@@ -7,41 +7,41 @@ cd "$(dirname "$0")"
 INITIAL_PASSWORD="bla bla bla will we make it!!"
 
 test_expect_success 'Basic move command' '
-	"$PASS" init $KEY1 &&
-	"$PASS" git init &&
-	"$PASS" insert -e cred1 <<<"$INITIAL_PASSWORD" &&
-	"$PASS" mv cred1 cred2 &&
-	[[ -e $PASSWORD_STORE_DIR/cred2.gpg && ! -e $PASSWORD_STORE_DIR/cred1.gpg ]]
+	create_test_template &&
+	"$PIGGY" git init &&
+	"$PIGGY" insert -e cred1 <<<"$INITIAL_PASSWORD" &&
+	"$PIGGY" mv cred1 cred2 &&
+	[[ -e $PIGGY_STORE_DIR/cred2.ebox && ! -e $PIGGY_STORE_DIR/cred1.ebox ]]
 '
 
 test_expect_success 'Directory creation' '
-	"$PASS" mv cred2 directory/ &&
-	[[ -d $PASSWORD_STORE_DIR/directory && -e $PASSWORD_STORE_DIR/directory/cred2.gpg ]]
+	"$PIGGY" mv cred2 directory/ &&
+	[[ -d $PIGGY_STORE_DIR/directory && -e $PIGGY_STORE_DIR/directory/cred2.ebox ]]
 '
 
 test_expect_success 'Directory creation with file rename and empty directory removal' '
-	"$PASS" mv directory/cred2 "new directory with spaces"/cred &&
-	[[ -d $PASSWORD_STORE_DIR/"new directory with spaces" && -e $PASSWORD_STORE_DIR/"new directory with spaces"/cred.gpg && ! -e $PASSWORD_STORE_DIR/directory ]]
+	"$PIGGY" mv directory/cred2 "new directory with spaces"/cred &&
+	[[ -d $PIGGY_STORE_DIR/"new directory with spaces" && -e $PIGGY_STORE_DIR/"new directory with spaces"/cred.ebox && ! -e $PIGGY_STORE_DIR/directory ]]
 '
 
 test_expect_success 'Directory rename' '
-	"$PASS" mv "new directory with spaces" anotherdirectory &&
-	[[ -d $PASSWORD_STORE_DIR/anotherdirectory && -e $PASSWORD_STORE_DIR/anotherdirectory/cred.gpg && ! -e $PASSWORD_STORE_DIR/"new directory with spaces" ]]
+	"$PIGGY" mv "new directory with spaces" anotherdirectory &&
+	[[ -d $PIGGY_STORE_DIR/anotherdirectory && -e $PIGGY_STORE_DIR/anotherdirectory/cred.ebox && ! -e $PIGGY_STORE_DIR/"new directory with spaces" ]]
 '
 
 test_expect_success 'Directory move into new directory' '
-	"$PASS" mv anotherdirectory "new directory with spaces"/ &&
-	[[ -d $PASSWORD_STORE_DIR/"new directory with spaces"/anotherdirectory && -e $PASSWORD_STORE_DIR/"new directory with spaces"/anotherdirectory/cred.gpg && ! -e $PASSWORD_STORE_DIR/anotherdirectory ]]
+	"$PIGGY" mv anotherdirectory "new directory with spaces"/ &&
+	[[ -d $PIGGY_STORE_DIR/"new directory with spaces"/anotherdirectory && -e $PIGGY_STORE_DIR/"new directory with spaces"/anotherdirectory/cred.ebox && ! -e $PIGGY_STORE_DIR/anotherdirectory ]]
 '
 
 test_expect_success 'Multi-directory creation and multi-directory empty removal' '
-	"$PASS" mv "new directory with spaces"/anotherdirectory/cred new1/new2/new3/new4/thecred &&
-	"$PASS" mv new1/new2/new3/new4/thecred cred &&
-	[[ ! -d $PASSWORD_STORE_DIR/"new directory with spaces"/anotherdirectory && ! -d $PASSWORD_STORE_DIR/new1/new2/new3/new4 && -e $PASSWORD_STORE_DIR/cred.gpg ]]
+	"$PIGGY" mv "new directory with spaces"/anotherdirectory/cred new1/new2/new3/new4/thecred &&
+	"$PIGGY" mv new1/new2/new3/new4/thecred cred &&
+	[[ ! -d $PIGGY_STORE_DIR/"new directory with spaces"/anotherdirectory && ! -d $PIGGY_STORE_DIR/new1/new2/new3/new4 && -e $PIGGY_STORE_DIR/cred.ebox ]]
 '
 
 test_expect_success 'Password made it until the end' '
-	[[ $("$PASS" show cred) == "$INITIAL_PASSWORD" ]]
+	[[ $("$PIGGY" show cred) == "$INITIAL_PASSWORD" ]]
 '
 
 test_expect_success 'Git is consistent' '

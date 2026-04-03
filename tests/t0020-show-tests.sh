@@ -5,23 +5,23 @@ cd "$(dirname "$0")"
 . ./setup.sh
 
 test_expect_success 'Test "show" command' '
-	"$PASS" init $KEY1 &&
-	"$PASS" generate cred1 20 &&
-	"$PASS" show cred1
+	create_test_template &&
+	"$PIGGY" generate cred1 20 &&
+	"$PIGGY" show cred1
 '
 
 test_expect_success 'Test "show" command with spaces' '
-	"$PASS" insert -e "I am a cred with lots of spaces"<<<"BLAH!!" &&
-	[[ $("$PASS" show "I am a cred with lots of spaces") == "BLAH!!" ]]
+	"$PIGGY" insert -e "I am a cred with lots of spaces"<<<"BLAH!!" &&
+	[[ $("$PIGGY" show "I am a cred with lots of spaces") == "BLAH!!" ]]
 '
 
 test_expect_success 'Test "show" command with unicode' '
-	"$PASS" generate 🏠 &&
-	"$PASS" show | grep -q '🏠'
+	"$PIGGY" generate 🏠 &&
+	"$PIGGY" show | grep -q "🏠"
 '
 
 test_expect_success 'Test "show" of nonexistant password' '
-	test_must_fail "$PASS" show cred2
+	test_must_fail "$PIGGY" show cred2
 '
 
 test_done

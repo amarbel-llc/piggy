@@ -5,9 +5,9 @@ cd "$(dirname "$0")"
 . ./setup.sh
 
 test_expect_success 'Test "insert" command' '
-	"$PASS" init $KEY1 &&
-	echo "Hello world" | "$PASS" insert -e cred1 &&
-	[[ $("$PASS" show cred1) == "Hello world" ]]
+	create_test_template &&
+	echo "Hello world" | "$PIGGY" insert -e cred1 &&
+	[[ $("$PIGGY" show cred1) == "Hello world" ]]
 '
 
 test_done
