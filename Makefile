@@ -32,46 +32,36 @@ endif
 endif
 
 all:
-	@echo "Password store is a shell script, so there is nothing to do. Try \"make install\" instead."
+	@echo "Piggy is a shell script, so there is nothing to do. Try \"make install\" instead."
 
 install-common:
-	@install -v -d "$(DESTDIR)$(MANDIR)/man1" && install -m 0644 -v man/pass.1 "$(DESTDIR)$(MANDIR)/man1/pass.1"
-	@[ "$(WITH_BASHCOMP)" = "yes" ] || exit 0; install -v -d "$(DESTDIR)$(BASHCOMPDIR)" && install -m 0644 -v src/completion/pass.bash-completion "$(DESTDIR)$(BASHCOMPDIR)/pass"
-	@[ "$(WITH_ZSHCOMP)" = "yes" ] || exit 0; install -v -d "$(DESTDIR)$(ZSHCOMPDIR)" && install -m 0644 -v src/completion/pass.zsh-completion "$(DESTDIR)$(ZSHCOMPDIR)/_pass"
-	@[ "$(WITH_FISHCOMP)" = "yes" ] || exit 0; install -v -d "$(DESTDIR)$(FISHCOMPDIR)" && install -m 0644 -v src/completion/pass.fish-completion "$(DESTDIR)$(FISHCOMPDIR)/pass.fish"
 
 
 ifneq ($(strip $(wildcard $(PLATFORMFILE))),)
 install: install-common
-	@install -v -d "$(DESTDIR)$(LIBDIR)/password-store" && install -m 0644 -v "$(PLATFORMFILE)" "$(DESTDIR)$(LIBDIR)/password-store/platform.sh"
-	@install -v -d "$(DESTDIR)$(LIBDIR)/password-store/extensions"
+	@install -v -d "$(DESTDIR)$(LIBDIR)/piggy" && install -m 0644 -v "$(PLATFORMFILE)" "$(DESTDIR)$(LIBDIR)/piggy/platform.sh"
 	@install -v -d "$(DESTDIR)$(BINDIR)/"
-	@trap 'rm -f src/.pass' EXIT; sed 's:.*PLATFORM_FUNCTION_FILE.*:source "$(LIBDIR)/password-store/platform.sh":;s:^SYSTEM_EXTENSION_DIR=.*:SYSTEM_EXTENSION_DIR="$(LIBDIR)/password-store/extensions":' src/password-store.sh > src/.pass && \
-	install -v -d "$(DESTDIR)$(BINDIR)/" && install -m 0755 -v src/.pass "$(DESTDIR)$(BINDIR)/pass"
+	@trap 'rm -f src/.piggy' EXIT; sed 's:.*PLATFORM_FUNCTION_FILE.*:source "$(LIBDIR)/piggy/platform.sh":' src/piggy.sh > src/.piggy && \
+	install -v -d "$(DESTDIR)$(BINDIR)/" && install -m 0755 -v src/.piggy "$(DESTDIR)$(BINDIR)/piggy"
 else
 install: install-common
-	@install -v -d "$(DESTDIR)$(LIBDIR)/password-store/extensions"
-	@trap 'rm -f src/.pass' EXIT; sed '/PLATFORM_FUNCTION_FILE/d;s:^SYSTEM_EXTENSION_DIR=.*:SYSTEM_EXTENSION_DIR="$(LIBDIR)/password-store/extensions":' src/password-store.sh > src/.pass && \
-	install -v -d "$(DESTDIR)$(BINDIR)/" && install -m 0755 -v src/.pass "$(DESTDIR)$(BINDIR)/pass"
+	@trap 'rm -f src/.piggy' EXIT; sed '/PLATFORM_FUNCTION_FILE/d' src/piggy.sh > src/.piggy && \
+	install -v -d "$(DESTDIR)$(BINDIR)/" && install -m 0755 -v src/.piggy "$(DESTDIR)$(BINDIR)/piggy"
 endif
 
 uninstall:
 	@rm -vrf \
-		"$(DESTDIR)$(BINDIR)/pass" \
-		"$(DESTDIR)$(LIBDIR)/password-store" \
-		"$(DESTDIR)$(MANDIR)/man1/pass.1" \
-		"$(DESTDIR)$(BASHCOMPDIR)/pass" \
-		"$(DESTDIR)$(ZSHCOMPDIR)/_pass" \
-		"$(DESTDIR)$(FISHCOMPDIR)/pass.fish"
+		"$(DESTDIR)$(BINDIR)/piggy" \
+		"$(DESTDIR)$(LIBDIR)/piggy"
 
 TESTS = $(sort $(wildcard tests/t[0-9][0-9][0-9][0-9]-*.sh))
 
 test: $(TESTS)
 
 $(TESTS):
-	@$@ $(PASS_TEST_OPTS)
+	@$@ $(PIGGY_TEST_OPTS)
 
 clean:
-	$(RM) -rf tests/test-results/ tests/trash\ directory.*/ tests/gnupg/random_seed
+	$(RM) -rf tests/test-results/ tests/trash\ directory.*/
 
 .PHONY: install uninstall install-common test clean $(TESTS)
