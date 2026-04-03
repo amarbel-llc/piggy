@@ -40,6 +40,21 @@ qrcode() {
   fi
 }
 
-GETOPT="${PIGGY_GETOPT:-$({ test -x /usr/local/opt/gnu-getopt/bin/getopt && echo /usr/local/opt/gnu-getopt; } || brew --prefix gnu-getopt 2>/dev/null || { command -v port &>/dev/null && echo /opt/local; } || echo /usr/local)/bin/getopt}"
+_piggy_find_gnu_getopt() {
+  # Prefer getopt already on PATH if it's GNU getopt (e.g. from Nix)
+  # GNU getopt -T exits 4; BSD getopt -T exits 0
+  if command -v getopt &>/dev/null; then
+    getopt -T &>/dev/null
+    if [ $? -eq 4 ]; then
+      command -v getopt
+      return
+    fi
+  fi
+  # Fall back to Homebrew/MacPorts locations
+  local prefix
+  prefix="$({ test -x /usr/local/opt/gnu-getopt/bin/getopt && echo /usr/local/opt/gnu-getopt; } || brew --prefix gnu-getopt 2>/dev/null || { command -v port &>/dev/null && echo /opt/local; } || echo /usr/local)"
+  echo "${prefix}/bin/getopt"
+}
+GETOPT="${PIGGY_GETOPT:-$(_piggy_find_gnu_getopt)}"
 SHRED="srm -f -z"
 BASE64="openssl base64"
