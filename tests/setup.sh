@@ -15,6 +15,10 @@ unset PIGGY_CHARACTER_SET
 unset PIGGY_CHARACTER_SET_NO_SYMBOLS
 unset EDITOR
 
+# Use system getopt (nix provides gnu-getopt on PATH), bypassing darwin.sh's
+# homebrew resolution which may hang or point to a non-existent path.
+export PIGGY_GETOPT=getopt
+
 # We must be called from tests/
 TEST_HOME="$(pwd)"
 

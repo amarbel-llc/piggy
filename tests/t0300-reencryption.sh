@@ -22,12 +22,16 @@ test_expect_success 'Reencryption after template change preserves content' '
 
 test_expect_success 'Reencryption subfolder, copy' '
 	create_test_template "$PIGGY_STORE_DIR/anotherfolder" &&
+	git add "$PIGGY_STORE_DIR/anotherfolder/.pivy-id" &&
+	git commit -m "Add anotherfolder template" &&
 	"$PIGGY" cp folder/cred1 anotherfolder/ &&
 	[[ -f "$PIGGY_STORE_DIR/anotherfolder/cred1.ebox" ]]
 '
 
 test_expect_success 'Reencryption subfolder, move' '
 	create_test_template "$PIGGY_STORE_DIR/anotherfolder2" &&
+	git add "$PIGGY_STORE_DIR/anotherfolder2/.pivy-id" &&
+	git commit -m "Add anotherfolder2 template" &&
 	"$PIGGY" mv -f anotherfolder anotherfolder2/ &&
 	[[ -f "$PIGGY_STORE_DIR/anotherfolder2/anotherfolder/cred1.ebox" ]]
 '
@@ -38,6 +42,8 @@ test_expect_success 'Reencryption skips links' '
 	git add "$PIGGY_STORE_DIR/folder/linked_cred.ebox" &&
 	git commit "$PIGGY_STORE_DIR/folder/linked_cred.ebox" -m "Added linked cred" &&
 	create_test_template "$PIGGY_STORE_DIR/folder" &&
+	git add "$PIGGY_STORE_DIR/folder/.pivy-id" &&
+	git commit -m "Add folder template" &&
 	[[ -L $PIGGY_STORE_DIR/folder/linked_cred.ebox ]]
 '
 
