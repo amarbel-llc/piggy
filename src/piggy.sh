@@ -228,11 +228,12 @@ cmd_usage() {
   echo
   cat <<-_EOF
 	Usage:
-	    $PROGRAM init [-p subfolder] [-k pubkey] [-e]
+	    $PROGRAM init [-p subfolder] [-g guid] [-e] [-i]
 	        Initialize new password storage with a pivy-box template.
-	        -k: Non-interactive, create template from SSH public key.
-	        -e: Edit existing .pivy-id template.
-	        Without flags: interactive pivy-box tpl create.
+	        -g: Use a specific PIV device GUID (from pivy-tool list).
+	        -e: Edit existing .pivy-id template interactively.
+	        -i: Interactive pivy-box tpl create.
+	        Without flags: auto-detect inserted PIV device.
 	    $PROGRAM [ls] [subfolder]
 	        List passwords.
 	    $PROGRAM find pass-names...
@@ -270,8 +271,8 @@ cmd_usage() {
 }
 
 cmd_init() {
-  local opts id_path="" pubkey="" edit=0
-  opts="$($GETOPT -o p:k:e -l path:,key:,edit -n "$PROGRAM" -- "$@")"
+  local opts id_path="" guid="" edit=0 interactive=0
+  opts="$($GETOPT -o p:g:ei -l path:,guid:,edit,interactive -n "$PROGRAM" -- "$@")"
   local err=$?
   eval set -- "$opts"
   while true; do case $1 in
@@ -279,12 +280,16 @@ cmd_init() {
       id_path="$2"
       shift 2
       ;;
-    -k | --key)
-      pubkey="$2"
+    -g | --guid)
+      guid="$2"
       shift 2
       ;;
     -e | --edit)
       edit=1
+      shift
+      ;;
+    -i | --interactive)
+      interactive=1
       shift
       ;;
     --)
@@ -293,7 +298,7 @@ cmd_init() {
       ;;
     esac done
 
-  [[ $err -ne 0 ]] && die "Usage: $PROGRAM $COMMAND [-p subfolder] [-k pubkey] [-e]"
+  [[ $err -ne 0 ]] && die "Usage: $PROGRAM $COMMAND [-p subfolder] [-g guid] [-e] [-i]"
   [[ -n $id_path ]] && check_sneaky_paths "$id_path"
   [[ -n $id_path && ! -d $PREFIX/$id_path && -e $PREFIX/$id_path ]] && die "Error: $PREFIX/$id_path exists but is not a directory."
 
@@ -302,13 +307,21 @@ cmd_init() {
 
   if [[ $edit -eq 1 ]]; then
     [[ ! -f $pivy_id ]] && die "Error: $pivy_id does not exist. Run '$PROGRAM init' first."
-    pivy-box tpl edit "$pivy_id" || die "Template editing failed."
-  elif [[ -n $pubkey ]]; then
-    mkdir -v -p "$PREFIX/$id_path"
-    pivy-box tpl create -k "$pubkey" "$pivy_id" || die "Template creation failed."
-  else
+    pivy-box tpl edit -i "$pivy_id" || die "Template editing failed."
+  elif [[ $interactive -eq 1 ]]; then
     mkdir -v -p "$PREFIX/$id_path"
     pivy-box tpl create -i "$pivy_id" || die "Template creation failed."
+  elif [[ -n $guid ]]; then
+    mkdir -v -p "$PREFIX/$id_path"
+    pivy-box tpl create "$pivy_id" primary local-guid "$guid" || die "Template creation failed."
+  else
+    # Auto-detect: find the first inserted PIV device
+    local detected_guid
+    detected_guid="$(pivy-tool list 2>/dev/null | grep '^ *guid:' | head -1 | awk '{print $2}')" || true
+    [[ -z $detected_guid ]] && die "Error: no PIV device found. Insert a YubiKey or specify -g <guid>."
+    echo "Using PIV device: $detected_guid"
+    mkdir -v -p "$PREFIX/$id_path"
+    pivy-box tpl create "$pivy_id" primary local-guid "$detected_guid" || die "Template creation failed."
   fi
 
   echo "Password store initialized${id_path:+ ($id_path)}"
