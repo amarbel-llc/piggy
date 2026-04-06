@@ -12,7 +12,7 @@ run-nix *ARGS:
 test: test-bats
 
 test-bats:
-    BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --no-sandbox --tap zz-tests_bats/*.bats
+  BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/*.bats
 
 codemod-fmt: codemod-fmt-nix codemod-fmt-shell
 
