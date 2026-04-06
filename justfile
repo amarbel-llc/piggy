@@ -9,14 +9,7 @@ build-nix:
 run-nix *ARGS:
     nix run . -- {{ARGS}}
 
-test: test-sharness test-bats
-
-test-sharness:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for t in tests/t[0-9][0-9][0-9][0-9]-*.sh; do
-      bash "$t"
-    done
+test: test-bats
 
 test-bats:
     BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap zz-tests_bats/*.bats
@@ -34,10 +27,7 @@ update: update-nix
 update-nix:
     nix flake update
 
-clean: clean-build clean-test
+clean: clean-build
 
 clean-build:
     rm -rf result
-
-clean-test:
-    rm -rf tests/test-results/ tests/trash\ directory.*/

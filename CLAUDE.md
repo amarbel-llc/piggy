@@ -10,14 +10,14 @@ Piggy is a passwordstore.org fork that replaces GPG encryption with PIV smart ca
 
 ```sh
 just build          # Build nix package (nix build --show-trace)
-just test           # Run sharness test suite
+just test           # Run bats test suite
 just codemod-fmt    # Format nix (nixfmt) and shell (shfmt -s -i=2)
-just clean          # Remove build artifacts and test trash dirs
+just clean          # Remove build artifacts
 ```
 
-Run a single test with verbose output:
+Run a single bats test file:
 ```sh
-bash tests/t0001-sanity-checks.sh -v
+bats --no-sandbox zz-tests_bats/t0100-insert.bats
 ```
 
 ## Architecture
@@ -32,14 +32,14 @@ bash tests/t0001-sanity-checks.sh -v
 
 **Platform abstraction** — `src/platform/darwin.sh` overrides clipboard (pbcopy/pbpaste), tmpdir (ramdisk via hdid), and getopt resolution for macOS. Linux uses defaults from the main script.
 
-**Test framework** — Sharness (TAP-based bash test framework) in `tests/`. Tests use mock scripts (`mock-pivy-box.sh`, `mock-pivy-tool.sh`) that substitute base64 for real encryption, so no physical PIV card is needed.
+**Test framework** — BATS (Bash Automated Testing System) in `zz-tests_bats/`. Tests use mock scripts (`helpers/mock-pivy-box.sh`, `helpers/mock-pivy-tool.sh`) that substitute base64 for real encryption, so no physical PIV card is needed.
 
 ## Key Files
 
 - `src/piggy.sh` — main script: env setup, helpers, all command implementations, dispatch
 - `src/platform/darwin.sh` — macOS platform overrides
-- `tests/setup.sh` — test harness initialization (mock PATH, temp store, git identity)
-- `tests/mock-pivy-box.sh` — mock pivy-box using base64 encode/decode
+- `zz-tests_bats/common.bash` — bats test harness (mock PATH, temp store, git identity)
+- `zz-tests_bats/helpers/mock-pivy-box.sh` — mock pivy-box using base64 encode/decode
 - `flake.nix` — nix package definition and dev shell
 - `contrib/emacs/piggy.el` — Emacs integration package
 

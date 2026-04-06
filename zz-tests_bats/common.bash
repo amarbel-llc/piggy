@@ -37,8 +37,8 @@ git config --global user.name "Piggy Automated Testing Suite"
 PIGGY="$REPO_ROOT/src/piggy.sh"
 
 # Mock pivy-box and pivy-tool (base64 encode/decode instead of real crypto)
-ln -sf "$REPO_ROOT/tests/mock-pivy-box.sh" "$BATS_TEST_TMPDIR/pivy-box"
-ln -sf "$REPO_ROOT/tests/mock-pivy-tool.sh" "$BATS_TEST_TMPDIR/pivy-tool"
+ln -sf "$REPO_ROOT/zz-tests_bats/helpers/mock-pivy-box.sh" "$BATS_TEST_TMPDIR/pivy-box"
+ln -sf "$REPO_ROOT/zz-tests_bats/helpers/mock-pivy-tool.sh" "$BATS_TEST_TMPDIR/pivy-tool"
 export PATH="$BATS_TEST_TMPDIR:$PATH"
 
 # Create a test .pivy-id template (marker file for the mock)
