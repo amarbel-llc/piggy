@@ -3,6 +3,7 @@ INITIAL_PASSWORD="will this password live? a big question indeed..."
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   create_test_template
+  init_test_git
   "$PIGGY" git init
 }
 

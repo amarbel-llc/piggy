@@ -3,6 +3,7 @@ INITIAL_PASSWORD="bla bla bla will we make it!!"
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   create_test_template
+  init_test_git
   "$PIGGY" git init
   echo "$INITIAL_PASSWORD" | "$PIGGY" insert -e cred1
 }
