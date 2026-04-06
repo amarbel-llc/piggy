@@ -1,4 +1,3 @@
-set output-format := "tap"
 
 default: build test
 
@@ -13,7 +12,11 @@ run-nix *ARGS:
 test: test-sharness
 
 test-sharness:
-    nix develop --command make test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for t in tests/t[0-9][0-9][0-9][0-9]-*.sh; do
+      bash "$t"
+    done
 
 codemod-fmt: codemod-fmt-nix codemod-fmt-shell
 

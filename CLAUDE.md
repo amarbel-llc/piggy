@@ -10,14 +10,14 @@ Piggy is a passwordstore.org fork that replaces GPG encryption with PIV smart ca
 
 ```sh
 just build          # Build nix package (nix build --show-trace)
-just test           # Run sharness test suite (nix develop --command make test)
+just test           # Run sharness test suite
 just codemod-fmt    # Format nix (nixfmt) and shell (shfmt -s -i=2)
 just clean          # Remove build artifacts and test trash dirs
 ```
 
 Run a single test with verbose output:
 ```sh
-nix develop --command bash tests/t0001-sanity-checks.sh -v
+bash tests/t0001-sanity-checks.sh -v
 ```
 
 ## Architecture
@@ -41,7 +41,6 @@ nix develop --command bash tests/t0001-sanity-checks.sh -v
 - `tests/setup.sh` — test harness initialization (mock PATH, temp store, git identity)
 - `tests/mock-pivy-box.sh` — mock pivy-box using base64 encode/decode
 - `flake.nix` — nix package definition and dev shell
-- `Makefile` — install targets and test runner (used by nix develop)
 - `contrib/emacs/piggy.el` — Emacs integration package
 
 ## Code Conventions
