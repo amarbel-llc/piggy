@@ -1,0 +1,5 @@
+bats_timeout := "30"
+
+test *targets="*.bats":
+  BATS_TEST_TIMEOUT="{{bats_timeout}}" \
+    bats --no-sandbox --tap {{targets}}

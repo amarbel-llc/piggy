@@ -77,6 +77,24 @@ piggy_decrypt() {
   # Usage: piggy_decrypt <input-file>
   pivy-box stream decrypt <"$1" || exit $?
 }
+_piggy_move_tpl() {
+  # pivy-box tpl create writes to its default template path, not to a
+  # direct file path. Find where it wrote the template and move it.
+  local tpl_name="$1" dest="$2"
+  local src=""
+  local candidate
+  for candidate in \
+    "$HOME/Library/Preferences/pivy/tpl/$tpl_name" \
+    "$HOME/.pivy/tpl/$tpl_name" \
+    "$HOME/.ebox/tpl/$tpl_name"; do
+    if [[ -f $candidate ]]; then
+      src="$candidate"
+      break
+    fi
+  done
+  [[ -z $src ]] && die "Error: could not find created template '$tpl_name'."
+  mv "$src" "$dest" || die "Error: failed to move template to $dest."
+}
 reencrypt_path() {
   local passfile passfile_dir passfile_display passfile_temp
   while read -r -d "" passfile; do
@@ -303,25 +321,35 @@ cmd_init() {
   [[ -n $id_path && ! -d $PREFIX/$id_path && -e $PREFIX/$id_path ]] && die "Error: $PREFIX/$id_path exists but is not a directory."
 
   local pivy_id="$PREFIX/$id_path/.pivy-id"
+  local tpl_dir="$PREFIX/$id_path"
   set_git "$pivy_id"
+
+  # pivy-box tpl create resolves template names via a path search (not
+  # direct file paths) and always prefers its compiled-in default dirs.
+  # We use a unique temp name, let pivy-box write it wherever it wants,
+  # then move the result into our store directory.
+  local tpl_name
+  tpl_name="piggy-init-$$"
+
+  mkdir -v -p "$tpl_dir"
 
   if [[ $edit -eq 1 ]]; then
     [[ ! -f $pivy_id ]] && die "Error: $pivy_id does not exist. Run '$PROGRAM init' first."
     pivy-box tpl edit -i "$pivy_id" || die "Template editing failed."
   elif [[ $interactive -eq 1 ]]; then
-    mkdir -v -p "$PREFIX/$id_path"
-    pivy-box tpl create -i "$pivy_id" || die "Template creation failed."
+    pivy-box tpl create -i "$tpl_name" || die "Template creation failed."
+    _piggy_move_tpl "$tpl_name" "$pivy_id"
   elif [[ -n $guid ]]; then
-    mkdir -v -p "$PREFIX/$id_path"
-    pivy-box tpl create "$pivy_id" primary local-guid "$guid" || die "Template creation failed."
+    pivy-box tpl create "$tpl_name" primary local-guid "$guid" || die "Template creation failed."
+    _piggy_move_tpl "$tpl_name" "$pivy_id"
   else
     # Auto-detect: find the first inserted PIV device
     local detected_guid
     detected_guid="$(pivy-tool list 2>/dev/null | grep '^ *guid:' | head -1 | awk '{print $2}')" || true
     [[ -z $detected_guid ]] && die "Error: no PIV device found. Insert a YubiKey or specify -g <guid>."
     echo "Using PIV device: $detected_guid"
-    mkdir -v -p "$PREFIX/$id_path"
-    pivy-box tpl create "$pivy_id" primary local-guid "$detected_guid" || die "Template creation failed."
+    pivy-box tpl create "$tpl_name" primary local-guid "$detected_guid" || die "Template creation failed."
+    _piggy_move_tpl "$tpl_name" "$pivy_id"
   fi
 
   echo "Password store initialized${id_path:+ ($id_path)}"

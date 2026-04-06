@@ -11,6 +11,13 @@
       inputs.utils.follows = "utils";
     };
 
+    bob = {
+      url = "github:amarbel-llc/bob";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.nixpkgs-master.follows = "nixpkgs-master";
+      inputs.utils.follows = "utils";
+    };
+
   };
 
   outputs =
@@ -20,6 +27,7 @@
       nixpkgs-master,
       utils,
       pivy,
+      bob,
     }:
     (utils.lib.eachDefaultSystem (
       system:
@@ -71,6 +79,7 @@
         devShells.default = pkgs.mkShell {
           packages = runtimeDeps ++ [
             pkgs-master.just
+            bob.packages.${system}.batman
           ];
         };
       }
