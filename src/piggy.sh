@@ -324,10 +324,14 @@ cmd_init() {
   local tpl_dir="$PREFIX/$id_path"
   set_git "$pivy_id"
 
-  # pivy-box tpl create resolves template names via a path search (not
-  # direct file paths) and always prefers its compiled-in default dirs.
-  # We use a unique temp name, let pivy-box write it wherever it wants,
-  # then move the result into our store directory.
+  # pivy-box tpl create with local-guid defaults to slot 9D (Key Management),
+  # which is the correct PIV slot for encryption/decryption (ECDH key agreement)
+  # per NIST SP 800-73. Slot 9A (PIV Authentication) is for signing only.
+  #
+  # tpl create resolves template names via a path search (not direct file
+  # paths) and always prefers its compiled-in default dirs. We use a unique
+  # temp name, let pivy-box write it wherever it wants, then move the result
+  # into our store directory.
   local tpl_name
   tpl_name="piggy-init-$$"
 
