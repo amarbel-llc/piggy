@@ -11,11 +11,12 @@
 # Returns: 0 on success, 1 on error
 
 if [[ $# -ne 1 ]]; then
-	echo "Usage: $0 <filename>"
-	exit 1
+  echo "Usage: $0 <filename>"
+  exit 1
 fi
 
-filename=$1 ; shift ;
+filename=$1
+shift
 new_password="${FAKE_EDITOR_PASSWORD:-Hello World}"
 
 # And change only first line of file
