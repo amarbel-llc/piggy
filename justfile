@@ -9,7 +9,7 @@ build-nix:
 run-nix *ARGS:
     nix run . -- {{ARGS}}
 
-test: test-sharness
+test: test-sharness test-bats
 
 test-sharness:
     #!/usr/bin/env bash
@@ -17,6 +17,9 @@ test-sharness:
     for t in tests/t[0-9][0-9][0-9][0-9]-*.sh; do
       bash "$t"
     done
+
+test-bats:
+    BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap zz-tests_bats/*.bats
 
 codemod-fmt: codemod-fmt-nix codemod-fmt-shell
 
