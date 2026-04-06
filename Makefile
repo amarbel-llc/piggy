@@ -43,16 +43,19 @@ install: install-common
 	@install -v -d "$(DESTDIR)$(BINDIR)/"
 	@trap 'rm -f src/.piggy' EXIT; sed 's:.*PLATFORM_FUNCTION_FILE.*:source "$(LIBDIR)/piggy/platform.sh":' src/piggy.sh > src/.piggy && \
 	install -v -d "$(DESTDIR)$(BINDIR)/" && install -m 0755 -v src/.piggy "$(DESTDIR)$(BINDIR)/piggy"
+	@install -v -d "$(DESTDIR)$(MANDIR)/man1/" && install -m 0644 -v man/piggy.1 "$(DESTDIR)$(MANDIR)/man1/piggy.1"
 else
 install: install-common
 	@trap 'rm -f src/.piggy' EXIT; sed '/PLATFORM_FUNCTION_FILE/d' src/piggy.sh > src/.piggy && \
 	install -v -d "$(DESTDIR)$(BINDIR)/" && install -m 0755 -v src/.piggy "$(DESTDIR)$(BINDIR)/piggy"
+	@install -v -d "$(DESTDIR)$(MANDIR)/man1/" && install -m 0644 -v man/piggy.1 "$(DESTDIR)$(MANDIR)/man1/piggy.1"
 endif
 
 uninstall:
 	@rm -vrf \
 		"$(DESTDIR)$(BINDIR)/piggy" \
-		"$(DESTDIR)$(LIBDIR)/piggy"
+		"$(DESTDIR)$(LIBDIR)/piggy" \
+		"$(DESTDIR)$(MANDIR)/man1/piggy.1"
 
 TESTS = $(sort $(wildcard tests/t[0-9][0-9][0-9][0-9]-*.sh))
 

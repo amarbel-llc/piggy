@@ -55,7 +55,7 @@
           nativeBuildInputs = [ pkgs.makeWrapper ];
 
           installPhase = ''
-            mkdir -p $out/lib/piggy/platform $out/bin
+            mkdir -p $out/lib/piggy/platform $out/bin $out/share/man/man1
 
             install -m 0755 src/piggy.sh $out/lib/piggy/piggy
             if [ -f src/platform/darwin.sh ]; then
@@ -64,6 +64,7 @@
             if [ -f src/platform/linux.sh ]; then
               install -m 0644 src/platform/linux.sh $out/lib/piggy/platform/linux.sh
             fi
+            install -m 0644 man/piggy.1 $out/share/man/man1/piggy.1
 
             makeWrapper $out/lib/piggy/piggy $out/bin/piggy \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}

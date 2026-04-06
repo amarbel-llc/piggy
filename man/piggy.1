@@ -1,0 +1,410 @@
+.TH PIGGY 1 "2026 April 06" "piggy v0.1.0" "PIV Password Store"
+
+.SH NAME
+piggy \- stores, retrieves, generates, and synchronizes passwords using PIV smart cards
+
+.SH SYNOPSIS
+.B piggy
+[
+.I COMMAND
+] [
+.I OPTIONS
+]... [
+.I ARGS
+]...
+
+.SH DESCRIPTION
+
+.B piggy
+is a simple password store that keeps passwords inside
+.BR pivy-box (1)
+encrypted files (with the \fI.ebox\fP extension) inside a directory tree
+residing at
+.IR ~/.local/share/piggy .
+The
+.B piggy
+utility provides a series of commands for manipulating the password store,
+allowing the user to add, remove, edit, synchronize, generate, and manipulate
+passwords.
+
+Encryption uses PIV slot 9D (Key Management / ECDH key agreement) on a smart
+card such as a YubiKey.  Encryption requires only the public key and does not
+need the card to be present.  Decryption requires
+.BR pivy-agent
+with the physical card inserted, or a forwarded SSH agent socket when working
+remotely.
+
+Recipients are managed via \fI.pivy-id\fP template files (analogous to
+\fI.gpg-id\fP in
+.BR pass (1)).
+Each \fI.pivy-id\fP is a
+.BR pivy-box (1)
+ebox template that lists the PIV public keys secrets are encrypted to.
+
+If no COMMAND is specified, COMMAND defaults to either
+.B show
+or
+.BR ls ,
+depending on the type of specifier in ARGS.
+Otherwise COMMAND must be one of the valid commands listed below.
+
+Several of the commands below rely on or provide additional functionality if
+the password store directory is also a git repository.  If the password store
+directory is a git repository, all password store modification commands will
+cause a corresponding git commit.  See the \fIEXTENDED GIT EXAMPLE\fP section
+for a detailed description using \fBinit\fP and
+.BR git (1).
+
+The \fBinit\fP command must be run before other commands in order to initialize
+the password store with a pivy-box template.
+
+.SH COMMANDS
+
+.TP
+\fBinit\fP [ \fI\-\-path=sub\-folder\fP, \fI\-p sub\-folder\fP ] [ \fI\-\-guid=GUID\fP, \fI\-g GUID\fP ] [ \fI\-\-edit\fP, \fI\-e\fP ] [ \fI\-\-interactive\fP, \fI\-i\fP ]
+Initialize new password storage with a pivy-box ebox template.  Without
+flags, the first inserted PIV device is auto-detected via
+.BR pivy-tool (1).
+If \fI\-\-guid\fP or \fI\-g\fP is specified, create a template for the given
+PIV device GUID.  If \fI\-\-interactive\fP or \fI\-i\fP is specified, run
+the interactive
+.BR pivy-box (1)
+template creation menu.  If \fI\-\-edit\fP or \fI\-e\fP is specified, edit
+an existing \fI.pivy-id\fP template interactively.  If \fI\-\-path\fP or
+\fI\-p\fP is specified, assign a template for that specific sub-folder of
+the password store.  If the specified template is different from the one
+used in any existing files, those files will be re-encrypted to the new
+template.
+.TP
+\fBls\fP \fIsubfolder\fP
+List names of passwords inside the tree at
+.I subfolder
+by using the
+.BR tree (1)
+program.  This command is alternatively named \fBlist\fP.
+.TP
+\fBgrep\fP [\fIGREPOPTIONS\fP] \fIsearch\-string\fP
+Searches inside each decrypted password file for \fIsearch-string\fP, and
+displays line containing matched string along with filename.  Uses
+.BR grep (1)
+for matching.  \fIGREPOPTIONS\fP are passed to
+.BR grep (1)
+as-is.
+.TP
+\fBfind\fP \fIpass\-names\fP...
+List names of passwords inside the tree that match \fIpass-names\fP by using the
+.BR tree (1)
+program.  This command is alternatively named \fBsearch\fP.
+.TP
+\fBshow\fP [ \fI\-\-clip\fP[=\fIline\-number\fP], \fI\-c\fP[\fIline\-number\fP] ] [ \fI\-\-qrcode\fP[=\fIline\-number\fP], \fI\-q\fP[\fIline\-number\fP] ] \fIpass\-name\fP
+Decrypt and print a password named \fIpass-name\fP.  If \fI\-\-clip\fP or \fI\-c\fP
+is specified, do not print the password but instead copy the first (or otherwise
+specified) line to the clipboard using
+.BR xclip (1)
+or
+.BR wl-clipboard (1)
+and then restore the clipboard after 45 (or \fIPIGGY_CLIP_TIME\fP) seconds.
+If \fI\-\-qrcode\fP or \fI\-q\fP is specified, do not print the password but
+instead display a QR code using
+.BR qrencode (1)
+either to the terminal or graphically if supported.
+.TP
+\fBinsert\fP [ \fI\-\-echo\fP, \fI\-e\fP | \fI\-\-multiline\fP, \fI\-m\fP ] [ \fI\-\-force\fP, \fI\-f\fP ] \fIpass\-name\fP
+Insert a new password into the password store called \fIpass-name\fP.  This will
+read the new password from standard input.  If \fI\-\-echo\fP or \fI\-e\fP is
+\fInot\fP specified, disable keyboard echo when the password is entered and
+confirm the password by asking for it twice.  If \fI\-\-multiline\fP or \fI\-m\fP
+is specified, lines will be read until EOF or Ctrl+D is reached.  Otherwise,
+only a single line from standard input is read.  Prompt before overwriting an
+existing password, unless \fI\-\-force\fP or \fI\-f\fP is specified.  This
+command is alternatively named \fBadd\fP.
+.TP
+\fBedit\fP \fIpass\-name\fP
+Insert a new password or edit an existing password using the default text editor
+specified by the environment variable \fIEDITOR\fP or using
+.BR vi (1)
+as a fallback.  This mode makes use of temporary files for editing, but care is
+taken to ensure that temporary files are created in \fI/dev/shm\fP in order to
+avoid writing to difficult-to-erase disk sectors.  If \fI/dev/shm\fP is not
+accessible, fallback to the ordinary \fITMPDIR\fP location, and print a warning.
+On macOS, a RAM disk is created instead.
+.TP
+\fBgenerate\fP [ \fI\-\-no\-symbols\fP, \fI\-n\fP ] [ \fI\-\-clip\fP, \fI\-c\fP ] [ \fI\-\-qrcode\fP, \fI\-q\fP ] [ \fI\-\-in\-place\fP, \fI\-i\fP | \fI\-\-force\fP, \fI\-f\fP ] \fIpass\-name\fP [\fIpass\-length\fP]
+Generate a new password using \fB/dev/urandom\fP of length \fIpass-length\fP
+(or \fIPIGGY_GENERATED_LENGTH\fP if unspecified, default 25) and insert into
+\fIpass-name\fP.  If \fI\-\-no\-symbols\fP or \fI\-n\fP is specified, do not use
+any non-alphanumeric characters in the generated password.  The character sets
+used in generating passwords can be changed with the
+\fIPIGGY_CHARACTER_SET\fP and \fIPIGGY_CHARACTER_SET_NO_SYMBOLS\fP environment
+variables, described below.  If \fI\-\-clip\fP or \fI\-c\fP is specified, do
+not print the password but instead copy it to the clipboard using
+.BR xclip (1)
+or
+.BR wl-clipboard (1)
+and then restore the clipboard after 45 (or \fIPIGGY_CLIP_TIME\fP) seconds.
+If \fI\-\-qrcode\fP or \fI\-q\fP is specified, do not print the password but
+instead display a QR code using
+.BR qrencode (1)
+either to the terminal or graphically if supported.  Prompt before overwriting
+an existing password, unless \fI\-\-force\fP or \fI\-f\fP is specified.
+If \fI\-\-in\-place\fP or \fI\-i\fP is specified, do not interactively prompt,
+and only replace the first line of the password file with the new generated
+password, keeping the remainder of the file intact.
+.TP
+\fBrm\fP [ \fI\-\-recursive\fP, \fI\-r\fP ] [ \fI\-\-force\fP, \fI\-f\fP ] \fIpass\-name\fP
+Remove the password named \fIpass-name\fP from the password store.  This command
+is alternatively named \fBremove\fP or \fBdelete\fP.  If \fI\-\-recursive\fP or
+\fI\-r\fP is specified, delete pass-name recursively if it is a directory.  If
+\fI\-\-force\fP or \fI\-f\fP is specified, do not interactively prompt before
+removal.
+.TP
+\fBmv\fP [ \fI\-\-force\fP, \fI\-f\fP ] \fIold\-path\fP \fInew\-path\fP
+Renames the password or directory named \fIold-path\fP to \fInew-path\fP.  This
+command is alternatively named \fBrename\fP.  If \fI\-\-force\fP is specified,
+silently overwrite \fInew-path\fP if it exists.  If \fInew-path\fP ends in a
+trailing \fI/\fP, it is always treated as a directory.  Passwords are
+selectively re-encrypted to the corresponding template of their new destination.
+.TP
+\fBcp\fP [ \fI\-\-force\fP, \fI\-f\fP ] \fIold\-path\fP \fInew\-path\fP
+Copies the password or directory named \fIold-path\fP to \fInew-path\fP.  This
+command is alternatively named \fBcopy\fP.  If \fI\-\-force\fP is specified,
+silently overwrite \fInew-path\fP if it exists.  If \fInew-path\fP ends in a
+trailing \fI/\fP, it is always treated as a directory.  Passwords are
+selectively re-encrypted to the corresponding template of their new destination.
+.TP
+\fBgit\fP \fIgit\-command\-args\fP...
+If the password store is a git repository, pass \fIgit-command-args\fP as
+arguments to
+.BR git (1)
+using the password store as the git repository.  If \fIgit-command-args\fP is
+\fBinit\fP, in addition to initializing the git repository, add the current
+contents of the password store to the repository in an initial commit and
+configure \fI.gitattributes\fP so that
+.BR git-diff (1)
+can display decrypted content via
+.BR pivy-box (1)
+textconv.  If the git config key \fIpiggy.signcommits\fP is set to \fItrue\fP,
+then all commits will be signed using the default git signing key.  This config
+key may be turned on using:
+.B `piggy git config \-\-bool \-\-add piggy.signcommits true`
+.TP
+\fBhelp\fP
+Show usage message.
+.TP
+\fBversion\fP
+Show version information.
+
+.SH SIMPLE EXAMPLES
+
+.TP
+Initialize password store with auto-detected YubiKey
+.B $ piggy init
+.br
+Using PIV device: C291D27B...
+.br
+Password store initialized.
+.TP
+Initialize with a specific PIV device GUID
+.B $ piggy init \-g C291D27B12345678
+.br
+Password store initialized.
+.TP
+List existing passwords in store
+.B $ piggy
+.br
+Password Store
+.br
+\[u251C]\[u2500]\[u2500] Business
+.br
+\[u2502]   \[u251C]\[u2500]\[u2500] some-site.com
+.br
+\[u2502]   \[u2514]\[u2500]\[u2500] another-site.net
+.br
+\[u2514]\[u2500]\[u2500] Email
+.br
+    \[u251C]\[u2500]\[u2500] personal
+.br
+    \[u2514]\[u2500]\[u2500] work
+.TP
+Show existing password
+.B $ piggy show Email/work
+.br
+sup3rh4x3rizmynam3
+.TP
+Copy existing password to clipboard
+.B $ piggy show \-c Email/work
+.br
+Copied Email/work to clipboard. Will clear in 45 seconds.
+.TP
+Add password to store
+.B $ piggy insert Business/new\-site
+.br
+Enter password for Business/new-site:
+.br
+Retype password for Business/new-site:
+.TP
+Generate new password
+.B $ piggy generate Email/new\-account 20
+.br
+The generated password for Email/new-account is:
+.br
+$(-QF&Q=IN2nFBx!@kz3
+.TP
+Generate new alphanumeric password
+.B $ piggy generate \-n Email/new\-account 12
+.br
+The generated password for Email/new-account is:
+.br
+YqFsMkBeO6di
+.TP
+Remove password from store
+.B $ piggy rm Business/old\-site
+.br
+Are you sure you would like to delete Business/old-site? [y/N] y
+.br
+removed \[u2018]/home/user/.local/share/piggy/Business/old-site.ebox\[u2019]
+
+.SH EXTENDED GIT EXAMPLE
+
+Here, we initialize a new password store, create a git repository, and then
+manipulate and sync passwords.
+
+.B $ piggy init
+.br
+Using PIV device: C291D27B...
+.br
+Password store initialized.
+
+.B $ piggy git init
+.br
+Initialized empty Git repository in /home/user/.local/share/piggy/.git/
+.br
+[master (root-commit) 998c8fd] Add current contents of password store.
+
+.B $ piggy git remote add origin git@host:secrets.git
+
+.B $ piggy generate Email/account 21
+.br
+[master 30fdc1e] Add generated password for Email/account to store.
+.br
+The generated password for Email/account is:
+.br
+<5m,_BrZY`antNDxKN<0A
+
+.B $ piggy git push \-u \-\-all
+
+.B $ piggy insert Email/other\-account
+.br
+Enter password for Email/other-account:
+.br
+Retype password for Email/other-account:
+.br
+[master b9b6746] Add given password for Email/other-account to store.
+
+.B $ piggy rm \-f Email/account
+.br
+removed \[u2018]/home/user/.local/share/piggy/Email/account.ebox\[u2019]
+.br
+[master 288b379] Remove Email/account from store.
+
+.B $ piggy git push
+
+.SH FILES
+
+.TP
+.B ~/.local/share/piggy
+The default password storage directory.
+.TP
+.B ~/.local/share/piggy/.pivy\-id
+Contains the pivy-box ebox template used for encryption.  This is a binary
+template file created by
+.BR pivy-box (1)
+that lists PIV public keys that secrets are encrypted to.
+Sub-directories may contain their own \fI.pivy-id\fP files; passwords inside
+those sub-directories are encrypted using those templates.  This should be set
+using the \fBinit\fP command.
+
+.SH ENVIRONMENT VARIABLES
+
+.TP
+.I PIGGY_STORE_DIR
+Overrides the default password storage directory.  Default:
+\fI$XDG_DATA_HOME/piggy\fP or \fI~/.local/share/piggy\fP.
+.TP
+.I PIGGY_UMASK
+Sets the umask of all files modified by piggy, by default \fI077\fP.
+.TP
+.I PIGGY_X_SELECTION
+Overrides the selection passed to \fBxclip\fP, by default \fIclipboard\fP.  See
+.BR xclip (1)
+for more info.
+.TP
+.I PIGGY_CLIP_TIME
+Specifies the number of seconds to wait before restoring the clipboard, by
+default \fI45\fP seconds.
+.TP
+.I PIGGY_GENERATED_LENGTH
+The default password length if the \fIpass-length\fP parameter to \fBgenerate\fP
+is unspecified, by default \fI25\fP.
+.TP
+.I PIGGY_CHARACTER_SET
+The character set to be used in password generation for \fBgenerate\fP.  This
+value is to be interpreted by \fBtr\fP.  See
+.BR tr (1)
+for more info.  Default: \fI[:punct:][:alnum:]\fP.
+.TP
+.I PIGGY_CHARACTER_SET_NO_SYMBOLS
+The character set to be used in no-symbol password generation for \fBgenerate\fP,
+when \fI\-\-no\-symbols\fP or \fI\-n\fP is specified.  This value is to be
+interpreted by \fBtr\fP.  See
+.BR tr (1)
+for more info.  Default: \fI[:alnum:]\fP.
+.TP
+.I PIGGY_GIT
+If set, overrides automatic git detection.
+.TP
+.I PIGGY_GETOPT
+Override the path to GNU
+.BR getopt (1).
+Useful in Nix environments where getopt is provided on PATH.
+.TP
+.I EDITOR
+The location of the text editor used by \fBedit\fP.
+
+.SH SEE ALSO
+.BR pivy-box (1),
+.BR pivy-tool (1),
+.BR pivy-agent (1),
+.BR git (1),
+.BR tree (1),
+.BR tr (1),
+.BR xclip (1),
+.BR wl-clipboard (1),
+.BR qrencode (1).
+
+.SH AUTHOR
+.B piggy
+is a fork of
+.BR pass (1)
+by
+.MT Jason@zx2c4.com
+Jason A. Donenfeld
+.ME ,
+rewritten to use PIV smart cards via
+.BR pivy-box (1)
+instead of GPG.
+
+.SH COPYING
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
