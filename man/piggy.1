@@ -368,6 +368,11 @@ Override the path to GNU
 .BR getopt (1).
 Useful in Nix environments where getopt is provided on PATH.
 .TP
+.I SECURE_TMPDIR
+If set, skip automatic secure temporary directory creation (ramdisk on macOS,
+/dev/shm on Linux) and use this path instead.
+Useful in sandboxed environments where device operations are restricted.
+.TP
 .I EDITOR
 The location of the text editor used by \fBedit\fP.
 
