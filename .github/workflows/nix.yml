@@ -53,3 +53,9 @@ jobs:
           determinate: true
       - uses: DeterminateSystems/flakehub-cache-action@main
       - run: nix build
+      # End-to-end suite: cargo build + bats (existing piggy bash tests
+      # routed through the rust dispatcher) + cargo test. The bats step
+      # is the one that proves the rust to bash dispatch path works at
+      # runtime; nix build alone would not catch a regression there.
+      - name: Run rust + bats end-to-end suite
+        run: nix develop --command just test
