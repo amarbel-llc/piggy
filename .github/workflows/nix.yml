@@ -34,6 +34,9 @@ jobs:
   build-nix-package:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     strategy:
+      # Don't abort sibling jobs when one platform fails — a darwin
+      # regression should not mask a linux failure (and vice versa).
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
