@@ -1,0 +1,60 @@
+#! /usr/bin/env bats
+#
+# C pivy-agent oracle, kept verbatim from amarbel-llc/pivy.
+#
+# This file is named `.bats.skip` so bats discovery skips it. As the rust
+# `piggy agent` subcommand grows toward parity with the C `pivy-agent`
+# binary (install-service / restart-service / uninstall-service / XDG
+# paths), tests should be ported here, rewritten to invoke
+# `$PIGGY agent <action>` instead of bare `pivy-agent`, then renamed to
+# `.bats` and added to the conformance suite.
+#
+# Tracking: piggy roadmap issue (catch-up rust to C feature parity).
+
+setup() {
+  load "$(dirname "$BATS_TEST_FILE")/common.bash"
+  setup_test_home
+  export output
+}
+
+teardown() {
+  teardown_test_home
+}
+
+stub_service_commands() {
+  local stub_dir="$BATS_TEST_TMPDIR/stub-bin"
+  local exit_code="${1:-0}"
+  mkdir -p "$stub_dir"
+  printf '#!/bin/sh\nexit %s\n' "$exit_code" >"$stub_dir/systemctl"
+  printf '#!/bin/sh\nexit %s\n' "$exit_code" >"$stub_dir/launchctl"
+  chmod +x "$stub_dir/systemctl" "$stub_dir/launchctl"
+  PATH="$stub_dir:$PATH"
+}
+
+install_service_setup() {
+  if [[ "$(uname)" == "Darwin" ]]; then
+    mkdir -p "$HOME/Library"
+    SERVICE_FILE="$HOME/Library/LaunchAgents/net.cooperi.pivy-agent.plist"
+  else
+    mkdir -p "$HOME/.config"
+    SERVICE_FILE="$HOME/.config/systemd/user/pivy-agent@.service"
+  fi
+  stub_service_commands
+}
+
+function no_args_prints_usage_and_fails { # @test
+  run pivy-agent
+  assert_failure
+  assert_output --partial "usage: pivy-agent"
+}
+
+function bad_option_prints_usage_and_fails { # @test
+  run pivy-agent -Q
+  assert_failure
+  assert_output --partial "usage: pivy-agent"
+}
+
+# install-service / restart-service / uninstall-service / XDG path tests:
+# see amarbel-llc/pivy zz-tests_bats/pivy_agent.bats for the full set.
+# They are intentionally NOT duplicated here verbatim — port them as the
+# rust `piggy agent install-service` etc. subcommands land.

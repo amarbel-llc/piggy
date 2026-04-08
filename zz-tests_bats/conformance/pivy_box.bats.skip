@@ -1,0 +1,32 @@
+#! /usr/bin/env bats
+#
+# C pivy-box oracle. Kept as `.bats.skip` so bats discovery ignores it.
+#
+# When `piggy box` lands as a rust subcommand, port these tests to
+# invoke `$PIGGY box` and rename to `.bats`. Until then, piggy.sh
+# encryption / decryption still goes through the C pivy-box via the
+# rust dispatcher's fallback path.
+#
+# Tracking: piggy roadmap issue (catch-up rust to C feature parity).
+
+setup() {
+  load "$(dirname "$BATS_TEST_FILE")/common.bash"
+  export output
+}
+
+function no_args_prints_usage_and_fails { # @test
+  run pivy-box
+  assert_failure
+  assert_output --partial "type and operation required"
+}
+
+function type_without_op_prints_usage_and_fails { # @test
+  run pivy-box key
+  assert_failure
+  assert_output --partial "operation required"
+}
+
+function bad_type_and_op_fails { # @test
+  run pivy-box nonexistent badop
+  assert_failure
+}

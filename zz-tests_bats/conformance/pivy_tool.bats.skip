@@ -1,0 +1,32 @@
+#! /usr/bin/env bats
+#
+# C pivy-tool oracle. Kept as `.bats.skip` so bats discovery ignores it.
+#
+# When `piggy tool` lands as a rust subcommand, port these tests to
+# invoke `$PIGGY tool` and rename to `.bats`.
+#
+# Tracking: piggy roadmap issue (catch-up rust to C feature parity).
+
+setup() {
+  load "$(dirname "$BATS_TEST_FILE")/common.bash"
+  export output
+}
+
+function no_args_prints_usage_and_fails { # @test
+  run pivy-tool
+  assert_failure
+  assert_output --partial "usage: pivy-tool"
+}
+
+function bad_option_fails { # @test
+  run pivy-tool -Z
+  assert_failure
+  assert_output --partial "usage: pivy-tool"
+}
+
+function bad_subcommand_fails { # @test
+  run pivy-tool nonexistent-command
+  assert_failure
+}
+
+# pivy-tool version requires pcscd; see pivy issue #3.

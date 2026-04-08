@@ -35,6 +35,9 @@
         pkgs = import nixpkgs { inherit system; };
         pkgs-master = import nixpkgs-master { inherit system; };
 
+        # Runtime deps on PATH for the wrapped piggy binary. `pivy` is kept
+        # as a fallback for subcommands the rust binary hasn't implemented
+        # yet (box/tool/ca/luks/zfs) — see crates/piggy/src/fallback.rs.
         runtimeDeps = [
           pivy.packages.${system}.default
           pkgs.git
@@ -44,9 +47,50 @@
           pkgs.gnugrep
           pkgs.coreutils
         ];
-      in
-      {
-        packages.default = pkgs.stdenv.mkDerivation {
+
+        # Native rust workspace: `piggy` (binary) + `piggy-piv` (library).
+        # pcsclite is only needed on linux; macOS has PC/SC in CoreServices.
+        rustBuildInputs = [ pkgs.openssl ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.pcsclite ];
+        rustNativeBuildInputs = [ pkgs.pkg-config ];
+
+        piggy-rs = pkgs.rustPlatform.buildRustPackage {
+          pname = "piggy-rs";
+          version = "0.1.0";
+
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              name: type:
+              let
+                rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
+                base = baseNameOf rel;
+              in
+              base == "Cargo.toml" || base == "Cargo.lock" || pkgs.lib.hasPrefix "crates" rel;
+          };
+
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
+
+          buildInputs = rustBuildInputs;
+          nativeBuildInputs = rustNativeBuildInputs;
+
+          # Integration tests in crates/piggy-piv/tests/ need a pcsc daemon
+          # that nix sandboxes can't provide. Match pivy's flake, which skips
+          # checks on darwin for the same reason (no system pcscd under CI).
+          doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
+
+          meta = with pkgs.lib; {
+            description = "Piggy rust workspace (piggy CLI + piggy-piv library)";
+            homepage = "https://github.com/amarbel-llc/piggy";
+            license = licenses.mpl20;
+            platforms = platforms.linux ++ platforms.darwin;
+          };
+        };
+
+        # Wrapped `piggy` binary: rust dispatch + bash passwordstore + pivy
+        # fallback, bundled as a single symlink-joined package.
+        piggy = pkgs.stdenv.mkDerivation {
           pname = "piggy";
           version = "0.1.0";
 
@@ -54,19 +98,33 @@
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
 
-          installPhase = ''
-            mkdir -p $out/lib/piggy/platform $out/bin $out/share/man/man1
+          dontBuild = true;
 
-            install -m 0755 src/piggy.sh $out/lib/piggy/piggy
+          installPhase = ''
+            mkdir -p $out/bin \
+                     $out/libexec/piggy \
+                     $out/libexec/piggy/platform \
+                     $out/share/man/man1
+
+            # Stash the rust dispatcher and bash script at known paths,
+            # then wrap the rust binary as $out/bin/piggy with PIGGY_SH_PATH
+            # set so fallback::find_piggy_sh locates the bash script.
+            install -m 0755 ${piggy-rs}/bin/piggy \
+                            $out/libexec/piggy/piggy-rs
+            install -m 0755 src/piggy.sh \
+                            $out/libexec/piggy/piggy.sh
             if [ -f src/platform/darwin.sh ]; then
-              install -m 0644 src/platform/darwin.sh $out/lib/piggy/platform/darwin.sh
+              install -m 0644 src/platform/darwin.sh \
+                              $out/libexec/piggy/platform/darwin.sh
             fi
             if [ -f src/platform/linux.sh ]; then
-              install -m 0644 src/platform/linux.sh $out/lib/piggy/platform/linux.sh
+              install -m 0644 src/platform/linux.sh \
+                              $out/libexec/piggy/platform/linux.sh
             fi
             install -m 0644 man/piggy.1 $out/share/man/man1/piggy.1
 
-            makeWrapper $out/lib/piggy/piggy $out/bin/piggy \
+            makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
+              --set PIGGY_SH_PATH $out/libexec/piggy/piggy.sh \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
           '';
 
@@ -76,12 +134,32 @@
             platforms = platforms.linux ++ platforms.darwin;
           };
         };
+      in
+      {
+        packages.default = piggy;
+        packages.piggy = piggy;
+        packages.piggy-rs = piggy-rs;
 
         devShells.default = pkgs.mkShell {
-          packages = runtimeDeps ++ [
-            pkgs-master.just
-            bob.packages.${system}.batman
-          ];
+          packages =
+            runtimeDeps
+            ++ rustBuildInputs
+            ++ rustNativeBuildInputs
+            ++ [
+              pkgs-master.just
+              pkgs-master.rustc
+              pkgs-master.cargo
+              pkgs-master.rustfmt
+              pkgs-master.clippy
+              pkgs-master.rust-analyzer
+              bob.packages.${system}.batman
+            ];
+
+          # Help the openssl + pcsc-sys crates find their libraries
+          # without having to vendor, mirroring pivy's flake semantics.
+          OPENSSL_NO_VENDOR = "1";
+          OPENSSL_DIR = "${pkgs.openssl.dev}";
+          OPENSSL_LIB_DIR = "${pkgs.lib.getLib pkgs.openssl}/lib";
         };
       }
     ));

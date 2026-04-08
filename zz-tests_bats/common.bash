@@ -37,8 +37,28 @@ export GIT_WORK_TREE="$PIGGY_STORE_DIR"
 git config --global user.email "Piggy-Automated-Testing-Suite@test.local"
 git config --global user.name "Piggy Automated Testing Suite"
 
-# Piggy script under test
-PIGGY="$REPO_ROOT/src/piggy.sh"
+# Piggy under test:
+#   - $PIGGY is the rust dispatcher binary (NOT src/piggy.sh directly).
+#     Every bash subcommand goes through the full rust → bash dispatch path
+#     so the integration layer is exercised on every test run.
+#   - $PIGGY_SH_PATH points the rust binary at the in-repo bash script.
+#
+# Resolution order: $PIGGY env var → target/debug/piggy → target/release/piggy.
+# We deliberately do NOT fall back to src/piggy.sh — bypassing the rust
+# dispatcher would hide regressions in the wrapper.
+if [[ -z ${PIGGY:-} ]]; then
+  if [[ -x $REPO_ROOT/target/debug/piggy ]]; then
+    PIGGY="$REPO_ROOT/target/debug/piggy"
+  elif [[ -x $REPO_ROOT/target/release/piggy ]]; then
+    PIGGY="$REPO_ROOT/target/release/piggy"
+  else
+    echo "common.bash: piggy rust binary not found." >&2
+    echo "             Run 'cargo build' first, or set \$PIGGY explicitly." >&2
+    exit 1
+  fi
+fi
+export PIGGY
+export PIGGY_SH_PATH="$REPO_ROOT/src/piggy.sh"
 
 # Pre-set SECURE_TMPDIR so piggy skips ramdisk creation (sandbox-safe)
 export SECURE_TMPDIR="$BATS_TEST_TMPDIR/secure-tmp"
