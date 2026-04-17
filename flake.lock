@@ -658,11 +658,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1775786350,
-        "narHash": "sha256-vpa2NLl1BUadnxDbCsyXcPgvKvZRcTJS4locV2hYee0=",
+        "lastModified": 1776458279,
+        "narHash": "sha256-XXqLGG6/C9IVZXDSImUSoF8vIOr1ffV2RyrevG+XUOg=",
         "owner": "amarbel-llc",
         "repo": "pivy",
-        "rev": "fdf76d6d60725ec5a97ac892ebfb6f57c6d4da49",
+        "rev": "e3f683b1e79b9351f5a3fb255430c31fbdabd2a3",
         "type": "github"
       },
       "original": {
