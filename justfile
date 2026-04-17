@@ -39,7 +39,8 @@ test-bats-conformance: build-rust
 
 test-bats-conformance-protocol: build-rust build-nix-conformance
   CONFORMANCE_BIN="$(readlink -f ./result-conformance)/bin/piggy-agent-conformance" \
-    BATS_TEST_TIMEOUT=30 bats --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
+    BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding \
+    --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
 
 test-rust:
     cargo test

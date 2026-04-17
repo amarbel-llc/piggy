@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use ssh_agent_lib::{
     agent::Session,
     error::AgentError,
-    proto::{signature, Identity, SignRequest},
+    proto::{signature, Extension, Identity, SignRequest},
 };
 use ssh_key::{public::KeyData, Algorithm, Signature};
 
@@ -113,6 +113,48 @@ impl Session for PiggyAgent {
         let mut pin = self.pin.lock().await;
         *pin = Some(key);
         Ok(())
+    }
+
+    async fn extension(
+        &mut self,
+        extension: Extension,
+    ) -> Result<Option<Extension>, AgentError> {
+        match extension.name.as_str() {
+            "query" => {
+                let supported: &[&str] = &[
+                    "query",
+                    "session-bind@openssh.com",
+                    "pin-status@joyent.com",
+                ];
+                let mut buf = Vec::new();
+                for name in supported {
+                    let bytes = name.as_bytes();
+                    buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(bytes);
+                }
+                Ok(Some(Extension {
+                    name: "query".into(),
+                    details: buf.into(),
+                }))
+            }
+            "session-bind@openssh.com" => Ok(None),
+            "pin-status@joyent.com" => {
+                let pin_guard = self.pin.lock().await;
+                let has_pin: u8 = if pin_guard.is_some() { 1 } else { 0 };
+                let has_card: u8 = if !self.keys.lock().await.is_empty() {
+                    1
+                } else {
+                    0
+                };
+                Ok(Some(Extension {
+                    name: "pin-status@joyent.com".into(),
+                    details: vec![has_pin, has_card].into(),
+                }))
+            }
+            _ => Err(AgentError::from(
+                ssh_agent_lib::proto::ProtoError::UnsupportedCommand { command: 27 },
+            )),
+        }
     }
 }
 
