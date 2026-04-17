@@ -134,11 +134,39 @@
             platforms = platforms.linux ++ platforms.darwin;
           };
         };
+
+        piggy-agent-conformance = pkgs.buildGoModule {
+          pname = "piggy-agent-conformance";
+          version = "0.1.0";
+
+          src = pkgs.lib.fileset.toSource {
+            root = ./go;
+            fileset = pkgs.lib.fileset.unions [
+              ./go/go.mod
+              ./go/go.sum
+              ./go/main.go
+            ];
+          };
+
+          vendorHash = "sha256-P8Y1OaDAgNbfGA99vNeXlfOuQqpMhHPebxYceLgZew0=";
+
+          postInstall = ''
+            mv $out/bin/conformance $out/bin/piggy-agent-conformance
+          '';
+
+          meta = with pkgs.lib; {
+            description = "Go-based SSH agent conformance tests for piggy";
+            homepage = "https://github.com/amarbel-llc/piggy";
+            license = licenses.mpl20;
+            platforms = platforms.linux ++ platforms.darwin;
+          };
+        };
       in
       {
         packages.default = piggy;
         packages.piggy = piggy;
         packages.piggy-rs = piggy-rs;
+        packages.piggy-agent-conformance = piggy-agent-conformance;
 
         devShells.default = pkgs.mkShell {
           packages =

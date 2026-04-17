@@ -8,6 +8,9 @@ build: build-nix build-rust
 build-nix:
     nix build --show-trace
 
+build-nix-conformance:
+    nix build .#piggy-agent-conformance -o result-conformance
+
 build-rust:
     cargo build
 
@@ -33,6 +36,10 @@ test-bats-piggy: build-rust
 
 test-bats-conformance: build-rust
   BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/conformance/*.bats
+
+test-bats-conformance-protocol: build-rust build-nix-conformance
+  CONFORMANCE_BIN="$(readlink -f ./result-conformance)/bin/piggy-agent-conformance" \
+    BATS_TEST_TIMEOUT=30 bats --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
 
 test-rust:
     cargo test

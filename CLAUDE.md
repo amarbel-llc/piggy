@@ -20,6 +20,12 @@ Run a single bats test file:
 bats --no-sandbox zz-tests_bats/t0100-insert.bats
 ```
 
+Protocol conformance tests (Go binary validates SSH agent wire format):
+```sh
+just build-nix-conformance           # Build Go conformance binary
+just test-bats-conformance-protocol  # Run protocol tests against piggy agent
+```
+
 ## Architecture
 
 **Single-script CLI** — the entire tool is `src/piggy.sh` (~800 lines of bash). It implements all passwordstore.org commands (init, show, insert, edit, generate, rm, mv, cp, find, grep, git) with pivy-box as the crypto backend.
@@ -41,6 +47,8 @@ bats --no-sandbox zz-tests_bats/t0100-insert.bats
 - `zz-tests_bats/common.bash` — bats test harness (mock PATH, temp store, git identity)
 - `zz-tests_bats/helpers/mock-pivy-box.sh` — mock pivy-box using base64 encode/decode
 - `flake.nix` — nix package definition and dev shell
+- `go/main.go` — Go SSH agent conformance test binary (protocol wire format validation)
+- `zz-tests_bats/conformance/piggy_agent_protocol.bats` — bats harness for protocol conformance
 - `contrib/emacs/piggy.el` — Emacs integration package
 
 ## Code Conventions

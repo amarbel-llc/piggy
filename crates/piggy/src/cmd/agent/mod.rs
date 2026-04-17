@@ -124,9 +124,21 @@ async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
             .collect()
     });
 
-    // Enumerate PIV tokens and cache their keys
-    let ctx = piggy_piv::PivContext::new()?;
-    let tokens = ctx.enumerate_tokens()?;
+    // Enumerate PIV tokens and cache their keys.
+    // If PCSC is unavailable (e.g. no pcscd), start with zero keys.
+    let (tokens, _ctx_available) = match piggy_piv::PivContext::new() {
+        Ok(ctx) => match ctx.enumerate_tokens() {
+            Ok(tokens) => (tokens, true),
+            Err(e) => {
+                tracing::warn!("Failed to enumerate PIV tokens: {e}");
+                (Vec::new(), false)
+            }
+        },
+        Err(e) => {
+            tracing::warn!("PCSC not available: {e}");
+            (Vec::new(), false)
+        }
+    };
 
     let mut cached_keys = Vec::new();
     let mut primary_guid = None;
