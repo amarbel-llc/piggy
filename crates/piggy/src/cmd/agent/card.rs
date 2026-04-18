@@ -81,63 +81,166 @@ pub async fn probe_loop_with<F>(
 
 #[cfg(test)]
 mod tests {
+    //! Deterministic unit tests for `probe_loop_with` and the production
+    //! constants consumed by `probe_loop`.
+    //!
+    //! All time-dependent tests run under `#[tokio::test(start_paused =
+    //! true)]` and drive the clock manually via `tokio::time::advance`
+    //! or `sleep`. This eliminates the wall-clock flake risk the
+    //! antagonistic review of #1 called out — the previous tests used a
+    //! 1 ms interval + 20 ms real-time `timeout`, which could under-tick
+    //! on slow CI and pass vacuously.
+    //!
+    //! `tick_at_least_n_times` spawns the loop with a known counter,
+    //! advances the paused clock past the target number of intervals,
+    //! and polls the counter. This is the idiomatic pattern for testing
+    //! `tokio::time::interval` under paused time.
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use tokio::time::timeout;
+    use tokio::task::yield_now;
 
     fn sample_guid() -> Guid {
         Guid::from_hex("995E171383029CDA0D9CDBDBAD580813").unwrap()
     }
 
-    /// Drive the probe loop for enough real time to fire `n_ticks`
-    /// immediate-interval ticks, then cancel it.
+    /// Spawn `probe_loop_with`, drive the paused clock until the probe
+    /// has been called at least `target_probes` times, and return the
+    /// loop's JoinHandle (caller aborts it).
     ///
-    /// `interval(Duration::from_millis(0))` still fires on every poll,
-    /// but each tick yields; `timeout` cancels the loop cleanly.
-    async fn run_probe_for_ticks<F>(
+    /// Important: `tokio::time::interval` fires its **first** tick
+    /// immediately on the first `.tick().await` — no `advance()` is
+    /// required to see probe #1. Each subsequent tick needs one
+    /// `advance(interval_dur)`. So `target_probes = k` requires
+    /// `k - 1` advances past the initial immediate tick.
+    ///
+    /// Panics if the counter does not rise to `target_probes` after the
+    /// clock is advanced — a floor against silent no-op loops.
+    async fn run_until_n_probes<F>(
         guid: Guid,
         pin: Arc<Mutex<Option<String>>>,
         probe: F,
+        interval_dur: Duration,
         fail_limit: u32,
-    ) where
+        counter: Arc<AtomicU32>,
+        target_probes: u32,
+    ) -> tokio::task::JoinHandle<()>
+    where
         F: FnMut(&Guid) -> bool + Send + 'static,
     {
-        // Use a very small interval; `timeout` cancels the loop.
-        // 20ms total is plenty for ~100 rapid-fire ticks while keeping
-        // tests fast and deterministic on slow CI.
-        let _ = timeout(
-            Duration::from_millis(20),
-            probe_loop_with(guid, pin, probe, Duration::from_millis(1), fail_limit),
-        )
-        .await;
+        assert!(target_probes >= 1, "need at least 1 probe");
+        let handle = tokio::spawn(async move {
+            probe_loop_with(guid, pin, probe, interval_dur, fail_limit).await;
+        });
+
+        // Yield so the spawned task reaches its first tick.await and the
+        // immediate tick fires (probe #1).
+        for _ in 0..4 {
+            yield_now().await;
+        }
+
+        // Each further probe needs one interval_dur advance.
+        for _ in 0..(target_probes - 1) {
+            tokio::time::advance(interval_dur).await;
+            for _ in 0..4 {
+                yield_now().await;
+            }
+        }
+
+        let observed = counter.load(Ordering::SeqCst);
+        assert!(
+            observed >= target_probes,
+            "probe loop under-ran: expected ≥ {target_probes} probes, got {observed}"
+        );
+        handle
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn probe_loop_clears_pin_after_fail_limit() {
         let pin = Arc::new(Mutex::new(Some("1234".to_string())));
         let guid = sample_guid();
-        let probe = |_g: &Guid| false;
+        let counter = Arc::new(AtomicU32::new(0));
+        let fail_limit: u32 = 3;
+        let counter_cl = counter.clone();
+        let probe = move |_g: &Guid| {
+            counter_cl.fetch_add(1, Ordering::SeqCst);
+            false
+        };
 
-        run_probe_for_ticks(guid, pin.clone(), probe, 3).await;
+        let handle = run_until_n_probes(
+            guid,
+            pin.clone(),
+            probe,
+            Duration::from_millis(10),
+            fail_limit,
+            counter,
+            fail_limit, // advance exactly fail_limit ticks
+        )
+        .await;
 
-        // After multiple consecutive failures, the pin must have been
-        // cleared.
+        // After fail_limit consecutive failures the PIN must be cleared.
         assert_eq!(*pin.lock().await, None);
+        handle.abort();
     }
 
-    #[tokio::test]
+    /// Positive control for the clear-after-fail-limit test: at one
+    /// fewer tick, the PIN must still be present. Pins the boundary.
+    #[tokio::test(start_paused = true)]
+    async fn probe_loop_keeps_pin_just_below_fail_limit() {
+        let pin = Arc::new(Mutex::new(Some("1234".to_string())));
+        let guid = sample_guid();
+        let counter = Arc::new(AtomicU32::new(0));
+        let fail_limit: u32 = 3;
+        let counter_cl = counter.clone();
+        let probe = move |_g: &Guid| {
+            counter_cl.fetch_add(1, Ordering::SeqCst);
+            false
+        };
+
+        let handle = run_until_n_probes(
+            guid,
+            pin.clone(),
+            probe,
+            Duration::from_millis(10),
+            fail_limit,
+            counter,
+            fail_limit - 1, // one tick short of the limit
+        )
+        .await;
+
+        assert_eq!(*pin.lock().await, Some("1234".to_string()));
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn probe_loop_keeps_pin_while_card_present() {
         let pin = Arc::new(Mutex::new(Some("hunter2".to_string())));
         let guid = sample_guid();
-        let probe = |_g: &Guid| true;
+        let counter = Arc::new(AtomicU32::new(0));
+        let fail_limit: u32 = 3;
+        let counter_cl = counter.clone();
+        let probe = move |_g: &Guid| {
+            counter_cl.fetch_add(1, Ordering::SeqCst);
+            true
+        };
 
-        run_probe_for_ticks(guid, pin.clone(), probe, 3).await;
+        // Run for 2× fail_limit ticks — even if the counter logic were
+        // broken, we'd see any spurious clear here.
+        let handle = run_until_n_probes(
+            guid,
+            pin.clone(),
+            probe,
+            Duration::from_millis(10),
+            fail_limit,
+            counter,
+            fail_limit * 2,
+        )
+        .await;
 
-        // Continuously successful probes must not touch the pin.
         assert_eq!(*pin.lock().await, Some("hunter2".to_string()));
+        handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn probe_loop_resets_failure_counter_on_success() {
         // Pattern: fail, fail, succeed, fail, fail -- should NOT clear
         // the pin because the success resets the counter and we never
@@ -145,6 +248,7 @@ mod tests {
         let pin = Arc::new(Mutex::new(Some("stable".to_string())));
         let guid = sample_guid();
         let counter = Arc::new(AtomicU32::new(0));
+        let fail_limit: u32 = 3;
         let counter_cl = counter.clone();
         let probe = move |_g: &Guid| {
             let n = counter_cl.fetch_add(1, Ordering::SeqCst);
@@ -152,45 +256,114 @@ mod tests {
             n % 3 == 2
         };
 
-        run_probe_for_ticks(guid, pin.clone(), probe, 3).await;
+        // 6 ticks: fail, fail, succeed, fail, fail, succeed.
+        // Longest consecutive failure run is 2, below fail_limit.
+        let handle = run_until_n_probes(
+            guid,
+            pin.clone(),
+            probe,
+            Duration::from_millis(10),
+            fail_limit,
+            counter.clone(),
+            6,
+        )
+        .await;
 
+        // PIN must survive, AND the counter must prove the loop actually
+        // ran 6+ times (no vacuous pass).
+        assert!(counter.load(Ordering::SeqCst) >= 6);
         assert_eq!(*pin.lock().await, Some("stable".to_string()));
+        handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn probe_loop_no_op_when_pin_already_empty() {
         // If the PIN is None and the card is absent, the loop must
-        // still exit cleanly and leave the PIN as None (no spurious
-        // writes / panics).
+        // still run cleanly and leave the PIN as None.
         let pin: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let guid = sample_guid();
-        let probe = |_g: &Guid| false;
-
-        run_probe_for_ticks(guid, pin.clone(), probe, 3).await;
-
-        assert_eq!(*pin.lock().await, None);
-    }
-
-    #[tokio::test]
-    async fn probe_loop_passes_correct_guid_to_probe() {
-        // The guid given to probe_loop must be the guid the probe
-        // function receives -- regression guard against future
-        // refactors that might accidentally drop it.
-        let pin = Arc::new(Mutex::new(None));
-        let guid = sample_guid();
-        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let seen_cl = seen.clone();
-        let probe = move |g: &Guid| {
-            seen_cl.lock().unwrap().push(g.to_hex());
-            true
+        let counter = Arc::new(AtomicU32::new(0));
+        let fail_limit: u32 = 3;
+        let counter_cl = counter.clone();
+        let probe = move |_g: &Guid| {
+            counter_cl.fetch_add(1, Ordering::SeqCst);
+            false
         };
 
-        run_probe_for_ticks(guid.clone(), pin, probe, 3).await;
+        let handle = run_until_n_probes(
+            guid,
+            pin.clone(),
+            probe,
+            Duration::from_millis(10),
+            fail_limit,
+            counter,
+            fail_limit * 2,
+        )
+        .await;
+
+        assert_eq!(*pin.lock().await, None);
+        handle.abort();
+    }
+
+    /// The GUID given to `probe_loop` must be the one passed to the
+    /// probe closure on every call — including failure calls, since
+    /// that is the security-relevant branch (where the PIN gets
+    /// cleared). Collect GUIDs from both success and failure probes.
+    #[tokio::test(start_paused = true)]
+    async fn probe_loop_passes_correct_guid_to_probe_on_every_call() {
+        let pin = Arc::new(Mutex::new(None));
+        let guid = sample_guid();
+        let counter = Arc::new(AtomicU32::new(0));
+        let fail_limit: u32 = 3;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_cl = seen.clone();
+        let counter_cl = counter.clone();
+        let probe = move |g: &Guid| {
+            let n = counter_cl.fetch_add(1, Ordering::SeqCst);
+            seen_cl.lock().unwrap().push(g.to_hex());
+            // Alternate success/failure so both branches get exercised.
+            n % 2 == 0
+        };
+
+        let handle = run_until_n_probes(
+            guid.clone(),
+            pin,
+            probe,
+            Duration::from_millis(10),
+            fail_limit,
+            counter,
+            5,
+        )
+        .await;
 
         let seen = seen.lock().unwrap();
-        assert!(!seen.is_empty(), "probe should have been called at least once");
+        assert!(
+            seen.len() >= 5,
+            "expected ≥ 5 probe calls, got {}",
+            seen.len()
+        );
         for h in seen.iter() {
             assert_eq!(h, &guid.to_hex());
         }
+        handle.abort();
+    }
+
+    // -------- Production constants (pinned) --------
+
+    /// Pin the production `PROBE_FAIL_LIMIT`. Changing the constant is a
+    /// behavioural change worth a deliberate update to this test, not a
+    /// silent regression.
+    #[test]
+    fn probe_fail_limit_is_3() {
+        assert_eq!(PROBE_FAIL_LIMIT, 3);
+    }
+
+    /// Pin the production `PROBE_INTERVAL`. 60 seconds is the window
+    /// between card-presence probes and also bounds how quickly a
+    /// pulled card de-authenticates (3 × 60 s = 3 min); changing it is
+    /// a security-relevant knob.
+    #[test]
+    fn probe_interval_is_60s() {
+        assert_eq!(PROBE_INTERVAL, Duration::from_secs(60));
     }
 }

@@ -20,3 +20,9 @@ zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
 sha2 = "0.10"
 libc = "0.2"
+
+[dev-dependencies]
+# tokio's test-util feature enables `tokio::time::pause` / `advance` and
+# `#[tokio::test(start_paused = true)]`, which `cmd::agent::card` unit
+# tests use to drive the probe-loop interval deterministically.
+tokio = { version = "1", features = ["test-util"] }

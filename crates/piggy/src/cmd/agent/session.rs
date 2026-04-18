@@ -541,6 +541,52 @@ mod tests {
         assert_eq!(&out[tail_start + RSA_DIGEST_PREFIX_SHA512.len()..], hash.as_slice());
     }
 
+    /// When both SHA-256 and SHA-512 flags are set, the production code
+    /// (match arm order: SHA-512 first) picks SHA-512. Pins this so a
+    /// future refactor that flips branch order would fail — the
+    /// precedence is not documented anywhere else.
+    #[test]
+    fn prepare_sign_data_rsa2048_sha512_wins_when_both_flags_set() {
+        let data = b"precedence test";
+        let out = prepare_sign_data(
+            PivAlgorithm::Rsa2048,
+            data,
+            signature::RSA_SHA2_256 | signature::RSA_SHA2_512,
+        )
+        .unwrap();
+        // If SHA-512 wins, the tail of the padded block is the SHA-512
+        // DigestInfo + SHA-512 hash — NOT the SHA-256 version.
+        let hash = Sha512::digest(data);
+        let digest_info_len = RSA_DIGEST_PREFIX_SHA512.len() + hash.len();
+        let tail_start = out.len() - digest_info_len;
+        assert_eq!(
+            &out[tail_start..tail_start + RSA_DIGEST_PREFIX_SHA512.len()],
+            RSA_DIGEST_PREFIX_SHA512,
+            "SHA-512 must take precedence over SHA-256 when both flags set"
+        );
+        assert_eq!(
+            &out[tail_start + RSA_DIGEST_PREFIX_SHA512.len()..],
+            hash.as_slice()
+        );
+    }
+
+    /// Unknown flag bits must default to SHA-256 — verify by comparing
+    /// to the pure-default (flags=0) output.
+    #[test]
+    fn prepare_sign_data_rsa2048_unknown_flags_default_to_sha256() {
+        let data = b"unknown flags";
+        let default_out = prepare_sign_data(PivAlgorithm::Rsa2048, data, 0).unwrap();
+        // Pick a flag bit that is NOT RSA_SHA2_256 or RSA_SHA2_512.
+        // The SSH agent protocol defines those as bits 1 and 2; bit 31
+        // is guaranteed-unused territory.
+        let noise_flags: u32 = 1 << 31;
+        let noisy_out = prepare_sign_data(PivAlgorithm::Rsa2048, data, noise_flags).unwrap();
+        assert_eq!(
+            default_out, noisy_out,
+            "unknown flag bits must be ignored (default to SHA-256)"
+        );
+    }
+
     #[test]
     fn prepare_sign_data_rsa1024_default_sha256() {
         let data = b"rsa1024 message";
@@ -593,8 +639,11 @@ mod tests {
         // Key too small: need at least digest_info_len + 11. A
         // 40-byte key cannot fit 32 byte hash + 19 byte prefix + 11.
         let hash = vec![0; 32];
-        let err = pkcs1_v15_pad(&hash, RSA_DIGEST_PREFIX_SHA256, 40);
-        assert!(err.is_err(), "undersized key must be rejected");
+        let err = pkcs1_v15_pad(&hash, RSA_DIGEST_PREFIX_SHA256, 40).unwrap_err();
+        assert!(
+            format!("{err}").contains("key too small for digest"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -610,6 +659,74 @@ mod tests {
             assert_eq!(out[i], 0xFF);
         }
         assert_eq!(out[10], 0x00);
+    }
+
+    /// Boundary: one byte below the minimum viable size MUST be rejected.
+    /// Pins the exact cutoff at `digest_info_len + 11` — an off-by-one
+    /// in the production check at line 227 (`<` vs `<=`) would accept
+    /// this input and corrupt the padding layout.
+    #[test]
+    fn pkcs1_v15_pad_rejects_one_byte_below_minimum() {
+        let hash = vec![0xCC; 32];
+        let key_size = RSA_DIGEST_PREFIX_SHA256.len() + hash.len() + 10; // 61, one below
+        let err = pkcs1_v15_pad(&hash, RSA_DIGEST_PREFIX_SHA256, key_size).unwrap_err();
+        assert!(
+            format!("{err}").contains("key too small for digest"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Independent structural parser for a PKCS#1 v1.5 signature block.
+    /// Walks the bytes end-to-end without using any of the constants or
+    /// helpers from the production module, so any circular-reference
+    /// concern (the self-referential-structure critique) is eliminated.
+    ///
+    /// Returns the embedded hash on success, panics on any layout
+    /// violation — tests assert both that the layout is valid and the
+    /// hash at the tail matches the input.
+    fn parse_pkcs1_v15_padded(block: &[u8], expected_digest_info_prefix_len: usize) -> Vec<u8> {
+        assert!(block.len() >= 12, "block too short: {}", block.len());
+        assert_eq!(block[0], 0x00, "leading byte must be 0x00");
+        assert_eq!(block[1], 0x01, "block type must be 0x01 for signature");
+        let mut i = 2;
+        while i < block.len() && block[i] == 0xFF {
+            i += 1;
+        }
+        assert!(i >= 2 + 8, "padding must be at least 8 bytes (got {})", i - 2);
+        assert!(i < block.len(), "no separator byte found");
+        assert_eq!(block[i], 0x00, "separator byte must be 0x00");
+        let digest_info_start = i + 1;
+        let hash_start = digest_info_start + expected_digest_info_prefix_len;
+        assert!(
+            hash_start <= block.len(),
+            "DigestInfo prefix exceeds block"
+        );
+        block[hash_start..].to_vec()
+    }
+
+    /// Independent round-trip: pad a SHA-256 hash, then parse the block
+    /// with a structure walker that does NOT share code with
+    /// pkcs1_v15_pad. Confirms the emitted bytes form a well-formed
+    /// PKCS#1 v1.5 signature block and that the trailing hash matches
+    /// what we put in — circular assertions avoided.
+    #[test]
+    fn pkcs1_v15_pad_roundtrips_through_independent_parser() {
+        let hash = Sha256::digest(b"hello world").to_vec();
+        let padded = pkcs1_v15_pad(&hash, RSA_DIGEST_PREFIX_SHA256, 256).unwrap();
+        let extracted_hash =
+            parse_pkcs1_v15_padded(&padded, RSA_DIGEST_PREFIX_SHA256.len());
+        assert_eq!(extracted_hash, hash);
+    }
+
+    /// Same for SHA-512 so the DigestInfo prefix length variation is
+    /// exercised.
+    #[test]
+    fn pkcs1_v15_pad_roundtrips_through_independent_parser_sha512() {
+        let hash = Sha512::digest(b"hello world").to_vec();
+        let padded = pkcs1_v15_pad(&hash, RSA_DIGEST_PREFIX_SHA512, 256).unwrap();
+        let extracted_hash =
+            parse_pkcs1_v15_padded(&padded, RSA_DIGEST_PREFIX_SHA512.len());
+        assert_eq!(extracted_hash, hash);
     }
 
     // -------- decode_der_ecdsa_signature --------
@@ -671,16 +788,32 @@ mod tests {
     fn decode_der_ecdsa_signature_rejects_non_sequence() {
         // First byte should be 0x30 (SEQUENCE)
         let bad = vec![0x31, 0x04, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00];
-        assert!(decode_der_ecdsa_signature(&bad).is_err());
+        let err = decode_der_ecdsa_signature(&bad).unwrap_err();
+        assert!(format!("{err}").contains("not a SEQUENCE"));
     }
 
     #[test]
     fn decode_der_ecdsa_signature_rejects_too_short() {
-        for len in 0..6 {
+        // Each length hits a different bounds check; assert the error
+        // message matches the expected one so a change in the control
+        // flow stands out.
+        let cases: &[(usize, &str)] = &[
+            (0, "not a SEQUENCE"),
+            (1, "missing length byte"),
+            // len 2-5: SEQUENCE claims length >= the byte value of
+            // der[1] (48, since vec![0x30; len]) and the buffer
+            // undershoots — truncated body.
+            (2, "truncated body"),
+            (3, "truncated body"),
+            (4, "truncated body"),
+            (5, "truncated body"),
+        ];
+        for &(len, expected_fragment) in cases {
             let bad = vec![0x30; len];
+            let err = decode_der_ecdsa_signature(&bad).unwrap_err();
             assert!(
-                decode_der_ecdsa_signature(&bad).is_err(),
-                "should reject len={len}"
+                format!("{err}").contains(expected_fragment),
+                "len={len}: expected {expected_fragment:?}, got: {err}"
             );
         }
     }
@@ -689,14 +822,16 @@ mod tests {
     fn decode_der_ecdsa_signature_rejects_missing_r_integer_tag() {
         // 0x30 seq_len  <not 0x02>  ...
         let bad = vec![0x30, 0x06, 0x03, 0x01, 0x00, 0x02, 0x01, 0x00];
-        assert!(decode_der_ecdsa_signature(&bad).is_err());
+        let err = decode_der_ecdsa_signature(&bad).unwrap_err();
+        assert!(format!("{err}").contains("expected INTEGER tag for r"));
     }
 
     #[test]
     fn decode_der_ecdsa_signature_rejects_missing_s_integer_tag() {
         // 0x30 seq  0x02 r_len r 0x03 s_len s
         let bad = vec![0x30, 0x06, 0x02, 0x01, 0x00, 0x03, 0x01, 0x00];
-        assert!(decode_der_ecdsa_signature(&bad).is_err());
+        let err = decode_der_ecdsa_signature(&bad).unwrap_err();
+        assert!(format!("{err}").contains("expected INTEGER tag for s"));
     }
 
     /// Regression (specific bounds check): an INTEGER length that claims
@@ -899,9 +1034,22 @@ mod tests {
 
     #[test]
     fn to_ssh_signature_ecdsa_rejects_bad_der() {
+        // 0xFF...: not a SEQUENCE. Check the exact error so a refactor
+        // that returns a different error (e.g. a post-decode panic path)
+        // still fails the test.
         let bad_der = vec![0xFF; 8];
-        let err = to_ssh_signature(PivAlgorithm::EcP256, &bad_der, 0);
-        assert!(err.is_err());
+        let err = to_ssh_signature(PivAlgorithm::EcP256, &bad_der, 0).unwrap_err();
+        assert!(format!("{err}").contains("not a SEQUENCE"));
+    }
+
+    /// Extra coverage: DER that passes the SEQUENCE tag check but has a
+    /// malformed inner INTEGER. Pre-fix code could panic here; confirms
+    /// the error propagates cleanly through to_ssh_signature.
+    #[test]
+    fn to_ssh_signature_ecdsa_rejects_malformed_inner_der() {
+        let bad_der = vec![0x30, 0x06, 0x02, 0x64, 0x00, 0x02, 0x01, 0x00];
+        let err = to_ssh_signature(PivAlgorithm::EcP256, &bad_der, 0).unwrap_err();
+        assert!(format!("{err}").contains("r INTEGER length exceeds SEQUENCE"));
     }
 
     #[test]
@@ -944,6 +1092,30 @@ mod tests {
         assert_eq!(sig.algorithm().as_str(), "rsa-sha2-256");
     }
 
+    /// Mirror of `prepare_sign_data_rsa2048_sha512_wins_when_both_flags_set`
+    /// for the to_ssh_signature label path: when both flags are set, the
+    /// produced SSH algorithm label is rsa-sha2-512.
+    #[test]
+    fn to_ssh_signature_rsa2048_sha512_wins_when_both_flags_set() {
+        let raw = vec![0xAB; 256];
+        let sig = to_ssh_signature(
+            PivAlgorithm::Rsa2048,
+            &raw,
+            signature::RSA_SHA2_256 | signature::RSA_SHA2_512,
+        )
+        .unwrap();
+        assert_eq!(sig.algorithm().as_str(), "rsa-sha2-512");
+    }
+
+    /// Mirror of `prepare_sign_data_rsa2048_unknown_flags_default_to_sha256`:
+    /// unknown flag bits label the signature as rsa-sha2-256.
+    #[test]
+    fn to_ssh_signature_rsa2048_unknown_flags_default_to_sha256() {
+        let raw = vec![0xAB; 256];
+        let sig = to_ssh_signature(PivAlgorithm::Rsa2048, &raw, 1 << 31).unwrap();
+        assert_eq!(sig.algorithm().as_str(), "rsa-sha2-256");
+    }
+
     // -------- Session impl: request_identities --------
 
     #[tokio::test]
@@ -983,6 +1155,26 @@ mod tests {
 
     // -------- Session impl: sign (pre-PCSC branch) --------
 
+    /// Assert that an `AgentError` is the `::Other` variant AND that its
+    /// rendered message equals `expected`. The variant check uses the
+    /// `{:?}` Debug representation (which starts with the variant name),
+    /// the message check uses `{}` Display. Tighter than a raw
+    /// `.contains()` on Display alone — a refactor that moves the error
+    /// to a different variant but keeps a similar message would fail
+    /// this assertion.
+    fn assert_agent_error_other_eq(err: &AgentError, expected: &str) {
+        let debug = format!("{err:?}");
+        let display = format!("{err}");
+        assert!(
+            debug.trim_start().starts_with("Other"),
+            "expected AgentError::Other variant, got debug={debug}"
+        );
+        assert!(
+            display.contains(expected),
+            "error message mismatch: expected to contain {expected:?}, got {display}"
+        );
+    }
+
     #[tokio::test]
     async fn sign_unknown_key_errors_before_touching_pcsc() {
         // An empty cache plus any pubkey must short-circuit at
@@ -996,8 +1188,7 @@ mod tests {
             flags: 0,
         };
         let err = agent.sign(req).await.unwrap_err();
-        let s = format!("{err}");
-        assert!(s.contains("key not found"), "got: {s}");
+        assert_agent_error_other_eq(&err, "key not found");
     }
 
     #[tokio::test]
@@ -1011,7 +1202,7 @@ mod tests {
             flags: 0,
         };
         let err = agent.sign(req).await.unwrap_err();
-        assert!(format!("{err}").contains("key not found"));
+        assert_agent_error_other_eq(&err, "key not found");
     }
 
     // -------- Session impl: lock / unlock --------
@@ -1180,8 +1371,32 @@ mod tests {
                 name: "bogus@example.com".into(),
                 details: Vec::<u8>::new().into(),
             })
-            .await;
-        assert!(err.is_err());
+            .await
+            .unwrap_err();
+        // Specifically the UnsupportedCommand protocol error, not any
+        // random other AgentError variant.
+        let debug = format!("{err:?}");
+        assert!(
+            debug.contains("UnsupportedCommand"),
+            "expected UnsupportedCommand, got {debug}"
+        );
+    }
+
+    /// Matching on extension names is case-sensitive — "Query" must NOT
+    /// match the "query" arm. Pins the exact-match semantics so a later
+    /// refactor to case-insensitive lookup (which would be a protocol
+    /// violation per the SSH agent spec) fails loudly.
+    #[tokio::test]
+    async fn extension_name_is_case_sensitive() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        let err = agent
+            .extension(Extension {
+                name: "Query".into(),
+                details: Vec::<u8>::new().into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("UnsupportedCommand"));
     }
 
     // -------- Sanity: RSA DigestInfo prefixes match RFC 8017 --------
