@@ -135,6 +135,16 @@
               --run '[[ -f /usr/lib/x86_64-linux-gnu/libpcsclite.so.1 ]] && export LIBPCSCLITE_DELEGATE=/usr/lib/x86_64-linux-gnu/libpcsclite.so.1 || true'
           '';
 
+          # Expose the Go-based SSH-agent conformance binary as a test
+          # attribute of the main piggy package. Reachable via
+          # `nix build .#piggy.tests.conformance` and enumerated by
+          # `nix flake check`. Keeps the relationship between the agent
+          # and its wire-protocol oracle explicit without merging the
+          # Rust and Go toolchains into one derivation.
+          passthru.tests = {
+            conformance = piggy-agent-conformance;
+          };
+
           meta = with pkgs.lib; {
             description = "PIV-based password store using pivy-box and ebox templates";
             license = licenses.gpl2Plus;

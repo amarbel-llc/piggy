@@ -8,9 +8,6 @@ build: build-nix build-rust
 build-nix:
     nix build --show-trace
 
-build-nix-conformance:
-    nix build .#piggy-agent-conformance -o result-conformance
-
 build-rust:
     cargo build
 
@@ -37,8 +34,15 @@ test-bats-piggy: build-rust
 test-bats-conformance: build-rust
   BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/conformance/*.bats
 
-test-bats-conformance-protocol: build-rust build-nix-conformance
-  CONFORMANCE_BIN="$(readlink -f ./result-conformance)/bin/piggy-agent-conformance" \
+test-bats-conformance-protocol: build-rust
+  #!/usr/bin/env bash
+  set -euo pipefail
+  # Build the conformance binary on demand and resolve its store path
+  # without creating a `./result-conformance` symlink in the worktree.
+  # The binary is exposed as piggy.tests.conformance (see passthru in
+  # flake.nix). nix caches aggressively, so repeat invocations are free.
+  out=$(nix build .#piggy.tests.conformance --no-link --print-out-paths)
+  CONFORMANCE_BIN="$out/bin/piggy-agent-conformance" \
     BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding \
     --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
 
@@ -51,9 +55,10 @@ test-rust:
 # print per-test PASS/FAIL/SKIP lines. Useful for eyeballing which subtests
 # pass without bats swallowing the output.
 [group('debug')]
-debug-conformance-run: build-rust build-nix-conformance
+debug-conformance-run: build-rust
     #!/usr/bin/env bash
     set -euo pipefail
+    conformance=$(nix build .#piggy.tests.conformance --no-link --print-out-paths)/bin/piggy-agent-conformance
     tmpdir=$(mktemp -d /tmp/piggy-debug-conf.XXXXXX)
     sock="$tmpdir/agent.sock"
     trap 'kill "$agent_pid" 2>/dev/null || true; rm -rf "$tmpdir"' EXIT
@@ -61,7 +66,7 @@ debug-conformance-run: build-rust build-nix-conformance
     agent_pid=$!
     for _ in $(seq 1 20); do [[ -S $sock ]] && break; sleep 0.1; done
     [[ -S $sock ]] || { echo "agent socket never appeared"; exit 1; }
-    ./result-conformance/bin/piggy-agent-conformance "$sock" || true
+    "$conformance" "$sock" || true
 
 # Inspect which libpcsclite.so.1 each PIV client resolves against.
 # Used to diagnose "PCSC error: The Smart card resource manager has shut
@@ -202,11 +207,12 @@ debug-pcsclite-linkage:
 # place of the bundled libpcsclite_real.so.1. Forcing Ubuntu's 2.0.3 lib
 # lets piggy speak the same protocol as the running daemon.
 [group('debug')]
-debug-conformance-run-hw: build-rust build-nix-conformance
+debug-conformance-run-hw: build-rust
     #!/usr/bin/env bash
     set -euo pipefail
     export LIBPCSCLITE_DELEGATE=/usr/lib/x86_64-linux-gnu/libpcsclite.so.1
     [[ -f $LIBPCSCLITE_DELEGATE ]] || { echo "system libpcsclite not found at $LIBPCSCLITE_DELEGATE (#6 workaround)"; exit 1; }
+    conformance=$(nix build .#piggy.tests.conformance --no-link --print-out-paths)/bin/piggy-agent-conformance
     tmpdir=$(mktemp -d /tmp/piggy-debug-conf.XXXXXX)
     sock="$tmpdir/agent.sock"
     trap 'kill "$agent_pid" 2>/dev/null || true; rm -rf "$tmpdir"' EXIT
@@ -216,7 +222,7 @@ debug-conformance-run-hw: build-rust build-nix-conformance
     [[ -S $sock ]] || { echo "agent socket never appeared"; exit 1; }
     echo "Unlocking agent via ssh-add -X (enter card PIN when prompted):"
     SSH_AUTH_SOCK="$sock" ssh-add -X
-    ./result-conformance/bin/piggy-agent-conformance --hardware "$sock" || true
+    "$conformance" --hardware "$sock" || true
 
 # --- format / lint ---
 

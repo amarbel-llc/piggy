@@ -22,9 +22,12 @@ bats --no-sandbox zz-tests_bats/t0100-insert.bats
 
 Protocol conformance tests (Go binary validates SSH agent wire format):
 ```sh
-just build-nix-conformance           # Build Go conformance binary
-just test-bats-conformance-protocol  # Run protocol tests against piggy agent
+just test-bats-conformance-protocol  # Build + run protocol tests against piggy agent
 ```
+The conformance binary is exposed as `piggy.tests.conformance` in
+`flake.nix`; the recipe builds it on demand via
+`nix build --no-link --print-out-paths` so no extra `result-*` symlink
+appears in the worktree.
 
 ## Architecture
 

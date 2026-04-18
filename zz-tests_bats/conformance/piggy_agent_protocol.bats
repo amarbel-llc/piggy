@@ -18,10 +18,12 @@ setup() {
     export LIBPCSCLITE_DELEGATE=/usr/lib/x86_64-linux-gnu/libpcsclite.so.1
   fi
 
-  CONFORMANCE_BIN="${CONFORMANCE_BIN:-$(dirname "$BATS_TEST_FILE")/../../result-conformance/bin/piggy-agent-conformance}"
-
-  if [[ ! -x $CONFORMANCE_BIN ]]; then
-    skip "conformance binary not found at $CONFORMANCE_BIN (run: nix build .#piggy-agent-conformance -o result-conformance)"
+  # CONFORMANCE_BIN must be supplied by the caller. The `just
+  # test-bats-conformance-protocol` recipe resolves it via
+  # `nix build .#piggy.tests.conformance --no-link --print-out-paths`
+  # so no `result-conformance` symlink is ever created in the worktree.
+  if [[ -z ${CONFORMANCE_BIN:-} || ! -x $CONFORMANCE_BIN ]]; then
+    skip "CONFORMANCE_BIN not set or binary not executable (run: just test-bats-conformance-protocol)"
   fi
 
   PIVY_TMPDIR="$(mktemp -d /tmp/piggy-test.XXXXXX)"
