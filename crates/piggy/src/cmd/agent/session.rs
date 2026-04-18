@@ -285,36 +285,122 @@ fn to_ssh_signature(
 }
 
 /// Decode a DER-encoded ECDSA signature into (r, s) as big-endian byte arrays.
-/// DER format: SEQUENCE { INTEGER r, INTEGER s }
+/// DER format: SEQUENCE { INTEGER r, INTEGER s }.
+///
+/// Every bounds check is explicit — the card may return arbitrary bytes, and
+/// a malformed length field (e.g. `r_len = 0xFF` on a short buffer) must be
+/// rejected with an error, never cause an index-out-of-bounds panic.
+///
+/// Supports DER long-form SEQUENCE / INTEGER lengths (0x81 LL, 0x82 LL LL)
+/// so P-384 signatures at or beyond the short-form 0-127 threshold decode
+/// correctly.
 fn decode_der_ecdsa_signature(der: &[u8]) -> Result<(Vec<u8>, Vec<u8>), AgentError> {
-    if der.len() < 6 || der[0] != 0x30 {
+    // Outer SEQUENCE tag.
+    if der.first().copied() != Some(0x30) {
         return Err(AgentError::Other(
-            "invalid DER ECDSA signature".into(),
+            "invalid DER ECDSA signature: not a SEQUENCE".into(),
         ));
     }
 
-    let mut pos = 2; // skip SEQUENCE tag + length
-
-    // Read r
-    if der[pos] != 0x02 {
-        return Err(AgentError::Other("expected INTEGER tag for r".into()));
+    // Parse SEQUENCE length and its header size (tag + length-of-length).
+    let (seq_len, seq_hdr) = parse_der_length(&der[1..])?;
+    let seq_start = 1 + seq_hdr;
+    let seq_end = seq_start
+        .checked_add(seq_len)
+        .ok_or_else(|| AgentError::Other("DER SEQUENCE length overflows usize".into()))?;
+    if der.len() < seq_end {
+        return Err(AgentError::Other(
+            "invalid DER ECDSA signature: truncated body".into(),
+        ));
     }
-    pos += 1;
-    let r_len = der[pos] as usize;
-    pos += 1;
-    let r = &der[pos..pos + r_len];
-    pos += r_len;
 
-    // Read s
-    if der[pos] != 0x02 {
-        return Err(AgentError::Other("expected INTEGER tag for s".into()));
+    let (r, after_r) = read_der_integer(der, seq_start, seq_end, "r")?;
+    let (s, after_s) = read_der_integer(der, after_r, seq_end, "s")?;
+    if after_s != seq_end {
+        return Err(AgentError::Other(
+            "invalid DER ECDSA signature: trailing bytes after s".into(),
+        ));
     }
-    pos += 1;
-    let s_len = der[pos] as usize;
-    pos += 1;
-    let s = &der[pos..pos + s_len];
 
-    Ok((r.to_vec(), s.to_vec()))
+    Ok((r, s))
+}
+
+/// Read a DER INTEGER `{ 0x02 len bytes }` starting at `pos`. Returns the
+/// integer bytes and the position just past the integer. `end` caps the
+/// enclosing SEQUENCE body so we never read past it.
+fn read_der_integer(
+    der: &[u8],
+    pos: usize,
+    end: usize,
+    label: &str,
+) -> Result<(Vec<u8>, usize), AgentError> {
+    if pos >= end {
+        return Err(AgentError::Other(
+            format!("invalid DER ECDSA signature: missing INTEGER for {}", label).into(),
+        ));
+    }
+    if der[pos] != 0x02 {
+        return Err(AgentError::Other(
+            format!("expected INTEGER tag for {}", label).into(),
+        ));
+    }
+    let (int_len, int_hdr) = parse_der_length(&der[pos + 1..end])?;
+    let int_start = pos + 1 + int_hdr;
+    let int_end = int_start
+        .checked_add(int_len)
+        .ok_or_else(|| AgentError::Other("DER INTEGER length overflows usize".into()))?;
+    if int_end > end {
+        return Err(AgentError::Other(
+            format!(
+                "invalid DER ECDSA signature: {} INTEGER length exceeds SEQUENCE",
+                label
+            )
+            .into(),
+        ));
+    }
+    Ok((der[int_start..int_end].to_vec(), int_end))
+}
+
+/// Parse a DER length prefix. Returns `(length, header_byte_count)` where
+/// `header_byte_count` is 1 (short form), 2 (0x81 LL), or 3 (0x82 LL LL).
+/// Rejects indefinite form (0x80) and lengths > 0x82 (longer than needed
+/// for any realistic ECDSA signature).
+fn parse_der_length(bytes: &[u8]) -> Result<(usize, usize), AgentError> {
+    let first = *bytes
+        .first()
+        .ok_or_else(|| AgentError::Other("DER length: missing length byte".into()))?;
+    if first < 0x80 {
+        Ok((first as usize, 1))
+    } else if first == 0x81 {
+        let b = *bytes
+            .get(1)
+            .ok_or_else(|| AgentError::Other("DER length: truncated 0x81".into()))?;
+        // 0x81 MUST be used only for lengths >= 128; reject non-canonical encoding.
+        if b < 0x80 {
+            return Err(AgentError::Other(
+                "DER length: non-canonical 0x81 short length".into(),
+            ));
+        }
+        Ok((b as usize, 2))
+    } else if first == 0x82 {
+        let hi = *bytes
+            .get(1)
+            .ok_or_else(|| AgentError::Other("DER length: truncated 0x82".into()))?;
+        let lo = *bytes
+            .get(2)
+            .ok_or_else(|| AgentError::Other("DER length: truncated 0x82".into()))?;
+        // 0x82 MUST be used only for lengths >= 256.
+        if hi == 0 {
+            return Err(AgentError::Other(
+                "DER length: non-canonical 0x82 encoding".into(),
+            ));
+        }
+        Ok((u16::from_be_bytes([hi, lo]) as usize, 3))
+    } else {
+        Err(AgentError::Other(
+            format!("DER length: unsupported form 0x{:02x}", first).into(),
+        ))
+    }
 }
 
 /// Encode (r, s) as SSH mpint-pair for ECDSA signature blob.
@@ -611,6 +697,128 @@ mod tests {
         // 0x30 seq  0x02 r_len r 0x03 s_len s
         let bad = vec![0x30, 0x06, 0x02, 0x01, 0x00, 0x03, 0x01, 0x00];
         assert!(decode_der_ecdsa_signature(&bad).is_err());
+    }
+
+    /// Regression (specific bounds check): an INTEGER length that claims
+    /// more payload than fits inside the advertised SEQUENCE must error,
+    /// NOT panic with index-out-of-bounds. Use a short-form length (0x64
+    /// = 100) so we exercise the `int_end > end` bounds check directly
+    /// rather than the "unsupported form" filter.
+    #[test]
+    fn decode_der_ecdsa_signature_rejects_r_len_exceeding_sequence() {
+        // 0x30 seq=0x06  0x02 r_len=0x64 (100 — lies)  0x00  0x02 0x01 0x00
+        let bad = vec![0x30, 0x06, 0x02, 0x64, 0x00, 0x02, 0x01, 0x00];
+        let err = decode_der_ecdsa_signature(&bad).unwrap_err();
+        assert!(format!("{err}").contains("r INTEGER length exceeds SEQUENCE"));
+    }
+
+    /// Regression (specific bounds check): same as the r case but for s.
+    #[test]
+    fn decode_der_ecdsa_signature_rejects_s_len_exceeding_sequence() {
+        // 0x30 seq=0x06  0x02 0x01 0x00  0x02 s_len=0x64 (lies)  0x00
+        let bad = vec![0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x64, 0x00];
+        let err = decode_der_ecdsa_signature(&bad).unwrap_err();
+        assert!(format!("{err}").contains("s INTEGER length exceeds SEQUENCE"));
+    }
+
+    /// Regression (fuzz-style panic-safety): a set of adversarial inputs
+    /// that pre-fix code would have panicked on (index-out-of-bounds when
+    /// the length byte claims more content than the buffer holds). Any
+    /// panic here is a DoS — we only assert that the function returns
+    /// without panicking.
+    #[test]
+    fn decode_der_ecdsa_signature_never_panics_on_malformed_input() {
+        let fuzz_inputs: &[&[u8]] = &[
+            &[],
+            &[0x30],
+            &[0x30, 0xFF],
+            &[0x30, 0x06, 0x02, 0xFF, 0x00, 0x02, 0x01, 0x00],
+            &[0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0xFF, 0x00],
+            &[0x30, 0x81, 0xFF, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00],
+            &[0x30, 0x82, 0xFF, 0xFF, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00],
+            &[0x30, 0x80], // indefinite form (unsupported)
+            &[0x30, 0x04, 0x02, 0x02, 0x00, 0x01], // s missing entirely
+        ];
+        for (i, input) in fuzz_inputs.iter().enumerate() {
+            // If this panics, the test fails with a clear backtrace.
+            let result = decode_der_ecdsa_signature(input);
+            assert!(result.is_err(), "fuzz input #{i} unexpectedly succeeded: {input:?}");
+        }
+    }
+
+    /// Regression: a SEQUENCE that claims a length larger than the buffer
+    /// must be caught up front.
+    #[test]
+    fn decode_der_ecdsa_signature_rejects_truncated_sequence_body() {
+        // 0x30 seq=0x20  then only 4 payload bytes
+        let bad = vec![0x30, 0x20, 0x02, 0x01, 0x00, 0x02];
+        let err = decode_der_ecdsa_signature(&bad).unwrap_err();
+        assert!(format!("{err}").contains("truncated"));
+    }
+
+    /// Build a DER signature using long-form SEQUENCE length (0x81 LL).
+    /// Real P-384 signatures hit this when SEQUENCE payload ≥ 128 bytes
+    /// (two 48-byte integers + overhead easily exceeds 127).
+    fn make_der_sig_long_form(r: &[u8], s: &[u8]) -> Vec<u8> {
+        let body_len = 4 + r.len() + s.len(); // two INTEGERs with 1-byte length headers each
+        assert!(
+            body_len >= 128,
+            "long-form test requires body >= 128, got {body_len}"
+        );
+        let mut v = Vec::new();
+        v.push(0x30); // SEQUENCE
+        v.push(0x81); // long-form length: next byte is the length
+        v.push(body_len as u8);
+        v.push(0x02); // INTEGER
+        v.push(r.len() as u8);
+        v.extend_from_slice(r);
+        v.push(0x02);
+        v.push(s.len() as u8);
+        v.extend_from_slice(s);
+        v
+    }
+
+    /// P-384-shaped signature with SEQUENCE length ≥ 128 must decode
+    /// correctly. The previous `pos = 2` implementation would silently
+    /// mis-parse long-form DER. DER short-form lengths cap at 127; the
+    /// smallest long-form encoding is 0x81 0x80. Pick r+s so body length
+    /// = 4 + 63 + 63 = 130, comfortably above the threshold.
+    #[test]
+    fn decode_der_ecdsa_signature_handles_long_form_sequence_length() {
+        let r: Vec<u8> = std::iter::repeat(0x11).take(63).collect();
+        let s: Vec<u8> = std::iter::repeat(0x22).take(63).collect();
+        let der = make_der_sig_long_form(&r, &s);
+        // sanity: long-form marker actually in use
+        assert_eq!(der[1], 0x81);
+        let (dr, ds) = decode_der_ecdsa_signature(&der).unwrap();
+        assert_eq!(dr, r);
+        assert_eq!(ds, s);
+    }
+
+    /// Non-canonical DER is rejected: 0x81 with a length < 128 is not a
+    /// valid long-form encoding (should have been short form). Reject to
+    /// avoid ambiguity.
+    #[test]
+    fn decode_der_ecdsa_signature_rejects_non_canonical_long_form() {
+        // 0x30 0x81 0x06 {valid body} — 0x81 should never be used for len < 128.
+        let bad = vec![0x30, 0x81, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00];
+        let err = decode_der_ecdsa_signature(&bad).unwrap_err();
+        assert!(format!("{err}").contains("non-canonical"));
+    }
+
+    /// Trailing bytes inside the SEQUENCE (beyond s) must be rejected so
+    /// we don't silently accept malformed or extended signatures.
+    #[test]
+    fn decode_der_ecdsa_signature_rejects_trailing_bytes_in_sequence() {
+        // SEQUENCE body = 0x02 0x01 0x00 0x02 0x01 0x00 0xDE  (7 bytes).
+        // r and s parse fine, but 0xDE sits inside the SEQUENCE past s.
+        let inner: Vec<u8> = vec![0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0xDE];
+        let mut der = Vec::with_capacity(2 + inner.len());
+        der.push(0x30);
+        der.push(inner.len() as u8);
+        der.extend_from_slice(&inner);
+        let err = decode_der_ecdsa_signature(&der).unwrap_err();
+        assert!(format!("{err}").contains("trailing bytes"));
     }
 
     // -------- encode_ecdsa_ssh_signature --------
