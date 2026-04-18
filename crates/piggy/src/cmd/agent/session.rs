@@ -331,3 +331,672 @@ fn encode_ecdsa_ssh_signature(r: &[u8], s: &[u8]) -> Vec<u8> {
     buf.extend_from_slice(s);
     buf
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the pure signing-path helpers plus the
+    //! non-PCSC-touching portions of the `Session` impl.
+    //!
+    //! Tests DO NOT touch PCSC or real hardware. `PiggyAgent::sign`
+    //! internally calls `PivContext::new()` once a matching key has
+    //! been found; the tests here only exercise the *pre-PCSC*
+    //! branch (key not found in cache) and the pure helpers.
+
+    use super::*;
+    use sha2::{Digest, Sha256, Sha384, Sha512};
+    use ssh_agent_lib::proto::{signature, Extension, SignRequest};
+    use ssh_key::public::{Ed25519PublicKey, KeyData};
+
+    // -------- Helpers --------
+
+    /// Build an arbitrary Ed25519 KeyData for testing. All zeroes is
+    /// not a cryptographically valid public key, but `Session` never
+    /// verifies that — it only uses `KeyData` for equality matching.
+    fn ed25519_key_data(seed: u8) -> KeyData {
+        KeyData::Ed25519(Ed25519PublicKey([seed; 32]))
+    }
+
+    fn sample_guid() -> Guid {
+        Guid::from_hex("995E171383029CDA0D9CDBDBAD580813").unwrap()
+    }
+
+    fn cached_ed25519(seed: u8, slot: u8) -> CachedKey {
+        CachedKey {
+            guid: sample_guid(),
+            reader_name: "MockReader".into(),
+            slot_id: slot,
+            algorithm: PivAlgorithm::Ed25519,
+            public_key: ed25519_key_data(seed),
+            comment: format!("seed-{seed}"),
+        }
+    }
+
+    // -------- prepare_sign_data --------
+
+    #[test]
+    fn prepare_sign_data_ecp256_returns_sha256_digest() {
+        let data = b"hello world";
+        let out = prepare_sign_data(PivAlgorithm::EcP256, data, 0).unwrap();
+        let expected = Sha256::digest(data).to_vec();
+        assert_eq!(out, expected);
+        assert_eq!(out.len(), 32);
+    }
+
+    #[test]
+    fn prepare_sign_data_ecp384_returns_sha384_digest() {
+        let data = b"hello world";
+        let out = prepare_sign_data(PivAlgorithm::EcP384, data, 0).unwrap();
+        let expected = Sha384::digest(data).to_vec();
+        assert_eq!(out, expected);
+        assert_eq!(out.len(), 48);
+    }
+
+    #[test]
+    fn prepare_sign_data_ed25519_is_passthrough() {
+        let data = b"\x00\x01\x02ascii and binary\xff";
+        let out = prepare_sign_data(PivAlgorithm::Ed25519, data, 0).unwrap();
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn prepare_sign_data_ed25519_passthrough_empty() {
+        let out = prepare_sign_data(PivAlgorithm::Ed25519, b"", 0).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn prepare_sign_data_rsa2048_default_sha256() {
+        // flags=0 should default to SHA-256
+        let data = b"test message";
+        let out = prepare_sign_data(PivAlgorithm::Rsa2048, data, 0).unwrap();
+        assert_eq!(out.len(), 256);
+
+        // PKCS#1 v1.5 header: 00 01 FF ... FF 00 <DigestInfo> <hash>
+        assert_eq!(out[0], 0x00);
+        assert_eq!(out[1], 0x01);
+
+        let hash = Sha256::digest(data);
+        let digest_info_len = RSA_DIGEST_PREFIX_SHA256.len() + hash.len();
+        // Tail must equal digest prefix + hash
+        let tail_start = out.len() - digest_info_len;
+        assert_eq!(&out[tail_start..tail_start + RSA_DIGEST_PREFIX_SHA256.len()],
+                   RSA_DIGEST_PREFIX_SHA256);
+        assert_eq!(&out[tail_start + RSA_DIGEST_PREFIX_SHA256.len()..], hash.as_slice());
+
+        // Byte just before DigestInfo must be 0x00 separator
+        assert_eq!(out[tail_start - 1], 0x00);
+        // All bytes between 0x01 and the 0x00 separator are 0xFF padding
+        for &b in &out[2..tail_start - 1] {
+            assert_eq!(b, 0xFF);
+        }
+    }
+
+    #[test]
+    fn prepare_sign_data_rsa2048_explicit_sha256_flag() {
+        let data = b"test message";
+        let default_out = prepare_sign_data(PivAlgorithm::Rsa2048, data, 0).unwrap();
+        let flagged_out =
+            prepare_sign_data(PivAlgorithm::Rsa2048, data, signature::RSA_SHA2_256).unwrap();
+        assert_eq!(default_out, flagged_out);
+    }
+
+    #[test]
+    fn prepare_sign_data_rsa2048_sha512_flag() {
+        let data = b"test message";
+        let out =
+            prepare_sign_data(PivAlgorithm::Rsa2048, data, signature::RSA_SHA2_512).unwrap();
+        assert_eq!(out.len(), 256);
+
+        let hash = Sha512::digest(data);
+        let digest_info_len = RSA_DIGEST_PREFIX_SHA512.len() + hash.len();
+        let tail_start = out.len() - digest_info_len;
+        assert_eq!(&out[tail_start..tail_start + RSA_DIGEST_PREFIX_SHA512.len()],
+                   RSA_DIGEST_PREFIX_SHA512);
+        assert_eq!(&out[tail_start + RSA_DIGEST_PREFIX_SHA512.len()..], hash.as_slice());
+    }
+
+    #[test]
+    fn prepare_sign_data_rsa1024_default_sha256() {
+        let data = b"rsa1024 message";
+        let out = prepare_sign_data(PivAlgorithm::Rsa1024, data, 0).unwrap();
+        assert_eq!(out.len(), 128);
+        assert_eq!(out[0], 0x00);
+        assert_eq!(out[1], 0x01);
+    }
+
+    #[test]
+    fn prepare_sign_data_rsa1024_rejects_sha512_digest_too_large() {
+        // SHA-512 DigestInfo (19 + 64 = 83 bytes) plus the minimum 11
+        // bytes of PKCS#1 overhead equals 94 bytes, which fits in a
+        // 128-byte block. The current impl accepts it. Regression
+        // guard: ensure no panic and correct tail.
+        let data = b"rsa1024 sha512";
+        let out =
+            prepare_sign_data(PivAlgorithm::Rsa1024, data, signature::RSA_SHA2_512).unwrap();
+        assert_eq!(out.len(), 128);
+        let hash = Sha512::digest(data);
+        assert!(out.ends_with(hash.as_slice()));
+    }
+
+    // -------- pkcs1_v15_pad (direct) --------
+
+    #[test]
+    fn pkcs1_v15_pad_exact_structure_sha256() {
+        // Pad a SHA-256 hash (32 bytes) into a 256-byte RSA-2048 block.
+        let hash = vec![0xAB; 32];
+        let padded = pkcs1_v15_pad(&hash, RSA_DIGEST_PREFIX_SHA256, 256).unwrap();
+        assert_eq!(padded.len(), 256);
+        assert_eq!(padded[0..2], [0x00, 0x01]);
+
+        // Expect 0xFF padding of length: 256 - 3 - 19 - 32 = 202 bytes
+        let pad_len = 256 - 3 - RSA_DIGEST_PREFIX_SHA256.len() - 32;
+        assert_eq!(pad_len, 202);
+        for i in 2..2 + pad_len {
+            assert_eq!(padded[i], 0xFF, "byte {i} should be 0xFF");
+        }
+        // Separator
+        assert_eq!(padded[2 + pad_len], 0x00);
+        // DigestInfo + hash at tail
+        assert_eq!(&padded[3 + pad_len..3 + pad_len + RSA_DIGEST_PREFIX_SHA256.len()],
+                   RSA_DIGEST_PREFIX_SHA256);
+        assert_eq!(&padded[padded.len() - 32..], hash.as_slice());
+    }
+
+    #[test]
+    fn pkcs1_v15_pad_rejects_undersized_key() {
+        // Key too small: need at least digest_info_len + 11. A
+        // 40-byte key cannot fit 32 byte hash + 19 byte prefix + 11.
+        let hash = vec![0; 32];
+        let err = pkcs1_v15_pad(&hash, RSA_DIGEST_PREFIX_SHA256, 40);
+        assert!(err.is_err(), "undersized key must be rejected");
+    }
+
+    #[test]
+    fn pkcs1_v15_pad_minimum_viable_size() {
+        // Exactly at the minimum: digest_info_len + 11
+        let hash = vec![0xCC; 32];
+        let key_size = RSA_DIGEST_PREFIX_SHA256.len() + hash.len() + 11; // 62
+        let out = pkcs1_v15_pad(&hash, RSA_DIGEST_PREFIX_SHA256, key_size).unwrap();
+        assert_eq!(out.len(), key_size);
+        assert_eq!(out[0..2], [0x00, 0x01]);
+        // Padding length is exactly 8 bytes (the minimum allowed)
+        for i in 2..10 {
+            assert_eq!(out[i], 0xFF);
+        }
+        assert_eq!(out[10], 0x00);
+    }
+
+    // -------- decode_der_ecdsa_signature --------
+
+    /// Build a DER-encoded ECDSA signature from r, s byte slices.
+    /// Assumes r.len() + s.len() + 4 < 128 so single-byte lengths work.
+    fn make_der_sig(r: &[u8], s: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.push(0x30); // SEQUENCE
+        v.push((r.len() + s.len() + 4) as u8);
+        v.push(0x02); // INTEGER
+        v.push(r.len() as u8);
+        v.extend_from_slice(r);
+        v.push(0x02);
+        v.push(s.len() as u8);
+        v.extend_from_slice(s);
+        v
+    }
+
+    #[test]
+    fn decode_der_ecdsa_signature_minimal_valid() {
+        let r = vec![0x11; 32];
+        let s = vec![0x22; 32];
+        let der = make_der_sig(&r, &s);
+        let (dr, ds) = decode_der_ecdsa_signature(&der).unwrap();
+        assert_eq!(dr, r);
+        assert_eq!(ds, s);
+    }
+
+    #[test]
+    fn decode_der_ecdsa_signature_with_integer_leading_zero_padding() {
+        // DER INTEGER encoding prepends 0x00 if the high bit of the
+        // first byte is set (to distinguish from negative). Those
+        // bytes are part of the decoded integer — the decoder should
+        // preserve them verbatim so the caller can re-encode as SSH
+        // mpint (which also prefers the same convention).
+        let r = vec![0x00, 0x80, 0x12, 0x34];
+        let s = vec![0x00, 0xFF, 0xCC];
+        let der = make_der_sig(&r, &s);
+        let (dr, ds) = decode_der_ecdsa_signature(&der).unwrap();
+        assert_eq!(dr, r);
+        assert_eq!(ds, s);
+    }
+
+    #[test]
+    fn decode_der_ecdsa_signature_short_integers() {
+        // Small r/s — well within range of the algorithm but under
+        // the curve's expected byte count. The decoder must accept
+        // whatever length the INTEGER TLV reports.
+        let r = vec![0x01];
+        let s = vec![0x02, 0x03];
+        let der = make_der_sig(&r, &s);
+        let (dr, ds) = decode_der_ecdsa_signature(&der).unwrap();
+        assert_eq!(dr, r);
+        assert_eq!(ds, s);
+    }
+
+    #[test]
+    fn decode_der_ecdsa_signature_rejects_non_sequence() {
+        // First byte should be 0x30 (SEQUENCE)
+        let bad = vec![0x31, 0x04, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00];
+        assert!(decode_der_ecdsa_signature(&bad).is_err());
+    }
+
+    #[test]
+    fn decode_der_ecdsa_signature_rejects_too_short() {
+        for len in 0..6 {
+            let bad = vec![0x30; len];
+            assert!(
+                decode_der_ecdsa_signature(&bad).is_err(),
+                "should reject len={len}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_der_ecdsa_signature_rejects_missing_r_integer_tag() {
+        // 0x30 seq_len  <not 0x02>  ...
+        let bad = vec![0x30, 0x06, 0x03, 0x01, 0x00, 0x02, 0x01, 0x00];
+        assert!(decode_der_ecdsa_signature(&bad).is_err());
+    }
+
+    #[test]
+    fn decode_der_ecdsa_signature_rejects_missing_s_integer_tag() {
+        // 0x30 seq  0x02 r_len r 0x03 s_len s
+        let bad = vec![0x30, 0x06, 0x02, 0x01, 0x00, 0x03, 0x01, 0x00];
+        assert!(decode_der_ecdsa_signature(&bad).is_err());
+    }
+
+    // -------- encode_ecdsa_ssh_signature --------
+
+    #[test]
+    fn encode_ecdsa_ssh_signature_format() {
+        // SSH ECDSA sig blob = uint32(r_len) || r || uint32(s_len) || s
+        let r = vec![0x01, 0x02, 0x03];
+        let s = vec![0xAA, 0xBB];
+        let blob = encode_ecdsa_ssh_signature(&r, &s);
+        // 4 (r_len) + 3 (r) + 4 (s_len) + 2 (s) = 13
+        assert_eq!(blob.len(), 13);
+        assert_eq!(&blob[0..4], &3u32.to_be_bytes());
+        assert_eq!(&blob[4..7], r.as_slice());
+        assert_eq!(&blob[7..11], &2u32.to_be_bytes());
+        assert_eq!(&blob[11..13], s.as_slice());
+    }
+
+    #[test]
+    fn encode_ecdsa_ssh_signature_roundtrip_from_der() {
+        let r = vec![0x00, 0xAB, 0xCD, 0xEF];
+        let s = vec![0x12, 0x34, 0x56];
+        let der = make_der_sig(&r, &s);
+        let (dr, ds) = decode_der_ecdsa_signature(&der).unwrap();
+        let blob = encode_ecdsa_ssh_signature(&dr, &ds);
+        assert_eq!(&blob[0..4], &(r.len() as u32).to_be_bytes());
+        assert_eq!(&blob[4..4 + r.len()], r.as_slice());
+        let s_off = 4 + r.len();
+        assert_eq!(&blob[s_off..s_off + 4], &(s.len() as u32).to_be_bytes());
+        assert_eq!(&blob[s_off + 4..], s.as_slice());
+    }
+
+    // -------- to_ssh_signature --------
+
+    #[test]
+    fn to_ssh_signature_ecp256_decodes_der() {
+        // DER INTEGERs with their high bit set carry a leading 0x00 byte
+        // (to disambiguate from negative two's-complement). SSH mpint
+        // encoding uses the same convention, so the raw DER integer
+        // bytes are also a valid SSH mpint body. Build r/s with a
+        // leading zero so `Signature::new` validation accepts the
+        // resulting blob.
+        let mut r = vec![0x00];
+        r.extend(std::iter::repeat(0xAB).take(32));
+        let mut s = vec![0x00];
+        s.extend(std::iter::repeat(0xCD).take(32));
+        let der = make_der_sig(&r, &s);
+        let sig = to_ssh_signature(PivAlgorithm::EcP256, &der, 0).unwrap();
+        assert_eq!(sig.algorithm().as_str(), "ecdsa-sha2-nistp256");
+        // Signature body is the SSH ECDSA encoding of (r, s)
+        let expected = encode_ecdsa_ssh_signature(&r, &s);
+        assert_eq!(sig.as_bytes(), expected.as_slice());
+    }
+
+    #[test]
+    fn to_ssh_signature_ecp256_decodes_der_low_high_bit() {
+        // When the high bit is clear, DER omits the leading zero.
+        let r = vec![0x11; 32]; // high bit 0
+        let s = vec![0x22; 32]; // high bit 0
+        let der = make_der_sig(&r, &s);
+        let sig = to_ssh_signature(PivAlgorithm::EcP256, &der, 0).unwrap();
+        assert_eq!(sig.algorithm().as_str(), "ecdsa-sha2-nistp256");
+        let expected = encode_ecdsa_ssh_signature(&r, &s);
+        assert_eq!(sig.as_bytes(), expected.as_slice());
+    }
+
+    #[test]
+    fn to_ssh_signature_ecp384_decodes_der() {
+        // Low high bit -> no leading zero in DER.
+        let r = vec![0x11; 48];
+        let s = vec![0x22; 48];
+        let der = make_der_sig(&r, &s);
+        let sig = to_ssh_signature(PivAlgorithm::EcP384, &der, 0).unwrap();
+        assert_eq!(sig.algorithm().as_str(), "ecdsa-sha2-nistp384");
+        let expected = encode_ecdsa_ssh_signature(&r, &s);
+        assert_eq!(sig.as_bytes(), expected.as_slice());
+    }
+
+    #[test]
+    fn to_ssh_signature_ecdsa_rejects_bad_der() {
+        let bad_der = vec![0xFF; 8];
+        let err = to_ssh_signature(PivAlgorithm::EcP256, &bad_der, 0);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn to_ssh_signature_ed25519_passthrough() {
+        let raw = vec![0x33; 64];
+        let sig = to_ssh_signature(PivAlgorithm::Ed25519, &raw, 0).unwrap();
+        assert_eq!(sig.algorithm().as_str(), "ssh-ed25519");
+        assert_eq!(sig.as_bytes(), raw.as_slice());
+    }
+
+    #[test]
+    fn to_ssh_signature_rsa2048_default_labels_sha256() {
+        let raw = vec![0xBB; 256];
+        let sig = to_ssh_signature(PivAlgorithm::Rsa2048, &raw, 0).unwrap();
+        assert_eq!(sig.algorithm().as_str(), "rsa-sha2-256");
+        assert_eq!(sig.as_bytes(), raw.as_slice());
+    }
+
+    #[test]
+    fn to_ssh_signature_rsa2048_sha512_flag_labels_sha512() {
+        let raw = vec![0xAB; 256];
+        let sig =
+            to_ssh_signature(PivAlgorithm::Rsa2048, &raw, signature::RSA_SHA2_512).unwrap();
+        assert_eq!(sig.algorithm().as_str(), "rsa-sha2-512");
+        assert_eq!(sig.as_bytes(), raw.as_slice());
+    }
+
+    #[test]
+    fn to_ssh_signature_rsa2048_sha256_flag_labels_sha256() {
+        let raw = vec![0x01; 256];
+        let sig =
+            to_ssh_signature(PivAlgorithm::Rsa2048, &raw, signature::RSA_SHA2_256).unwrap();
+        assert_eq!(sig.algorithm().as_str(), "rsa-sha2-256");
+    }
+
+    #[test]
+    fn to_ssh_signature_rsa1024_sha256_default() {
+        let raw = vec![0x01; 128];
+        let sig = to_ssh_signature(PivAlgorithm::Rsa1024, &raw, 0).unwrap();
+        assert_eq!(sig.algorithm().as_str(), "rsa-sha2-256");
+    }
+
+    // -------- Session impl: request_identities --------
+
+    #[tokio::test]
+    async fn request_identities_empty() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        let ids = agent.request_identities().await.unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_identities_returns_all_cached_keys() {
+        let keys = vec![
+            cached_ed25519(0x11, 0x9A),
+            cached_ed25519(0x22, 0x9C),
+            cached_ed25519(0x33, 0x9D),
+        ];
+        let comments: Vec<String> = keys.iter().map(|k| k.comment.clone()).collect();
+        let pubs: Vec<KeyData> = keys.iter().map(|k| k.public_key.clone()).collect();
+
+        let mut agent = PiggyAgent::new(keys);
+        let ids = agent.request_identities().await.unwrap();
+        assert_eq!(ids.len(), 3);
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(id.comment, comments[i]);
+            assert_eq!(id.pubkey, pubs[i]);
+        }
+    }
+
+    #[tokio::test]
+    async fn request_identities_idempotent() {
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x42, 0x9E)]);
+        let first = agent.request_identities().await.unwrap();
+        let second = agent.request_identities().await.unwrap();
+        assert_eq!(first.len(), second.len());
+        assert_eq!(first[0].pubkey, second[0].pubkey);
+    }
+
+    // -------- Session impl: sign (pre-PCSC branch) --------
+
+    #[tokio::test]
+    async fn sign_unknown_key_errors_before_touching_pcsc() {
+        // An empty cache plus any pubkey must short-circuit at
+        // find_key returning "key not found" -- importantly, this
+        // branch never calls PivContext::new(), so the test runs
+        // in environments without PCSC.
+        let mut agent = PiggyAgent::new(Vec::new());
+        let req = SignRequest {
+            pubkey: ed25519_key_data(0x01),
+            data: b"whatever".to_vec(),
+            flags: 0,
+        };
+        let err = agent.sign(req).await.unwrap_err();
+        let s = format!("{err}");
+        assert!(s.contains("key not found"), "got: {s}");
+    }
+
+    #[tokio::test]
+    async fn sign_mismatched_key_errors_before_touching_pcsc() {
+        // Cache has seed 0x11, request asks for seed 0x99 -- must
+        // still short-circuit before PCSC.
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9A)]);
+        let req = SignRequest {
+            pubkey: ed25519_key_data(0x99),
+            data: b"whatever".to_vec(),
+            flags: 0,
+        };
+        let err = agent.sign(req).await.unwrap_err();
+        assert!(format!("{err}").contains("key not found"));
+    }
+
+    // -------- Session impl: lock / unlock --------
+
+    #[tokio::test]
+    async fn unlock_populates_pin() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        agent.unlock("1234".into()).await.unwrap();
+        assert_eq!(*agent.pin_handle().lock().await, Some("1234".into()));
+    }
+
+    #[tokio::test]
+    async fn lock_clears_pin() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        agent.unlock("abcd".into()).await.unwrap();
+        agent.lock("ignored-by-impl".into()).await.unwrap();
+        assert_eq!(*agent.pin_handle().lock().await, None);
+    }
+
+    #[tokio::test]
+    async fn unlock_overwrites_existing_pin() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        agent.unlock("first".into()).await.unwrap();
+        agent.unlock("second".into()).await.unwrap();
+        assert_eq!(*agent.pin_handle().lock().await, Some("second".into()));
+    }
+
+    #[tokio::test]
+    async fn lock_when_empty_is_noop() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        agent.lock("anything".into()).await.unwrap();
+        assert_eq!(*agent.pin_handle().lock().await, None);
+        // Lock again, still None.
+        agent.lock("again".into()).await.unwrap();
+        assert_eq!(*agent.pin_handle().lock().await, None);
+    }
+
+    #[tokio::test]
+    async fn lock_unlock_lock_cycle() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        let handle = agent.pin_handle();
+
+        assert_eq!(*handle.lock().await, None);
+        agent.unlock("pin1".into()).await.unwrap();
+        assert_eq!(*handle.lock().await, Some("pin1".into()));
+        agent.lock("x".into()).await.unwrap();
+        assert_eq!(*handle.lock().await, None);
+        agent.unlock("pin2".into()).await.unwrap();
+        assert_eq!(*handle.lock().await, Some("pin2".into()));
+    }
+
+    #[tokio::test]
+    async fn pin_handle_shares_state_with_clone() {
+        // `pin_handle()` must hand out an Arc that reflects live
+        // state — otherwise the background `probe_loop` could never
+        // clear the PIN.
+        let mut agent = PiggyAgent::new(Vec::new());
+        let handle = agent.pin_handle();
+        agent.unlock("shared".into()).await.unwrap();
+        assert_eq!(*handle.lock().await, Some("shared".into()));
+
+        // Mutate via the handle, observe via the agent.
+        *handle.lock().await = Some("via-handle".into());
+        let handle2 = agent.pin_handle();
+        assert_eq!(*handle2.lock().await, Some("via-handle".into()));
+    }
+
+    // -------- Session impl: extension --------
+
+    #[tokio::test]
+    async fn extension_query_lists_supported_names() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        let resp = agent
+            .extension(Extension {
+                name: "query".into(),
+                details: Vec::<u8>::new().into(),
+            })
+            .await
+            .unwrap()
+            .expect("query extension must produce a response");
+        assert_eq!(resp.name, "query");
+
+        // Body is a sequence of uint32-length-prefixed ASCII names.
+        let body: Vec<u8> = resp.details.into_bytes();
+        let mut names = Vec::new();
+        let mut i = 0;
+        while i + 4 <= body.len() {
+            let len = u32::from_be_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize;
+            i += 4;
+            names.push(String::from_utf8(body[i..i + len].to_vec()).unwrap());
+            i += len;
+        }
+        assert_eq!(i, body.len(), "body must fully parse with no trailing bytes");
+        assert!(names.iter().any(|n| n == "query"));
+        assert!(names.iter().any(|n| n == "session-bind@openssh.com"));
+        assert!(names.iter().any(|n| n == "pin-status@joyent.com"));
+    }
+
+    #[tokio::test]
+    async fn extension_session_bind_returns_none() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        let resp = agent
+            .extension(Extension {
+                name: "session-bind@openssh.com".into(),
+                details: Vec::<u8>::new().into(),
+            })
+            .await
+            .unwrap();
+        assert!(resp.is_none());
+    }
+
+    #[tokio::test]
+    async fn extension_pin_status_empty_agent() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        let resp = agent
+            .extension(Extension {
+                name: "pin-status@joyent.com".into(),
+                details: Vec::<u8>::new().into(),
+            })
+            .await
+            .unwrap()
+            .expect("pin-status must produce a response");
+        let body: Vec<u8> = resp.details.into_bytes();
+        assert_eq!(body.len(), 2);
+        assert_eq!(body[0], 0, "no PIN -> has_pin=0");
+        assert_eq!(body[1], 0, "no keys -> has_card=0");
+    }
+
+    #[tokio::test]
+    async fn extension_pin_status_with_keys_and_pin() {
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x77, 0x9A)]);
+        agent.unlock("cached".into()).await.unwrap();
+
+        let resp = agent
+            .extension(Extension {
+                name: "pin-status@joyent.com".into(),
+                details: Vec::<u8>::new().into(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let body: Vec<u8> = resp.details.into_bytes();
+        assert_eq!(body, vec![1, 1]);
+    }
+
+    #[tokio::test]
+    async fn extension_pin_status_with_keys_no_pin() {
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x77, 0x9A)]);
+        let resp = agent
+            .extension(Extension {
+                name: "pin-status@joyent.com".into(),
+                details: Vec::<u8>::new().into(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let body: Vec<u8> = resp.details.into_bytes();
+        assert_eq!(body, vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn extension_unknown_returns_error() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        let err = agent
+            .extension(Extension {
+                name: "bogus@example.com".into(),
+                details: Vec::<u8>::new().into(),
+            })
+            .await;
+        assert!(err.is_err());
+    }
+
+    // -------- Sanity: RSA DigestInfo prefixes match RFC 8017 --------
+
+    #[test]
+    fn rsa_digest_prefix_sha256_matches_rfc_8017() {
+        // RFC 8017 § 9.2 (PKCS#1 v2.2) EMSA-PKCS1-v1_5 DigestInfo for SHA-256:
+        //   30 31 30 0d 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20
+        let expected: [u8; 19] = [
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x01, 0x05, 0x00, 0x04, 0x20,
+        ];
+        assert_eq!(RSA_DIGEST_PREFIX_SHA256, &expected);
+    }
+
+    #[test]
+    fn rsa_digest_prefix_sha512_matches_rfc_8017() {
+        // RFC 8017 § 9.2 EMSA-PKCS1-v1_5 DigestInfo for SHA-512:
+        //   30 51 30 0d 06 09 60 86 48 01 65 03 04 02 03 05 00 04 40
+        let expected: [u8; 19] = [
+            0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x03, 0x05, 0x00, 0x04, 0x40,
+        ];
+        assert_eq!(RSA_DIGEST_PREFIX_SHA512, &expected);
+    }
+}
