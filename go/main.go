@@ -66,8 +66,12 @@ func testList(client agent.ExtendedAgent) []*agent.Key {
 	return keys
 }
 
-func testSign(client agent.ExtendedAgent, keys []*agent.Key) {
+func testSign(client agent.ExtendedAgent, keys []*agent.Key, hardware bool) {
 	name := "sign"
+	if !hardware {
+		fmt.Printf("SKIP: %s — requires --hardware flag (signing needs a cached PIN)\n", name)
+		return
+	}
 	if len(keys) == 0 {
 		fmt.Printf("SKIP: %s — no keys available (card not present)\n", name)
 		return
@@ -545,7 +549,7 @@ func main() {
 
 	fmt.Println("Running Go conformance tests...\n")
 	keys := testList(client)
-	testSign(client, keys)
+	testSign(client, keys, hardware)
 	testQuery(client)
 	testSessionBind(client)
 	testX509CertsNoCard(client)

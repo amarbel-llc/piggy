@@ -45,6 +45,85 @@ test-bats-conformance-protocol: build-rust build-nix-conformance
 test-rust:
     cargo test
 
+# --- debug ---
+
+# Run the Go conformance binary against a freshly-started piggy agent and
+# print per-test PASS/FAIL/SKIP lines. Useful for eyeballing which subtests
+# pass without bats swallowing the output.
+[group('debug')]
+debug-conformance-run: build-rust build-nix-conformance
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmpdir=$(mktemp -d /tmp/piggy-debug-conf.XXXXXX)
+    sock="$tmpdir/agent.sock"
+    trap 'kill "$agent_pid" 2>/dev/null || true; rm -rf "$tmpdir"' EXIT
+    ./target/debug/piggy agent -A -D -a "$sock" &
+    agent_pid=$!
+    for _ in $(seq 1 20); do [[ -S $sock ]] && break; sleep 0.1; done
+    [[ -S $sock ]] || { echo "agent socket never appeared"; exit 1; }
+    ./result-conformance/bin/piggy-agent-conformance "$sock" || true
+
+# Inspect which libpcsclite.so.1 each PIV client resolves against.
+# Used to diagnose "PCSC error: The Smart card resource manager has shut
+# down" when piggy can't reach pcscd but pivy-tool can.
+# Try piggy agent -i under PCSCLITE_CSOCK_NAME override to see if it's a
+# socket-path disagreement between piggy's libpcsclite and the running daemon.
+[group('debug')]
+debug-pcsclite-csock-override: build-rust
+    #!/usr/bin/env bash
+    set -uo pipefail
+    for sock in /run/pcscd/pcscd.comm /var/run/pcscd/pcscd.comm; do
+      [[ -S $sock ]] || { echo "skip: $sock not a socket"; continue; }
+      echo "=== PCSCLITE_CSOCK_NAME=$sock ==="
+      PCSCLITE_CSOCK_NAME="$sock" ./target/debug/piggy agent -A -i 2>&1 | head -20
+      echo
+    done
+
+# Trace openat() during piggy agent -i vs pivy-tool list — reveals which
+# libpcsclite.so.1 is loaded and which pcscd socket is connected.
+[group('debug')]
+debug-pcsclite-opens: build-rust
+    #!/usr/bin/env bash
+    set -uo pipefail
+    for cmd in "./target/debug/piggy agent -A -i" "pivy-tool list"; do
+      echo "=== strace: $cmd ==="
+      strace -f -e trace=openat,connect -o /tmp/pcsc-strace.$$ -- $cmd >/dev/null 2>&1 || true
+      grep -E 'libpcsclite|pcscd\.comm|pcscd\.pid' /tmp/pcsc-strace.$$ | head -30
+      rm -f /tmp/pcsc-strace.$$
+      echo
+    done
+
+[group('debug')]
+debug-pcsclite-linkage:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    for bin in ./target/debug/piggy "$(command -v pivy-tool)" "$(command -v pcscd)"; do
+      [[ -x $bin ]] || continue
+      echo "=== $bin ==="
+      echo "-- ldd pcsc deps --"
+      ldd "$bin" 2>/dev/null | grep -i pcsc || echo "  (none direct)"
+      echo "-- strings for pcscd socket path --"
+      strings "$bin" 2>/dev/null | grep -E 'pcscd\.(comm|pid)|libpcsclite' | sort -u || true
+      echo
+    done
+
+# Like debug-conformance-run, but with --hardware. Prompts for the card PIN
+# via `ssh-add -X` so the sign test can actually execute against the card.
+[group('debug')]
+debug-conformance-run-hw: build-rust build-nix-conformance
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmpdir=$(mktemp -d /tmp/piggy-debug-conf.XXXXXX)
+    sock="$tmpdir/agent.sock"
+    trap 'kill "$agent_pid" 2>/dev/null || true; rm -rf "$tmpdir"' EXIT
+    ./target/debug/piggy agent -A -D -a "$sock" &
+    agent_pid=$!
+    for _ in $(seq 1 20); do [[ -S $sock ]] && break; sleep 0.1; done
+    [[ -S $sock ]] || { echo "agent socket never appeared"; exit 1; }
+    echo "Unlocking agent via ssh-add -X (enter card PIN when prompted):"
+    SSH_AUTH_SOCK="$sock" ssh-add -X
+    ./result-conformance/bin/piggy-agent-conformance --hardware "$sock" || true
+
 # --- format / lint ---
 
 codemod-fmt: codemod-fmt-nix codemod-fmt-shell codemod-fmt-rust
