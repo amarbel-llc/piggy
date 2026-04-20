@@ -1,5 +1,7 @@
 use ssh_key::PublicKey;
 
+use crate::apdu::PIV_TAG_CERT_YK_ATTESTATION;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PivAlgorithm {
     Rsa1024,
@@ -67,6 +69,7 @@ pub fn slot_to_cert_tag(slot_id: u8) -> Option<u32> {
         0x9D => Some(0x5FC10B),
         0x9E => Some(0x5FC101),
         0x82..=0x95 => Some(0x5FC10D + (slot_id - 0x82) as u32),
+        0xF9 => Some(PIV_TAG_CERT_YK_ATTESTATION),
         _ => None,
     }
 }

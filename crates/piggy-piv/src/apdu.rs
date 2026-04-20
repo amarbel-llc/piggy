@@ -8,6 +8,9 @@ pub const PIV_AID: &[u8] = &[
 /// YubiKey PIV management AID
 pub const YKPIV_AID: &[u8] = &[0xA0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 
+/// Data object tag for the YubiKey attestation certificate (slot F9)
+pub const PIV_TAG_CERT_YK_ATTESTATION: u32 = 0x5FFF01;
+
 /// ISO 7816-4 instruction codes
 pub mod ins {
     pub const SELECT: u8 = 0xA4;
@@ -19,6 +22,7 @@ pub mod ins {
     pub const PUT_DATA: u8 = 0xDB;
     pub const GEN_ASYM: u8 = 0x47;
     pub const CONTINUE: u8 = 0xC0;
+    pub const YK_ATTEST: u8 = 0xF9;
 }
 
 /// PIV slot IDs
@@ -113,6 +117,18 @@ impl Apdu {
             p1: alg,
             p2: slot,
             data: data.to_vec(),
+            le: None,
+        }
+    }
+
+    /// YubiKey ATTEST command — generates an attestation certificate for a slot.
+    pub fn yk_attest(slot: u8) -> Self {
+        Self {
+            cla: 0x00,
+            ins: ins::YK_ATTEST,
+            p1: slot,
+            p2: 0x00,
+            data: Vec::new(),
             le: None,
         }
     }

@@ -126,6 +126,7 @@ impl Session for PiggyAgent {
                     "session-bind@openssh.com",
                     "pin-status@joyent.com",
                     "ecdh@joyent.com",
+                    "ykpiv-attest@joyent.com",
                 ];
                 let mut buf = Vec::new();
                 for name in supported {
@@ -154,6 +155,10 @@ impl Session for PiggyAgent {
             }
             "ecdh@joyent.com" => {
                 self.handle_ecdh(&extension.details.clone().into_bytes())
+                    .await
+            }
+            "ykpiv-attest@joyent.com" => {
+                self.handle_attest(&extension.details.clone().into_bytes())
                     .await
             }
             _ => Err(AgentError::from(
@@ -237,6 +242,67 @@ impl PiggyAgent {
 
         Ok(Some(Extension {
             name: "ecdh@joyent.com".into(),
+            details: resp.into(),
+        }))
+    }
+
+    async fn handle_attest(
+        &mut self,
+        details: &[u8],
+    ) -> Result<Option<Extension>, AgentError> {
+        let inner = read_ssh_string(details, 0)
+            .map_err(|e| AgentError::Other(e.into()))?
+            .0;
+
+        let (card_key_blob, pos) =
+            read_ssh_bytes(inner, 0).map_err(|e| AgentError::Other(e.into()))?;
+        if pos + 4 > inner.len() {
+            return Err(AgentError::Other("attest: truncated flags field".into()));
+        }
+        let _flags = u32::from_be_bytes([
+            inner[pos],
+            inner[pos + 1],
+            inner[pos + 2],
+            inner[pos + 3],
+        ]);
+
+        let card_pubkey = PublicKey::from_bytes(card_key_blob)
+            .map_err(|e| AgentError::Other(format!("attest: bad card key: {e}").into()))?;
+        let card_key_data = card_pubkey.key_data().clone();
+
+        let keys = self.keys.lock().await;
+        let key = Self::find_key(&keys, &card_key_data)
+            .ok_or_else(|| AgentError::Other("attest: key not found".into()))?;
+        drop(keys);
+
+        let ctx = PivContext::new().map_err(|e| AgentError::Other(e.to_string().into()))?;
+        let tokens = ctx
+            .enumerate_tokens()
+            .map_err(|e| AgentError::Other(e.to_string().into()))?;
+        let token = tokens
+            .iter()
+            .find(|t| t.guid() == &key.guid)
+            .ok_or_else(|| AgentError::Other("PIV token no longer available".into()))?;
+
+        let attest_cert = token
+            .yk_attest(key.slot_id)
+            .map_err(|e| AgentError::Other(e.to_string().into()))?;
+
+        let mut certs: Vec<Vec<u8>> = vec![attest_cert];
+
+        if let Ok(f9_slot) = token.read_slot(0xF9) {
+            certs.push(f9_slot.cert_der().to_vec());
+        }
+
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&(certs.len() as u32).to_be_bytes());
+        for cert in &certs {
+            resp.extend_from_slice(&(cert.len() as u32).to_be_bytes());
+            resp.extend_from_slice(cert);
+        }
+
+        Ok(Some(Extension {
+            name: "ykpiv-attest@joyent.com".into(),
             details: resp.into(),
         }))
     }

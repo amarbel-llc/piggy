@@ -278,6 +278,17 @@ impl PivToken {
         Ok(secret.to_vec())
     }
 
+    /// Generate a YubiKey attestation certificate for the given slot.
+    /// Returns the DER-encoded X.509 attestation statement signed by the F9 key.
+    pub fn yk_attest(&self, slot_id: u8) -> Result<Vec<u8>, PivError> {
+        let apdu = Apdu::yk_attest(slot_id);
+        let (data, sw) = self.transmit(&apdu)?;
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+        Ok(data)
+    }
+
     /// Verify the PIV PIN. The PIN is padded to 8 bytes with 0xFF per the spec.
     pub fn verify_pin(&self, pin: &str) -> Result<(), PivError> {
         let apdu = Apdu::verify_pin(pin.as_bytes());
