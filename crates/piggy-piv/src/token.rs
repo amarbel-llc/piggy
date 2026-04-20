@@ -4,7 +4,7 @@ use crate::apdu::{ga_tag, Apdu, StatusWord, PIV_AID};
 use crate::cert;
 use crate::error::PivError;
 use crate::guid::Guid;
-use crate::slot::{self, PivSlot};
+use crate::slot::{self, PivAlgorithm, PivSlot};
 use crate::tlv::{TlvReader, TlvWriter};
 use crate::PivContext;
 
@@ -53,7 +53,7 @@ impl PivToken {
             let mut chain_sw = sw;
             while chain_sw.has_more_data() {
                 let mut get_resp = Apdu::new(0x00, 0xC0, 0x00, 0x00);
-                get_resp.le = Some(chain_sw.remaining_bytes() as u16);
+                get_resp.le = Some(chain_sw.remaining_bytes());
                 let cmd2 = get_resp.to_bytes();
                 let mut resp_buf2 = vec![0u8; 4096];
                 let resp2 = self.card.transmit(&cmd2, &mut resp_buf2)?;
@@ -189,48 +189,7 @@ impl PivToken {
     /// For RSA, `data` is the PKCS#1 v1.5 padded DigestInfo (128 or 256 bytes).
     pub fn sign_prehash(&self, slot_id: u8, data: &[u8]) -> Result<Vec<u8>, PivError> {
         let slot = self.read_slot(slot_id)?;
-        let alg_byte = slot.algorithm().to_byte();
-
-        // Build GENERAL AUTHENTICATE TLV:
-        //   Tag 0x7C containing:
-        //     Tag 0x82 (response placeholder, empty)
-        //     Tag 0x81 (challenge/data to sign)
-        let mut inner = TlvWriter::new();
-        inner.write_tag_value(ga_tag::RESPONSE as u32, &[]);
-        inner.write_tag_value(ga_tag::CHALLENGE as u32, data);
-        let mut outer = TlvWriter::new();
-        outer.write_tag_value(0x7C, inner.as_bytes());
-
-        let apdu = Apdu::general_authenticate(alg_byte, slot_id, outer.as_bytes());
-        let (resp, sw) = self.transmit(&apdu)?;
-
-        if sw.as_u16() == 0x6982 {
-            return Err(PivError::PinRequired);
-        }
-        if !sw.is_success() {
-            return Err(PivError::Apdu { sw: sw.as_u16() });
-        }
-
-        // Parse response: 0x7C { 0x82 = signature }
-        let mut reader = TlvReader::new(&resp);
-        let outer_tag = reader.read_tag()?;
-        if outer_tag != 0x7C {
-            return Err(PivError::Tlv {
-                message: format!("expected GA response tag 0x7C, got {:#X}", outer_tag),
-            });
-        }
-        let inner_data = reader.read_value()?;
-
-        let mut inner_reader = TlvReader::new(inner_data);
-        let resp_tag = inner_reader.read_tag()?;
-        if resp_tag != ga_tag::RESPONSE as u32 {
-            return Err(PivError::Tlv {
-                message: format!("expected GA response tag 0x82, got {:#X}", resp_tag),
-            });
-        }
-        let signature = inner_reader.read_value()?;
-
-        Ok(signature.to_vec())
+        self.general_authenticate(slot.algorithm().to_byte(), slot_id, ga_tag::CHALLENGE, data)
     }
 
     /// Perform ECDH key agreement with the key in the given slot.
@@ -239,15 +198,25 @@ impl PivToken {
     /// derived point on the curve).
     pub fn ecdh_derive(&self, slot_id: u8, peer_ec_point: &[u8]) -> Result<Vec<u8>, PivError> {
         let slot = self.read_slot(slot_id)?;
-        let alg_byte = slot.algorithm().to_byte();
+        validate_ec_point(slot.algorithm(), peer_ec_point)?;
+        self.general_authenticate(slot.algorithm().to_byte(), slot_id, ga_tag::EXPONENT, peer_ec_point)
+    }
 
+    /// Build and transmit a GENERAL AUTHENTICATE APDU, parse the response.
+    fn general_authenticate(
+        &self,
+        alg: u8,
+        slot_id: u8,
+        data_tag: u8,
+        data: &[u8],
+    ) -> Result<Vec<u8>, PivError> {
         let mut inner = TlvWriter::new();
         inner.write_tag_value(ga_tag::RESPONSE as u32, &[]);
-        inner.write_tag_value(ga_tag::EXPONENT as u32, peer_ec_point);
+        inner.write_tag_value(data_tag as u32, data);
         let mut outer = TlvWriter::new();
         outer.write_tag_value(0x7C, inner.as_bytes());
 
-        let apdu = Apdu::general_authenticate(alg_byte, slot_id, outer.as_bytes());
+        let apdu = Apdu::general_authenticate(alg, slot_id, outer.as_bytes());
         let (resp, sw) = self.transmit(&apdu)?;
 
         if sw.as_u16() == 0x6982 {
@@ -257,25 +226,7 @@ impl PivToken {
             return Err(PivError::Apdu { sw: sw.as_u16() });
         }
 
-        let mut reader = TlvReader::new(&resp);
-        let outer_tag = reader.read_tag()?;
-        if outer_tag != 0x7C {
-            return Err(PivError::Tlv {
-                message: format!("expected GA response tag 0x7C, got {:#X}", outer_tag),
-            });
-        }
-        let inner_data = reader.read_value()?;
-
-        let mut inner_reader = TlvReader::new(inner_data);
-        let resp_tag = inner_reader.read_tag()?;
-        if resp_tag != ga_tag::RESPONSE as u32 {
-            return Err(PivError::Tlv {
-                message: format!("expected GA response tag 0x82, got {:#X}", resp_tag),
-            });
-        }
-        let secret = inner_reader.read_value()?;
-
-        Ok(secret.to_vec())
+        parse_ga_response(&resp)
     }
 
     /// Generate a YubiKey attestation certificate for the given slot.
@@ -285,6 +236,14 @@ impl PivToken {
         let (data, sw) = self.transmit(&apdu)?;
         if !sw.is_success() {
             return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+        // Most YubiKey firmware returns raw DER (starts with SEQUENCE 0x30).
+        // Some versions wrap the cert in a PIV data object (0x53 { 0x70 = cert }).
+        // Handle both transparently.
+        if data.first().copied() == Some(0x53) {
+            if let Ok(cert_der) = unwrap_piv_cert_object(&data) {
+                return Ok(cert_der);
+            }
         }
         Ok(data)
     }
@@ -305,6 +264,79 @@ impl PivToken {
             Err(PivError::Apdu { sw: sw.as_u16() })
         }
     }
+}
+
+/// Try to unwrap a PIV data object (0x53 { 0x70 = cert_der }).
+fn unwrap_piv_cert_object(data: &[u8]) -> Result<Vec<u8>, PivError> {
+    let mut reader = TlvReader::new(data);
+    let tag = reader.read_tag()?;
+    if tag != 0x53 {
+        return Err(PivError::Tlv {
+            message: "not a PIV data object".into(),
+        });
+    }
+    let inner = reader.read_value()?;
+    let mut inner_reader = TlvReader::new(inner);
+    while inner_reader.has_remaining() {
+        let tag = inner_reader.read_tag()?;
+        let value = inner_reader.read_value()?;
+        if tag == 0x70 {
+            return Ok(value.to_vec());
+        }
+    }
+    Err(PivError::Tlv {
+        message: "cert tag (0x70) not found in data object".into(),
+    })
+}
+
+/// Validate that `peer_ec_point` is an uncompressed SEC1 point whose size
+/// matches the slot's curve.
+fn validate_ec_point(alg: PivAlgorithm, point: &[u8]) -> Result<(), PivError> {
+    let expected_len = match alg {
+        PivAlgorithm::EcP256 => 65,  // 1 + 32 + 32
+        PivAlgorithm::EcP384 => 97,  // 1 + 48 + 48
+        _ => {
+            return Err(PivError::Other(
+                "ECDH requires an EC key (P-256 or P-384)".into(),
+            ))
+        }
+    };
+    if point.is_empty() || point[0] != 0x04 {
+        return Err(PivError::Crypto(
+            "peer EC point must be uncompressed (0x04 prefix)".into(),
+        ));
+    }
+    if point.len() != expected_len {
+        return Err(PivError::Crypto(format!(
+            "peer EC point length {} does not match curve (expected {})",
+            point.len(),
+            expected_len,
+        )));
+    }
+    Ok(())
+}
+
+/// Parse a GENERAL AUTHENTICATE response: 0x7C { 0x82 = payload }.
+fn parse_ga_response(resp: &[u8]) -> Result<Vec<u8>, PivError> {
+    let mut reader = TlvReader::new(resp);
+    let outer_tag = reader.read_tag()?;
+    if outer_tag != 0x7C {
+        return Err(PivError::Tlv {
+            message: format!("expected GA response tag 0x7C, got {:#X}", outer_tag),
+        });
+    }
+    let inner_data = reader.read_value()?;
+
+    let mut inner_reader = TlvReader::new(inner_data);
+    let resp_tag = inner_reader.read_tag()?;
+    if resp_tag != ga_tag::RESPONSE as u32 {
+        return Err(PivError::Tlv {
+            message: format!("expected GA response tag 0x82, got {:#X}", resp_tag),
+        });
+    }
+    let payload = inner_reader.read_value()?;
+
+    Ok(payload.to_vec())
 }
 
 impl PivContext {

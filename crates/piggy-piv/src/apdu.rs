@@ -149,26 +149,42 @@ impl Apdu {
         }
     }
 
-    /// Encode APDU to ISO 7816-4 byte format (short APDU)
+    /// Encode APDU to ISO 7816-4 byte format.
+    ///
+    /// Uses short encoding when data fits in a single Lc byte (≤255).
+    /// Switches to extended-length encoding (3-byte Lc: 0x00 + u16 BE)
+    /// when data exceeds 255 bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(5 + self.data.len() + 1);
+        let data_len = self.data.len();
+        let extended = data_len > 255 || matches!(self.le, Some(le) if le > 256);
+        let mut buf = Vec::with_capacity(7 + data_len + 3);
         buf.push(self.cla);
         buf.push(self.ins);
         buf.push(self.p1);
         buf.push(self.p2);
 
-        if !self.data.is_empty() {
-            // Case 3/4: command data present
-            buf.push(self.data.len() as u8); // Lc
-            buf.extend_from_slice(&self.data);
-        }
-
-        if let Some(le) = self.le {
-            // Le field
-            if le >= 256 {
-                buf.push(0x00); // 256 encoded as 0x00
-            } else {
-                buf.push(le as u8);
+        if extended {
+            buf.push(0x00); // extended-length marker
+            if !self.data.is_empty() {
+                buf.push((data_len >> 8) as u8);
+                buf.push((data_len & 0xFF) as u8);
+                buf.extend_from_slice(&self.data);
+            }
+            if let Some(le) = self.le {
+                buf.push((le >> 8) as u8);
+                buf.push((le & 0xFF) as u8);
+            }
+        } else {
+            if !self.data.is_empty() {
+                buf.push(data_len as u8);
+                buf.extend_from_slice(&self.data);
+            }
+            if let Some(le) = self.le {
+                if le >= 256 {
+                    buf.push(0x00);
+                } else {
+                    buf.push(le as u8);
+                }
             }
         }
 
@@ -198,9 +214,10 @@ impl StatusWord {
         self.0 == 0x61
     }
 
-    /// Number of remaining bytes when has_more_data() is true
-    pub fn remaining_bytes(&self) -> u8 {
-        self.1
+    /// Number of remaining bytes when has_more_data() is true.
+    /// SW2=0x00 means 256 per ISO 7816-4.
+    pub fn remaining_bytes(&self) -> u16 {
+        if self.1 == 0 { 256 } else { self.1 as u16 }
     }
 
     /// SW 63Cx: wrong PIN, x = retries remaining

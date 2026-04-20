@@ -15,11 +15,13 @@ use ssh_agent_lib::{
 use ssh_key::{public::KeyData, Algorithm, PublicKey, Signature};
 
 use piggy_piv::{Guid, PivAlgorithm, PivContext};
+use zeroize::Zeroize;
 
 /// Cached key info from a PIV token (populated at startup)
 #[derive(Clone)]
 pub struct CachedKey {
     pub guid: Guid,
+    #[allow(dead_code)]
     pub reader_name: String,
     pub slot_id: u8,
     pub algorithm: PivAlgorithm,
@@ -65,16 +67,9 @@ impl Session for PiggyAgent {
     }
 
     async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
-        let keys = self.keys.lock().await;
-        let key = Self::find_key(&keys, &request.pubkey)
-            .ok_or_else(|| AgentError::Other("key not found".into()))?;
-        drop(keys);
+        let key = self.find_cached_key(&request.pubkey).await?;
 
-        // Reconnect to card for signing
-        let ctx = PivContext::new().map_err(|e| AgentError::Other(e.to_string().into()))?;
-        let tokens = ctx
-            .enumerate_tokens()
-            .map_err(|e| AgentError::Other(e.to_string().into()))?;
+        let tokens = reconnect_to_token(&key.guid)?;
         let token = tokens
             .iter()
             .find(|t| t.guid() == &key.guid)
@@ -169,6 +164,12 @@ impl Session for PiggyAgent {
 }
 
 impl PiggyAgent {
+    async fn find_cached_key(&self, pubkey: &KeyData) -> Result<CachedKey, AgentError> {
+        let keys = self.keys.lock().await;
+        Self::find_key(&keys, pubkey)
+            .ok_or_else(|| AgentError::Other("key not found".into()))
+    }
+
     async fn handle_ecdh(
         &mut self,
         details: &[u8],
@@ -178,28 +179,16 @@ impl PiggyAgent {
             .0;
 
         let (card_key_blob, pos) =
-            read_ssh_bytes(inner, 0).map_err(|e| AgentError::Other(e.into()))?;
+            read_ssh_string(inner, 0).map_err(|e| AgentError::Other(e.into()))?;
         let (partner_blob, pos) =
-            read_ssh_bytes(inner, pos).map_err(|e| AgentError::Other(e.into()))?;
-        if pos + 4 > inner.len() {
-            return Err(AgentError::Other("ecdh: truncated flags field".into()));
-        }
-        // flags are currently unused but must be consumed for protocol correctness
-        let _flags = u32::from_be_bytes([
-            inner[pos],
-            inner[pos + 1],
-            inner[pos + 2],
-            inner[pos + 3],
-        ]);
+            read_ssh_string(inner, pos).map_err(|e| AgentError::Other(e.into()))?;
+        let _flags = read_u32_be(inner, pos, "ecdh")?;
 
         let card_pubkey = PublicKey::from_bytes(card_key_blob)
             .map_err(|e| AgentError::Other(format!("ecdh: bad card key: {e}").into()))?;
-        let card_key_data = card_pubkey.key_data().clone();
 
-        let keys = self.keys.lock().await;
-        let key = Self::find_key(&keys, &card_key_data)
-            .ok_or_else(|| AgentError::Other("ecdh: key not found".into()))?;
-        drop(keys);
+        let key = self.find_cached_key(card_pubkey.key_data()).await
+            .map_err(|_| AgentError::Other("ecdh: key not found".into()))?;
 
         let ec_point = extract_ec_point_from_ssh_blob(partner_blob)
             .map_err(|e| AgentError::Other(e.into()))?;
@@ -213,10 +202,7 @@ impl PiggyAgent {
             }
         }
 
-        let ctx = PivContext::new().map_err(|e| AgentError::Other(e.to_string().into()))?;
-        let tokens = ctx
-            .enumerate_tokens()
-            .map_err(|e| AgentError::Other(e.to_string().into()))?;
+        let tokens = reconnect_to_token(&key.guid)?;
         let token = tokens
             .iter()
             .find(|t| t.guid() == &key.guid)
@@ -232,13 +218,14 @@ impl PiggyAgent {
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
         }
 
-        let secret = token
+        let mut secret = token
             .ecdh_derive(key.slot_id, &ec_point)
             .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
         let mut resp = Vec::new();
         resp.extend_from_slice(&(secret.len() as u32).to_be_bytes());
         resp.extend_from_slice(&secret);
+        secret.zeroize();
 
         Ok(Some(Extension {
             name: "ecdh@joyent.com".into(),
@@ -255,30 +242,16 @@ impl PiggyAgent {
             .0;
 
         let (card_key_blob, pos) =
-            read_ssh_bytes(inner, 0).map_err(|e| AgentError::Other(e.into()))?;
-        if pos + 4 > inner.len() {
-            return Err(AgentError::Other("attest: truncated flags field".into()));
-        }
-        let _flags = u32::from_be_bytes([
-            inner[pos],
-            inner[pos + 1],
-            inner[pos + 2],
-            inner[pos + 3],
-        ]);
+            read_ssh_string(inner, 0).map_err(|e| AgentError::Other(e.into()))?;
+        let _flags = read_u32_be(inner, pos, "attest")?;
 
         let card_pubkey = PublicKey::from_bytes(card_key_blob)
             .map_err(|e| AgentError::Other(format!("attest: bad card key: {e}").into()))?;
-        let card_key_data = card_pubkey.key_data().clone();
 
-        let keys = self.keys.lock().await;
-        let key = Self::find_key(&keys, &card_key_data)
-            .ok_or_else(|| AgentError::Other("attest: key not found".into()))?;
-        drop(keys);
+        let key = self.find_cached_key(card_pubkey.key_data()).await
+            .map_err(|_| AgentError::Other("attest: key not found".into()))?;
 
-        let ctx = PivContext::new().map_err(|e| AgentError::Other(e.to_string().into()))?;
-        let tokens = ctx
-            .enumerate_tokens()
-            .map_err(|e| AgentError::Other(e.to_string().into()))?;
+        let tokens = reconnect_to_token(&key.guid)?;
         let token = tokens
             .iter()
             .find(|t| t.guid() == &key.guid)
@@ -330,15 +303,10 @@ fn prepare_sign_data(alg: PivAlgorithm, data: &[u8], flags: u32) -> Result<Vec<u
                 _ => unreachable!(),
             };
 
-            // Determine hash algorithm from SSH agent flags
             let (hash_bytes, digest_prefix) = if flags & signature::RSA_SHA2_512 != 0 {
                 let hash = Sha512::digest(data);
                 (hash.to_vec(), RSA_DIGEST_PREFIX_SHA512)
-            } else if flags & signature::RSA_SHA2_256 != 0 {
-                let hash = Sha256::digest(data);
-                (hash.to_vec(), RSA_DIGEST_PREFIX_SHA256)
             } else {
-                // Default to SHA-256 for modern SSH
                 let hash = Sha256::digest(data);
                 (hash.to_vec(), RSA_DIGEST_PREFIX_SHA256)
             };
@@ -402,16 +370,13 @@ fn to_ssh_signature(
     flags: u32,
 ) -> Result<Signature, AgentError> {
     match alg {
-        PivAlgorithm::EcP256 => {
-            let algo = Algorithm::new("ecdsa-sha2-nistp256").map_err(AgentError::other)?;
-            // PIV card returns DER-encoded ECDSA signature
-            // ssh_key expects the raw (r || s) encoding wrapped in the SSH format
-            let (r, s) = decode_der_ecdsa_signature(sig_bytes)?;
-            let ssh_sig = encode_ecdsa_ssh_signature(&r, &s);
-            Signature::new(algo, ssh_sig).map_err(AgentError::other)
-        }
-        PivAlgorithm::EcP384 => {
-            let algo = Algorithm::new("ecdsa-sha2-nistp384").map_err(AgentError::other)?;
+        PivAlgorithm::EcP256 | PivAlgorithm::EcP384 => {
+            let algo_name = match alg {
+                PivAlgorithm::EcP256 => "ecdsa-sha2-nistp256",
+                PivAlgorithm::EcP384 => "ecdsa-sha2-nistp384",
+                _ => unreachable!(),
+            };
+            let algo = Algorithm::new(algo_name).map_err(AgentError::other)?;
             let (r, s) = decode_der_ecdsa_signature(sig_bytes)?;
             let ssh_sig = encode_ecdsa_ssh_signature(&r, &s);
             Signature::new(algo, ssh_sig).map_err(AgentError::other)
@@ -419,8 +384,6 @@ fn to_ssh_signature(
         PivAlgorithm::Rsa1024 | PivAlgorithm::Rsa2048 => {
             let algo_name = if flags & signature::RSA_SHA2_512 != 0 {
                 "rsa-sha2-512"
-            } else if flags & signature::RSA_SHA2_256 != 0 {
-                "rsa-sha2-256"
             } else {
                 "rsa-sha2-256"
             };
@@ -573,9 +536,28 @@ fn read_ssh_string(data: &[u8], offset: usize) -> Result<(&[u8], usize), String>
     Ok((&data[start..end], end))
 }
 
-/// Alias for `read_ssh_string` — both return `(&[u8], usize)`.
-fn read_ssh_bytes(data: &[u8], offset: usize) -> Result<(&[u8], usize), String> {
-    read_ssh_string(data, offset)
+/// Read a big-endian u32 from `data` at `offset`, returning the value.
+fn read_u32_be(data: &[u8], offset: usize, label: &str) -> Result<u32, AgentError> {
+    if offset + 4 > data.len() {
+        return Err(AgentError::Other(
+            format!("{label}: truncated flags field").into(),
+        ));
+    }
+    Ok(u32::from_be_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ]))
+}
+
+/// Establish a fresh PCSC context and enumerate PIV tokens.
+fn reconnect_to_token(
+    _guid: &Guid,
+) -> Result<Vec<piggy_piv::PivToken>, AgentError> {
+    let ctx = PivContext::new().map_err(|e| AgentError::Other(e.to_string().into()))?;
+    ctx.enumerate_tokens()
+        .map_err(|e| AgentError::Other(e.to_string().into()))
 }
 
 /// Extract the raw SEC1 EC point from an SSH ECDSA public key blob.
@@ -607,6 +589,7 @@ fn encode_ecdsa_ssh_signature(r: &[u8], s: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::vec_init_then_push, clippy::manual_repeat_n, clippy::needless_range_loop)]
 mod tests {
     //! Unit tests for the pure signing-path helpers plus the
     //! non-PCSC-touching portions of the `Session` impl.

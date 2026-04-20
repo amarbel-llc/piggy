@@ -322,7 +322,7 @@ mod tests {
             let n = counter_cl.fetch_add(1, Ordering::SeqCst);
             seen_cl.lock().unwrap().push(g.to_hex());
             // Alternate success/failure so both branches get exercised.
-            n % 2 == 0
+            n.is_multiple_of(2)
         };
 
         let handle = run_until_n_probes(

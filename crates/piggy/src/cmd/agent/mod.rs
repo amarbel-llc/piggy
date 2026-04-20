@@ -208,7 +208,7 @@ async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Detect shell output format
     let use_csh = cli.csh_format
-        || (!cli.sh_format && std::env::var("SHELL").map_or(false, |s| s.ends_with("csh")));
+        || (!cli.sh_format && std::env::var("SHELL").is_ok_and(|s| s.ends_with("csh")));
 
     if use_csh {
         println!("setenv SSH_AUTH_SOCK {};", socket_path);
