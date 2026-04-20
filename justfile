@@ -98,92 +98,6 @@ debug-pcsclite-opens: build-rust
       echo
     done
 
-# Probe versions of the running pcscd and the two libpcsclite candidates.
-# Confirms the pcscd actually in use and whether Ubuntu's is older than nix's.
-[group('debug')]
-debug-pcsclite-versions:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    echo "=== running pcscd ==="
-    /usr/sbin/pcscd --version 2>&1 | head -3
-    echo
-    echo "=== nix pcscd (unused) ==="
-    /nix/store/dzbw5iwazj3mmy12xk9491hip59x1m2g-pcsclite-2.3.0/bin/pcscd --version 2>&1 | head -3 || true
-    echo
-    echo "=== Ubuntu libpcsclite ==="
-    for f in /usr/lib/x86_64-linux-gnu/libpcsclite.so.1* /lib/x86_64-linux-gnu/libpcsclite.so.1*; do
-      [[ -e $f ]] || continue
-      echo "  $f"
-      [[ -L $f ]] && echo "    -> $(readlink -f "$f")"
-    done
-    echo
-    echo "=== nix libpcsclite_real.so.1 ==="
-    ls -la /nix/store/fl7ixhxn48nhincydz9b4sflmw84fmcg-pcsclite-2.3.0-lib/lib/libpcsclite_real.so.1
-
-# Verify that the nix-built wrapper (./result/bin/piggy) sets
-# LIBPCSCLITE_DELEGATE correctly on this host. Runs with the current
-# LIBPCSCLITE_DELEGATE unset, and confirms the agent loads the card key.
-# Serves as a regression guard for the makeWrapper --run snippet in
-# flake.nix's piggy derivation (issue #6 fix).
-[group('debug')]
-debug-wrapper-env-sanity: build-nix
-    #!/usr/bin/env bash
-    set -uo pipefail
-    echo "=== unset LIBPCSCLITE_DELEGATE, run wrapped piggy agent -A -i ==="
-    unset LIBPCSCLITE_DELEGATE
-    ./result/bin/piggy agent -A -i 2>&1 | head -5
-
-# Point LIBPCSCLITE_DELEGATE at a nonexistent file to confirm whether the
-# nix shim falls back to libpcsclite_real.so.1 or errors out. Result
-# determines whether the #6 fix strictly needs [[ -f ]] guards or whether
-# they are belt-and-suspenders.
-[group('debug')]
-debug-pcsclite-missing-delegate: build-rust
-    #!/usr/bin/env bash
-    set -uo pipefail
-    LIBPCSCLITE_DELEGATE=/nonexistent/libpcsclite.so.1 \
-      ./target/debug/piggy agent -A -i 2>&1 | head -10
-    echo "exit: $?"
-
-# Exercise the nix libpcsclite shim's LIBPCSCLITE_DELEGATE env-var escape
-# hatch. If setting it to the Ubuntu system libpcsclite makes piggy talk
-# to the card, we've confirmed the shim/real-lib protocol mismatch theory
-# for issue #6 and have a clean workaround.
-[group('debug')]
-debug-pcsclite-delegate: build-rust
-    #!/usr/bin/env bash
-    set -uo pipefail
-    for candidate in \
-      /usr/lib/x86_64-linux-gnu/libpcsclite.so.1 \
-      /lib/x86_64-linux-gnu/libpcsclite.so.1 \
-      /usr/lib/libpcsclite.so.1; do
-      [[ -f $candidate ]] || continue
-      echo "=== LIBPCSCLITE_DELEGATE=$candidate ==="
-      LIBPCSCLITE_DELEGATE="$candidate" ./target/debug/piggy agent -A -i 2>&1 | head -10
-      echo
-    done
-
-# Inspect what the nix pcsclite shim does - strings and runtime linkage.
-# Purpose: confirm or refute the polkit-wrapper theory for issue #6.
-[group('debug')]
-debug-pcsclite-shim-inspect:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    shim_dir=$(dirname "$(ldd ./target/debug/piggy | awk '/libpcsclite.so.1/{print $3}')")
-    echo "=== shim dir: $shim_dir ==="
-    for lib in libpcsclite.so.1 libpcsclite_real.so.1; do
-      path="$shim_dir/$lib"
-      [[ -f $path ]] || continue
-      echo
-      echo "--- $lib ($(stat -c%s "$path") bytes) ---"
-      echo "-- ldd --"
-      ldd "$path" 2>/dev/null
-      echo "-- dynamic symbols (top 20) --"
-      nm -D --defined-only "$path" 2>/dev/null | grep -v ' [a-z] ' | head -20 || true
-      echo "-- interesting strings --"
-      strings "$path" 2>/dev/null | grep -iE '(polkit|dbus|authoriz|pkcheck|getCapabilities|IsSystemEnabled|LoadModule|getenv|environ|PCSC|SCARD|pcscd|driver)' | grep -v '^%' | sort -u | head -40 || true
-    done
-
 [group('debug')]
 debug-pcsclite-linkage:
     #!/usr/bin/env bash
@@ -200,18 +114,10 @@ debug-pcsclite-linkage:
 
 # Like debug-conformance-run, but with --hardware. Prompts for the card PIN
 # via `ssh-add -X` so the sign test can actually execute against the card.
-#
-# LIBPCSCLITE_DELEGATE: works around the pcsc-lite 2.0.3 (Ubuntu system
-# daemon) vs 2.3.0 (nix client lib) protocol mismatch described in #6. The
-# nix libpcsclite shim reads this env var and dlopens the specified path in
-# place of the bundled libpcsclite_real.so.1. Forcing Ubuntu's 2.0.3 lib
-# lets piggy speak the same protocol as the running daemon.
 [group('debug')]
 debug-conformance-run-hw: build-rust
     #!/usr/bin/env bash
     set -euo pipefail
-    export LIBPCSCLITE_DELEGATE=/usr/lib/x86_64-linux-gnu/libpcsclite.so.1
-    [[ -f $LIBPCSCLITE_DELEGATE ]] || { echo "system libpcsclite not found at $LIBPCSCLITE_DELEGATE (#6 workaround)"; exit 1; }
     conformance=$(nix build .#piggy.tests.conformance --no-link --print-out-paths)/bin/piggy-agent-conformance
     tmpdir=$(mktemp -d /tmp/piggy-debug-conf.XXXXXX)
     sock="$tmpdir/agent.sock"

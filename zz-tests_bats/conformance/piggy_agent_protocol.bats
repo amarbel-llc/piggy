@@ -9,15 +9,6 @@
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
 
-  # Work around issue #6 on hosts where nix libpcsclite can't talk to the
-  # system pcscd (e.g. Ubuntu 2.0.3 daemon vs. nix 2.3.0 client). The nix
-  # shim honours LIBPCSCLITE_DELEGATE and dlopens that path in place of
-  # libpcsclite_real.so.1. Guarded so pure NixOS / missing-path cases are a
-  # no-op; the shim errors on a missing delegate path.
-  if [[ -f /usr/lib/x86_64-linux-gnu/libpcsclite.so.1 ]]; then
-    export LIBPCSCLITE_DELEGATE=/usr/lib/x86_64-linux-gnu/libpcsclite.so.1
-  fi
-
   # CONFORMANCE_BIN must be supplied by the caller. The `just
   # test-bats-conformance-protocol` recipe resolves it via
   # `nix build .#piggy.tests.conformance --no-link --print-out-paths`

@@ -50,7 +50,10 @@
 
         # Native rust workspace: `piggy` (binary) + `piggy-piv` (library).
         # pcsclite is only needed on linux; macOS has PC/SC in CoreServices.
-        rustBuildInputs = [ pkgs.openssl ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.pcsclite ];
+        # Uses pkgs-master (2.4.1) for backward-compatible IPC protocol
+        # negotiation — a 2.4.1 client can talk to daemons as old as 1.8.24,
+        # which covers Ubuntu 24.04's 2.0.3 pcscd without workarounds.
+        rustBuildInputs = [ pkgs.openssl ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs-master.pcsclite ];
         rustNativeBuildInputs = [ pkgs.pkg-config ];
 
         piggy-rs = pkgs.rustPlatform.buildRustPackage {
@@ -123,16 +126,9 @@
             fi
             install -m 0644 man/piggy.1 $out/share/man/man1/piggy.1
 
-            # --run guards LIBPCSCLITE_DELEGATE with a file-existence check:
-            # on hosts where a matching system libpcsclite.so.1 is present
-            # (e.g. Ubuntu's apt-installed 2.0.3 when piggy's nix lib is 2.3.0
-            # and can't talk to the running Ubuntu pcscd), route through it.
-            # On NixOS or hosts without the Ubuntu path, stays unset and the
-            # nix libpcsclite_real.so.1 is used as-is. See issue #6.
             makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
               --set PIGGY_SH_PATH $out/libexec/piggy/piggy.sh \
-              --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps} \
-              --run '[[ -f /usr/lib/x86_64-linux-gnu/libpcsclite.so.1 ]] && export LIBPCSCLITE_DELEGATE=/usr/lib/x86_64-linux-gnu/libpcsclite.so.1 || true'
+              --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
           '';
 
           # Expose the Go-based SSH-agent conformance binary as a test
@@ -205,19 +201,6 @@
           OPENSSL_NO_VENDOR = "1";
           OPENSSL_DIR = "${pkgs.openssl.dev}";
           OPENSSL_LIB_DIR = "${pkgs.lib.getLib pkgs.openssl}/lib";
-
-          # Work around issue #6: piggy's nix libpcsclite 2.3.0 client can't
-          # speak the 2.0.x IPC protocol used by Ubuntu's apt-installed pcscd.
-          # The nix libpcsclite shim honours LIBPCSCLITE_DELEGATE and dlopens
-          # that path in place of libpcsclite_real.so.1. Guarded with [[ -f ]]
-          # so NixOS devshells (and anywhere without the Ubuntu lib) are a
-          # no-op; the shim errors on a missing delegate, so guarding is
-          # mandatory.
-          shellHook = ''
-            if [[ -f /usr/lib/x86_64-linux-gnu/libpcsclite.so.1 ]]; then
-              export LIBPCSCLITE_DELEGATE=/usr/lib/x86_64-linux-gnu/libpcsclite.so.1
-            fi
-          '';
         };
       }
     ));
