@@ -250,6 +250,12 @@ impl PivToken {
 
     /// Verify the PIV PIN. The PIN is padded to 8 bytes with 0xFF per the spec.
     pub fn verify_pin(&self, pin: &str) -> Result<(), PivError> {
+        if pin.len() > 8 {
+            return Err(PivError::Other(format!(
+                "PIV PIN must be at most 8 bytes, got {}",
+                pin.len()
+            )));
+        }
         let apdu = Apdu::verify_pin(pin.as_bytes());
         let (_, sw) = self.transmit(&apdu)?;
         if sw.is_success() {

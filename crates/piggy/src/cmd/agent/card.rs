@@ -74,6 +74,7 @@ pub async fn probe_loop_with<F>(
                     tracing::warn!("card unavailable after {} probes, forgetting PIN", failures);
                     *pin_guard = None;
                 }
+                failures = 0;
             }
         }
     }

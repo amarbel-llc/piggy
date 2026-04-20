@@ -69,11 +69,7 @@ impl Session for PiggyAgent {
     async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
         let key = self.find_cached_key(&request.pubkey).await?;
 
-        let tokens = reconnect_to_token(&key.guid)?;
-        let token = tokens
-            .iter()
-            .find(|t| t.guid() == &key.guid)
-            .ok_or_else(|| AgentError::Other("PIV token no longer available".into()))?;
+        let token = reconnect_to_token(&key.guid)?;
 
         // Verify PIN if needed (slot 9E doesn't require PIN)
         if key.slot_id != 0x9E {
@@ -202,11 +198,7 @@ impl PiggyAgent {
             }
         }
 
-        let tokens = reconnect_to_token(&key.guid)?;
-        let token = tokens
-            .iter()
-            .find(|t| t.guid() == &key.guid)
-            .ok_or_else(|| AgentError::Other("PIV token no longer available".into()))?;
+        let token = reconnect_to_token(&key.guid)?;
 
         if key.slot_id != 0x9E {
             let pin_guard = self.pin.lock().await;
@@ -251,11 +243,7 @@ impl PiggyAgent {
         let key = self.find_cached_key(card_pubkey.key_data()).await
             .map_err(|_| AgentError::Other("attest: key not found".into()))?;
 
-        let tokens = reconnect_to_token(&key.guid)?;
-        let token = tokens
-            .iter()
-            .find(|t| t.guid() == &key.guid)
-            .ok_or_else(|| AgentError::Other("PIV token no longer available".into()))?;
+        let token = reconnect_to_token(&key.guid)?;
 
         let attest_cert = token
             .yk_attest(key.slot_id)
@@ -519,26 +507,29 @@ fn parse_der_length(bytes: &[u8]) -> Result<(usize, usize), AgentError> {
 /// Read an SSH string (u32 length prefix + payload) from `data` at `offset`.
 /// Returns `(&payload_slice, next_offset)`.
 fn read_ssh_string(data: &[u8], offset: usize) -> Result<(&[u8], usize), String> {
-    if offset + 4 > data.len() {
-        return Err("SSH string: not enough data for length".into());
-    }
+    let hdr_end = offset
+        .checked_add(4)
+        .filter(|&e| e <= data.len())
+        .ok_or("SSH string: not enough data for length")?;
     let len =
         u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
             as usize;
-    let start = offset + 4;
-    let end = start + len;
-    if end > data.len() {
-        return Err(format!(
-            "SSH string: length {len} exceeds remaining data {}",
-            data.len() - start
-        ));
-    }
-    Ok((&data[start..end], end))
+    let end = hdr_end
+        .checked_add(len)
+        .filter(|&e| e <= data.len())
+        .ok_or_else(|| {
+            format!(
+                "SSH string: length {len} exceeds remaining data {}",
+                data.len() - hdr_end
+            )
+        })?;
+    Ok((&data[hdr_end..end], end))
 }
 
 /// Read a big-endian u32 from `data` at `offset`, returning the value.
 fn read_u32_be(data: &[u8], offset: usize, label: &str) -> Result<u32, AgentError> {
-    if offset + 4 > data.len() {
+    let end = offset.checked_add(4).filter(|&e| e <= data.len());
+    if end.is_none() {
         return Err(AgentError::Other(
             format!("{label}: truncated flags field").into(),
         ));
@@ -551,13 +542,16 @@ fn read_u32_be(data: &[u8], offset: usize, label: &str) -> Result<u32, AgentErro
     ]))
 }
 
-/// Establish a fresh PCSC context and enumerate PIV tokens.
-fn reconnect_to_token(
-    _guid: &Guid,
-) -> Result<Vec<piggy_piv::PivToken>, AgentError> {
+/// Establish a fresh PCSC context and find the token matching `guid`.
+fn reconnect_to_token(guid: &Guid) -> Result<piggy_piv::PivToken, AgentError> {
     let ctx = PivContext::new().map_err(|e| AgentError::Other(e.to_string().into()))?;
-    ctx.enumerate_tokens()
-        .map_err(|e| AgentError::Other(e.to_string().into()))
+    let tokens = ctx
+        .enumerate_tokens()
+        .map_err(|e| AgentError::Other(e.to_string().into()))?;
+    tokens
+        .into_iter()
+        .find(|t| t.guid() == guid)
+        .ok_or_else(|| AgentError::Other("PIV token no longer available".into()))
 }
 
 /// Extract the raw SEC1 EC point from an SSH ECDSA public key blob.

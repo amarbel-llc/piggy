@@ -118,11 +118,21 @@ async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Parse slot spec if provided
-    let allowed_slots: Option<Vec<u8>> = cli.slot_spec.as_ref().map(|spec| {
-        spec.split(',')
-            .filter_map(|s| u8::from_str_radix(s.trim(), 16).ok())
-            .collect()
-    });
+    let allowed_slots: Option<Vec<u8>> = cli
+        .slot_spec
+        .as_ref()
+        .map(|spec| {
+            spec.split(',')
+                .map(|s| {
+                    let s = s.trim();
+                    u8::from_str_radix(s, 16).map_err(|_| {
+                        format!("invalid slot in -S spec: {:?}", s)
+                    })
+                })
+                .collect::<Result<Vec<u8>, _>>()
+        })
+        .transpose()
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     // Enumerate PIV tokens and cache their keys.
     // If PCSC is unavailable (e.g. no pcscd), start with zero keys.
@@ -200,11 +210,25 @@ async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Loaded {} keys from PIV tokens", cached_keys.len());
 
     // Determine socket path
-    let socket_path = cli.socket.unwrap_or_else(|| {
-        let dir = std::env::temp_dir().join(format!("piggy-agent.{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        dir.join("agent.sock").to_string_lossy().into_owned()
-    });
+    let socket_path = match cli.socket {
+        Some(s) => s,
+        None => {
+            let dir = std::env::temp_dir().join(format!("piggy-agent.{}", std::process::id()));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&dir)?;
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::create_dir_all(&dir)?;
+            }
+            dir.join("agent.sock").to_string_lossy().into_owned()
+        }
+    };
 
     // Detect shell output format
     let use_csh = cli.csh_format
@@ -269,8 +293,15 @@ fn kill_agent() -> Result<(), Box<dyn std::error::Error>> {
     let pid: i32 = pid_str.parse().map_err(|_| "invalid SSH_AGENT_PID")?;
 
     #[cfg(unix)]
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
+    {
+        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if rc != 0 {
+            return Err(format!(
+                "kill({pid}, SIGTERM): {}",
+                std::io::Error::last_os_error()
+            )
+            .into());
+        }
     }
 
     println!("unset SSH_AUTH_SOCK;");

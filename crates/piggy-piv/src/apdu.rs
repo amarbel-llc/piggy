@@ -134,10 +134,18 @@ impl Apdu {
     }
 
     /// VERIFY PIN command. PIN is padded to 8 bytes with 0xFF.
+    ///
+    /// Panics if `pin` is longer than 8 bytes. PIV PINs are 6-8 digits;
+    /// silently truncating a longer value would waste a retry attempt on
+    /// an invalid PIN.
     pub fn verify_pin(pin: &[u8]) -> Self {
+        assert!(
+            pin.len() <= 8,
+            "PIV PIN must be at most 8 bytes, got {}",
+            pin.len()
+        );
         let mut padded = [0xFF_u8; 8];
-        let len = pin.len().min(8);
-        padded[..len].copy_from_slice(&pin[..len]);
+        padded[..pin.len()].copy_from_slice(pin);
 
         Self {
             cla: 0x00,
