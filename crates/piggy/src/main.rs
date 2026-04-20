@@ -3,9 +3,10 @@
 //! Dispatch logic:
 //!
 //! 1. `piggy agent ...` — handled in rust (see [`cmd::agent`]).
-//! 2. `piggy box|tool|ca|luks|zfs ...` — handed off to the corresponding
+//! 2. `piggy box ...` — handled in rust (see [`cmd::pivy_box`]).
+//! 3. `piggy tool|ca|luks|zfs ...` — handed off to the corresponding
 //!    C `pivy-*` binary from `$PATH` (see [`fallback`]).
-//! 3. Anything else (including `piggy` with no args, `--help`, `show`,
+//! 4. Anything else (including `piggy` with no args, `--help`, `show`,
 //!    `insert`, `edit`, …) — handed off to the bash `piggy.sh`
 //!    implementation.
 //!
@@ -21,6 +22,10 @@ fn main() {
 
     if args.len() >= 2 && args[1] == "agent" {
         std::process::exit(cmd::agent::run(args));
+    }
+
+    if args.len() >= 2 && args[1] == "box" {
+        std::process::exit(cmd::pivy_box::run(args));
     }
 
     fallback::dispatch(&args);

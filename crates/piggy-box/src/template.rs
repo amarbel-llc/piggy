@@ -7,7 +7,7 @@ use crate::wire::{WireReader, WireWriter};
 const EBOX_MAGIC: u16 = 0xEB0C;
 const EBOX_TPL_VERSION: u8 = 1;
 const EBOX_TYPE_TEMPLATE: u8 = 0x01;
-pub(crate) const DEFAULT_SLOT: u8 = 0x9D; // PIV_SLOT_KEY_MGMT
+pub const DEFAULT_SLOT: u8 = 0x9D; // PIV_SLOT_KEY_MGMT
 
 pub(crate) const PART_END: u8 = 0;
 pub(crate) const PART_PUBKEY: u8 = 1;

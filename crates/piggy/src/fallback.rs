@@ -16,7 +16,7 @@ use std::process::Command;
 
 /// Subcommand names that currently live in the C pivy implementation.
 /// Each maps to a `pivy-<name>` binary expected on `$PATH`.
-const PIVY_SUBCOMMANDS: &[&str] = &["box", "tool", "ca", "luks", "zfs"];
+const PIVY_SUBCOMMANDS: &[&str] = &["tool", "ca", "luks", "zfs"];
 
 /// Dispatch an argv that did not match any rust subcommand.
 ///

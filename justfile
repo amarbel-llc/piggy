@@ -52,6 +52,9 @@ test-rust:
 check-box:
     cargo check -p piggy-box
 
+check-piggy:
+    cargo check -p piggy
+
 # --- debug ---
 
 # Run the Go conformance binary against a freshly-started piggy agent and

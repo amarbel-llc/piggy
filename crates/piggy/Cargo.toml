@@ -9,6 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 piggy-piv = { path = "../piggy-piv" }
+piggy-box = { path = "../piggy-box" }
+openssl = "0.10"
 ssh-agent-lib = "0.5"
 ssh-key = { version = "0.6", features = ["alloc", "ecdsa", "rsa", "ed25519"] }
 clap = { version = "4", features = ["derive"] }
