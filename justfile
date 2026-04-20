@@ -49,6 +49,9 @@ test-bats-conformance-protocol: build-rust
 test-rust:
     cargo test
 
+check-box:
+    cargo check -p piggy-box
+
 # --- debug ---
 
 # Run the Go conformance binary against a freshly-started piggy agent and
