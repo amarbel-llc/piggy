@@ -129,7 +129,7 @@ impl EboxStream {
 
         let iv = seqnr_to_iv(seqnr);
         let padded = aes256_ctr_decrypt(key, &iv, ciphertext)?;
-        let plain = pkcs7_unpad(&padded)?;
+        let plain = pkcs7_unpad(&padded, AES_BLOCK_SIZE)?;
 
         Ok((seqnr, plain))
     }
@@ -138,7 +138,7 @@ impl EboxStream {
 fn seqnr_to_iv(seqnr: u32) -> Vec<u8> {
     let mut iv = vec![0u8; AES_IV_LEN];
     iv[..4].copy_from_slice(&seqnr.to_be_bytes());
-    Ok::<Vec<u8>, BoxError>(iv).unwrap()
+    iv
 }
 
 fn aes256_ctr_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
@@ -164,29 +164,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     Ok(signer.sign_to_vec()?)
 }
 
-fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
-    let pad_len = block_size - (data.len() % block_size);
-    let mut padded = data.to_vec();
-    padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
-    padded
-}
-
-fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>> {
-    if data.is_empty() {
-        return Err(BoxError::BadPadding);
-    }
-    let pad_byte = data[data.len() - 1];
-    let pad_len = pad_byte as usize;
-    if pad_len == 0 || pad_len > data.len() || pad_len > AES_BLOCK_SIZE {
-        return Err(BoxError::BadPadding);
-    }
-    for &b in &data[data.len() - pad_len..] {
-        if b != pad_byte {
-            return Err(BoxError::BadPadding);
-        }
-    }
-    Ok(data[..data.len() - pad_len].to_vec())
-}
+use crate::wire::{pkcs7_pad, pkcs7_unpad};
 
 #[cfg(test)]
 mod tests {
@@ -243,7 +221,7 @@ mod tests {
 
     #[test]
     fn stream_encrypt_decrypt_chunk_roundtrip() {
-        let (tpl, priv_key) = make_tpl_and_privkey();
+        let (tpl, _) = make_tpl_and_privkey();
         let stream = EboxStream::new(&tpl).unwrap();
 
         let plaintext = b"hello world, this is a stream chunk!";
@@ -313,7 +291,7 @@ mod tests {
             let padded = pkcs7_pad(&data, AES_BLOCK_SIZE);
             assert_eq!(padded.len() % AES_BLOCK_SIZE, 0);
             assert!(padded.len() > data.len());
-            let unpadded = pkcs7_unpad(&padded).unwrap();
+            let unpadded = pkcs7_unpad(&padded, AES_BLOCK_SIZE).unwrap();
             assert_eq!(unpadded, data);
         }
     }

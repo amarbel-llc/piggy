@@ -1,5 +1,3 @@
-use std::io::{self, Read, Write};
-
 use crate::error::{BoxError, Result};
 
 pub struct WireReader<'a> {
@@ -14,10 +12,6 @@ impl<'a> WireReader<'a> {
 
     pub fn remaining(&self) -> usize {
         self.data.len() - self.pos
-    }
-
-    pub fn position(&self) -> usize {
-        self.pos
     }
 
     pub fn rest(&self) -> &'a [u8] {
@@ -108,12 +102,6 @@ impl WireWriter {
         Self { buf: Vec::new() }
     }
 
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            buf: Vec::with_capacity(cap),
-        }
-    }
-
     pub fn into_bytes(self) -> Vec<u8> {
         self.buf
     }
@@ -186,22 +174,29 @@ impl WireWriter {
     }
 }
 
-/// Read an ebox stream from a `Read` source: first the ebox header (variable
-/// length, prefixed by u32 length), then stream metadata fields.
-pub fn read_framed<R: Read>(reader: &mut R) -> io::Result<Vec<u8>> {
-    let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf)?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut data = vec![0u8; len];
-    reader.read_exact(&mut data)?;
-    Ok(data)
+
+pub(crate) fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
+    let pad_len = block_size - (data.len() % block_size);
+    let mut padded = data.to_vec();
+    padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+    padded
 }
 
-/// Write a framed message (u32 BE length + data).
-pub fn write_framed<W: Write>(writer: &mut W, data: &[u8]) -> io::Result<()> {
-    writer.write_all(&(data.len() as u32).to_be_bytes())?;
-    writer.write_all(data)?;
-    Ok(())
+pub(crate) fn pkcs7_unpad(data: &[u8], block_size: usize) -> Result<Vec<u8>> {
+    if data.is_empty() {
+        return Err(BoxError::BadPadding);
+    }
+    let pad_byte = data[data.len() - 1];
+    let pad_len = pad_byte as usize;
+    if pad_len == 0 || pad_len > data.len() || pad_len > block_size {
+        return Err(BoxError::BadPadding);
+    }
+    for &b in &data[data.len() - pad_len..] {
+        if b != pad_byte {
+            return Err(BoxError::BadPadding);
+        }
+    }
+    Ok(data[..data.len() - pad_len].to_vec())
 }
 
 #[cfg(test)]

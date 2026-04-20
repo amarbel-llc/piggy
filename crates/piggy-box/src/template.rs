@@ -5,6 +5,7 @@ use crate::piv_box::EcCurve;
 use crate::wire::{WireReader, WireWriter};
 
 const EBOX_MAGIC: u16 = 0xEB0C;
+#[cfg(test)]
 const EBOX_TPL_VERSION: u8 = 1;
 const EBOX_TYPE_TEMPLATE: u8 = 0x01;
 pub const DEFAULT_SLOT: u8 = 0x9D; // PIV_SLOT_KEY_MGMT

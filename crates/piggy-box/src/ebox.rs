@@ -17,7 +17,6 @@ const EBOX_MAGIC: u16 = 0xEB0C;
 const EBOX_VERSION: u8 = 3;
 const RECOVERY_CIPHER: &str = "aes256-gcm";
 
-const RECOV_TOKEN: u8 = 0x01;
 const RECOV_KEY: u8 = 0x02;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,7 +255,7 @@ impl Ebox {
                 self.key = Some(Zeroizing::new(data));
                 return Ok(());
             }
-            // Skip other tags (RECOV_TOKEN, etc.)
+            // Skip unknown tags
             if r.remaining() == 0 {
                 break;
             }
@@ -590,29 +589,6 @@ fn aes256_gcm_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8
 mod tests {
     use super::*;
     use crate::template::{EboxConfigType, EboxTemplate, EboxTplConfig, EboxTplPart};
-
-    fn generate_tpl_part(curve: EcCurve) -> EboxTplPart {
-        let group = EcGroup::from_curve_name(curve.nid()).unwrap();
-        let key = EcKey::generate(&group).unwrap();
-        let mut ctx = openssl::bn::BigNumContext::new().unwrap();
-        let pubkey = key
-            .public_key()
-            .to_bytes(
-                &group,
-                openssl::ec::PointConversionForm::COMPRESSED,
-                &mut ctx,
-            )
-            .unwrap();
-
-        EboxTplPart {
-            guid: Guid::from_hex("AABBCCDD11223344AABBCCDD11223344").unwrap(),
-            slot: DEFAULT_SLOT,
-            name: Some("test".to_string()),
-            pubkey,
-            pubkey_curve: curve,
-            cak: None,
-        }
-    }
 
     fn make_tpl_and_privkey() -> (EboxTemplate, EcKey<Private>) {
         let curve = EcCurve::NistP256;

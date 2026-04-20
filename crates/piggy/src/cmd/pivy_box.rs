@@ -147,15 +147,14 @@ fn cmd_stream_encrypt(args: &[&str]) -> i32 {
     }
 
     let chunk_size = stream.chunk_size as usize;
-    let mut seqnr: u32 = 0;
-    let mut offset = 0;
+    let chunks: Vec<&[u8]> = if plaintext.is_empty() {
+        vec![b""]
+    } else {
+        plaintext.chunks(chunk_size).collect()
+    };
 
-    while offset < plaintext.len() {
-        let end = (offset + chunk_size).min(plaintext.len());
-        let chunk = &plaintext[offset..end];
-        let last = end >= plaintext.len();
-
-        match stream.encrypt_chunk(seqnr, chunk) {
+    for (seqnr, chunk) in chunks.iter().enumerate() {
+        match stream.encrypt_chunk(seqnr as u32, chunk) {
             Ok(enc) => {
                 if let Err(e) = stdout.write_all(&enc) {
                     eprintln!("piggy box stream encrypt: write: {e}");
@@ -164,29 +163,6 @@ fn cmd_stream_encrypt(args: &[&str]) -> i32 {
             }
             Err(e) => {
                 eprintln!("piggy box stream encrypt: chunk {seqnr}: {e}");
-                return 1;
-            }
-        }
-
-        seqnr += 1;
-        offset = end;
-
-        if last {
-            break;
-        }
-    }
-
-    // Empty input: write a single empty chunk
-    if plaintext.is_empty() {
-        match stream.encrypt_chunk(0, b"") {
-            Ok(enc) => {
-                if let Err(e) = stdout.write_all(&enc) {
-                    eprintln!("piggy box stream encrypt: write: {e}");
-                    return 1;
-                }
-            }
-            Err(e) => {
-                eprintln!("piggy box stream encrypt: {e}");
                 return 1;
             }
         }

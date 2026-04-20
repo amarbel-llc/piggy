@@ -52,12 +52,6 @@ impl EcCurve {
         }
     }
 
-    fn compressed_point_len(&self) -> usize {
-        match self {
-            EcCurve::NistP256 => 33,
-            EcCurve::NistP384 => 49,
-        }
-    }
 }
 
 pub struct PivBox {
@@ -119,41 +113,9 @@ impl PivBox {
         &mut self,
         recipient_pub: &EcKey<openssl::pkey::Public>,
     ) -> Result<()> {
-        let plaintext = self.plaintext.as_ref().ok_or(BoxError::NotSealed)?;
-
         let group = EcGroup::from_curve_name(self.curve.nid())?;
         let ephem = EcKey::generate(&group)?;
-
-        let mut ctx = openssl::bn::BigNumContext::new()?;
-
-        // Compressed EC point encoding for recipient
-        self.recipient_pubkey = recipient_pub
-            .public_key()
-            .to_bytes(&group, openssl::ec::PointConversionForm::COMPRESSED, &mut ctx)?;
-
-        // Compressed EC point encoding for ephemeral
-        self.ephemeral_pubkey = ephem
-            .public_key()
-            .to_bytes(&group, openssl::ec::PointConversionForm::COMPRESSED, &mut ctx)?;
-
-        // ECDH shared secret
-        let shared_secret = ecdh_derive(&ephem, recipient_pub)?;
-
-        // Generate nonce
-        let mut nonce = vec![0u8; NONCE_LEN];
-        openssl::rand::rand_bytes(&mut nonce)?;
-        self.nonce = nonce;
-
-        // KDF: SHA-512(shared_secret || nonce)
-        let key_material = kdf_sha512(&shared_secret, &self.nonce)?;
-
-        // ChaCha20-Poly1305 encrypt with PKCS#7 padding
-        let padded = pkcs7_pad(plaintext, 16);
-        let (ct, iv) = chacha20_poly1305_encrypt(&key_material[..32], &padded)?;
-        self.iv = iv;
-        self.ciphertext = ct;
-
-        Ok(())
+        self.seal_offline_with_ephemeral(recipient_pub, &ephem)
     }
 
     /// Seal using an externally-provided ephemeral key. Used by Ebox to
@@ -210,7 +172,7 @@ impl PivBox {
 
         // Decrypt
         let padded = chacha20_poly1305_decrypt(&key_material[..32], &self.iv, &self.ciphertext)?;
-        let plain = pkcs7_unpad(&padded)?;
+        let plain = pkcs7_unpad(&padded, 16)?;
 
         self.plaintext = Some(Zeroizing::new(plain));
         Ok(())
@@ -378,29 +340,7 @@ fn chacha20_poly1305_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result
     Ok(pt)
 }
 
-fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
-    let pad_len = block_size - (data.len() % block_size);
-    let mut padded = data.to_vec();
-    padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
-    padded
-}
-
-fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>> {
-    if data.is_empty() {
-        return Err(BoxError::BadPadding);
-    }
-    let pad_byte = data[data.len() - 1];
-    let pad_len = pad_byte as usize;
-    if pad_len == 0 || pad_len > data.len() || pad_len > 255 {
-        return Err(BoxError::BadPadding);
-    }
-    for &b in &data[data.len() - pad_len..] {
-        if b != pad_byte {
-            return Err(BoxError::BadPadding);
-        }
-    }
-    Ok(data[..data.len() - pad_len].to_vec())
-}
+use crate::wire::{pkcs7_pad, pkcs7_unpad};
 
 #[cfg(test)]
 mod tests {
@@ -423,7 +363,6 @@ mod tests {
         b.set_data(data);
         b.seal_offline(&pub_key).unwrap();
 
-        assert!(b.plaintext.is_none() || true); // plaintext may still be set
         let bytes = b.to_bytes().unwrap();
         let mut b2 = PivBox::from_bytes(&bytes).unwrap();
         b2.open_offline(&priv_key).unwrap();
@@ -514,7 +453,7 @@ mod tests {
             let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
             let padded = pkcs7_pad(&data, 16);
             assert_eq!(padded.len() % 16, 0);
-            let unpadded = pkcs7_unpad(&padded).unwrap();
+            let unpadded = pkcs7_unpad(&padded, 16).unwrap();
             assert_eq!(unpadded, data);
         }
     }
