@@ -72,3 +72,27 @@ function kill_with_invalid_pid_fails { # @test
   assert_failure
   assert_output --partial "invalid SSH_AGENT_PID"
 }
+
+# --- mutual exclusion ---
+
+function all_cards_and_guid_conflict { # @test
+  run "$PIGGY" agent -A -g 1234
+  assert_failure
+  assert_output --partial "cannot be used with"
+}
+
+# --- socket path ---
+
+function help_shows_socket_option { # @test
+  run "$PIGGY" agent --help
+  assert_success
+  assert_output --partial "Socket path"
+}
+
+# --- slot spec ---
+
+function help_shows_slot_spec_format { # @test
+  run "$PIGGY" agent --help
+  assert_success
+  assert_output --partial "9a,9e"
+}

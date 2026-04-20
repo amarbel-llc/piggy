@@ -23,7 +23,7 @@ pub struct AgentArgs {
     pub guid: Option<String>,
 
     /// All-card mode: expose keys from all PIV cards
-    #[arg(short = 'A')]
+    #[arg(short = 'A', conflicts_with = "guid")]
     pub all_cards: bool,
 
     /// Socket path for the agent
