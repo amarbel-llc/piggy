@@ -12,7 +12,7 @@ use ssh_agent_lib::{
     error::AgentError,
     proto::{signature, Extension, Identity, SignRequest},
 };
-use ssh_key::{public::KeyData, Algorithm, Signature};
+use ssh_key::{public::KeyData, Algorithm, PublicKey, Signature};
 
 use piggy_piv::{Guid, PivAlgorithm, PivContext};
 
@@ -125,6 +125,7 @@ impl Session for PiggyAgent {
                     "query",
                     "session-bind@openssh.com",
                     "pin-status@joyent.com",
+                    "ecdh@joyent.com",
                 ];
                 let mut buf = Vec::new();
                 for name in supported {
@@ -151,10 +152,93 @@ impl Session for PiggyAgent {
                     details: vec![has_pin, has_card].into(),
                 }))
             }
+            "ecdh@joyent.com" => {
+                self.handle_ecdh(&extension.details.clone().into_bytes())
+                    .await
+            }
             _ => Err(AgentError::from(
                 ssh_agent_lib::proto::ProtoError::UnsupportedCommand { command: 27 },
             )),
         }
+    }
+}
+
+impl PiggyAgent {
+    async fn handle_ecdh(
+        &mut self,
+        details: &[u8],
+    ) -> Result<Option<Extension>, AgentError> {
+        let inner = read_ssh_string(details, 0)
+            .map_err(|e| AgentError::Other(e.into()))?
+            .0;
+
+        let (card_key_blob, pos) =
+            read_ssh_bytes(inner, 0).map_err(|e| AgentError::Other(e.into()))?;
+        let (partner_blob, pos) =
+            read_ssh_bytes(inner, pos).map_err(|e| AgentError::Other(e.into()))?;
+        if pos + 4 > inner.len() {
+            return Err(AgentError::Other("ecdh: truncated flags field".into()));
+        }
+        // flags are currently unused but must be consumed for protocol correctness
+        let _flags = u32::from_be_bytes([
+            inner[pos],
+            inner[pos + 1],
+            inner[pos + 2],
+            inner[pos + 3],
+        ]);
+
+        let card_pubkey = PublicKey::from_bytes(card_key_blob)
+            .map_err(|e| AgentError::Other(format!("ecdh: bad card key: {e}").into()))?;
+        let card_key_data = card_pubkey.key_data().clone();
+
+        let keys = self.keys.lock().await;
+        let key = Self::find_key(&keys, &card_key_data)
+            .ok_or_else(|| AgentError::Other("ecdh: key not found".into()))?;
+        drop(keys);
+
+        let ec_point = extract_ec_point_from_ssh_blob(partner_blob)
+            .map_err(|e| AgentError::Other(e.into()))?;
+
+        match key.algorithm {
+            PivAlgorithm::EcP256 | PivAlgorithm::EcP384 => {}
+            _ => {
+                return Err(AgentError::Other(
+                    "ecdh: key is not an EC key".into(),
+                ));
+            }
+        }
+
+        let ctx = PivContext::new().map_err(|e| AgentError::Other(e.to_string().into()))?;
+        let tokens = ctx
+            .enumerate_tokens()
+            .map_err(|e| AgentError::Other(e.to_string().into()))?;
+        let token = tokens
+            .iter()
+            .find(|t| t.guid() == &key.guid)
+            .ok_or_else(|| AgentError::Other("PIV token no longer available".into()))?;
+
+        if key.slot_id != 0x9E {
+            let pin_guard = self.pin.lock().await;
+            let pin = pin_guard
+                .as_ref()
+                .ok_or_else(|| AgentError::Other("PIN required (use ssh-add -X)".into()))?;
+            token
+                .verify_pin(pin)
+                .map_err(|e| AgentError::Other(e.to_string().into()))?;
+        }
+
+        let secret = token
+            .ecdh_derive(key.slot_id, &ec_point)
+            .map_err(|e| AgentError::Other(e.to_string().into()))?;
+
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&(secret.len() as u32).to_be_bytes());
+        resp.extend_from_slice(&secret);
+
+        Ok(Some(Extension {
+            name: "ecdh@joyent.com".into(),
+            details: resp.into(),
+        }))
     }
 }
 
@@ -401,6 +485,44 @@ fn parse_der_length(bytes: &[u8]) -> Result<(usize, usize), AgentError> {
             format!("DER length: unsupported form 0x{:02x}", first).into(),
         ))
     }
+}
+
+/// Read an SSH string (u32 length prefix + payload) from `data` at `offset`.
+/// Returns `(&payload_slice, next_offset)`.
+fn read_ssh_string(data: &[u8], offset: usize) -> Result<(&[u8], usize), String> {
+    if offset + 4 > data.len() {
+        return Err("SSH string: not enough data for length".into());
+    }
+    let len =
+        u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+            as usize;
+    let start = offset + 4;
+    let end = start + len;
+    if end > data.len() {
+        return Err(format!(
+            "SSH string: length {len} exceeds remaining data {}",
+            data.len() - start
+        ));
+    }
+    Ok((&data[start..end], end))
+}
+
+/// Alias for `read_ssh_string` — both return `(&[u8], usize)`.
+fn read_ssh_bytes(data: &[u8], offset: usize) -> Result<(&[u8], usize), String> {
+    read_ssh_string(data, offset)
+}
+
+/// Extract the raw SEC1 EC point from an SSH ECDSA public key blob.
+///
+/// SSH ECDSA public key wire format:
+///   ssh_string("ecdsa-sha2-nistp256")  (or nistp384)
+///   ssh_string("nistp256")             (curve identifier)
+///   ssh_string(<SEC1 EC point>)        (04 || x || y)
+fn extract_ec_point_from_ssh_blob(blob: &[u8]) -> Result<Vec<u8>, String> {
+    let (_algo, pos) = read_ssh_string(blob, 0)?;
+    let (_curve, pos) = read_ssh_string(blob, pos)?;
+    let (point, _) = read_ssh_string(blob, pos)?;
+    Ok(point.to_vec())
 }
 
 /// Encode (r, s) as SSH mpint-pair for ECDSA signature blob.

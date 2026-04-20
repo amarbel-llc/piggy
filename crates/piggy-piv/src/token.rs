@@ -233,6 +233,51 @@ impl PivToken {
         Ok(signature.to_vec())
     }
 
+    /// Perform ECDH key agreement with the key in the given slot.
+    /// `peer_ec_point` is the uncompressed EC point of the peer's ephemeral key
+    /// (04 || x || y). Returns the raw shared secret (the x-coordinate of the
+    /// derived point on the curve).
+    pub fn ecdh_derive(&self, slot_id: u8, peer_ec_point: &[u8]) -> Result<Vec<u8>, PivError> {
+        let slot = self.read_slot(slot_id)?;
+        let alg_byte = slot.algorithm().to_byte();
+
+        let mut inner = TlvWriter::new();
+        inner.write_tag_value(ga_tag::RESPONSE as u32, &[]);
+        inner.write_tag_value(ga_tag::EXPONENT as u32, peer_ec_point);
+        let mut outer = TlvWriter::new();
+        outer.write_tag_value(0x7C, inner.as_bytes());
+
+        let apdu = Apdu::general_authenticate(alg_byte, slot_id, outer.as_bytes());
+        let (resp, sw) = self.transmit(&apdu)?;
+
+        if sw.as_u16() == 0x6982 {
+            return Err(PivError::PinRequired);
+        }
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+
+        let mut reader = TlvReader::new(&resp);
+        let outer_tag = reader.read_tag()?;
+        if outer_tag != 0x7C {
+            return Err(PivError::Tlv {
+                message: format!("expected GA response tag 0x7C, got {:#X}", outer_tag),
+            });
+        }
+        let inner_data = reader.read_value()?;
+
+        let mut inner_reader = TlvReader::new(inner_data);
+        let resp_tag = inner_reader.read_tag()?;
+        if resp_tag != ga_tag::RESPONSE as u32 {
+            return Err(PivError::Tlv {
+                message: format!("expected GA response tag 0x82, got {:#X}", resp_tag),
+            });
+        }
+        let secret = inner_reader.read_value()?;
+
+        Ok(secret.to_vec())
+    }
+
     /// Verify the PIV PIN. The PIN is padded to 8 bytes with 0xFF per the spec.
     pub fn verify_pin(&self, pin: &str) -> Result<(), PivError> {
         let apdu = Apdu::verify_pin(pin.as_bytes());
