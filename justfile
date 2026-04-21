@@ -318,6 +318,8 @@ fib-smoke:
     echo "--- ldd pivy-tool-unwrapped ---"
     unwrapped="$(dirname "$(command -v pivy-tool)")/.pivy-tool-unwrapped"
     ldd "$unwrapped" 2>/dev/null | grep -i pcsc || echo "(no pcsc in ldd output)"
+    echo "--- ldd opensc-tool ---"
+    ldd "$(command -v opensc-tool)" 2>/dev/null | grep -i pcsc || echo "(no pcsc in ldd output)"
     echo "--- opensc-tool reader list ---"
     opensc-tool -l 2>&1 || echo "(opensc-tool -l failed)"
     echo "--- .fib/env ---"
