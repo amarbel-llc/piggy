@@ -138,7 +138,7 @@
 
           src = ./.;
 
-          nativeBuildInputs = [ pkgs.makeWrapper ];
+          nativeBuildInputs = [ pkgs.makeWrapper pkgs.scdoc ];
 
           dontBuild = true;
 
@@ -163,7 +163,13 @@
               install -m 0644 src/platform/linux.sh \
                               $out/libexec/piggy/platform/linux.sh
             fi
-            install -m 0644 man/piggy.1 $out/share/man/man1/piggy.1
+            for f in doc/*.scd; do
+              stem="$(basename "$f" .scd)"
+              section="''${stem##*.}"
+              name="''${stem%.*}"
+              mkdir -p "$out/share/man/man''${section}"
+              scdoc < "$f" > "$out/share/man/man''${section}/''${name}.''${section}"
+            done
 
             makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
               --set PIGGY_SH_PATH $out/libexec/piggy/piggy.sh \
@@ -247,6 +253,7 @@
               pkgs-master.rustfmt
               pkgs-master.clippy
               pkgs-master.rust-analyzer
+              pkgs.scdoc
               bob.packages.${system}.batman
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [

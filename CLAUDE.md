@@ -54,6 +54,19 @@ appears in the worktree.
 - `zz-tests_bats/conformance/piggy_agent_protocol.bats` — bats harness for protocol conformance
 - `contrib/emacs/piggy.el` — Emacs integration package
 
+## Just Recipes
+
+Use just recipes for all cargo and bats operations instead of calling cargo/bats directly via `develop-run` or shell:
+
+- `just build-rust -p <crate>` instead of `cargo build --package <crate>`
+- `just check-rust -p <crate>` instead of `cargo check --package <crate>`
+- `just test-rust --workspace` instead of `cargo test --workspace`
+- `just test-bats-file <path>` instead of `bats --no-sandbox <path>`
+- `just lint-rust` for clippy
+- `just test` for the full suite
+
+Recipes ensure consistent flags, proper dependencies, and keep the justfile as the single source of truth.
+
 ## Code Conventions
 
 - Bash: `set -o pipefail`, `[[ ]]` conditionals, all variables quoted
