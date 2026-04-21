@@ -146,6 +146,86 @@ codemod-fmt-rust:
 lint-rust:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# --- fib: virtual PIV smart card ---
+#
+# `fib` is a software PIV card built from PivApplet + jCardSim + vsmartcard-vpcd.
+# Packaged via nix/virtual-piv.nix; see docs/virtual-piv.md for architecture
+# and troubleshooting.
+#
+# `fib-up` starts a private pcscd and the applet; `fib-down` tears them down.
+# Callers must `eval .fib/env` after `fib-up` to redirect PC/SC clients at
+# the private socket (via PCSCLITE_CSOCK_NAME). `fib-shell` is the
+# interactive convenience wrapper — opens a subshell with the env set and
+# cleans up on exit.
+
+# Start a private pcscd + PivApplet pair. After this returns, run
+# `eval $(cat .fib/env)` in your shell; then `pivy-tool list` etc. will
+# see "Virtual PCD piggy fib" as the reader.
+[group('test')]
+fib-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p .fib
+    # Short-circuit if already running.
+    if [[ -f .fib/pcscd.pid ]] && kill -0 "$(cat .fib/pcscd.pid)" 2>/dev/null; then
+      echo "fib-up: already running (pid $(cat .fib/pcscd.pid)). eval \$(cat .fib/env)" >&2
+      exit 0
+    fi
+    reader_conf=$(nix build --no-link --print-out-paths .#fib-reader-conf)
+    sock="$PWD/.fib/pcscd.comm"
+    rm -f "$sock"
+    # Private pcscd loading only vpcd.
+    PCSCLITE_CSOCK_NAME="$sock" pcscd \
+      --foreground \
+      --config "$reader_conf" \
+      --disable-polkit \
+      --hotplug \
+      >.fib/pcscd.log 2>&1 &
+    pcscd_pid=$!
+    echo "$pcscd_pid" >.fib/pcscd.pid
+    # Wait for the socket.
+    for _ in $(seq 1 30); do [[ -S $sock ]] && break; sleep 0.1; done
+    if [[ ! -S $sock ]]; then
+      echo "fib-up: pcscd socket never appeared — see .fib/pcscd.log" >&2
+      kill "$pcscd_pid" 2>/dev/null || true
+      exit 1
+    fi
+    # Start the applet — it connects to vpcd on localhost:35963.
+    nix run .#fib >.fib/fib.log 2>&1 &
+    fib_pid=$!
+    echo "$fib_pid" >.fib/fib.pid
+    # Export env for the caller.
+    cat >.fib/env <<EOF
+    export PCSCLITE_CSOCK_NAME="$sock"
+    # fib pcscd pid: $pcscd_pid
+    # fib jcardsim pid: $fib_pid
+    EOF
+    echo "fib: up — eval \$(cat .fib/env) to connect"
+
+# Tear down the private pcscd + fib pair.
+[group('test')]
+fib-down:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [[ -f .fib/fib.pid ]]; then
+      kill "$(cat .fib/fib.pid)" 2>/dev/null || true
+    fi
+    if [[ -f .fib/pcscd.pid ]]; then
+      kill "$(cat .fib/pcscd.pid)" 2>/dev/null || true
+    fi
+    rm -rf .fib
+    echo "fib: down"
+
+# Open a subshell with fib up and the env preloaded; tears down on exit.
+[group('test')]
+fib-shell:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just fib-up
+    trap 'just fib-down' EXIT
+    export PCSCLITE_CSOCK_NAME="$PWD/.fib/pcscd.comm"
+    PS1="(fib) $PS1" exec "$SHELL"
+
 # --- update / clean ---
 
 update: update-nix

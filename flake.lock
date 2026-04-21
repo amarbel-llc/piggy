@@ -492,6 +492,22 @@
         "type": "github"
       }
     },
+    "jcardsim": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1589327878,
+        "narHash": "sha256-0akp8BAp6QxGuBrDFEg0ED/F98bCkO2WQSocYqWszyI=",
+        "owner": "arekinath",
+        "repo": "jcardsim",
+        "rev": "4c766cfb48c43507f9a30a1443e7214d2073a430",
+        "type": "github"
+      },
+      "original": {
+        "owner": "arekinath",
+        "repo": "jcardsim",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1761468971,
@@ -644,6 +660,38 @@
         "type": "github"
       }
     },
+    "oracle-javacard-sdks": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1763401029,
+        "narHash": "sha256-f54ckaxd8Jaz2Hsw1Cj2zK1OVI5MYC/nYnz4llPp6tM=",
+        "owner": "martinpaljak",
+        "repo": "oracle_javacard_sdks",
+        "rev": "3751d774dd4e6b60e813c6be61ab017e77f36570",
+        "type": "github"
+      },
+      "original": {
+        "owner": "martinpaljak",
+        "repo": "oracle_javacard_sdks",
+        "type": "github"
+      }
+    },
+    "pivapplet": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1661144882,
+        "narHash": "sha256-FuO9iocgB1ZjQCKW9EfPUuCIx066LIz0mhb73SmGMAw=",
+        "owner": "arekinath",
+        "repo": "PivApplet",
+        "rev": "5cb14a9e8d16e92fbad73dcad86a219a9210554f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "arekinath",
+        "repo": "PivApplet",
+        "type": "github"
+      }
+    },
     "pivy": {
       "inputs": {
         "bob": "bob_2",
@@ -722,8 +770,11 @@
     "root": {
       "inputs": {
         "bob": "bob",
+        "jcardsim": "jcardsim",
         "nixpkgs": "nixpkgs_4",
         "nixpkgs-master": "nixpkgs-master_2",
+        "oracle-javacard-sdks": "oracle-javacard-sdks",
+        "pivapplet": "pivapplet",
         "pivy": "pivy",
         "utils": "utils_3"
       }

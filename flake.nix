@@ -18,6 +18,31 @@
       inputs.utils.follows = "utils";
     };
 
+    # Software PIV smart card for tests — see nix/virtual-piv.nix.
+    # Not flakes themselves; fetched as plain sources.
+    jcardsim = {
+      url = "github:arekinath/jcardsim";
+      flake = false;
+    };
+    pivapplet = {
+      url = "github:arekinath/PivApplet";
+      flake = false;
+    };
+    # Oracle JavaCard SDK binaries vendored by martinpaljak. The jc305u3
+    # kit provides api_classic.jar, which jcardsim's pom.xml requires at
+    # build time (its `initialize` phase runs install-file on
+    # $JC_CLASSIC_HOME/lib/api_classic.jar). The resulting jcardsim.jar
+    # bundles the javacard.* bytecode.
+    #
+    # License: Oracle Binary Code License — redistribution allowed
+    # "bundled as part of Your Programs" with the constraints listed in
+    # jc305u3_kit/legal/Distribution_ReadME.txt. See LICENSING in
+    # nix/virtual-piv.nix for how this posture affects piggy.
+    oracle-javacard-sdks = {
+      url = "github:martinpaljak/oracle_javacard_sdks";
+      flake = false;
+    };
+
   };
 
   outputs =
@@ -28,12 +53,26 @@
       utils,
       pivy,
       bob,
+      jcardsim,
+      pivapplet,
+      oracle-javacard-sdks,
     }:
     (utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
         pkgs-master = import nixpkgs-master { inherit system; };
+
+        # Software PIV smart card for tests. Only built on Linux — vsmartcard
+        # is marked broken on darwin upstream.
+        virtualPiv = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
+          import ./nix/virtual-piv.nix {
+            inherit pkgs;
+            jcardsim-src = jcardsim;
+            pivapplet-src = pivapplet;
+            oracle-javacard-sdks-src = oracle-javacard-sdks;
+          }
+        );
 
         # Runtime deps on PATH for the wrapped piggy binary. `pivy` is kept
         # as a fallback for subcommands the rust binary hasn't implemented
@@ -137,9 +176,13 @@
           # `nix flake check`. Keeps the relationship between the agent
           # and its wire-protocol oracle explicit without merging the
           # Rust and Go toolchains into one derivation.
-          passthru.tests = {
-            conformance = piggy-agent-conformance;
-          };
+          passthru.tests =
+            {
+              conformance = piggy-agent-conformance;
+            }
+            // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+              fib = virtualPiv.fibBundle;
+            };
 
           meta = with pkgs.lib; {
             description = "PIV-based password store using pivy-box and ebox templates";
@@ -176,10 +219,20 @@
         };
       in
       {
-        packages.default = piggy;
-        packages.piggy = piggy;
-        packages.piggy-rs = piggy-rs;
-        packages.piggy-agent-conformance = piggy-agent-conformance;
+        packages =
+          {
+            default = piggy;
+            piggy = piggy;
+            piggy-rs = piggy-rs;
+            piggy-agent-conformance = piggy-agent-conformance;
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+            fib = virtualPiv.fib;
+            fib-bundle = virtualPiv.fibBundle;
+            fib-reader-conf = virtualPiv.readerConf;
+            jcardsim = virtualPiv.jcardsim;
+            pivapplet = virtualPiv.pivapplet;
+          };
 
         devShells.default = pkgs.mkShell {
           packages =
@@ -194,6 +247,11 @@
               pkgs-master.clippy
               pkgs-master.rust-analyzer
               bob.packages.${system}.batman
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              # `just fib-up` needs pcscd + fib on PATH.
+              pkgs.pcsclite
+              virtualPiv.fib
             ];
 
           # Help the openssl + pcsc-sys crates find their libraries
