@@ -320,6 +320,8 @@ fib-smoke:
     ldd "$unwrapped" 2>/dev/null | grep -i pcsc || echo "(no pcsc in ldd output)"
     echo "--- ldd opensc-tool ---"
     ldd "$(command -v opensc-tool)" 2>/dev/null | grep -i pcsc || echo "(no pcsc in ldd output)"
+    echo "--- LD_DEBUG opensc-tool (dlopen trace) ---"
+    LD_DEBUG=libs opensc-tool -l 2>&1 | grep -i pcsc || echo "(no pcsc in LD_DEBUG output)"
     echo "--- opensc-tool reader list ---"
     opensc-tool -l 2>&1 || echo "(opensc-tool -l failed)"
     echo "--- .fib/env ---"
