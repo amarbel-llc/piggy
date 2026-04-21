@@ -299,11 +299,36 @@ fib-smoke:
     trap 'just fib-down' EXIT
     just fib-up
     eval "$(cat .fib/env)"
-    echo "--- pivy-tool list ---"
-    output=$(pivy-tool list 2>&1)
-    echo "$output"
-    if ! echo "$output" | grep -q "Virtual PCD piggy fib"; then
-      echo "fib-smoke: FAIL — virtual card not visible" >&2
+
+    echo "--- fib diagnostics ---"
+    echo "PCSCLITE_CSOCK_NAME=${PCSCLITE_CSOCK_NAME:-<unset>}"
+    echo "socket exists: $(test -S "${PCSCLITE_CSOCK_NAME:-}" && echo yes || echo no)"
+    echo "pcscd alive: $(kill -0 "$(cat .fib/pcscd.pid 2>/dev/null)" 2>/dev/null && echo yes || echo no)"
+    echo "fib alive: $(kill -0 "$(cat .fib/fib.pid 2>/dev/null)" 2>/dev/null && echo yes || echo no)"
+    echo "LD_PRELOAD=${LD_PRELOAD:-<unset>}"
+    echo "pivy-tool path: $(command -v pivy-tool)"
+    echo "--- .fib/env ---"
+    cat .fib/env
+    echo "--- .fib/pcscd.log (last 20) ---"
+    tail -20 .fib/pcscd.log 2>/dev/null || echo "(empty or missing)"
+    echo "--- .fib/fib.log (last 20) ---"
+    tail -20 .fib/fib.log 2>/dev/null || echo "(empty or missing)"
+    echo "--- .fib/activate.log ---"
+    cat .fib/activate.log 2>/dev/null || echo "(empty or missing)"
+
+    echo "--- pivy-tool list (with retries) ---"
+    found=false
+    for attempt in $(seq 1 10); do
+      output=$(pivy-tool list 2>&1) || true
+      echo "attempt $attempt: $output"
+      if echo "$output" | grep -q "Virtual PCD piggy fib"; then
+        found=true
+        break
+      fi
+      sleep 0.5
+    done
+    if [[ "$found" != true ]]; then
+      echo "fib-smoke: FAIL — virtual card not visible after 10 attempts" >&2
       exit 1
     fi
     echo "fib-smoke: PASS"
