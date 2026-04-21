@@ -120,3 +120,76 @@ function slot_spec_rejects_zero { # @test
   assert_failure
   assert_output --partial "unknown PIV slot 0x00"
 }
+
+function slot_spec_rejects_empty_string { # @test
+  run "$PIGGY" agent -S ""
+  assert_failure
+  assert_output --partial "invalid slot in -S spec"
+}
+
+function slot_spec_trims_whitespace { # @test
+  # "9a , 9e" should parse the same as "9a,9e" — the trim in the parser
+  # strips surrounding whitespace from each entry.
+  run "$PIGGY" agent -S " 9a , 9e " -i
+  assert_success
+}
+
+# --- info mode ---
+
+function info_mode_succeeds { # @test
+  run "$PIGGY" agent -i
+  assert_success
+}
+
+function info_mode_with_all_cards { # @test
+  run "$PIGGY" agent -A -i
+  assert_success
+}
+
+# --- shell format ---
+
+function help_shows_sh_format_option { # @test
+  run "$PIGGY" agent --help
+  assert_success
+  assert_output --partial "Bourne shell"
+}
+
+function help_shows_csh_format_option { # @test
+  run "$PIGGY" agent --help
+  assert_success
+  assert_output --partial "C-shell"
+}
+
+# --- debug flags ---
+
+function help_shows_debug_option { # @test
+  run "$PIGGY" agent --help
+  assert_success
+  assert_output --partial "Debug level"
+}
+
+function help_shows_foreground_debug_option { # @test
+  run "$PIGGY" agent --help
+  assert_success
+  assert_output --partial "Foreground debug"
+}
+
+# --- guid ---
+
+function guid_requires_argument { # @test
+  run "$PIGGY" agent -g
+  assert_failure
+  assert_output --partial "a value is required"
+}
+
+function socket_requires_argument { # @test
+  run "$PIGGY" agent -a
+  assert_failure
+  assert_output --partial "a value is required"
+}
+
+function slot_spec_requires_argument { # @test
+  run "$PIGGY" agent -S
+  assert_failure
+  assert_output --partial "a value is required"
+}
