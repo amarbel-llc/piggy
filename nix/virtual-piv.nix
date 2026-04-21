@@ -25,6 +25,7 @@
 
 {
   pkgs,
+  pkgs-master,
   jcardsim-src,
   pivapplet-src,
   oracle-javacard-sdks-src,
@@ -141,6 +142,32 @@ let
     };
   };
 
+  # Custom pcscd. Two constraints:
+  #
+  # 1. A different ipcdir so the private instance won't collide with a
+  #    system pcscd over /run/pcscd/pcscd.pid (pcscdaemon.c reads that
+  #    file, does kill(pid, 0), and aborts with EPERM if a root-owned
+  #    system daemon is running and our user-level pcscd can't signal
+  #    it). Override via meson -Dipcdir=/tmp/piggy-fib-ipc.
+  #
+  # 2. Use pkgs-master.pcsclite (2.4.1) for IPC protocol compatibility,
+  #    mirroring the fix from issue #6: pcsclite 2.4.1 negotiates with
+  #    clients as old as 1.8.24, so older system libpcsclite.so (e.g.
+  #    Ubuntu 24.04's 2.0.3 that pivy-tool's wrapper LD_PRELOADs) can
+  #    still talk to our daemon. Building with pkgs.pcsclite (2.3.0)
+  #    broke that compatibility and pivy-tool failed to connect.
+  #
+  # Clients redirect via PCSCLITE_CSOCK_NAME at runtime so the ipcdir
+  # only affects the daemon's own bookkeeping files; clients need
+  # libpcsclite.so built with PCSCLITE_CSOCK_NAME env support (true
+  # for pcsclite ≥ ~2.0.0).
+  pcscdForFib = pkgs-master.pcsclite.overrideAttrs (old: {
+    pname = "pcscd-for-fib";
+    mesonFlags = (old.mesonFlags or [ ]) ++ [
+      "-Dipcdir=/tmp/piggy-fib-ipc"
+    ];
+  });
+
   # reader.conf snippet pointing at the nix-store-provided vpcd PCSC driver.
   # Used by `just fib-up` to start a private pcscd; not intended for
   # installation into /etc/reader.conf.d/.
@@ -150,7 +177,7 @@ let
   readerConf = pkgs.writeText "fib-reader.conf" ''
     FRIENDLYNAME      "Virtual PCD piggy fib"
     DEVICENAME        /dev/null:0x8C7B
-    LIBPATH           ${pkgs.vsmartcard-vpcd}/lib/pcsc/drivers/serial/libifdvpcd.so
+    LIBPATH           ${pkgs.vsmartcard-vpcd}/var/lib/pcsc/drivers/serial/libifdvpcd.so
     CHANNELID         0x8C7B
   '';
 
@@ -182,16 +209,19 @@ let
   fibBundle = pkgs.runCommand "fib-bundle" { } ''
     mkdir -p $out/bin $out/share/fib
     ln -s ${fib}/bin/fib $out/bin/fib
+    ln -s ${pcscdForFib}/bin/pcscd $out/bin/pcscd-fib
     ln -s ${readerConf} $out/share/fib/reader.conf
     ln -s ${pkgs.vsmartcard-vpcd} $out/share/fib/vsmartcard-vpcd
     ln -s ${jcardsim} $out/share/fib/jcardsim
     ln -s ${pivapplet} $out/share/fib/pivapplet
+    ln -s ${pcscdForFib} $out/share/fib/pcscd
   '';
 in
 {
   inherit
     jcardsim
     pivapplet
+    pcscdForFib
     readerConf
     fib
     fibBundle

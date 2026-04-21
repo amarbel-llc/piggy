@@ -172,14 +172,22 @@ fib-up:
       exit 0
     fi
     reader_conf=$(nix build --no-link --print-out-paths .#fib-reader-conf)
-    sock="$PWD/.fib/pcscd.comm"
-    rm -f "$sock"
+    pcscd_bin=$(nix build --no-link --print-out-paths .#fib-pcscd^out)/bin/pcscd
+    # pcscd hardcodes its socket path at compile time via --enable-ipcdir.
+    # Our fib-pcscd was built with -Dipcdir=/tmp/piggy-fib-ipc, so that's
+    # where the socket lives. PCSCLITE_CSOCK_NAME only redirects CLIENTS,
+    # not the server. We export that env var below so clients point here.
+    sock="/tmp/piggy-fib-ipc/pcscd.comm"
+    mkdir -p /tmp/piggy-fib-ipc
+    # Clean stale state: the singleton check reads pcscd.pid and tries
+    # kill(pid, 0); a stale pid from a dead process yields a confusing
+    # error. Removing it (and the socket) bypasses that.
+    rm -f /tmp/piggy-fib-ipc/pcscd.pid "$sock"
     # Private pcscd loading only vpcd.
-    PCSCLITE_CSOCK_NAME="$sock" pcscd \
+    "$pcscd_bin" \
       --foreground \
       --config "$reader_conf" \
       --disable-polkit \
-      --hotplug \
       >.fib/pcscd.log 2>&1 &
     pcscd_pid=$!
     echo "$pcscd_pid" >.fib/pcscd.pid
@@ -223,7 +231,7 @@ fib-shell:
     set -euo pipefail
     just fib-up
     trap 'just fib-down' EXIT
-    export PCSCLITE_CSOCK_NAME="$PWD/.fib/pcscd.comm"
+    export PCSCLITE_CSOCK_NAME="/tmp/piggy-fib-ipc/pcscd.comm"
     PS1="(fib) $PS1" exec "$SHELL"
 
 # --- update / clean ---

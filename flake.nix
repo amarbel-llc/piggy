@@ -67,7 +67,7 @@
         # is marked broken on darwin upstream.
         virtualPiv = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
           import ./nix/virtual-piv.nix {
-            inherit pkgs;
+            inherit pkgs pkgs-master;
             jcardsim-src = jcardsim;
             pivapplet-src = pivapplet;
             oracle-javacard-sdks-src = oracle-javacard-sdks;
@@ -230,6 +230,7 @@
             fib = virtualPiv.fib;
             fib-bundle = virtualPiv.fibBundle;
             fib-reader-conf = virtualPiv.readerConf;
+            fib-pcscd = virtualPiv.pcscdForFib;
             jcardsim = virtualPiv.jcardsim;
             pivapplet = virtualPiv.pivapplet;
           };
