@@ -63,3 +63,6 @@ jobs:
       - name: Smoke-test virtual PIV card (fib)
         if: matrix.system == 'x86_64-linux'
         run: nix develop --command just fib-smoke
+      - name: Interop tests — piggy box vs pivy-box (fib)
+        if: matrix.system == 'x86_64-linux'
+        run: nix develop --command just test-bats-conformance-interop

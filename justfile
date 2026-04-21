@@ -46,6 +46,26 @@ test-bats-conformance-protocol: build-rust
     BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding \
     --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
 
+test-bats-conformance-interop: build-rust
+  #!/usr/bin/env bash
+  set -euo pipefail
+  trap 'just fib-down' EXIT
+  just fib-up
+  eval "$(cat .fib/env)"
+  # Generate a key on the fib card's 9D slot (Key Management / ECDH)
+  # so ebox encrypt/decrypt has something to work with.
+  pivy-tool -P 123456 -K default generate 9d
+  # Discover the card's GUID for template creation.
+  guid=$(pivy-tool list 2>&1 | grep -oE '[0-9a-f]{32}' | head -1)
+  # Create a template via the Rust CLI (tests will also create their own).
+  export HOME="$PWD/.fib"
+  "$PWD/target/debug/piggy" box tpl create interop primary local-guid "$guid"
+  tpl_file="$HOME/.pivy/tpl/interop"
+  INTEROP_TPL="$tpl_file" INTEROP_GUID="$guid" \
+    PCSCLITE_CSOCK_NAME="$PCSCLITE_CSOCK_NAME" \
+    BATS_TEST_TIMEOUT=30 bats --tap \
+    zz-tests_bats/conformance/piggy_box_interop.bats
+
 test-rust:
     cargo test
 
