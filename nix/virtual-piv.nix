@@ -42,28 +42,21 @@ let
   # from Oracle's api_classic.jar. PivApplet compiles against the
   # javacard.* classes from this jar at runtime.
   #
-  # The pom.xml's `initialize` phase runs install-file on
-  # $JC_CLASSIC_HOME/lib/api_classic.jar to register the Oracle SDK jar
-  # in Maven's local repo. We set JC_CLASSIC_HOME to the jc305u3_kit
-  # path inside the vendored oracle_javacard_sdks input.
-  #
-  # NOTE: mvnHash is a placeholder. On first build nix will error with
-  # "hash mismatch" and print the actual hash; copy it into this file.
-  jcardsim = pkgs.maven.buildMavenPackage {
+  # Maven dependencies are vendored in nix/jcardsim-m2/ (captured by
+  # `just debug-capture-jcardsim-m2`). This eliminates the
+  # buildMavenPackage FOD whose hash drifts when Maven Central changes
+  # dependency metadata. Re-run that recipe when bumping the jcardsim
+  # flake input.
+  jcardsim = pkgs.stdenv.mkDerivation {
     pname = "jcardsim";
     version = "3.0.5-SNAPSHOT";
     src = jcardsim-src;
 
-    # buildMavenPackage's fetchedMavenDeps sub-derivation (FOD) only
-    # inherits `src`, `sourceRoot`, and `patches` from the outer
-    # attrset — env vars don't propagate, and dependency resolution
-    # runs before the `initialize` phase (so the upstream pom's
-    # install-file plugin never gets a chance to register api_classic
-    # in the local repo). We instead rewrite the dependency inline to
-    # a `<scope>system</scope>` reference to the vendored SDK jar, and
-    # also rewrite the `${env.JC_CLASSIC_HOME}` reference in the
-    # install-file plugin config so its harmless re-execution at the
-    # `initialize` phase still succeeds.
+    nativeBuildInputs = [
+      jdk
+      pkgs.maven
+    ];
+
     postPatch = ''
       substituteInPlace pom.xml \
         --replace-fail \
@@ -72,10 +65,20 @@ let
       sed -i "s|\''${env.JC_CLASSIC_HOME}|${oracle-javacard-sdks-src}/jc305u3_kit|g" pom.xml
     '';
 
-    mvnHash = "sha256-0lslxntkRr7e+Jhu8GLZgy2aeA6s96oH/gue2T7bsIQ=";
-    # Upstream pom targets Java 1.7 (`<java.version>1.7</java.version>`)
-    # which JDK 21 dropped support for. Override via the same property.
-    mvnParameters = "-Dmaven.test.skip=true -Dgpg.skip=true -Djava.version=1.8 package";
+    buildPhase = ''
+      runHook preBuild
+
+      cp -dpR ${./jcardsim-m2} mvnDeps
+      chmod -R u+w mvnDeps
+
+      mvn package -o -nsu \
+        "-Dmaven.repo.local=mvnDeps" \
+        -Dmaven.test.skip=true \
+        -Dgpg.skip=true \
+        -Djava.version=1.8
+
+      runHook postBuild
+    '';
 
     installPhase = ''
       runHook preInstall

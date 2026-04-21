@@ -16,7 +16,7 @@ is plumbed through the top-level [`flake.nix`](../flake.nix). Linux only
 
 | Derivation | Produces | Notes |
 |---|---|---|
-| `jcardsim` | `$out/share/java/jcardsim-3.0.5-SNAPSHOT.jar` | Maven-built fork (arekinath/jcardsim). Includes a reimplementation of the JavaCard APIs, so compiling the applet does **not** require the Oracle JavaCard SDK. |
+| `jcardsim` | `$out/share/java/jcardsim-3.0.5-SNAPSHOT.jar` | Maven-built fork (arekinath/jcardsim). Uses vendored deps from `nix/jcardsim-m2/` (offline build). Includes a reimplementation of the JavaCard APIs, so compiling the applet does **not** require the Oracle JavaCard SDK. |
 | `pivapplet` | `$out/classes/**/*.class`, `$out/jcardsim.cfg` | `ant preprocess` (vendored `ext/jpp-1.0.3.jar`) then `javac` against `jcardsim.jar`. `ant dist` is skipped — we never emit a CAP file. |
 | `fib-reader-conf` | `reader.conf` text | Points `LIBPATH` at the nix-store `libifdvpcd.so`. Consumed by the private `pcscd`. |
 | `fib` | `bin/fib` | Launches `java com.licel.jcardsim.remote.VSmartCard`. Connects to the vpcd TCP listener at `localhost:35963`. |
@@ -29,21 +29,24 @@ Flake outputs on Linux:
 - `.#fib-reader-conf` — the `reader.conf` snippet
 - `.#jcardsim`, `.#pivapplet` — underlying artifacts
 
-## First build: discovering `mvnHash`
+## Vendored Maven dependencies
 
-`jcardsim` is built with `pkgs.maven.buildMavenPackage`, which needs a
-pre-computed hash of its Maven dependency closure. The first build will
-fail with a hash mismatch error and print the actual hash. Copy that
-into [`nix/virtual-piv.nix`](../nix/virtual-piv.nix) and rebuild:
+`jcardsim`'s Maven dependency closure is vendored in
+[`nix/jcardsim-m2/`](../nix/jcardsim-m2/) and used offline during the
+nix build. This eliminates `buildMavenPackage`'s fixed-output derivation
+(FOD) whose hash drifts when Maven Central changes metadata — even with
+no code changes on our side.
+
+To regenerate (only needed when bumping the `jcardsim` flake input):
 
 ```sh
-nix build .#jcardsim 2>&1 | tee build.log
-# look for "got:    sha256-<hash>" in the error output,
-# paste it into nix/virtual-piv.nix as mvnHash.
-nix build .#jcardsim        # succeeds
+just debug-capture-jcardsim-m2
+git add nix/jcardsim-m2/
 ```
 
-The placeholder `sha256-AAAA…` is intentional — first build expects to fail.
+The recipe runs Maven on the host (pure Java, works on any platform),
+applies the same `pom.xml` patches as the nix build, downloads deps, and
+strips ephemeral metadata files.
 
 ## Runtime use: `just fib-up` / `fib-down` / `fib-shell`
 

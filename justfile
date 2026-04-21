@@ -302,6 +302,79 @@ fib-smoke:
     fi
     echo "fib-smoke: PASS"
 
+# Capture the jcardsim Maven dependency closure into nix/jcardsim-m2/.
+# Run once whenever the jcardsim flake input is bumped. The vendored .m2
+# replaces buildMavenPackage's FOD so the nix build never fetches from
+# Maven Central (eliminates hash drift). Maven is pure Java — works on
+# any platform regardless of fib/vsmartcard Linux constraints.
+[group('debug')]
+debug-capture-jcardsim-m2:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    project_root="$PWD"
+    tmpdir=$(mktemp -d /tmp/jcardsim-m2-capture.XXXXXX)
+    trap 'rm -rf "$tmpdir"' EXIT
+
+    echo "=== Resolving flake input store paths ==="
+    archive=$(nix flake archive --json .)
+    jcardsim_src=$(echo "$archive" | jq -r '.inputs.jcardsim.path // empty')
+    if [[ -z $jcardsim_src ]]; then
+      echo "ERROR: Could not resolve jcardsim source path from flake" >&2
+      exit 1
+    fi
+    echo "jcardsim source: $jcardsim_src"
+
+    oracle_sdks=$(echo "$archive" | jq -r '.inputs["oracle-javacard-sdks"].path // empty')
+    if [[ -z $oracle_sdks ]]; then
+      echo "ERROR: Could not resolve oracle-javacard-sdks source path from flake" >&2
+      exit 1
+    fi
+    echo "oracle-javacard-sdks: $oracle_sdks"
+
+    echo "=== Copying jcardsim source to writable tmpdir ==="
+    cp -r "$jcardsim_src"/. "$tmpdir/jcardsim"
+    chmod -R u+w "$tmpdir/jcardsim"
+
+    echo "=== Patching pom.xml (same as nix/virtual-piv.nix postPatch) ==="
+    sdk_jar="$oracle_sdks/jc305u3_kit/lib/api_classic.jar"
+    if [[ ! -f "$sdk_jar" ]]; then
+      echo "ERROR: Oracle SDK jar not found at $sdk_jar" >&2
+      exit 1
+    fi
+    cd "$tmpdir/jcardsim"
+    # Replace compile scope with system scope + absolute path to SDK jar.
+    # Replace ${env.JC_CLASSIC_HOME} with the actual path.
+    # Use temp file for BSD/GNU sed portability.
+    sed \
+      -e "s|<scope>compile</scope>|<scope>system</scope><systemPath>$sdk_jar</systemPath>|g" \
+      -e "s|\${env.JC_CLASSIC_HOME}|$oracle_sdks/jc305u3_kit|g" \
+      pom.xml > pom.xml.tmp
+    mv pom.xml.tmp pom.xml
+
+    echo "=== Running Maven to download dependency closure ==="
+    m2repo="$tmpdir/m2-repo"
+    mkdir -p "$m2repo"
+    # Use nix shell to get Maven + JDK without polluting the devshell
+    nix shell nixpkgs#maven nixpkgs#jdk21_headless --command \
+      mvn package \
+        "-Dmaven.repo.local=$m2repo" \
+        -Dmaven.test.skip=true \
+        -Dgpg.skip=true \
+        -Djava.version=1.8
+
+    echo "=== Stripping ephemeral Maven metadata (matches buildMavenPackage) ==="
+    find "$m2repo" -name '*.lastUpdated' -delete
+    find "$m2repo" -name 'resolver-status.properties' -delete
+    find "$m2repo" -name '_remote.repositories' -delete
+
+    echo "=== Installing to nix/jcardsim-m2/ ==="
+    dest="$project_root/nix/jcardsim-m2"
+    rm -rf "$dest"
+    cp -r "$m2repo" "$dest"
+
+    echo "=== Done. Vendored Maven deps at nix/jcardsim-m2/ ==="
+    du -sh "$dest"
+
 # --- update / clean ---
 
 update: update-nix
