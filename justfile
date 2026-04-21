@@ -8,8 +8,8 @@ build: build-nix build-rust
 build-nix:
     nix build --show-trace
 
-build-rust:
-    cargo build
+build-rust *ARGS:
+    cargo build {{ARGS}}
 
 build-rust-release:
     cargo build --release
@@ -66,8 +66,14 @@ test-bats-conformance-interop: build-rust
     BATS_TEST_TIMEOUT=30 bats --tap \
     zz-tests_bats/conformance/piggy_box_interop.bats
 
-test-rust:
-    cargo test
+test-bats-file *FILES: build-rust
+    BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
+
+test-rust *ARGS:
+    cargo test {{ARGS}}
+
+check-rust *ARGS:
+    cargo check {{ARGS}}
 
 check-box:
     cargo check -p piggy-box
