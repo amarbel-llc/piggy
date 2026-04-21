@@ -92,42 +92,23 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         };
     }
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("failed to start tokio runtime");
-
-    match rt.block_on(run_async(cli)) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("piggy agent: {}", e);
-            1
-        }
-    }
-}
-
-async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
     let filter = match cli.debug {
         0 if cli.foreground_debug => "piggy=debug",
         0 => "piggy=info",
         1 => "piggy=debug",
         _ => "piggy=trace",
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    // Parse slot spec if provided
-    let allowed_slots: Option<Vec<u8>> = cli
+    let allowed_slots: Option<Vec<u8>> = match cli
         .slot_spec
         .as_ref()
         .map(|spec| {
             spec.split(',')
                 .map(|s| {
                     let s = s.trim();
-                    let slot = u8::from_str_radix(s, 16).map_err(|_| {
-                        format!("invalid slot in -S spec: {:?}", s)
-                    })?;
+                    let slot = u8::from_str_radix(s, 16)
+                        .map_err(|_| format!("invalid slot in -S spec: {:?}", s))?;
                     if !piggy_piv::slot::is_valid_piv_slot(slot) {
                         return Err(format!(
                             "unknown PIV slot 0x{slot:02x} in -S spec \
@@ -139,10 +120,14 @@ async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
                 .collect::<Result<Vec<u8>, _>>()
         })
         .transpose()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    {
+        Ok(slots) => slots,
+        Err(e) => {
+            eprintln!("piggy agent: {}", e);
+            return 1;
+        }
+    };
 
-    // Enumerate PIV tokens and cache their keys.
-    // If PCSC is unavailable (e.g. no pcscd), start with zero keys.
     let (tokens, _ctx_available) = match piggy_piv::PivContext::new() {
         Ok(ctx) => match ctx.enumerate_tokens() {
             Ok(tokens) => (tokens, true),
@@ -174,7 +159,6 @@ async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         let slots = token.read_all_slots().unwrap_or_default();
         for slot in &slots {
-            // Filter by slot spec
             if let Some(ref allowed) = allowed_slots {
                 if !allowed.contains(&slot.id()) {
                     continue;
@@ -196,7 +180,6 @@ async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Handle -i (info mode)
     if cli.info {
         if cached_keys.is_empty() {
             eprintln!("No PIV keys found");
@@ -211,11 +194,36 @@ async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        return Ok(());
+        return 0;
     }
 
     tracing::info!("Loaded {} keys from PIV tokens", cached_keys.len());
 
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("piggy agent: failed to start async runtime: {}", e);
+            return 1;
+        }
+    };
+
+    match rt.block_on(run_async(cli, cached_keys, primary_guid)) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("piggy agent: {}", e);
+            1
+        }
+    }
+}
+
+async fn run_async(
+    cli: AgentArgs,
+    cached_keys: Vec<CachedKey>,
+    primary_guid: Option<piggy_piv::Guid>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Determine socket path
     let socket_path = match cli.socket {
         Some(s) => s,
@@ -295,19 +303,16 @@ async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn kill_agent() -> Result<(), Box<dyn std::error::Error>> {
-    let pid_str = std::env::var("SSH_AGENT_PID")
-        .map_err(|_| "SSH_AGENT_PID not set")?;
+    let pid_str = std::env::var("SSH_AGENT_PID").map_err(|_| "SSH_AGENT_PID not set")?;
     let pid: i32 = pid_str.parse().map_err(|_| "invalid SSH_AGENT_PID")?;
 
     #[cfg(unix)]
     {
         let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
         if rc != 0 {
-            return Err(format!(
-                "kill({pid}, SIGTERM): {}",
-                std::io::Error::last_os_error()
-            )
-            .into());
+            return Err(
+                format!("kill({pid}, SIGTERM): {}", std::io::Error::last_os_error()).into(),
+            );
         }
     }
 
