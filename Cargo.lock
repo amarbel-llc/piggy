@@ -784,6 +784,8 @@ dependencies = [
  "clap",
  "hex",
  "libc",
+ "openssl",
+ "piggy-box",
  "piggy-piv",
  "sha2",
  "ssh-agent-lib",
