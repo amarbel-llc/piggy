@@ -74,27 +74,11 @@
           }
         );
 
-        # Override pivy's pcsclite from 2.3.0 (pkgs) to 2.4.1
-        # (pkgs-master) on Linux so pivy-tool can talk to pcscd servers
-        # as old as 1.8.24 — matching piggy-rs's own pcsclite pin.
-        pivy-pkg =
-          let
-            base = pivy.packages.${system}.default;
-          in
-          if pkgs.stdenv.isLinux then
-            base.overrideAttrs (old: {
-              buildInputs = map (
-                dep: if dep.pname or "" == "pcsclite" then pkgs-master.pcsclite else dep
-              ) (old.buildInputs or [ ]);
-            })
-          else
-            base;
-
         # Runtime deps on PATH for the wrapped piggy binary. `pivy` is kept
         # as a fallback for subcommands the rust binary hasn't implemented
         # yet (box/tool/ca/luks/zfs) — see crates/piggy/src/fallback.rs.
         runtimeDeps = [
-          pivy-pkg
+          pivy.packages.${system}.default
           pkgs.git
           pkgs.tree
           pkgs.qrencode

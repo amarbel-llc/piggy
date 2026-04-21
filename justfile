@@ -300,38 +300,13 @@ fib-smoke:
     just fib-up
     eval "$(cat .fib/env)"
 
+    # Minimal diagnostics — see #20 for full investigation history.
     echo "--- fib diagnostics ---"
     echo "PCSCLITE_CSOCK_NAME=${PCSCLITE_CSOCK_NAME:-<unset>}"
     echo "socket exists: $(test -S "${PCSCLITE_CSOCK_NAME:-}" && echo yes || echo no)"
     echo "pcscd alive: $(kill -0 "$(cat .fib/pcscd.pid 2>/dev/null)" 2>/dev/null && echo yes || echo no)"
     echo "fib alive: $(kill -0 "$(cat .fib/fib.pid 2>/dev/null)" 2>/dev/null && echo yes || echo no)"
-    echo "LD_PRELOAD=${LD_PRELOAD:-<unset>}"
-    echo "pivy-tool path: $(command -v pivy-tool)"
-    echo "pivy-tool real: $(readlink -f "$(command -v pivy-tool)" 2>/dev/null || echo unknown)"
-    echo "--- pivy-tool wrapper script ---"
-    cat "$(command -v pivy-tool)" 2>/dev/null | head -20
-    echo "--- system pcscd check ---"
-    echo "system pcscd running: $(pgrep -x pcscd >/dev/null 2>&1 && echo yes || echo no)"
-    echo "system pcscd pids: $(pgrep -a pcscd 2>/dev/null || echo none)"
-    echo "/run/pcscd/pcscd.comm exists: $(test -S /run/pcscd/pcscd.comm && echo yes || echo no)"
-    echo "system libpcsclite: $(find /usr/lib -name 'libpcsclite.so*' 2>/dev/null || echo not-found)"
-    echo "--- ldd pivy-tool-unwrapped ---"
-    unwrapped="$(dirname "$(command -v pivy-tool)")/.pivy-tool-unwrapped"
-    ldd "$unwrapped" 2>/dev/null | grep -i pcsc || echo "(no pcsc in ldd output)"
-    echo "--- ldd opensc-tool ---"
-    ldd "$(command -v opensc-tool)" 2>/dev/null | grep -i pcsc || echo "(no pcsc in ldd output)"
-    echo "--- LD_DEBUG opensc-tool (dlopen trace) ---"
-    LD_DEBUG=libs opensc-tool -l 2>&1 | grep -i pcsc || echo "(no pcsc in LD_DEBUG output)"
-    echo "--- opensc-tool reader list ---"
     opensc-tool -l 2>&1 || echo "(opensc-tool -l failed)"
-    echo "--- .fib/env ---"
-    cat .fib/env
-    echo "--- .fib/pcscd.log (last 20) ---"
-    tail -20 .fib/pcscd.log 2>/dev/null || echo "(empty or missing)"
-    echo "--- .fib/fib.log (last 20) ---"
-    tail -20 .fib/fib.log 2>/dev/null || echo "(empty or missing)"
-    echo "--- .fib/activate.log ---"
-    cat .fib/activate.log 2>/dev/null || echo "(empty or missing)"
 
     echo "--- pivy-tool list (with retries) ---"
     found=false
