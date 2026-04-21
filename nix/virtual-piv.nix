@@ -215,6 +215,7 @@ let
     ln -s ${jcardsim} $out/share/fib/jcardsim
     ln -s ${pivapplet} $out/share/fib/pivapplet
     ln -s ${pcscdForFib} $out/share/fib/pcscd
+    ln -s ${pkgs.opensc}/bin/opensc-tool $out/bin/opensc-tool
   '';
 in
 {

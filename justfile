@@ -208,6 +208,31 @@ fib-up:
     nix run .#fib >.fib/fib.log 2>&1 &
     fib_pid=$!
     echo "$fib_pid" >.fib/fib.pid
+    # Activate PivApplet — jCardSim loads the class but install() isn't
+    # called until this APDU triggers it. Without this, SELECT AID fails
+    # with SW 6986. Retry until jCardSim connects to vpcd and the card
+    # appears in the reader.
+    export PCSCLITE_CSOCK_NAME="$sock"
+    reader="Virtual PCD piggy fib 00 00"
+    activate_apdu='80 b8 00 00 12 0b a0 00 00 03 08 00 00 10 00 01 00 05 00 00 02 0F 0F 7f'
+    activated=false
+    for _ in $(seq 1 50); do
+      if opensc-tool -r "$reader" -s "$activate_apdu" >.fib/activate.log 2>&1; then
+        activated=true
+        break
+      fi
+      if ! kill -0 "$fib_pid" 2>/dev/null; then
+        echo "fib-up: fib process died — see .fib/fib.log" >&2
+        kill "$pcscd_pid" 2>/dev/null || true
+        exit 1
+      fi
+      sleep 0.1
+    done
+    if [[ "$activated" != true ]]; then
+      echo "fib-up: PivApplet activation timed out — see .fib/activate.log" >&2
+      kill "$fib_pid" "$pcscd_pid" 2>/dev/null || true
+      exit 1
+    fi
     # Export env for the caller.
     cat >.fib/env <<EOF
     export PCSCLITE_CSOCK_NAME="$sock"

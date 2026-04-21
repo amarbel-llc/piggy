@@ -20,7 +20,7 @@ is plumbed through the top-level [`flake.nix`](../flake.nix). Linux only
 | `pivapplet` | `$out/classes/**/*.class`, `$out/jcardsim.cfg` | `ant preprocess` (vendored `ext/jpp-1.0.3.jar`) then `javac` against `jcardsim.jar`. `ant dist` is skipped — we never emit a CAP file. |
 | `fib-reader-conf` | `reader.conf` text | Points `LIBPATH` at the nix-store `libifdvpcd.so`. Consumed by the private `pcscd`. |
 | `fib` | `bin/fib` | Launches `java com.licel.jcardsim.remote.VSmartCard`. Connects to the vpcd TCP listener at `localhost:35963`. |
-| `fib-bundle` | `bin/fib` + convenience symlinks under `share/fib/` | What `piggy.passthru.tests.fib` points at. |
+| `fib-bundle` | `bin/fib`, `bin/opensc-tool` + convenience symlinks under `share/fib/` | What `piggy.passthru.tests.fib` points at. Includes `opensc-tool` for applet activation. |
 
 Flake outputs on Linux:
 
@@ -75,21 +75,16 @@ just fib-shell        # opens a subshell with env set; teardown on exit
 `PCSCLITE_CSOCK_NAME` is a libpcsclite env var that redirects both the
 server (pcscd) and the client (pivy-tool) to a non-default Unix socket.
 This is how we avoid contention with a system pcscd that may also be
-running. `fib-up` starts pcscd, waits for the socket to appear, then
-launches the jCardSim process — which connects to vpcd's TCP listener
-and registers itself as the card.
+running. `fib-up` starts pcscd, waits for the socket to appear, launches
+the jCardSim process, and sends the jCardSim activation APDU to call
+`PivApplet.install()`. After `fib-up` returns, the applet is ready for
+use — no manual activation step needed.
 
-## Initializing the applet
+## Generating keys
 
-The first time you talk to the newly-attached fib it has no keys. Follow
-the standard PivApplet bring-up:
+After `fib-up`, the applet is active but has no keys. Generate one:
 
 ```sh
-# Activate the applet (APDU from the PivApplet README).
-opensc-tool -r 'Virtual PCD piggy fib 00 00' -s \
-  '80 b8 00 00 12 0b a0 00 00 03 08 00 00 10 00 01 00 05 00 00 02 0F 0F 7f'
-
-# Generate a key in slot 9a using the factory default PIN/admin.
 pivy-tool -P 123456 -K default generate 9a
 ```
 
@@ -133,5 +128,10 @@ Keep the hardware-gated bats file (`*_hardware.bats`, pattern from
 - **jCardSim connects but pcscd reports no card.** The virtual reader
   needs vpcd to be loaded. Verify via `pcsc_scan -n` against
   `PCSCLITE_CSOCK_NAME=$PWD/.fib/pcscd.comm`.
-- **APDU failures with `6D 00`.** The applet was never activated with
-  the bring-up APDU above.
+- **SELECT AID fails with `69 86` (SW_COMMAND_NOT_ALLOWED).** The
+  `PivApplet.install()` APDU wasn't sent. `fib-up` does this
+  automatically; if you're running jCardSim manually, send:
+  `opensc-tool -r 'Virtual PCD piggy fib 00 00' -s '80 b8 00 00 12 0b a0 00 00 03 08 00 00 10 00 01 00 05 00 00 02 0F 0F 7f'`
+- **`fib-up`: PivApplet activation timed out.** jCardSim didn't connect
+  to vpcd within 5 seconds. Check `.fib/fib.log` for Java errors and
+  `.fib/activate.log` for the opensc-tool output.

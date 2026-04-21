@@ -250,8 +250,9 @@
               bob.packages.${system}.batman
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-              # `just fib-up` needs pcscd + fib on PATH.
+              # `just fib-up` needs pcscd + fib + opensc-tool on PATH.
               pkgs.pcsclite
+              pkgs.opensc
               virtualPiv.fib
             ];
 
