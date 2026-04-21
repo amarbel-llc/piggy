@@ -60,3 +60,6 @@ jobs:
       # runtime; nix build alone would not catch a regression there.
       - name: Run rust + bats end-to-end suite
         run: nix develop --command just test
+      - name: Smoke-test virtual PIV card (fib)
+        if: matrix.system == 'x86_64-linux'
+        run: nix develop --command just fib-smoke

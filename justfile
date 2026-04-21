@@ -265,6 +265,23 @@ fib-shell:
     export PCSCLITE_CSOCK_NAME="/tmp/piggy-fib-ipc/pcscd.comm"
     PS1="(fib) $PS1" exec "$SHELL"
 
+# Smoke test: bring up fib, verify pivy-tool sees the virtual card, tear down.
+[group('test')]
+fib-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'just fib-down' EXIT
+    just fib-up
+    eval "$(cat .fib/env)"
+    echo "--- pivy-tool list ---"
+    output=$(pivy-tool list 2>&1)
+    echo "$output"
+    if ! echo "$output" | grep -q "Virtual PCD piggy fib"; then
+      echo "fib-smoke: FAIL — virtual card not visible" >&2
+      exit 1
+    fi
+    echo "fib-smoke: PASS"
+
 # --- update / clean ---
 
 update: update-nix
