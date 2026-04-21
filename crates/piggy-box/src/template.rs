@@ -237,8 +237,7 @@ mod tests {
     use super::*;
 
     fn sample_part(curve: EcCurve) -> EboxTplPart {
-        let group =
-            openssl::ec::EcGroup::from_curve_name(curve.nid()).unwrap();
+        let group = openssl::ec::EcGroup::from_curve_name(curve.nid()).unwrap();
         let key = openssl::ec::EcKey::generate(&group).unwrap();
         let mut ctx = openssl::bn::BigNumContext::new().unwrap();
         let pubkey = key

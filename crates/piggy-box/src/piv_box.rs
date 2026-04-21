@@ -51,7 +51,6 @@ impl EcCurve {
             Err(BoxError::UnsupportedCurve(format!("NID {:?}", nid)))
         }
     }
-
 }
 
 pub struct PivBox {
@@ -109,10 +108,7 @@ impl PivBox {
         self.plaintext.is_some()
     }
 
-    pub fn seal_offline(
-        &mut self,
-        recipient_pub: &EcKey<openssl::pkey::Public>,
-    ) -> Result<()> {
+    pub fn seal_offline(&mut self, recipient_pub: &EcKey<openssl::pkey::Public>) -> Result<()> {
         let group = EcGroup::from_curve_name(self.curve.nid())?;
         let ephem = EcKey::generate(&group)?;
         self.seal_offline_with_ephemeral(recipient_pub, &ephem)
@@ -130,13 +126,17 @@ impl PivBox {
         let group = EcGroup::from_curve_name(self.curve.nid())?;
         let mut ctx = openssl::bn::BigNumContext::new()?;
 
-        self.recipient_pubkey = recipient_pub
-            .public_key()
-            .to_bytes(&group, openssl::ec::PointConversionForm::COMPRESSED, &mut ctx)?;
+        self.recipient_pubkey = recipient_pub.public_key().to_bytes(
+            &group,
+            openssl::ec::PointConversionForm::COMPRESSED,
+            &mut ctx,
+        )?;
 
-        self.ephemeral_pubkey = ephem
-            .public_key()
-            .to_bytes(&group, openssl::ec::PointConversionForm::COMPRESSED, &mut ctx)?;
+        self.ephemeral_pubkey = ephem.public_key().to_bytes(
+            &group,
+            openssl::ec::PointConversionForm::COMPRESSED,
+            &mut ctx,
+        )?;
 
         let shared_secret = ecdh_derive(ephem, recipient_pub)?;
 
@@ -153,10 +153,7 @@ impl PivBox {
         Ok(())
     }
 
-    pub fn open_offline(
-        &mut self,
-        privkey: &EcKey<Private>,
-    ) -> Result<()> {
+    pub fn open_offline(&mut self, privkey: &EcKey<Private>) -> Result<()> {
         let group = EcGroup::from_curve_name(self.curve.nid())?;
         let mut ctx = openssl::bn::BigNumContext::new()?;
 
@@ -279,16 +276,15 @@ fn ecdh_derive<T: openssl::pkey::HasPrivate, U: openssl::pkey::HasPublic>(
     privkey: &EcKey<T>,
     pubkey: &EcKey<U>,
 ) -> Result<Vec<u8>> {
-    let pkey_priv = openssl::pkey::PKey::from_ec_key(
-        EcKey::from_private_components(
-            privkey.group(),
-            privkey.private_key(),
-            privkey.public_key(),
-        )?,
-    )?;
-    let pkey_pub = openssl::pkey::PKey::from_ec_key(
-        EcKey::from_public_key(pubkey.group(), pubkey.public_key())?,
-    )?;
+    let pkey_priv = openssl::pkey::PKey::from_ec_key(EcKey::from_private_components(
+        privkey.group(),
+        privkey.private_key(),
+        privkey.public_key(),
+    )?)?;
+    let pkey_pub = openssl::pkey::PKey::from_ec_key(EcKey::from_public_key(
+        pubkey.group(),
+        pubkey.public_key(),
+    )?)?;
     let mut deriver = openssl::derive::Deriver::new(&pkey_priv)?;
     deriver.set_peer(&pkey_pub)?;
     Ok(deriver.derive_to_vec()?)

@@ -106,10 +106,7 @@ impl Session for PiggyAgent {
         Ok(())
     }
 
-    async fn extension(
-        &mut self,
-        extension: Extension,
-    ) -> Result<Option<Extension>, AgentError> {
+    async fn extension(&mut self, extension: Extension) -> Result<Option<Extension>, AgentError> {
         match extension.name.as_str() {
             "query" => {
                 let supported: &[&str] = &[
@@ -162,14 +159,10 @@ impl Session for PiggyAgent {
 impl PiggyAgent {
     async fn find_cached_key(&self, pubkey: &KeyData) -> Result<CachedKey, AgentError> {
         let keys = self.keys.lock().await;
-        Self::find_key(&keys, pubkey)
-            .ok_or_else(|| AgentError::Other("key not found".into()))
+        Self::find_key(&keys, pubkey).ok_or_else(|| AgentError::Other("key not found".into()))
     }
 
-    async fn handle_ecdh(
-        &mut self,
-        details: &[u8],
-    ) -> Result<Option<Extension>, AgentError> {
+    async fn handle_ecdh(&mut self, details: &[u8]) -> Result<Option<Extension>, AgentError> {
         let inner = read_ssh_string(details, 0)
             .map_err(|e| AgentError::Other(e.into()))?
             .0;
@@ -183,7 +176,9 @@ impl PiggyAgent {
         let card_pubkey = PublicKey::from_bytes(card_key_blob)
             .map_err(|e| AgentError::Other(format!("ecdh: bad card key: {e}").into()))?;
 
-        let key = self.find_cached_key(card_pubkey.key_data()).await
+        let key = self
+            .find_cached_key(card_pubkey.key_data())
+            .await
             .map_err(|_| AgentError::Other("ecdh: key not found".into()))?;
 
         let ec_point = extract_ec_point_from_ssh_blob(partner_blob)
@@ -192,9 +187,7 @@ impl PiggyAgent {
         match key.algorithm {
             PivAlgorithm::EcP256 | PivAlgorithm::EcP384 => {}
             _ => {
-                return Err(AgentError::Other(
-                    "ecdh: key is not an EC key".into(),
-                ));
+                return Err(AgentError::Other("ecdh: key is not an EC key".into()));
             }
         }
 
@@ -225,10 +218,7 @@ impl PiggyAgent {
         }))
     }
 
-    async fn handle_attest(
-        &mut self,
-        details: &[u8],
-    ) -> Result<Option<Extension>, AgentError> {
+    async fn handle_attest(&mut self, details: &[u8]) -> Result<Option<Extension>, AgentError> {
         let inner = read_ssh_string(details, 0)
             .map_err(|e| AgentError::Other(e.into()))?
             .0;
@@ -240,7 +230,9 @@ impl PiggyAgent {
         let card_pubkey = PublicKey::from_bytes(card_key_blob)
             .map_err(|e| AgentError::Other(format!("attest: bad card key: {e}").into()))?;
 
-        let key = self.find_cached_key(card_pubkey.key_data()).await
+        let key = self
+            .find_cached_key(card_pubkey.key_data())
+            .await
             .map_err(|_| AgentError::Other("attest: key not found".into()))?;
 
         let token = reconnect_to_token(&key.guid)?;
@@ -312,14 +304,14 @@ fn prepare_sign_data(alg: PivAlgorithm, data: &[u8], flags: u32) -> Result<Vec<u
 // DER-encoded DigestInfo AlgorithmIdentifier prefixes for PKCS#1 v1.5
 // SHA-256: SEQUENCE { SEQUENCE { OID sha256, NULL }, OCTET STRING }
 const RSA_DIGEST_PREFIX_SHA256: &[u8] = &[
-    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
-    0x05, 0x00, 0x04, 0x20,
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+    0x00, 0x04, 0x20,
 ];
 
 // SHA-512: SEQUENCE { SEQUENCE { OID sha512, NULL }, OCTET STRING }
 const RSA_DIGEST_PREFIX_SHA512: &[u8] = &[
-    0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
-    0x05, 0x00, 0x04, 0x40,
+    0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05,
+    0x00, 0x04, 0x40,
 ];
 
 /// Build PKCS#1 v1.5 padded signing block:
@@ -511,9 +503,12 @@ fn read_ssh_string(data: &[u8], offset: usize) -> Result<(&[u8], usize), String>
         .checked_add(4)
         .filter(|&e| e <= data.len())
         .ok_or("SSH string: not enough data for length")?;
-    let len =
-        u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-            as usize;
+    let len = u32::from_be_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ]) as usize;
     let end = hdr_end
         .checked_add(len)
         .filter(|&e| e <= data.len())
@@ -583,7 +578,11 @@ fn encode_ecdsa_ssh_signature(r: &[u8], s: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
-#[allow(clippy::vec_init_then_push, clippy::manual_repeat_n, clippy::needless_range_loop)]
+#[allow(
+    clippy::vec_init_then_push,
+    clippy::manual_repeat_n,
+    clippy::needless_range_loop
+)]
 mod tests {
     //! Unit tests for the pure signing-path helpers plus the
     //! non-PCSC-touching portions of the `Session` impl.
@@ -670,9 +669,14 @@ mod tests {
         let digest_info_len = RSA_DIGEST_PREFIX_SHA256.len() + hash.len();
         // Tail must equal digest prefix + hash
         let tail_start = out.len() - digest_info_len;
-        assert_eq!(&out[tail_start..tail_start + RSA_DIGEST_PREFIX_SHA256.len()],
-                   RSA_DIGEST_PREFIX_SHA256);
-        assert_eq!(&out[tail_start + RSA_DIGEST_PREFIX_SHA256.len()..], hash.as_slice());
+        assert_eq!(
+            &out[tail_start..tail_start + RSA_DIGEST_PREFIX_SHA256.len()],
+            RSA_DIGEST_PREFIX_SHA256
+        );
+        assert_eq!(
+            &out[tail_start + RSA_DIGEST_PREFIX_SHA256.len()..],
+            hash.as_slice()
+        );
 
         // Byte just before DigestInfo must be 0x00 separator
         assert_eq!(out[tail_start - 1], 0x00);
@@ -694,16 +698,20 @@ mod tests {
     #[test]
     fn prepare_sign_data_rsa2048_sha512_flag() {
         let data = b"test message";
-        let out =
-            prepare_sign_data(PivAlgorithm::Rsa2048, data, signature::RSA_SHA2_512).unwrap();
+        let out = prepare_sign_data(PivAlgorithm::Rsa2048, data, signature::RSA_SHA2_512).unwrap();
         assert_eq!(out.len(), 256);
 
         let hash = Sha512::digest(data);
         let digest_info_len = RSA_DIGEST_PREFIX_SHA512.len() + hash.len();
         let tail_start = out.len() - digest_info_len;
-        assert_eq!(&out[tail_start..tail_start + RSA_DIGEST_PREFIX_SHA512.len()],
-                   RSA_DIGEST_PREFIX_SHA512);
-        assert_eq!(&out[tail_start + RSA_DIGEST_PREFIX_SHA512.len()..], hash.as_slice());
+        assert_eq!(
+            &out[tail_start..tail_start + RSA_DIGEST_PREFIX_SHA512.len()],
+            RSA_DIGEST_PREFIX_SHA512
+        );
+        assert_eq!(
+            &out[tail_start + RSA_DIGEST_PREFIX_SHA512.len()..],
+            hash.as_slice()
+        );
     }
 
     /// When both SHA-256 and SHA-512 flags are set, the production code
@@ -768,8 +776,7 @@ mod tests {
         // 128-byte block. The current impl accepts it. Regression
         // guard: ensure no panic and correct tail.
         let data = b"rsa1024 sha512";
-        let out =
-            prepare_sign_data(PivAlgorithm::Rsa1024, data, signature::RSA_SHA2_512).unwrap();
+        let out = prepare_sign_data(PivAlgorithm::Rsa1024, data, signature::RSA_SHA2_512).unwrap();
         assert_eq!(out.len(), 128);
         let hash = Sha512::digest(data);
         assert!(out.ends_with(hash.as_slice()));
@@ -794,8 +801,10 @@ mod tests {
         // Separator
         assert_eq!(padded[2 + pad_len], 0x00);
         // DigestInfo + hash at tail
-        assert_eq!(&padded[3 + pad_len..3 + pad_len + RSA_DIGEST_PREFIX_SHA256.len()],
-                   RSA_DIGEST_PREFIX_SHA256);
+        assert_eq!(
+            &padded[3 + pad_len..3 + pad_len + RSA_DIGEST_PREFIX_SHA256.len()],
+            RSA_DIGEST_PREFIX_SHA256
+        );
         assert_eq!(&padded[padded.len() - 32..], hash.as_slice());
     }
 
@@ -857,15 +866,16 @@ mod tests {
         while i < block.len() && block[i] == 0xFF {
             i += 1;
         }
-        assert!(i >= 2 + 8, "padding must be at least 8 bytes (got {})", i - 2);
+        assert!(
+            i >= 2 + 8,
+            "padding must be at least 8 bytes (got {})",
+            i - 2
+        );
         assert!(i < block.len(), "no separator byte found");
         assert_eq!(block[i], 0x00, "separator byte must be 0x00");
         let digest_info_start = i + 1;
         let hash_start = digest_info_start + expected_digest_info_prefix_len;
-        assert!(
-            hash_start <= block.len(),
-            "DigestInfo prefix exceeds block"
-        );
+        assert!(hash_start <= block.len(), "DigestInfo prefix exceeds block");
         block[hash_start..].to_vec()
     }
 
@@ -878,8 +888,7 @@ mod tests {
     fn pkcs1_v15_pad_roundtrips_through_independent_parser() {
         let hash = Sha256::digest(b"hello world").to_vec();
         let padded = pkcs1_v15_pad(&hash, RSA_DIGEST_PREFIX_SHA256, 256).unwrap();
-        let extracted_hash =
-            parse_pkcs1_v15_padded(&padded, RSA_DIGEST_PREFIX_SHA256.len());
+        let extracted_hash = parse_pkcs1_v15_padded(&padded, RSA_DIGEST_PREFIX_SHA256.len());
         assert_eq!(extracted_hash, hash);
     }
 
@@ -889,8 +898,7 @@ mod tests {
     fn pkcs1_v15_pad_roundtrips_through_independent_parser_sha512() {
         let hash = Sha512::digest(b"hello world").to_vec();
         let padded = pkcs1_v15_pad(&hash, RSA_DIGEST_PREFIX_SHA512, 256).unwrap();
-        let extracted_hash =
-            parse_pkcs1_v15_padded(&padded, RSA_DIGEST_PREFIX_SHA512.len());
+        let extracted_hash = parse_pkcs1_v15_padded(&padded, RSA_DIGEST_PREFIX_SHA512.len());
         assert_eq!(extracted_hash, hash);
     }
 
@@ -1036,13 +1044,16 @@ mod tests {
             &[0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0xFF, 0x00],
             &[0x30, 0x81, 0xFF, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00],
             &[0x30, 0x82, 0xFF, 0xFF, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00],
-            &[0x30, 0x80], // indefinite form (unsupported)
+            &[0x30, 0x80],                         // indefinite form (unsupported)
             &[0x30, 0x04, 0x02, 0x02, 0x00, 0x01], // s missing entirely
         ];
         for (i, input) in fuzz_inputs.iter().enumerate() {
             // If this panics, the test fails with a clear backtrace.
             let result = decode_der_ecdsa_signature(input);
-            assert!(result.is_err(), "fuzz input #{i} unexpectedly succeeded: {input:?}");
+            assert!(
+                result.is_err(),
+                "fuzz input #{i} unexpectedly succeeded: {input:?}"
+            );
         }
     }
 
@@ -1236,8 +1247,7 @@ mod tests {
     #[test]
     fn to_ssh_signature_rsa2048_sha512_flag_labels_sha512() {
         let raw = vec![0xAB; 256];
-        let sig =
-            to_ssh_signature(PivAlgorithm::Rsa2048, &raw, signature::RSA_SHA2_512).unwrap();
+        let sig = to_ssh_signature(PivAlgorithm::Rsa2048, &raw, signature::RSA_SHA2_512).unwrap();
         assert_eq!(sig.algorithm().as_str(), "rsa-sha2-512");
         assert_eq!(sig.as_bytes(), raw.as_slice());
     }
@@ -1245,8 +1255,7 @@ mod tests {
     #[test]
     fn to_ssh_signature_rsa2048_sha256_flag_labels_sha256() {
         let raw = vec![0x01; 256];
-        let sig =
-            to_ssh_signature(PivAlgorithm::Rsa2048, &raw, signature::RSA_SHA2_256).unwrap();
+        let sig = to_ssh_signature(PivAlgorithm::Rsa2048, &raw, signature::RSA_SHA2_256).unwrap();
         assert_eq!(sig.algorithm().as_str(), "rsa-sha2-256");
     }
 
@@ -1460,7 +1469,11 @@ mod tests {
             names.push(String::from_utf8(body[i..i + len].to_vec()).unwrap());
             i += len;
         }
-        assert_eq!(i, body.len(), "body must fully parse with no trailing bytes");
+        assert_eq!(
+            i,
+            body.len(),
+            "body must fully parse with no trailing bytes"
+        );
         assert!(names.iter().any(|n| n == "query"));
         assert!(names.iter().any(|n| n == "session-bind@openssh.com"));
         assert!(names.iter().any(|n| n == "pin-status@joyent.com"));

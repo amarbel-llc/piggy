@@ -66,10 +66,7 @@ impl EboxStream {
     }
 
     pub fn encrypt_chunk(&self, seqnr: u32, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let key = self
-            .ebox
-            .key()
-            .ok_or(BoxError::NotUnlocked)?;
+        let key = self.ebox.key().ok_or(BoxError::NotUnlocked)?;
 
         let padded = pkcs7_pad(plaintext, AES_BLOCK_SIZE);
 
@@ -93,10 +90,7 @@ impl EboxStream {
         expected_seqnr: Option<u32>,
         chunk_data: &[u8],
     ) -> Result<(u32, Vec<u8>)> {
-        let key = self
-            .ebox
-            .key()
-            .ok_or(BoxError::NotUnlocked)?;
+        let key = self.ebox.key().ok_or(BoxError::NotUnlocked)?;
 
         let mut r = WireReader::new(chunk_data);
         let seqnr = r.get_u32()?;
@@ -112,9 +106,7 @@ impl EboxStream {
         }
 
         if enc_with_mac.len() < HMAC_LEN + AES_BLOCK_SIZE {
-            return Err(BoxError::Wire(
-                "encrypted chunk too short".into(),
-            ));
+            return Err(BoxError::Wire("encrypted chunk too short".into()));
         }
 
         let mac_offset = enc_with_mac.len() - HMAC_LEN;

@@ -39,11 +39,7 @@ pub fn unlock_ebox(ebox: &mut Ebox, agent_socket: Option<&Path>) -> Result<()> {
     Err(BoxError::UnlockFailed)
 }
 
-fn try_agent_unlock(
-    _ebox: &mut Ebox,
-    _config_idx: usize,
-    _agent_socket: &Path,
-) -> Result<()> {
+fn try_agent_unlock(_ebox: &mut Ebox, _config_idx: usize, _agent_socket: &Path) -> Result<()> {
     // TODO: implement SSH agent ECDH extension
     Err(BoxError::UnlockFailed)
 }

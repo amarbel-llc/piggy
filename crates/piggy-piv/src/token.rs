@@ -199,7 +199,12 @@ impl PivToken {
     pub fn ecdh_derive(&self, slot_id: u8, peer_ec_point: &[u8]) -> Result<Vec<u8>, PivError> {
         let slot = self.read_slot(slot_id)?;
         validate_ec_point(slot.algorithm(), peer_ec_point)?;
-        self.general_authenticate(slot.algorithm().to_byte(), slot_id, ga_tag::EXPONENT, peer_ec_point)
+        self.general_authenticate(
+            slot.algorithm().to_byte(),
+            slot_id,
+            ga_tag::EXPONENT,
+            peer_ec_point,
+        )
     }
 
     /// Build and transmit a GENERAL AUTHENTICATE APDU, parse the response.
@@ -299,8 +304,8 @@ fn unwrap_piv_cert_object(data: &[u8]) -> Result<Vec<u8>, PivError> {
 /// matches the slot's curve.
 fn validate_ec_point(alg: PivAlgorithm, point: &[u8]) -> Result<(), PivError> {
     let expected_len = match alg {
-        PivAlgorithm::EcP256 => 65,  // 1 + 32 + 32
-        PivAlgorithm::EcP384 => 97,  // 1 + 48 + 48
+        PivAlgorithm::EcP256 => 65, // 1 + 32 + 32
+        PivAlgorithm::EcP384 => 97, // 1 + 48 + 48
         _ => {
             return Err(PivError::Other(
                 "ECDH requires an EC key (P-256 or P-384)".into(),

@@ -230,12 +230,9 @@ fn cmd_stream_decrypt(args: &[&str]) -> i32 {
             eprintln!("piggy box stream decrypt: truncated chunk frame");
             return 1;
         }
-        let string_len = u32::from_be_bytes([
-            chunk_data[4],
-            chunk_data[5],
-            chunk_data[6],
-            chunk_data[7],
-        ]) as usize;
+        let string_len =
+            u32::from_be_bytes([chunk_data[4], chunk_data[5], chunk_data[6], chunk_data[7]])
+                as usize;
         let frame_len = 4 + 4 + string_len;
         if chunk_data.len() < frame_len {
             eprintln!("piggy box stream decrypt: truncated chunk data");
@@ -276,7 +273,9 @@ fn cmd_tpl_create(args: &[&str]) -> i32 {
     }
 
     if args.len() < 4 {
-        eprintln!("piggy box tpl create: usage: piggy box tpl create <name> primary local-guid <guid>");
+        eprintln!(
+            "piggy box tpl create: usage: piggy box tpl create <name> primary local-guid <guid>"
+        );
         return 1;
     }
 
@@ -319,10 +318,7 @@ fn cmd_tpl_create(args: &[&str]) -> i32 {
         }
     };
 
-    let token = match tokens
-        .iter()
-        .find(|t| t.guid().to_hex() == guid.to_hex())
-    {
+    let token = match tokens.iter().find(|t| t.guid().to_hex() == guid.to_hex()) {
         Some(t) => t,
         None => {
             eprintln!(
@@ -397,19 +393,13 @@ fn cmd_tpl_create(args: &[&str]) -> i32 {
     // Write to the standard pivy template location
     let tpl_dir = tpl_dir();
     if let Err(e) = std::fs::create_dir_all(&tpl_dir) {
-        eprintln!(
-            "piggy box tpl create: mkdir {}: {e}",
-            tpl_dir.display()
-        );
+        eprintln!("piggy box tpl create: mkdir {}: {e}", tpl_dir.display());
         return 1;
     }
 
     let tpl_file = tpl_dir.join(tpl_name);
     if let Err(e) = std::fs::write(&tpl_file, &tpl_bytes) {
-        eprintln!(
-            "piggy box tpl create: write {}: {e}",
-            tpl_file.display()
-        );
+        eprintln!("piggy box tpl create: write {}: {e}", tpl_file.display());
         return 1;
     }
 
@@ -493,20 +483,16 @@ fn extract_ec_compressed_point(
 ) -> std::result::Result<Vec<u8>, String> {
     use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
 
-    let group = EcGroup::from_curve_name(curve.nid())
-        .map_err(|e| format!("EC group: {e}"))?;
+    let group = EcGroup::from_curve_name(curve.nid()).map_err(|e| format!("EC group: {e}"))?;
 
     let ec_bytes = match pubkey.key_data() {
-        ssh_key::public::KeyData::Ecdsa(ecdsa) => {
-            ecdsa.as_ref().to_vec()
-        }
+        ssh_key::public::KeyData::Ecdsa(ecdsa) => ecdsa.as_ref().to_vec(),
         _ => return Err("not an EC key".to_string()),
     };
 
-    let mut ctx = openssl::bn::BigNumContext::new()
-        .map_err(|e| format!("BN context: {e}"))?;
-    let point = EcPoint::from_bytes(&group, &ec_bytes, &mut ctx)
-        .map_err(|e| format!("EC point: {e}"))?;
+    let mut ctx = openssl::bn::BigNumContext::new().map_err(|e| format!("BN context: {e}"))?;
+    let point =
+        EcPoint::from_bytes(&group, &ec_bytes, &mut ctx).map_err(|e| format!("EC point: {e}"))?;
     let compressed = point
         .to_bytes(&group, PointConversionForm::COMPRESSED, &mut ctx)
         .map_err(|e| format!("compress: {e}"))?;

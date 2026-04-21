@@ -8,8 +8,8 @@ use piggy_piv::Guid;
 use crate::error::{BoxError, Result};
 use crate::piv_box::{EcCurve, PivBox};
 use crate::template::{
-    EboxConfigType, EboxTemplate, DEFAULT_SLOT, PART_BOX, PART_CAK, PART_END, PART_GUID,
-    PART_NAME, PART_OPTIONAL_FLAG, PART_PUBKEY, PART_SLOT,
+    EboxConfigType, EboxTemplate, DEFAULT_SLOT, PART_BOX, PART_CAK, PART_END, PART_GUID, PART_NAME,
+    PART_OPTIONAL_FLAG, PART_PUBKEY, PART_SLOT,
 };
 use crate::wire::{WireReader, WireWriter};
 
@@ -81,11 +81,7 @@ pub struct Ebox {
 }
 
 impl Ebox {
-    pub fn create(
-        tpl: &EboxTemplate,
-        key: &[u8],
-        ebox_type: EboxType,
-    ) -> Result<Self> {
+    pub fn create(tpl: &EboxTemplate, key: &[u8], ebox_type: EboxType) -> Result<Self> {
         let recovery_key = generate_random(32)?;
 
         // Build recovery plaintext: u8(RECOV_KEY) + string8(key)
@@ -95,8 +91,7 @@ impl Ebox {
         let recov_plaintext = recov_plain.into_bytes();
 
         // Encrypt with AES-256-GCM
-        let (recovery_enc, recovery_iv) =
-            aes256_gcm_encrypt(&recovery_key, &recov_plaintext)?;
+        let (recovery_enc, recovery_iv) = aes256_gcm_encrypt(&recovery_key, &recov_plaintext)?;
 
         let mut ephemeral_keys: Vec<EphemeralKey> = Vec::new();
         let mut ephem_privkeys: Vec<(EcCurve, EcKey<Private>)> = Vec::new();
@@ -115,32 +110,22 @@ impl Ebox {
 
                 let m = tpl_config.parts.len() as u8;
                 let n = tpl_config.n;
-                let dealer =
-                    sharks::Sharks(n).dealer(&config_key);
+                let dealer = sharks::Sharks(n).dealer(&config_key);
                 let share_vec: Vec<sharks::Share> = dealer.take(m as usize).collect();
-                shares = Some(
-                    share_vec
-                        .iter()
-                        .map(Vec::from)
-                        .collect(),
-                );
+                shares = Some(share_vec.iter().map(Vec::from).collect());
             }
 
             let mut parts = Vec::with_capacity(tpl_config.parts.len());
             for (i, tpl_part) in tpl_config.parts.iter().enumerate() {
                 let curve = tpl_part.pubkey_curve;
 
-                let ephem = get_or_create_ephemeral(
-                    curve,
-                    &mut ephemeral_keys,
-                    &mut ephem_privkeys,
-                )?;
+                let ephem =
+                    get_or_create_ephemeral(curve, &mut ephemeral_keys, &mut ephem_privkeys)?;
 
                 let group = EcGroup::from_curve_name(curve.nid())?;
                 let mut ctx = openssl::bn::BigNumContext::new()?;
 
-                let recipient_point =
-                    EcPoint::from_bytes(&group, &tpl_part.pubkey, &mut ctx)?;
+                let recipient_point = EcPoint::from_bytes(&group, &tpl_part.pubkey, &mut ctx)?;
                 let recipient_pub = EcKey::from_public_key(&group, &recipient_point)?;
 
                 let mut pbox = PivBox::new(curve);
@@ -233,9 +218,7 @@ impl Ebox {
         // XOR config_key with nonce to get recovery key
         let nonce = &self.configs[config_idx].nonce;
         if nonce.len() != config_key.len() {
-            return Err(BoxError::Crypto(
-                "recovery nonce length mismatch".into(),
-            ));
+            return Err(BoxError::Crypto("recovery nonce length mismatch".into()));
         }
         let mut recovery_key = vec![0u8; config_key.len()];
         for i in 0..config_key.len() {
@@ -243,8 +226,7 @@ impl Ebox {
         }
 
         // Decrypt recovery box
-        let recov_plain =
-            aes256_gcm_decrypt(&recovery_key, &self.recovery_iv, &self.recovery_enc)?;
+        let recov_plain = aes256_gcm_decrypt(&recovery_key, &self.recovery_iv, &self.recovery_enc)?;
 
         // Parse recovery plaintext to extract key
         let mut r = WireReader::new(&recov_plain);
@@ -503,9 +485,7 @@ fn read_ebox_part(r: &mut WireReader, version: u8) -> Result<EboxPart> {
                 if tag & PART_OPTIONAL_FLAG != 0 {
                     let _ = r.get_string8()?;
                 } else {
-                    return Err(BoxError::Wire(format!(
-                        "unknown ebox part tag {tag:#04x}"
-                    )));
+                    return Err(BoxError::Wire(format!("unknown ebox part tag {tag:#04x}")));
                 }
             }
         }
@@ -538,9 +518,11 @@ fn get_or_create_ephemeral<'a>(
     let priv_key = EcKey::generate(&group)?;
 
     let mut ctx = openssl::bn::BigNumContext::new()?;
-    let pubkey_bytes = priv_key
-        .public_key()
-        .to_bytes(&group, openssl::ec::PointConversionForm::COMPRESSED, &mut ctx)?;
+    let pubkey_bytes = priv_key.public_key().to_bytes(
+        &group,
+        openssl::ec::PointConversionForm::COMPRESSED,
+        &mut ctx,
+    )?;
 
     ephemeral_keys.push(EphemeralKey {
         curve,

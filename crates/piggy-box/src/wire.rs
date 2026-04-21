@@ -184,7 +184,6 @@ impl WireWriter {
     }
 }
 
-
 pub(crate) fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
     let pad_len = block_size - (data.len() % block_size);
     let mut padded = data.to_vec();
