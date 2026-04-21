@@ -97,6 +97,12 @@ pub struct WireWriter {
     buf: Vec<u8>,
 }
 
+impl Default for WireWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WireWriter {
     pub fn new() -> Self {
         Self { buf: Vec::new() }
@@ -112,6 +118,10 @@ impl WireWriter {
 
     pub fn len(&self) -> usize {
         self.buf.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
     }
 
     pub fn put_u8(&mut self, v: u8) {
@@ -178,7 +188,7 @@ impl WireWriter {
 pub(crate) fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
     let pad_len = block_size - (data.len() % block_size);
     let mut padded = data.to_vec();
-    padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+    padded.extend(std::iter::repeat_n(pad_len as u8, pad_len));
     padded
 }
 

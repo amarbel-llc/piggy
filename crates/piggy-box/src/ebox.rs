@@ -121,7 +121,7 @@ impl Ebox {
                 shares = Some(
                     share_vec
                         .iter()
-                        .map(|s| Vec::from(s))
+                        .map(Vec::from)
                         .collect(),
                 );
             }

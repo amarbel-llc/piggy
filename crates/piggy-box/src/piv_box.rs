@@ -227,7 +227,7 @@ impl PivBox {
         }
 
         let version = r.get_u8()?;
-        if version < 1 || version > BOX_VERSION {
+        if !(1..=BOX_VERSION).contains(&version) {
             return Err(BoxError::UnsupportedVersion(version));
         }
 
