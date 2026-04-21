@@ -74,5 +74,9 @@ pub fn slot_to_cert_tag(slot_id: u8) -> Option<u32> {
     }
 }
 
+pub fn is_valid_piv_slot(slot_id: u8) -> bool {
+    slot_to_cert_tag(slot_id).is_some()
+}
+
 /// Standard PIV slots to probe for certificates
 pub const STANDARD_SLOTS: &[u8] = &[0x9A, 0x9C, 0x9D, 0x9E];

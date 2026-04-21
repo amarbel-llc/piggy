@@ -96,3 +96,27 @@ function help_shows_slot_spec_format { # @test
   assert_success
   assert_output --partial "9a,9e"
 }
+
+function slot_spec_rejects_non_hex { # @test
+  run "$PIGGY" agent -S "zz"
+  assert_failure
+  assert_output --partial "invalid slot in -S spec"
+}
+
+function slot_spec_rejects_out_of_range_slot { # @test
+  run "$PIGGY" agent -S "ff"
+  assert_failure
+  assert_output --partial "unknown PIV slot 0xff"
+}
+
+function slot_spec_rejects_mixed_valid_and_invalid { # @test
+  run "$PIGGY" agent -S "9a,ff"
+  assert_failure
+  assert_output --partial "unknown PIV slot 0xff"
+}
+
+function slot_spec_rejects_zero { # @test
+  run "$PIGGY" agent -S "00"
+  assert_failure
+  assert_output --partial "unknown PIV slot 0x00"
+}

@@ -125,9 +125,16 @@ async fn run_async(cli: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
             spec.split(',')
                 .map(|s| {
                     let s = s.trim();
-                    u8::from_str_radix(s, 16).map_err(|_| {
+                    let slot = u8::from_str_radix(s, 16).map_err(|_| {
                         format!("invalid slot in -S spec: {:?}", s)
-                    })
+                    })?;
+                    if !piggy_piv::slot::is_valid_piv_slot(slot) {
+                        return Err(format!(
+                            "unknown PIV slot 0x{slot:02x} in -S spec \
+                             (valid: 9a, 9c, 9d, 9e, 82-95, f9)"
+                        ));
+                    }
+                    Ok(slot)
                 })
                 .collect::<Result<Vec<u8>, _>>()
         })
