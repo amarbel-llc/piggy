@@ -480,6 +480,23 @@ debug-capture-jcardsim-m2:
     echo "=== Done. Vendored Maven deps at nix/jcardsim-m2/ ==="
     du -sh "$dest"
 
+# --- explore ---
+
+# Run pivy-tool bats tests against the nix-built pivy (not the devshell's).
+# Validates that changes to vendor/pivy/src/ are picked up by the actual
+# build artifact. Used to verify #23 (-K default fix).
+[group('explore')]
+explore-pivy-tool-bats: build-nix
+    #!/usr/bin/env bash
+    set -euo pipefail
+    piggy_out=$(readlink -f ./result)
+    # Extract the pivy store path from the piggy wrapper script.
+    pivy_bin=$(grep -oP '/nix/store/[a-z0-9]+-pivy-[^/]+/bin' "$piggy_out/bin/piggy" | head -1)
+    [[ -d "$pivy_bin" ]] || { echo "could not find pivy bin dir in piggy wrapper"; exit 1; }
+    PATH="$pivy_bin:$PATH" \
+      BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/pivy_tool_admin_key.bats
+
 # --- update / clean ---
 
 update: update-nix

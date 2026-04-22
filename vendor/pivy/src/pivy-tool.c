@@ -3170,6 +3170,7 @@ main(int argc, char *argv[])
 		case 'K':
 			if (strcmp(optarg, "default") == 0) {
 				admin_key = DEFAULT_ADMIN_KEY;
+				len = key_length;
 			} else if (optarg[0] == '@') {
 				buf = read_key_file(&optarg[1], &len);
 				if (len > key_length && sniff_hex(buf, len)) {
