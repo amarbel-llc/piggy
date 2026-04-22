@@ -282,6 +282,28 @@ fib-up:
       kill "$fib_pid" "$pcscd_pid" 2>/dev/null || true
       exit 1
     fi
+    # Consumer verification: opensc-tool succeeding warms up pcscd/vpcd/
+    # jCardSim, but doesn't strictly prove pivy-tool's piv_enumerate will
+    # succeed — the two tools use libpcsclite differently. See #20 CI
+    # trace where 10 bare `pivy-tool list` attempts failed while
+    # opensc-tool --send-apdu worked in the same environment moments
+    # later. Loop the actual consumer's own list command until it sees
+    # the reader, so fib-up's contract is "pivy-tool can enumerate",
+    # not just "opensc-tool can SELECT". If this fails after opensc
+    # succeeded, the error message calls that out by name.
+    pivy_ready=false
+    for _ in $(seq 1 30); do
+      if pivy-tool list 2>/dev/null | grep -q "Virtual PCD piggy fib"; then
+        pivy_ready=true
+        break
+      fi
+      sleep 0.2
+    done
+    if [[ "$pivy_ready" != true ]]; then
+      echo "fib-up: pivy-tool list never saw the virtual card despite opensc-tool SELECT succeeding (see #20)" >&2
+      kill "$fib_pid" "$pcscd_pid" 2>/dev/null || true
+      exit 1
+    fi
     # Export env for the caller.
     cat >.fib/env <<EOF
     export PCSCLITE_CSOCK_NAME="$sock"
