@@ -53,6 +53,16 @@ jobs:
         with:
           determinate: true
       - uses: DeterminateSystems/flakehub-cache-action@main
+      # Ubuntu 24.04's default AppArmor `unprivileged_userns` profile
+      # denies `unshare(CLONE_NEWUSER|CLONE_NEWNET)`, breaking bwrap(1)
+      # and any sandcastle(1)-wrapped command with
+      # `RTM_NEWADDR: Operation not permitted`. piggy's bats tests run
+      # through sandcastle via the devshell, so this affects the whole
+      # linux test matrix. See amarbel-llc/bob#108 for the upstream
+      # sandcastle config work that will let us remove this step.
+      - name: Allow unprivileged user namespaces (Ubuntu 24.04 -> bwrap/sandcastle)
+        if: matrix.system == 'x86_64-linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: nix build
       # End-to-end suite: cargo build + bats (existing piggy bash tests
       # routed through the rust dispatcher) + cargo test. The bats step
