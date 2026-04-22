@@ -234,73 +234,23 @@ fib-up:
     nix run .#fib >.fib/fib.log 2>&1 &
     fib_pid=$!
     echo "$fib_pid" >.fib/fib.pid
-    # Activate PivApplet — jCardSim loads the class but install() isn't
-    # called until this APDU triggers it. Without this, SELECT AID fails
-    # with SW 6986. Retry until jCardSim connects to vpcd and the card
-    # appears in the reader.
+    # Readiness probe: wait for jCardSim/vpcd to come up and the PIV
+    # applet to respond to SELECT. Uses SCardGetStatusChange (event-based,
+    # not polling) + SCardConnect + PIV AID SELECT. The --activate flag
+    # sends the jCardSim INSTALL APDU first. Replaces the former
+    # opensc-tool + pivy-tool polling loops (see #20, #22).
     export PCSCLITE_CSOCK_NAME="$sock"
     reader="Virtual PCD piggy fib 00 00"
-    activate_apdu='80 b8 00 00 12 0b a0 00 00 03 08 00 00 10 00 01 00 05 00 00 02 0F 0F 7f'
-    activated=false
-    for _ in $(seq 1 50); do
-      if opensc-tool -r "$reader" -s "$activate_apdu" >.fib/activate.log 2>&1; then
-        activated=true
-        break
-      fi
-      if ! kill -0 "$fib_pid" 2>/dev/null; then
-        echo "fib-up: fib process died — see .fib/fib.log" >&2
-        kill "$pcscd_pid" 2>/dev/null || true
-        exit 1
-      fi
-      sleep 0.1
-    done
-    if [[ "$activated" != true ]]; then
-      echo "fib-up: PivApplet activation timed out — see .fib/activate.log" >&2
-      kill "$fib_pid" "$pcscd_pid" 2>/dev/null || true
-      exit 1
+    fib_wait_bin="./target/debug/fib-wait-ready"
+    if [[ ! -x "$fib_wait_bin" ]]; then
+      cargo build -p fib-wait-ready --quiet
     fi
-    # Readiness probe: on CI (and other slow hosts) the first real
-    # SCardConnect against jCardSim can lag a beat after activation,
-    # so the very next `pivy-tool list` silently returns no tokens —
-    # piv_enumerate logs the per-reader SCardConnect failure only at
-    # BNY_DEBUG (see #20). Loop a PIV AID SELECT via opensc-tool until
-    # the applet responds so fib-up's contract is "when this returns,
-    # pivy-tool can enumerate". opensc-tool is the right probe here:
-    # it uses its own pcsclite build and is known to succeed even in
-    # the window where pivy-tool fails silently.
-    piv_select_apdu='00 A4 04 00 09 A0 00 00 03 08 00 00 10 00'
-    ready=false
-    for _ in $(seq 1 50); do
-      if opensc-tool -r "$reader" -s "$piv_select_apdu" >.fib/ready.log 2>&1; then
-        ready=true
-        break
-      fi
-      sleep 0.1
-    done
-    if [[ "$ready" != true ]]; then
-      echo "fib-up: PIV AID SELECT never succeeded — see .fib/ready.log" >&2
-      kill "$fib_pid" "$pcscd_pid" 2>/dev/null || true
-      exit 1
-    fi
-    # Consumer verification: opensc-tool succeeding warms up pcscd/vpcd/
-    # jCardSim, but doesn't strictly prove pivy-tool's piv_enumerate will
-    # succeed — the two tools use libpcsclite differently. See #20 CI
-    # trace where 10 bare `pivy-tool list` attempts failed while
-    # opensc-tool --send-apdu worked in the same environment moments
-    # later. Loop the actual consumer's own list command until it sees
-    # the reader, so fib-up's contract is "pivy-tool can enumerate",
-    # not just "opensc-tool can SELECT". If this fails after opensc
-    # succeeded, the error message calls that out by name.
-    pivy_ready=false
-    for _ in $(seq 1 30); do
-      if pivy-tool list 2>/dev/null | grep -q "Virtual PCD piggy fib"; then
-        pivy_ready=true
-        break
-      fi
-      sleep 0.2
-    done
-    if [[ "$pivy_ready" != true ]]; then
-      echo "fib-up: pivy-tool list never saw the virtual card despite opensc-tool SELECT succeeding (see #20)" >&2
+    activate_apdu='80b80000120ba000000308000010000100050000020F0F7f'
+    if ! "$fib_wait_bin" \
+        --reader "$reader" \
+        --timeout 30 \
+        --activate "$activate_apdu"; then
+      echo "fib-up: fib-wait-ready failed — card never became ready" >&2
       kill "$fib_pid" "$pcscd_pid" 2>/dev/null || true
       exit 1
     fi

@@ -1,0 +1,13 @@
+[package]
+name = "fib-wait-ready"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fib-wait-ready"
+path = "src/main.rs"
+
+[dependencies]
+pcsc = "2.9"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
