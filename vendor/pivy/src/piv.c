@@ -1100,7 +1100,19 @@ errf_t *piv_enumerate(struct piv_ctx *ctx, struct piv_token **tokens) {
                       &activeProtocol);
     if (rv != SCARD_S_SUCCESS) {
       err = pcscrerrf("SCardConnect", thisrdr, rv);
-      bunyan_log(BNY_DEBUG, "SCardConnect failed", "error", BNY_ERF, err, NULL);
+      /* SCARD_E_NO_SMARTCARD is expected for empty readers (a USB reader
+       * with nothing inserted, the second virtual reader in a
+       * vsmartcard-vpcd stack, etc.) — keep it at DEBUG. Anything else
+       * is an unexpected skip the operator should see at the default
+       * log level so piv_enumerate isn't a silent dead end. See
+       * amarbel-llc/piggy#24. */
+      if (rv == SCARD_E_NO_SMARTCARD) {
+        bunyan_log(BNY_DEBUG, "SCardConnect failed (no card inserted)",
+                   "error", BNY_ERF, err, NULL);
+      } else {
+        bunyan_log(BNY_WARN, "SCardConnect failed (skipping reader)",
+                   "error", BNY_ERF, err, NULL);
+      }
       errf_free(err);
       continue;
     }
@@ -1256,7 +1268,16 @@ errf_t *piv_find(struct piv_ctx *ctx, const uint8_t *guid, size_t guidlen,
                       &activeProtocol);
     if (rv != SCARD_S_SUCCESS) {
       err = pcscrerrf("SCardConnect", thisrdr, rv);
-      bunyan_log(BNY_DEBUG, "SCardConnect failed", "error", BNY_ERF, err, NULL);
+      /* Mirror piv_enumerate: stay quiet for empty readers (expected),
+       * surface every other SCardConnect failure at WARN so callers
+       * see why a GUID lookup skipped a reader. amarbel-llc/piggy#24. */
+      if (rv == SCARD_E_NO_SMARTCARD) {
+        bunyan_log(BNY_DEBUG, "SCardConnect failed (no card inserted)",
+                   "error", BNY_ERF, err, NULL);
+      } else {
+        bunyan_log(BNY_WARN, "SCardConnect failed (skipping reader)",
+                   "error", BNY_ERF, err, NULL);
+      }
       errf_free(err);
       continue;
     }
