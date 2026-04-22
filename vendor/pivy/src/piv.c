@@ -1107,11 +1107,11 @@ errf_t *piv_enumerate(struct piv_ctx *ctx, struct piv_token **tokens) {
        * log level so piv_enumerate isn't a silent dead end. See
        * amarbel-llc/piggy#24. */
       if (rv == SCARD_E_NO_SMARTCARD) {
-        bunyan_log(BNY_DEBUG, "SCardConnect failed (no card inserted)",
-                   "error", BNY_ERF, err, NULL);
+        bunyan_log(BNY_DEBUG, "SCardConnect failed (no card inserted)", "error",
+                   BNY_ERF, err, NULL);
       } else {
-        bunyan_log(BNY_WARN, "SCardConnect failed (skipping reader)",
-                   "error", BNY_ERF, err, NULL);
+        bunyan_log(BNY_WARN, "SCardConnect failed (skipping reader)", "error",
+                   BNY_ERF, err, NULL);
       }
       errf_free(err);
       continue;
@@ -1272,11 +1272,11 @@ errf_t *piv_find(struct piv_ctx *ctx, const uint8_t *guid, size_t guidlen,
        * surface every other SCardConnect failure at WARN so callers
        * see why a GUID lookup skipped a reader. amarbel-llc/piggy#24. */
       if (rv == SCARD_E_NO_SMARTCARD) {
-        bunyan_log(BNY_DEBUG, "SCardConnect failed (no card inserted)",
-                   "error", BNY_ERF, err, NULL);
+        bunyan_log(BNY_DEBUG, "SCardConnect failed (no card inserted)", "error",
+                   BNY_ERF, err, NULL);
       } else {
-        bunyan_log(BNY_WARN, "SCardConnect failed (skipping reader)",
-                   "error", BNY_ERF, err, NULL);
+        bunyan_log(BNY_WARN, "SCardConnect failed (skipping reader)", "error",
+                   BNY_ERF, err, NULL);
       }
       errf_free(err);
       continue;
