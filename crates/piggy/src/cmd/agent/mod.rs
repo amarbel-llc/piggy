@@ -128,17 +128,14 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         }
     };
 
-    let (tokens, _ctx_available) = match piggy_piv::PivContext::new() {
-        Ok(ctx) => match ctx.enumerate_tokens() {
-            Ok(tokens) => (tokens, true),
-            Err(e) => {
-                tracing::warn!("Failed to enumerate PIV tokens: {e}");
-                (Vec::new(), false)
-            }
-        },
+    let tokens = match piggy_piv::PivContext::new() {
+        Ok(ctx) => ctx.enumerate_tokens().unwrap_or_else(|e| {
+            tracing::warn!("Failed to enumerate PIV tokens: {e}");
+            Vec::new()
+        }),
         Err(e) => {
             tracing::warn!("PCSC not available: {e}");
-            (Vec::new(), false)
+            Vec::new()
         }
     };
 

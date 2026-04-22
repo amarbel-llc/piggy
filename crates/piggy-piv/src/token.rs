@@ -307,7 +307,7 @@ fn validate_ec_point(alg: PivAlgorithm, point: &[u8]) -> Result<(), PivError> {
         PivAlgorithm::EcP256 => 65, // 1 + 32 + 32
         PivAlgorithm::EcP384 => 97, // 1 + 48 + 48
         _ => {
-            return Err(PivError::Other(
+            return Err(PivError::UnsupportedAlgorithm(
                 "ECDH requires an EC key (P-256 or P-384)".into(),
             ))
         }
