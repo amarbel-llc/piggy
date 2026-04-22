@@ -1,0 +1,332 @@
+= pivy-tool(1)
+:doctype: manpage
+:manmanual: pivy
+:mansource: pivy {pivy-version}
+
+== Name
+
+pivy-tool - perform operations on PIV tokens and smart cards
+
+== Synopsis
+
+*pivy-tool* [_options_] _operation_ [_args_]
+
+== Description
+
+The *pivy-tool* command performs basic operations on PIV-compatible smart cards
+and tokens, such as Yubico YubiKeys.
+It can list available tokens, generate and import keys, manage certificates,
+change PINs and PUKs, and perform cryptographic operations (signing, ECDH,
+box encrypt/decrypt).
+
+PIV (Personal Identity Verification) is a US federal standard (NIST SP 800-73)
+for smart card authentication.
+YubiKeys implement PIV and are the most common device used with pivy.
+
+== Operations
+
+=== Informational
+
+*list*::
+  List PIV tokens present on the system.
+  Output includes GUID, device name, slot inventory, and authentication state.
+
+*pinfo*::
+  Display the contents of the Printed Information data object on the token.
+
+*pubkey* _slot_::
+  Output the public key stored in _slot_ in OpenSSH format.
+
+*cert* _slot_::
+  Output the X.509 certificate stored in _slot_ in PEM format.
+
+*version*::
+  Print the pivy version string.
+
+=== Setup
+
+*init*::
+  Write a new GUID and card capability container to the token.
+  Used to initialize a fresh Yubico PIV applet.
+
+*setup*::
+  Quick setup procedure for a new YubiKey.
+  Equivalent to running *init*, *generate* (for standard slots),
+  *change-pin*, *change-puk*, and *set-admin* in sequence.
+  Prompts interactively for PIN and PUK values.
+
+=== Key Management
+
+*generate* _slot_::
+  Generate a new private key in _slot_ and create a self-signed certificate
+  for it.
+  The algorithm defaults to ECDSA P-256; use *-a* to override.
+
+*import* _slot_::
+  Read an OpenSSH private key from standard input and import it into _slot_
+  on the YubiKey.
+  Generates a self-signed certificate to accompany it.
+
+*write-cert* _slot_::
+  Read a DER-encoded X.509 certificate from standard input and write it to
+  _slot_, replacing any existing certificate.
+
+*req-cert* _slot_::
+  Generate an X.509 Certificate Signing Request (CSR) for the key in _slot_.
+  Output is PEM-encoded on standard output.
+
+*delete-cert* _slot_::
+  Clear the certificate from _slot_ without affecting the private key.
+
+=== PIN and PUK
+
+*change-pin*::
+  Change the PIV PIN.
+  Prompts for the current and new PIN interactively unless *-P* is given.
+
+*change-puk*::
+  Change the PIV PUK (PIN Unblocking Key).
+
+*reset-pin*::
+  Reset a locked PIN using the PUK.
+
+*factory-reset*::
+  Factory reset the PIV applet on a YubiKey.
+  Both the PIN and PUK must already be locked (maximum retry attempts
+  exhausted) before this operation will succeed.
+  All private keys are destroyed.
+
+=== Administration
+
+*set-admin* _hex_|_@file_::
+  Set the PIV admin (management) key.
+  The key may be given as a hex string or as a path prefixed with *@*.
+
+*update-keyhist*::
+  Scan all retired key slots and regenerate the PIV Key History data object.
+
+=== Cryptographic Operations
+
+*sign* _slot_::
+  Read data from standard input and produce a signature using the key in
+  _slot_.
+  Requires PIN authentication.
+
+*ecdh* _slot_::
+  Read a public key from standard input and perform ECDH key agreement using
+  the key in _slot_.
+
+*auth* _slot_::
+  Read a public key from standard input and perform a round-trip signature
+  test to verify that it matches the key stored in _slot_.
+
+*attest* _slot_::
+  Output the YubiKey attestation certificate and chain for _slot_.
+  Only supported on YubiKeys with firmware that implements attestation.
+
+=== Box Operations
+
+Box operations provide simple public-key encryption using ECDH.
+Data is encrypted to a recipient's public key and can be decrypted by the
+corresponding PIV token.
+
+*box* [_slot_]::
+  Encrypt data from standard input.
+  If _slot_ is given, encrypt to the public key in that slot on the local
+  token.
+  Use *-k* to specify an arbitrary public key instead.
+
+*unbox*::
+  Decrypt box-encrypted data from standard input.
+  Automatically selects the appropriate token and slot.
+
+*box-info*::
+  Print metadata about box-encrypted data from standard input (recipient key,
+  cipher, etc.) without decrypting.
+
+== Options
+
+=== General Options
+
+*-g* _hex_::
+  GUID (or prefix) of the PIV token to use.
+  Required if more than one token is present on the system.
+
+*-P* _code_::
+  PIN code to authenticate with.
+  If not given, the PIN is read interactively from the terminal.
+  May be specified twice for operations that require both a current and new
+  PIN (e.g., *change-pin*).
+
+*-f*::
+  Attempt to unlock with the PIN even if only one retry attempt remains
+  before the card locks.
+
+*-A* _algorithm_::
+  Admin key algorithm.
+  One of *3des*, *aes128*, *aes192*, or *aes256*.
+  Must appear before *-K* on the command line.
+
+*-K* _hex_|_@file_::
+  Admin key for authenticating to the card for privileged operations
+  (e.g., *generate*, *init*).
+  Accepts a hex string, a file path prefixed with *@*, or the literal string
+  *default* to use the factory default key.
+
+*-d*::
+  Enable debug output on standard error.
+  Specify twice to include full APDU traces.
+
+*-X*::
+  Enumerate all retired key slots instead of consulting the PIV Key History
+  object.
+  Slower but ensures no slots are missed.
+
+=== Options for list
+
+*-p*::
+  Generate parseable (machine-readable) output.
+
+*-j*::
+  Generate JSON output.
+
+=== Options for generate and req-cert
+
+*-a* _algorithm_::
+  Key algorithm to use.
+  EC algorithms: *eccp256*, *eccp384*.
+  RSA algorithms: *rsa1024*, *rsa2048*, *rsa3072*.
+
+*-n* _cn_::
+  Set the Common Name (CN) attribute on the generated certificate.
+
+*-u* _upn_::
+  Set a UPN (User Principal Name) attribute on the certificate.
+
+*-r* _principal_::
+  Set a Kerberos 5 PKINIT principal name on the certificate.
+
+*-D* _param_=_value_::
+  Define a certificate template parameter.
+  May be specified multiple times.
+
+*-T* _template_::
+  Use a named certificate template.
+
+*-t* _policy_::
+  Set the touch policy (YubiKey only).
+  One of *never*, *always*, or *cached*.
+
+*-i* _policy_::
+  Set the PIN policy (YubiKey only).
+  One of *never*, *always*, or *once*.
+
+=== Options for box and unbox
+
+*-k* _pubkey_::
+  Use the specified public key (in OpenSSH format) for the box operation
+  instead of reading from a slot on the local token.
+
+=== Options for set-admin and setup
+
+*-R*::
+  Do not save the admin key in the PIV Printed Information object.
+  Required for compatibility with Yubico PIV Manager.
+
+*-N* _algorithm_::
+  Change the admin key algorithm type.
+  Same values as *-A*.
+
+== PIV Slots
+
+PIV tokens organize keys into numbered slots.
+The standard slots are:
+
+*9E* (Card Authentication)::
+  Authenticates the device, not the user.
+  Does not require a PIN by default.
+  Used by *pivy-agent* to verify the token's identity.
+
+*9A* (PIV Authentication)::
+  Primary user authentication key.
+  Protected by PIN.
+  Recommended for SSH authorized_keys and similar.
+
+*9C* (Digital Signature)::
+  Intended for signing documents and certificates.
+  Also usable as a fallback authentication key.
+  Protected by PIN.
+
+*9D* (Key Management)::
+  Used for key agreement (ECDH) and data encryption.
+  Requires PIN and touch confirmation on YubiKeys.
+
+*82*-*95* (Retired Key Management)::
+  Additional key slots for historical or backup keys.
+  Use *-X* to enumerate these slots.
+
+Slot arguments to operations may be given as bare hex (e.g., *9a*) or with a
+*0x* prefix.
+
+== Examples
+
+List all PIV tokens on the system:
+
+  $ pivy-tool list
+
+List tokens with JSON output:
+
+  $ pivy-tool -j list
+
+Show the SSH public key in slot 9a:
+
+  $ pivy-tool pubkey 9a
+
+Initialize and set up a new YubiKey interactively:
+
+  $ pivy-tool setup
+
+Generate an ECDSA P-384 key in the authentication slot:
+
+  $ pivy-tool -a eccp384 generate 9a
+
+Generate a key with touch-always policy on a YubiKey:
+
+  $ pivy-tool -a eccp256 -t always generate 9a
+
+Import an existing SSH key to a YubiKey:
+
+  $ pivy-tool import 9a < ~/.ssh/id_ecdsa
+
+Encrypt data to a specific public key:
+
+  $ echo "secret" | pivy-tool -k "ecdsa-sha2-nistp256 AAAA..." box
+
+Decrypt box-encrypted data (auto-selects token):
+
+  $ pivy-tool unbox < encrypted.box
+
+== Exit Status
+
+*0*::
+  Success.
+
+*1*::
+  General error.
+
+*3*::
+  Invalid arguments.
+
+*4*::
+  PIN required or incorrect.
+
+*6*::
+  PIN locked.
+
+== See Also
+
+*pivy-agent*(1), *pivy-box*(1), *pivy-ca*(1), *pivy-zfs*(1), *ssh-agent*(1)
+
+== Authors
+
+pivy was written by Alex Wilson and contributors.

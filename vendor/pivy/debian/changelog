@@ -1,0 +1,135 @@
+pivy (0.12.1-1) UNRELEASED; urgency=medium
+
+  * piv: disable xlen code on MacOS since it seems to be broken
+  * piv: fix xlen headers on data-less command APDUs
+  * piv: ignore InvalidDataError on reading all certs
+  * pivy-tool: add rsa3072 to list of possible values for -a
+  * update bundled libressl to 4.0.0, openssh to 10.0p1
+
+ -- Lexi Wilson <lexi@cooperi.net>  Mon, 12 Jan 2026 00:06:59 +0000
+
+pivy (0.12.0-1) UNRELEASED; urgency=medium
+
+  * piv: add support for extended-length APDUs
+  * piv: add support for Ed25519 keys, RSA3072/4096 with YubicoPIV 5.7.x
+  * pivy-tool: better support new AES-192 default admin key in YubicoPIV 5.7
+  * pivy-tool: add delete-cert command
+  * pivy-box: stop -b batch mode prompting for PIN
+  * pivy-box, pivy-agent: better logging of ecdh operations for audit
+  * pivy-agent: fix notify-send options and newlines for GNOME 46+
+  * pivy-zfs, pivy-ca: exit cleanly on invalid options
+  * pivy-zfs: compatibility with openzfs 2.3.x
+  * pivy-tool: init command crash on error
+  * pivy-ca: include SPKI extension on subordinate CAs
+  * pivy-ca: add supprot for cert policies extension
+  * certs: add keyEncipherment to RSA computer certs, support for IKE EKU
+  * certs: support for multiple UPN SANs
+  * update bundled libressl to 3.9.2, openssh to 9.9p1
+  * CBMC formal verification of some components (TLV parser, PIV RTS, cardcap, CHUID, FASC-N parser)
+
+ -- Alex Wilson <alex@cooperi.net>  Wed, 16 Apr 2025 06:12:06 +0000
+
+pivy (0.11.2-1) UNRELEASED; urgency=medium
+
+  * piv: better error messages on invalid PIN cowardice
+  * piv: handle "no readers" errors better, stops agent from getting lost
+  * pivy-agent: slot spec parser error message improvements
+  * pivy-agent: support for using notify-send as SSH_CONFIRM
+  * update bundled libressl to 3.8.2, openssh to 9.5p1
+
+pivy (0.11.1-1) UNRELEASED; urgency=medium
+
+  * pivy-ca/luks/zfs: fix possible use-after-free segfault in recovery mode
+  * pivy-luks/zfs/box: fix for reading PINs on Linux initrd console
+  * pivy-agent: fix wake-up deadline calculation causing high CPU usage
+
+pivy (0.11.0-1) UNRELEASED; urgency=medium
+
+  * pivy-ca: fixes for provisioning new CAs
+  * all tools: switch to getpassphrase() and handle ctrl+C properly
+  * pivy-tool: "setup" command is now much safer
+  * pivy-agent: fix denied connections (due to wrong UID) closing listen sock
+  * pivy-agent: new -u/-z option to whitelist other UIDs/ZIDs for access
+  * pivy-agent: x509-certs extension support
+  * pivy-agent: sign-prehash extension support
+  * pivy-box: fix garbage slot IDs when parsing keywords form of template
+  * pivy-tool: remove invalid algo from help text
+  * piv: parse deprecated "Auth Key Map" element in CHUID
+
+pivy (0.10.0-1) UNRELEASED; urgency=medium
+
+  * pivy-agent: support for sessbind extension
+  * pivy-tool: accept and use PEM rather than DER for certs
+  * pivy-ca: new tool, manages an X.509 CA on a PIV device
+  * pivy-tool: add -j JSON output mode for "list" command
+  * pivy-box: option for importing config from another tpl in edit -i
+  * pivy-tool: fix for MS SID extension in certs
+  * piv: don't reset the card after a txn if we can clear PIN state instead
+  * piv: handle 6A88 SW on PIN-related commands nicely
+  * pivy-tool: fix generate on non-contiguous retired key slots
+
+pivy (0.9.0-1) UNRELEASED; urgency=medium
+
+  * piv: support for full pinfo/chuid file decoding, incl. FASC-Ns
+  * pivy-agent: stricter timeouts for forgetting PIN after device removal
+  * pivy-tool: more control over cert generation, added req-cert command
+  * pivy-luks: make rekey command panic-safe
+  * pivy-box: improvements to challenge-response parsing
+
+pivy (0.8.0-1) UNRELEASED; urgency=medium
+
+  * piv: support for 4-digit PINs
+  * piv: bug fixes for some Gemalto cards
+  * piv: support AES algorithm for admin key
+  * piv: allow multiple 'AC' tags in APT
+  * pivy-agent: add support for SSH_NOTIFY_SEND on touch required
+  * pivy-zfs: allow 'rekey' command without a template
+  * pivy-zfs: add fallback to 'com.joyent.kbm:ebox' property name
+
+ -- Alex Wilson <alex@cooperi.net>  Wed, 10 Mar 2021 06:11:52 +0000
+
+pivy (0.7.1-1) UNRELEASED; urgency=medium
+
+  * pivy-box: regression in "tpl create" (not mkdir'ing user dirs)
+
+ -- Alex Wilson <alex@cooperi.net>  Wed, 26 Aug 2020 11:27:10 +0000
+
+pivy (0.7.0-1) UNRELEASED; urgency=medium
+
+  * pivy-box: "key unlock" and "stream decrypt" can now accept a filename arg
+  * pivy-box: can now find templates at multiple paths, including a system dir
+  * pivy-agent: in `-C` mode, PID authorizations are now cached for 15 seconds
+  * pivy-tool: add "update-keyhist" command
+  * all tools: now support using metadata/attestation information
+  * fix for some issues around using multiple local devices in order in recov
+
+ -- Alex Wilson <alex@cooperi.net>  Wed, 26 Aug 2020 10:23:24 +0000
+
+pivy (0.6.1-1) UNRELEASED; urgency=medium
+
+  * pivy-agent: fix for parsing errors in pivy-agent -S arguments
+  * pivy-box: performance improvements with large numbers of configs
+  * pivy-agent: re-establish new PCSC context on some errors
+
+ -- Alex Wilson <alex@cooperi.net>  Tue, 28 Jul 2020 07:34:33 +0000
+
+pivy (0.6.0-1) UNRELEASED; urgency=medium
+
+  * pivy-agent support for SSH_ASKPASS, connection confirm mode
+  * pivy-agent option to disable slots
+  * pivy-box/pivy-tool searches all PIV tokens to unlock a box
+  * pivy-box tpl list command
+
+ -- Alex Wilson <alex@cooperi.net>  Sun, 24 May 2020 08:55:19 +0000
+
+pivy (0.5.1-1) UNRELEASED; urgency=medium
+
+  * Bug fixes
+
+ -- Alex Wilson <alex@cooperi.net>  Sat, 16 May 2020 08:28:51 +0000
+
+pivy (0.5.0-1) UNRELEASED; urgency=medium
+
+  * Initial release. (Closes: #XXXXXX)
+
+ -- Alex Wilson <alex@cooperi.net>  Fri, 15 May 2020 04:41:01 +0000

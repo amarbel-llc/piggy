@@ -1,0 +1,37 @@
+language: c
+matrix:
+  include:
+    - os: osx
+      osx_image: xcode9.2
+    - os: linux
+      dist: bionic
+script:
+ - if [ "$TRAVIS_OS_NAME" = "osx" ]; then make; sudo make package; fi
+ - if [ "$TRAVIS_OS_NAME" = "linux" ]; then make deb; fi
+addons:
+  apt:
+    update: true
+    packages:
+    - libpcsclite-dev
+    - libpcsclite1
+    - libbsd-dev
+    - libbsd0
+    - libedit-dev
+    - libreadline-dev
+    - libcryptsetup-dev
+    - libjson-c-dev
+    - libpam-dev
+    - devscripts
+    - fakeroot
+    - debhelper
+  artifacts:
+    paths:
+    - $(ls macosx/pivy-*.pkg | tr "\n" ":")
+    - $(ls ../*.deb | tr "\n" ":")
+  coverity_scan:
+    project:
+      name: arekinath/pivy
+      version: 0.5.0
+    build_command_prepend: make $(pwd)/libressl/crypto/.libs/libcrypto.a
+    build_command: make
+    branch_pattern: coverity

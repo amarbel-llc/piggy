@@ -1,0 +1,29 @@
+name: build-deb-ubuntu
+on: [push]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-2404:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libpcsclite1 libbsd-dev libbsd0 libedit-dev libreadline-dev libcryptsetup-dev libjson-c-dev libpam-dev build-essential devscripts fakeroot debhelper ragel
+      - run: make && make deb && mv ../*.deb ./
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-2404
+          path: '*.deb'
+  build-2204:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev libpcsclite1 libbsd-dev libbsd0 libedit-dev libreadline-dev libcryptsetup-dev libjson-c-dev libpam-dev build-essential devscripts fakeroot debhelper ragel
+      - run: make && make deb && mv ../*.deb ./
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-2204
+          path: '*.deb'
+

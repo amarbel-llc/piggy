@@ -1,0 +1,212 @@
+= pivy-box(1)
+:doctype: manpage
+:manmanual: pivy
+:mansource: pivy {pivy-version}
+
+== Name
+
+pivy-box - encrypt and decrypt data using PIV tokens
+
+== Synopsis
+
+*pivy-box* _type_ _operation_ [_options_] [_tpl_]
+
+== Description
+
+*pivy-box* manages eboxes (encrypted boxes), which encrypt data so that it can
+be decrypted and authenticated using PIV tokens supported by pivy.
+It supports N-of-M recovery configurations, allowing data to be recovered when
+multiple token holders cooperate.
+
+Data can be encrypted either as small fixed-length keys (*key* type) or as
+large streaming data (*stream* type).
+Templates (*tpl* type) define the set of PIV tokens and recovery configurations
+used for encryption.
+
+== Types
+
+*tpl* (or *template*)::
+  Manage templates that track a set of devices and N/M recovery configuration.
+
+*key*::
+  Encrypt small amounts of data (up to tens of bytes).
+
+*stream*::
+  Encrypt larger amounts of data that can be streamed (does not have to fit in
+  RAM).
+
+*challenge*::
+  Respond to recovery challenges issued by *key unlock* or *stream decrypt*.
+
+== Global Options
+
+*-b*::
+  Batch mode; do not talk to the terminal.
+
+*-r*::
+  Raw input; do not base64-decode standard input.
+
+*-R*::
+  Raw output; do not base64-encode standard output.
+
+*-i*::
+  Interactive mode (for creating and editing templates).
+
+*-f* _path_::
+  Full path to a template file instead of using the _tpl_ name argument.
+
+== Template Operations
+
+*tpl create* [*-i*] _tpl_ [_builder_...]::
+  Create a new template.
+  Use *-i* for an interactive menu interface, or provide builder arguments
+  on the command line.
+
+*tpl edit* [*-i*] _tpl_ [_builder_...]::
+  Edit an existing template.
+  Builder arguments for edit include *remove-primary all*,
+  *remove-recovery all*, *add-primary* < ... >, and *add-recovery* < ... >.
+
+*tpl show* [*-r*] [_tpl_]::
+  Pretty-print a template to standard output.
+  If no _tpl_ or *-f* is given, reads the template from standard input.
+
+*tpl list*::
+  List templates stored in the standard template path.
+
+=== Template Builder Syntax
+
+Templates are constructed using a nested builder syntax:
+
+  primary < ... >         Specifies a primary configuration
+    local-guid <guid>     Generate based on a local device
+    name <string>         Display name for the device
+    guid <guid>           GUID of the device
+    slot <hex>            PIV slot to use
+    key <pubkey>          9D (Key Management) public key
+    cak <pubkey>          9E (Card Authentication) public key
+  recovery < ... >        Specifies a recovery configuration
+    require <int>         Number of parts required to recover
+    part < ... >          Specifies a recovery part
+      name/guid/slot/key  Same fields as primary
+
+== Key Operations
+
+*key generate* [*-R*] [*-l* _len_] _tpl_::
+  Generate random key material of _len_ bytes (default 16), encrypt it with
+  an ebox, and output the ebox.
+
+*key lock* [*-rR*] _tpl_::
+  Read pre-generated key material from standard input and encrypt it with a
+  key ebox.
+
+*key info* [*-r*]::
+  Print information about a key ebox from standard input.
+
+*key unlock* [*-brR*] [_file_]::
+  Decrypt a key ebox and output its contents.
+  If _file_ is given, reads from that path instead of standard input.
+
+*key relock* [*-brR*] _newtpl_ [_file_]::
+  Decrypt a key ebox and re-encrypt it with a new template.
+  Used to update an ebox after adding or removing devices from a template.
+
+=== Key Options
+
+*-l* _len_::
+  Set the key length in bytes (for *generate*; default 16).
+
+== Stream Operations
+
+*stream encrypt* _tpl_::
+  Encrypt streaming data from standard input in chunks.
+  Output is binary.
+
+*stream decrypt* [*-b*] [_file_]::
+  Decrypt streaming data from standard input (or _file_).
+  Data is only output after it has been authenticated and validated.
+
+== Challenge Operations
+
+Challenge operations are used during N-of-M recovery, where multiple token
+holders must cooperate to decrypt data.
+
+*challenge info*::
+  Read a recovery challenge from standard input, decrypt it, and print the
+  contained information.
+
+*challenge respond*::
+  Read a recovery challenge from standard input, decrypt it, print the
+  contained information, then wait for user confirmation before generating a
+  response.
+  The response must be transported back to the program that generated the
+  challenge to complete the recovery.
+
+== Template Paths
+
+When not using *-f*, templates are searched in the following locations:
+
+On macOS:::
+  *~/Library/Preferences/pivy/tpl/*_tpl_;;
+  */Library/Preferences/pivy/tpl/*_tpl_;;
+
+On Linux:::
+  *~/.config/pivy/tpl/*_tpl_;;
+  */etc/pivy/tpl/*_tpl_;;
+
+== Examples
+
+Create a template interactively:
+
+  $ pivy-box tpl create -i mykeys
+
+Create a template from the command line:
+
+  $ pivy-box tpl create mykeys \
+      primary \< local-guid 995E1713 \>
+
+List available templates:
+
+  $ pivy-box tpl list
+
+Generate a random 32-byte key:
+
+  $ pivy-box key generate -l 32 mykeys > secret.ebox
+
+Unlock a key ebox:
+
+  $ pivy-box key unlock secret.ebox
+
+Encrypt a file with streaming encryption:
+
+  $ pivy-box stream encrypt mykeys < largefile > largefile.enc
+
+Decrypt a stream-encrypted file:
+
+  $ pivy-box stream decrypt largefile.enc > largefile
+
+Re-encrypt a key ebox with an updated template:
+
+  $ pivy-box key relock newtemplate secret.ebox > secret-new.ebox
+
+== Exit Status
+
+*0*::
+  Success.
+
+*1*::
+  General error.
+
+*3*::
+  Invalid arguments.
+
+*4*::
+  PIN required or incorrect.
+
+== See Also
+
+*pivy-tool*(1), *pivy-agent*(1), *pivy-zfs*(1)
+
+== Authors
+
+pivy was written by Alex Wilson and contributors.

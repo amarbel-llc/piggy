@@ -5,3 +5,7 @@ members = [
     "crates/piggy-box",
     "crates/piggy-piv",
 ]
+# vendor/ holds the imported pivy source tree (see vendor/pivy/README.adoc
+# and piggy #21). It has its own rust/Cargo.toml workspace that must not
+# merge with piggy's — excluding keeps cargo from walking into it.
+exclude = ["vendor"]

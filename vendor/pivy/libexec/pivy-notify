@@ -1,0 +1,5 @@
+#!/bin/sh
+case "$(uname)" in
+  Darwin) exec terminal-notifier -title "$1" -message "$2" ;;
+  *)      exec notify-send "$1" "$2" ;;
+esac

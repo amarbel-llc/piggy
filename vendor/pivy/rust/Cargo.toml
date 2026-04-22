@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pivy-common",
+    "crates/pivy-piv",
+    "crates/pivy-agent",
+]

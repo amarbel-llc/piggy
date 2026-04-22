@@ -1,0 +1,203 @@
+= pivy-agent(1)
+:doctype: manpage
+:manmanual: pivy
+:mansource: pivy {pivy-version}
+
+== Name
+
+pivy-agent - SSH agent backed by PIV tokens
+
+== Synopsis
+
+*pivy-agent* [*-c* | *-s*] [*-Ddim*] [*-a* _bind_address_] [*-E* _fingerprint_hash_]
+[*-K* _cak_] *-g* _guid_ [_command_ [_arg_ ...]]
+
+*pivy-agent* [*-c* | *-s*] [*-Ddim*] [*-a* _bind_address_] [*-E* _fingerprint_hash_]
+*-A* [_command_ [_arg_ ...]]
+
+*pivy-agent* [*-c* | *-s*] *-k*
+
+*pivy-agent* *install-service* [*-g* _guid_] [*-K* _cak_] [*-A*] [*-a* _socket_]
+
+*pivy-agent* *restart-service*
+
+*pivy-agent* *uninstall-service*
+
+== Description
+
+*pivy-agent* is an SSH agent implementation that uses keys stored on
+PIV-compatible smart cards and tokens (such as YubiKeys) instead of keys stored
+on disk.
+It is a drop-in replacement for the OpenSSH *ssh-agent*(1), except that keys
+are always on the PIV token and *ssh-add*(1) is not needed to load them.
+
+The agent requires either a specific token GUID (*-g*) or all-card mode (*-A*).
+When a specific GUID is given, the agent can optionally verify the token's
+identity using the Card Authentication Key (*-K*).
+
+The PIV PIN can be provided via *SSH_ASKPASS* for graphical prompts, or via
+*ssh-add -X* interactively.
+The agent stores the PIN in memory protected by guard pages and marks it
+non-swappable and (on Linux) non-dumpable.
+The PIN is automatically forgotten if the token is removed for more than a few
+minutes or if unusual conditions are detected.
+
+== Options
+
+*-A*::
+  Expose identities from all PIV cards present on the system.
+  Mutually exclusive with *-g* and *-K*.
+
+*-a* _bind_address_::
+  Bind the agent to a specific UNIX domain socket path instead of creating a
+  temporary one.
+
+*-c*::
+  Generate C shell (*csh*) style commands on standard output.
+  Mutually exclusive with *-s*.
+
+*-s*::
+  Generate Bourne shell style commands on standard output.
+  Mutually exclusive with *-c*.
+
+*-C*::
+  Confirm new connections by running the program specified in *SSH_CONFIRM* or
+  *SSH_ASKPASS*.
+  Specify once to confirm only forwarded agent connections.
+  Specify twice to confirm all connections.
+
+*-D*::
+  Foreground mode; do not fork.
+
+*-d*::
+  Debug mode.
+  Enable verbose logging to standard error.
+
+*-i*::
+  Foreground mode with command logging.
+
+*-m*::
+  Allow signing with the 9D (Key Management) key.
+  By default, the 9D key is not exposed for signing because it is intended for
+  ECDH key agreement only.
+
+*-E* _fingerprint_hash_::
+  Set the hash algorithm used for key fingerprints.
+
+*-g* _guid_::
+  GUID or GUID prefix of the PIV token to use.
+  Required unless *-A* is given.
+
+*-K* _cak_::
+  Public key of the 9E (Card Authentication) slot, used to verify the token's
+  identity before sending it the user's PIN.
+  The key is specified in OpenSSH format.
+
+*-k*::
+  Kill an already-running agent.
+
+*-U*::
+  Do not check the UID of connecting clients.
+  By default, only the user who started the agent may connect.
+
+*-u* _username_::
+  Allow the specified user to connect to the agent.
+  May be given multiple times.
+
+*-S* _slot_spec_::
+  Filter the key slots available through the agent.
+  By default all keys are available.
+  Use *!9e* to disable just 9E, or *!all,9a* to disable everything except 9A.
+
+== Service Management
+
+*install-service*::
+  Install a systemd user service (Linux) or launchd user agent (macOS) for
+  the agent.
+  Accepts *-g*, *-K*, *-A*, and *-a* to configure the service.
+
+*restart-service*::
+  Restart a running agent service.
+
+*uninstall-service*::
+  Remove a previously installed agent service.
+
+== Environment
+
+*SSH_ASKPASS*::
+  Path to a program to run to prompt for the PIV PIN at first use.
+  The program receives the prompt string as its first argument and should
+  output the PIN on standard output.
+
+*SSH_CONFIRM*::
+  Path to a program to run to confirm that a new client should be allowed to
+  use the agent's keys.
+  The special value *zenity* invokes Zenity for graphical confirmation.
+
+*SSH_NOTIFY_SEND*::
+  Path to a notification command.
+  Called with a title and message when touch confirmation may be required on
+  the token.
+
+== PIN Management
+
+The agent's PIN state can be managed using standard *ssh-add*(1) commands:
+
+*ssh-add -X*::
+  Unlock the agent by providing the PIV PIN.
+
+*ssh-add -x*::
+  Lock the agent and forget the PIN.
+  Any lock password may be used.
+
+*ssh-add -D*::
+  Forget the PIN without prompting for a lock password.
+
+*ssh-add -l*::
+  List the keys currently available from the agent.
+
+== Examples
+
+Start the agent for a specific token and run a shell:
+
+  $ pivy-agent -g 995E1713 bash
+
+Start the agent in all-card mode with Bourne shell output:
+
+  $ eval $(pivy-agent -s -A)
+
+Start with confirmation required for forwarded connections:
+
+  $ pivy-agent -C -g 995E1713 bash
+
+Start with CAK verification for extra security:
+
+  $ pivy-agent -g 995E1713 \
+      -K "ecdsa-sha2-nistp256 AAAA..." bash
+
+Install as a system service (macOS):
+
+  $ pivy-agent install-service -g 995E1713
+
+Only expose the 9A authentication key:
+
+  $ pivy-agent -S '!all,9a' -g 995E1713 bash
+
+== Exit Status
+
+*0*::
+  Success.
+
+*1*::
+  General error.
+
+*3*::
+  Invalid arguments.
+
+== See Also
+
+*pivy-tool*(1), *pivy-box*(1), *ssh-agent*(1), *ssh-add*(1)
+
+== Authors
+
+pivy was written by Alex Wilson and contributors.
