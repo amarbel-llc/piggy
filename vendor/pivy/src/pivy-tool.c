@@ -3291,6 +3291,7 @@ main(int argc, char *argv[])
 	if (err && errf_caused_by(err, "ServiceError")) {
 		warnfx(err, "failed to create PCSC context");
 		errf_free(err);
+		err = ERRF_OK;
 	} else if (err) {
 		errfx(EXIT_IO_ERROR, err, "failed to initialise libpcsc");
 	}
