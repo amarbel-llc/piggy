@@ -4,13 +4,6 @@
     nixpkgs-master.url = "github:NixOS/nixpkgs/e2dde111aea2c0699531dc616112a96cd55ab8b5";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
 
-    pivy = {
-      url = "github:amarbel-llc/pivy";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.nixpkgs-master.follows = "nixpkgs-master";
-      inputs.utils.follows = "utils";
-    };
-
     bob = {
       url = "github:amarbel-llc/bob";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -51,7 +44,6 @@
       nixpkgs,
       nixpkgs-master,
       utils,
-      pivy,
       bob,
       jcardsim,
       pivapplet,
@@ -74,11 +66,18 @@
           }
         );
 
+        # pivy C package, built from vendor/pivy (see nix/pivy.nix and
+        # piggy #21). Local derivation instead of a nested flake input.
+        pivyPkg = import ./nix/pivy.nix {
+          inherit pkgs;
+          src = ./vendor/pivy;
+        };
+
         # Runtime deps on PATH for the wrapped piggy binary. `pivy` is kept
         # as a fallback for subcommands the rust binary hasn't implemented
         # yet (box/tool/ca/luks/zfs) — see crates/piggy/src/fallback.rs.
         runtimeDeps = [
-          pivy.packages.${system}.default
+          pivyPkg
           pkgs.git
           pkgs.tree
           pkgs.qrencode
