@@ -259,6 +259,29 @@ fib-up:
       kill "$fib_pid" "$pcscd_pid" 2>/dev/null || true
       exit 1
     fi
+    # Readiness probe: on CI (and other slow hosts) the first real
+    # SCardConnect against jCardSim can lag a beat after activation,
+    # so the very next `pivy-tool list` silently returns no tokens —
+    # piv_enumerate logs the per-reader SCardConnect failure only at
+    # BNY_DEBUG (see #20). Loop a PIV AID SELECT via opensc-tool until
+    # the applet responds so fib-up's contract is "when this returns,
+    # pivy-tool can enumerate". opensc-tool is the right probe here:
+    # it uses its own pcsclite build and is known to succeed even in
+    # the window where pivy-tool fails silently.
+    piv_select_apdu='00 A4 04 00 09 A0 00 00 03 08 00 00 10 00'
+    ready=false
+    for _ in $(seq 1 50); do
+      if opensc-tool -r "$reader" -s "$piv_select_apdu" >.fib/ready.log 2>&1; then
+        ready=true
+        break
+      fi
+      sleep 0.1
+    done
+    if [[ "$ready" != true ]]; then
+      echo "fib-up: PIV AID SELECT never succeeded — see .fib/ready.log" >&2
+      kill "$fib_pid" "$pcscd_pid" 2>/dev/null || true
+      exit 1
+    fi
     # Export env for the caller.
     cat >.fib/env <<EOF
     export PCSCLITE_CSOCK_NAME="$sock"
