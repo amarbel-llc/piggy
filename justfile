@@ -325,6 +325,40 @@ fib-smoke:
     fi
     echo "fib-smoke: PASS"
 
+# Trace pivy-tool vs opensc-tool against a running fib stack.
+# Fib must already be up (just fib-up). Used to investigate #20
+# (pivy-tool list empty despite opensc-tool seeing the virtual card).
+[group('debug')]
+debug-fib-pivy-trace:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [[ ! -f .fib/env ]]; then
+      echo "ERROR: .fib/env not found - run 'just fib-up' first" >&2
+      exit 1
+    fi
+    eval "$(cat .fib/env)"
+
+    echo "=== env ==="
+    echo "PCSCLITE_CSOCK_NAME=${PCSCLITE_CSOCK_NAME:-<unset>}"
+    echo "socket exists: $(test -S "${PCSCLITE_CSOCK_NAME:-}" && echo yes || echo no)"
+
+    echo
+    echo "=== opensc-tool -l (list only, no SCardConnect) ==="
+    opensc-tool -l 2>&1 || echo "(opensc-tool -l failed: exit $?)"
+
+    echo
+    echo "=== opensc-tool PIV AID SELECT (forces SCardConnect) ==="
+    opensc-tool --reader 0 --send-apdu 00A4040009A00000030800001000 2>&1 \
+      || echo "(opensc-tool send-apdu failed: exit $?)"
+
+    echo
+    echo "=== pivy-tool -d list (bunyan TRACE output) ==="
+    pivy-tool -d list 2>&1 || echo "(pivy-tool -d list failed: exit $?)"
+
+    echo
+    echo "=== pivy-tool -dd list (full APDU debug) ==="
+    pivy-tool -dd list 2>&1 || echo "(pivy-tool -dd list failed: exit $?)"
+
 # Capture the jcardsim Maven dependency closure into nix/jcardsim-m2/.
 # Run once whenever the jcardsim flake input is bumped. The vendored .m2
 # replaces buildMavenPackage's FOD so the nix build never fetches from
