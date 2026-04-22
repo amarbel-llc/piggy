@@ -157,20 +157,17 @@ impl PivBox {
         let group = EcGroup::from_curve_name(self.curve.nid())?;
         let mut ctx = openssl::bn::BigNumContext::new()?;
 
-        // Reconstruct ephemeral public key from compressed point
         let ephem_point = EcPoint::from_bytes(&group, &self.ephemeral_pubkey, &mut ctx)?;
         let ephem_pub = EcKey::from_public_key(&group, &ephem_point)?;
 
-        // ECDH shared secret
         let shared_secret = ecdh_derive(privkey, &ephem_pub)?;
+        self.open_with_secret(&shared_secret)
+    }
 
-        // KDF
-        let key_material = kdf_sha512(&shared_secret, &self.nonce)?;
-
-        // Decrypt
+    pub fn open_with_secret(&mut self, shared_secret: &[u8]) -> Result<()> {
+        let key_material = kdf_sha512(shared_secret, &self.nonce)?;
         let padded = chacha20_poly1305_decrypt(&key_material[..32], &self.iv, &self.ciphertext)?;
         let plain = pkcs7_unpad(&padded, 16)?;
-
         self.plaintext = Some(Zeroizing::new(plain));
         Ok(())
     }

@@ -14,6 +14,7 @@ use ssh_agent_lib::{
 };
 use ssh_key::{public::KeyData, Algorithm, PublicKey, Signature};
 
+use piggy_box::piv_box::{EcCurve, PivBox};
 use piggy_piv::{Guid, PivAlgorithm, PivContext};
 use zeroize::Zeroize;
 
@@ -114,6 +115,7 @@ impl Session for PiggyAgent {
                     "session-bind@openssh.com",
                     "pin-status@joyent.com",
                     "ecdh@joyent.com",
+                    "ecdh-rebox@joyent.com",
                     "ykpiv-attest@joyent.com",
                 ];
                 let mut buf = Vec::new();
@@ -143,6 +145,10 @@ impl Session for PiggyAgent {
             }
             "ecdh@joyent.com" => {
                 self.handle_ecdh(&extension.details.clone().into_bytes())
+                    .await
+            }
+            "ecdh-rebox@joyent.com" => {
+                self.handle_ecdh_rebox(&extension.details.clone().into_bytes())
                     .await
             }
             "ykpiv-attest@joyent.com" => {
@@ -258,6 +264,107 @@ impl PiggyAgent {
             name: "ykpiv-attest@joyent.com".into(),
             details: resp.into(),
         }))
+    }
+
+    async fn handle_ecdh_rebox(
+        &mut self,
+        details: &[u8],
+    ) -> Result<Option<Extension>, AgentError> {
+        let inner = read_ssh_string(details, 0)
+            .map_err(|e| AgentError::Other(e.into()))?
+            .0;
+
+        let (boxbuf, pos) =
+            read_ssh_string(inner, 0).map_err(|e| AgentError::Other(e.into()))?;
+        let (guid_bytes, pos) =
+            read_ssh_string(inner, pos).map_err(|e| AgentError::Other(e.into()))?;
+        let slot_id = *inner.get(pos).ok_or_else(|| {
+            AgentError::Other("ecdh-rebox: truncated slot_id".into())
+        })?;
+        let pos = pos + 1;
+        let (partner_blob, pos) =
+            read_ssh_string(inner, pos).map_err(|e| AgentError::Other(e.into()))?;
+        let flags = read_u32_be(inner, pos, "ecdh-rebox")?;
+
+        if flags != 0 {
+            return Err(AgentError::Other(
+                format!("ecdh-rebox: unsupported flags {flags:#x}").into(),
+            ));
+        }
+
+        let mut piv_box = PivBox::from_bytes(boxbuf)
+            .map_err(|e| AgentError::Other(format!("ecdh-rebox: bad box: {e}").into()))?;
+
+        let (box_guid, box_slot) = piv_box.guid_slot.as_ref().ok_or_else(|| {
+            AgentError::Other("ecdh-rebox: box has no GUID/slot".into())
+        })?;
+        let box_slot = *box_slot;
+
+        let key = self
+            .find_key_by_guid(box_guid)
+            .await
+            .ok_or_else(|| AgentError::Other("ecdh-rebox: no matching key".into()))?;
+
+        let token = reconnect_to_token(&key.guid)?;
+
+        if box_slot != 0x9E {
+            let pin_guard = self.pin.lock().await;
+            let pin = pin_guard
+                .as_ref()
+                .ok_or_else(|| AgentError::Other("PIN required (use ssh-add -X)".into()))?;
+            token
+                .verify_pin(pin)
+                .map_err(|e| AgentError::Other(e.to_string().into()))?;
+        }
+
+        let ec_point = decompress_ec_point(&piv_box.ephemeral_pubkey, piv_box.curve)?;
+
+        let shared_secret = token
+            .ecdh_derive(box_slot, &ec_point)
+            .map_err(|e| AgentError::Other(e.to_string().into()))?;
+
+        piv_box
+            .open_with_secret(&shared_secret)
+            .map_err(|e| AgentError::Other(format!("ecdh-rebox: decrypt: {e}").into()))?;
+
+        let partner_point = extract_ec_point_from_ssh_blob(partner_blob)
+            .map_err(|e| AgentError::Other(e.into()))?;
+
+        let partner_ec_pub = ec_public_key_from_point(&partner_point, piv_box.curve)
+            .map_err(|e| AgentError::Other(e.into()))?;
+
+        let mut new_box = PivBox::new(piv_box.curve);
+        if !guid_bytes.is_empty() {
+            let target_guid = Guid::from_bytes(guid_bytes)
+                .map_err(|e| AgentError::Other(format!("ecdh-rebox: bad target GUID: {e}").into()))?;
+            new_box.guid_slot = Some((target_guid, slot_id));
+        }
+        let plaintext = piv_box
+            .take_data()
+            .map_err(|e| AgentError::Other(format!("ecdh-rebox: take_data: {e}").into()))?;
+        new_box.set_data(&plaintext);
+
+        new_box
+            .seal_offline(&partner_ec_pub)
+            .map_err(|e| AgentError::Other(format!("ecdh-rebox: seal: {e}").into()))?;
+
+        let new_box_bytes = new_box
+            .to_bytes()
+            .map_err(|e| AgentError::Other(format!("ecdh-rebox: serialize: {e}").into()))?;
+
+        let mut resp = Vec::new();
+        resp.extend_from_slice(&(new_box_bytes.len() as u32).to_be_bytes());
+        resp.extend_from_slice(&new_box_bytes);
+
+        Ok(Some(Extension {
+            name: "ecdh-rebox@joyent.com".into(),
+            details: resp.into(),
+        }))
+    }
+
+    async fn find_key_by_guid(&self, guid: &Guid) -> Option<CachedKey> {
+        let keys = self.keys.lock().await;
+        keys.iter().find(|k| &k.guid == guid).cloned()
     }
 }
 
@@ -560,6 +667,36 @@ fn extract_ec_point_from_ssh_blob(blob: &[u8]) -> Result<Vec<u8>, String> {
     let (_curve, pos) = read_ssh_string(blob, pos)?;
     let (point, _) = read_ssh_string(blob, pos)?;
     Ok(point.to_vec())
+}
+
+fn decompress_ec_point(compressed: &[u8], curve: EcCurve) -> Result<Vec<u8>, AgentError> {
+    use openssl::bn::BigNumContext;
+    use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
+
+    let group = EcGroup::from_curve_name(curve.nid())
+        .map_err(|e| AgentError::Other(format!("ec group: {e}").into()))?;
+    let mut ctx = BigNumContext::new()
+        .map_err(|e| AgentError::Other(format!("bn ctx: {e}").into()))?;
+    let point = EcPoint::from_bytes(&group, compressed, &mut ctx)
+        .map_err(|e| AgentError::Other(format!("ec decompress: {e}").into()))?;
+    point
+        .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+        .map_err(|e| AgentError::Other(format!("ec to_bytes: {e}").into()))
+}
+
+fn ec_public_key_from_point(
+    point: &[u8],
+    curve: EcCurve,
+) -> Result<openssl::ec::EcKey<openssl::pkey::Public>, String> {
+    use openssl::bn::BigNumContext;
+    use openssl::ec::{EcGroup, EcKey, EcPoint};
+
+    let group =
+        EcGroup::from_curve_name(curve.nid()).map_err(|e| format!("ec group: {e}"))?;
+    let mut ctx = BigNumContext::new().map_err(|e| format!("bn ctx: {e}"))?;
+    let ec_point =
+        EcPoint::from_bytes(&group, point, &mut ctx).map_err(|e| format!("ec point: {e}"))?;
+    EcKey::from_public_key(&group, &ec_point).map_err(|e| format!("ec key: {e}"))
 }
 
 /// Encode (r, s) as SSH mpint-pair for ECDSA signature blob.
