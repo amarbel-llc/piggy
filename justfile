@@ -321,6 +321,9 @@ fib-smoke:
     done
     if [[ "$found" != true ]]; then
       echo "fib-smoke: FAIL — virtual card not visible after 10 attempts" >&2
+      echo
+      echo "--- dumping debug-fib-pivy-trace on failure (see #20) ---" >&2
+      just debug-fib-pivy-trace >&2 || true
       exit 1
     fi
     echo "fib-smoke: PASS"
