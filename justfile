@@ -85,6 +85,33 @@ check-piggy:
 
 # --- debug ---
 
+# PIN-safe side-by-side of Rust-piggy and C-pivy stream encrypt byte layouts
+# against the same fib template. Used to diagnose #29 wire-format issues.
+# Only runs the encrypt paths — decrypt is intentionally omitted because it
+# would prompt for a PIN on /dev/tty and consume PIV retries on fib's slot.
+[group('debug')]
+debug-interop-stream-bytes: build-rust
+  #!/usr/bin/env bash
+  set -euo pipefail
+  trap 'just fib-down' EXIT
+  just fib-up
+  eval "$(cat .fib/env)"
+  pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
+  guid=$(pivy-tool list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+  export HOME="$PWD/.fib"
+  "$PWD/target/debug/piggy" box tpl create interop primary local-guid "$guid"
+  tpl_file="$HOME/.pivy/tpl/interop"
+
+  echo "--- rust encrypt first 80 bytes ---"
+  printf "hello from rust" | "$PWD/target/debug/piggy" box stream encrypt "$tpl_file" > /tmp/stream-rust.ebox
+  head -c 80 /tmp/stream-rust.ebox | xxd
+  echo "total: $(wc -c < /tmp/stream-rust.ebox) bytes"
+  echo
+  echo "--- C encrypt first 80 bytes ---"
+  printf "hello from c" | pivy-box stream encrypt "$tpl_file" > /tmp/stream-c.ebox
+  head -c 80 /tmp/stream-c.ebox | xxd
+  echo "total: $(wc -c < /tmp/stream-c.ebox) bytes"
+
 # Run the Go conformance binary against a freshly-started piggy agent and
 # print per-test PASS/FAIL/SKIP lines. Useful for eyeballing which subtests
 # pass without bats swallowing the output.

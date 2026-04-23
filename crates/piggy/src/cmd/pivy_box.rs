@@ -110,7 +110,7 @@ fn cmd_stream_encrypt(args: &[&str]) -> i32 {
         }
     };
 
-    let tpl = match piggy_box::EboxTemplate::from_bytes(&tpl_bytes) {
+    let tpl = match piggy_box::EboxTemplate::from_b64_bytes(&tpl_bytes) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("piggy box stream encrypt: invalid template: {e}");
@@ -382,8 +382,10 @@ fn cmd_tpl_create(args: &[&str]) -> i32 {
         }],
     };
 
-    let tpl_bytes = match tpl.to_bytes() {
-        Ok(b) => b,
+    // Serialize in pivy-box's on-disk format: base64-wrapped at 65 chars/line.
+    // See vendor/pivy/src/pivy-box.c `printwrap(sshbuf_dtob64_string(...))`.
+    let tpl_text = match tpl.to_b64_wrapped() {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("piggy box tpl create: serialize: {e}");
             return 1;
@@ -398,7 +400,7 @@ fn cmd_tpl_create(args: &[&str]) -> i32 {
     }
 
     let tpl_file = tpl_dir.join(tpl_name);
-    if let Err(e) = std::fs::write(&tpl_file, &tpl_bytes) {
+    if let Err(e) = std::fs::write(&tpl_file, tpl_text.as_bytes()) {
         eprintln!("piggy box tpl create: write {}: {e}", tpl_file.display());
         return 1;
     }
@@ -429,7 +431,7 @@ fn cmd_tpl_show(args: &[&str]) -> i32 {
         }
     };
 
-    let tpl = match piggy_box::EboxTemplate::from_bytes(&tpl_bytes) {
+    let tpl = match piggy_box::EboxTemplate::from_b64_bytes(&tpl_bytes) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("piggy box tpl show: invalid template: {e}");

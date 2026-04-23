@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use piggy_piv::Guid;
 
 use crate::error::{BoxError, Result};
@@ -5,6 +6,11 @@ use crate::piv_box::EcCurve;
 use crate::wire::{WireReader, WireWriter};
 
 const EBOX_MAGIC: u16 = 0xEB0C;
+
+/// Line width pivy-box wraps base64 at (`BASE64_LINE_LEN` in
+/// `vendor/pivy/src/ebox-cmd.h`). Matches the on-disk byte-for-byte so
+/// templates written by Rust are indistinguishable from pivy's.
+const BASE64_LINE_LEN: usize = 65;
 #[cfg(test)]
 const EBOX_TPL_VERSION: u8 = 1;
 const EBOX_TYPE_TEMPLATE: u8 = 0x01;
@@ -106,6 +112,43 @@ impl EboxTemplate {
         }
 
         Ok(EboxTemplate { version, configs })
+    }
+
+    /// Serialize as a pivy-box-compatible template file: binary wire format
+    /// wrapped as base64 at 65 chars per line, each line terminated with
+    /// `\n` (including the last). Exactly matches what
+    /// `vendor/pivy/src/pivy-box.c` writes via
+    /// `printwrap(sshbuf_dtob64_string(buf, 0), BASE64_LINE_LEN)`.
+    pub fn to_b64_wrapped(&self) -> Result<String> {
+        let bin = self.to_bytes()?;
+        let raw = BASE64_STANDARD.encode(&bin);
+        let mut out = String::with_capacity(raw.len() + raw.len() / BASE64_LINE_LEN + 1);
+        let bytes = raw.as_bytes();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let end = (offset + BASE64_LINE_LEN).min(bytes.len());
+            out.push_str(std::str::from_utf8(&bytes[offset..end]).unwrap());
+            out.push('\n');
+            offset = end;
+        }
+        Ok(out)
+    }
+
+    /// Parse a pivy-box-compatible template file: strips any whitespace
+    /// (newlines, spaces, tabs, CR) from `data` and base64-decodes the
+    /// remainder before delegating to [`Self::from_bytes`]. Tolerant of
+    /// either LF or CRLF line endings and of files with or without a
+    /// trailing newline.
+    pub fn from_b64_bytes(data: &[u8]) -> Result<Self> {
+        let stripped: Vec<u8> = data
+            .iter()
+            .copied()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect();
+        let bin = BASE64_STANDARD
+            .decode(&stripped)
+            .map_err(|e| BoxError::Wire(format!("base64 decode failed: {e}")))?;
+        Self::from_bytes(&bin)
     }
 }
 
@@ -358,6 +401,80 @@ mod tests {
         assert!(matches!(
             EboxTemplate::from_bytes(w.as_bytes()),
             Err(BoxError::BadEboxType(0x02))
+        ));
+    }
+
+    #[test]
+    fn b64_wrap_width_matches_pivy() {
+        // Craft a template large enough to need multiple wrapped lines.
+        let tpl = EboxTemplate {
+            version: EBOX_TPL_VERSION,
+            configs: vec![EboxTplConfig {
+                config_type: EboxConfigType::Primary,
+                n: 1,
+                parts: vec![sample_part(EcCurve::NistP384)],
+            }],
+        };
+        let text = tpl.to_b64_wrapped().unwrap();
+        assert!(text.ends_with('\n'), "must end with newline");
+        // Every line except the last may be exactly BASE64_LINE_LEN long; the
+        // last may be shorter. No line may exceed BASE64_LINE_LEN.
+        for (i, line) in text.trim_end_matches('\n').split('\n').enumerate() {
+            assert!(
+                line.len() <= BASE64_LINE_LEN,
+                "line {i} is {} chars, max {BASE64_LINE_LEN}",
+                line.len()
+            );
+        }
+    }
+
+    #[test]
+    fn b64_roundtrip_through_wire() {
+        let tpl = EboxTemplate {
+            version: EBOX_TPL_VERSION,
+            configs: vec![EboxTplConfig {
+                config_type: EboxConfigType::Primary,
+                n: 1,
+                parts: vec![sample_part(EcCurve::NistP256)],
+            }],
+        };
+        let text = tpl.to_b64_wrapped().unwrap();
+        let parsed = EboxTemplate::from_b64_bytes(text.as_bytes()).unwrap();
+        assert_eq!(parsed.to_bytes().unwrap(), tpl.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn b64_from_bytes_tolerates_crlf_and_no_trailing_newline() {
+        let tpl = EboxTemplate {
+            version: EBOX_TPL_VERSION,
+            configs: vec![EboxTplConfig {
+                config_type: EboxConfigType::Primary,
+                n: 1,
+                parts: vec![sample_part(EcCurve::NistP256)],
+            }],
+        };
+        let text = tpl.to_b64_wrapped().unwrap();
+        let crlf: String = text.replace('\n', "\r\n");
+        let no_trail = crlf.trim_end_matches(['\r', '\n']);
+        assert!(EboxTemplate::from_b64_bytes(no_trail.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn b64_rejects_binary_input() {
+        // Passing raw binary (old on-disk format) must fail cleanly, not
+        // silently misinterpret it as base64.
+        let tpl = EboxTemplate {
+            version: EBOX_TPL_VERSION,
+            configs: vec![EboxTplConfig {
+                config_type: EboxConfigType::Primary,
+                n: 1,
+                parts: vec![sample_part(EcCurve::NistP256)],
+            }],
+        };
+        let bin = tpl.to_bytes().unwrap();
+        assert!(matches!(
+            EboxTemplate::from_b64_bytes(&bin),
+            Err(BoxError::Wire(_))
         ));
     }
 }

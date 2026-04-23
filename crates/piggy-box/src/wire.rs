@@ -60,22 +60,20 @@ impl<'a> WireReader<'a> {
         Ok(v)
     }
 
-    /// `cstring8`: u8 length prefix (includes trailing NUL) + bytes + NUL.
-    /// Returns the string without the NUL terminator.
+    /// `cstring8`: u8 length prefix + that many bytes of UTF-8 text. No
+    /// NUL terminator is written on the wire — pivy's `sshbuf_put_cstring8`
+    /// (see `vendor/pivy/openssh.patch:285`) forwards to
+    /// `sshbuf_put_string8(buf, v, strlen(v))`; the NUL is appended by the
+    /// reader as a local convenience when it materializes a C string.
+    ///
+    /// Returns the string; fails if the payload contains an interior NUL
+    /// or is not valid UTF-8.
     pub fn get_cstring8(&mut self) -> Result<String> {
         let raw = self.get_string8()?;
-        if raw.is_empty() {
-            return Err(BoxError::Wire("cstring8 is empty (no NUL)".into()));
-        }
-        if raw[raw.len() - 1] != 0 {
-            return Err(BoxError::Wire("cstring8 missing NUL terminator".into()));
-        }
-        let s = &raw[..raw.len() - 1];
-        if s.contains(&0u8) {
+        if raw.contains(&0u8) {
             return Err(BoxError::Wire("cstring8 contains interior NUL".into()));
         }
-        String::from_utf8(s.to_vec())
-            .map_err(|e| BoxError::Wire(format!("cstring8 not UTF-8: {e}")))
+        String::from_utf8(raw).map_err(|e| BoxError::Wire(format!("cstring8 not UTF-8: {e}")))
     }
 
     /// `eckey8`: u8 length prefix + compressed EC point bytes.
@@ -149,22 +147,15 @@ impl WireWriter {
         Ok(())
     }
 
-    /// `cstring8`: u8 length prefix (includes trailing NUL) + bytes + NUL.
+    /// `cstring8`: u8 length prefix + that many bytes of UTF-8 text. No
+    /// NUL terminator is written on the wire (matches pivy's
+    /// `sshbuf_put_cstring8` in `vendor/pivy/openssh.patch:285`, which
+    /// forwards to `sshbuf_put_string8(buf, v, strlen(v))`).
     pub fn put_cstring8(&mut self, s: &str) -> Result<()> {
-        let with_nul_len = s.len() + 1;
-        if with_nul_len > 255 {
-            return Err(BoxError::Wire(format!(
-                "cstring8 too long: {} bytes",
-                with_nul_len
-            )));
-        }
         if s.as_bytes().contains(&0u8) {
             return Err(BoxError::Wire("cstring8 contains interior NUL".into()));
         }
-        self.buf.push(with_nul_len as u8);
-        self.buf.extend_from_slice(s.as_bytes());
-        self.buf.push(0);
-        Ok(())
+        self.put_string8(s.as_bytes())
     }
 
     /// `eckey8`: u8 length prefix + compressed EC point bytes.
@@ -242,6 +233,29 @@ mod tests {
     fn cstring8_rejects_interior_nul() {
         let mut w = WireWriter::new();
         assert!(w.put_cstring8("bad\0string").is_err());
+    }
+
+    #[test]
+    fn cstring8_wire_matches_pivy_no_trailing_nul() {
+        // pivy's sshbuf_put_cstring8 writes `u8 strlen(v)` + `strlen(v) bytes`,
+        // no trailing NUL. A Rust-written "aes256-gcm" must round-trip
+        // through C pivy-box, so we pin the exact bytes here.
+        let mut w = WireWriter::new();
+        w.put_cstring8("aes256-gcm").unwrap();
+        assert_eq!(
+            w.as_bytes(),
+            &[0x0a, b'a', b'e', b's', b'2', b'5', b'6', b'-', b'g', b'c', b'm'][..]
+        );
+    }
+
+    #[test]
+    fn cstring8_read_rejects_interior_nul_on_wire() {
+        // Reader must reject stale Rust templates that still carry an
+        // interior or trailing NUL — otherwise consumers would see a
+        // surprise NUL in their returned String.
+        let raw = [0x05u8, b'a', b'b', 0x00, b'c', b'd'];
+        let mut r = WireReader::new(&raw);
+        assert!(r.get_cstring8().is_err());
     }
 
     #[test]
