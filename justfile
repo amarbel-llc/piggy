@@ -53,10 +53,12 @@ test-bats-conformance-interop: build-rust
   just fib-up
   eval "$(cat .fib/env)"
   # Generate a key on the fib card's 9D slot (Key Management / ECDH)
-  # so ebox encrypt/decrypt has something to work with.
-  pivy-tool -P 123456 -K default generate 9d
-  # Discover the card's GUID for template creation.
-  guid=$(pivy-tool list 2>&1 | grep -oE '[0-9a-f]{32}' | head -1)
+  # so ebox encrypt/decrypt has something to work with. pivy-tool requires
+  # -a on `generate`; eccp256 matches the Rust ECDH codepath today.
+  pivy-tool -P 123456 -K default -a eccp256 generate 9d
+  # Discover the card's GUID for template creation. pivy-tool prints the
+  # GUID in uppercase, so the grep must be case-insensitive.
+  guid=$(pivy-tool list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
   # Create a template via the Rust CLI (tests will also create their own).
   export HOME="$PWD/.fib"
   "$PWD/target/debug/piggy" box tpl create interop primary local-guid "$guid"
