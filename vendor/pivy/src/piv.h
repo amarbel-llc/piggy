@@ -10,22 +10,22 @@
 #if !defined(_PIV_H)
 #define _PIV_H
 
-#include <stdint.h>
 #include <assert.h>
+#include <stdint.h>
 
 #if defined(__APPLE__)
-#include <PCSC/wintypes.h>
 #include <PCSC/winscard.h>
+#include <PCSC/wintypes.h>
 #else
-#include <wintypes.h>
 #include <winscard.h>
+#include <wintypes.h>
 #endif
 
 #include <sys/types.h>
 
+#include <openssl/cms.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
-#include <openssl/cms.h>
 
 #include "errf.h"
 
@@ -107,45 +107,45 @@
  * IDs that we support.
  */
 enum piv_slotid {
-	PIV_SLOT_9A = 0x9A,
-	PIV_SLOT_9B = 0x9B,
-	PIV_SLOT_9C = 0x9C,
-	PIV_SLOT_9D = 0x9D,
-	PIV_SLOT_9E = 0x9E,
+  PIV_SLOT_9A = 0x9A,
+  PIV_SLOT_9B = 0x9B,
+  PIV_SLOT_9C = 0x9C,
+  PIV_SLOT_9D = 0x9D,
+  PIV_SLOT_9E = 0x9E,
 
-	PIV_SLOT_82 = 0x82,
-	PIV_SLOT_83 = 0x83,
-	PIV_SLOT_84 = 0x84,
-	PIV_SLOT_85 = 0x85,
-	PIV_SLOT_86 = 0x86,
-	PIV_SLOT_87 = 0x87,
-	PIV_SLOT_88 = 0x88,
-	PIV_SLOT_89 = 0x89,
-	PIV_SLOT_8A = 0x8A,
-	PIV_SLOT_8B = 0x8B,
-	PIV_SLOT_8C = 0x8C,
-	PIV_SLOT_8D = 0x8D,
-	PIV_SLOT_8E = 0x8E,
-	PIV_SLOT_8F = 0x8F,
-	PIV_SLOT_90 = 0x90,
-	PIV_SLOT_91 = 0x91,
-	PIV_SLOT_92 = 0x92,
-	PIV_SLOT_93 = 0x93,
-	PIV_SLOT_94 = 0x94,
-	PIV_SLOT_95 = 0x95,
+  PIV_SLOT_82 = 0x82,
+  PIV_SLOT_83 = 0x83,
+  PIV_SLOT_84 = 0x84,
+  PIV_SLOT_85 = 0x85,
+  PIV_SLOT_86 = 0x86,
+  PIV_SLOT_87 = 0x87,
+  PIV_SLOT_88 = 0x88,
+  PIV_SLOT_89 = 0x89,
+  PIV_SLOT_8A = 0x8A,
+  PIV_SLOT_8B = 0x8B,
+  PIV_SLOT_8C = 0x8C,
+  PIV_SLOT_8D = 0x8D,
+  PIV_SLOT_8E = 0x8E,
+  PIV_SLOT_8F = 0x8F,
+  PIV_SLOT_90 = 0x90,
+  PIV_SLOT_91 = 0x91,
+  PIV_SLOT_92 = 0x92,
+  PIV_SLOT_93 = 0x93,
+  PIV_SLOT_94 = 0x94,
+  PIV_SLOT_95 = 0x95,
 
-	PIV_SLOT_F9 = 0xF9,
+  PIV_SLOT_F9 = 0xF9,
 
-	PIV_SLOT_PIV_AUTH = PIV_SLOT_9A,
-	PIV_SLOT_ADMIN = PIV_SLOT_9B,
-	PIV_SLOT_SIGNATURE = PIV_SLOT_9C,
-	PIV_SLOT_KEY_MGMT = PIV_SLOT_9D,
-	PIV_SLOT_CARD_AUTH = PIV_SLOT_9E,
+  PIV_SLOT_PIV_AUTH = PIV_SLOT_9A,
+  PIV_SLOT_ADMIN = PIV_SLOT_9B,
+  PIV_SLOT_SIGNATURE = PIV_SLOT_9C,
+  PIV_SLOT_KEY_MGMT = PIV_SLOT_9D,
+  PIV_SLOT_CARD_AUTH = PIV_SLOT_9E,
 
-	PIV_SLOT_RETIRED_1 = PIV_SLOT_82,
-	PIV_SLOT_RETIRED_20 = PIV_SLOT_95,
+  PIV_SLOT_RETIRED_1 = PIV_SLOT_82,
+  PIV_SLOT_RETIRED_20 = PIV_SLOT_95,
 
-	PIV_SLOT_YK_ATTESTATION = PIV_SLOT_F9,
+  PIV_SLOT_YK_ATTESTATION = PIV_SLOT_F9,
 };
 
 /*
@@ -155,21 +155,21 @@ enum piv_slotid {
  * piv_read_file() if you want to.
  */
 enum piv_tags {
-	PIV_TAG_CARDCAP = 0x5FC107,
-	PIV_TAG_CHUID = 0x5FC102,
-	PIV_TAG_SECOBJ = 0x5FC106,
-	PIV_TAG_KEYHIST = 0x5FC10C,
-	PIV_TAG_PRINTINFO = 0x5FC109,
-	PIV_TAG_DISCOV = 0x7E,
-	PIV_TAG_CERT_9A = 0x5FC105,
-	PIV_TAG_CERT_9C = 0x5FC10A,
-	PIV_TAG_CERT_9D = 0x5FC10B,
-	PIV_TAG_CERT_9E = 0x5FC101,
+  PIV_TAG_CARDCAP = 0x5FC107,
+  PIV_TAG_CHUID = 0x5FC102,
+  PIV_TAG_SECOBJ = 0x5FC106,
+  PIV_TAG_KEYHIST = 0x5FC10C,
+  PIV_TAG_PRINTINFO = 0x5FC109,
+  PIV_TAG_DISCOV = 0x7E,
+  PIV_TAG_CERT_9A = 0x5FC105,
+  PIV_TAG_CERT_9C = 0x5FC10A,
+  PIV_TAG_CERT_9D = 0x5FC10B,
+  PIV_TAG_CERT_9E = 0x5FC101,
 
-	PIV_TAG_CERT_82 = 0x5FC10D,	/* First retired slot */
-	PIV_TAG_CERT_95 = 0x5FC120,	/* Last retired slot */
+  PIV_TAG_CERT_82 = 0x5FC10D, /* First retired slot */
+  PIV_TAG_CERT_95 = 0x5FC120, /* Last retired slot */
 
-	PIV_TAG_CERT_YK_ATTESTATION = 0x5FFF01,
+  PIV_TAG_CERT_YK_ATTESTATION = 0x5FFF01,
 };
 
 /*
@@ -177,79 +177,79 @@ enum piv_tags {
  * the table of these in NIST SP 800-78-4.
  */
 enum piv_alg {
-	PIV_ALG_3DES = 0x03,
-	PIV_ALG_AES128 = 0x08,
-	PIV_ALG_AES192 = 0x0A,
-	PIV_ALG_AES256 = 0x0C,
+  PIV_ALG_3DES = 0x03,
+  PIV_ALG_AES128 = 0x08,
+  PIV_ALG_AES192 = 0x0A,
+  PIV_ALG_AES256 = 0x0C,
 
-	PIV_ALG_RSA1024 = 0x06,
-	PIV_ALG_RSA2048 = 0x07,
-	PIV_ALG_RSA3072 = 0x05,
-	PIV_ALG_RSA4096 = 0x16,
-	PIV_ALG_ECCP256 = 0x11,
-	PIV_ALG_ECCP384 = 0x14,
+  PIV_ALG_RSA1024 = 0x06,
+  PIV_ALG_RSA2048 = 0x07,
+  PIV_ALG_RSA3072 = 0x05,
+  PIV_ALG_RSA4096 = 0x16,
+  PIV_ALG_ECCP256 = 0x11,
+  PIV_ALG_ECCP384 = 0x14,
 
-	PIV_ALG_SM_ECCP256 = 0x27,
-	PIV_ALG_SM_ECCP384 = 0x2E,
+  PIV_ALG_SM_ECCP256 = 0x27,
+  PIV_ALG_SM_ECCP384 = 0x2E,
 
-	/* These are YubicoPIV proprietary */
-	PIV_ALG_ED25519 = 0xE0,
-	PIV_ALG_X25519 = 0xE1,
+  /* These are YubicoPIV proprietary */
+  PIV_ALG_ED25519 = 0xE0,
+  PIV_ALG_X25519 = 0xE1,
 
-	/*
-	 * Proprietary hack for Javacards running PivApplet -- they don't
-	 * support bare ECDSA so instead we have to give them the full input
-	 * data and they hash it on the card.
-	 */
-	PIV_ALG_ECCP256_SHA1 = 0xf0,
-	PIV_ALG_ECCP256_SHA256 = 0xf1,
-	PIV_ALG_ECCP384_SHA1 = 0xf2,
-	PIV_ALG_ECCP384_SHA256 = 0xf3,
-	PIV_ALG_ECCP384_SHA384 = 0xf4,
+  /*
+   * Proprietary hack for Javacards running PivApplet -- they don't
+   * support bare ECDSA so instead we have to give them the full input
+   * data and they hash it on the card.
+   */
+  PIV_ALG_ECCP256_SHA1 = 0xf0,
+  PIV_ALG_ECCP256_SHA256 = 0xf1,
+  PIV_ALG_ECCP384_SHA1 = 0xf2,
+  PIV_ALG_ECCP384_SHA256 = 0xf3,
+  PIV_ALG_ECCP384_SHA384 = 0xf4,
 };
 
 /* Types of PIV cardholder authentication methods. */
 enum piv_pin {
-	PIV_NO_PIN = 0x00,
-	/* PIV application PIN, local to the PIV applet. */
-	PIV_PIN = 0x80,
-	/* A global PIN used by all applets on the card. */
-	PIV_GLOBAL_PIN = 0x00,
-	/* PIN Unlock code, used if the PIN is lost/forgotten. */
-	PIV_PUK = 0x81,
+  PIV_NO_PIN = 0x00,
+  /* PIV application PIN, local to the PIV applet. */
+  PIV_PIN = 0x80,
+  /* A global PIN used by all applets on the card. */
+  PIV_GLOBAL_PIN = 0x00,
+  /* PIN Unlock code, used if the PIN is lost/forgotten. */
+  PIV_PUK = 0x81,
 
-	/*
-	 * We don't really support these yet, but OCC is "on-chip comparison"
-	 * of biometric data.
-	 */
-	PIV_OCC = 0x96,
-	PIV_OCC2 = 0x97,
+  /*
+   * We don't really support these yet, but OCC is "on-chip comparison"
+   * of biometric data.
+   */
+  PIV_OCC = 0x96,
+  PIV_OCC2 = 0x97,
 
-	/* Only useful with securechannel/VCI (not supported) */
-	PIV_PAIRING = 0x98
+  /* Only useful with securechannel/VCI (not supported) */
+  PIV_PAIRING = 0x98
 };
 
 enum ykpiv_pin_policy {
-	YKPIV_PIN_DEFAULT = 0x00,
-	YKPIV_PIN_NEVER = 0x01,
-	YKPIV_PIN_ONCE = 0x02,
-	YKPIV_PIN_ALWAYS = 0x03,
+  YKPIV_PIN_DEFAULT = 0x00,
+  YKPIV_PIN_NEVER = 0x01,
+  YKPIV_PIN_ONCE = 0x02,
+  YKPIV_PIN_ALWAYS = 0x03,
 };
 
 enum ykpiv_touch_policy {
-	YKPIV_TOUCH_DEFAULT = 0x00,
-	YKPIV_TOUCH_NEVER = 0x01,
-	YKPIV_TOUCH_ALWAYS = 0x02,
-	YKPIV_TOUCH_CACHED = 0x03,		/* Cached for 15sec */
+  YKPIV_TOUCH_DEFAULT = 0x00,
+  YKPIV_TOUCH_NEVER = 0x01,
+  YKPIV_TOUCH_ALWAYS = 0x02,
+  YKPIV_TOUCH_CACHED = 0x03, /* Cached for 15sec */
 };
 
 enum piv_slot_auth {
-	PIV_SLOT_AUTH_UNKNOWN = 0,
-	PIV_SLOT_AUTH_PIN = 1<<0,
-	PIV_SLOT_AUTH_TOUCH = 1<<1
+  PIV_SLOT_AUTH_UNKNOWN = 0,
+  PIV_SLOT_AUTH_PIN = 1 << 0,
+  PIV_SLOT_AUTH_TOUCH = 1 << 1
 };
 
-#define	GUID_LEN	16
+#define GUID_LEN 16
 
 struct piv_ctx;
 struct piv_slot;
@@ -319,7 +319,7 @@ errf_t *piv_enumerate(struct piv_ctx *ctx, struct piv_token **tokens);
  */
 MUST_CHECK
 errf_t *piv_find(struct piv_ctx *ctx, const uint8_t *guid, size_t guidlen,
-    struct piv_token **token);
+                 struct piv_token **token);
 
 /*
  * Returns the next token on a list of tokens such as that returned by
@@ -428,7 +428,7 @@ const uint8_t *ykpiv_token_version(const struct piv_token *token);
  * given version, 0 if it is the same, and 1 if it is later.
  */
 int ykpiv_version_compare(const struct piv_token *token, uint8_t major,
-    uint8_t minor, uint8_t patch);
+                          uint8_t minor, uint8_t patch);
 
 /*
  * Returns true if the card allows reading the YubiKey serial number over
@@ -457,7 +457,7 @@ struct piv_slot *piv_slot_next(struct piv_token *tk, struct piv_slot *slot);
  * off-card in the case of key history slots).
  */
 struct piv_slot *piv_force_slot(struct piv_token *tk, enum piv_slotid slotid,
-   enum piv_alg alg);
+                                enum piv_alg alg);
 
 /* Returns the key reference ID for the given slot. */
 enum piv_slotid piv_slot_id(const struct piv_slot *slot);
@@ -496,7 +496,7 @@ struct sshkey *piv_slot_pubkey(const struct piv_slot *slot);
  * This requires an open txn in case it needs to ask the device.
  */
 enum piv_slot_auth piv_slot_get_auth(struct piv_token *key,
-    struct piv_slot *slot);
+                                     struct piv_slot *slot);
 
 /*
  * Begins a new transaction on the card. Needs to be called before any
@@ -571,7 +571,7 @@ errf_t *piv_read_all_certs(struct piv_token *tk);
  */
 MUST_CHECK
 errf_t *piv_auth_admin(struct piv_token *tk, const uint8_t *key, size_t keylen,
-    enum piv_alg keyalg);
+                       enum piv_alg keyalg);
 
 /*
  * YubicoPIV-specific: changes the 3DES card administrator key.
@@ -585,7 +585,7 @@ errf_t *piv_auth_admin(struct piv_token *tk, const uint8_t *key, size_t keylen,
  */
 MUST_CHECK
 errf_t *ykpiv_set_admin(struct piv_token *tk, const uint8_t *key, size_t keylen,
-    enum piv_alg alg, enum ykpiv_touch_policy touchpolicy);
+                        enum piv_alg alg, enum ykpiv_touch_policy touchpolicy);
 
 /*
  * Generates a new asymmetric private key in a slot on the token, and returns
@@ -604,7 +604,7 @@ errf_t *ykpiv_set_admin(struct piv_token *tk, const uint8_t *key, size_t keylen,
  */
 MUST_CHECK
 errf_t *piv_generate(struct piv_token *tk, enum piv_slotid slotid,
-    enum piv_alg alg, struct sshkey **pubkey);
+                     enum piv_alg alg, struct sshkey **pubkey);
 
 /*
  * Writes the key history object of the card with the given counts of on-
@@ -621,7 +621,7 @@ errf_t *piv_generate(struct piv_token *tk, enum piv_slotid slotid,
  */
 MUST_CHECK
 errf_t *piv_write_keyhistory(struct piv_token *tk, uint oncard, uint offcard,
-    const char *offcard_url);
+                             const char *offcard_url);
 
 /*
  * YubicoPIV specific: generates a new asymmetric private key in a slot on the
@@ -641,8 +641,9 @@ errf_t *piv_write_keyhistory(struct piv_token *tk, uint oncard, uint offcard,
  */
 MUST_CHECK
 errf_t *ykpiv_generate(struct piv_token *tk, enum piv_slotid slotid,
-    enum piv_alg alg, enum ykpiv_pin_policy pinpolicy,
-    enum ykpiv_touch_policy touchpolicy, struct sshkey **pubkey);
+                       enum piv_alg alg, enum ykpiv_pin_policy pinpolicy,
+                       enum ykpiv_touch_policy touchpolicy,
+                       struct sshkey **pubkey);
 
 /*
  * YubicoPIV specific: import an asymmetric private key into a given slot.
@@ -657,8 +658,8 @@ errf_t *ykpiv_generate(struct piv_token *tk, enum piv_slotid slotid,
  */
 MUST_CHECK
 errf_t *ykpiv_import(struct piv_token *tk, enum piv_slotid slotid,
-    struct sshkey *privkey, enum ykpiv_pin_policy pinpolicy,
-    enum ykpiv_touch_policy touchpolicy);
+                     struct sshkey *privkey, enum ykpiv_pin_policy pinpolicy,
+                     enum ykpiv_touch_policy touchpolicy);
 
 /*
  * Loads a certificate for a given slot on the token.
@@ -674,7 +675,7 @@ errf_t *ykpiv_import(struct piv_token *tk, enum piv_slotid slotid,
  */
 MUST_CHECK
 errf_t *piv_write_cert(struct piv_token *tk, enum piv_slotid slotid,
-    const uint8_t *data, size_t datalen, uint flags);
+                       const uint8_t *data, size_t datalen, uint flags);
 
 /*
  * Uses the YubicoPIV GET METADATA extension command to request the state of the
@@ -691,7 +692,8 @@ errf_t *piv_write_cert(struct piv_token *tk, enum piv_slotid slotid,
  */
 MUST_CHECK
 errf_t *ykpiv_admin_auth_info(struct piv_token *tk, enum piv_alg *alg,
-    boolean_t *is_default, enum ykpiv_touch_policy *touchpol);
+                              boolean_t *is_default,
+                              enum ykpiv_touch_policy *touchpol);
 
 /*
  * Writes a file object on the PIV token by its bare tag number.
@@ -707,8 +709,8 @@ errf_t *ykpiv_admin_auth_info(struct piv_token *tk, enum piv_alg *alg,
  *  - APDUError: other card error
  */
 MUST_CHECK
-errf_t *piv_write_file(struct piv_token *pt, uint tag,
-    const uint8_t *data, size_t len);
+errf_t *piv_write_file(struct piv_token *pt, uint tag, const uint8_t *data,
+                       size_t len);
 
 /*
  * Reads a file object on the PIV token by its bare tag number.
@@ -732,7 +734,7 @@ errf_t *piv_write_file(struct piv_token *pt, uint tag,
  */
 MUST_CHECK
 errf_t *piv_read_file(struct piv_token *pt, uint tag, uint8_t **data,
-    size_t *len);
+                      size_t *len);
 
 /*
  * Reads and parses the PIV Printed Information object.
@@ -843,7 +845,7 @@ void piv_file_data_free(uint8_t *data, size_t len);
  */
 MUST_CHECK
 errf_t *piv_verify_pin(struct piv_token *tk, enum piv_pin type, const char *pin,
-    uint *retries, boolean_t canskip);
+                       uint *retries, boolean_t canskip);
 
 /*
  * Clears the security status of a given PIN (undoing the stateful effects of
@@ -873,7 +875,7 @@ errf_t *piv_clear_pin(struct piv_token *tk, enum piv_pin type);
  */
 MUST_CHECK
 errf_t *piv_change_pin(struct piv_token *tk, enum piv_pin type, const char *pin,
-    const char *newpin);
+                       const char *newpin);
 
 /*
  * Resets the PIV PIN on a token using the PUK.
@@ -884,12 +886,13 @@ errf_t *piv_change_pin(struct piv_token *tk, enum piv_pin type, const char *pin,
  * Errors:
  *  - ArgumentError: PIN supplied was zero-length or >8 digits long
  *  - IOError: general card communication failure
- *  - APDUError: the card rejected the command (e.g. because applet not selected)
+ *  - APDUError: the card rejected the command (e.g. because applet not
+ * selected)
  *  - PermissionError: the PUK was incorrect.
  */
 MUST_CHECK
 errf_t *piv_reset_pin(struct piv_token *tk, enum piv_pin type, const char *puk,
-    const char *newpin);
+                      const char *newpin);
 
 /*
  * YubicoPIV only: resets the entire PIV applet to defaults, including PIN, PUK,
@@ -899,7 +902,8 @@ errf_t *piv_reset_pin(struct piv_token *tk, enum piv_pin type, const char *puk,
  * used up) before executing.
  *
  * Errors:
- *  - APDUError: the card rejected the command (e.g. because applet not selected)
+ *  - APDUError: the card rejected the command (e.g. because applet not
+ * selected)
  *  - NotSupportedError: the card does not support YubicoPIV extensions
  *  - IOError: general card communication failure
  *  - ResetConditionsError: conditions to allow a factory reset were not met
@@ -916,13 +920,15 @@ errf_t *ykpiv_reset(struct piv_token *tk);
  *
  * Errors:
  *  - IOError: general card communication failure
- *  - APDUError: the card rejected the command (e.g. because applet not selected)
+ *  - APDUError: the card rejected the command (e.g. because applet not
+ * selected)
  *  - NotSupportedError: the card does not support YubicoPIV extensions
  *  - PermissionError: the necessary auth has not been done before calling
  *                     (piv_auth_admin() and piv_verify_pin()).
  */
 MUST_CHECK
-errf_t *ykpiv_set_pin_retries(struct piv_token *tk, uint pintries, uint puktries);
+errf_t *ykpiv_set_pin_retries(struct piv_token *tk, uint pintries,
+                              uint puktries);
 
 /*
  * YubicoPIV only: moves a private key from one slot to another. To execute it
@@ -935,7 +941,7 @@ errf_t *ykpiv_set_pin_retries(struct piv_token *tk, uint pintries, uint puktries
  */
 MUST_CHECK
 errf_t *ykpiv_move_key(struct piv_token *tk, struct piv_slot *src,
-    enum piv_slotid dest);
+                       enum piv_slotid dest);
 
 /*
  * YubicoPIV only: destroys a private key. To execute it you must have called
@@ -956,7 +962,8 @@ errf_t *ykpiv_delete_key(struct piv_token *tk, struct piv_slot *slot);
  *
  * Errors:
  *  - IOError: general card communication failure
- *  - APDUError: the card rejected the command (e.g. because applet not selected)
+ *  - APDUError: the card rejected the command (e.g. because applet not
+ * selected)
  *  - PermissionError: the key slot in question is locked
  *  - NotSupportedError: the card returned a GEN_AUTH payload type that isn't
  *                       supported
@@ -966,7 +973,7 @@ errf_t *ykpiv_delete_key(struct piv_token *tk, struct piv_slot *slot);
  */
 MUST_CHECK
 errf_t *piv_auth_key(struct piv_token *tk, struct piv_slot *slot,
-    struct sshkey *pubkey);
+                     struct sshkey *pubkey);
 
 /*
  * Requests an attestation certificate.
@@ -974,11 +981,12 @@ errf_t *piv_auth_key(struct piv_token *tk, struct piv_slot *slot,
  * Errors:
  *  - IOError: general card communication failure
  *  - NotSupportedError: the card does not support YubicoPIV extensions
- *  - APDUError: the card rejected the command (e.g. because applet not selected)
+ *  - APDUError: the card rejected the command (e.g. because applet not
+ * selected)
  */
 MUST_CHECK
 errf_t *ykpiv_attest(struct piv_token *tk, struct piv_slot *slot,
-    uint8_t **data, size_t *len);
+                     uint8_t **data, size_t *len);
 
 /*
  * Signs a payload using a private key stored on the card.
@@ -1002,7 +1010,8 @@ errf_t *ykpiv_attest(struct piv_token *tk, struct piv_slot *slot,
  *   - IOError: general card communication failure
  *   - PermissionError: the key slot in question is locked and cannot be used.
  *                      You might need to unlock the card with piv_verify_pin.
- *   - APDUError: the card rejected the command (e.g. because applet not selected)
+ *   - APDUError: the card rejected the command (e.g. because applet not
+ * selected)
  *   - InvalidDataError: the card returned unparseable or invalid payloads
  *   - NotFoundError: the given slot has no key in it or is not supported by
  *                    the card
@@ -1010,11 +1019,13 @@ errf_t *ykpiv_attest(struct piv_token *tk, struct piv_slot *slot,
  */
 MUST_CHECK
 errf_t *piv_sign(struct piv_token *tk, struct piv_slot *slot,
-    const uint8_t *data, size_t datalen, enum sshdigest_types *hashalgo,
-    uint8_t **signature, size_t *siglen);
+                 const uint8_t *data, size_t datalen,
+                 enum sshdigest_types *hashalgo, uint8_t **signature,
+                 size_t *siglen);
 MUST_CHECK
 errf_t *piv_sign_prehash(struct piv_token *tk, struct piv_slot *slot,
-    const uint8_t *hash, size_t hashlen, uint8_t **signature, size_t *siglen);
+                         const uint8_t *hash, size_t hashlen,
+                         uint8_t **signature, size_t *siglen);
 
 /*
  * Performs an ECDH key derivation between the private key on the token and
@@ -1029,14 +1040,14 @@ errf_t *piv_sign_prehash(struct piv_token *tk, struct piv_slot *slot,
  *   - IOError: general card communication failure
  *   - PermissionError: the key slot in question is locked and cannot be used.
  *                      You might need to unlock the card with piv_verify_pin.
- *   - APDUError: the card rejected the command (e.g. because applet not selected)
+ *   - APDUError: the card rejected the command (e.g. because applet not
+ * selected)
  *   - InvalidDataError: the card returned a GEN_AUTH payload type that isn't
  *                       supported or was invalid
  */
 MUST_CHECK
 errf_t *piv_ecdh(struct piv_token *tk, struct piv_slot *slot,
-    struct sshkey *pubkey, uint8_t **secret, size_t *seclen);
-
+                 struct sshkey *pubkey, uint8_t **secret, size_t *seclen);
 
 struct piv_ecdh_box;
 
@@ -1045,16 +1056,18 @@ struct piv_ecdh_box *piv_box_clone(const struct piv_ecdh_box *box);
 void piv_box_free(struct piv_ecdh_box *box);
 
 MUST_CHECK
-errf_t *piv_box_set_data(struct piv_ecdh_box *box, const uint8_t *data, size_t len);
+errf_t *piv_box_set_data(struct piv_ecdh_box *box, const uint8_t *data,
+                         size_t len);
 MUST_CHECK
 errf_t *piv_box_set_datab(struct piv_ecdh_box *box, struct sshbuf *buf);
 MUST_CHECK
 errf_t *piv_box_seal(struct piv_token *tk, struct piv_slot *slot,
-    struct piv_ecdh_box *box);
+                     struct piv_ecdh_box *box);
 MUST_CHECK
 errf_t *piv_box_seal_offline(struct sshkey *pubk, struct piv_ecdh_box *box);
 MUST_CHECK
-errf_t *piv_box_to_binary(struct piv_ecdh_box *box, uint8_t **output, size_t *len);
+errf_t *piv_box_to_binary(struct piv_ecdh_box *box, uint8_t **output,
+                          size_t *len);
 
 boolean_t piv_box_has_guidslot(const struct piv_ecdh_box *box);
 const uint8_t *piv_box_guid(const struct piv_ecdh_box *box);
@@ -1063,7 +1076,8 @@ enum piv_slotid piv_box_slot(const struct piv_ecdh_box *box);
 struct sshkey *piv_box_pubkey(const struct piv_ecdh_box *box);
 struct sshkey *piv_box_ephem_pubkey(const struct piv_ecdh_box *box);
 MUST_CHECK
-errf_t *piv_box_copy_pubkey(const struct piv_ecdh_box *box, struct sshkey **tgt);
+errf_t *piv_box_copy_pubkey(const struct piv_ecdh_box *box,
+                            struct sshkey **tgt);
 const char *piv_box_cipher(const struct piv_ecdh_box *box);
 const char *piv_box_kdf(const struct piv_ecdh_box *box);
 size_t piv_box_encsize(const struct piv_ecdh_box *box);
@@ -1072,22 +1086,23 @@ size_t piv_box_nonce_size(const struct piv_ecdh_box *box);
 uint piv_box_version(const struct piv_ecdh_box *box);
 
 void piv_box_set_guid(struct piv_ecdh_box *box, const uint8_t *guid,
-    size_t len);
+                      size_t len);
 void piv_box_set_slot(struct piv_ecdh_box *box, enum piv_slotid slot);
 
 MUST_CHECK
 errf_t *piv_box_from_binary(const uint8_t *input, size_t len,
-    struct piv_ecdh_box **box);
+                            struct piv_ecdh_box **box);
 MUST_CHECK
 errf_t *piv_box_find_token(struct piv_token *tks, struct piv_ecdh_box *box,
-    struct piv_token **tk, struct piv_slot **slot);
+                           struct piv_token **tk, struct piv_slot **slot);
 MUST_CHECK
 errf_t *piv_box_open(struct piv_token *tk, struct piv_slot *slot,
-    struct piv_ecdh_box *box);
+                     struct piv_ecdh_box *box);
 MUST_CHECK
 errf_t *piv_box_open_offline(struct sshkey *privkey, struct piv_ecdh_box *box);
 MUST_CHECK
-errf_t *piv_box_take_data(struct piv_ecdh_box *box, uint8_t **data, size_t *len);
+errf_t *piv_box_take_data(struct piv_ecdh_box *box, uint8_t **data,
+                          size_t *len);
 MUST_CHECK
 errf_t *piv_box_take_datab(struct piv_ecdh_box *box, struct sshbuf **buf);
 MUST_CHECK
@@ -1110,66 +1125,61 @@ errf_t *sshbuf_get_piv_box(struct sshbuf *buf, struct piv_ecdh_box **box);
 /* Low-level APDU access */
 struct apdu;
 
-enum iso_class {
-	CLA_ISO = 0x00,
-	CLA_CHAIN = 0x10
-};
+enum iso_class { CLA_ISO = 0x00, CLA_CHAIN = 0x10 };
 
-enum iso_sel_p1 {
-	SEL_APP_AID = 0x04
-};
+enum iso_sel_p1 { SEL_APP_AID = 0x04 };
 
 enum iso_ins {
-	/* Standard commands from ISO7816-4 */
-	INS_SELECT = 0xA4,
-	INS_GET_DATA = 0xCB,
-	INS_VERIFY = 0x20,
-	INS_CHANGE_PIN = 0x24,
-	INS_RESET_PIN = 0x2C,
-	INS_GEN_AUTH = 0x87,
-	INS_PUT_DATA = 0xDB,
-	INS_GEN_ASYM = 0x47,
-	INS_CONTINUE = 0xC0,
+  /* Standard commands from ISO7816-4 */
+  INS_SELECT = 0xA4,
+  INS_GET_DATA = 0xCB,
+  INS_VERIFY = 0x20,
+  INS_CHANGE_PIN = 0x24,
+  INS_RESET_PIN = 0x2C,
+  INS_GEN_AUTH = 0x87,
+  INS_PUT_DATA = 0xDB,
+  INS_GEN_ASYM = 0x47,
+  INS_CONTINUE = 0xC0,
 
-	/* YubicoPIV specific */
-	INS_SET_MGMT = 0xFF,
-	INS_IMPORT_ASYM = 0xFE,
-	INS_GET_VER = 0xFD,
-	INS_SET_PIN_RETRIES = 0xFA,
-	INS_RESET = 0xFB,
-	INS_MANAGE_KEY = 0xF6,
-	INS_GET_METADATA = 0xF7,
-	INS_GET_SERIAL = 0xF8,
-	INS_ATTEST = 0xF9,
+  /* YubicoPIV specific */
+  INS_SET_MGMT = 0xFF,
+  INS_IMPORT_ASYM = 0xFE,
+  INS_GET_VER = 0xFD,
+  INS_SET_PIN_RETRIES = 0xFA,
+  INS_RESET = 0xFB,
+  INS_MANAGE_KEY = 0xF6,
+  INS_GET_METADATA = 0xF7,
+  INS_GET_SERIAL = 0xF8,
+  INS_ATTEST = 0xF9,
 };
 
 enum iso_sw {
-	SW_NO_ERROR = 0x9000,
-	SW_FUNC_NOT_SUPPORTED = 0x6A81,
-	SW_CONDITIONS_NOT_SATISFIED = 0x6985,
-	SW_SECURITY_STATUS_NOT_SATISFIED = 0x6982,
-	SW_BYTES_REMAINING_00 = 0x6100,
-	SW_CORRECT_LE_00 = 0x6C00,
-	SW_WARNING_NO_CHANGE_00 = 0x6200,
-	SW_WARNING_EOF = 0x6282,
-	SW_WARNING_00 = 0x6300,
-	SW_FILE_NOT_FOUND = 0x6A82,
-	SW_INCORRECT_PIN = 0x63C0,
-	SW_INCORRECT_P1P2 = 0x6A86,
-	SW_WRONG_DATA = 0x6A80,
-	SW_OUT_OF_MEMORY = 0x6A84,
-	SW_WRONG_LENGTH = 0x6700,
-	SW_INS_NOT_SUP = 0x6D00,
-	SW_FILE_INVALID = 0x6983,
-	SW_INVALID_KEY_REF = 0x6A88,
-	SW_NO_CURRENT_EF = 0x6986,
+  SW_NO_ERROR = 0x9000,
+  SW_FUNC_NOT_SUPPORTED = 0x6A81,
+  SW_CONDITIONS_NOT_SATISFIED = 0x6985,
+  SW_SECURITY_STATUS_NOT_SATISFIED = 0x6982,
+  SW_BYTES_REMAINING_00 = 0x6100,
+  SW_CORRECT_LE_00 = 0x6C00,
+  SW_WARNING_NO_CHANGE_00 = 0x6200,
+  SW_WARNING_EOF = 0x6282,
+  SW_WARNING_00 = 0x6300,
+  SW_FILE_NOT_FOUND = 0x6A82,
+  SW_INCORRECT_PIN = 0x63C0,
+  SW_INCORRECT_P1P2 = 0x6A86,
+  SW_WRONG_DATA = 0x6A80,
+  SW_OUT_OF_MEMORY = 0x6A84,
+  SW_WRONG_LENGTH = 0x6700,
+  SW_INS_NOT_SUP = 0x6D00,
+  SW_FILE_INVALID = 0x6983,
+  SW_INVALID_KEY_REF = 0x6A88,
+  SW_NO_CURRENT_EF = 0x6986,
 };
 
 /*
  * Creates an APDU with the given class, instruction, p1 and p2 values.
  */
 struct apdu *piv_apdu_make(enum iso_class cls, enum iso_ins ins, uint8_t p1,
-    uint8_t p2);
+                           uint8_t p2);
 
 /*
  * Sets the command data for an apdu. The command data is not copied, so
@@ -1240,21 +1250,21 @@ void piv_fascn_free(struct piv_fascn *);
 
 /* FASC-N Organizational Category (OC) */
 enum piv_fascn_oc {
-	PIV_FASCN_OC_FEDERAL,
-	PIV_FASCN_OC_STATE,
-	PIV_FASCN_OC_COMMERCIAL,
-	PIV_FASCN_OC_FOREIGN
+  PIV_FASCN_OC_FEDERAL,
+  PIV_FASCN_OC_STATE,
+  PIV_FASCN_OC_COMMERCIAL,
+  PIV_FASCN_OC_FOREIGN
 };
 
 /* FASC-N Person-Org Association Type (POA) */
 enum piv_fascn_poa {
-	PIV_FASCN_POA_EMPLOYEE,
-	PIV_FASCN_POA_CIVIL,
-	PIV_FASCN_POA_EXECUTIVE,
-	PIV_FASCN_POA_UNIFORMED,
-	PIV_FASCN_POA_CONTRACTOR,
-	PIV_FASCN_POA_AFFILIATE,
-	PIV_FASCN_POA_BENEFICIARY
+  PIV_FASCN_POA_EMPLOYEE,
+  PIV_FASCN_POA_CIVIL,
+  PIV_FASCN_POA_EXECUTIVE,
+  PIV_FASCN_POA_UNIFORMED,
+  PIV_FASCN_POA_CONTRACTOR,
+  PIV_FASCN_POA_AFFILIATE,
+  PIV_FASCN_POA_BENEFICIARY
 };
 
 const char *piv_fascn_get_agency_code(const struct piv_fascn *);
@@ -1272,7 +1282,8 @@ void piv_fascn_set_system_code(struct piv_fascn *, const char *);
 void piv_fascn_set_cred_number(struct piv_fascn *, const char *);
 void piv_fascn_set_cred_series(struct piv_fascn *, const char *);
 void piv_fascn_set_indiv_cred_issue(struct piv_fascn *, const char *);
-void piv_fascn_set_person_id(struct piv_fascn *, enum piv_fascn_poa, const char *);
+void piv_fascn_set_person_id(struct piv_fascn *, enum piv_fascn_poa,
+                             const char *);
 void piv_fascn_set_org_id(struct piv_fascn *, enum piv_fascn_oc, const char *);
 
 const char *piv_fascn_org_type_to_string(enum piv_fascn_oc);
@@ -1289,13 +1300,14 @@ const char *piv_fascn_to_string(const struct piv_fascn *);
  * Encodes a FASC-N in binary BCD form, including the LRC digit. Allocates
  * output buffer and places it in *out. Caller must free it later with free().
  */
-errf_t *piv_fascn_encode(const struct piv_fascn *, uint8_t **out, size_t *outlen);
+errf_t *piv_fascn_encode(const struct piv_fascn *, uint8_t **out,
+                         size_t *outlen);
 
 /*
  * Decodes a FASC-N from binary BCD form, also checking the LRC.
  */
-errf_t *piv_fascn_decode(const uint8_t *data, size_t len, struct piv_fascn **out);
-
+errf_t *piv_fascn_decode(const uint8_t *data, size_t len,
+                         struct piv_fascn **out);
 
 /*
  * CHUID utility functions
@@ -1325,14 +1337,16 @@ void piv_chuid_set_expiry_rel(struct piv_chuid *, uint sec);
 
 errf_t *piv_chuid_tbs(const struct piv_chuid *, uint8_t **out, size_t *len);
 errf_t *piv_chuid_set_signature(struct piv_chuid *, X509 *cacert,
-    enum sshdigest_types hashalgo, uint8_t *sig, size_t siglen);
+                                enum sshdigest_types hashalgo, uint8_t *sig,
+                                size_t siglen);
 
-errf_t *piv_chuid_verify(const struct piv_chuid *, STACK_OF(X509) *certs,
-    X509_STORE *store);
+errf_t *piv_chuid_verify(const struct piv_chuid *, STACK_OF(X509) * certs,
+                         X509_STORE *store);
 
-errf_t *piv_chuid_encode(const struct piv_chuid *, uint8_t **out, size_t *outlen);
-errf_t *piv_chuid_decode(const uint8_t *data, size_t len, struct piv_chuid **out);
-
+errf_t *piv_chuid_encode(const struct piv_chuid *, uint8_t **out,
+                         size_t *outlen);
+errf_t *piv_chuid_decode(const uint8_t *data, size_t len,
+                         struct piv_chuid **out);
 
 /*
  * PINFO utility functions
@@ -1357,34 +1371,41 @@ const char *piv_pinfo_get_issuer(const struct piv_pinfo *pp);
 const char *piv_pinfo_get_org_line_1(const struct piv_pinfo *pp);
 const char *piv_pinfo_get_org_line_2(const struct piv_pinfo *pp);
 
-const uint8_t *ykpiv_pinfo_get_admin_key(const struct piv_pinfo *pp, size_t *len);
+const uint8_t *ykpiv_pinfo_get_admin_key(const struct piv_pinfo *pp,
+                                         size_t *len);
 
-boolean_t piv_pinfo_get_kv_uint(const struct piv_pinfo *pp, const char *key, uint *out);
+boolean_t piv_pinfo_get_kv_uint(const struct piv_pinfo *pp, const char *key,
+                                uint *out);
 boolean_t piv_pinfo_get_kv_bool(const struct piv_pinfo *pp, const char *key);
-const char *piv_pinfo_get_kv_string(const struct piv_pinfo *pp, const char *key);
-const uint8_t *piv_pinfo_get_kv(const struct piv_pinfo *pp, const char *key, size_t *len);
+const char *piv_pinfo_get_kv_string(const struct piv_pinfo *pp,
+                                    const char *key);
+const uint8_t *piv_pinfo_get_kv(const struct piv_pinfo *pp, const char *key,
+                                size_t *len);
 
-void ykpiv_pinfo_set_admin_key(struct piv_pinfo *pp, const uint8_t *key, size_t len);
+void ykpiv_pinfo_set_admin_key(struct piv_pinfo *pp, const uint8_t *key,
+                               size_t len);
 
-void piv_pinfo_set_kv(struct piv_pinfo *pp, const char *key, const uint8_t *val, size_t len);
+void piv_pinfo_set_kv(struct piv_pinfo *pp, const char *key, const uint8_t *val,
+                      size_t len);
 void piv_pinfo_set_kv_uint(struct piv_pinfo *pp, const char *key, uint val);
 void piv_pinfo_set_kv_bool(struct piv_pinfo *pp, const char *key);
 void piv_pinfo_unset_kv(struct piv_pinfo *pp, const char *key);
-void piv_pinfo_set_kv_string(struct piv_pinfo *pp, const char *key, const char *val);
+void piv_pinfo_set_kv_string(struct piv_pinfo *pp, const char *key,
+                             const char *val);
 
-errf_t *piv_pinfo_encode(const struct piv_pinfo *, uint8_t **out, size_t *outlen);
-errf_t *piv_pinfo_decode(const uint8_t *data, size_t len, struct piv_pinfo **out);
+errf_t *piv_pinfo_encode(const struct piv_pinfo *, uint8_t **out,
+                         size_t *outlen);
+errf_t *piv_pinfo_decode(const uint8_t *data, size_t len,
+                         struct piv_pinfo **out);
 
 enum cardcap_type {
-	PIV_CARDCAP_FS = 0x01,
-	PIV_CARDCAP_JAVACARD = 0x02,
-	PIV_CARDCAP_MULTOS = 0x03,
-	PIV_CARDCAP_JAVACARD_FS = 0x04
+  PIV_CARDCAP_FS = 0x01,
+  PIV_CARDCAP_JAVACARD = 0x02,
+  PIV_CARDCAP_MULTOS = 0x03,
+  PIV_CARDCAP_JAVACARD_FS = 0x04
 };
 
-enum cardcap_data_model {
-	PIV_CARDCAP_MODEL_PIV = 0x10
-};
+enum cardcap_data_model { PIV_CARDCAP_MODEL_PIV = 0x10 };
 
 struct piv_cardcap *piv_cardcap_new(void);
 void piv_cardcap_free(struct piv_cardcap *cc);
@@ -1405,10 +1426,12 @@ boolean_t piv_cardcap_has_pkcs15(const struct piv_cardcap *cc);
 void piv_cardcap_set_pkcs15(struct piv_cardcap *cc, boolean_t ena);
 
 enum cardcap_data_model piv_cardcap_data_model(const struct piv_cardcap *cc);
-void piv_cardcap_set_data_model(struct piv_cardcap *cc, enum cardcap_data_model dmid);
+void piv_cardcap_set_data_model(struct piv_cardcap *cc,
+                                enum cardcap_data_model dmid);
 
-errf_t *piv_cardcap_encode(const struct piv_cardcap *, uint8_t **out, size_t *outlen);
-errf_t *piv_cardcap_decode(const uint8_t *data, size_t len, struct piv_cardcap **out);
-
+errf_t *piv_cardcap_encode(const struct piv_cardcap *, uint8_t **out,
+                           size_t *outlen);
+errf_t *piv_cardcap_decode(const uint8_t *data, size_t len,
+                           struct piv_cardcap **out);
 
 #endif
