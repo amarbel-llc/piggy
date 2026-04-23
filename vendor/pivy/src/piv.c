@@ -344,6 +344,8 @@ static const char *sw_to_name(enum iso_sw sw) {
     return ("WRONG_LENGTH");
   case SW_INS_NOT_SUP:
     return ("INS_NOT_SUPPORTED");
+  case SW_NO_CURRENT_EF:
+    return ("NO_CURRENT_EF");
   case SW_FILE_INVALID:
     return ("FILE_INVALID");
   case SW_INVALID_KEY_REF:
@@ -2035,11 +2037,21 @@ again:
     rv = ERRF_OK;
 
   } else if (tk->pt_xselect != XLEN_NO &&
-             (apdu->a_sw == SW_WRONG_LENGTH || apdu->a_sw == SW_INS_NOT_SUP)) {
+             (apdu->a_sw == SW_WRONG_LENGTH || apdu->a_sw == SW_INS_NOT_SUP ||
+              apdu->a_sw == SW_NO_CURRENT_EF)) {
+    /*
+     * SW_NO_CURRENT_EF (0x6986) is returned by jCardSim's PivApplet when
+     * it's sent an extended-length SELECT before it has been plain-SELECTed
+     * once in the current session (see piggy#27). It isn't a strictly
+     * standard "no xlen support" signal, but treating it that way lets us
+     * fall back to the plain SELECT that any PIV card must accept —
+     * robustness against misbehaving cards rather than a spec change.
+     */
     bunyan_log(BNY_DEBUG,
-               "card does not seem to support extended"
-               " length select APDUs, trying normal",
-               "reader", BNY_STRING, tk->pt_rdrname, NULL);
+               "card did not accept extended"
+               " length select APDU, trying normal",
+               "reader", BNY_STRING, tk->pt_rdrname, "xlen_sw", BNY_UINT,
+               (uint)apdu->a_sw, NULL);
     tk->pt_xselect = XLEN_NO;
     tk->pt_xapdu = XLEN_NO;
     goto again;

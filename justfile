@@ -306,9 +306,14 @@ fib-smoke:
     echo "--- pivy-tool list (with retries) ---"
     found=false
     for attempt in $(seq 1 10); do
-      output=$(pivy-tool list 2>&1) || true
+      # -d so piv_enumerate's BNY_DEBUG "eliminated reader" messages surface
+      # during any retry window (#27). Match the "device:" field emitted by
+      # pivy-tool's successful enumeration — this line only appears when the
+      # reader passes piv_enumerate's probes, so it won't false-positive on
+      # debug log fields that mention the reader name.
+      output=$(pivy-tool -d list 2>&1) || true
       echo "attempt $attempt: $output"
-      if echo "$output" | grep -q "Virtual PCD piggy fib"; then
+      if echo "$output" | grep -qE "^\s*device: Virtual PCD piggy fib"; then
         found=true
         break
       fi
