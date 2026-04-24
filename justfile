@@ -83,6 +83,26 @@ test-bats-file *FILES: build-rust
 test-rust *ARGS:
     cargo test {{ARGS}}
 
+# End-to-end ECDH round-trip: boot fib, generate a 9D key, spawn
+# piggy-agent as a child of the test binary, and verify the agent's
+# ecdh@joyent.com extension agrees with a locally-computed shared
+# secret. Issue #32 checkpoint 2. Requires fib (just fib-up will be
+# called automatically and torn down on exit).
+test-rust-agent-ecdh: build-rust
+  #!/usr/bin/env bash
+  set -euo pipefail
+  trap 'just fib-down' EXIT
+  just fib-up
+  eval "$(cat .fib/env)"
+  # Generate a key on the fib card's 9D slot (Key Management / ECDH).
+  # eccp256 matches both the oracle and the PIV card's ECDH codepath.
+  pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
+  export PIGGY_BIN="$PWD/target/debug/piggy"
+  # Direct `cargo test` is fine here — the just recipe is the entry
+  # point, not cargo (see CLAUDE.md: "Use just recipes for all cargo
+  # ... operations" — the recipe *is* the single source of truth).
+  cargo test --test agent_ecdh_integration -- --nocapture
+
 check-rust *ARGS:
     cargo check {{ARGS}}
 

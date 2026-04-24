@@ -1,6 +1,7 @@
 pub mod agent_ext;
 pub mod ebox;
 pub mod error;
+pub mod oracle;
 pub mod piv_box;
 pub mod stream;
 pub mod template;

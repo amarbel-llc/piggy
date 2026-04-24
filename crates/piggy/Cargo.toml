@@ -28,3 +28,10 @@ libc = "0.2"
 # `#[tokio::test(start_paused = true)]`, which `cmd::agent::card` unit
 # tests use to drive the probe-loop interval deterministically.
 tokio = { version = "1", features = ["test-util"] }
+# Used by tests/agent_ecdh_integration.rs to generate an ephemeral P-256
+# partner key and compute the "expected" ECDH scalar locally, so the test
+# can compare it against what the agent produces. See issue #32 checkpoint
+# 2. Already pulled transitively via ssh-key; added explicitly so the test
+# file can `use p256::...`.
+p256 = { version = "0.13", default-features = false, features = ["ecdh"] }
+rand = "0.8"

@@ -27,11 +27,7 @@ use crate::wire::{WireReader, WireWriter};
 ///
 /// The returned `Vec<u8>` is ready to be placed in `Extension.details`; it
 /// already contains the outer SSH-string wrap described at the module level.
-pub fn encode_ecdh_request(
-    self_key_blob: &[u8],
-    partner_key_blob: &[u8],
-    flags: u32,
-) -> Vec<u8> {
+pub fn encode_ecdh_request(self_key_blob: &[u8], partner_key_blob: &[u8], flags: u32) -> Vec<u8> {
     let mut inner = WireWriter::new();
     inner.put_string(self_key_blob);
     inner.put_string(partner_key_blob);
@@ -163,8 +159,7 @@ mod tests {
         // prefix.
         for n in 1..=3 {
             let buf = vec![0u8; n];
-            let err = decode_ecdh_response(&buf)
-                .expect_err("truncated header rejected");
+            let err = decode_ecdh_response(&buf).expect_err("truncated header rejected");
             assert!(
                 matches!(err, BoxError::InvalidAgentReply(_)),
                 "{n}-byte input should surface InvalidAgentReply"
@@ -176,8 +171,7 @@ mod tests {
     fn decode_rejects_short_body() {
         // Claims 10 bytes of payload but only supplies 3.
         let wire: &[u8] = &[0x00, 0x00, 0x00, 0x0A, 0xAA, 0xBB, 0xCC];
-        let err =
-            decode_ecdh_response(wire).expect_err("short body rejected");
+        let err = decode_ecdh_response(wire).expect_err("short body rejected");
         assert!(matches!(err, BoxError::InvalidAgentReply(_)));
     }
 
@@ -186,8 +180,7 @@ mod tests {
         // ssh-string declares 2 payload bytes, but wire has 3 after the
         // prefix — the extra byte must be rejected.
         let wire: &[u8] = &[0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB, 0xCC];
-        let err = decode_ecdh_response(wire)
-            .expect_err("trailing bytes rejected");
+        let err = decode_ecdh_response(wire).expect_err("trailing bytes rejected");
         match err {
             BoxError::InvalidAgentReply(msg) => {
                 assert!(
