@@ -1,3 +1,4 @@
+pub mod agent_ext;
 pub mod ebox;
 pub mod error;
 pub mod piv_box;

@@ -56,6 +56,9 @@ pub enum BoxError {
     #[error("stream sequence number mismatch: expected {expected}, got {got}")]
     SequenceMismatch { expected: u32, got: u32 },
 
+    #[error("invalid agent reply: {0}")]
+    InvalidAgentReply(String),
+
     #[error("PIV: {0}")]
     Piv(#[from] piggy_piv::PivError),
 
