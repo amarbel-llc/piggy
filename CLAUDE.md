@@ -77,3 +77,18 @@ Recipes ensure consistent flags, proper dependencies, and keep the justfile as t
 ## Environment Variables
 
 User config is via `PIGGY_*` env vars (store dir, clip time, generated length, character set, etc.) — defaults are set at the top of `src/piggy.sh`. `PIGGY_STORE_DIR` defaults to `~/.local/share/piggy`.
+
+## Debugging
+
+### bats + PCSC
+
+Any bats recipe whose tests exercise pcscd (directly, via pivy-tool, or
+indirectly via piggy's Rust PCSC codepath) MUST invoke bats with
+`--allow-unix-sockets --allow-local-binding`. Without those flags,
+batman's sandbox blocks the Unix-domain socket connection to
+`pcscd.comm` and libpcsclite reports "PC/SC system service/daemon not
+available" — even though `PCSCLITE_CSOCK_NAME` reaches the subprocess.
+The symptom looks identical to a missing pcscd; it isn't. This is a
+batman property (not piggy-specific), but it bites here often enough to
+warrant a local note. See `just explore-bats` for the generic driver
+that always sets the flag correctly.

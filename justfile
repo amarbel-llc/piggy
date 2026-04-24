@@ -63,9 +63,13 @@ test-bats-conformance-interop: build-rust
   export HOME="$PWD/.fib"
   "$PWD/target/debug/piggy" box tpl create interop primary local-guid "$guid"
   tpl_file="$HOME/.pivy/tpl/interop"
+  # --allow-unix-sockets / --allow-local-binding are batman sandbox
+  # escapes — without them subprocesses cannot connect to pcscd.comm
+  # (a Unix socket) and libpcsclite reports "Smart card resource manager
+  # is not running". See CLAUDE.md "Debugging → bats + PCSC".
   INTEROP_TPL="$tpl_file" INTEROP_GUID="$guid" \
     PCSCLITE_CSOCK_NAME="$PCSCLITE_CSOCK_NAME" \
-    BATS_TEST_TIMEOUT=30 bats --tap \
+    BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_interop.bats
 
 test-bats-file *FILES: build-rust
@@ -111,6 +115,18 @@ debug-interop-stream-bytes: build-rust
   printf "hello from c" | pivy-box stream encrypt "$tpl_file" > /tmp/stream-c.ebox
   head -c 80 /tmp/stream-c.ebox | xxd
   echo "total: $(wc -c < /tmp/stream-c.ebox) bytes"
+
+# Generic driver for exploratory bats files. Each file brings up whatever
+# infrastructure it needs in setup_file() / teardown_file(). We pass
+# --no-sandbox because explore tests often need to talk to pcscd (Unix
+# sockets), bind local ports, shell out to `just` to bring up fib (which
+# writes .fib/ into CWD and /run/user/$UID), etc. The narrow-escape flags
+# (--allow-unix-sockets, --allow-local-binding) cover sockets and ports
+# but leave CWD read-only, which breaks fib-up. Explores are not part of
+# the CI gate so the broader trust is fine.
+[group('explore')]
+explore-bats *FILES: build-rust
+  BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
 
 # Run the Go conformance binary against a freshly-started piggy agent and
 # print per-test PASS/FAIL/SKIP lines. Useful for eyeballing which subtests
