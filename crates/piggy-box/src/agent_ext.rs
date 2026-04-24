@@ -21,6 +21,7 @@
 //!
 //! Checkpoint 1 of issue #32.
 use crate::error::{BoxError, Result};
+use crate::piv_box::EcCurve;
 use crate::wire::{WireReader, WireWriter};
 
 /// Encode an `ecdh@joyent.com` request body.
@@ -64,6 +65,33 @@ pub fn decode_ecdh_response(details: &[u8]) -> Result<Vec<u8>> {
     }
 
     Ok(secret)
+}
+
+/// Encode a raw NIST EC point as an OpenSSH `ecdsa-sha2-nistpNNN` sshkey
+/// blob.
+///
+/// The input is the SEC1 uncompressed encoding (`0x04 || X || Y`, 65 bytes
+/// for P-256, 97 for P-384) — the same format `piv_box` stores in
+/// `recipient_pubkey` / `ephemeral_pubkey` *after* decompressing, and the
+/// same encoding the card itself emits over ECDH.
+///
+/// Returns `string("ecdsa-sha2-nistpNNN") | string("nistpNNN") | string(point)`,
+/// which matches what [`ssh_key::PublicKey::to_bytes`] produces for an
+/// Ecdsa key — verified by checkpoint 2's integration test round-trip.
+///
+/// This helper does NOT validate `point`: length-checking is left to the
+/// caller or to the oracle backend. A mis-sized point will surface as an
+/// oracle-side `InvalidPubkey` error rather than a silent success.
+pub fn ec_point_to_ssh_pubkey_blob(curve: EcCurve, point: &[u8]) -> Vec<u8> {
+    let (key_type, curve_name) = match curve {
+        EcCurve::NistP256 => ("ecdsa-sha2-nistp256", "nistp256"),
+        EcCurve::NistP384 => ("ecdsa-sha2-nistp384", "nistp384"),
+    };
+    let mut w = WireWriter::new();
+    w.put_string(key_type.as_bytes());
+    w.put_string(curve_name.as_bytes());
+    w.put_string(point);
+    w.into_bytes()
 }
 
 #[cfg(test)]
@@ -190,5 +218,134 @@ mod tests {
             }
             other => panic!("expected InvalidAgentReply, got {other:?}"),
         }
+    }
+
+    /// Byte-exact golden: the sshkey blob for a toy 65-byte P-256 point.
+    ///
+    /// Layout (u32 BE length + bytes, concatenated):
+    ///   00 00 00 13  "ecdsa-sha2-nistp256"        // 4 + 19 = 23 bytes
+    ///   00 00 00 08  "nistp256"                   // 4 +  8 = 12 bytes
+    ///   00 00 00 41  (65 bytes: 04 || 00 01 02 ..) // 4 + 65 = 69 bytes
+    /// total = 23 + 12 + 69 = 104 bytes.
+    #[test]
+    fn blob_has_expected_shape_p256() {
+        // Build a deterministic 65-byte point: 0x04 prefix + 64 filler bytes.
+        // The helper does not (and should not) validate the point shape;
+        // this test pins the *wire framing*, not the cryptographic legality
+        // of the point.
+        let mut point = vec![0x04u8];
+        for i in 0..64 {
+            point.push(i as u8);
+        }
+        assert_eq!(point.len(), 65);
+
+        let blob = ec_point_to_ssh_pubkey_blob(EcCurve::NistP256, &point);
+        assert_eq!(blob.len(), 104, "framed blob is 104 bytes");
+
+        // First ssh-string: "ecdsa-sha2-nistp256"
+        assert_eq!(&blob[0..4], &[0x00, 0x00, 0x00, 0x13]);
+        assert_eq!(&blob[4..23], b"ecdsa-sha2-nistp256");
+
+        // Second ssh-string: "nistp256"
+        assert_eq!(&blob[23..27], &[0x00, 0x00, 0x00, 0x08]);
+        assert_eq!(&blob[27..35], b"nistp256");
+
+        // Third ssh-string: the 65-byte point.
+        assert_eq!(&blob[35..39], &[0x00, 0x00, 0x00, 0x41]);
+        assert_eq!(&blob[39..104], &point[..]);
+    }
+
+    /// Same shape, different curve labels and point length.
+    #[test]
+    fn blob_has_expected_shape_p384() {
+        // 97-byte P-384 point: 0x04 prefix + 96 filler bytes.
+        let mut point = vec![0x04u8];
+        for i in 0..96 {
+            point.push(i as u8);
+        }
+        assert_eq!(point.len(), 97);
+
+        let blob = ec_point_to_ssh_pubkey_blob(EcCurve::NistP384, &point);
+        // 4 + 19 (ecdsa-sha2-nistp384) + 4 + 8 (nistp384) + 4 + 97 = 136
+        assert_eq!(blob.len(), 136, "framed blob is 136 bytes");
+
+        assert_eq!(&blob[0..4], &[0x00, 0x00, 0x00, 0x13]);
+        assert_eq!(&blob[4..23], b"ecdsa-sha2-nistp384");
+
+        assert_eq!(&blob[23..27], &[0x00, 0x00, 0x00, 0x08]);
+        assert_eq!(&blob[27..35], b"nistp384");
+
+        assert_eq!(&blob[35..39], &[0x00, 0x00, 0x00, 0x61]);
+        assert_eq!(&blob[39..136], &point[..]);
+    }
+
+    /// Pin compatibility with the `ssh-key` crate: feeding a real P-256
+    /// key through `PublicKey::to_bytes()` must produce the same bytes as
+    /// our helper. This is the canary that tells us the oracle will
+    /// accept what we're sending.
+    ///
+    /// `ssh-key` is added under `[dev-dependencies]` so the production
+    /// build of piggy-box stays ssh-key-free.
+    #[test]
+    fn blob_matches_ssh_key_crate_for_p256() {
+        use ssh_key::public::{EcdsaPublicKey, KeyData};
+        use ssh_key::PublicKey;
+
+        // Arbitrary but valid P-256 point generated via openssl so this
+        // test doesn't depend on a hard-coded key elsewhere.
+        let group = openssl::ec::EcGroup::from_curve_name(EcCurve::NistP256.nid()).unwrap();
+        let key = openssl::ec::EcKey::generate(&group).unwrap();
+        let mut ctx = openssl::bn::BigNumContext::new().unwrap();
+        let uncompressed = key
+            .public_key()
+            .to_bytes(
+                &group,
+                openssl::ec::PointConversionForm::UNCOMPRESSED,
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(uncompressed.len(), 65);
+
+        let ours = ec_point_to_ssh_pubkey_blob(EcCurve::NistP256, &uncompressed);
+
+        let ecdsa = EcdsaPublicKey::from_sec1_bytes(&uncompressed).unwrap();
+        let ssh_pub = PublicKey::from(KeyData::Ecdsa(ecdsa));
+        let theirs = ssh_pub.to_bytes().unwrap();
+
+        assert_eq!(
+            ours, theirs,
+            "our sshkey blob must match ssh-key::PublicKey::to_bytes"
+        );
+    }
+
+    /// Mirror of the P-256 interop check for P-384.
+    #[test]
+    fn blob_matches_ssh_key_crate_for_p384() {
+        use ssh_key::public::{EcdsaPublicKey, KeyData};
+        use ssh_key::PublicKey;
+
+        let group = openssl::ec::EcGroup::from_curve_name(EcCurve::NistP384.nid()).unwrap();
+        let key = openssl::ec::EcKey::generate(&group).unwrap();
+        let mut ctx = openssl::bn::BigNumContext::new().unwrap();
+        let uncompressed = key
+            .public_key()
+            .to_bytes(
+                &group,
+                openssl::ec::PointConversionForm::UNCOMPRESSED,
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(uncompressed.len(), 97);
+
+        let ours = ec_point_to_ssh_pubkey_blob(EcCurve::NistP384, &uncompressed);
+
+        let ecdsa = EcdsaPublicKey::from_sec1_bytes(&uncompressed).unwrap();
+        let ssh_pub = PublicKey::from(KeyData::Ecdsa(ecdsa));
+        let theirs = ssh_pub.to_bytes().unwrap();
+
+        assert_eq!(
+            ours, theirs,
+            "P-384 sshkey blob must match ssh-key::PublicKey::to_bytes"
+        );
     }
 }

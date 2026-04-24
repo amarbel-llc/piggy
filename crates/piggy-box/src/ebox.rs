@@ -250,6 +250,14 @@ impl Ebox {
         self.key.as_ref().map(|k| k.as_slice())
     }
 
+    /// True once [`Self::unlock`] (or [`Self::recover`], or
+    /// [`Self::set_key`]) has populated the inner key. Added in
+    /// checkpoint 3A of issue #32 so integration tests can assert on
+    /// unlock state without poking into private fields.
+    pub fn is_unlocked(&self) -> bool {
+        self.key.is_some()
+    }
+
     pub fn set_key(&mut self, key: Vec<u8>) {
         self.key = Some(Zeroizing::new(key));
     }

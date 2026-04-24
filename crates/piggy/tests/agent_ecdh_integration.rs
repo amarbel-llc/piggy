@@ -179,8 +179,8 @@ fn ecdh_roundtrip_against_real_agent() {
     );
 
     // Wrap as ssh_key::PublicKey → SSH wire blob.
-    let partner_ecdsa = EcdsaPublicKey::from_sec1_bytes(&partner_sec1)
-        .expect("from_sec1_bytes partner");
+    let partner_ecdsa =
+        EcdsaPublicKey::from_sec1_bytes(&partner_sec1).expect("from_sec1_bytes partner");
     let partner_key_data = KeyData::Ecdsa(partner_ecdsa);
     let partner_ssh_pub = PublicKey::from(partner_key_data);
     let partner_blob = partner_ssh_pub.to_bytes().expect("encode partner pubkey");
@@ -199,14 +199,11 @@ fn ecdh_roundtrip_against_real_agent() {
     // ---- Assert ----
     assert_eq!(got.len(), 32, "agent returned wrong-length secret");
     assert_eq!(
-        got,
-        expected_bytes,
+        got, expected_bytes,
         "agent ECDH scalar disagrees with locally-computed scalar"
     );
 
-    eprintln!(
-        "ECDH round-trip OK: 32-byte shared secret matches local computation"
-    );
+    eprintln!("ECDH round-trip OK: 32-byte shared secret matches local computation");
 
     // `guard` drops here, tearing down the child agent.
     drop(guard);

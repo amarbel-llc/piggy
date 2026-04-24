@@ -202,9 +202,32 @@ fn cmd_stream_decrypt(args: &[&str]) -> i32 {
         }
     };
 
+    // Checkpoint 3A (#32): build an AgentEcdhOracle from SSH_AUTH_SOCK
+    // if set, and hand it to `unlock_ebox` as an abstract `EcdhOracle`.
+    // A missing SSH_AUTH_SOCK is not fatal — unlock_ebox will fall
+    // through to the (still-stubbed) direct-card path. PIN unlock is
+    // NOT done here; the user is expected to have run `ssh-add -X`
+    // (or equivalent) externally.
     let agent_socket = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
+    let mut agent_oracle: Option<piggy::agent_client::AgentEcdhOracle> = match &agent_socket {
+        Some(sock) => match piggy::agent_client::AgentEcdhOracle::new(sock) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                tracing::warn!(
+                    "piggy box stream decrypt: failed to construct AgentEcdhOracle: {e} — \
+                     proceeding without agent"
+                );
+                None
+            }
+        },
+        None => None,
+    };
 
-    if let Err(e) = unlock_ebox(&mut stream.ebox, agent_socket.as_deref()) {
+    let oracle_dyn: Option<&mut dyn piggy_box::oracle::EcdhOracle> = agent_oracle
+        .as_mut()
+        .map(|o| o as &mut dyn piggy_box::oracle::EcdhOracle);
+
+    if let Err(e) = unlock_ebox(&mut stream.ebox, oracle_dyn) {
         eprintln!("piggy box stream decrypt: unlock failed: {e}");
         return 1;
     }

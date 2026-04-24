@@ -103,6 +103,22 @@ test-rust-agent-ecdh: build-rust
   # ... operations" — the recipe *is* the single source of truth).
   cargo test --test agent_ecdh_integration -- --nocapture
 
+# End-to-end unlock round-trip: boot fib, generate a 9D key, seal a
+# random AEAD key to it, push the ebox through the wire format, and
+# unlock it via a live piggy-agent (through the EcdhOracle trait).
+# Issue #32 checkpoint 3A. Mirrors the shape of test-rust-agent-ecdh.
+test-rust-agent-unlock: build-rust
+  #!/usr/bin/env bash
+  set -euo pipefail
+  trap 'just fib-down' EXIT
+  just fib-up
+  eval "$(cat .fib/env)"
+  # eccp256 matches the curve the Rust ECDH path exercises; 9D is the
+  # Key-Management slot used by the EcP256 unlock flow.
+  pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
+  export PIGGY_BIN="$PWD/target/debug/piggy"
+  cargo test --test unlock_ebox_agent_integration -- --nocapture
+
 check-rust *ARGS:
     cargo check {{ARGS}}
 
