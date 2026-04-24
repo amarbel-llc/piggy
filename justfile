@@ -63,11 +63,16 @@ test-bats-conformance-interop: build-rust
   export HOME="$PWD/.fib"
   "$PWD/target/debug/piggy" box tpl create interop primary local-guid "$guid"
   tpl_file="$HOME/.pivy/tpl/interop"
+  # Capture the real C pivy-box path NOW, before common.bash inside bats
+  # prepends a mock tmpdir to PATH that masks it with a base64 stand-in.
+  # Interop tests need the real binary to actually cross the wire boundary.
+  real_pivy_box=$(command -v pivy-box)
   # --allow-unix-sockets / --allow-local-binding are batman sandbox
   # escapes — without them subprocesses cannot connect to pcscd.comm
   # (a Unix socket) and libpcsclite reports "Smart card resource manager
   # is not running". See CLAUDE.md "Debugging → bats + PCSC".
   INTEROP_TPL="$tpl_file" INTEROP_GUID="$guid" \
+    REAL_PIVY_BOX="$real_pivy_box" \
     PCSCLITE_CSOCK_NAME="$PCSCLITE_CSOCK_NAME" \
     BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_interop.bats

@@ -17,6 +17,14 @@ setup() {
   if [[ -z ${INTEROP_TPL:-} || ! -f ${INTEROP_TPL:-} ]]; then
     skip "INTEROP_TPL not set or file missing (run: just test-bats-conformance-interop)"
   fi
+  # common.bash prepends zz-tests_bats/helpers (with mock-pivy-box.sh) to
+  # PATH. That mock substitutes base64 for real crypto, which is the
+  # opposite of what interop tests want — they need the REAL C pivy-box
+  # to actually cross the wire boundary. The recipe captures the real
+  # binary's path before bats loads and passes it in via REAL_PIVY_BOX.
+  if [[ -z ${REAL_PIVY_BOX:-} || ! -x ${REAL_PIVY_BOX:-} ]]; then
+    skip "REAL_PIVY_BOX not set (run: just test-bats-conformance-interop)"
+  fi
 }
 
 # --- stream encrypt/decrypt cross-compat ---
@@ -24,8 +32,8 @@ setup() {
 function rust_encrypt_c_decrypt { # @test
   local encrypted="$BATS_TEST_TMPDIR/stream.ebox"
 
-  printf "hello from rust" | "$PIGGY" box stream encrypt "$INTEROP_TPL" > "$encrypted"
-  run pivy-box stream decrypt < "$encrypted"
+  printf "hello from rust" | "$PIGGY" box stream encrypt "$INTEROP_TPL" >"$encrypted"
+  run "$REAL_PIVY_BOX" stream decrypt <"$encrypted"
   assert_success
   assert_output "hello from rust"
 }
@@ -33,7 +41,7 @@ function rust_encrypt_c_decrypt { # @test
 function c_encrypt_rust_decrypt { # @test
   local encrypted="$BATS_TEST_TMPDIR/stream.ebox"
 
-  printf "hello from c" | pivy-box stream encrypt "$INTEROP_TPL" > "$encrypted"
+  printf "hello from c" | "$REAL_PIVY_BOX" stream encrypt "$INTEROP_TPL" >"$encrypted"
   run "$PIGGY" box stream decrypt "$encrypted"
   assert_success
   assert_output "hello from c"
@@ -59,7 +67,7 @@ function rust_tpl_create_c_tpl_show { # @test
     fail "template file not found after tpl create"
   fi
 
-  run pivy-box tpl show "$tpl_file"
+  run "$REAL_PIVY_BOX" tpl show "$tpl_file"
   assert_success
 }
 
@@ -68,7 +76,7 @@ function c_tpl_create_rust_tpl_show { # @test
 
   local tpl_file="$BATS_TEST_TMPDIR/c-interop.tpl"
 
-  run pivy-box tpl create "$tpl_file" primary local-guid "$INTEROP_GUID"
+  run "$REAL_PIVY_BOX" tpl create "$tpl_file" primary local-guid "$INTEROP_GUID"
   if [[ $status -ne 0 ]]; then
     skip "C pivy-box tpl create failed (may require interactive mode): $output"
   fi
