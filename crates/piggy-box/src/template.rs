@@ -295,7 +295,7 @@ mod tests {
         EboxTplPart {
             guid: Guid::from_hex("AABBCCDD11223344AABBCCDD11223344").unwrap(),
             slot: DEFAULT_SLOT,
-            name: Some("test-key".to_string()),
+            name: Some("piggy-test:template-fixture".to_string()),
             pubkey,
             pubkey_curve: curve,
             cak: None,
@@ -321,7 +321,10 @@ mod tests {
         assert_eq!(tpl2.configs[0].config_type, EboxConfigType::Primary);
         assert_eq!(tpl2.configs[0].n, 1);
         assert_eq!(tpl2.configs[0].parts.len(), 1);
-        assert_eq!(tpl2.configs[0].parts[0].name.as_deref(), Some("test-key"));
+        assert_eq!(
+            tpl2.configs[0].parts[0].name.as_deref(),
+            Some("piggy-test:template-fixture")
+        );
         assert_eq!(
             tpl2.configs[0].parts[0].guid.to_hex(),
             "AABBCCDD11223344AABBCCDD11223344"

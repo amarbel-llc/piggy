@@ -171,7 +171,7 @@ fn unlock_ebox_against_real_agent() {
             parts: vec![EboxTplPart {
                 guid: card_guid.clone(),
                 slot: DEFAULT_SLOT,
-                name: Some("unlock-integration-test".into()),
+                name: Some("piggy-test:unlock-integration".into()),
                 pubkey: card_sec1_compressed,
                 pubkey_curve: EcCurve::NistP256,
                 cak: None,

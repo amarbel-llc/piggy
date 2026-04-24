@@ -188,7 +188,7 @@ mod tests {
                 parts: vec![EboxTplPart {
                     guid: Guid::from_hex("AABBCCDD11223344AABBCCDD11223344").unwrap(),
                     slot: crate::template::DEFAULT_SLOT,
-                    name: Some("test".to_string()),
+                    name: Some("piggy-test:stream-fixture".to_string()),
                     pubkey,
                     pubkey_curve: curve,
                     cak: None,

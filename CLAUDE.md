@@ -74,6 +74,18 @@ Recipes ensure consistent flags, proper dependencies, and keep the justfile as t
 - Shell formatting: `shfmt -s -i=2` (2-space indent, simplified)
 - Nix formatting: `nixfmt-rfc-style`
 
+### Test-fixture ebox part names
+
+When a unit or integration test builds an `EboxTplPart`, set `name:
+Some("piggy-test:<short-context>".into())`. The `piggy-test:` prefix
+ensures that if a PIN prompt ever escapes the test harness — via a
+misrouted SSH_AUTH_SOCK, a user's background pivy-agent, a
+misconfigured askpass binary, etc — the dialog's "token (partname)"
+line makes the origin obvious rather than looking like a real-card
+request. Examples: `piggy-test:stream-fixture`,
+`piggy-test:unlock-integration`. See #33 for planned askpass-context
+improvements that build on this prefix.
+
 ## Environment Variables
 
 User config is via `PIGGY_*` env vars (store dir, clip time, generated length, character set, etc.) — defaults are set at the top of `src/piggy.sh`. `PIGGY_STORE_DIR` defaults to `~/.local/share/piggy`.

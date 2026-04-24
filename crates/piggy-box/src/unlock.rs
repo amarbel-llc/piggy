@@ -239,7 +239,7 @@ mod tests {
                 parts: vec![EboxTplPart {
                     guid: Guid::from_hex("AABBCCDD11223344AABBCCDD11223344").unwrap(),
                     slot: DEFAULT_SLOT,
-                    name: Some("unit-test".into()),
+                    name: Some("piggy-test:unlock-unit".into()),
                     pubkey,
                     pubkey_curve: curve,
                     cak: None,
