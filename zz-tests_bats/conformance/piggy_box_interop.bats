@@ -76,7 +76,10 @@ function c_tpl_create_rust_tpl_show { # @test
 
   local tpl_file="$BATS_TEST_TMPDIR/c-interop.tpl"
 
-  run "$REAL_PIVY_BOX" tpl create "$tpl_file" primary local-guid "$INTEROP_GUID"
+  # -f writes to the given absolute path instead of ~/.ebox-tpl/<name>.
+  # See vendor/pivy/src/pivy-box.c:1944 and vendor/pivy/zz-tests_bats/
+  # pivy_ext_interop.bats for the canonical usage.
+  run "$REAL_PIVY_BOX" tpl create -f "$tpl_file" primary local-guid "$INTEROP_GUID"
   if [[ $status -ne 0 ]]; then
     skip "C pivy-box tpl create failed (may require interactive mode): $output"
   fi

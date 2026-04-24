@@ -49,7 +49,13 @@ test-bats-conformance-protocol: build-rust
 test-bats-conformance-interop: build-rust
   #!/usr/bin/env bash
   set -euo pipefail
-  trap 'just fib-down' EXIT
+  # Anchor the agent socket at /tmp rather than under TMPDIR (nix-shell
+  # nests TMPDIR deeply, which can overflow sockaddr_un's 108-byte limit;
+  # see crates/piggy/tests/agent_ecdh_integration.rs::tempdir for the
+  # longer story). $$ keeps it unique per recipe run.
+  agent_sock="/tmp/piggy-interop-agent-$$.sock"
+  agent_pid=""
+  trap 'kill "$agent_pid" 2>/dev/null || true; rm -f "$agent_sock"; just fib-down' EXIT
   just fib-up
   eval "$(cat .fib/env)"
   # Generate a key on the fib card's 9D slot (Key Management / ECDH)
@@ -67,6 +73,31 @@ test-bats-conformance-interop: build-rust
   # prepends a mock tmpdir to PATH that masks it with a base64 stand-in.
   # Interop tests need the real binary to actually cross the wire boundary.
   real_pivy_box=$(command -v pivy-box)
+  # Spawn piggy-agent. -A = all-cards, -D = foreground debug, -a = socket.
+  # PCSCLITE_CSOCK_NAME is already exported above, so the child inherits
+  # the fib pcscd socket. Mirrors the integration-test invocation in
+  # crates/piggy/tests/agent_ecdh_integration.rs.
+  "$PWD/target/debug/piggy" agent -A -D -a "$agent_sock" &
+  agent_pid=$!
+  # Wait up to 5 s for the agent socket to appear (matches the timeout
+  # in agent_ecdh_integration.rs::wait_for_socket).
+  for _ in $(seq 1 50); do [[ -S "$agent_sock" ]] && break; sleep 0.1; done
+  [[ -S "$agent_sock" ]] || { echo "agent socket never appeared"; exit 1; }
+  # Safety net for PIN prompts. See CLAUDE.md "Test harness safety net
+  # for PIN prompts" and amarbel-llc/piggy#35. SSH_ASKPASS points at a
+  # tagging non-interactive helper; SSH_ASKPASS_REQUIRE=force blocks the
+  # tty prompt path; DISPLAY="" blocks GUI askpass fallbacks (zenity,
+  # etc.) from rendering dialogs. PIGGY_TEST_FIB_PIN authorizes the
+  # helper to supply fib's PIN.
+  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+  export SSH_ASKPASS="$askpass" \
+         SSH_ASKPASS_REQUIRE=force \
+         DISPLAY="" \
+         PIGGY_TEST_FIB_PIN=123456
+  # Unlock the PIN on the agent via ssh-add -X. piggy-agent's `unlock`
+  # handler stuffs the passphrase into its PIN slot; the SSH_ASKPASS env
+  # above makes ssh-add supply the PIN non-interactively.
+  SSH_AUTH_SOCK="$agent_sock" ssh-add -X
   # --allow-unix-sockets / --allow-local-binding are batman sandbox
   # escapes — without them subprocesses cannot connect to pcscd.comm
   # (a Unix socket) and libpcsclite reports "Smart card resource manager
@@ -74,6 +105,11 @@ test-bats-conformance-interop: build-rust
   INTEROP_TPL="$tpl_file" INTEROP_GUID="$guid" \
     REAL_PIVY_BOX="$real_pivy_box" \
     PCSCLITE_CSOCK_NAME="$PCSCLITE_CSOCK_NAME" \
+    SSH_AUTH_SOCK="$agent_sock" \
+    SSH_ASKPASS="$askpass" \
+    SSH_ASKPASS_REQUIRE=force \
+    DISPLAY="" \
+    PIGGY_TEST_FIB_PIN=123456 \
     BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_interop.bats
 
