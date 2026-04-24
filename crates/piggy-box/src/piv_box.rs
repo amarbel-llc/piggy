@@ -146,8 +146,16 @@ impl PivBox {
 
         let key_material = kdf_sha512(&shared_secret, &self.nonce)?;
         let padded = pkcs7_pad(plaintext, 16);
-        let (ct, iv) = chacha20_poly1305_encrypt(&key_material[..32], &padded)?;
-        self.iv = iv;
+        let ct = chacha20_poly1305_encrypt(&key_material[..32], &padded)?;
+        // Per RFC 0002 §Cipher, chacha20-poly1305 has a 0-byte IV on the
+        // wire — the cipher uses an all-zero internal nonce fed to the
+        // AEAD primitive, but the serialized `iv` field is empty. pivy C's
+        // `piv_box_open_common` validates `pdb_iv.b_len == cipher_ivlen`,
+        // and `cipher_ivlen("chacha20-poly1305") == 0`; writing any
+        // non-empty IV here makes pivy reject the box.
+        // TODO: when we support aes256-gcm (or any cipher with non-zero
+        // ivlen), cipher-dispatch both the internal nonce and the wire IV.
+        self.iv = Vec::new();
         self.ciphertext = ct;
 
         Ok(())
@@ -166,7 +174,13 @@ impl PivBox {
 
     pub fn open_with_secret(&mut self, shared_secret: &[u8]) -> Result<()> {
         let key_material = kdf_sha512(shared_secret, &self.nonce)?;
-        let padded = chacha20_poly1305_decrypt(&key_material[..32], &self.iv, &self.ciphertext)?;
+        // `self.iv` is intentionally ignored: per RFC 0002 §Cipher, the
+        // chacha20-poly1305 wire IV is 0-length and the primitive uses an
+        // all-zero internal nonce (established inside
+        // `chacha20_poly1305_decrypt`). This accepts any serialized IV —
+        // 0-byte (spec-correct) or 12-zero-byte (from older Rust seals
+        // before the #34 fix) — so we can decrypt both shapes.
+        let padded = chacha20_poly1305_decrypt(&key_material[..32], &self.ciphertext)?;
         let plain = pkcs7_unpad(&padded, 16)?;
         self.plaintext = Some(Zeroizing::new(plain));
         Ok(())
@@ -295,20 +309,29 @@ fn kdf_sha512(shared_secret: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
     Ok(h.finish()?.to_vec())
 }
 
-fn chacha20_poly1305_encrypt(key: &[u8], plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+/// Encrypt with ChaCha20-Poly1305 using an all-zero internal nonce.
+///
+/// Per RFC 0002 §Cipher, the `chacha20-poly1305` cipher as used by pivy
+/// feeds the AEAD primitive an all-zero 12-byte nonce; the serialized
+/// piv_box `iv` field is always 0-length for this cipher. Returning just
+/// the (ciphertext || tag) keeps the encrypt path from leaking an
+/// already-known nonce that callers might be tempted to persist.
+fn chacha20_poly1305_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     use openssl::symm::{encrypt_aead, Cipher};
 
     let cipher = Cipher::chacha20_poly1305();
-    let iv = vec![0u8; 12]; // pivy always uses zero IV for ChaCha20-Poly1305
+    let iv = [0u8; 12];
 
     let mut tag = vec![0u8; 16];
     let mut ct = encrypt_aead(cipher, key, Some(&iv), &[], plaintext, &mut tag)?;
     ct.extend_from_slice(&tag);
 
-    Ok((ct, iv))
+    Ok(ct)
 }
 
-fn chacha20_poly1305_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+/// Decrypt ChaCha20-Poly1305 ciphertext (with appended 16-byte tag)
+/// using an all-zero internal nonce. See [`chacha20_poly1305_encrypt`].
+fn chacha20_poly1305_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     use openssl::symm::{decrypt_aead, Cipher};
 
     let cipher = Cipher::chacha20_poly1305();
@@ -321,13 +344,8 @@ fn chacha20_poly1305_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result
     let ct = &ciphertext[..tag_offset];
     let tag = &ciphertext[tag_offset..];
 
-    let effective_iv = if iv.is_empty() {
-        vec![0u8; 12]
-    } else {
-        iv.to_vec()
-    };
-
-    let pt = decrypt_aead(cipher, key, Some(&effective_iv), &[], ct, tag)
+    let iv = [0u8; 12];
+    let pt = decrypt_aead(cipher, key, Some(&iv), &[], ct, tag)
         .map_err(|e| BoxError::Crypto(format!("ChaCha20-Poly1305 decrypt: {e}")))?;
 
     Ok(pt)
@@ -375,6 +393,101 @@ mod tests {
 
         let bytes = b.to_bytes().unwrap();
         let mut b2 = PivBox::from_bytes(&bytes).unwrap();
+        b2.open_offline(&priv_key).unwrap();
+
+        let recovered = b2.take_data().unwrap();
+        assert_eq!(&*recovered, data);
+    }
+
+    #[test]
+    fn seal_leaves_iv_field_empty_per_rfc_0002() {
+        // Regression test for #34. Per RFC 0002 §Cipher, the
+        // chacha20-poly1305 wire IV is 0 bytes. Pre-fix, Rust wrote 12
+        // zero bytes here, shifting the rest of the parse on pivy C and
+        // surfacing as "IV length (0) is not appropriate for cipher
+        // 'chacha20-poly1305'".
+        let (pub_key, _) = generate_keypair(EcCurve::NistP256);
+        let mut b = PivBox::new(EcCurve::NistP256);
+        b.set_data(b"payload");
+        b.seal_offline(&pub_key).unwrap();
+        assert!(
+            b.iv.is_empty(),
+            "post-#34, PivBox.iv must be empty for chacha20-poly1305 (got {} bytes)",
+            b.iv.len()
+        );
+
+        // Deserialize and assert the field survives the wire round-trip.
+        let bytes = b.to_bytes().unwrap();
+        let b2 = PivBox::from_bytes(&bytes).unwrap();
+        assert!(
+            b2.iv.is_empty(),
+            "IV field on the wire must deserialize as empty (got {} bytes)",
+            b2.iv.len()
+        );
+    }
+
+    #[test]
+    fn wire_iv_length_prefix_is_zero_byte() {
+        // Byte-level canary: the IV field's u8 length prefix sits at a
+        // known offset for a v2 no-guid Primary box with DEFAULT_CIPHER
+        // + DEFAULT_KDF on NistP256. If a future refactor writes any
+        // non-zero byte there, pivy C will reject — this test fails
+        // before interop does.
+        //
+        // Layout up to the IV field (pivy RFC 0002 §Binary Serialization):
+        //   off 0..2   magic "B0 C5"
+        //   off 2      version (0x02)
+        //   off 3      guid_valid flag (0x00 here)
+        //   off 4      guid string8 len (0x00)
+        //   off 5      slot u8 (0x00)
+        //   off 6      cipher cstring8 len (0x11 for "chacha20-poly1305")
+        //   off 7..24  "chacha20-poly1305"        (17 bytes)
+        //   off 24     kdf cstring8 len (0x06 for "sha512")
+        //   off 25..31 "sha512"                   (6 bytes)
+        //   off 31     nonce string8 len (0x10, NONCE_LEN=16)
+        //   off 32..48 nonce                      (16 bytes)
+        //   off 48     curve cstring8 len (0x08 for "nistp256")
+        //   off 49..57 "nistp256"                 (8 bytes)
+        //   off 57     recipient eckey8 len (0x21, compressed P-256 = 33)
+        //   off 58..91 recipient pubkey           (33 bytes)
+        //   off 91     ephemeral eckey8 len (0x21)
+        //   off 92..125 ephemeral pubkey          (33 bytes)
+        //   off 125    IV string8 len             <-- MUST be 0x00
+        let (pub_key, _) = generate_keypair(EcCurve::NistP256);
+        let mut b = PivBox::new(EcCurve::NistP256);
+        b.set_data(b"payload");
+        b.seal_offline(&pub_key).unwrap();
+        let bytes = b.to_bytes().unwrap();
+
+        assert_eq!(
+            bytes.get(125),
+            Some(&0x00),
+            "IV length byte at offset 125 must be 0x00 for chacha20-poly1305 \
+             (got {:?}); pivy C rejects anything else. If the layout above \
+             shifted, update the offset AND pivy C's expected ivlen.",
+            bytes.get(125)
+        );
+    }
+
+    #[test]
+    fn open_with_secret_ignores_self_iv() {
+        // open_with_secret must not depend on `self.iv`. This test seals
+        // a box, then mutates `self.iv` to a bogus 12-zero vector — the
+        // same shape older Rust seals produced before #34 — and confirms
+        // decrypt still succeeds. Covers backwards-compatibility for
+        // eboxes sealed by a pre-fix Rust and still at rest on disk.
+        let (pub_key, priv_key) = generate_keypair(EcCurve::NistP256);
+        let mut b = PivBox::new(EcCurve::NistP256);
+        let data = b"backcompat-payload";
+        b.set_data(data);
+        b.seal_offline(&pub_key).unwrap();
+
+        // Round-trip through the wire so we have a fresh struct whose
+        // state mirrors what from_bytes would produce — then inject a
+        // legacy-shaped IV.
+        let bytes = b.to_bytes().unwrap();
+        let mut b2 = PivBox::from_bytes(&bytes).unwrap();
+        b2.iv = vec![0u8; 12];
         b2.open_offline(&priv_key).unwrap();
 
         let recovered = b2.take_data().unwrap();
