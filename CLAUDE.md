@@ -104,3 +104,28 @@ The symptom looks identical to a missing pcscd; it isn't. This is a
 batman property (not piggy-specific), but it bites here often enough to
 warrant a local note. See `just explore-bats` for the generic driver
 that always sets the flag correctly.
+
+### Test harness safety net for PIN prompts
+
+Any recipe that could invoke `pivy-box`, `pivy-agent`, or any path that
+might reach pivy's `assert_pin()` interactive fallback MUST set:
+
+```sh
+askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+export SSH_ASKPASS="$askpass" \
+       SSH_ASKPASS_REQUIRE=force \
+       DISPLAY="" \
+       PIGGY_TEST_FIB_PIN=123456   # only if the recipe legitimately needs auto-unlock
+```
+
+Without these, a failed agent unlock (or any other pivy decrypt-path
+error) falls through to whatever `SSH_ASKPASS` the operator's shell
+inherits — typically zenity or ssh-askpass — and renders a GUI dialog
+on their desktop that looks indistinguishable from a real unlock. We
+had exactly this escape on 2026-04-24; see #35.
+
+The helper script in `zz-tests_bats/helpers/piggy-test-askpass.sh`
+either supplies the configured test PIN non-interactively (if
+`PIGGY_TEST_FIB_PIN` is exported) or refuses with a `[piggy-test-askpass]`-
+prefixed stderr banner so test logs show exactly which prompt leaked.
+It NEVER prompts and NEVER touches /dev/tty.
