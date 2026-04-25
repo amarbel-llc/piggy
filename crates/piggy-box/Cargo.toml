@@ -26,3 +26,6 @@ ssh-key = { version = "0.6", features = ["alloc", "ecdsa"] }
 # oracle for piv_box's openssl-based AEAD path. Test-only; piggy-box
 # itself never compiles against this crate. See #38 for context.
 chacha20poly1305 = "0.10"
+# Property-based fuzzer for the piv_box / ebox / stream / template
+# wire parsers. Test-only. See #40.
+proptest = "1"

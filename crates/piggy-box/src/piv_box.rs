@@ -634,6 +634,61 @@ mod tests {
         }
     }
 
+    /// Property-based wire-format fuzzing for `PivBox`. Idempotence:
+    /// `serialize(parse(serialize(v))) == serialize(v)` for any sealed
+    /// `PivBox`. Catches asymmetry between writer and parser (e.g. a
+    /// length prefix written one way and read another). See #40.
+    mod proptest_wire {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_curve() -> impl Strategy<Value = EcCurve> {
+            prop_oneof![Just(EcCurve::NistP256), Just(EcCurve::NistP384)]
+        }
+
+        fn arb_guid_slot() -> impl Strategy<Value = Option<(piggy_piv::Guid, u8)>> {
+            prop_oneof![
+                Just(None),
+                (any::<[u8; 16]>(), 1u8..=0xFFu8).prop_map(|(b, slot)| {
+                    Some((piggy_piv::Guid::from_bytes(&b).unwrap(), slot))
+                }),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 64, .. ProptestConfig::default() })]
+
+            #[test]
+            fn piv_box_serialize_parse_idempotent(
+                curve in arb_curve(),
+                plaintext in proptest::collection::vec(any::<u8>(), 0..=128),
+                guid_slot in arb_guid_slot(),
+            ) {
+                let group = openssl::ec::EcGroup::from_curve_name(curve.nid()).unwrap();
+                let recipient_priv = EcKey::generate(&group).unwrap();
+                let recipient_pub =
+                    EcKey::from_public_key(&group, recipient_priv.public_key()).unwrap();
+                let ephemeral_priv = EcKey::generate(&group).unwrap();
+
+                let mut sealed = PivBox::new(curve);
+                sealed.guid_slot = guid_slot;
+                sealed.set_data(&plaintext);
+                sealed
+                    .seal_offline_with_ephemeral(&recipient_pub, &ephemeral_priv)
+                    .unwrap();
+
+                let bytes1 = sealed.to_bytes().unwrap();
+                let parsed = PivBox::from_bytes(&bytes1).unwrap();
+                let bytes2 = parsed.to_bytes().unwrap();
+                prop_assert_eq!(
+                    bytes1,
+                    bytes2,
+                    "piv_box wire serialize→parse→serialize is not idempotent"
+                );
+            }
+        }
+    }
+
     /// Cross-impl oracle: encrypt/decrypt the same inputs with both
     /// piggy's openssl-backed `chacha20_poly1305_*` wrapper AND
     /// RustCrypto's pure-Rust `chacha20poly1305` crate, then compare.

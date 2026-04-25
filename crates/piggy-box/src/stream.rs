@@ -287,4 +287,73 @@ mod tests {
             assert_eq!(unpadded, data);
         }
     }
+
+    /// Property-based wire-format fuzzing for `EboxStream`. See #40.
+    /// EboxStream wraps an `Ebox` and adds a chunk_size + cipher/mac
+    /// header; this proptest exercises the header round-trip plus the
+    /// embedded Ebox bytes. Real ECDH + AEAD per iteration; cases low.
+    mod proptest_wire {
+        use super::*;
+        use crate::piv_box::EcCurve;
+        use crate::template::{EboxConfigType, EboxTplConfig, EboxTplPart, DEFAULT_SLOT};
+        use openssl::ec::{EcGroup, EcKey};
+        use piggy_piv::Guid;
+        use proptest::prelude::*;
+
+        fn arb_template() -> impl Strategy<Value = EboxTemplate> {
+            prop_oneof![Just(EcCurve::NistP256), Just(EcCurve::NistP384)].prop_map(|curve| {
+                let group = EcGroup::from_curve_name(curve.nid()).unwrap();
+                let key = EcKey::generate(&group).unwrap();
+                let mut ctx = openssl::bn::BigNumContext::new().unwrap();
+                let pubkey = key
+                    .public_key()
+                    .to_bytes(
+                        &group,
+                        openssl::ec::PointConversionForm::COMPRESSED,
+                        &mut ctx,
+                    )
+                    .unwrap();
+                EboxTemplate {
+                    version: 1,
+                    configs: vec![EboxTplConfig {
+                        config_type: EboxConfigType::Primary,
+                        n: 1,
+                        parts: vec![EboxTplPart {
+                            guid: Guid::from_bytes(&[0u8; 16]).unwrap(),
+                            slot: DEFAULT_SLOT,
+                            name: Some("piggy-test:proptest-stream".to_string()),
+                            pubkey,
+                            pubkey_curve: curve,
+                            cak: None,
+                        }],
+                    }],
+                }
+            })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 16, .. ProptestConfig::default() })]
+
+            #[test]
+            fn ebox_stream_serialize_parse_idempotent(
+                tpl in arb_template(),
+                // Sweep chunk_size and cipher/mac names to exercise the
+                // EboxStream-specific header bytes.
+                chunk_size in 1024u64..=1_048_576,
+            ) {
+                let mut stream = EboxStream::new(&tpl).unwrap();
+                stream.chunk_size = chunk_size;
+
+                let bytes1 = stream.to_bytes().unwrap();
+                let parsed = EboxStream::from_bytes(&bytes1).unwrap();
+                let bytes2 = parsed.to_bytes().unwrap();
+                prop_assert_eq!(
+                    bytes1,
+                    bytes2,
+                    "ebox_stream wire serialize→parse→serialize is not idempotent"
+                );
+            }
+        }
+
+    }
 }

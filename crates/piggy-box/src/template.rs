@@ -480,4 +480,91 @@ mod tests {
             Err(BoxError::Wire(_))
         ));
     }
+
+    /// Property-based wire-format fuzzing for `EboxTemplate`. See #40.
+    /// The pubkey field is generated as random bytes of the correct
+    /// compressed-point length (33 for P-256, 49 for P-384) — the wire
+    /// idempotence property does not depend on the bytes being valid
+    /// EC points; that's tested separately by `unlock_ebox_*`.
+    mod proptest_wire {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_curve_and_pubkey() -> impl Strategy<Value = (EcCurve, Vec<u8>)> {
+            prop_oneof![
+                proptest::collection::vec(any::<u8>(), 33..=33)
+                    .prop_map(|v| (EcCurve::NistP256, v)),
+                proptest::collection::vec(any::<u8>(), 49..=49)
+                    .prop_map(|v| (EcCurve::NistP384, v)),
+            ]
+        }
+
+        fn arb_part() -> impl Strategy<Value = EboxTplPart> {
+            (
+                any::<[u8; 16]>(),
+                prop_oneof![Just(DEFAULT_SLOT), 0x82u8..=0x95u8],
+                prop::option::of("[a-zA-Z0-9_:-]{1,30}"),
+                arb_curve_and_pubkey(),
+                prop::option::of(proptest::collection::vec(any::<u8>(), 0..=64)),
+            )
+                .prop_map(
+                    |(guid_bytes, slot, name, (pubkey_curve, pubkey), cak)| EboxTplPart {
+                        guid: Guid::from_bytes(&guid_bytes).unwrap(),
+                        slot,
+                        name,
+                        pubkey,
+                        pubkey_curve,
+                        cak,
+                    },
+                )
+        }
+
+        fn arb_config() -> impl Strategy<Value = EboxTplConfig> {
+            (
+                prop_oneof![
+                    Just(EboxConfigType::Primary),
+                    Just(EboxConfigType::Recovery),
+                ],
+                proptest::collection::vec(arb_part(), 1..=3),
+            )
+                .prop_map(|(config_type, parts)| {
+                    let m = parts.len() as u8;
+                    let n = match config_type {
+                        // Per `read_tpl_config`: PRIMARY MUST have n=1.
+                        EboxConfigType::Primary => 1,
+                        // RECOVERY: 1 <= n <= m.
+                        EboxConfigType::Recovery => 1.max(m / 2).min(m),
+                    };
+                    EboxTplConfig {
+                        config_type,
+                        n,
+                        parts,
+                    }
+                })
+        }
+
+        fn arb_template() -> impl Strategy<Value = EboxTemplate> {
+            proptest::collection::vec(arb_config(), 1..=2)
+                .prop_map(|configs| EboxTemplate {
+                    version: EBOX_TPL_VERSION,
+                    configs,
+                })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 64, .. ProptestConfig::default() })]
+
+            #[test]
+            fn ebox_template_serialize_parse_idempotent(tpl in arb_template()) {
+                let bytes1 = tpl.to_bytes().unwrap();
+                let parsed = EboxTemplate::from_bytes(&bytes1).unwrap();
+                let bytes2 = parsed.to_bytes().unwrap();
+                prop_assert_eq!(
+                    bytes1,
+                    bytes2,
+                    "ebox_template wire serialize→parse→serialize is not idempotent"
+                );
+            }
+        }
+    }
 }

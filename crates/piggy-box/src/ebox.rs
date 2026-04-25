@@ -673,4 +673,88 @@ mod tests {
         ebox2.unlock(0).unwrap();
         assert!(matches!(ebox2.unlock(0), Err(BoxError::AlreadyUnlocked)));
     }
+
+    /// Property-based wire-format fuzzing for `Ebox`. See #40. Each
+    /// iteration runs real ECDH + AEAD, so cases are capped low.
+    mod proptest_wire {
+        use super::*;
+        use crate::template::{EboxTplConfig, EboxTplPart, DEFAULT_SLOT};
+        use proptest::prelude::*;
+
+        // Generate compressed-point bytes by spawning a real EcKey on
+        // the chosen curve — Ebox::create needs the bytes to round-trip
+        // through ECDH (the stub PivBox parts hash these against an
+        // ephemeral). Random bytes won't validate as EC points.
+        fn arb_curve_and_real_pubkey() -> impl Strategy<Value = (EcCurve, Vec<u8>)> {
+            prop_oneof![
+                Just(EcCurve::NistP256),
+                Just(EcCurve::NistP384),
+            ]
+            .prop_map(|curve| {
+                let group = EcGroup::from_curve_name(curve.nid()).unwrap();
+                let key = EcKey::generate(&group).unwrap();
+                let mut ctx = openssl::bn::BigNumContext::new().unwrap();
+                let pubkey = key
+                    .public_key()
+                    .to_bytes(
+                        &group,
+                        openssl::ec::PointConversionForm::COMPRESSED,
+                        &mut ctx,
+                    )
+                    .unwrap();
+                (curve, pubkey)
+            })
+        }
+
+        fn arb_part() -> impl Strategy<Value = EboxTplPart> {
+            (
+                any::<[u8; 16]>(),
+                arb_curve_and_real_pubkey(),
+                prop::option::of("piggy-test:proptest-[a-z0-9]{1,8}"),
+            )
+                .prop_map(|(guid_bytes, (pubkey_curve, pubkey), name)| EboxTplPart {
+                    guid: piggy_piv::Guid::from_bytes(&guid_bytes).unwrap(),
+                    slot: DEFAULT_SLOT,
+                    name,
+                    pubkey,
+                    pubkey_curve,
+                    cak: None,
+                })
+        }
+
+        fn arb_template() -> impl Strategy<Value = crate::template::EboxTemplate> {
+            proptest::collection::vec(arb_part(), 1..=2).prop_map(|parts| {
+                crate::template::EboxTemplate {
+                    version: 1,
+                    configs: vec![EboxTplConfig {
+                        config_type: EboxConfigType::Primary,
+                        n: 1,
+                        parts,
+                    }],
+                }
+            })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 16, .. ProptestConfig::default() })]
+
+            #[test]
+            fn ebox_serialize_parse_idempotent(
+                tpl in arb_template(),
+                key_len in 16usize..=64,
+            ) {
+                let key = vec![0xa5u8; key_len];
+                let ebox = Ebox::create(&tpl, &key, EboxType::Key).unwrap();
+
+                let bytes1 = ebox.to_bytes().unwrap();
+                let parsed = Ebox::from_bytes(&bytes1).unwrap();
+                let bytes2 = parsed.to_bytes().unwrap();
+                prop_assert_eq!(
+                    bytes1,
+                    bytes2,
+                    "ebox wire serialize→parse→serialize is not idempotent"
+                );
+            }
+        }
+    }
 }
