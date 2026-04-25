@@ -203,11 +203,10 @@ fn cmd_stream_decrypt(args: &[&str]) -> i32 {
     };
 
     // Checkpoint 3A (#32): build an AgentEcdhOracle from SSH_AUTH_SOCK
-    // if set, and hand it to `unlock_ebox` as an abstract `EcdhOracle`.
-    // A missing SSH_AUTH_SOCK is not fatal — unlock_ebox will fall
-    // through to the (still-stubbed) direct-card path. PIN unlock is
-    // NOT done here; the user is expected to have run `ssh-add -X`
-    // (or equivalent) externally.
+    // if set, so unlock can hit a running piggy-agent / pivy-agent.
+    // A missing SSH_AUTH_SOCK is not fatal — we also try the direct-PCSC
+    // card path (#31) below. PIN unlock for the agent path is NOT done
+    // here; the user is expected to have run `ssh-add -X` externally.
     let agent_socket = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
     let mut agent_oracle: Option<piggy::agent_client::AgentEcdhOracle> = match &agent_socket {
         Some(sock) => match piggy::agent_client::AgentEcdhOracle::new(sock) {
@@ -223,11 +222,31 @@ fn cmd_stream_decrypt(args: &[&str]) -> i32 {
         None => None,
     };
 
-    let oracle_dyn: Option<&mut dyn piggy_box::oracle::EcdhOracle> = agent_oracle
+    // Issue #31: build a CardEcdhOracle backed by PCSC + SSH_ASKPASS.
+    // Construction can fail if the PCSC resource manager is unreachable
+    // (no pcscd, no PCSCLITE_CSOCK_NAME); that's fine — we simply skip
+    // the card path and let the agent path carry the unlock, or surface
+    // UnlockFailed if neither is available.
+    let mut card_oracle: Option<piggy::card_oracle::CardEcdhOracle> =
+        match piggy::card_oracle::CardEcdhOracle::new(piggy::card_oracle::askpass_pin_supplier()) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                tracing::debug!(
+                    "piggy box stream decrypt: card oracle unavailable: {e} — \
+                     agent path only"
+                );
+                None
+            }
+        };
+
+    let agent_dyn: Option<&mut dyn piggy_box::oracle::EcdhOracle> = agent_oracle
+        .as_mut()
+        .map(|o| o as &mut dyn piggy_box::oracle::EcdhOracle);
+    let card_dyn: Option<&mut dyn piggy_box::oracle::EcdhOracle> = card_oracle
         .as_mut()
         .map(|o| o as &mut dyn piggy_box::oracle::EcdhOracle);
 
-    if let Err(e) = unlock_ebox(&mut stream.ebox, oracle_dyn) {
+    if let Err(e) = unlock_ebox(&mut stream.ebox, agent_dyn, card_dyn) {
         eprintln!("piggy box stream decrypt: unlock failed: {e}");
         return 1;
     }

@@ -7,3 +7,4 @@
 //! `ecdh@joyent.com` round-trip against a live `piggy-agent`.
 
 pub mod agent_client;
+pub mod card_oracle;

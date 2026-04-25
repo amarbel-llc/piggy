@@ -1,15 +1,17 @@
 //! Unlock flow for a deserialized [`Ebox`].
 //!
-//! Checkpoint 3A of issue #32 wires the abstract
+//! Checkpoint 3A of issue #32 wired the abstract
 //! [`EcdhOracle`](crate::oracle::EcdhOracle) trait into this code path so
-//! callers can plug in any ECDH backend — the concrete
-//! `AgentEcdhOracle` in the `piggy` crate is today's only consumer, but
-//! future checkpoints will add a direct-PCSC oracle alongside it.
+//! callers can plug in any ECDH backend. Issue #31 then added the second
+//! consumer alongside the agent: a direct-PCSC oracle in the `piggy`
+//! crate, used when no SSH agent is reachable.
 //!
-//! The function walks each PRIMARY config in order and tries the
-//! oracle-backed agent path first, then falls back to the (still-stubbed)
-//! direct-card path. Interactive recovery (challenge-response, Shamir
-//! reassembly) stays out of scope for v1.
+//! `unlock_ebox` walks each PRIMARY config in order. For each config it
+//! tries the agent oracle first, then the card oracle — whichever the
+//! caller supplied. The two oracles share one helper
+//! ([`try_unlock_with_oracle`]) so the per-part loop is in exactly one
+//! place. Interactive recovery (challenge-response, Shamir reassembly)
+//! stays out of scope for v1.
 
 use openssl::bn::BigNumContext;
 use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
@@ -21,19 +23,21 @@ use crate::oracle::{EcdhOracle, OracleError};
 use crate::piv_box::EcCurve;
 use crate::template::EboxConfigType;
 
-/// Attempt to unlock an ebox by trying each PRIMARY config in order:
+/// Attempt to unlock an ebox by trying each PRIMARY config in order.
 ///
-///   1. If an ECDH oracle is supplied, ask it for the shared secret of
-///      each part. The oracle is the abstraction that hides "SSH agent
-///      over SSH_AUTH_SOCK" from this layer — no sockets, no tokio
-///      runtime, no transport concerns.
-///   2. Otherwise (or if the oracle had no matching key) fall through to
-///      `try_card_unlock`, which will one day talk to a PCSC-backed PIV
-///      card directly.
+/// For each config: ask `agent_oracle` first (if supplied), then fall
+/// through to `card_oracle` (if supplied). Each oracle is given a chance
+/// at the whole config before the next one is tried. The first oracle
+/// that opens a part wins and `unlock_ebox` returns `Ok(())`.
 ///
-/// Returns `Ok(())` as soon as any config succeeds; returns
-/// [`BoxError::UnlockFailed`] if every config was exhausted.
-pub fn unlock_ebox(ebox: &mut Ebox, mut agent_oracle: Option<&mut dyn EcdhOracle>) -> Result<()> {
+/// Either oracle may be `None` — that path is simply skipped.
+/// `agent_oracle = None, card_oracle = None` returns
+/// [`BoxError::UnlockFailed`] without touching anything.
+pub fn unlock_ebox(
+    ebox: &mut Ebox,
+    mut agent_oracle: Option<&mut dyn EcdhOracle>,
+    mut card_oracle: Option<&mut dyn EcdhOracle>,
+) -> Result<()> {
     let primary_indices: Vec<usize> = ebox
         .configs
         .iter()
@@ -44,18 +48,15 @@ pub fn unlock_ebox(ebox: &mut Ebox, mut agent_oracle: Option<&mut dyn EcdhOracle
 
     for idx in primary_indices {
         if let Some(oracle) = agent_oracle.as_deref_mut() {
-            match try_agent_unlock(ebox, idx, oracle) {
+            match try_unlock_with_oracle(ebox, idx, oracle) {
                 Ok(()) => return Ok(()),
-                Err(e) => {
-                    tracing::debug!("agent unlock failed for config {idx}: {e}");
-                }
+                Err(e) => tracing::debug!("agent unlock failed for config {idx}: {e}"),
             }
         }
-
-        match try_card_unlock(ebox, idx) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                tracing::debug!("card unlock failed for config {idx}: {e}");
+        if let Some(oracle) = card_oracle.as_deref_mut() {
+            match try_unlock_with_oracle(ebox, idx, oracle) {
+                Ok(()) => return Ok(()),
+                Err(e) => tracing::debug!("card unlock failed for config {idx}: {e}"),
             }
         }
     }
@@ -65,6 +66,7 @@ pub fn unlock_ebox(ebox: &mut Ebox, mut agent_oracle: Option<&mut dyn EcdhOracle
 
 /// Try to unlock a single PRIMARY config via the supplied ECDH oracle.
 ///
+/// Used by both the agent and card paths — the oracle hides which one.
 /// For each part in the config, we:
 ///
 ///   1. Pull the card (self) pubkey and the partner (ephemeral) pubkey
@@ -94,7 +96,11 @@ pub fn unlock_ebox(ebox: &mut Ebox, mut agent_oracle: Option<&mut dyn EcdhOracle
 /// `EboxPart` mirror fields may be `None` on eboxes re-materialized from
 /// the wire if the serializer decided to drop them — the piv_box copy is
 /// the load-bearing one.
-fn try_agent_unlock(ebox: &mut Ebox, config_idx: usize, oracle: &mut dyn EcdhOracle) -> Result<()> {
+fn try_unlock_with_oracle(
+    ebox: &mut Ebox,
+    config_idx: usize,
+    oracle: &mut dyn EcdhOracle,
+) -> Result<()> {
     let mut any_opened = false;
 
     // Version-2+ eboxes hoist per-curve ephemeral pubkeys to the Ebox
@@ -182,13 +188,6 @@ fn try_agent_unlock(ebox: &mut Ebox, config_idx: usize, oracle: &mut dyn EcdhOra
     ebox.unlock(config_idx)
 }
 
-/// Direct-PCSC fallback. Tracked by issue #31; PR 3A intentionally leaves
-/// the body stubbed so the oracle path can land first.
-// TODO(#31): implement direct PCSC card unlock path.
-fn try_card_unlock(_ebox: &mut Ebox, _config_idx: usize) -> Result<()> {
-    Err(BoxError::UnlockFailed)
-}
-
 /// Convert a SEC1-compressed EC point (33 or 49 bytes, starting with
 /// `0x02`/`0x03`) to the SEC1-uncompressed encoding (`0x04 || X || Y`,
 /// 65 or 97 bytes).
@@ -264,10 +263,8 @@ mod tests {
             _self_blob: &[u8],
             partner_blob: &[u8],
         ) -> std::result::Result<Vec<u8>, OracleError> {
-            // The blob is three concatenated ssh-strings:
-            //   string(key_type) | string(curve_name) | string(point)
-            // Unpack by walking length prefixes.
-            let point = extract_point_from_sshkey_blob(partner_blob)?;
+            // Unpack the partner sshkey blob to recover the SEC1 point.
+            let point = crate::agent_ext::extract_point_from_sshkey_blob(partner_blob)?;
 
             let group = EcGroup::from_curve_name(self.curve.nid())
                 .map_err(|e| OracleError::Other(e.to_string()))?;
@@ -288,29 +285,6 @@ mod tests {
             d.derive_to_vec()
                 .map_err(|e| OracleError::Other(e.to_string()))
         }
-    }
-
-    /// Strip the (key_type, curve_name) ssh-strings off the front of an
-    /// sshkey blob and return just the raw SEC1 point. Used by the
-    /// `LocalEcdhOracle` test harness to recover the ephemeral point
-    /// from what `unlock_ebox` hands to the oracle.
-    fn extract_point_from_sshkey_blob(blob: &[u8]) -> std::result::Result<Vec<u8>, OracleError> {
-        fn take_string(b: &[u8]) -> std::result::Result<(&[u8], &[u8]), OracleError> {
-            if b.len() < 4 {
-                return Err(OracleError::InvalidPubkey(
-                    "blob too short for length".into(),
-                ));
-            }
-            let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
-            if b.len() < 4 + n {
-                return Err(OracleError::InvalidPubkey("blob string underflow".into()));
-            }
-            Ok((&b[4..4 + n], &b[4 + n..]))
-        }
-        let (_key_type, rest) = take_string(blob)?;
-        let (_curve_name, rest) = take_string(rest)?;
-        let (point, _tail) = take_string(rest)?;
-        Ok(point.to_vec())
     }
 
     /// End-to-end happy path: seal with the template, deserialize through
@@ -335,7 +309,7 @@ mod tests {
             priv_key,
             curve: EcCurve::NistP256,
         };
-        unlock_ebox(&mut deserialized, Some(&mut oracle)).expect("unlock");
+        unlock_ebox(&mut deserialized, Some(&mut oracle), None).expect("unlock");
         assert!(deserialized.is_unlocked(), "ebox must be unlocked");
         assert_eq!(
             deserialized.key(),
@@ -361,22 +335,22 @@ mod tests {
         let mut deserialized = Ebox::from_bytes(&sealed.to_bytes().unwrap()).unwrap();
 
         let mut oracle = NoKeyOracle;
-        let err = unlock_ebox(&mut deserialized, Some(&mut oracle))
+        let err = unlock_ebox(&mut deserialized, Some(&mut oracle), None)
             .expect_err("missing key should be UnlockFailed");
         assert!(matches!(err, BoxError::UnlockFailed));
     }
 
-    /// With no oracle supplied, the fallback `try_card_unlock` (still a
-    /// stub) runs and fails cleanly.
+    /// With neither oracle supplied there's nothing to try; surface
+    /// `UnlockFailed` cleanly rather than panic.
     #[test]
-    fn unlock_ebox_without_oracle_falls_through_to_card_stub() {
+    fn unlock_ebox_with_no_oracles_fails() {
         let (tpl, _) = seed_tpl_and_priv();
         let secret_key: Vec<u8> = vec![0x01; 32];
         let sealed = Ebox::create(&tpl, &secret_key, EboxType::Stream).unwrap();
         let mut deserialized = Ebox::from_bytes(&sealed.to_bytes().unwrap()).unwrap();
 
-        let err =
-            unlock_ebox(&mut deserialized, None).expect_err("no oracle + stubbed card must fail");
+        let err = unlock_ebox(&mut deserialized, None, None)
+            .expect_err("neither oracle supplied must fail");
         assert!(matches!(err, BoxError::UnlockFailed));
     }
 }

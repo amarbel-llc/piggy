@@ -134,6 +134,26 @@ test-rust-agent-unlock: build-rust
   export PIGGY_BIN="$PWD/target/debug/piggy"
   cargo test --test unlock_ebox_agent_integration -- --nocapture
 
+# End-to-end unlock round-trip via the direct-PCSC card path (no agent).
+# Boots fib, generates a 9D key, seals a random AEAD key to it, pushes
+# the ebox through the wire format, and unlocks it via CardEcdhOracle.
+# Issue #31. SSH_ASKPASS routes to the refusing test askpass; the recipe
+# exports PIGGY_TEST_FIB_PIN so the askpass non-interactively supplies
+# the fib PIN. Any code path that falls through to a real askpass
+# surfaces as a `[piggy-test-askpass]` stderr banner, not a GUI dialog.
+test-rust-card-unlock: build-rust
+  #!/usr/bin/env bash
+  set -euo pipefail
+  trap 'just fib-down' EXIT
+  just fib-up
+  eval "$(cat .fib/env)"
+  pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
+  export PIGGY_BIN="$PWD/target/debug/piggy"
+  export PIGGY_TEST_FIB_PIN=123456
+  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+  export SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=""
+  cargo test --test unlock_ebox_card_integration -- --nocapture
+
 check-rust *ARGS:
     cargo check {{ARGS}}
 

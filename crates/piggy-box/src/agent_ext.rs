@@ -21,6 +21,7 @@
 //!
 //! Checkpoint 1 of issue #32.
 use crate::error::{BoxError, Result};
+use crate::oracle::OracleError;
 use crate::piv_box::EcCurve;
 use crate::wire::{WireReader, WireWriter};
 
@@ -92,6 +93,36 @@ pub fn ec_point_to_ssh_pubkey_blob(curve: EcCurve, point: &[u8]) -> Vec<u8> {
     w.put_string(curve_name.as_bytes());
     w.put_string(point);
     w.into_bytes()
+}
+
+/// Inverse of [`ec_point_to_ssh_pubkey_blob`]: pull the raw EC point bytes
+/// out of an OpenSSH `ecdsa-sha2-nistpNNN` sshkey blob.
+///
+/// The blob is `string(key_type) | string(curve_name) | string(point)`. We
+/// step over the first two strings and return the third as `Vec<u8>` —
+/// callers get whatever encoding the original blob carried (in practice
+/// SEC1 uncompressed `0x04 || X || Y`, since that's what
+/// [`ec_point_to_ssh_pubkey_blob`] writes).
+///
+/// Returns [`OracleError::InvalidPubkey`] when the blob is too short to
+/// hold three length-prefixed strings.
+pub fn extract_point_from_sshkey_blob(blob: &[u8]) -> std::result::Result<Vec<u8>, OracleError> {
+    fn take_string(b: &[u8]) -> std::result::Result<(&[u8], &[u8]), OracleError> {
+        if b.len() < 4 {
+            return Err(OracleError::InvalidPubkey(
+                "blob too short for length".into(),
+            ));
+        }
+        let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        if b.len() < 4 + n {
+            return Err(OracleError::InvalidPubkey("blob string underflow".into()));
+        }
+        Ok((&b[4..4 + n], &b[4 + n..]))
+    }
+    let (_key_type, rest) = take_string(blob)?;
+    let (_curve_name, rest) = take_string(rest)?;
+    let (point, _tail) = take_string(rest)?;
+    Ok(point.to_vec())
 }
 
 #[cfg(test)]

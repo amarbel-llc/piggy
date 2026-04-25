@@ -192,7 +192,7 @@ fn unlock_ebox_against_real_agent() {
 
     // ---- Unlock via the agent ----
     let mut oracle = AgentEcdhOracle::new(&sock).expect("build oracle");
-    unlock_ebox(&mut ebox, Some(&mut oracle)).expect("unlock_ebox via agent");
+    unlock_ebox(&mut ebox, Some(&mut oracle), None).expect("unlock_ebox via agent");
 
     assert!(
         ebox.is_unlocked(),
