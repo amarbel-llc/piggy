@@ -12,6 +12,7 @@ const BOX_VERSION: u8 = 2;
 const DEFAULT_CIPHER: &str = "chacha20-poly1305";
 const DEFAULT_KDF: &str = "sha512";
 const NONCE_LEN: usize = 16;
+const CIPHER_IV_LEN: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EcCurve {
@@ -117,30 +118,39 @@ impl PivBox {
     /// Seal using an externally-provided ephemeral key. Used by Ebox to
     /// share a single ephemeral key across all parts on the same curve.
     ///
-    /// The wire nonce is generated freshly here. For deterministic
-    /// reproduction (e.g. RFC 0002 §A test vectors) call
-    /// [`PivBox::seal_offline_with_ephemeral_and_nonce`] directly with a
-    /// caller-controlled nonce.
+    /// The 16-byte KDF nonce and the 12-byte cipher IV are both
+    /// generated freshly here. For deterministic reproduction (e.g.
+    /// RFC 0002 §A test vectors) call
+    /// [`PivBox::seal_offline_with_ephemeral_and_pinned_random`]
+    /// directly with caller-controlled values.
     pub fn seal_offline_with_ephemeral(
         &mut self,
         recipient_pub: &EcKey<openssl::pkey::Public>,
         ephem: &EcKey<Private>,
     ) -> Result<()> {
-        let mut nonce = vec![0u8; NONCE_LEN];
-        openssl::rand::rand_bytes(&mut nonce)?;
-        self.seal_offline_with_ephemeral_and_nonce(recipient_pub, ephem, &nonce)
+        let mut kdf_nonce = vec![0u8; NONCE_LEN];
+        openssl::rand::rand_bytes(&mut kdf_nonce)?;
+        let mut cipher_iv = vec![0u8; CIPHER_IV_LEN];
+        openssl::rand::rand_bytes(&mut cipher_iv)?;
+        self.seal_offline_with_ephemeral_and_pinned_random(
+            recipient_pub,
+            ephem,
+            &kdf_nonce,
+            &cipher_iv,
+        )
     }
 
-    /// Seal with both the ephemeral key and the KDF nonce supplied by
-    /// the caller. Crate-private because deterministic nonce reuse is
-    /// unsafe in production: callers MUST guarantee per-box nonce
-    /// freshness, which only holds for one-shot tests with hard-coded
-    /// inputs (see `docs/rfcs/0002-piv-ecdh-box.md` §A).
-    pub(crate) fn seal_offline_with_ephemeral_and_nonce(
+    /// Seal with the ephemeral key, KDF nonce, AND cipher IV supplied
+    /// by the caller. Crate-private because deterministic nonce/IV
+    /// reuse is unsafe in production: callers MUST guarantee per-box
+    /// freshness for both, which only holds for one-shot tests with
+    /// hard-coded inputs (see `docs/rfcs/0002-piv-ecdh-box.md` §A).
+    pub(crate) fn seal_offline_with_ephemeral_and_pinned_random(
         &mut self,
         recipient_pub: &EcKey<openssl::pkey::Public>,
         ephem: &EcKey<Private>,
-        nonce: &[u8],
+        kdf_nonce: &[u8],
+        cipher_iv: &[u8],
     ) -> Result<()> {
         let plaintext = self.plaintext.as_ref().ok_or(BoxError::NotSealed)?;
 
@@ -161,20 +171,12 @@ impl PivBox {
 
         let shared_secret = ecdh_derive(ephem, recipient_pub)?;
 
-        self.nonce = nonce.to_vec();
+        self.nonce = kdf_nonce.to_vec();
+        self.iv = cipher_iv.to_vec();
 
         let key_material = kdf_sha512(&shared_secret, &self.nonce)?;
         let padded = pkcs7_pad(plaintext, 16);
-        let ct = chacha20_poly1305_encrypt(&key_material[..32], &padded)?;
-        // Per RFC 0002 §Cipher, chacha20-poly1305 has a 0-byte IV on the
-        // wire — the cipher uses an all-zero internal nonce fed to the
-        // AEAD primitive, but the serialized `iv` field is empty. pivy C's
-        // `piv_box_open_common` validates `pdb_iv.b_len == cipher_ivlen`,
-        // and `cipher_ivlen("chacha20-poly1305") == 0`; writing any
-        // non-empty IV here makes pivy reject the box.
-        // TODO: when we support aes256-gcm (or any cipher with non-zero
-        // ivlen), cipher-dispatch both the internal nonce and the wire IV.
-        self.iv = Vec::new();
+        let ct = chacha20_poly1305_encrypt(&key_material[..32], &self.iv, &padded)?;
         self.ciphertext = ct;
 
         Ok(())
@@ -192,14 +194,16 @@ impl PivBox {
     }
 
     pub fn open_with_secret(&mut self, shared_secret: &[u8]) -> Result<()> {
+        if self.iv.len() != CIPHER_IV_LEN {
+            return Err(BoxError::Crypto(format!(
+                "wire IV must be {CIPHER_IV_LEN} bytes for chacha20-poly1305, got {}",
+                self.iv.len()
+            )));
+        }
         let key_material = kdf_sha512(shared_secret, &self.nonce)?;
-        // `self.iv` is intentionally ignored: per RFC 0002 §Cipher, the
-        // chacha20-poly1305 wire IV is 0-length and the primitive uses an
-        // all-zero internal nonce (established inside
-        // `chacha20_poly1305_decrypt`). This accepts any serialized IV —
-        // 0-byte (spec-correct) or 12-zero-byte (from older Rust seals
-        // before the #34 fix) — so we can decrypt both shapes.
-        let padded = chacha20_poly1305_decrypt(&key_material[..32], &self.ciphertext)?;
+        // The wire IV is the AEAD nonce per RFC 7539 (see
+        // `docs/rfcs/0002-piv-ecdh-box.md` §Cipher).
+        let padded = chacha20_poly1305_decrypt(&key_material[..32], &self.iv, &self.ciphertext)?;
         let plain = pkcs7_unpad(&padded, 16)?;
         self.plaintext = Some(Zeroizing::new(plain));
         Ok(())
@@ -328,30 +332,42 @@ fn kdf_sha512(shared_secret: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
     Ok(h.finish()?.to_vec())
 }
 
-/// Encrypt with ChaCha20-Poly1305 using an all-zero internal nonce.
+/// Encrypt with RFC 7539 / RFC 8439 ChaCha20-Poly1305 AEAD.
 ///
-/// Per RFC 0002 §Cipher, the `chacha20-poly1305` cipher as used by pivy
-/// feeds the AEAD primitive an all-zero 12-byte nonce; the serialized
-/// piv_box `iv` field is always 0-length for this cipher. Returning just
-/// the (ciphertext || tag) keeps the encrypt path from leaking an
-/// already-known nonce that callers might be tempted to persist.
-fn chacha20_poly1305_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+/// Per `docs/rfcs/0002-piv-ecdh-box.md` §Cipher, the AEAD nonce is the
+/// 12-byte wire IV — fresh per box, supplied by the caller, and serialized
+/// verbatim into the piv_box `iv` field. AAD is empty; the 16-byte
+/// authentication tag is appended to the ciphertext.
+fn chacha20_poly1305_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     use openssl::symm::{encrypt_aead, Cipher};
 
+    if iv.len() != CIPHER_IV_LEN {
+        return Err(BoxError::Crypto(format!(
+            "ChaCha20-Poly1305 IV must be {CIPHER_IV_LEN} bytes, got {}",
+            iv.len()
+        )));
+    }
+
     let cipher = Cipher::chacha20_poly1305();
-    let iv = [0u8; 12];
 
     let mut tag = vec![0u8; 16];
-    let mut ct = encrypt_aead(cipher, key, Some(&iv), &[], plaintext, &mut tag)?;
+    let mut ct = encrypt_aead(cipher, key, Some(iv), &[], plaintext, &mut tag)?;
     ct.extend_from_slice(&tag);
 
     Ok(ct)
 }
 
-/// Decrypt ChaCha20-Poly1305 ciphertext (with appended 16-byte tag)
-/// using an all-zero internal nonce. See [`chacha20_poly1305_encrypt`].
-fn chacha20_poly1305_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+/// Decrypt RFC 7539 ChaCha20-Poly1305 ciphertext (with appended 16-byte
+/// tag). See [`chacha20_poly1305_encrypt`].
+fn chacha20_poly1305_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     use openssl::symm::{decrypt_aead, Cipher};
+
+    if iv.len() != CIPHER_IV_LEN {
+        return Err(BoxError::Crypto(format!(
+            "ChaCha20-Poly1305 IV must be {CIPHER_IV_LEN} bytes, got {}",
+            iv.len()
+        )));
+    }
 
     let cipher = Cipher::chacha20_poly1305();
 
@@ -363,8 +379,7 @@ fn chacha20_poly1305_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     let ct = &ciphertext[..tag_offset];
     let tag = &ciphertext[tag_offset..];
 
-    let iv = [0u8; 12];
-    let pt = decrypt_aead(cipher, key, Some(&iv), &[], ct, tag)
+    let pt = decrypt_aead(cipher, key, Some(iv), &[], ct, tag)
         .map_err(|e| BoxError::Crypto(format!("ChaCha20-Poly1305 decrypt: {e}")))?;
 
     Ok(pt)
@@ -419,41 +434,45 @@ mod tests {
     }
 
     #[test]
-    fn seal_leaves_iv_field_empty_per_rfc_0002() {
-        // Regression test for #34. Per RFC 0002 §Cipher, the
-        // chacha20-poly1305 wire IV is 0 bytes. Pre-fix, Rust wrote 12
-        // zero bytes here, shifting the rest of the parse on pivy C and
-        // surfacing as "IV length (0) is not appropriate for cipher
-        // 'chacha20-poly1305'".
+    fn seal_writes_random_12_byte_iv() {
+        // Per RFC 0002 §Cipher (post-#36), the chacha20-poly1305 wire
+        // IV is 12 bytes — the AEAD nonce per RFC 7539, freshly random
+        // per box. Two consecutive seals MUST produce distinct IVs.
         let (pub_key, _) = generate_keypair(EcCurve::NistP256);
-        let mut b = PivBox::new(EcCurve::NistP256);
-        b.set_data(b"payload");
-        b.seal_offline(&pub_key).unwrap();
-        assert!(
-            b.iv.is_empty(),
-            "post-#34, PivBox.iv must be empty for chacha20-poly1305 (got {} bytes)",
-            b.iv.len()
+
+        let mut b1 = PivBox::new(EcCurve::NistP256);
+        b1.set_data(b"payload");
+        b1.seal_offline(&pub_key).unwrap();
+        assert_eq!(
+            b1.iv.len(),
+            CIPHER_IV_LEN,
+            "PivBox.iv must be {CIPHER_IV_LEN} bytes for chacha20-poly1305 (got {})",
+            b1.iv.len()
         );
 
-        // Deserialize and assert the field survives the wire round-trip.
-        let bytes = b.to_bytes().unwrap();
-        let b2 = PivBox::from_bytes(&bytes).unwrap();
-        assert!(
-            b2.iv.is_empty(),
-            "IV field on the wire must deserialize as empty (got {} bytes)",
-            b2.iv.len()
+        let mut b2 = PivBox::new(EcCurve::NistP256);
+        b2.set_data(b"payload");
+        b2.seal_offline(&pub_key).unwrap();
+        assert_ne!(
+            b1.iv, b2.iv,
+            "successive seals must produce distinct random IVs"
         );
+
+        // Wire round-trip preserves the IV bytes verbatim.
+        let bytes = b1.to_bytes().unwrap();
+        let parsed = PivBox::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.iv, b1.iv, "wire round-trip must preserve IV");
     }
 
     #[test]
-    fn wire_iv_length_prefix_is_zero_byte() {
+    fn wire_iv_length_prefix_is_twelve() {
         // Byte-level canary: the IV field's u8 length prefix sits at a
         // known offset for a v2 no-guid Primary box with DEFAULT_CIPHER
         // + DEFAULT_KDF on NistP256. If a future refactor writes any
-        // non-zero byte there, pivy C will reject — this test fails
-        // before interop does.
+        // value other than 0x0C there, RFC 7539 conformance breaks —
+        // this test fails before vector tests do.
         //
-        // Layout up to the IV field (pivy RFC 0002 §Binary Serialization):
+        // Layout up to the IV field (RFC 0002 §Binary Serialization):
         //   off 0..2   magic "B0 C5"
         //   off 2      version (0x02)
         //   off 3      guid_valid flag (0x00 here)
@@ -471,7 +490,8 @@ mod tests {
         //   off 58..91 recipient pubkey           (33 bytes)
         //   off 91     ephemeral eckey8 len (0x21)
         //   off 92..125 ephemeral pubkey          (33 bytes)
-        //   off 125    IV string8 len             <-- MUST be 0x00
+        //   off 125    IV string8 len             <-- MUST be 0x0C
+        //   off 126..138 IV bytes                 (12 bytes)
         let (pub_key, _) = generate_keypair(EcCurve::NistP256);
         let mut b = PivBox::new(EcCurve::NistP256);
         b.set_data(b"payload");
@@ -480,37 +500,47 @@ mod tests {
 
         assert_eq!(
             bytes.get(125),
-            Some(&0x00),
-            "IV length byte at offset 125 must be 0x00 for chacha20-poly1305 \
-             (got {:?}); pivy C rejects anything else. If the layout above \
-             shifted, update the offset AND pivy C's expected ivlen.",
+            Some(&0x0C),
+            "IV length byte at offset 125 must be 0x0C ({CIPHER_IV_LEN}) for \
+             chacha20-poly1305 (got {:?}). If the layout above shifted, \
+             update the offset AND the spec.",
             bytes.get(125)
+        );
+        assert!(
+            bytes.len() >= 138,
+            "wire must contain the full 12-byte IV before ciphertext (len {})",
+            bytes.len()
         );
     }
 
     #[test]
-    fn open_with_secret_ignores_self_iv() {
-        // open_with_secret must not depend on `self.iv`. This test seals
-        // a box, then mutates `self.iv` to a bogus 12-zero vector — the
-        // same shape older Rust seals produced before #34 — and confirms
-        // decrypt still succeeds. Covers backwards-compatibility for
-        // eboxes sealed by a pre-fix Rust and still at rest on disk.
+    fn open_rejects_wire_iv_of_wrong_length() {
+        // Belt-and-braces for the length validation in
+        // `open_with_secret`. Any IV length != CIPHER_IV_LEN must
+        // produce an error; in particular, the legacy 0-byte and
+        // 12-zero-byte shapes (from pre-#36 piggy or pivy) MUST NOT
+        // silently round-trip into garbage plaintext.
         let (pub_key, priv_key) = generate_keypair(EcCurve::NistP256);
         let mut b = PivBox::new(EcCurve::NistP256);
-        let data = b"backcompat-payload";
-        b.set_data(data);
+        b.set_data(b"payload");
         b.seal_offline(&pub_key).unwrap();
 
-        // Round-trip through the wire so we have a fresh struct whose
-        // state mirrors what from_bytes would produce — then inject a
-        // legacy-shaped IV.
         let bytes = b.to_bytes().unwrap();
-        let mut b2 = PivBox::from_bytes(&bytes).unwrap();
-        b2.iv = vec![0u8; 12];
-        b2.open_offline(&priv_key).unwrap();
 
-        let recovered = b2.take_data().unwrap();
-        assert_eq!(&*recovered, data);
+        // Empty IV — pre-#36 (post-#34) wire shape.
+        let mut b_empty = PivBox::from_bytes(&bytes).unwrap();
+        b_empty.iv = Vec::new();
+        assert!(b_empty.open_offline(&priv_key).is_err());
+
+        // 13 bytes — clearly wrong length.
+        let mut b_long = PivBox::from_bytes(&bytes).unwrap();
+        b_long.iv = vec![0u8; 13];
+        assert!(b_long.open_offline(&priv_key).is_err());
+
+        // 11 bytes — clearly wrong length.
+        let mut b_short = PivBox::from_bytes(&bytes).unwrap();
+        b_short.iv = vec![0u8; 11];
+        assert!(b_short.open_offline(&priv_key).is_err());
     }
 
     #[test]
@@ -607,9 +637,10 @@ mod tests {
     /// Replays the bit-exact wire vectors pinned in
     /// `docs/rfcs/0002-piv-ecdh-box.md` Appendix A. Each vector fixes
     /// every input that feeds the wire (recipient priv, ephemeral priv,
-    /// KDF nonce, plaintext, GUID/slot) so that
-    /// `seal_offline_with_ephemeral_and_nonce` produces a known-byte
-    /// output. Drift between this module and the spec is a CI failure.
+    /// KDF nonce, cipher IV, plaintext, GUID/slot) so that
+    /// `seal_offline_with_ephemeral_and_pinned_random` produces a
+    /// known-byte output. Drift between this module and the spec is a
+    /// CI failure.
     mod rfc0002_vectors {
         use super::*;
 
@@ -634,11 +665,13 @@ mod tests {
         /// 1. seal with pinned inputs and assert wire == expected_hex
         /// 2. from_bytes(expected) and assert all wire fields match inputs
         /// 3. open_offline(recipient_priv) and assert plaintext recovered
+        #[allow(clippy::too_many_arguments)]
         fn replay_vector(
             curve: EcCurve,
             recipient_scalar: &[u8],
             ephemeral_scalar: &[u8],
-            nonce: &[u8],
+            kdf_nonce: &[u8],
+            cipher_iv: &[u8],
             plaintext: &[u8],
             guid_slot: Option<(piggy_piv::Guid, u8)>,
             expected_hex: &str,
@@ -653,7 +686,12 @@ mod tests {
             sealed.guid_slot = guid_slot.clone();
             sealed.set_data(plaintext);
             sealed
-                .seal_offline_with_ephemeral_and_nonce(&recipient_pub, &ephemeral_priv, nonce)
+                .seal_offline_with_ephemeral_and_pinned_random(
+                    &recipient_pub,
+                    &ephemeral_priv,
+                    kdf_nonce,
+                    cipher_iv,
+                )
                 .unwrap();
             let actual_bytes = sealed.to_bytes().unwrap();
             assert_eq!(
@@ -668,8 +706,8 @@ mod tests {
             assert_eq!(parsed.cipher, DEFAULT_CIPHER, "cipher");
             assert_eq!(parsed.kdf, DEFAULT_KDF, "kdf");
             assert_eq!(parsed.curve, curve, "curve");
-            assert_eq!(parsed.nonce, nonce, "nonce");
-            assert!(parsed.iv.is_empty(), "wire IV must be 0-length");
+            assert_eq!(parsed.nonce, kdf_nonce, "kdf nonce");
+            assert_eq!(parsed.iv, cipher_iv, "cipher IV");
             match (&parsed.guid_slot, &guid_slot) {
                 (None, None) => {}
                 (Some((pg, ps)), Some((eg, es))) => {
@@ -688,19 +726,21 @@ mod tests {
 
         /// docs/rfcs/0002-piv-ecdh-box.md §A.1 — P-256, no GUID/slot,
         /// empty plaintext. Smallest realistic box (one PKCS7 block of
-        /// padding, 16-byte AEAD tag).
-        const A1_WIRE_HEX: &str = "b0c5020000001163686163686132302d706f6c79313330350673686135313210a0a1a2a3a4a5a6a7a8a9aaabacadaeaf086e697374703235362102515c3d6eb9e396b904d3feca7f54fdcd0cc1e997bf375dca515ad0a6c3b4035f21031f140146bfb1b251f84f4ddbe0d4cdcfd77afd984a9520e35794021f8312bb9e0000000020e1a6ec6df050b2a882cd105457da7b1d6d36a2ab8636ec0181d34e9150290f88";
+        /// padding, 16-byte AEAD tag). 174 bytes total.
+        const A1_WIRE_HEX: &str = "b0c5020000001163686163686132302d706f6c79313330350673686135313210a0a1a2a3a4a5a6a7a8a9aaabacadaeaf086e697374703235362102515c3d6eb9e396b904d3feca7f54fdcd0cc1e997bf375dca515ad0a6c3b4035f21031f140146bfb1b251f84f4ddbe0d4cdcfd77afd984a9520e35794021f8312bb9e0cd0d1d2d3d4d5d6d7d8d9dadb000000208dd88e114913dc759f69c7590b369008a754ee2d0528e4386c46661631e7fbfd";
 
         #[test]
         fn vector_a_1() {
             let recipient: Vec<u8> = (1u8..=32).collect();
             let ephemeral: Vec<u8> = (33u8..=64).collect();
-            let nonce: Vec<u8> = (0xA0u8..=0xAF).collect();
+            let kdf_nonce: Vec<u8> = (0xA0u8..=0xAF).collect();
+            let cipher_iv: Vec<u8> = (0xD0u8..=0xDB).collect();
             replay_vector(
                 EcCurve::NistP256,
                 &recipient,
                 &ephemeral,
-                &nonce,
+                &kdf_nonce,
+                &cipher_iv,
                 b"",
                 None,
                 A1_WIRE_HEX,
@@ -709,21 +749,24 @@ mod tests {
 
         /// docs/rfcs/0002-piv-ecdh-box.md §A.2 — P-256, GUID
         /// 000102…0f / slot 0x9D, plaintext "hello". Exercises the
-        /// guid_slot path on the wire and a non-empty payload.
-        const A2_WIRE_HEX: &str = "b0c5020110000102030405060708090a0b0c0d0e0f9d1163686163686132302d706f6c79313330350673686135313210b0b1b2b3b4b5b6b7b8b9babbbcbdbebf086e6973747032353621038e71ca9d7a62917be7f0db9896b47bf9b91c8b86628eed55d47fe750e65e5bcb21038ed57ec2b8f5e75e9192327b51e5661c87c8e5db0170721309a517fc6e1046b10000000020038feab45e59efde12f175924622799489bb4bd7da8fbba06f898c04a3dff04f";
+        /// guid_slot path on the wire and a non-empty payload. 190
+        /// bytes total.
+        const A2_WIRE_HEX: &str = "b0c5020110000102030405060708090a0b0c0d0e0f9d1163686163686132302d706f6c79313330350673686135313210b0b1b2b3b4b5b6b7b8b9babbbcbdbebf086e6973747032353621038e71ca9d7a62917be7f0db9896b47bf9b91c8b86628eed55d47fe750e65e5bcb21038ed57ec2b8f5e75e9192327b51e5661c87c8e5db0170721309a517fc6e1046b10ce0e1e2e3e4e5e6e7e8e9eaeb00000020f0a8350c88929a3f68dd0d5a74b5d339c5d3624f6b5be4a3b7aa86eac9e0e0db";
 
         #[test]
         fn vector_a_2() {
             let recipient: Vec<u8> = (0x10u8..=0x2F).collect();
             let ephemeral: Vec<u8> = (0x30u8..=0x4F).collect();
-            let nonce: Vec<u8> = (0xB0u8..=0xBF).collect();
+            let kdf_nonce: Vec<u8> = (0xB0u8..=0xBF).collect();
+            let cipher_iv: Vec<u8> = (0xE0u8..=0xEBu8).collect();
             let guid_bytes: [u8; 16] = std::array::from_fn(|i| i as u8);
             let guid = piggy_piv::Guid::from_bytes(&guid_bytes).unwrap();
             replay_vector(
                 EcCurve::NistP256,
                 &recipient,
                 &ephemeral,
-                &nonce,
+                &kdf_nonce,
+                &cipher_iv,
                 b"hello",
                 Some((guid, 0x9D)),
                 A2_WIRE_HEX,
@@ -733,18 +776,21 @@ mod tests {
         /// docs/rfcs/0002-piv-ecdh-box.md §A.3 — P-384, no GUID/slot,
         /// plaintext "piggy rfc0002 vector A.3". Exercises the second
         /// supported curve (49-byte compressed points, longer wire).
-        const A3_WIRE_HEX: &str = "b0c5020000001163686163686132302d706f6c79313330350673686135313210c0c1c2c3c4c5c6c7c8c9cacbcccdcecf086e697374703338343103c76f2283dda95cd49b0ed9e733d2904474e37216f124e13d2c9ab4cf01021c49ad9cabb3d0b97499aef2f0ab313fa0283103db89855d1980b2aacdec0752249bea9e0630c16b69c095f6c752b2547b520d8109511d908881491780594f03cfee8a0a000000003034edc15689caddcaffd2267362aae0a69c1af4696fc7dd02cec0be62b6552163999d6d9bb78fd6d79715e2f7359f0501";
+        /// 222 bytes total.
+        const A3_WIRE_HEX: &str = "b0c5020000001163686163686132302d706f6c79313330350673686135313210c0c1c2c3c4c5c6c7c8c9cacbcccdcecf086e697374703338343103c76f2283dda95cd49b0ed9e733d2904474e37216f124e13d2c9ab4cf01021c49ad9cabb3d0b97499aef2f0ab313fa0283103db89855d1980b2aacdec0752249bea9e0630c16b69c095f6c752b2547b520d8109511d908881491780594f03cfee8a0a0cf0f1f2f3f4f5f6f7f8f9fafb0000003001ed7daba77156dd87a22208274ce93706f3261619acf1f52c8c3d12e71380f30fe5091f18b17ccdfbcefe2a15d0d6df";
 
         #[test]
         fn vector_a_3() {
             let recipient: Vec<u8> = (0x01u8..=0x30).collect();
             let ephemeral: Vec<u8> = (0x31u8..=0x60).collect();
-            let nonce: Vec<u8> = (0xC0u8..=0xCF).collect();
+            let kdf_nonce: Vec<u8> = (0xC0u8..=0xCF).collect();
+            let cipher_iv: Vec<u8> = (0xF0u8..=0xFBu8).collect();
             replay_vector(
                 EcCurve::NistP384,
                 &recipient,
                 &ephemeral,
-                &nonce,
+                &kdf_nonce,
+                &cipher_iv,
                 b"piggy rfc0002 vector A.3",
                 None,
                 A3_WIRE_HEX,
@@ -758,5 +804,6 @@ mod tests {
             let ids = ["A.1", "A.2", "A.3"];
             assert_eq!(ids.len(), 3, "RFC 0002 §A pins exactly 3 vectors");
         }
+
     }
 }
