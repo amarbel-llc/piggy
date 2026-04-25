@@ -804,6 +804,5 @@ mod tests {
             let ids = ["A.1", "A.2", "A.3"];
             assert_eq!(ids.len(), 3, "RFC 0002 §A pins exactly 3 vectors");
         }
-
     }
 }

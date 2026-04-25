@@ -1,6 +1,22 @@
 #! /usr/bin/env bats
 #
-# Interop tests: Rust `piggy box` ↔ C `pivy-box` wire compatibility.
+# Interop tests: Rust `piggy box` ↔ C `pivy-box` *template* compatibility.
+#
+# Crypto compatibility (Rust seal ↔ C decrypt and the reverse) is OUT OF
+# SCOPE by design. As of #36, piggy standardizes on RFC 7539 ChaCha20-
+# Poly1305 with a 12-byte wire IV; pivy retains its OpenSSH
+# `chacha20-poly1305@openssh.com` variant with a 0-byte wire IV. The two
+# constructions are wire-incompatible — see
+# `docs/rfcs/0002-piv-ecdh-box.md` §Compatibility. Earlier revisions of
+# this file held `rust_encrypt_c_decrypt` and `c_encrypt_rust_decrypt`
+# tests; they were deliberately removed (see #41) rather than skipped, so
+# the suite reflects what's actually expected to work. Their bodies
+# survive in git history at `38df53c` if the direction ever reverses.
+#
+# What's still tested here: piggy's template format remains aligned with
+# pivy's (base64-armored sshbuf bytes, see `8221588`), so a template
+# created by either tool MUST be readable by the other. Tests 1 and 2
+# below exercise that contract round-trip.
 #
 # Requires the fib virtual PIV card stack (just test-bats-conformance-interop).
 # The recipe brings up fib, generates a key on slot 9D, creates a template,
@@ -25,26 +41,6 @@ setup() {
   if [[ -z ${REAL_PIVY_BOX:-} || ! -x ${REAL_PIVY_BOX:-} ]]; then
     skip "REAL_PIVY_BOX not set (run: just test-bats-conformance-interop)"
   fi
-}
-
-# --- stream encrypt/decrypt cross-compat ---
-
-function rust_encrypt_c_decrypt { # @test
-  local encrypted="$BATS_TEST_TMPDIR/stream.ebox"
-
-  printf "hello from rust" | "$PIGGY" box stream encrypt "$INTEROP_TPL" >"$encrypted"
-  run "$REAL_PIVY_BOX" stream decrypt <"$encrypted"
-  assert_success
-  assert_output "hello from rust"
-}
-
-function c_encrypt_rust_decrypt { # @test
-  local encrypted="$BATS_TEST_TMPDIR/stream.ebox"
-
-  printf "hello from c" | "$REAL_PIVY_BOX" stream encrypt "$INTEROP_TPL" >"$encrypted"
-  run "$PIGGY" box stream decrypt "$encrypted"
-  assert_success
-  assert_output "hello from c"
 }
 
 # --- template cross-compat ---
