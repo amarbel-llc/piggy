@@ -712,8 +712,8 @@ mod tests {
             let iv = [0x07u8; 12];
             let plaintext = b"piggy oracle xcheck #38 :: identical-ciphertext";
 
-            let openssl_ct = chacha20_poly1305_encrypt(&key, &iv, plaintext)
-                .expect("openssl encrypt");
+            let openssl_ct =
+                chacha20_poly1305_encrypt(&key, &iv, plaintext).expect("openssl encrypt");
 
             let rust_cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
             let rust_ct = rust_cipher
@@ -736,8 +736,8 @@ mod tests {
             let iv: [u8; 12] = std::array::from_fn(|i| i as u8);
             let plaintext = b"";
 
-            let openssl_ct = chacha20_poly1305_encrypt(&key, &iv, plaintext)
-                .expect("openssl encrypt");
+            let openssl_ct =
+                chacha20_poly1305_encrypt(&key, &iv, plaintext).expect("openssl encrypt");
 
             let rust_cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
             let recovered = rust_cipher
@@ -762,8 +762,8 @@ mod tests {
                 .encrypt(Nonce::from_slice(&iv), plaintext.as_slice())
                 .expect("rustcrypto encrypt");
 
-            let recovered = chacha20_poly1305_decrypt(&key, &iv, &rust_ct)
-                .expect("openssl decrypt");
+            let recovered =
+                chacha20_poly1305_decrypt(&key, &iv, &rust_ct).expect("openssl decrypt");
 
             assert_eq!(recovered, plaintext);
         }
@@ -826,7 +826,10 @@ mod tests {
                 &mut tag,
             )
             .expect("encrypt");
-            assert_eq!(ct, EXPECTED_CIPHERTEXT, "ciphertext drifted from RFC 8439 §2.8.2");
+            assert_eq!(
+                ct, EXPECTED_CIPHERTEXT,
+                "ciphertext drifted from RFC 8439 §2.8.2"
+            );
             assert_eq!(tag, EXPECTED_TAG, "auth tag drifted from RFC 8439 §2.8.2");
         }
 

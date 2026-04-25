@@ -507,16 +507,16 @@ mod tests {
                 arb_curve_and_pubkey(),
                 prop::option::of(proptest::collection::vec(any::<u8>(), 0..=64)),
             )
-                .prop_map(
-                    |(guid_bytes, slot, name, (pubkey_curve, pubkey), cak)| EboxTplPart {
+                .prop_map(|(guid_bytes, slot, name, (pubkey_curve, pubkey), cak)| {
+                    EboxTplPart {
                         guid: Guid::from_bytes(&guid_bytes).unwrap(),
                         slot,
                         name,
                         pubkey,
                         pubkey_curve,
                         cak,
-                    },
-                )
+                    }
+                })
         }
 
         fn arb_config() -> impl Strategy<Value = EboxTplConfig> {
@@ -544,11 +544,10 @@ mod tests {
         }
 
         fn arb_template() -> impl Strategy<Value = EboxTemplate> {
-            proptest::collection::vec(arb_config(), 1..=2)
-                .prop_map(|configs| EboxTemplate {
-                    version: EBOX_TPL_VERSION,
-                    configs,
-                })
+            proptest::collection::vec(arb_config(), 1..=2).prop_map(|configs| EboxTemplate {
+                version: EBOX_TPL_VERSION,
+                configs,
+            })
         }
 
         proptest! {

@@ -686,11 +686,7 @@ mod tests {
         // through ECDH (the stub PivBox parts hash these against an
         // ephemeral). Random bytes won't validate as EC points.
         fn arb_curve_and_real_pubkey() -> impl Strategy<Value = (EcCurve, Vec<u8>)> {
-            prop_oneof![
-                Just(EcCurve::NistP256),
-                Just(EcCurve::NistP384),
-            ]
-            .prop_map(|curve| {
+            prop_oneof![Just(EcCurve::NistP256), Just(EcCurve::NistP384),].prop_map(|curve| {
                 let group = EcGroup::from_curve_name(curve.nid()).unwrap();
                 let key = EcKey::generate(&group).unwrap();
                 let mut ctx = openssl::bn::BigNumContext::new().unwrap();
