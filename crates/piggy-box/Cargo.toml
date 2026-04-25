@@ -22,3 +22,7 @@ openssl = "0.10"
 # ssh-key-free — the agent-oracle consumer in the `piggy` crate is
 # where the runtime dep lives.
 ssh-key = { version = "0.6", features = ["alloc", "ecdsa"] }
+# Independent ChaCha20-Poly1305 implementation used as a second-impl
+# oracle for piv_box's openssl-based AEAD path. Test-only; piggy-box
+# itself never compiles against this crate. See #38 for context.
+chacha20poly1305 = "0.10"

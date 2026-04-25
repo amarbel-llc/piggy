@@ -634,6 +634,86 @@ mod tests {
         }
     }
 
+    /// Cross-impl oracle: encrypt/decrypt the same inputs with both
+    /// piggy's openssl-backed `chacha20_poly1305_*` wrapper AND
+    /// RustCrypto's pure-Rust `chacha20poly1305` crate, then compare.
+    /// Catches regressions where one impl drifts from the AEAD spec
+    /// while the other doesn't (e.g. an openssl version bump that
+    /// silently changes nonce-extension or tag-verification behavior).
+    /// piggy-box compiles against openssl in production; the
+    /// RustCrypto crate is `[dev-dependencies]` only. See #38.
+    mod oracle_xcheck {
+        use super::*;
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+
+        /// Both impls SHOULD produce byte-identical (ciphertext || tag)
+        /// for the same key/IV/plaintext under empty AAD. AEAD is
+        /// deterministic given those inputs, so any divergence is a
+        /// real disagreement.
+        #[test]
+        fn openssl_and_rustcrypto_produce_identical_ciphertext() {
+            let key = [0x42u8; 32];
+            let iv = [0x07u8; 12];
+            let plaintext = b"piggy oracle xcheck #38 :: identical-ciphertext";
+
+            let openssl_ct = chacha20_poly1305_encrypt(&key, &iv, plaintext)
+                .expect("openssl encrypt");
+
+            let rust_cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+            let rust_ct = rust_cipher
+                .encrypt(Nonce::from_slice(&iv), plaintext.as_ref())
+                .expect("rustcrypto encrypt");
+
+            assert_eq!(
+                openssl_ct, rust_ct,
+                "openssl and RustCrypto produced different (ciphertext || tag) \
+                 for the same key/iv/plaintext under empty AAD"
+            );
+        }
+
+        /// What openssl encrypts, RustCrypto decrypts. Catches
+        /// "openssl produces tag/ct that doesn't verify under a spec
+        /// implementation."
+        #[test]
+        fn rustcrypto_decrypts_openssl_ciphertext() {
+            let key = [0x11u8; 32];
+            let iv: [u8; 12] = std::array::from_fn(|i| i as u8);
+            let plaintext = b"";
+
+            let openssl_ct = chacha20_poly1305_encrypt(&key, &iv, plaintext)
+                .expect("openssl encrypt");
+
+            let rust_cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+            let recovered = rust_cipher
+                .decrypt(Nonce::from_slice(&iv), openssl_ct.as_ref())
+                .expect("rustcrypto decrypt");
+
+            assert_eq!(recovered, plaintext);
+        }
+
+        /// What RustCrypto encrypts, openssl decrypts (via piggy's
+        /// wrapper). Catches "openssl rejects spec-conformant tag/ct
+        /// from another impl."
+        #[test]
+        fn openssl_decrypts_rustcrypto_ciphertext() {
+            let key = [0xa5u8; 32];
+            let iv: [u8; 12] = std::array::from_fn(|i| 0xc0 | (i as u8));
+            // 64 bytes — exercises a multi-block payload.
+            let plaintext: Vec<u8> = (0..64u8).collect();
+
+            let rust_cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+            let rust_ct = rust_cipher
+                .encrypt(Nonce::from_slice(&iv), plaintext.as_slice())
+                .expect("rustcrypto encrypt");
+
+            let recovered = chacha20_poly1305_decrypt(&key, &iv, &rust_ct)
+                .expect("openssl decrypt");
+
+            assert_eq!(recovered, plaintext);
+        }
+    }
+
     /// Pinned RFC 8439 §2.8.2 ChaCha20-Poly1305 AEAD test vector. piggy's
     /// `chacha20_poly1305_encrypt` is a thin wrapper over
     /// `openssl::symm::{encrypt_aead, decrypt_aead}` with empty AAD; this
