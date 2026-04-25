@@ -30,9 +30,6 @@ setup() {
   if [[ -z ${PCSCLITE_CSOCK_NAME:-} ]]; then
     skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-interop)"
   fi
-  if [[ -z ${INTEROP_TPL:-} || ! -f ${INTEROP_TPL:-} ]]; then
-    skip "INTEROP_TPL not set or file missing (run: just test-bats-conformance-interop)"
-  fi
   # common.bash prepends zz-tests_bats/helpers (with mock-pivy-box.sh) to
   # PATH. That mock substitutes base64 for real crypto, which is the
   # opposite of what interop tests want — they need the REAL C pivy-box
