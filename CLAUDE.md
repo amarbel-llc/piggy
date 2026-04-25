@@ -141,3 +141,24 @@ either supplies the configured test PIN non-interactively (if
 `PIGGY_TEST_FIB_PIN` is exported) or refuses with a `[piggy-test-askpass]`-
 prefixed stderr banner so test logs show exactly which prompt leaked.
 It NEVER prompts and NEVER touches /dev/tty.
+
+### User-facing askpass helper
+
+`contrib/piggy-askpass.sh` is the **user-facing** sibling to the
+test-harness askpass above. Where the test askpass refuses to render
+any prompt, this one renders piggy-aware context (parent process,
+`PIGGY_ASKPASS_CONTEXT` env var, `[TEST]` tag heuristic) on top of
+the prompt text, then reads the PIN — preferring `/dev/tty`, falling
+back to `zenity` if `$DISPLAY` is set, refusing otherwise. Set in
+your shell as a drop-in `SSH_ASKPASS`:
+
+```sh
+export SSH_ASKPASS="$PWD/contrib/piggy-askpass.sh"
+```
+
+Smoke-test without entering a PIN by setting `PIGGY_ASKPASS_DRY_RUN=1`
+— the script emits its rendered context to stderr and exits 0
+without reading. See `zz-tests_bats/conformance/piggy_askpass.bats`
+for the test surface and #33 for the design discussion (notably: a
+shell wrapper around zenity's `--text` was preferred over a bundled
+Rust binary because zenity already accepts caller-driven decoration).
