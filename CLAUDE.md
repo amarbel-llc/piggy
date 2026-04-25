@@ -58,6 +58,14 @@ appears in the worktree.
 - `zz-tests_bats/conformance/piggy_agent_protocol.bats` — bats harness for protocol conformance
 - `contrib/emacs/piggy.el` — Emacs integration package
 
+## Specs
+
+- `docs/rfcs/0002-piv-ecdh-box.md` — normative wire-format spec for
+  `piggy-box`. Forked from pivy RFC 0002, owned by piggy. Appendix A
+  pins three bit-exact wire vectors replayed by
+  `crates/piggy-box/src/piv_box.rs::tests::rfc0002_vectors`. Drift
+  between the spec and the test module is a CI failure.
+
 ## Just Recipes
 
 Use just recipes for all cargo and bats operations instead of calling cargo/bats directly via `develop-run` or shell:

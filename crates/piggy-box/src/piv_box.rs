@@ -116,10 +116,31 @@ impl PivBox {
 
     /// Seal using an externally-provided ephemeral key. Used by Ebox to
     /// share a single ephemeral key across all parts on the same curve.
+    ///
+    /// The wire nonce is generated freshly here. For deterministic
+    /// reproduction (e.g. RFC 0002 §A test vectors) call
+    /// [`PivBox::seal_offline_with_ephemeral_and_nonce`] directly with a
+    /// caller-controlled nonce.
     pub fn seal_offline_with_ephemeral(
         &mut self,
         recipient_pub: &EcKey<openssl::pkey::Public>,
         ephem: &EcKey<Private>,
+    ) -> Result<()> {
+        let mut nonce = vec![0u8; NONCE_LEN];
+        openssl::rand::rand_bytes(&mut nonce)?;
+        self.seal_offline_with_ephemeral_and_nonce(recipient_pub, ephem, &nonce)
+    }
+
+    /// Seal with both the ephemeral key and the KDF nonce supplied by
+    /// the caller. Crate-private because deterministic nonce reuse is
+    /// unsafe in production: callers MUST guarantee per-box nonce
+    /// freshness, which only holds for one-shot tests with hard-coded
+    /// inputs (see `docs/rfcs/0002-piv-ecdh-box.md` §A).
+    pub(crate) fn seal_offline_with_ephemeral_and_nonce(
+        &mut self,
+        recipient_pub: &EcKey<openssl::pkey::Public>,
+        ephem: &EcKey<Private>,
+        nonce: &[u8],
     ) -> Result<()> {
         let plaintext = self.plaintext.as_ref().ok_or(BoxError::NotSealed)?;
 
@@ -140,9 +161,7 @@ impl PivBox {
 
         let shared_secret = ecdh_derive(ephem, recipient_pub)?;
 
-        let mut nonce = vec![0u8; NONCE_LEN];
-        openssl::rand::rand_bytes(&mut nonce)?;
-        self.nonce = nonce;
+        self.nonce = nonce.to_vec();
 
         let key_material = kdf_sha512(&shared_secret, &self.nonce)?;
         let padded = pkcs7_pad(plaintext, 16);
@@ -582,6 +601,162 @@ mod tests {
     fn curve_wire_name_roundtrip() {
         for curve in [EcCurve::NistP256, EcCurve::NistP384] {
             assert_eq!(EcCurve::from_wire_name(curve.wire_name()).unwrap(), curve);
+        }
+    }
+
+    /// Replays the bit-exact wire vectors pinned in
+    /// `docs/rfcs/0002-piv-ecdh-box.md` Appendix A. Each vector fixes
+    /// every input that feeds the wire (recipient priv, ephemeral priv,
+    /// KDF nonce, plaintext, GUID/slot) so that
+    /// `seal_offline_with_ephemeral_and_nonce` produces a known-byte
+    /// output. Drift between this module and the spec is a CI failure.
+    mod rfc0002_vectors {
+        use super::*;
+
+        fn priv_key_from_scalar(curve: EcCurve, scalar_bytes: &[u8]) -> EcKey<Private> {
+            let group = EcGroup::from_curve_name(curve.nid()).unwrap();
+            let ctx = openssl::bn::BigNumContext::new().unwrap();
+            let scalar = openssl::bn::BigNum::from_slice(scalar_bytes).unwrap();
+            let mut pub_point = EcPoint::new(&group).unwrap();
+            pub_point.mul_generator(&group, &scalar, &ctx).unwrap();
+            EcKey::from_private_components(&group, &scalar, &pub_point).unwrap()
+        }
+
+        fn pub_from_priv(
+            curve: EcCurve,
+            priv_key: &EcKey<Private>,
+        ) -> EcKey<openssl::pkey::Public> {
+            let group = EcGroup::from_curve_name(curve.nid()).unwrap();
+            EcKey::from_public_key(&group, priv_key.public_key()).unwrap()
+        }
+
+        /// Replay one §A vector end-to-end:
+        /// 1. seal with pinned inputs and assert wire == expected_hex
+        /// 2. from_bytes(expected) and assert all wire fields match inputs
+        /// 3. open_offline(recipient_priv) and assert plaintext recovered
+        fn replay_vector(
+            curve: EcCurve,
+            recipient_scalar: &[u8],
+            ephemeral_scalar: &[u8],
+            nonce: &[u8],
+            plaintext: &[u8],
+            guid_slot: Option<(piggy_piv::Guid, u8)>,
+            expected_hex: &str,
+        ) {
+            let recipient_priv = priv_key_from_scalar(curve, recipient_scalar);
+            let recipient_pub = pub_from_priv(curve, &recipient_priv);
+            let ephemeral_priv = priv_key_from_scalar(curve, ephemeral_scalar);
+            let expected_bytes = hex::decode(expected_hex).expect("vector hex parses");
+
+            // (1) seal -> exact wire match
+            let mut sealed = PivBox::new(curve);
+            sealed.guid_slot = guid_slot.clone();
+            sealed.set_data(plaintext);
+            sealed
+                .seal_offline_with_ephemeral_and_nonce(&recipient_pub, &ephemeral_priv, nonce)
+                .unwrap();
+            let actual_bytes = sealed.to_bytes().unwrap();
+            assert_eq!(
+                hex::encode(&actual_bytes),
+                expected_hex,
+                "wire bytes drifted from RFC 0002 §A vector"
+            );
+
+            // (2) from_bytes -> field equality
+            let parsed = PivBox::from_bytes(&expected_bytes).unwrap();
+            assert_eq!(parsed.version, BOX_VERSION, "version");
+            assert_eq!(parsed.cipher, DEFAULT_CIPHER, "cipher");
+            assert_eq!(parsed.kdf, DEFAULT_KDF, "kdf");
+            assert_eq!(parsed.curve, curve, "curve");
+            assert_eq!(parsed.nonce, nonce, "nonce");
+            assert!(parsed.iv.is_empty(), "wire IV must be 0-length");
+            match (&parsed.guid_slot, &guid_slot) {
+                (None, None) => {}
+                (Some((pg, ps)), Some((eg, es))) => {
+                    assert_eq!(pg.to_hex(), eg.to_hex(), "guid");
+                    assert_eq!(ps, es, "slot");
+                }
+                _ => panic!("guid_slot mismatch: parsed={:?}", parsed.guid_slot),
+            }
+
+            // (3) open with the recipient private key recovers plaintext
+            let mut opener = PivBox::from_bytes(&expected_bytes).unwrap();
+            opener.open_offline(&recipient_priv).unwrap();
+            let recovered = opener.take_data().unwrap();
+            assert_eq!(&*recovered, plaintext, "plaintext mismatch");
+        }
+
+        /// docs/rfcs/0002-piv-ecdh-box.md §A.1 — P-256, no GUID/slot,
+        /// empty plaintext. Smallest realistic box (one PKCS7 block of
+        /// padding, 16-byte AEAD tag).
+        const A1_WIRE_HEX: &str = "b0c5020000001163686163686132302d706f6c79313330350673686135313210a0a1a2a3a4a5a6a7a8a9aaabacadaeaf086e697374703235362102515c3d6eb9e396b904d3feca7f54fdcd0cc1e997bf375dca515ad0a6c3b4035f21031f140146bfb1b251f84f4ddbe0d4cdcfd77afd984a9520e35794021f8312bb9e0000000020e1a6ec6df050b2a882cd105457da7b1d6d36a2ab8636ec0181d34e9150290f88";
+
+        #[test]
+        fn vector_a_1() {
+            let recipient: Vec<u8> = (1u8..=32).collect();
+            let ephemeral: Vec<u8> = (33u8..=64).collect();
+            let nonce: Vec<u8> = (0xA0u8..=0xAF).collect();
+            replay_vector(
+                EcCurve::NistP256,
+                &recipient,
+                &ephemeral,
+                &nonce,
+                b"",
+                None,
+                A1_WIRE_HEX,
+            );
+        }
+
+        /// docs/rfcs/0002-piv-ecdh-box.md §A.2 — P-256, GUID
+        /// 000102…0f / slot 0x9D, plaintext "hello". Exercises the
+        /// guid_slot path on the wire and a non-empty payload.
+        const A2_WIRE_HEX: &str = "b0c5020110000102030405060708090a0b0c0d0e0f9d1163686163686132302d706f6c79313330350673686135313210b0b1b2b3b4b5b6b7b8b9babbbcbdbebf086e6973747032353621038e71ca9d7a62917be7f0db9896b47bf9b91c8b86628eed55d47fe750e65e5bcb21038ed57ec2b8f5e75e9192327b51e5661c87c8e5db0170721309a517fc6e1046b10000000020038feab45e59efde12f175924622799489bb4bd7da8fbba06f898c04a3dff04f";
+
+        #[test]
+        fn vector_a_2() {
+            let recipient: Vec<u8> = (0x10u8..=0x2F).collect();
+            let ephemeral: Vec<u8> = (0x30u8..=0x4F).collect();
+            let nonce: Vec<u8> = (0xB0u8..=0xBF).collect();
+            let guid_bytes: [u8; 16] = std::array::from_fn(|i| i as u8);
+            let guid = piggy_piv::Guid::from_bytes(&guid_bytes).unwrap();
+            replay_vector(
+                EcCurve::NistP256,
+                &recipient,
+                &ephemeral,
+                &nonce,
+                b"hello",
+                Some((guid, 0x9D)),
+                A2_WIRE_HEX,
+            );
+        }
+
+        /// docs/rfcs/0002-piv-ecdh-box.md §A.3 — P-384, no GUID/slot,
+        /// plaintext "piggy rfc0002 vector A.3". Exercises the second
+        /// supported curve (49-byte compressed points, longer wire).
+        const A3_WIRE_HEX: &str = "b0c5020000001163686163686132302d706f6c79313330350673686135313210c0c1c2c3c4c5c6c7c8c9cacbcccdcecf086e697374703338343103c76f2283dda95cd49b0ed9e733d2904474e37216f124e13d2c9ab4cf01021c49ad9cabb3d0b97499aef2f0ab313fa0283103db89855d1980b2aacdec0752249bea9e0630c16b69c095f6c752b2547b520d8109511d908881491780594f03cfee8a0a000000003034edc15689caddcaffd2267362aae0a69c1af4696fc7dd02cec0be62b6552163999d6d9bb78fd6d79715e2f7359f0501";
+
+        #[test]
+        fn vector_a_3() {
+            let recipient: Vec<u8> = (0x01u8..=0x30).collect();
+            let ephemeral: Vec<u8> = (0x31u8..=0x60).collect();
+            let nonce: Vec<u8> = (0xC0u8..=0xCF).collect();
+            replay_vector(
+                EcCurve::NistP384,
+                &recipient,
+                &ephemeral,
+                &nonce,
+                b"piggy rfc0002 vector A.3",
+                None,
+                A3_WIRE_HEX,
+            );
+        }
+
+        /// Sanity check: forces touching this list when adding a
+        /// vector, which forces re-checking the spec.
+        #[test]
+        fn vector_count_matches_spec() {
+            let ids = ["A.1", "A.2", "A.3"];
+            assert_eq!(ids.len(), 3, "RFC 0002 §A pins exactly 3 vectors");
         }
     }
 }
