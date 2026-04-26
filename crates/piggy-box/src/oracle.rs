@@ -137,9 +137,7 @@ mod tests {
     #[test]
     fn error_display_has_variant_specific_text() {
         assert!(format!("{}", OracleError::NoKey).contains("does not hold"));
-        assert!(
-            format!("{}", OracleError::InvalidPubkey("bad".into())).contains("invalid pubkey")
-        );
+        assert!(format!("{}", OracleError::InvalidPubkey("bad".into())).contains("invalid pubkey"));
         assert!(format!("{}", OracleError::Transport("eof".into())).contains("transport"));
         assert!(format!("{}", OracleError::Protocol("short".into())).contains("protocol"));
         assert!(format!("{}", OracleError::Other("boom".into())).contains("boom"));

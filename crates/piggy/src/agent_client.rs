@@ -66,16 +66,12 @@ impl EcdhOracle for AgentEcdhOracle {
         self_pubkey_ssh_blob: &[u8],
         partner_pubkey_ssh_blob: &[u8],
     ) -> Result<Vec<u8>, OracleError> {
-        let request_bytes =
-            encode_ecdh_request(self_pubkey_ssh_blob, partner_pubkey_ssh_blob, 0);
+        let request_bytes = encode_ecdh_request(self_pubkey_ssh_blob, partner_pubkey_ssh_blob, 0);
         let socket_path = self.socket_path.clone();
 
         self.runtime.block_on(async move {
             let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
-                OracleError::Transport(format!(
-                    "connect {}: {e}",
-                    socket_path.display()
-                ))
+                OracleError::Transport(format!("connect {}: {e}", socket_path.display()))
             })?;
             let mut client = Client::new(stream);
 
@@ -119,10 +115,7 @@ pub fn unlock_agent_pin(socket_path: &Path, pin: &str) -> Result<(), OracleError
 
     runtime.block_on(async move {
         let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
-            OracleError::Transport(format!(
-                "connect {}: {e}",
-                socket_path.display()
-            ))
+            OracleError::Transport(format!("connect {}: {e}", socket_path.display()))
         })?;
         let mut client = Client::new(stream);
         client
@@ -143,7 +136,10 @@ mod tests {
     #[test]
     fn oracle_constructs_with_arbitrary_path() {
         let oracle = AgentEcdhOracle::new("/nonexistent/piggy-agent.sock");
-        assert!(oracle.is_ok(), "construction should not touch the filesystem");
+        assert!(
+            oracle.is_ok(),
+            "construction should not touch the filesystem"
+        );
     }
 
     /// When the socket doesn't exist, `ecdh` surfaces `Transport`, not
@@ -151,8 +147,7 @@ mod tests {
     /// network/permission failures from server-side protocol bugs.
     #[test]
     fn ecdh_on_missing_socket_is_transport_error() {
-        let mut oracle =
-            AgentEcdhOracle::new("/nonexistent/piggy-agent.sock").expect("construct");
+        let mut oracle = AgentEcdhOracle::new("/nonexistent/piggy-agent.sock").expect("construct");
         let err = oracle
             .ecdh(b"self-blob", b"partner-blob")
             .expect_err("missing socket must fail");

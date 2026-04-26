@@ -266,21 +266,17 @@ impl PiggyAgent {
         }))
     }
 
-    async fn handle_ecdh_rebox(
-        &mut self,
-        details: &[u8],
-    ) -> Result<Option<Extension>, AgentError> {
+    async fn handle_ecdh_rebox(&mut self, details: &[u8]) -> Result<Option<Extension>, AgentError> {
         let inner = read_ssh_string(details, 0)
             .map_err(|e| AgentError::Other(e.into()))?
             .0;
 
-        let (boxbuf, pos) =
-            read_ssh_string(inner, 0).map_err(|e| AgentError::Other(e.into()))?;
+        let (boxbuf, pos) = read_ssh_string(inner, 0).map_err(|e| AgentError::Other(e.into()))?;
         let (guid_bytes, pos) =
             read_ssh_string(inner, pos).map_err(|e| AgentError::Other(e.into()))?;
-        let slot_id = *inner.get(pos).ok_or_else(|| {
-            AgentError::Other("ecdh-rebox: truncated slot_id".into())
-        })?;
+        let slot_id = *inner
+            .get(pos)
+            .ok_or_else(|| AgentError::Other("ecdh-rebox: truncated slot_id".into()))?;
         let pos = pos + 1;
         let (partner_blob, pos) =
             read_ssh_string(inner, pos).map_err(|e| AgentError::Other(e.into()))?;
@@ -295,9 +291,10 @@ impl PiggyAgent {
         let mut piv_box = PivBox::from_bytes(boxbuf)
             .map_err(|e| AgentError::Other(format!("ecdh-rebox: bad box: {e}").into()))?;
 
-        let (box_guid, box_slot) = piv_box.guid_slot.as_ref().ok_or_else(|| {
-            AgentError::Other("ecdh-rebox: box has no GUID/slot".into())
-        })?;
+        let (box_guid, box_slot) = piv_box
+            .guid_slot
+            .as_ref()
+            .ok_or_else(|| AgentError::Other("ecdh-rebox: box has no GUID/slot".into()))?;
         let box_slot = *box_slot;
 
         let key = self
@@ -335,8 +332,9 @@ impl PiggyAgent {
 
         let mut new_box = PivBox::new(piv_box.curve);
         if !guid_bytes.is_empty() {
-            let target_guid = Guid::from_bytes(guid_bytes)
-                .map_err(|e| AgentError::Other(format!("ecdh-rebox: bad target GUID: {e}").into()))?;
+            let target_guid = Guid::from_bytes(guid_bytes).map_err(|e| {
+                AgentError::Other(format!("ecdh-rebox: bad target GUID: {e}").into())
+            })?;
             new_box.guid_slot = Some((target_guid, slot_id));
         }
         let plaintext = piv_box
@@ -675,8 +673,8 @@ fn decompress_ec_point(compressed: &[u8], curve: EcCurve) -> Result<Vec<u8>, Age
 
     let group = EcGroup::from_curve_name(curve.nid())
         .map_err(|e| AgentError::Other(format!("ec group: {e}").into()))?;
-    let mut ctx = BigNumContext::new()
-        .map_err(|e| AgentError::Other(format!("bn ctx: {e}").into()))?;
+    let mut ctx =
+        BigNumContext::new().map_err(|e| AgentError::Other(format!("bn ctx: {e}").into()))?;
     let point = EcPoint::from_bytes(&group, compressed, &mut ctx)
         .map_err(|e| AgentError::Other(format!("ec decompress: {e}").into()))?;
     point
@@ -691,8 +689,7 @@ fn ec_public_key_from_point(
     use openssl::bn::BigNumContext;
     use openssl::ec::{EcGroup, EcKey, EcPoint};
 
-    let group =
-        EcGroup::from_curve_name(curve.nid()).map_err(|e| format!("ec group: {e}"))?;
+    let group = EcGroup::from_curve_name(curve.nid()).map_err(|e| format!("ec group: {e}"))?;
     let mut ctx = BigNumContext::new().map_err(|e| format!("bn ctx: {e}"))?;
     let ec_point =
         EcPoint::from_bytes(&group, point, &mut ctx).map_err(|e| format!("ec point: {e}"))?;
