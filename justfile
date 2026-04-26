@@ -573,6 +573,43 @@ explore-pivy-tool-bats: build-nix
       BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
       zz-tests_bats/conformance/pivy_tool_admin_key.bats
 
+# Probe PivApplet (running under fib) for X25519 / Ed25519 algorithm
+# support. Sends GENERATE ASYMMETRIC KEY PAIR for several alg bytes and
+# captures each SW. Hardware-free: only touches the virtual card behind
+# fib. Used to settle issue #11 (X25519 ECDH) — see findings on the
+# issue. Bring fib up with `just fib-up` first; this recipe fails fast
+# if it isn't running rather than managing the lifecycle.
+[group('explore')]
+explore-x25519-pivapplet:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [[ ! -f .fib/env ]]; then
+      echo "ERROR: .fib/env not found - run 'just fib-up' first" >&2
+      exit 1
+    fi
+    eval "$(cat .fib/env)"
+    reader="Virtual PCD piggy fib 00 00"
+    aid="00:a4:04:00:0b:a0:00:00:03:08:00:00:10:00:01:00"
+
+    probe() {
+      local label="$1" alg="$2"
+      echo
+      echo "=== Probe $label (alg=0x$alg) ==="
+      echo "--- SELECT PIV AID ---"
+      opensc-tool -r "$reader" -s "$aid" 2>&1 || echo "(SELECT failed: $?)"
+      echo "--- GENERATE ASYMMETRIC KEY PAIR slot=9D ---"
+      opensc-tool -r "$reader" -s "$aid" \
+        -s "00:47:00:9d:05:ac:03:80:01:$alg" 2>&1 \
+        || echo "(GEN ASYM failed: $?)"
+    }
+
+    probe "Yubico/pivy X25519"             "e1"
+    probe "Yubico/pivy ED25519"            "e0"
+    probe "piggy-piv apdu.rs X25519"       "23"
+    probe "piggy-piv apdu.rs ED25519"      "22"
+    probe "ECCP256 (control, supported)"   "11"
+    probe "RSA2048 (control, supported)"   "07"
+
 # --- update / clean ---
 
 update: update-nix
