@@ -46,8 +46,10 @@ pub mod alg {
     pub const RSA2048: u8 = 0x07;
     pub const ECCP256: u8 = 0x11;
     pub const ECCP384: u8 = 0x14;
-    pub const ED25519: u8 = 0x22;
-    pub const X25519: u8 = 0x23;
+    // Ed25519 / X25519 are YubicoPIV proprietary extensions (firmware 5.7+),
+    // not NIST SP 800-78. Bytes match Yubico/yubico-piv-tool/lib/ykpiv.h.
+    pub const ED25519: u8 = 0xE0;
+    pub const X25519: u8 = 0xE1;
 }
 
 /// GENERAL AUTHENTICATE dynamic template tags

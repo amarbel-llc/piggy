@@ -1,4 +1,4 @@
-use piggy_piv::apdu::{Apdu, StatusWord, PIV_AID};
+use piggy_piv::apdu::{alg, Apdu, StatusWord, PIV_AID};
 
 #[test]
 fn build_select_piv() {
@@ -95,4 +95,25 @@ fn apdu_with_le() {
     let bytes = apdu.to_bytes();
     // Le=256 encoded as 0x00 in short form
     assert_eq!(bytes, &[0x00, 0xC0, 0x00, 0x00, 0x00]);
+}
+
+#[test]
+fn alg_constants_match_authoritative_sources() {
+    // NIST SP 800-78-4 Table 6-2.
+    assert_eq!(alg::TDEA_3KEY, 0x03);
+    assert_eq!(alg::AES128, 0x08);
+    assert_eq!(alg::AES192, 0x0A);
+    assert_eq!(alg::AES256, 0x0C);
+    assert_eq!(alg::RSA1024, 0x06);
+    assert_eq!(alg::RSA2048, 0x07);
+    assert_eq!(alg::ECCP256, 0x11);
+    assert_eq!(alg::ECCP384, 0x14);
+
+    // YubicoPIV proprietary extensions, supported in YubiKey firmware 5.7+.
+    // Bytes match Yubico/yubico-piv-tool/lib/ykpiv.h:639-640 (YKPIV_ALGO_*).
+    // Pinned here to catch drift; the project hit this exact bug in #44 when
+    // these constants were initially set to 0x22/0x23 (SP 800-78-5 draft
+    // values that real YubiKeys do not answer to).
+    assert_eq!(alg::ED25519, 0xE0);
+    assert_eq!(alg::X25519, 0xE1);
 }

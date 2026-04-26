@@ -18,7 +18,7 @@ impl PivAlgorithm {
             PivAlgorithm::Rsa2048 => 0x07,
             PivAlgorithm::EcP256 => 0x11,
             PivAlgorithm::EcP384 => 0x14,
-            PivAlgorithm::Ed25519 => 0x22,
+            PivAlgorithm::Ed25519 => 0xE0,
         }
     }
 }
