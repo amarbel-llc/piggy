@@ -98,6 +98,28 @@ test-bats-file *FILES: build-rust
 test-rust *ARGS:
     cargo test {{ARGS}}
 
+# Smoke-test for the `services.piggy-agent` home-manager module (#52).
+# Evaluates the module against synthetic configs and verifies the option
+# schema, both platform code paths, and every assertion. Reports
+# pass/fail per case.
+test-nix-hm-module:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  expr='let
+    flake = builtins.getFlake (toString ./.);
+    pkgs = flake.inputs.nixpkgs.legacyPackages.${builtins.currentSystem};
+    test = import ./nix/hm/eval-test.nix {
+      inherit pkgs;
+      module = flake.homeManagerModules.piggy-agent;
+    };
+  in test'
+  json="$(nix eval --impure --json --expr "$expr")"
+  printf '%s\n' "$json" | jq -r '"\(.summary)"'
+  if [[ "$(printf '%s\n' "$json" | jq -r '.pass')" != "true" ]]; then
+    printf '%s\n' "$json" | jq -r '.failures[] | "FAIL: \(.name)\n  got: \(.result.got)"'
+    exit 1
+  fi
+
 # End-to-end ECDH round-trip: boot fib, generate a 9D key, spawn
 # piggy-agent as a child of the test binary, and verify the agent's
 # ecdh@joyent.com extension agrees with a locally-computed shared
