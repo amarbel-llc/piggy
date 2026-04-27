@@ -1,14 +1,4 @@
 # home-manager module for `services.piggy-agent`.
-#
-# Generates a systemd user service on Linux and a launchd LaunchAgent on
-# Darwin from one option set. Wraps the `piggy agent` rust subcommand
-# (or the C `pivy-agent` if `package` is swapped to `pkgs.pivy`).
-#
-# Step 1 (#52): single-instance only — top-level `guid` / `allCards`
-# / `cak` / `slots` directly drive one unit. Step 2 adds
-# `services.piggy-agent.instances.<name>` for multi-instance.
-#
-# Scoping doc: docs/plans/2026-04-27-piggy-agent-nix-module.md
 {
   config,
   lib,
@@ -25,24 +15,20 @@ let
 
   cfg = config.services.piggy-agent;
 
-  # Resolve the binary the unit should exec. Default is `piggy agent ...`
-  # against piggy's wrapped binary; users can swap `package` to `pkgs.pivy`
-  # and `programName` to `pivy-agent` to run the C agent under the same
-  # surface.
-  binPath = "${cfg.package}/bin/${cfg.programName}";
+  # Auto-detect whether we're running the rust `piggy agent` subcommand
+  # or the C `pivy-agent` standalone binary. Determined by `package.pname`
+  # so users only configure `package`; the dispatch shape (subcommand vs
+  # direct binary) follows from it.
+  isRustAgent = (cfg.package.pname or "") == "piggy";
+  binPath = "${cfg.package}/bin/${if isRustAgent then "piggy" else "pivy-agent"}";
+  preArgs = lib.optional isRustAgent "agent";
 
-  # Socket path: $XDG_STATE_HOME/piggy/piggy-agent.sock with $HOME fallback
-  # for platforms (Darwin) that don't set XDG_STATE_HOME by default.
-  # The wrapper script and shell-init use the same shell expansion so they
-  # always resolve to the same path at runtime.
   socketPathExpr =
     if cfg.socketPath != null then
       cfg.socketPath
     else
       "\${XDG_STATE_HOME:-$HOME/.local/state}/piggy/piggy-agent.sock";
 
-  # The agent's argv beyond `agent` and `-i`. Built from the option surface,
-  # then quoted as a shell-string list inside the wrapper script.
   agentArgs =
     [
       "-i"
@@ -64,55 +50,18 @@ let
     ]
     ++ cfg.extraArgs;
 
-  # Shell-quote each argv element. Used inside the wrapper script and the
-  # systemd ExecStart line.
-  shellEscape = arg: lib.escapeShellArg arg;
-  agentArgsLine = lib.concatStringsSep " " (map shellEscape agentArgs);
-
-  # The agent subcommand on the binary. For `piggy agent ...` we prepend
-  # `agent`; for `pivy-agent` (which IS the agent) we don't.
-  preArgs = if cfg.programName == "piggy" then [ "agent" ] else [ ];
-  preArgsLine = lib.concatStringsSep " " (map shellEscape preArgs);
-
-  # Linux: systemd user service.
+  # Single shared launcher script for both Linux and Darwin. Handles
+  # XDG_STATE_HOME default, socket-dir creation, stale-socket cleanup,
+  # askpass env wiring, then exec's the agent.
   #
-  # Uses `ExecStartPre=/bin/rm -f $SOCK` (matching the prior pivy unit) to
-  # clear stale sockets from previous runs. Socket activation (#53) would
-  # eliminate the need for this preflight; until then this is the
-  # well-trodden path.
-  linuxService = {
-    Unit = {
-      Description = "Piggy PIV-backed SSH agent";
-      Documentation = "https://github.com/amarbel-llc/piggy";
-    };
-
-    Service = {
-      Environment = [
-        "SSH_AUTH_SOCK=${socketPathExpr}"
-      ]
-      ++ lib.optional (cfg.askpass != null) "SSH_ASKPASS=${cfg.askpass}"
-      ++ lib.optional (cfg.askpass != null) "SSH_ASKPASS_REQUIRE=force";
-      # Stale-socket cleanup. systemd expands $SSH_AUTH_SOCK from
-      # Environment= above before invoking ExecStartPre.
-      ExecStartPre = "${pkgs.coreutils}/bin/rm -f \"$SSH_AUTH_SOCK\"";
-      # Use a wrapped shell so $XDG_STATE_HOME / $HOME expansion happens
-      # at runtime (systemd does NOT expand env-var refs inside ExecStart
-      # argument values, only in `Environment=` and `EnvironmentFile=`).
-      ExecStart = "${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/mkdir -p -m 0700 \"$(dirname \"${socketPathExpr}\")\" && exec ${binPath} ${preArgsLine} ${agentArgsLine}'";
-      Restart = "always";
-      RestartSec = 3;
-    };
-
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
-
-  # Darwin: launchd LaunchAgent. launchd has no ExecStartPre analogue and
-  # does not perform shell expansion on ProgramArguments entries, so the
-  # cleanest path is a wrapper script that does the mkdir + rm + exec
-  # itself.
-  darwinWrapper = pkgs.writeShellScript "piggy-agent-launch" ''
+  # Used in two places:
+  # - Linux:  systemd ExecStart points at this script directly.
+  # - Darwin: launchd ProgramArguments points at this script.
+  #
+  # Unifying eliminates the brittle bash -c '...' string in ExecStart
+  # (single-quote injection hazards) and the tmpfiles.d rule (the script
+  # mkdir's the dir itself).
+  launcher = pkgs.writeShellScript "piggy-agent-launch" ''
     set -eu
     : "''${HOME:?HOME must be set}"
     : "''${XDG_STATE_HOME:=$HOME/.local/state}"
@@ -124,13 +73,30 @@ let
       export SSH_ASKPASS="${cfg.askpass}"
       export SSH_ASKPASS_REQUIRE=force
     ''}
-    exec ${binPath} ${preArgsLine} ${agentArgsLine}
+    exec ${binPath} ${lib.escapeShellArgs preArgs} ${lib.escapeShellArgs agentArgs}
   '';
+
+  linuxService = {
+    Unit = {
+      Description = "Piggy PIV-backed SSH agent";
+      Documentation = "https://github.com/amarbel-llc/piggy";
+    };
+
+    Service = {
+      ExecStart = "${launcher}";
+      Restart = "always";
+      RestartSec = 3;
+    };
+
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
 
   darwinAgent = {
     enable = true;
     config = {
-      ProgramArguments = [ "${darwinWrapper}" ];
+      ProgramArguments = [ "${launcher}" ];
       KeepAlive = {
         Crashed = true;
         SuccessfulExit = false;
@@ -146,35 +112,17 @@ let
   };
 in
 {
-  meta.maintainers = [ ];
-
   options.services.piggy-agent = {
     enable = lib.mkEnableOption "piggy PIV-backed SSH agent";
 
-    package = lib.mkOption {
-      type = types.package;
-      default = pkgs.piggy or pkgs.pivy;
-      defaultText = lib.literalExpression "pkgs.piggy";
-      description = ''
-        Package providing the agent binary. Default is `pkgs.piggy`
-        (the rust agent at `bin/piggy agent ...`). Set to `pkgs.pivy`
-        to run the C `pivy-agent` instead under the same option
-        surface.
-      '';
-    };
+    # mkPackageOption defaults to `pkgs.piggy` and emits the right
+    # defaultText. Users without piggy in their nixpkgs (the common
+    # case) MUST set `package = piggy.packages.${system}.piggy` from
+    # this flake — there's no silent fallback. Set `package = pkgs.pivy`
+    # (with pname = "pivy") to run the C agent under the same surface.
+    package = lib.mkPackageOption pkgs "piggy" { };
 
-    programName = lib.mkOption {
-      type = types.str;
-      default = "piggy";
-      description = ''
-        Binary name inside `package`'s `bin/`. Defaults to `piggy`,
-        which means the unit invokes `piggy agent <flags>`. Set to
-        `pivy-agent` when `package = pkgs.pivy` so the unit invokes
-        `pivy-agent <flags>` directly (no `agent` subcommand).
-      '';
-    };
-
-    guid = lib.mkOption {
+    guid = mkOption {
       type = types.nullOr types.str;
       default = null;
       example = "A1B2C3D4E5F60718293A4B5C6D7E8F90";
@@ -184,7 +132,7 @@ in
       '';
     };
 
-    allCards = lib.mkOption {
+    allCards = mkOption {
       type = types.bool;
       default = false;
       description = ''
@@ -193,7 +141,7 @@ in
       '';
     };
 
-    cak = lib.mkOption {
+    cak = mkOption {
       type = types.nullOr types.str;
       default = null;
       example = "ecdsa-sha2-nistp256 AAAA...";
@@ -203,7 +151,7 @@ in
       '';
     };
 
-    slots = lib.mkOption {
+    slots = mkOption {
       type = types.str;
       default = "all";
       example = "9a,9e";
@@ -214,7 +162,7 @@ in
       '';
     };
 
-    socketPath = lib.mkOption {
+    socketPath = mkOption {
       type = types.nullOr types.str;
       default = null;
       defaultText = lib.literalExpression "$XDG_STATE_HOME/piggy/piggy-agent.sock";
@@ -228,7 +176,7 @@ in
       '';
     };
 
-    askpass = lib.mkOption {
+    askpass = mkOption {
       type = types.nullOr types.str;
       default = null;
       example = lib.literalExpression "\"\${pkgs.piggy}/share/piggy/piggy-askpass.sh\"";
@@ -240,7 +188,7 @@ in
       '';
     };
 
-    logFile = lib.mkOption {
+    logFile = mkOption {
       type = types.nullOr types.str;
       default = null;
       description = ''
@@ -250,7 +198,7 @@ in
       '';
     };
 
-    extraArgs = lib.mkOption {
+    extraArgs = mkOption {
       type = types.listOf types.str;
       default = [ ];
       description = ''
@@ -277,24 +225,14 @@ in
       }
     ];
 
-    # Linux: systemd user service.
     systemd.user.services = mkIf pkgs.stdenv.isLinux {
       piggy-agent = linuxService;
     };
 
-    # Linux: ensure $XDG_STATE_HOME/piggy/ exists with mode 0700 before
-    # anything tries to bind. tmpfiles.d D = create-dir-if-missing.
-    systemd.user.tmpfiles.rules = mkIf pkgs.stdenv.isLinux [
-      "D %S/piggy 0700 - - -"
-    ];
-
-    # Darwin: launchd agent. The wrapper script handles directory
-    # creation + stale-socket cleanup before exec'ing the agent.
     launchd.agents = mkIf pkgs.stdenv.isDarwin {
       piggy-agent = darwinAgent;
     };
 
-    # Export SSH_AUTH_SOCK so the user's shell points at the agent.
     home.sessionVariables = {
       SSH_AUTH_SOCK = socketPathExpr;
     };

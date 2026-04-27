@@ -271,12 +271,8 @@
       }
     ))
     // {
-      # System-independent outputs. The home-manager module is sourced
-      # by users from this flake; they're expected to include their own
-      # nixpkgs and pass `pkgs.piggy` (or `pkgs.pivy`) via the module's
-      # `package` option. See docs/plans/2026-04-27-piggy-agent-nix-module.md
-      # for design rationale and the full module surface.
+      # See docs/plans/2026-04-27-piggy-agent-nix-module.md for the
+      # module's design rationale and option surface.
       homeManagerModules.piggy-agent = import ./nix/hm/piggy-agent.nix;
-      homeManagerModules.default = import ./nix/hm/piggy-agent.nix;
     };
 }

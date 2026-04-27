@@ -56,12 +56,22 @@ let
     };
   };
 
+  # `mkPackageOption pkgs "piggy"` defaults to `pkgs.piggy`, which
+  # doesn't exist in stock nixpkgs. Every case is evaluated with
+  # `package` pinned to `pkgs.hello` so the default's thrown error
+  # doesn't fire when the launcher derivation gets forced.
+  #
+  # Passed as a separate module (not merged via `//`) so evalModules
+  # does the proper deep-merge with the case's own config.
+  pinPackage = { services.piggy-agent.package = pkgs.hello; };
+
   runEval =
     cfg:
     lib.evalModules {
       modules = [
         harness
         module
+        pinPackage
         cfg
       ];
       specialArgs = { inherit pkgs; };
@@ -70,8 +80,17 @@ let
   trippedMessages =
     result: map (a: a.message) (builtins.filter (a: !a.assertion) result.config.assertions);
 
-  # Each case asserts a property on the module's evaluation. `failures`
-  # lists every case whose actual result didn't match `expected`.
+  # Force the launcher derivation through nix's laziness so we catch
+  # bugs that would only surface when home-manager actually realizes
+  # the unit. Reading either the systemd unit (Linux) or the launchd
+  # plist (Darwin) drives `binPath` and the writeShellScript through.
+  forceLauncher =
+    result:
+    if pkgs.stdenv.isLinux then
+      result.config.systemd.user.services.piggy-agent.Service.ExecStart
+    else
+      result.config.launchd.agents.piggy-agent.config.ProgramArguments;
+
   cases = [
     {
       name = "valid-single-instance-evaluates-cleanly";
@@ -84,11 +103,12 @@ let
         let
           tripped = trippedMessages result;
           sock = result.config.home.sessionVariables.SSH_AUTH_SOCK or null;
+          launcher = forceLauncher result;
         in
         {
-          ok = tripped == [ ] && sock != null;
+          ok = tripped == [ ] && sock != null && launcher != null;
           got = {
-            inherit tripped sock;
+            inherit tripped sock launcher;
           };
         };
     }
@@ -98,10 +118,18 @@ let
         services.piggy-agent.enable = true;
         services.piggy-agent.allCards = true;
       };
-      check = result: {
-        ok = trippedMessages result == [ ];
-        got = trippedMessages result;
-      };
+      check =
+        result:
+        let
+          launcher = forceLauncher result;
+        in
+        {
+          ok = trippedMessages result == [ ] && launcher != null;
+          got = {
+            tripped = trippedMessages result;
+            inherit launcher;
+          };
+        };
     }
     {
       name = "no-card-trips-required-assertion";
