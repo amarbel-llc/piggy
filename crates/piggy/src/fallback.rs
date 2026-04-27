@@ -1,9 +1,13 @@
 //! Bash + C pivy fallback dispatch.
 //!
-//! Unknown subcommands are handed off to either a C `pivy-*` binary (for
-//! subcommands that currently have no rust implementation) or to the bash
-//! `piggy.sh` script (for everything else, including the passwordstore-style
-//! commands and `--help`).
+//! Pass-style clap handlers in `main` call [`exec_bash`] directly with an
+//! explicit `subcmd` and `rest`. The catch-all [`dispatch`] entry point
+//! handles the C-pivy shortcuts (`tool`, `ca`, `luks`, `zfs`) and also
+//! retains a bash catch-all for argv that clap rejects with an error.
+//! Under the v1.0 minimal-rewrite framing the catch-all is logically
+//! unreachable for any subcommand clap names; #50 removes
+//! [`hand_off_to_bash`] entirely once #48 promotes the C-pivy shortcuts
+//! into clap handlers.
 //!
 //! Uses [`std::os::unix::process::CommandExt`]'s process-image-replacement
 //! primitive (a thin wrapper around the `execve(2)` syscall) so the child
@@ -18,12 +22,17 @@ use std::process::Command;
 /// Each maps to a `pivy-<name>` binary expected on `$PATH`.
 const PIVY_SUBCOMMANDS: &[&str] = &["tool", "ca", "luks", "zfs"];
 
-/// Dispatch an argv that did not match any rust subcommand.
-///
-/// `args` is the full argv (including `args[0]` = program name).
-/// Never returns on success — the process is replaced in-place.
+/// Returns true if `name` is a C-pivy shortcut handled outside clap.
+/// Used by `main` to short-circuit clap parsing for `piggy tool ...`
+/// etc. — #48 replaces this with explicit clap handlers.
+pub fn is_pivy_shortcut(name: &str) -> bool {
+    PIVY_SUBCOMMANDS.contains(&name)
+}
+
+/// Dispatch an argv that did not reach clap (currently only the C-pivy
+/// shortcuts). `args` is the full argv (including `args[0]` = program
+/// name). Never returns on success — the process is replaced in-place.
 pub fn dispatch(args: &[String]) -> ! {
-    // Strip the program name; the target binary gets only the subcommand + rest.
     let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
 
     if let Some(&first) = rest.first() {
@@ -32,7 +41,22 @@ pub fn dispatch(args: &[String]) -> ! {
         }
     }
 
+    // Defense in depth: if `dispatch` is called with anything else, fall
+    // back to bash. Under the current main.rs flow this branch is
+    // unreachable — `is_pivy_shortcut` gates the call.
     hand_off_to_bash(&rest);
+}
+
+/// Exec `piggy.sh <subcmd> <rest...>`. Used by every pass-style clap
+/// handler. Never returns on success.
+pub fn exec_bash(subcmd: &str, rest: &[String]) -> ! {
+    let script = find_piggy_sh();
+    let mut cmd = Command::new(&script);
+    cmd.arg(subcmd);
+    cmd.args(rest);
+    let err = cmd.exec();
+    eprintln!("piggy: failed to launch {}: {}", script.display(), err);
+    std::process::exit(127);
 }
 
 fn hand_off_to_pivy(subcmd: &str, rest: &[&str]) -> ! {
