@@ -30,7 +30,15 @@ Dependencies (pinned by the devshell): `bash`, `pivy` (vendored at `vendor/pivy/
 
 ## Usage
 
-piggy mirrors pass's command surface (`init`, `show`, `insert`, `edit`, `generate`, `rm`, `mv`, `cp`, `find`, `grep`, `git`). See the manpages in `doc/` for the full command reference and the `PIGGY_*` environment-variable knobs.
+The user-facing CLI is `piggy <subcommand>`. `piggy --help` prints the full subcommand list. There are three groups:
+
+- **Pass-style** (`init`, `show`, `insert`, `edit`, `generate`, `rm`, `mv`, `cp`, `find`, `grep`, `git`) — same surface as passwordstore.org.
+- **First-party Rust** (`agent`, `box`) — PIV-backed SSH agent and pivy-box reimplementation.
+- **C `pivy-*` shortcuts** (`tool`, `ca`, `luks`, `zfs`) and the generic `piggy pivy <tool>` escape hatch — forwarded to the corresponding `pivy-*` C binary.
+
+See the manpages in `doc/` for the full command reference and the `PIGGY_*` environment-variable knobs.
+
+`src/piggy.sh` is the bash implementation behind the pass-style handlers. It is an internal detail of the installed binary (lives under `$out/libexec/piggy/`, not on `$PATH`) and is not a separately callable program.
 
 A more complete walkthrough is tracked at [#25](https://github.com/amarbel-llc/piggy/issues/25).
 

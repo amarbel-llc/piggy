@@ -6,10 +6,9 @@
 //! passthrough call [`exec_pivy`] to run the matching `pivy-*` binary
 //! from `$PATH`.
 //!
-//! Top-level dispatch is exhaustive in clap; this module no longer owns
-//! any subcommand-name routing. [`hand_off_to_bash`] is retained as a
-//! defense-in-depth catch-all for argv that clap somehow lets through;
-//! #50 removes it once that's verified to never happen.
+//! Top-level dispatch is exhaustive in clap; this module owns no
+//! subcommand-name routing and has no catch-all. Every reachable
+//! function here is named explicitly by some clap handler.
 //!
 //! Uses [`std::os::unix::process::CommandExt`]'s process-image-replacement
 //! primitive (a thin wrapper around the `execve(2)` syscall) so the child
@@ -52,17 +51,6 @@ pub fn exec_pivy(tool: &str, rest: &[String]) -> ! {
     std::process::exit(127);
 }
 
-/// Defense-in-depth bash catch-all. Reachable only if argv slipped past
-/// clap somehow (it should not). #50 removes this once that invariant
-/// is verified to hold.
-#[allow(dead_code)]
-pub fn hand_off_to_bash(rest: &[&str]) -> ! {
-    let script = find_piggy_sh();
-    let err = Command::new(&script).args(rest).exec();
-    eprintln!("piggy: failed to launch {}: {}", script.display(), err);
-    std::process::exit(127);
-}
-
 /// `piggy pivy <tool>` accepts free-form `tool` strings; keep them
 /// restricted to printable ASCII without separators so a misbehaving
 /// caller cannot synthesize a path or option-prefixed binary name.
@@ -75,12 +63,19 @@ fn is_safe_pivy_tool_name(tool: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Locate `piggy.sh`:
+/// Locate `piggy.sh`. `piggy.sh` is an internal implementation detail
+/// of the installed binary, not a callable program — `flake.nix`
+/// installs it under `$out/libexec/piggy/` and the makeWrapper-set
+/// `PIGGY_SH_PATH` points the rust dispatcher at that absolute path.
 ///
-/// 1. `$PIGGY_SH_PATH` if set (baked in by nix makeWrapper at build time, or
-///    set explicitly by bats tests to point at the in-repo copy).
-/// 2. Otherwise assume `piggy.sh` is on `$PATH` (unusual, but OK for a
-///    devshell setup where `src/` is on `$PATH`).
+/// Resolution order:
+///
+/// 1. `$PIGGY_SH_PATH` (set by `flake.nix`'s makeWrapper for installed
+///    builds, or by the bats harness's `common.bash` for local tests
+///    against the in-repo copy).
+/// 2. Bare `piggy.sh` as a final-resort PATH lookup. This branch only
+///    matters for unusual devshell setups that put `src/` on `$PATH`;
+///    every other reachable invocation goes through `$PIGGY_SH_PATH`.
 fn find_piggy_sh() -> PathBuf {
     if let Some(path) = std::env::var_os("PIGGY_SH_PATH") {
         return PathBuf::from(path);

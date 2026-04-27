@@ -35,7 +35,7 @@ appears in the worktree.
 
 ## Architecture
 
-**Single-script CLI** — the entire tool is `src/piggy.sh` (~800 lines of bash). It implements all passwordstore.org commands (init, show, insert, edit, generate, rm, mv, cp, find, grep, git) with pivy-box as the crypto backend.
+**Rust-on-top, bash-on-back CLI** — top-level argv parsing is a Rust `clap` subcommand tree in `crates/piggy/src/main.rs`. Each pass-style handler (`init`, `show`, `insert`, `edit`, `generate`, `rm`, `mv`, `cp`, `find`, `grep`, `git`, `help`, `version`) `exec(2)`s into `src/piggy.sh` to run the corresponding `cmd_*` function — `piggy.sh` is the implementation backing every pass-style subcommand and is installed under `$out/libexec/piggy/`, not on `$PATH`. The Rust binary also owns first-party subcommands `agent` (PIV-backed SSH agent) and `box` (pivy-box reimpl), and explicit clap handlers for the C-pivy shortcuts `tool`/`ca`/`luks`/`zfs` plus the generic `piggy pivy <tool>` passthrough. Top-level dispatch is exhaustive in clap; `fallback.rs` no longer has a catch-all bash branch.
 
 **Crypto layer:**
 - Encrypt: `pivy-box stream encrypt <template> < plaintext > file.ebox`
@@ -49,13 +49,16 @@ appears in the worktree.
 
 ## Key Files
 
-- `src/piggy.sh` — main script: env setup, helpers, all command implementations, dispatch
-- `src/platform/darwin.sh` — macOS platform overrides
+- `crates/piggy/src/main.rs` — clap subcommand tree; top-level dispatch
+- `crates/piggy/src/fallback.rs` — `exec_bash` (pass-style handlers) + `exec_pivy` (C-pivy handlers + `piggy pivy <tool>` passthrough)
+- `src/piggy.sh` — bash command bodies: env setup, helpers, all `cmd_*` implementations. Installed under `$out/libexec/piggy/`, not on `$PATH`; reached via `PIGGY_SH_PATH` baked in by `flake.nix`'s makeWrapper.
+- `src/platform/darwin.sh` — macOS platform overrides (sourced by `piggy.sh` at runtime)
 - `zz-tests_bats/common.bash` — bats test harness (mock PATH, temp store, git identity)
 - `zz-tests_bats/helpers/mock-pivy-box.sh` — mock pivy-box using base64 encode/decode
 - `flake.nix` — nix package definition and dev shell
 - `go/main.go` — Go SSH agent conformance test binary (protocol wire format validation)
 - `zz-tests_bats/conformance/piggy_agent_protocol.bats` — bats harness for protocol conformance
+- `zz-tests_bats/conformance/piggy_pivy.bats` — bats harness for the `piggy pivy <tool>` passthrough
 - `contrib/emacs/piggy.el` — Emacs integration package
 
 ## Specs
