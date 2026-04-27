@@ -1,26 +1,23 @@
 //! Top-level `piggy` binary.
 //!
-//! Dispatch layout:
+//! Dispatch layout (top-level argv is parsed entirely by clap):
 //!
-//! 1. Clap parses the top-level subcommand. The subcommand tree mirrors
-//!    `src/piggy.sh`'s pass-style case statement plus the existing
-//!    first-party Rust subcommands.
-//! 2. Pass-style subcommands (init, show, find, grep, insert, edit,
+//! 1. Pass-style subcommands (init, show, find, grep, insert, edit,
 //!    generate, rm, mv, cp, git, help, version) `exec(2)` into
 //!    `piggy.sh <subcommand> <rest...>` — Shape A from the v1.0 scoping
 //!    doc. The case statement at the bottom of `piggy.sh` does the
 //!    second-level dispatch to the matching `cmd_*` function. Per-
 //!    subcommand `getopt` parsing stays in bash; clap captures all
 //!    trailing argv verbatim.
-//! 3. Rust-native subcommands (agent, box) dispatch to their existing
+//! 2. Rust-native subcommands (agent, box) dispatch to their existing
 //!    handlers in [`cmd::agent`] / [`cmd::pivy_box`].
-//! 4. C-pivy shortcuts (tool, ca, luks, zfs) and the catch-all bash
-//!    fallback live in [`fallback`] and continue to handle anything
-//!    clap does not recognize. Clap is exhaustive over the pass-style
-//!    surface, so the catch-all is logically unreachable for known
-//!    subcommands; #50 removes it explicitly. #48 promotes the C-pivy
-//!    shortcuts into clap handlers and adds the new
-//!    `piggy pivy <tool>` passthrough.
+//! 3. C-pivy shortcuts (tool, ca, luks, zfs) `exec(2)` the matching
+//!    `pivy-*` binary from `$PATH` via [`fallback::exec_pivy`].
+//! 4. The `pivy` passthrough (`piggy pivy <tool> [args...]`) is a
+//!    generic escape hatch around the Rust subcommands — always
+//!    forwards to the C `pivy-*` binary, even when there's a Rust
+//!    counterpart (`piggy pivy box` ≠ `piggy box`). See the v1.0
+//!    scoping doc for the rationale.
 
 mod cmd;
 mod fallback;
@@ -138,24 +135,55 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
+    /// Run the C `pivy-tool` binary.
+    ///
+    /// Forwarded to `pivy-tool` from `$PATH`; piggy does not interpret
+    /// any of its flags. Scheduled for a Rust port post-1.0 (#3).
+    #[command(disable_help_flag = true)]
+    Tool {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Run the C `pivy-ca` binary.
+    #[command(disable_help_flag = true)]
+    Ca {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Run the C `pivy-luks` binary.
+    #[command(disable_help_flag = true)]
+    Luks {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Run the C `pivy-zfs` binary.
+    #[command(disable_help_flag = true)]
+    Zfs {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Run any C `pivy-<tool>` binary explicitly (escape hatch).
+    ///
+    /// Always reaches the C binary from `$PATH`; `piggy pivy box` runs
+    /// `pivy-box` even though `piggy box` runs the Rust reimplementation,
+    /// and `piggy pivy agent` runs `pivy-agent` even though `piggy agent`
+    /// runs the Rust agent. Useful when callers specifically want the
+    /// upstream C behavior or are scripting against the full `pivy-*`
+    /// family.
+    #[command(disable_help_flag = true)]
+    Pivy {
+        /// Subcommand name (e.g. `box`, `tool`, `agent`, `ca`, `luks`,
+        /// `zfs`). Concatenated as `pivy-<TOOL>` and looked up on
+        /// `$PATH`.
+        tool: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
 }
 
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
-
-    // Pre-clap escape hatch for subcommands that clap does not know yet
-    // (the C-pivy shortcuts: tool/ca/luks/zfs). #48 will replace this
-    // with explicit clap handlers; until then keep the existing argv-
-    // prefix match so those shortcuts continue to work without a clap
-    // parse error.
-    if let Some(first) = argv.get(1) {
-        if fallback::is_pivy_shortcut(first) {
-            fallback::dispatch(&argv);
-        }
-    }
-
     let cli = Cli::parse_from(&argv);
-
     let prog = argv[0].clone();
 
     match cli.cmd {
@@ -187,5 +215,20 @@ fn main() {
         Some(Command::Git { rest }) => fallback::exec_bash("git", &rest),
         Some(Command::Help { rest }) => fallback::exec_bash("help", &rest),
         Some(Command::Version { rest }) => fallback::exec_bash("version", &rest),
+
+        Some(Command::Tool { rest }) => fallback::exec_pivy("tool", &rest),
+        Some(Command::Ca { rest }) => fallback::exec_pivy("ca", &rest),
+        Some(Command::Luks { rest }) => fallback::exec_pivy("luks", &rest),
+        Some(Command::Zfs { rest }) => fallback::exec_pivy("zfs", &rest),
+
+        Some(Command::Pivy { tool, rest }) => match tool {
+            Some(tool) => fallback::exec_pivy(&tool, &rest),
+            None => {
+                eprintln!("piggy pivy: missing tool name");
+                eprintln!("Usage: piggy pivy <tool> [args...]");
+                eprintln!("Examples: piggy pivy box help, piggy pivy tool list");
+                std::process::exit(2);
+            }
+        },
     }
 }
