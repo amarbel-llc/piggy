@@ -1,7 +1,9 @@
 # `piggy` pass-style CLI — v1.0 scoping
 
-Status: **scope only, no implementation**. Issue: #46. Tracker: #45.
-Milestone: v1.0.0 — Rust clap CLI shelling out to C `pivy-*`.
+Status: **scope only, no implementation**. Issue: #46.
+Milestone: [v1.0.0 — Rust clap CLI shelling out to C `pivy-*`](https://github.com/amarbel-llc/piggy/milestone/4).
+(Tracker #45 retired 2026-04-27 — operational state lives on the
+milestone description and in #26 Tier 11.)
 
 ## Goal (minimal-rewrite framing)
 
@@ -162,33 +164,29 @@ nothing was rewritten" — easier than under a porting approach.
 
 ## #50 cutover under minimal-rewrite
 
-Conflict to flag: #45's "done means" lists "`src/piggy.sh` is gone"
-and "`flake.nix` no longer puts `piggy.sh` (or bash) on the dispatch
-path." Under minimal-rewrite, **`piggy.sh` is not deleted in v1.0**
-— it stays as the implementation backing every pass-style clap
-handler.
+Under minimal-rewrite, **`piggy.sh` is not deleted in v1.0** — it
+stays as the implementation backing every pass-style clap handler.
+The original #45 "done means" listed "`src/piggy.sh` is gone" and
+"`flake.nix` no longer puts `piggy.sh` (or bash) on the dispatch
+path"; same with #50's original body.
 
-Two ways to reconcile:
+**Reconciliation done 2026-04-27**: #45 retired (closed not-planned;
+v1.0 narrative moved to the milestone description); #50 re-scoped
+(title + body rewritten) to scope only the catch-all-fallback
+removal + "off `$PATH`" + flake.nix/README updates. The actual
+`piggy.sh` deletion is explicitly post-v1.0 (probably absorbed into
+the per-command Rust ports later).
 
-- **Soften #45/#50.** v1.0 ships clap-on-front + bash-on-back.
-  Deletion of `piggy.sh` moves to a post-v1.0 milestone (probably
-  v1.1.x or absorbed into the Rust crypto roadmap, since it's
-  blocked on per-command Rust ports). v1.0's "done means" becomes:
-  - Top-level clap dispatch is exhaustive; no more catch-all
-    `hand_off_to_bash` in `fallback.rs`.
-  - `piggy <subcommand>` is documented under `piggy --help` with
-    clap-formatted output.
-  - `piggy pivy <tool>` exists.
-  - All `t0*-*.bats` green.
-  - `piggy.sh` becomes an internal implementation detail (no longer
-    exposed on `$PATH`), but is not deleted.
-- **Keep #50 as written, expand v1.0 scope.** Means porting every
-  `cmd_*` to Rust before v1.0 ships — i.e., the previous version of
-  this scoping doc. Rejected: user explicitly chose minimal-rewrite.
+v1.0's "done means" (now on the milestone description):
 
-Recommend the first reconciliation. **Open question**: confirm with
-the user that #45/#50 should be relaxed accordingly, and update those
-issue bodies if so.
+- Top-level clap dispatch is exhaustive; no more catch-all
+  `hand_off_to_bash` in `fallback.rs`.
+- `piggy <subcommand>` is documented under `piggy --help` with
+  clap-formatted output.
+- `piggy pivy <tool>` exists.
+- All `t0*-*.bats` green.
+- `piggy.sh` becomes an internal implementation detail (no longer
+  exposed on `$PATH`), but is not deleted.
 
 ## Things explicitly NOT in v1.0
 
@@ -207,8 +205,10 @@ issue bodies if so.
 
 ## Open questions
 
-1. **#45/#50 reconciliation.** Confirm minimal-rewrite means
-   `piggy.sh` survives v1.0 and #50 cutover gets re-scoped post-1.0.
+1. ~~**#45/#50 reconciliation.** Confirm minimal-rewrite means
+   `piggy.sh` survives v1.0 and #50 cutover gets re-scoped post-1.0.~~
+   **Resolved 2026-04-27** — #45 retired, #50 re-scoped accordingly.
+   See "#50 cutover under minimal-rewrite" above.
 2. **Shape A vs B.** Decide at impl time (#47) whether to keep
    `piggy.sh`'s case statement (A) or strip it and have Rust handlers
    name `cmd_*` directly (B).
