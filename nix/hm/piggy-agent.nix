@@ -23,92 +23,118 @@ let
   binPath = "${cfg.package}/bin/${if isRustAgent then "piggy" else "pivy-agent"}";
   preArgs = lib.optional isRustAgent "agent";
 
-  socketPathExpr =
-    if cfg.socketPath != null then
-      cfg.socketPath
-    else
-      "\${XDG_STATE_HOME:-$HOME/.local/state}/piggy/piggy-agent.sock";
-
-  agentArgs =
-    [
-      "-i"
-      "-a"
-      socketPathExpr
-    ]
-    ++ (lib.optionals (cfg.guid != null) [
-      "-g"
-      cfg.guid
-    ])
-    ++ lib.optional cfg.allCards "-A"
-    ++ (lib.optionals (cfg.cak != null) [
-      "-K"
-      cfg.cak
-    ])
-    ++ [
-      "-S"
-      cfg.slots
-    ]
-    ++ cfg.extraArgs;
-
-  # Single shared launcher script for both Linux and Darwin. Handles
-  # XDG_STATE_HOME default, socket-dir creation, stale-socket cleanup,
-  # askpass env wiring, then exec's the agent.
-  #
-  # Used in two places:
-  # - Linux:  systemd ExecStart points at this script directly.
-  # - Darwin: launchd ProgramArguments points at this script.
-  #
-  # Unifying eliminates the brittle bash -c '...' string in ExecStart
-  # (single-quote injection hazards) and the tmpfiles.d rule (the script
-  # mkdir's the dir itself).
-  launcher = pkgs.writeShellScript "piggy-agent-launch" ''
-    set -eu
-    : "''${HOME:?HOME must be set}"
-    : "''${XDG_STATE_HOME:=$HOME/.local/state}"
-    SOCK="${socketPathExpr}"
-    mkdir -p -m 0700 "$(dirname "$SOCK")"
-    rm -f "$SOCK"
-    export SSH_AUTH_SOCK="$SOCK"
-    ${optionalString (cfg.askpass != null) ''
-      export SSH_ASKPASS="${cfg.askpass}"
-      export SSH_ASKPASS_REQUIRE=force
-    ''}
-    exec ${binPath} ${lib.escapeShellArgs preArgs} ${lib.escapeShellArgs agentArgs}
-  '';
-
-  linuxService = {
-    Unit = {
-      Description = "Piggy PIV-backed SSH agent";
-      Documentation = "https://github.com/amarbel-llc/piggy";
-    };
-
-    Service = {
-      ExecStart = "${launcher}";
-      Restart = "always";
-      RestartSec = 3;
-    };
-
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
-
-  darwinAgent = {
-    enable = true;
-    config = {
-      ProgramArguments = [ "${launcher}" ];
-      KeepAlive = {
-        Crashed = true;
-        SuccessfulExit = false;
-      };
-      RunAtLoad = true;
-      ProcessType = "Background";
-      StandardErrorPath =
-        if cfg.logFile != null then
-          cfg.logFile
+  # Build the per-instance unit definitions. Single-instance mode
+  # synthesizes one instance named `piggy-agent` from the top-level
+  # options; multi-instance mode (planned) maps `cfg.instances` through
+  # this helper. `name` becomes the systemd unit / launchd label name
+  # AND the default socket basename, so each instance lands at its own
+  # `$XDG_STATE_HOME/piggy/<name>.sock`.
+  mkInstance =
+    name: instanceCfg:
+    let
+      socketPathExpr =
+        if instanceCfg.socketPath != null then
+          instanceCfg.socketPath
         else
-          "$HOME/Library/Logs/piggy-agent.log";
+          "\${XDG_STATE_HOME:-$HOME/.local/state}/piggy/${name}.sock";
+
+      agentArgs = [
+        "-i"
+        "-a"
+        socketPathExpr
+      ]
+      ++ (lib.optionals (instanceCfg.guid != null) [
+        "-g"
+        instanceCfg.guid
+      ])
+      ++ lib.optional instanceCfg.allCards "-A"
+      ++ (lib.optionals (instanceCfg.cak != null) [
+        "-K"
+        instanceCfg.cak
+      ])
+      ++ [
+        "-S"
+        instanceCfg.slots
+      ]
+      ++ instanceCfg.extraArgs;
+
+      # Single shared launcher script for both Linux and Darwin. Handles
+      # XDG_STATE_HOME default, socket-dir creation, stale-socket cleanup,
+      # askpass env wiring, then exec's the agent. Unifying eliminates
+      # the brittle bash -c '...' string in ExecStart (single-quote
+      # injection hazards) and the tmpfiles.d rule (the script mkdir's
+      # the dir itself).
+      launcher = pkgs.writeShellScript "${name}-launch" ''
+        set -eu
+        : "''${HOME:?HOME must be set}"
+        : "''${XDG_STATE_HOME:=$HOME/.local/state}"
+        SOCK="${socketPathExpr}"
+        mkdir -p -m 0700 "$(dirname "$SOCK")"
+        rm -f "$SOCK"
+        export SSH_AUTH_SOCK="$SOCK"
+        ${optionalString (instanceCfg.askpass != null) ''
+          export SSH_ASKPASS="${instanceCfg.askpass}"
+          export SSH_ASKPASS_REQUIRE=force
+        ''}
+        exec ${binPath} ${lib.escapeShellArgs preArgs} ${lib.escapeShellArgs agentArgs}
+      '';
+
+      linuxService = {
+        Unit = {
+          Description = "Piggy PIV-backed SSH agent (${name})";
+          Documentation = "https://github.com/amarbel-llc/piggy";
+        };
+
+        Service = {
+          ExecStart = "${launcher}";
+          Restart = "always";
+          RestartSec = 3;
+        };
+
+        Install = {
+          WantedBy = [ "default.target" ];
+        };
+      };
+
+      darwinAgent = {
+        enable = true;
+        config = {
+          ProgramArguments = [ "${launcher}" ];
+          KeepAlive = {
+            Crashed = true;
+            SuccessfulExit = false;
+          };
+          RunAtLoad = true;
+          ProcessType = "Background";
+          StandardErrorPath =
+            if instanceCfg.logFile != null then instanceCfg.logFile else "$HOME/Library/Logs/${name}.log";
+        };
+      };
+    in
+    {
+      inherit
+        socketPathExpr
+        launcher
+        linuxService
+        darwinAgent
+        ;
     };
+
+  # Single-instance mode: synthesize one instance named `piggy-agent`
+  # from the top-level option set. Multi-instance support added in a
+  # follow-up commit will replace this with a dispatch on
+  # `cfg.instances`.
+  singleInstance = mkInstance "piggy-agent" {
+    inherit (cfg)
+      guid
+      allCards
+      cak
+      slots
+      socketPath
+      askpass
+      logFile
+      extraArgs
+      ;
   };
 in
 {
@@ -226,15 +252,15 @@ in
     ];
 
     systemd.user.services = mkIf pkgs.stdenv.isLinux {
-      piggy-agent = linuxService;
+      piggy-agent = singleInstance.linuxService;
     };
 
     launchd.agents = mkIf pkgs.stdenv.isDarwin {
-      piggy-agent = darwinAgent;
+      piggy-agent = singleInstance.darwinAgent;
     };
 
     home.sessionVariables = {
-      SSH_AUTH_SOCK = socketPathExpr;
+      SSH_AUTH_SOCK = singleInstance.socketPathExpr;
     };
   };
 }
