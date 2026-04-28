@@ -208,8 +208,8 @@ fn cmd_stream_decrypt(args: &[&str]) -> i32 {
     // card path (#31) below. PIN unlock for the agent path is NOT done
     // here; the user is expected to have run `ssh-add -X` externally.
     let agent_socket = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
-    let mut agent_oracle: Option<piggy::agent_client::AgentEcdhOracle> = match &agent_socket {
-        Some(sock) => match piggy::agent_client::AgentEcdhOracle::new(sock) {
+    let mut agent_oracle: Option<crate::agent_client::AgentEcdhOracle> = match &agent_socket {
+        Some(sock) => match crate::agent_client::AgentEcdhOracle::new(sock) {
             Ok(o) => Some(o),
             Err(e) => {
                 tracing::warn!(
@@ -227,8 +227,8 @@ fn cmd_stream_decrypt(args: &[&str]) -> i32 {
     // (no pcscd, no PCSCLITE_CSOCK_NAME); that's fine — we simply skip
     // the card path and let the agent path carry the unlock, or surface
     // UnlockFailed if neither is available.
-    let mut card_oracle: Option<piggy::card_oracle::CardEcdhOracle> =
-        match piggy::card_oracle::CardEcdhOracle::new(piggy::card_oracle::askpass_pin_supplier()) {
+    let mut card_oracle: Option<crate::card_oracle::CardEcdhOracle> =
+        match crate::card_oracle::CardEcdhOracle::new(crate::card_oracle::askpass_pin_supplier()) {
             Ok(o) => Some(o),
             Err(e) => {
                 tracing::debug!(

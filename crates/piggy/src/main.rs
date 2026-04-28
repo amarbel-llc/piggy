@@ -9,17 +9,24 @@
 //!    second-level dispatch to the matching `cmd_*` function. Per-
 //!    subcommand `getopt` parsing stays in bash; clap captures all
 //!    trailing argv verbatim.
-//! 2. Rust-native subcommands (agent, box) dispatch to their existing
-//!    handlers in [`cmd::agent`] / [`cmd::pivy_box`].
-//! 3. C-pivy shortcuts (tool, ca, luks, zfs) `exec(2)` the matching
-//!    `pivy-*` binary from `$PATH` via [`fallback::exec_pivy`].
-//! 4. The `pivy` passthrough (`piggy pivy <tool> [args...]`) is a
-//!    generic escape hatch around the Rust subcommands — always
-//!    forwards to the C `pivy-*` binary, even when there's a Rust
-//!    counterpart (`piggy pivy box` ≠ `piggy box`). See the v1.0
-//!    scoping doc for the rationale.
+//! 2. C-pivy passthroughs — every other subcommand `exec(2)`s the
+//!    matching `pivy-*` binary from `$PATH` via
+//!    [`fallback::exec_pivy`]:
+//!    - `agent` → `pivy-agent`
+//!    - `box` → `pivy-box`
+//!    - `tool` → `pivy-tool`, `ca` → `pivy-ca`, `luks` → `pivy-luks`,
+//!      `zfs` → `pivy-zfs`
+//!    - `pivy <X>` is the explicit-escape-hatch form — `piggy pivy
+//!      <tool> [args]` always reaches `pivy-<tool>`.
+//!
+//! Rust-native re-implementations of `agent` and `box` exist under
+//! `cmd::agent` / `cmd::pivy_box` but are NOT on the binary's
+//! dispatch path. They will return once they reach feature parity
+//! with the C implementations (notably: PC/SC transaction handling
+//! in piggy-piv, and `piggy box`'s direct-PCSC ECDH path for the
+//! agentless case is currently lost since C `pivy-box` requires an
+//! agent for ECDH).
 
-mod cmd;
 mod fallback;
 
 use clap::{Parser, Subcommand};
@@ -182,25 +189,15 @@ enum Command {
 }
 
 fn main() {
-    let argv: Vec<String> = std::env::args().collect();
-    let cli = Cli::parse_from(&argv);
-    let prog = argv[0].clone();
+    let cli = Cli::parse();
 
     match cli.cmd {
         // No subcommand: piggy.sh's default-case (line 789-792) calls
         // `cmd_show ""`. Forward an empty argv and let bash do that.
         None => fallback::exec_bash("show", &[]),
 
-        Some(Command::Agent { rest }) => {
-            let mut full = vec![prog, "agent".to_string()];
-            full.extend(rest);
-            std::process::exit(cmd::agent::run(full));
-        }
-        Some(Command::Box { rest }) => {
-            let mut full = vec![prog, "box".to_string()];
-            full.extend(rest);
-            std::process::exit(cmd::pivy_box::run(full));
-        }
+        Some(Command::Agent { rest }) => fallback::exec_pivy("agent", &rest),
+        Some(Command::Box { rest }) => fallback::exec_pivy("box", &rest),
 
         Some(Command::Init { rest }) => fallback::exec_bash("init", &rest),
         Some(Command::Show { rest }) => fallback::exec_bash("show", &rest),
