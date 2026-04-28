@@ -389,5 +389,25 @@ in
     home.sessionVariables = lib.mkIf (!hasInstances) {
       SSH_AUTH_SOCK = builtInstances.piggy-agent.socketPathExpr;
     };
+
+    # Per-instance shell snippets. In multi-instance mode the module
+    # cannot pick a winner for `$SSH_AUTH_SOCK`, so it emits one
+    # source-able fragment per instance under
+    # `~/.config/piggy/<unit>.sh`. Users add e.g.
+    #   source ~/.config/piggy/piggy-agent-work.sh
+    # to whichever shell-init file (.bashrc / config.fish / .zshrc)
+    # should talk to that instance.
+    xdg.configFile = lib.mkIf hasInstances (
+      lib.mapAttrs' (
+        unitName: built:
+        lib.nameValuePair "piggy/${unitName}.sh" {
+          text = ''
+            # Source this file to point ssh-add / ssh at the
+            # ${unitName} piggy-agent instance.
+            export SSH_AUTH_SOCK="${built.socketPathExpr}"
+          '';
+        }
+      ) builtInstances
+    );
   };
 }

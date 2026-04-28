@@ -40,6 +40,10 @@ let
         type = lib.types.attrs;
         default = { };
       };
+      xdg.configFile = lib.mkOption {
+        type = lib.types.attrs;
+        default = { };
+      };
       assertions = lib.mkOption {
         type = lib.types.listOf (
           lib.types.submodule {
@@ -267,6 +271,46 @@ let
         {
           ok = hasExpected;
           got = tripped;
+        };
+    }
+    {
+      name = "multi-instance-emits-shell-snippets";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.instances = {
+          default = {
+            guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+          };
+          work = {
+            allCards = true;
+          };
+        };
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          configFiles = result.config.xdg.configFile or { };
+          defaultText = configFiles."piggy/piggy-agent-default.sh".text or null;
+          workText = configFiles."piggy/piggy-agent-work.sh".text or null;
+          defaultOk =
+            defaultText != null
+            && lib.hasInfix "SSH_AUTH_SOCK=" defaultText
+            && lib.hasInfix "piggy/piggy-agent-default.sock" defaultText;
+          workOk =
+            workText != null
+            && lib.hasInfix "SSH_AUTH_SOCK=" workText
+            && lib.hasInfix "piggy/piggy-agent-work.sock" workText;
+        in
+        {
+          ok = tripped == [ ] && defaultOk && workOk;
+          got = {
+            inherit
+              tripped
+              defaultText
+              workText
+              ;
+          };
         };
     }
   ];
