@@ -88,12 +88,16 @@ let
   # bugs that would only surface when home-manager actually realizes
   # the unit. Reading either the systemd unit (Linux) or the launchd
   # plist (Darwin) drives `binPath` and the writeShellScript through.
-  forceLauncher =
-    result:
+  # `unitName` defaults to `piggy-agent` for the single-instance case;
+  # multi-instance cases pass `piggy-agent-<key>` per instance.
+  forceLauncherNamed =
+    unitName: result:
     if pkgs.stdenv.isLinux then
-      result.config.systemd.user.services.piggy-agent.Service.ExecStart
+      result.config.systemd.user.services.${unitName}.Service.ExecStart
     else
-      result.config.launchd.agents.piggy-agent.config.ProgramArguments;
+      result.config.launchd.agents.${unitName}.config.ProgramArguments;
+
+  forceLauncher = forceLauncherNamed "piggy-agent";
 
   cases = [
     {
@@ -181,6 +185,84 @@ let
         let
           tripped = trippedMessages result;
           hasExpected = lib.any (m: lib.hasInfix "comma-separated list" m) tripped;
+        in
+        {
+          ok = hasExpected;
+          got = tripped;
+        };
+    }
+    {
+      name = "multi-instance-evaluates-cleanly";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.instances = {
+          default = {
+            guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+          };
+          work = {
+            allCards = true;
+            slots = "9a";
+          };
+        };
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          defaultLauncher = forceLauncherNamed "piggy-agent-default" result;
+          workLauncher = forceLauncherNamed "piggy-agent-work" result;
+          # In multi-instance mode SSH_AUTH_SOCK must NOT be set —
+          # the user picks per-shell via the per-instance snippets.
+          sock = result.config.home.sessionVariables.SSH_AUTH_SOCK or null;
+        in
+        {
+          ok = tripped == [ ] && defaultLauncher != null && workLauncher != null && sock == null;
+          got = {
+            inherit
+              tripped
+              defaultLauncher
+              workLauncher
+              sock
+              ;
+          };
+        };
+    }
+    {
+      name = "top-level-with-instances-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.instances.work = {
+          allCards = true;
+        };
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          hasExpected = lib.any (m: lib.hasInfix "top-level options" m) tripped;
+        in
+        {
+          ok = hasExpected;
+          got = tripped;
+        };
+    }
+    {
+      name = "instance-no-card-trips-required-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.instances.work = {
+          # Neither guid nor allCards set — should trip the
+          # required-card assertion with the (instance ...) suffix.
+        };
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          hasExpected = lib.any (
+            m: lib.hasInfix "one of `guid` or `allCards`" m && lib.hasInfix "piggy-agent-work" m
+          ) tripped;
         in
         {
           ok = hasExpected;

@@ -120,11 +120,11 @@ let
         ;
     };
 
-  # Single-instance mode: synthesize one instance named `piggy-agent`
-  # from the top-level option set. Multi-instance support added in a
-  # follow-up commit will replace this with a dispatch on
-  # `cfg.instances`.
-  singleInstance = mkInstance "piggy-agent" {
+  hasInstances = cfg.instances != { };
+
+  # Snapshot of the top-level instance options, used to synthesize a
+  # single `piggy-agent` entry when `cfg.instances` is empty.
+  topLevelInstanceCfg = {
     inherit (cfg)
       guid
       allCards
@@ -136,6 +136,53 @@ let
       extraArgs
       ;
   };
+
+  # Whether the user set any of the top-level instance options to a
+  # non-default value. Used by the "top-level + instances" mutex
+  # assertion (OQ1: reject as config error).
+  topLevelHasInstanceConfig =
+    cfg.guid != null
+    || cfg.allCards
+    || cfg.cak != null
+    || cfg.slots != "all"
+    || cfg.socketPath != null
+    || cfg.askpass != null
+    || cfg.logFile != null
+    || cfg.extraArgs != [ ];
+
+  # Map of effective unit-name → per-instance config. Single-instance
+  # mode synthesizes one entry named `piggy-agent` from the top-level
+  # options. Multi-instance mode prefixes each user key with
+  # `piggy-agent-` so the systemd / launchd labels stay namespaced.
+  effectiveInstances =
+    if hasInstances then
+      lib.mapAttrs' (name: ic: lib.nameValuePair "piggy-agent-${name}" ic) cfg.instances
+    else
+      { piggy-agent = topLevelInstanceCfg; };
+
+  builtInstances = lib.mapAttrs mkInstance effectiveInstances;
+
+  # Per-instance assertions: mutex (`guid` xor `allCards`),
+  # required-card, and `slots` format. The instance-name suffix in
+  # the message is what lets users find the offending entry when
+  # multi-instance is in play; in single-instance mode it always
+  # reads `(instance piggy-agent)`.
+  perInstanceAssertions = lib.flatten (
+    lib.mapAttrsToList (unitName: ic: [
+      {
+        assertion = ic.guid == null || !ic.allCards;
+        message = "services.piggy-agent: `guid` and `allCards` are mutually exclusive (instance ${unitName}).";
+      }
+      {
+        assertion = ic.guid != null || ic.allCards;
+        message = "services.piggy-agent: one of `guid` or `allCards` must be set (instance ${unitName}).";
+      }
+      {
+        assertion = builtins.match "^(all|[0-9a-fA-F]{2}(,[0-9a-fA-F]{2})*)$" ic.slots != null;
+        message = "services.piggy-agent: `slots` must be \"all\" or a comma-separated list of two-hex-char slot IDs, e.g. \"9a\", \"9a,9e\" (instance ${unitName}).";
+      }
+    ]) effectiveInstances
+  );
 in
 {
   options.services.piggy-agent = {
@@ -233,34 +280,114 @@ in
         debug verbosity).
       '';
     };
+
+    instances = mkOption {
+      default = { };
+      example = lib.literalExpression ''
+        {
+          default = { guid = "ABCD..."; cak = "ecdsa-sha2-nistp256 AAAA..."; };
+          work    = { guid = "1234..."; slots = "9a"; };
+          spare   = { allCards = true; };
+        }
+      '';
+      type = types.attrsOf (
+        types.submodule {
+          options = {
+            guid = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              example = "A1B2C3D4E5F60718293A4B5C6D7E8F90";
+              description = "GUID of the PIV card for this instance. Mutex with `allCards`.";
+            };
+            allCards = mkOption {
+              type = types.bool;
+              default = false;
+              description = "All-cards mode for this instance. Mutex with `guid`.";
+            };
+            cak = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "Optional Card Authentication Key for this instance.";
+            };
+            slots = mkOption {
+              type = types.str;
+              default = "all";
+              description = "Slot filter for this instance.";
+            };
+            socketPath = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = ''
+                Path to this instance's UNIX socket. When `null` the
+                module uses
+                `$XDG_STATE_HOME/piggy/piggy-agent-<name>.sock`.
+              '';
+            };
+            askpass = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "Per-instance askpass override.";
+            };
+            logFile = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = ''
+                Stderr destination. Linux: ignored. Darwin: defaults
+                to `~/Library/Logs/piggy-agent-<name>.log` when
+                `null`.
+              '';
+            };
+            extraArgs = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = "Extra agent argv per instance.";
+            };
+          };
+        }
+      );
+      description = ''
+        Multi-instance map. Each key becomes a systemd user unit
+        named `piggy-agent-<name>` (Linux) or a launchd agent labelled
+        `piggy-agent-<name>` (Darwin), with its own socket at
+        `$XDG_STATE_HOME/piggy/piggy-agent-<name>.sock`.
+
+        Mutually exclusive with the top-level `guid`/`allCards`/
+        `cak`/`slots`/`socketPath`/`askpass`/`logFile`/`extraArgs`
+        options: setting any of those alongside a non-empty
+        `instances` map is a configuration error. Use top-level
+        options OR `instances`, never both.
+
+        When `instances` is non-empty, the module does **not** set
+        `$SSH_AUTH_SOCK` automatically — users pick which instance
+        each shell talks to by sourcing the per-instance shell
+        snippets the module emits (added in a later commit).
+      '';
+    };
   };
 
   config = mkIf cfg.enable {
-    assertions = [
+    assertions = perInstanceAssertions ++ [
       {
-        assertion = cfg.guid == null || !cfg.allCards;
-        message = "services.piggy-agent: `guid` and `allCards` are mutually exclusive.";
-      }
-      {
-        assertion = cfg.guid != null || cfg.allCards;
-        message = "services.piggy-agent: one of `guid` or `allCards` must be set.";
-      }
-      {
-        assertion = builtins.match "^(all|[0-9a-fA-F]{2}(,[0-9a-fA-F]{2})*)$" cfg.slots != null;
-        message = "services.piggy-agent: `slots` must be \"all\" or a comma-separated list of two-hex-char slot IDs (e.g. \"9a\", \"9a,9e\").";
+        assertion = !(hasInstances && topLevelHasInstanceConfig);
+        message =
+          "services.piggy-agent: top-level options "
+          + "(`guid`/`allCards`/`cak`/`slots`/`socketPath`/`askpass`"
+          + "/`logFile`/`extraArgs`) are forbidden when `instances` "
+          + "is non-empty. Move them into `instances.<name>` "
+          + "entries.";
       }
     ];
 
-    systemd.user.services = mkIf pkgs.stdenv.isLinux {
-      piggy-agent = singleInstance.linuxService;
-    };
+    systemd.user.services = mkIf pkgs.stdenv.isLinux (
+      lib.mapAttrs (_: built: built.linuxService) builtInstances
+    );
 
-    launchd.agents = mkIf pkgs.stdenv.isDarwin {
-      piggy-agent = singleInstance.darwinAgent;
-    };
+    launchd.agents = mkIf pkgs.stdenv.isDarwin (
+      lib.mapAttrs (_: built: built.darwinAgent) builtInstances
+    );
 
-    home.sessionVariables = {
-      SSH_AUTH_SOCK = singleInstance.socketPathExpr;
+    home.sessionVariables = lib.mkIf (!hasInstances) {
+      SSH_AUTH_SOCK = builtInstances.piggy-agent.socketPathExpr;
     };
   };
 }
