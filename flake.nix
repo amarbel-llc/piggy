@@ -277,7 +277,11 @@
     ))
     // {
       # See docs/plans/2026-04-27-piggy-agent-nix-module.md for the
-      # module's design rationale and option surface.
+      # module's design rationale and option surface. The NixOS
+      # module is a thin re-export that wires the hm module into
+      # `home-manager.sharedModules`; per-user activation lives
+      # under `home-manager.users.<u>.services.piggy-agent`.
       homeManagerModules.piggy-agent = import ./nix/hm/piggy-agent.nix;
+      nixosModules.piggy-agent = import ./nix/nixos/piggy-agent.nix;
     };
 }

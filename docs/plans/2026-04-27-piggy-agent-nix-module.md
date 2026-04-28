@@ -153,24 +153,36 @@ The module emits the following `lib.assertMsg` failures during evaluation, befor
 
 ## Open questions (resolve at impl time)
 
-1. **Top-level options + `instances` interaction.** If a user sets both `services.piggy-agent.guid = "X"; services.piggy-agent.instances.work = { guid = "Y"; }`, do we (a) reject as a config error, (b) treat the top-level as a default that `work` overrides but unspecified keys inherit from, or (c) silently ignore the top-level when `instances` is non-empty? Recommend (a) at impl time — clearest user model — but (b) is what gpg-agent-style modules tend to do. Document the choice in the module.
-2. **Multi-instance default name.** When `instances` is empty and top-level options are set, what's the systemd unit name? Recommend `piggy-agent.service` (no template suffix) to match the gpg-agent shape. The pivy prior art used `pivy-agent@default.service` via the templated `DefaultInstance=default` line.
-3. **`enable = true` with no instances and no top-level card.** Should this be a config error (assertion) or a soft-deferral (warn + don't generate units)? Recommend assertion — saves users the silent-failure debugging — but the gpg-agent module accepts `enable = true` with a default key set, which is closer to soft-deferral. Decision: **module assertion fails.** (Confirmed at scoping time.)
-4. **Where does `nixosModules.piggy-agent` route?** It declares `services.piggy-agent` as a top-level option but most nix users with home-manager already get that through `homeManagerModules.piggy-agent`. Two reasonable paths: (a) `nixosModules.piggy-agent` re-exports the home-manager module under `home-manager.users.<u>.services.piggy-agent`, or (b) it provides a separate `users.users.<u>.services.piggy-agent.<...>` surface that materializes to the same unit. Recommend (a) at impl time — DRY.
+1. **Top-level options + `instances` interaction.** Decision: **(a) reject as config error.** (Confirmed during step-2 implementation, 2026-04-28.) The module assertion `services.piggy-agent: top-level options ... are forbidden when 'instances' is non-empty` fires before any unit is generated. Single-instance mode (top-level options, empty `instances`) and multi-instance mode (non-empty `instances`, untouched top-level) are the only two valid shapes.
+2. **Multi-instance default name.** Decision: `piggy-agent.service` (no template suffix). (Confirmed at scoping time.) Multi-instance keys map to `piggy-agent-<name>` per the systemd-user attrset.
+3. **`enable = true` with no instances and no top-level card.** Decision: **module assertion fails.** (Confirmed at scoping time.) Implemented as the per-instance `one of 'guid' or 'allCards' must be set (instance ...)` assertion, which fires for the synthetic single-instance entry too.
+4. **Where does `nixosModules.piggy-agent` route?** Decision: **(a) re-export under `home-manager.sharedModules`.** (Confirmed during step-3 implementation, 2026-04-28.) The NixOS module at `nix/nixos/piggy-agent.nix` is a thin pass-through that adds the hm module to `home-manager.sharedModules`. Per-user activation lives at `home-manager.users.<u>.services.piggy-agent.enable = true;`. Users who don't run home-manager are out of v1.0 scope.
 5. **`piggy agent kill` integration.** `piggy agent -k` reads `$SSH_AGENT_PID` and SIGTERMs the agent. With systemd-managed services, that's `systemctl --user stop piggy-agent` instead. Document but don't try to bridge — they're meant for different contexts.
 6. **Templating cost.** The module evaluates several attrsets per instance (units, sockets, scripts). Worth caching via `lib.foldl'` / `lib.attrsToList` patterns if `instances` is large? Probably not — typical users have 1-3 instances. Skip the optimization.
 
+## Multi-instance shell snippet shape (recorded during step-3 impl)
+
+When `cfg.instances != {}`, the module emits one source-able fragment per instance under `~/.config/piggy/piggy-agent-<name>.sh` via `xdg.configFile`. Each fragment is a two-line shell snippet:
+
+```sh
+# Source this file to point ssh-add / ssh at the
+# piggy-agent-<name> piggy-agent instance.
+export SSH_AUTH_SOCK="<resolved socket path>"
+```
+
+Users add e.g. `source ~/.config/piggy/piggy-agent-work.sh` to whichever shell-init file (.bashrc / config.fish / .zshrc) should talk to that instance. The module does NOT auto-export `$SSH_AUTH_SOCK` in multi-instance mode — only single-instance mode keeps `home.sessionVariables.SSH_AUTH_SOCK` set. This avoids picking a winner when the user has multiple cards.
+
+`lib.hm.shell.mk{Bash,Fish,Zsh}IntegrationOption` is intentionally NOT used. The single-instance `home.sessionVariables` covers typical login-shell-then-subshell flows; multi-instance is opt-in by design. Adding non-login-shell auto-coverage is a follow-up if real users hit it.
+
 ## Sequencing
 
-This issue lands in three follow-up PRs:
+Landed as three logical steps on the `smart-rowan` branch (commits, not separate PRs — see issue #52):
 
-**Step 1 — module skeleton + single-instance home-manager.** Add `flake.homeManagerModules.piggy-agent` and the bare-minimum option surface (`enable`, `guid`, `allCards`, `cak`, `slots`, `package`). Generate `systemd.user.services.piggy-agent` and `launchd.agents.piggy-agent` from one `mkIf cfg.enable` block. Single-instance only. Verify with a smoke-test home-manager config that exercises both Linux and Darwin code paths via `nix flake check` and a manual nix-darwin spin-up.
+**Step 1 — module skeleton + single-instance home-manager.** ✅ Landed in `7fb3373` + `ac6b172`. `flake.homeManagerModules.piggy-agent`, single-instance option surface, `systemd.user.services.piggy-agent` + `launchd.agents.piggy-agent` from one `mkIf cfg.enable` block. 5/5 eval-test cases pass.
 
-**Step 2 — multi-instance.** Add the `instances` attrset, generalize the unit-generation helpers, add the assertions for top-level vs `instances` conflict. `piggy-agent@<name>.service` / `net.amarbel.piggy-agent.<name>.plist` per instance.
+**Step 2 — multi-instance.** ✅ Landed in `4600da2` (with prep refactor in `d692d1b`). `instances` attrsOf submodule, `mkInstance` helper, per-instance assertions, top-level/instances mutex. Each instance emits its own `systemd.user.services.piggy-agent-<name>` (Linux) / `launchd.agents.piggy-agent-<name>` (Darwin) with socket at `$XDG_STATE_HOME/piggy/piggy-agent-<name>.sock`. 8/8 cases pass.
 
-**Step 3 — `nixosModules.piggy-agent` + shell integration.** Add the NixOS-direct module that re-exports under home-manager's namespace. Add bash/fish/zsh integration helpers for `SSH_AUTH_SOCK` export. Smoke-test with a `nixosTest`.
-
-Each step is a discrete PR. Splits keep the diff reviewable and lets us course-correct on the option surface before locking it in.
+**Step 3 — `nixosModules.piggy-agent` + shell integration.** ✅ Landed in `7489180` (snippets) and the commit adding the nixos module. `nix/nixos/piggy-agent.nix` re-exports the hm module via `home-manager.sharedModules`. Multi-instance mode emits per-instance shell snippets via `xdg.configFile`; single-instance mode keeps `home.sessionVariables.SSH_AUTH_SOCK`. `lib.hm.shell.mk*IntegrationOption` deliberately deferred — see "Multi-instance shell snippet shape" above. 9/9 cases pass.
 
 ## Verification (after step 3)
 
