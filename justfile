@@ -310,7 +310,8 @@ debug-conformance-run-hw: build-rust
 codemod-fmt: codemod-fmt-nix codemod-fmt-shell codemod-fmt-rust
 
 codemod-fmt-nix:
-    nix run ./devenvs/nix#fmt -- flake.nix
+    nix develop --command bash -c \
+      'git ls-files --others --cached --exclude-standard "*.nix" | xargs nixfmt'
 
 codemod-fmt-shell:
     nix develop --command shfmt -s -i=2 -w src/

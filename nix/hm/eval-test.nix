@@ -41,12 +41,14 @@ let
         default = { };
       };
       assertions = lib.mkOption {
-        type = lib.types.listOf (lib.types.submodule {
-          options = {
-            assertion = lib.mkOption { type = lib.types.bool; };
-            message = lib.mkOption { type = lib.types.str; };
-          };
-        });
+        type = lib.types.listOf (
+          lib.types.submodule {
+            options = {
+              assertion = lib.mkOption { type = lib.types.bool; };
+              message = lib.mkOption { type = lib.types.str; };
+            };
+          }
+        );
         default = [ ];
       };
       meta.maintainers = lib.mkOption {
@@ -63,7 +65,9 @@ let
   #
   # Passed as a separate module (not merged via `//`) so evalModules
   # does the proper deep-merge with the case's own config.
-  pinPackage = { services.piggy-agent.package = pkgs.hello; };
+  pinPackage = {
+    services.piggy-agent.package = pkgs.hello;
+  };
 
   runEval =
     cfg:
@@ -195,5 +199,7 @@ in
 {
   inherit results failures;
   pass = failures == [ ];
-  summary = "${toString (lib.length cases - lib.length failures)}/${toString (lib.length cases)} cases passed";
+  summary = "${
+    toString (lib.length cases - lib.length failures)
+  }/${toString (lib.length cases)} cases passed";
 }

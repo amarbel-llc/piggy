@@ -91,7 +91,10 @@
         # Uses pkgs-master (2.4.1) for backward-compatible IPC protocol
         # negotiation — a 2.4.1 client can talk to daemons as old as 1.8.24,
         # which covers Ubuntu 24.04's 2.0.3 pcscd without workarounds.
-        rustBuildInputs = [ pkgs.openssl ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs-master.pcsclite ];
+        rustBuildInputs = [
+          pkgs.openssl
+        ]
+        ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs-master.pcsclite ];
         rustNativeBuildInputs = [ pkgs.pkg-config ];
 
         piggy-rs = pkgs.rustPlatform.buildRustPackage {
@@ -137,7 +140,10 @@
 
           src = ./.;
 
-          nativeBuildInputs = [ pkgs.makeWrapper pkgs.scdoc ];
+          nativeBuildInputs = [
+            pkgs.makeWrapper
+            pkgs.scdoc
+          ];
 
           dontBuild = true;
 
@@ -181,13 +187,12 @@
           # `nix flake check`. Keeps the relationship between the agent
           # and its wire-protocol oracle explicit without merging the
           # Rust and Go toolchains into one derivation.
-          passthru.tests =
-            {
-              conformance = piggy-agent-conformance;
-            }
-            // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-              fib = virtualPiv.fibBundle;
-            };
+          passthru.tests = {
+            conformance = piggy-agent-conformance;
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+            fib = virtualPiv.fibBundle;
+          };
 
           meta = with pkgs.lib; {
             description = "PIV-based password store using pivy-box and ebox templates";
@@ -224,21 +229,20 @@
         };
       in
       {
-        packages =
-          {
-            default = piggy;
-            piggy = piggy;
-            piggy-rs = piggy-rs;
-            piggy-agent-conformance = piggy-agent-conformance;
-          }
-          // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-            fib = virtualPiv.fib;
-            fib-bundle = virtualPiv.fibBundle;
-            fib-reader-conf = virtualPiv.readerConf;
-            fib-pcscd = virtualPiv.pcscdForFib;
-            jcardsim = virtualPiv.jcardsim;
-            pivapplet = virtualPiv.pivapplet;
-          };
+        packages = {
+          default = piggy;
+          piggy = piggy;
+          piggy-rs = piggy-rs;
+          piggy-agent-conformance = piggy-agent-conformance;
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          fib = virtualPiv.fib;
+          fib-bundle = virtualPiv.fibBundle;
+          fib-reader-conf = virtualPiv.readerConf;
+          fib-pcscd = virtualPiv.pcscdForFib;
+          jcardsim = virtualPiv.jcardsim;
+          pivapplet = virtualPiv.pivapplet;
+        };
 
         devShells.default = pkgs.mkShell {
           packages =
@@ -252,6 +256,7 @@
               pkgs-master.rustfmt
               pkgs-master.clippy
               pkgs-master.rust-analyzer
+              pkgs.nixfmt-rfc-style
               pkgs.scdoc
               bob.packages.${system}.batman
             ]
