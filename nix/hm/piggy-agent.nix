@@ -60,10 +60,16 @@ let
 
       # Single shared launcher script for both Linux and Darwin. Handles
       # XDG_STATE_HOME default, socket-dir creation, stale-socket cleanup,
-      # askpass env wiring, then exec's the agent. Unifying eliminates
-      # the brittle bash -c '...' string in ExecStart (single-quote
-      # injection hazards) and the tmpfiles.d rule (the script mkdir's
-      # the dir itself).
+      # then exec's the agent. Unifying eliminates the brittle bash -c
+      # '...' string in ExecStart (single-quote injection hazards) and
+      # the tmpfiles.d rule (the script mkdir's the dir itself).
+      #
+      # SSH_AUTH_SOCK stays here because socketPathExpr can include
+      # `$XDG_STATE_HOME` / `$HOME` references that need runtime
+      # expansion. Static env vars (askpass, confirm, notifySend) are
+      # set on the systemd Service.Environment / launchd
+      # EnvironmentVariables instead so they're inspectable in
+      # eval-test.
       launcher = pkgs.writeShellScript "${name}-launch" ''
         set -eu
         : "''${HOME:?HOME must be set}"
@@ -72,12 +78,25 @@ let
         mkdir -p -m 0700 "$(dirname "$SOCK")"
         rm -f "$SOCK"
         export SSH_AUTH_SOCK="$SOCK"
-        ${optionalString (instanceCfg.askpass != null) ''
-          export SSH_ASKPASS="${instanceCfg.askpass}"
-          export SSH_ASKPASS_REQUIRE=force
-        ''}
         exec ${binPath} ${lib.escapeShellArgs preArgs} ${lib.escapeShellArgs agentArgs}
       '';
+
+      # Static env vars routed to the agent process via the unit's
+      # native env-vars surface. systemd takes a list of "K=V" strings;
+      # launchd takes an attrset.
+      agentEnvAttrs =
+        lib.optionalAttrs (instanceCfg.askpass != null) {
+          SSH_ASKPASS = instanceCfg.askpass;
+          SSH_ASKPASS_REQUIRE = "force";
+        }
+        // lib.optionalAttrs (instanceCfg.confirm != null) {
+          SSH_CONFIRM = instanceCfg.confirm;
+        }
+        // lib.optionalAttrs (instanceCfg.notifySend != null) {
+          SSH_NOTIFY_SEND = instanceCfg.notifySend;
+        };
+
+      agentEnvList = lib.mapAttrsToList (k: v: "${k}=${v}") agentEnvAttrs;
 
       linuxService = {
         Unit = {
@@ -87,6 +106,7 @@ let
 
         Service = {
           ExecStart = "${launcher}";
+          Environment = agentEnvList;
           Restart = "always";
           RestartSec = 3;
         };
@@ -100,6 +120,7 @@ let
         enable = true;
         config = {
           ProgramArguments = [ "${launcher}" ];
+          EnvironmentVariables = agentEnvAttrs;
           KeepAlive = {
             Crashed = true;
             SuccessfulExit = false;
@@ -132,6 +153,8 @@ let
       slots
       socketPath
       askpass
+      confirm
+      notifySend
       logFile
       extraArgs
       ;
@@ -147,6 +170,8 @@ let
     || cfg.slots != "all"
     || cfg.socketPath != null
     || cfg.askpass != null
+    || cfg.confirm != null
+    || cfg.notifySend != null
     || cfg.logFile != null
     || cfg.extraArgs != [ ];
 
@@ -287,6 +312,35 @@ in
       '';
     };
 
+    confirm = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = lib.literalExpression "\"\${pkgs.pivy}/libexec/pivy/pivy-askpass\"";
+      description = ''
+        Path to the SSH_CONFIRM helper, exported into the agent
+        process's environment. pivy-agent reads `SSH_CONFIRM` to
+        surface slot-touch / sensitive-operation confirmations
+        (e.g. "key 9D wants to sign — confirm?"). Without it, the
+        relevant pivy-agent code path either fails or falls through
+        to a default that may differ from what the operator
+        configured. Typically the same path as {option}`askpass` —
+        pivy-askpass handles both prompts and confirmations.
+      '';
+    };
+
+    notifySend = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = lib.literalExpression "\"\${pkgs.pivy}/libexec/pivy/pivy-notify\"";
+      description = ''
+        Path to the SSH_NOTIFY_SEND helper, exported into the agent
+        process's environment. pivy-agent reads `SSH_NOTIFY_SEND` to
+        surface desktop notifications (e.g. unlock state changes).
+        Distinct from {option}`askpass` and {option}`confirm` because
+        pivy ships a separate `pivy-notify` binary for this.
+      '';
+    };
+
     logFile = mkOption {
       type = types.nullOr types.str;
       default = null;
@@ -353,6 +407,16 @@ in
               type = types.nullOr types.str;
               default = null;
               description = "Per-instance askpass override.";
+            };
+            confirm = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "Per-instance SSH_CONFIRM override.";
+            };
+            notifySend = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "Per-instance SSH_NOTIFY_SEND override.";
             };
             logFile = mkOption {
               type = types.nullOr types.str;

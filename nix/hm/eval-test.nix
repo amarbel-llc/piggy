@@ -103,6 +103,29 @@ let
 
   forceLauncher = forceLauncherNamed "piggy-agent";
 
+  # Read the agent-process env from whichever platform's unit shape
+  # is in play. Returns an attrset {KEY = VALUE; ...} regardless of
+  # whether the underlying field is a list of "K=V" strings (systemd)
+  # or an attrset (launchd). Used by the SSH_ASKPASS-contract tests.
+  getUnitEnv =
+    unitName: result:
+    if pkgs.stdenv.isLinux then
+      let
+        env = result.config.systemd.user.services.${unitName}.Service.Environment or [ ];
+        parsePair =
+          s:
+          let
+            parts = lib.splitString "=" s;
+          in
+          {
+            name = lib.head parts;
+            value = lib.concatStringsSep "=" (lib.tail parts);
+          };
+      in
+      builtins.listToAttrs (map parsePair env)
+    else
+      result.config.launchd.agents.${unitName}.config.EnvironmentVariables or { };
+
   cases = [
     {
       name = "valid-single-instance-evaluates-cleanly";
@@ -386,6 +409,115 @@ let
           ok = tripped == [ ] && askpass == null && require == null;
           got = {
             inherit tripped askpass require;
+          };
+        };
+    }
+    {
+      # SSH_ASKPASS / SSH_ASKPASS_REQUIRE on the agent-process env
+      # (systemd Service.Environment / launchd EnvironmentVariables).
+      # Site 2 (agent-process) of the SSH_ASKPASS contract.
+      name = "single-instance-with-askpass-emits-unit-env";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.askpass = "/run/current-system/sw/libexec/pivy/pivy-askpass";
+      };
+      check =
+        result:
+        let
+          env = getUnitEnv "piggy-agent" result;
+        in
+        {
+          ok =
+            (env.SSH_ASKPASS or null) == "/run/current-system/sw/libexec/pivy/pivy-askpass"
+            && (env.SSH_ASKPASS_REQUIRE or null) == "force";
+          got = env;
+        };
+    }
+    {
+      name = "single-instance-with-confirm-emits-unit-env";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.confirm = "/run/current-system/sw/libexec/pivy/pivy-askpass";
+      };
+      check =
+        result:
+        let
+          env = getUnitEnv "piggy-agent" result;
+        in
+        {
+          ok = (env.SSH_CONFIRM or null) == "/run/current-system/sw/libexec/pivy/pivy-askpass";
+          got = env;
+        };
+    }
+    {
+      name = "single-instance-with-notify-send-emits-unit-env";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.notifySend = "/run/current-system/sw/libexec/pivy/pivy-notify";
+      };
+      check =
+        result:
+        let
+          env = getUnitEnv "piggy-agent" result;
+        in
+        {
+          ok = (env.SSH_NOTIFY_SEND or null) == "/run/current-system/sw/libexec/pivy/pivy-notify";
+          got = env;
+        };
+    }
+    {
+      name = "single-instance-without-confirm-or-notify-skips-unit-env";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+      };
+      check =
+        result:
+        let
+          env = getUnitEnv "piggy-agent" result;
+        in
+        {
+          ok = (env.SSH_CONFIRM or null) == null && (env.SSH_NOTIFY_SEND or null) == null;
+          got = env;
+        };
+    }
+    {
+      # Per-instance confirm + notifySend route to the right per-
+      # instance unit, not to a sibling. Verifies the option is
+      # properly threaded through the multi-instance synthesis.
+      name = "multi-instance-per-instance-confirm-and-notify-routes-correctly";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.instances = {
+          default = {
+            guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+            confirm = "/path/default-confirm";
+            notifySend = "/path/default-notify";
+          };
+          work = {
+            allCards = true;
+            confirm = "/path/work-confirm";
+            # No notifySend — verifies per-instance independence.
+          };
+        };
+      };
+      check =
+        result:
+        let
+          defaultEnv = getUnitEnv "piggy-agent-default" result;
+          workEnv = getUnitEnv "piggy-agent-work" result;
+        in
+        {
+          ok =
+            (defaultEnv.SSH_CONFIRM or null) == "/path/default-confirm"
+            && (defaultEnv.SSH_NOTIFY_SEND or null) == "/path/default-notify"
+            && (workEnv.SSH_CONFIRM or null) == "/path/work-confirm"
+            && (workEnv.SSH_NOTIFY_SEND or null) == null;
+          got = {
+            inherit defaultEnv workEnv;
           };
         };
     }
