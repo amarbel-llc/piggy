@@ -264,9 +264,26 @@ in
       example = lib.literalExpression "\"\${pkgs.piggy}/share/piggy/piggy-askpass.sh\"";
       description = ''
         Path to the askpass helper. When set, exported as
-        `SSH_ASKPASS` with `SSH_ASKPASS_REQUIRE=force` so failed
-        unlocks render piggy-aware prompts rather than falling back
-        to whatever the user's shell inherits.
+        `SSH_ASKPASS` with `SSH_ASKPASS_REQUIRE=force` in two
+        places:
+
+        1. The agent process's environment (always — covers ssh
+           operations originating from the agent itself).
+        2. The user's interactive shell environment, via
+           `home.sessionVariables`, in single-instance mode only —
+           covers `ssh-add`, signed `git commit`, and any other
+           ssh-client invocation where the askpass fallback chain
+           consults the calling shell's env. Multi-instance mode
+           skips this propagation, parallel to the SSH_AUTH_SOCK
+           decision: the module cannot pick a winner among
+           per-instance askpass values; users with multiple
+           instances manage `home.sessionVariables.SSH_ASKPASS`
+           themselves.
+
+        Together these guarantee that a failed unlock renders the
+        configured askpass rather than falling through to whatever
+        ssh-client picks up from the OS (typically zenity or
+        ssh-askpass). Closes piggy#60.
       '';
     };
 
@@ -395,9 +412,15 @@ in
       lib.mapAttrs (_: built: built.darwinAgent) builtInstances
     );
 
-    home.sessionVariables = lib.mkIf (!hasInstances) {
-      SSH_AUTH_SOCK = builtInstances.piggy-agent.socketPathExpr;
-    };
+    home.sessionVariables = lib.mkIf (!hasInstances) (
+      {
+        SSH_AUTH_SOCK = builtInstances.piggy-agent.socketPathExpr;
+      }
+      // lib.optionalAttrs (cfg.askpass != null) {
+        SSH_ASKPASS = cfg.askpass;
+        SSH_ASKPASS_REQUIRE = "force";
+      }
+    );
 
     # Per-instance shell snippets. In multi-instance mode the module
     # cannot pick a winner for `$SSH_AUTH_SOCK`, so it emits one

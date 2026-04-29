@@ -313,6 +313,82 @@ let
           };
         };
     }
+    {
+      name = "single-instance-with-askpass-emits-session-vars";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.askpass = "/run/current-system/sw/libexec/pivy/pivy-askpass";
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          sv = result.config.home.sessionVariables;
+          askpass = sv.SSH_ASKPASS or null;
+          require = sv.SSH_ASKPASS_REQUIRE or null;
+        in
+        {
+          ok =
+            tripped == [ ]
+            && askpass == "/run/current-system/sw/libexec/pivy/pivy-askpass"
+            && require == "force";
+          got = {
+            inherit tripped askpass require;
+          };
+        };
+    }
+    {
+      name = "single-instance-without-askpass-skips-session-vars";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          sv = result.config.home.sessionVariables;
+          askpass = sv.SSH_ASKPASS or null;
+          require = sv.SSH_ASKPASS_REQUIRE or null;
+        in
+        {
+          ok = tripped == [ ] && askpass == null && require == null;
+          got = {
+            inherit tripped askpass require;
+          };
+        };
+    }
+    {
+      # Multi-instance askpass propagation parallels the SSH_AUTH_SOCK
+      # decision: the module can't pick a winner among instances, so it
+      # declines to emit askpass session vars and lets the user manage
+      # them per-shell. See piggy#60 for the design rationale.
+      name = "multi-instance-skips-askpass-session-vars";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.instances = {
+          default = {
+            guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+            askpass = "/run/current-system/sw/libexec/pivy/pivy-askpass";
+          };
+        };
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          sv = result.config.home.sessionVariables;
+          askpass = sv.SSH_ASKPASS or null;
+          require = sv.SSH_ASKPASS_REQUIRE or null;
+        in
+        {
+          ok = tripped == [ ] && askpass == null && require == null;
+          got = {
+            inherit tripped askpass require;
+          };
+        };
+    }
   ];
 
   results = map (c: {
