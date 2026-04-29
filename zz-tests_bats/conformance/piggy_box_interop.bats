@@ -1,26 +1,35 @@
 #! /usr/bin/env bats
 #
-# Interop tests: Rust `piggy box` ↔ C `pivy-box` *template* compatibility.
+# Wrapper-integrity smoke tests for `piggy box`. Confirms argv- and
+# template-path forwarding from the Rust clap dispatcher in
+# `crates/piggy/src/main.rs` to C `pivy-box` survives intact.
 #
-# Crypto compatibility (Rust seal ↔ C decrypt and the reverse) is OUT OF
-# SCOPE by design. As of #36, piggy standardizes on RFC 7539 ChaCha20-
-# Poly1305 with a 12-byte wire IV; pivy retains its OpenSSH
-# `chacha20-poly1305@openssh.com` variant with a 0-byte wire IV. The two
-# constructions are wire-incompatible — see
-# `docs/rfcs/0002-piv-ecdh-box.md` §Compatibility. Earlier revisions of
-# this file held `rust_encrypt_c_decrypt` and `c_encrypt_rust_decrypt`
-# tests; they were deliberately removed (see #41) rather than skipped, so
-# the suite reflects what's actually expected to work. Their bodies
-# survive in git history at `38df53c` if the direction ever reverses.
+# History. This file was originally a cross-language *template*-format
+# compat probe (Rust `piggy box` ↔ C `pivy-box`) — see #29 / #41 / #55.
+# After commit `79658e1` (2026-04-28), `piggy box` itself exec's into C
+# `pivy-box` via `fallback::exec_pivy`, so both sides of the original
+# tests reach the same binary. The cipher interop tests (`rust_encrypt_
+# c_decrypt` and the reverse) were deleted in #41; their bodies live in
+# git at `38df53c`. The remaining template tests have been relabeled
+# here as wrapper smoke tests — what they verify today is that
+# `piggy box tpl create` and `piggy box tpl show` reach `pivy-box`
+# unmolested, NOT anything about cross-language template format
+# compatibility (the latter no longer has two sides). See #55 for the
+# disposition discussion.
 #
-# What's still tested here: piggy's template format remains aligned with
-# pivy's (base64-armored sshbuf bytes, see `8221588`), so a template
-# created by either tool MUST be readable by the other. Tests 1 and 2
-# below exercise that contract round-trip.
+# Mock override. `common.bash` symlinks `zz-tests_bats/helpers/
+# mock-pivy-box.sh` as `pivy-box` in the test PATH so unit-test bats
+# files run without a real card. That mock errors on `tpl create`,
+# which would mask wrapper-integrity bugs here — `piggy box` would
+# reach the mock, hit the error, and the test would fail with a
+# misleading message. setup() below replaces that symlink with
+# $REAL_PIVY_BOX for this file's tests only (each bats test gets a
+# fresh BATS_TEST_TMPDIR).
 #
 # Requires the fib virtual PIV card stack (just test-bats-conformance-interop).
-# The recipe brings up fib, generates a key on slot 9D, creates a template,
-# and sets PCSCLITE_CSOCK_NAME + INTEROP_TPL + INTEROP_GUID before invoking
+# The recipe brings up fib, generates a key on slot 9D, captures the
+# real C pivy-box path BEFORE bats prepends the mock to PATH, and sets
+# PCSCLITE_CSOCK_NAME + REAL_PIVY_BOX + INTEROP_GUID before invoking
 # bats. Tests skip gracefully when these are absent.
 
 setup() {
@@ -30,19 +39,22 @@ setup() {
   if [[ -z ${PCSCLITE_CSOCK_NAME:-} ]]; then
     skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-interop)"
   fi
-  # common.bash prepends zz-tests_bats/helpers (with mock-pivy-box.sh) to
-  # PATH. That mock substitutes base64 for real crypto, which is the
-  # opposite of what interop tests want — they need the REAL C pivy-box
-  # to actually cross the wire boundary. The recipe captures the real
-  # binary's path before bats loads and passes it in via REAL_PIVY_BOX.
   if [[ -z ${REAL_PIVY_BOX:-} || ! -x ${REAL_PIVY_BOX:-} ]]; then
     skip "REAL_PIVY_BOX not set (run: just test-bats-conformance-interop)"
   fi
+
+  # Replace common.bash's mock pivy-box symlink with the real C
+  # binary — wrapper smoke tests need `piggy box` (which exec's
+  # `pivy-box` from PATH via fallback::exec_pivy) to reach the real
+  # binary. Scoped to BATS_TEST_TMPDIR, so other bats files keep the
+  # mock.
+  ln -sf "$REAL_PIVY_BOX" "$BATS_TEST_TMPDIR/pivy-box"
 }
 
-# --- template cross-compat ---
-
-function rust_tpl_create_c_tpl_show { # @test
+# `piggy box tpl create` must forward argv + write its output where C
+# `pivy-box` would. Roundtrips the produced file through `pivy-box tpl
+# show` directly (bypassing piggy) to confirm format integrity.
+function piggy_box_tpl_create_forwards_to_pivy_box { # @test
   [[ -n ${INTEROP_GUID:-} ]] || skip "INTEROP_GUID not set"
 
   local tpl_dir="$BATS_TEST_TMPDIR/tpl"
@@ -64,7 +76,11 @@ function rust_tpl_create_c_tpl_show { # @test
   assert_success
 }
 
-function c_tpl_create_rust_tpl_show { # @test
+# `piggy box tpl show` must forward a template-path positional arg to
+# C `pivy-box` correctly. Creates the input via direct `pivy-box`
+# (bypassing piggy) so the test failure surface is the wrapper, not
+# tpl-create.
+function piggy_box_tpl_show_forwards_to_pivy_box { # @test
   [[ -n ${INTEROP_GUID:-} ]] || skip "INTEROP_GUID not set"
 
   local tpl_file="$BATS_TEST_TMPDIR/c-interop.tpl"
