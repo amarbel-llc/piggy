@@ -128,10 +128,40 @@ let
 
   cases = [
     {
+      # Default behavior in single-instance mode (post-#62): the
+      # module evaluates cleanly and produces a launcher, but does
+      # NOT claim home.sessionVariables.SSH_AUTH_SOCK. The mux-in-
+      # front pattern (ssh-agent-mux + 1Password + …) is common
+      # enough that auto-claiming SSH_AUTH_SOCK is the wrong
+      # default.
       name = "valid-single-instance-evaluates-cleanly";
       cfg = {
         services.piggy-agent.enable = true;
         services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          sock = result.config.home.sessionVariables.SSH_AUTH_SOCK or null;
+          launcher = forceLauncher result;
+        in
+        {
+          ok = tripped == [ ] && sock == null && launcher != null;
+          got = {
+            inherit tripped sock launcher;
+          };
+        };
+    }
+    {
+      # Opt-in path for users without a mux: setSshAuthSock = true
+      # makes the module claim home.sessionVariables.SSH_AUTH_SOCK,
+      # restoring the pre-#62 behavior on demand.
+      name = "single-instance-with-set-ssh-auth-sock-true-emits-sock";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.setSshAuthSock = true;
       };
       check =
         result:

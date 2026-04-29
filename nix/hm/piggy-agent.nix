@@ -278,8 +278,29 @@ in
         Path to the agent's UNIX socket. When `null` (default), the
         module uses `$XDG_STATE_HOME/piggy/piggy-agent.sock`, with the
         XDG-spec fallback to `$HOME/.local/state/piggy/...` if
-        `$XDG_STATE_HOME` is unset. The chosen path is exported as
-        `$SSH_AUTH_SOCK` for the user session.
+        `$XDG_STATE_HOME` is unset. Whether this path is also
+        exported as `$SSH_AUTH_SOCK` for the user shell depends on
+        {option}`setSshAuthSock` — default false (mux-in-front
+        friendly).
+      '';
+    };
+
+    setSshAuthSock = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Set `home.sessionVariables.SSH_AUTH_SOCK` to this agent's
+        socket. Default false because in mux-in-front setups (e.g.
+        ssh-agent-mux multiplexing piggy-agent + a software-keys
+        agent + 1Password's agent + ...) the mux owns the user-
+        facing `SSH_AUTH_SOCK` and clobbering it from here breaks
+        the chain. Set to true if piggy IS the user's primary
+        agent (no mux above it).
+
+        Only applies in single-instance mode. Multi-instance mode
+        never sets `SSH_AUTH_SOCK` regardless (parallel reasoning:
+        the module can't pick a winner among instances). Closes
+        piggy#62.
       '';
     };
 
@@ -477,7 +498,7 @@ in
     );
 
     home.sessionVariables = lib.mkIf (!hasInstances) (
-      {
+      lib.optionalAttrs cfg.setSshAuthSock {
         SSH_AUTH_SOCK = builtInstances.piggy-agent.socketPathExpr;
       }
       // lib.optionalAttrs (cfg.askpass != null) {
