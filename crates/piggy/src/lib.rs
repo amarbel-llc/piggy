@@ -13,7 +13,11 @@
 //!   tests under each one keep running and so the code is in
 //!   place to swap back in once it reaches feature parity with
 //!   the C implementations. See the head of `main.rs` for the
-//!   full rationale.
+//!   full rationale, and #56 (PC/SC transactions in `piggy-piv`),
+//!   #57 (direct-PCSC ECDH oracle for `piggy box stream decrypt`),
+//!   #58 (askpass `[piggy-test]` context tagging), and #59
+//!   (probe-loop PIN-clearing in `piggy agent`) for the maturation
+//!   roadmap.
 
 pub mod agent_client;
 pub mod card_oracle;

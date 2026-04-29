@@ -22,10 +22,13 @@
 //! Rust-native re-implementations of `agent` and `box` exist under
 //! `cmd::agent` / `cmd::pivy_box` but are NOT on the binary's
 //! dispatch path. They will return once they reach feature parity
-//! with the C implementations (notably: PC/SC transaction handling
-//! in piggy-piv, and `piggy box`'s direct-PCSC ECDH path for the
-//! agentless case is currently lost since C `pivy-box` requires an
-//! agent for ECDH).
+//! with the C implementations. The maturation roadmap:
+//! - #56 — PC/SC transaction handling in `piggy-piv`.
+//! - #57 — direct-PCSC ECDH oracle for `piggy box stream decrypt`,
+//!   currently lost because C `pivy-box` requires an agent for ECDH.
+//! - #58 — restore `[piggy-test]` askpass-context tagging when
+//!   `piggy agent` returns to the user path.
+//! - #59 — restore probe-loop PIN-clearing in `piggy agent`.
 
 mod fallback;
 

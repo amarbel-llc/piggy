@@ -191,8 +191,17 @@ in
     # mkPackageOption defaults to `pkgs.piggy` and emits the right
     # defaultText. Users without piggy in their nixpkgs (the common
     # case) MUST set `package = piggy.packages.${system}.piggy` from
-    # this flake — there's no silent fallback. Set `package = pkgs.pivy`
-    # (with pname = "pivy") to run the C agent under the same surface.
+    # this flake — there's no silent fallback.
+    #
+    # Note: post-`79658e1` (v1.0), `piggy agent` itself exec's into C
+    # `pivy-agent` — there is no Rust-vs-C implementation choice to
+    # make at this layer. The `package = pkgs.pivy` escape hatch
+    # (selected by `pname == "pivy"` above) bypasses one layer of
+    # wrapping by talking to `pivy-agent` directly instead of via
+    # `piggy agent`'s clap dispatch; same underlying agent either way.
+    # The Rust agent under `crates/piggy/src/cmd/agent/` is held off
+    # the dispatch path until the maturation issues (#56, #58, #59)
+    # close.
     package = lib.mkPackageOption pkgs "piggy" { };
 
     guid = mkOption {

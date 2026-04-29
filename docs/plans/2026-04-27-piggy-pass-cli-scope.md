@@ -5,6 +5,24 @@ Milestone: [v1.0.0 — Rust clap CLI shelling out to C `pivy-*`](https://github.
 (Tracker #45 retired 2026-04-27 — operational state lives on the
 milestone description and in #26 Tier 11.)
 
+> **Wrap-C pivot (2026-04-28, commit `79658e1`).** This document was
+> written under the framing where `piggy agent` and `piggy box` are
+> Rust first-party implementations alongside the bash-backed pass-style
+> commands (see the table at "New: `piggy pivy <tool>` passthrough"
+> below, lines marked "first-party Rust"). After `79658e1`, both
+> `piggy agent` and `piggy box` `exec(2)` into the C `pivy-agent` and
+> `pivy-box` binaries via `fallback::exec_pivy`, joining `tool`/`ca`/
+> `luks`/`zfs` as C-pivy passthroughs for v1.0. The Rust impls in
+> `crates/piggy/src/cmd/{agent,pivy_box}` are kept under the
+> `piggy::cmd` library surface so their unit tests keep running and so
+> they are in place to swap back in once they reach feature parity with
+> the C binaries. The maturation roadmap is tracked in #56, #57, #58,
+> and #59. Read the rest of this document with that context — every
+> "first-party Rust" cell in the table below now means "Rust handler
+> that exec's the C binary in v1.0," and `piggy pivy box`'s "differs
+> once `tool` ports to Rust" framing has been broadened: today
+> `piggy pivy box` and `piggy box` reach the same C binary.
+
 ## Goal (minimal-rewrite framing)
 
 Replace `piggy.sh`'s top-level argv-dispatch (the case statement at
