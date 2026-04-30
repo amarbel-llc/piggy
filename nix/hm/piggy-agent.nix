@@ -38,25 +38,26 @@ let
         else
           "\${XDG_STATE_HOME:-$HOME/.local/state}/piggy/${name}.sock";
 
-      agentArgs = [
-        "-i"
-        "-a"
-        socketPathExpr
-      ]
-      ++ (lib.optionals (instanceCfg.guid != null) [
-        "-g"
-        instanceCfg.guid
-      ])
-      ++ lib.optional instanceCfg.allCards "-A"
-      ++ (lib.optionals (instanceCfg.cak != null) [
-        "-K"
-        instanceCfg.cak
-      ])
-      ++ [
-        "-S"
-        instanceCfg.slots
-      ]
-      ++ instanceCfg.extraArgs;
+      # Args other than the socket path. These get routed through
+      # `lib.escapeShellArgs` so user-supplied strings (guid, cak,
+      # extraArgs) can't break the exec line. The socket arg is
+      # handled separately in `launcherText` because it MUST be bash-
+      # expanded — see the comment on the exec line below.
+      nonSocketArgs =
+        (lib.optionals (instanceCfg.guid != null) [
+          "-g"
+          instanceCfg.guid
+        ])
+        ++ lib.optional instanceCfg.allCards "-A"
+        ++ (lib.optionals (instanceCfg.cak != null) [
+          "-K"
+          instanceCfg.cak
+        ])
+        ++ [
+          "-S"
+          instanceCfg.slots
+        ]
+        ++ instanceCfg.extraArgs;
 
       # Single shared launcher script for both Linux and Darwin. Handles
       # XDG_STATE_HOME default, socket-dir creation, stale-socket cleanup,
@@ -70,7 +71,13 @@ let
       # set on the systemd Service.Environment / launchd
       # EnvironmentVariables instead so they're inspectable in
       # eval-test.
-      launcher = pkgs.writeShellScript "${name}-launch" ''
+      #
+      # The exec line writes `-a "$SOCK"` directly instead of routing
+      # the socket through `lib.escapeShellArgs` — escapeShellArgs
+      # single-quotes every argument, which would prevent bash from
+      # expanding `$XDG_STATE_HOME` / `$HOME` and leave the agent to
+      # bind(2) the literal string `$HOME/.local/state/...`. See #63.
+      launcherText = ''
         set -eu
         : "''${HOME:?HOME must be set}"
         : "''${XDG_STATE_HOME:=$HOME/.local/state}"
@@ -78,8 +85,10 @@ let
         mkdir -p -m 0700 "$(dirname "$SOCK")"
         rm -f "$SOCK"
         export SSH_AUTH_SOCK="$SOCK"
-        exec ${binPath} ${lib.escapeShellArgs preArgs} ${lib.escapeShellArgs agentArgs}
+        exec ${binPath} ${lib.escapeShellArgs preArgs} -i -a "$SOCK" ${lib.escapeShellArgs nonSocketArgs}
       '';
+
+      launcher = pkgs.writeShellScript "${name}-launch" launcherText;
 
       # Static env vars routed to the agent process via the unit's
       # native env-vars surface. systemd takes a list of "K=V" strings;
@@ -136,6 +145,7 @@ let
       inherit
         socketPathExpr
         launcher
+        launcherText
         linuxService
         darwinAgent
         ;
@@ -382,6 +392,20 @@ in
       '';
     };
 
+    _launcherTexts = mkOption {
+      type = types.attrsOf types.str;
+      internal = true;
+      visible = false;
+      default = { };
+      description = ''
+        Internal: per-instance launcher script texts, keyed by unit
+        name. Exposed for `eval-test.nix` to assert wire-level
+        properties of the generated launcher (notably, that the
+        socket path is bash-expanded rather than single-quoted —
+        see #63). Not part of the user-facing surface.
+      '';
+    };
+
     instances = mkOption {
       default = { };
       example = lib.literalExpression ''
@@ -488,6 +512,8 @@ in
           + "entries.";
       }
     ];
+
+    services.piggy-agent._launcherTexts = lib.mapAttrs (_: built: built.launcherText) builtInstances;
 
     systemd.user.services = mkIf pkgs.stdenv.isLinux (
       lib.mapAttrs (_: built: built.linuxService) builtInstances

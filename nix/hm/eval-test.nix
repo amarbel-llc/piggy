@@ -515,6 +515,71 @@ let
         };
     }
     {
+      # Regression for piggy#63: launcher must hand `-a "$SOCK"` to
+      # the agent so bash expands the socket path before bind(2).
+      # The earlier shape routed `socketPathExpr` through
+      # `lib.escapeShellArgs`, which single-quotes its arguments and
+      # left the agent trying to bind the literal string
+      # `$HOME/.local/state/...` — which fails at bind(2) with no
+      # such file.
+      name = "launcher-bash-expands-default-socket-path";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+      };
+      check =
+        result:
+        let
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          hasExpandedSock = lib.hasInfix "-a \"$SOCK\"" text;
+          # `'$` would be the start of a single-quoted shell var, the
+          # exact failure mode from #63.
+          noSingleQuotedVar = !(lib.hasInfix "'$" text);
+        in
+        {
+          ok = hasExpandedSock && noSingleQuotedVar;
+          got = {
+            inherit text hasExpandedSock noSingleQuotedVar;
+          };
+        };
+    }
+    {
+      # Regression for piggy#63 (user-supplied path variant): when
+      # `socketPath` is set with a bash-expandable form, the
+      # launcher MUST still bash-expand it for the agent's `-a`
+      # arg. Same root cause; this case pins the user-set path so a
+      # future refactor can't accidentally reintroduce the literal-
+      # string regression for the socketPath != null branch.
+      name = "launcher-bash-expands-user-socket-path";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.socketPath = "$HOME/.local/state/ssh/pivy-agent.sock";
+      };
+      check =
+        result:
+        let
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          # SOCK assignment uses the user-provided path verbatim;
+          # bash will expand $HOME at runtime since it's inside
+          # double quotes.
+          hasSockAssign = lib.hasInfix "SOCK=\"$HOME/.local/state/ssh/pivy-agent.sock\"" text;
+          hasExpandedSock = lib.hasInfix "-a \"$SOCK\"" text;
+          noSingleQuotedVar = !(lib.hasInfix "'$" text);
+        in
+        {
+          ok = hasSockAssign && hasExpandedSock && noSingleQuotedVar;
+          got = {
+            inherit
+              text
+              hasSockAssign
+              hasExpandedSock
+              noSingleQuotedVar
+              ;
+          };
+        };
+    }
+    {
       # Per-instance confirm + notifySend route to the right per-
       # instance unit, not to a sibling. Verifies the option is
       # properly threaded through the multi-instance synthesis.
