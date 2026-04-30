@@ -136,8 +136,16 @@ let
           };
           RunAtLoad = true;
           ProcessType = "Background";
+          # home-manager's launchd module declares StandardErrorPath as
+          # `nullOr (absolute path)`, and launchd does not expand `$HOME`
+          # in plist contexts anyway. Resolve the home prefix at eval
+          # time via `config.home.homeDirectory` so the default is a
+          # real absolute path that passes the type check. Closes #64.
           StandardErrorPath =
-            if instanceCfg.logFile != null then instanceCfg.logFile else "$HOME/Library/Logs/${name}.log";
+            if instanceCfg.logFile != null then
+              instanceCfg.logFile
+            else
+              "${config.home.homeDirectory}/Library/Logs/${name}.log";
         };
       };
     in

@@ -28,6 +28,15 @@ let
         type = lib.types.attrs;
         default = { };
       };
+      # home-manager normally derives this from `home.username` and the
+      # platform; the harness pins it so the module can build absolute
+      # default paths (e.g. Darwin's StandardErrorPath — see #64) at
+      # eval time. The value is arbitrary but must be an absolute path
+      # to satisfy any consumer that type-checks against `path`.
+      home.homeDirectory = lib.mkOption {
+        type = lib.types.str;
+        default = "/Users/eval-test";
+      };
       systemd.user.services = lib.mkOption {
         type = lib.types.attrs;
         default = { };
@@ -613,6 +622,40 @@ let
             && (workEnv.SSH_NOTIFY_SEND or null) == null;
           got = {
             inherit defaultEnv workEnv;
+          };
+        };
+    }
+    {
+      # Regression for piggy#64: the Darwin StandardErrorPath default
+      # used to be the literal `"$HOME/Library/Logs/<name>.log"`,
+      # which fails home-manager's `nullOr (absolute path)` type check
+      # (and launchd doesn't expand $HOME in plist contexts anyway).
+      # The fix routes the home prefix through `config.home.homeDirectory`
+      # so the default is an absolute path. Only meaningful on Darwin —
+      # on Linux the launchd.agents attrset is empty by mkIf.
+      name = "darwin-default-stderr-path-is-absolute";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+      };
+      check =
+        result:
+        let
+          stderrPath =
+            result.config.launchd.agents.piggy-agent.config.StandardErrorPath or null;
+          isAbsolute = stderrPath != null && lib.hasPrefix "/" stderrPath;
+          noLiteralHome = stderrPath == null || !(lib.hasInfix "$HOME" stderrPath);
+        in
+        {
+          ok =
+            if pkgs.stdenv.isDarwin then
+              isAbsolute && noLiteralHome
+            else
+              # On Linux the launchd.agents surface is unpopulated;
+              # the regression is unreachable, so pass trivially.
+              stderrPath == null;
+          got = {
+            inherit stderrPath isAbsolute noLiteralHome;
           };
         };
     }
