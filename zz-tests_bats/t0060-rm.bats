@@ -4,22 +4,22 @@ setup() {
 }
 
 function remove_password { # @test
-  "$PIGGY" generate cred1 19
+  "$PIGGY" pass generate cred1 19
   assert [ -e "$PIGGY_STORE_DIR/cred1.ebox" ]
-  run "$PIGGY" rm -f cred1
+  run "$PIGGY" pass rm -f cred1
   assert_success
   assert [ ! -e "$PIGGY_STORE_DIR/cred1.ebox" ]
 }
 
 function remove_password_with_spaces { # @test
-  "$PIGGY" generate "hello i have spaces" 19
+  "$PIGGY" pass generate "hello i have spaces" 19
   assert [ -e "$PIGGY_STORE_DIR/hello i have spaces.ebox" ]
-  run "$PIGGY" rm -f "hello i have spaces"
+  run "$PIGGY" pass rm -f "hello i have spaces"
   assert_success
   assert [ ! -e "$PIGGY_STORE_DIR/hello i have spaces.ebox" ]
 }
 
 function remove_nonexistent_password_fails { # @test
-  run "$PIGGY" rm -f does-not-exist
+  run "$PIGGY" pass rm -f does-not-exist
   assert_failure
 }

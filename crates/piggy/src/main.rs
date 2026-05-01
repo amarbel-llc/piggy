@@ -2,14 +2,18 @@
 //!
 //! Dispatch layout (top-level argv is parsed entirely by clap):
 //!
-//! 1. Pass-style subcommands (init, show, find, grep, insert, edit,
-//!    generate, rm, mv, cp, git, help, version) `exec(2)` into
-//!    `piggy.sh <subcommand> <rest...>` — Shape A from the v1.0 scoping
-//!    doc. The case statement at the bottom of `piggy.sh` does the
-//!    second-level dispatch to the matching `cmd_*` function. Per-
-//!    subcommand `getopt` parsing stays in bash; clap captures all
-//!    trailing argv verbatim.
-//! 2. C-pivy passthroughs — every other subcommand `exec(2)`s the
+//! 1. `piggy pass <X>` — every password-store subcommand (`init`, `show`,
+//!    `find`, `grep`, `insert`, `edit`, `generate`, `rm`, `mv`, `cp`,
+//!    `git`) lives under the `pass` namespace and `exec(2)`s into
+//!    `piggy.sh <X> <rest...>` via [`fallback::exec_bash`]. The case
+//!    statement at the bottom of `piggy.sh` does the second-level
+//!    dispatch to the matching `cmd_*` function. Per-subcommand
+//!    `getopt` parsing stays in bash; clap captures all trailing argv
+//!    verbatim.
+//! 2. Top-level `help` and `version` also `exec_bash` into piggy.sh's
+//!    `cmd_usage`/`cmd_version` — they print piggy-wide usage and
+//!    version banners and so live outside the `pass` namespace.
+//! 3. C-pivy passthroughs — every other subcommand `exec(2)`s the
 //!    matching `pivy-*` binary from `$PATH` via
 //!    [`fallback::exec_pivy`]:
 //!    - `agent` → `pivy-agent`
@@ -18,6 +22,10 @@
 //!      `zfs` → `pivy-zfs`
 //!    - `pivy <X>` is the explicit-escape-hatch form — `piggy pivy
 //!      <tool> [args]` always reaches `pivy-<tool>`.
+//!
+//! Bare `piggy` and bare `piggy pass` both print clap help (no implicit
+//! `cmd_show ""`); `arg_required_else_help` handles that on the top-level
+//! `Cli` and the nested `PassArgs`.
 //!
 //! Rust-native re-implementations of `agent` and `box` exist under
 //! `cmd::agent` / `cmd::pivy_box` but are NOT on the binary's
@@ -32,7 +40,7 @@
 
 mod fallback;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -40,81 +48,18 @@ use clap::{Parser, Subcommand};
     bin_name = "piggy",
     about = "PIV-encrypted password store",
     version,
+    arg_required_else_help = true,
     disable_help_subcommand = true
 )]
 struct Cli {
     #[command(subcommand)]
-    cmd: Option<Command>,
+    cmd: Command,
 }
 
-/// Each pass-style variant captures `rest` with `trailing_var_arg` +
-/// `allow_hyphen_values` so per-command flags (e.g. `-c`, `--multiline`,
-/// `-r`) reach `piggy.sh`'s `getopt` blocks untouched. Clap is only
-/// responsible for matching the subcommand name and any of its visible
-/// aliases.
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Initialize a new password store.
-    Init {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// List or show a password (default when no subcommand is given).
-    #[command(visible_aliases = ["ls", "list"])]
-    Show {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// List passwords whose names match a search term.
-    #[command(visible_alias = "search")]
-    Find {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// Grep across decrypted password contents.
-    Grep {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// Insert a new password.
-    #[command(visible_alias = "add")]
-    Insert {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// Edit an existing password in $EDITOR.
-    Edit {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// Generate a new password.
-    Generate {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// Remove a password or directory.
-    #[command(visible_aliases = ["delete", "remove"])]
-    Rm {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// Move/rename a password.
-    #[command(visible_alias = "rename")]
-    Mv {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// Copy a password.
-    #[command(visible_alias = "copy")]
-    Cp {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// Run git inside the password store.
-    Git {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
+    /// Password-store commands (init/show/find/grep/insert/edit/generate/rm/mv/cp/git).
+    Pass(PassArgs),
     /// Print piggy.sh's pass-style usage text.
     Help {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -191,37 +136,112 @@ enum Command {
     },
 }
 
+#[derive(Args, Debug)]
+#[command(arg_required_else_help = true, disable_help_subcommand = true)]
+struct PassArgs {
+    #[command(subcommand)]
+    cmd: PassCommand,
+}
+
+/// Each variant captures `rest` with `trailing_var_arg` +
+/// `allow_hyphen_values` so per-command flags (e.g. `-c`, `--multiline`,
+/// `-r`) reach `piggy.sh`'s `getopt` blocks untouched. Clap is only
+/// responsible for matching the subcommand name and any of its visible
+/// aliases.
+#[derive(Subcommand, Debug)]
+enum PassCommand {
+    /// Initialize a new password store.
+    Init {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// List or show a password.
+    #[command(visible_aliases = ["ls", "list"])]
+    Show {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// List passwords whose names match a search term.
+    #[command(visible_alias = "search")]
+    Find {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Grep across decrypted password contents.
+    Grep {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Insert a new password.
+    #[command(visible_alias = "add")]
+    Insert {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Edit an existing password in $EDITOR.
+    Edit {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Generate a new password.
+    Generate {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Remove a password or directory.
+    #[command(visible_aliases = ["delete", "remove"])]
+    Rm {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Move/rename a password.
+    #[command(visible_alias = "rename")]
+    Mv {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Copy a password.
+    #[command(visible_alias = "copy")]
+    Cp {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Run git inside the password store.
+    Git {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
     match cli.cmd {
-        // No subcommand: piggy.sh's default-case (line 789-792) calls
-        // `cmd_show ""`. Forward an empty argv and let bash do that.
-        None => fallback::exec_bash("show", &[]),
+        Command::Pass(args) => match args.cmd {
+            PassCommand::Init { rest } => fallback::exec_bash("init", &rest),
+            PassCommand::Show { rest } => fallback::exec_bash("show", &rest),
+            PassCommand::Find { rest } => fallback::exec_bash("find", &rest),
+            PassCommand::Grep { rest } => fallback::exec_bash("grep", &rest),
+            PassCommand::Insert { rest } => fallback::exec_bash("insert", &rest),
+            PassCommand::Edit { rest } => fallback::exec_bash("edit", &rest),
+            PassCommand::Generate { rest } => fallback::exec_bash("generate", &rest),
+            PassCommand::Rm { rest } => fallback::exec_bash("rm", &rest),
+            PassCommand::Mv { rest } => fallback::exec_bash("mv", &rest),
+            PassCommand::Cp { rest } => fallback::exec_bash("cp", &rest),
+            PassCommand::Git { rest } => fallback::exec_bash("git", &rest),
+        },
 
-        Some(Command::Agent { rest }) => fallback::exec_pivy("agent", &rest),
-        Some(Command::Box { rest }) => fallback::exec_pivy("box", &rest),
+        Command::Help { rest } => fallback::exec_bash("help", &rest),
+        Command::Version { rest } => fallback::exec_bash("version", &rest),
 
-        Some(Command::Init { rest }) => fallback::exec_bash("init", &rest),
-        Some(Command::Show { rest }) => fallback::exec_bash("show", &rest),
-        Some(Command::Find { rest }) => fallback::exec_bash("find", &rest),
-        Some(Command::Grep { rest }) => fallback::exec_bash("grep", &rest),
-        Some(Command::Insert { rest }) => fallback::exec_bash("insert", &rest),
-        Some(Command::Edit { rest }) => fallback::exec_bash("edit", &rest),
-        Some(Command::Generate { rest }) => fallback::exec_bash("generate", &rest),
-        Some(Command::Rm { rest }) => fallback::exec_bash("rm", &rest),
-        Some(Command::Mv { rest }) => fallback::exec_bash("mv", &rest),
-        Some(Command::Cp { rest }) => fallback::exec_bash("cp", &rest),
-        Some(Command::Git { rest }) => fallback::exec_bash("git", &rest),
-        Some(Command::Help { rest }) => fallback::exec_bash("help", &rest),
-        Some(Command::Version { rest }) => fallback::exec_bash("version", &rest),
+        Command::Agent { rest } => fallback::exec_pivy("agent", &rest),
+        Command::Box { rest } => fallback::exec_pivy("box", &rest),
+        Command::Tool { rest } => fallback::exec_pivy("tool", &rest),
+        Command::Ca { rest } => fallback::exec_pivy("ca", &rest),
+        Command::Luks { rest } => fallback::exec_pivy("luks", &rest),
+        Command::Zfs { rest } => fallback::exec_pivy("zfs", &rest),
 
-        Some(Command::Tool { rest }) => fallback::exec_pivy("tool", &rest),
-        Some(Command::Ca { rest }) => fallback::exec_pivy("ca", &rest),
-        Some(Command::Luks { rest }) => fallback::exec_pivy("luks", &rest),
-        Some(Command::Zfs { rest }) => fallback::exec_pivy("zfs", &rest),
-
-        Some(Command::Pivy { tool, rest }) => match tool {
+        Command::Pivy { tool, rest } => match tool {
             Some(tool) => fallback::exec_pivy(&tool, &rest),
             None => {
                 eprintln!("piggy pivy: missing tool name");

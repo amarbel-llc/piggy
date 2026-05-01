@@ -4,14 +4,14 @@ setup() {
 }
 
 function edit_existing_password { # @test
-  echo "original password" | "$PIGGY" insert -e cred1
+  echo "original password" | "$PIGGY" pass insert -e cred1
 
   export FAKE_EDITOR_PASSWORD="big fat fake password"
   export EDITOR="$REPO_ROOT/zz-tests_bats/helpers/fake-editor-change-password.sh"
 
-  "$PIGGY" edit cred1
+  "$PIGGY" pass edit cred1
 
-  run "$PIGGY" show cred1
+  run "$PIGGY" pass show cred1
   assert_success
   assert_output "big fat fake password"
 }

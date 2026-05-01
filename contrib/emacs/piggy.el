@@ -112,40 +112,40 @@ Nil arguments are ignored.  Output is discarded."
 
 (defun piggy--run-show (entry &optional callback)
   (if callback
-      (piggy--run-1 callback "show" entry)
-    (piggy--run "show" entry)))
+      (piggy--run-1 callback "pass" "show" entry)
+    (piggy--run "pass" "show" entry)))
 
 (defun piggy--run-edit (entry)
-  (piggy--run-async "edit"
+  (piggy--run-async "pass" "edit"
                              entry))
 
 (defun piggy--run-generate (entry password-length &optional force no-symbols)
-  (piggy--run "generate"
+  (piggy--run "pass" "generate"
                        (if force "--force")
                        (if no-symbols "--no-symbols")
                        entry
                        (number-to-string password-length)))
 
 (defun piggy--run-remove (entry &optional recursive)
-  (piggy--run "remove"
+  (piggy--run "pass" "remove"
                        "--force"
                        (if recursive "--recursive")
                        entry))
 
 (defun piggy--run-rename (entry new-entry &optional force)
-  (piggy--run "rename"
+  (piggy--run "pass" "rename"
                        (if force "--force")
                        entry
                        new-entry))
 
 (defun piggy--run-copy (entry new-entry &optional force)
-  (piggy--run "copy"
+  (piggy--run "pass" "copy"
                        (if force "--force")
                        entry
                        new-entry))
 
 (defun piggy--run-git (&rest args)
-  (apply 'piggy--run "git"
+  (apply 'piggy--run "pass" "git"
          args))
 
 (defun piggy--run-version ()
@@ -189,7 +189,7 @@ form KEY: VALUE become alist entries."
 
 (defun piggy-parse-entry (entry)
   "Return an alist of the data associated with ENTRY."
-  (let ((output (piggy--run "show" entry)))
+  (let ((output (piggy--run "pass" "show" entry)))
     (piggy--parse-fields output)))
 
 (defun piggy-read-field (entry)
@@ -220,7 +220,7 @@ form KEY: VALUE become alist entries."
 
 Returns the first line of the password data.  When CALLBACK is
 non-`NIL', call CALLBACK with the first line instead."
-  (let* ((output (piggy--run "show" entry))
+  (let* ((output (piggy--run "pass" "show" entry))
          (secret (car (split-string output "\n" t))))
     (if callback
         (funcall callback secret)
@@ -304,7 +304,7 @@ equals to symbol secret, then this function reduces to
   "Insert a new ENTRY containing PASSWORD."
   (interactive (list (piggy--completing-read)
                      (read-passwd "Password: " t)))
-  (let* ((command (format "echo %s | %s insert -m -f %s"
+  (let* ((command (format "echo %s | %s pass insert -m -f %s"
                           (shell-quote-argument password)
                           piggy-executable
                           (shell-quote-argument entry)))

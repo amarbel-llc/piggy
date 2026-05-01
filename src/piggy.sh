@@ -14,6 +14,9 @@ GENERATED_LENGTH="${PIGGY_GENERATED_LENGTH:-25}"
 CHARACTER_SET="${PIGGY_CHARACTER_SET:-[:punct:][:alnum:]}"
 CHARACTER_SET_NO_SYMBOLS="${PIGGY_CHARACTER_SET_NO_SYMBOLS:-[:alnum:]}"
 
+PROGRAM_TOP="piggy"
+PROGRAM_PASS="piggy pass"
+
 unset GIT_DIR GIT_WORK_TREE GIT_NAMESPACE GIT_INDEX_FILE GIT_INDEX_VERSION GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 export GIT_CEILING_DIRECTORIES="$PREFIX/.."
 
@@ -60,7 +63,7 @@ set_pivy_template() {
   if [[ ! -f $PIVY_TPL ]]; then
     cat >&2 <<-_EOF
 		Error: You must run:
-		    $PROGRAM init
+		    $PROGRAM_PASS init
 		before you may use the password store.
 
 		_EOF
@@ -246,44 +249,44 @@ cmd_usage() {
   echo
   cat <<-_EOF
 	Usage:
-	    $PROGRAM init [-p subfolder] [-g guid] [-e] [-i]
+	    $PROGRAM_PASS init [-p subfolder] [-g guid] [-e] [-i]
 	        Initialize new password storage with a pivy-box template.
 	        -g: Use a specific PIV device GUID (from pivy-tool list).
 	        -e: Edit existing .pivy-id template interactively.
 	        -i: Interactive pivy-box tpl create.
 	        Without flags: auto-detect inserted PIV device.
-	    $PROGRAM [ls] [subfolder]
+	    $PROGRAM_PASS ls [subfolder]
 	        List passwords.
-	    $PROGRAM find pass-names...
+	    $PROGRAM_PASS find pass-names...
 	    	List passwords that match pass-names.
-	    $PROGRAM [show] [--clip[=line-number],-c[line-number]] pass-name
+	    $PROGRAM_PASS show [--clip[=line-number],-c[line-number]] pass-name
 	        Show existing password and optionally put it on the clipboard.
 	        If put on the clipboard, it will be cleared in $CLIP_TIME seconds.
-	    $PROGRAM grep [GREPOPTIONS] search-string
+	    $PROGRAM_PASS grep [GREPOPTIONS] search-string
 	        Search for password files containing search-string when decrypted.
-	    $PROGRAM insert [--echo,-e | --multiline,-m] [--force,-f] pass-name
+	    $PROGRAM_PASS insert [--echo,-e | --multiline,-m] [--force,-f] pass-name
 	        Insert new password. Optionally, echo the password back to the console
 	        during entry. Or, optionally, the entry may be multiline. Prompt before
 	        overwriting existing password unless forced.
-	    $PROGRAM edit pass-name
+	    $PROGRAM_PASS edit pass-name
 	        Insert a new password or edit an existing password using ${EDITOR:-vi}.
-	    $PROGRAM generate [--no-symbols,-n] [--clip,-c] [--in-place,-i | --force,-f] pass-name [pass-length]
+	    $PROGRAM_PASS generate [--no-symbols,-n] [--clip,-c] [--in-place,-i | --force,-f] pass-name [pass-length]
 	        Generate a new password of pass-length (or $GENERATED_LENGTH if unspecified) with optionally no symbols.
 	        Optionally put it on the clipboard and clear board after $CLIP_TIME seconds.
 	        Prompt before overwriting existing password unless forced.
 	        Optionally replace only the first line of an existing file with a new password.
-	    $PROGRAM rm [--recursive,-r] [--force,-f] pass-name
+	    $PROGRAM_PASS rm [--recursive,-r] [--force,-f] pass-name
 	        Remove existing password or directory, optionally forcefully.
-	    $PROGRAM mv [--force,-f] old-path new-path
+	    $PROGRAM_PASS mv [--force,-f] old-path new-path
 	        Renames or moves old-path to new-path, optionally forcefully, selectively reencrypting.
-	    $PROGRAM cp [--force,-f] old-path new-path
+	    $PROGRAM_PASS cp [--force,-f] old-path new-path
 	        Copies old-path to new-path, optionally forcefully, selectively reencrypting.
-	    $PROGRAM git git-command-args...
+	    $PROGRAM_PASS git git-command-args...
 	        If the password store is a git repository, execute a git command
 	        specified by git-command-args.
-	    $PROGRAM help
+	    $PROGRAM_TOP help
 	        Show this text.
-	    $PROGRAM version
+	    $PROGRAM_TOP version
 	        Show version information.
 	_EOF
 }
@@ -316,7 +319,7 @@ cmd_init() {
       ;;
     esac done
 
-  [[ $err -ne 0 ]] && die "Usage: $PROGRAM $COMMAND [-p subfolder] [-g guid] [-e] [-i]"
+  [[ $err -ne 0 ]] && die "Usage: $PROGRAM_PASS $COMMAND [-p subfolder] [-g guid] [-e] [-i]"
   [[ -n $id_path ]] && check_sneaky_paths "$id_path"
   [[ -n $id_path && ! -d $PREFIX/$id_path && -e $PREFIX/$id_path ]] && die "Error: $PREFIX/$id_path exists but is not a directory."
 
@@ -338,7 +341,7 @@ cmd_init() {
   mkdir -v -p "$tpl_dir"
 
   if [[ $edit -eq 1 ]]; then
-    [[ ! -f $pivy_id ]] && die "Error: $pivy_id does not exist. Run '$PROGRAM init' first."
+    [[ ! -f $pivy_id ]] && die "Error: $pivy_id does not exist. Run '$PROGRAM_PASS init' first."
     pivy-box tpl edit -i "$pivy_id" || die "Template editing failed."
   elif [[ $interactive -eq 1 ]]; then
     pivy-box tpl create -i "$tpl_name" || die "Template creation failed."
@@ -385,7 +388,7 @@ cmd_show() {
       ;;
     esac done
 
-  [[ $err -ne 0 || ($qrcode -eq 1 && $clip -eq 1) ]] && die "Usage: $PROGRAM $COMMAND [--clip[=line-number],-c[line-number]] [--qrcode[=line-number],-q[line-number]] [pass-name]"
+  [[ $err -ne 0 || ($qrcode -eq 1 && $clip -eq 1) ]] && die "Usage: $PROGRAM_PASS $COMMAND [--clip[=line-number],-c[line-number]] [--qrcode[=line-number],-q[line-number]] [pass-name]"
 
   local pass
   local path="$1"
@@ -413,21 +416,21 @@ cmd_show() {
     fi
     tree -N -C -l --noreport "$PREFIX/$path" 3>&- | tail -n +2 | sed -E 's/\.ebox(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
   elif [[ -z $path ]]; then
-    die 'Error: password store is empty. Try "piggy init".'
+    die 'Error: password store is empty. Try "piggy pass init".'
   else
     die "Error: $path is not in the password store."
   fi
 }
 
 cmd_find() {
-  [[ $# -eq 0 ]] && die "Usage: $PROGRAM $COMMAND pass-names..."
+  [[ $# -eq 0 ]] && die "Usage: $PROGRAM_PASS $COMMAND pass-names..."
   IFS="," eval 'echo "Search Terms: $*"'
   local terms="*$(printf '%s*|*' "$@")"
   tree -N -C -l --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" 3>&- | tail -n +2 | sed -E 's/\.ebox(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
 }
 
 cmd_grep() {
-  [[ $# -lt 1 ]] && die "Usage: $PROGRAM $COMMAND [GREPOPTIONS] search-string"
+  [[ $# -lt 1 ]] && die "Usage: $PROGRAM_PASS $COMMAND [GREPOPTIONS] search-string"
   local passfile grepresults
   while read -r -d "" passfile; do
     grepresults="$(piggy_decrypt "$passfile" | grep --color=always "$@")"
@@ -466,7 +469,7 @@ cmd_insert() {
       ;;
     esac done
 
-  [[ $err -ne 0 || ($multiline -eq 1 && $noecho -eq 0) || $# -ne 1 ]] && die "Usage: $PROGRAM $COMMAND [--echo,-e | --multiline,-m] [--force,-f] pass-name"
+  [[ $err -ne 0 || ($multiline -eq 1 && $noecho -eq 0) || $# -ne 1 ]] && die "Usage: $PROGRAM_PASS $COMMAND [--echo,-e | --multiline,-m] [--force,-f] pass-name"
   local path="${1%/}"
   local passfile="$PREFIX/$path.ebox"
   check_sneaky_paths "$path"
@@ -504,7 +507,7 @@ cmd_insert() {
 }
 
 cmd_edit() {
-  [[ $# -ne 1 ]] && die "Usage: $PROGRAM $COMMAND pass-name"
+  [[ $# -ne 1 ]] && die "Usage: $PROGRAM_PASS $COMMAND pass-name"
 
   local path="${1%/}"
   check_sneaky_paths "$path"
@@ -562,7 +565,7 @@ cmd_generate() {
       ;;
     esac done
 
-  [[ $err -ne 0 || ($# -ne 2 && $# -ne 1) || ($force -eq 1 && $inplace -eq 1) || ($qrcode -eq 1 && $clip -eq 1) ]] && die "Usage: $PROGRAM $COMMAND [--no-symbols,-n] [--clip,-c] [--qrcode,-q] [--in-place,-i | --force,-f] pass-name [pass-length]"
+  [[ $err -ne 0 || ($# -ne 2 && $# -ne 1) || ($force -eq 1 && $inplace -eq 1) || ($qrcode -eq 1 && $clip -eq 1) ]] && die "Usage: $PROGRAM_PASS $COMMAND [--no-symbols,-n] [--clip,-c] [--qrcode,-q] [--in-place,-i | --force,-f] pass-name [pass-length]"
   local path="$1"
   local length="${2:-$GENERATED_LENGTH}"
   check_sneaky_paths "$path"
@@ -623,7 +626,7 @@ cmd_delete() {
       break
       ;;
     esac done
-  [[ $# -ne 1 ]] && die "Usage: $PROGRAM $COMMAND [--recursive,-r] [--force,-f] pass-name"
+  [[ $# -ne 1 ]] && die "Usage: $PROGRAM_PASS $COMMAND [--recursive,-r] [--force,-f] pass-name"
   local path="$1"
   check_sneaky_paths "$path"
 
@@ -662,7 +665,7 @@ cmd_copy_move() {
       break
       ;;
     esac done
-  [[ $# -ne 2 ]] && die "Usage: $PROGRAM $COMMAND [--force,-f] old-path new-path"
+  [[ $# -ne 2 ]] && die "Usage: $PROGRAM_PASS $COMMAND [--force,-f] old-path new-path"
   check_sneaky_paths "$@"
   local old_path="$PREFIX/${1%/}"
   local old_dir="$old_path"
@@ -722,7 +725,7 @@ cmd_git() {
     export TMPDIR="$SECURE_TMPDIR"
     git -C "$INNER_GIT_DIR" "$@"
   else
-    die "Error: the password store is not a git repository. Try \"$PROGRAM git init\"."
+    die "Error: the password store is not a git repository. Try \"$PROGRAM_PASS git init\"."
   fi
 }
 

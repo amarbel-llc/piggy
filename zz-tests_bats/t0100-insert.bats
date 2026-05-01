@@ -4,8 +4,8 @@ setup() {
 }
 
 function insert_and_show_password { # @test
-  echo "Hello world" | "$PIGGY" insert -e cred1
-  run "$PIGGY" show cred1
+  echo "Hello world" | "$PIGGY" pass insert -e cred1
+  run "$PIGGY" pass show cred1
   assert_success
   assert_output "Hello world"
 }

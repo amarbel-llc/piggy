@@ -4,14 +4,14 @@ setup() {
 }
 
 function find_resolves_matching_files { # @test
-  "$PIGGY" generate Something/neat 19
-  "$PIGGY" generate Anotherthing/okay 19
-  "$PIGGY" generate Fish 19
-  "$PIGGY" generate Fishies 19
-  "$PIGGY" generate Fishthings/stuff 19
-  "$PIGGY" generate Fishthings/otherstuff 19
+  "$PIGGY" pass generate Something/neat 19
+  "$PIGGY" pass generate Anotherthing/okay 19
+  "$PIGGY" pass generate Fish 19
+  "$PIGGY" pass generate Fishies 19
+  "$PIGGY" pass generate Fishthings/stuff 19
+  "$PIGGY" pass generate Fishthings/otherstuff 19
 
-  run "$PIGGY" find fish
+  run "$PIGGY" pass find fish
   assert_success
   assert_output --partial "Fish"
   assert_output --partial "Fishies"
