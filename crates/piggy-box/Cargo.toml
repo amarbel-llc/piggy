@@ -29,3 +29,8 @@ chacha20poly1305 = "0.10"
 # Property-based fuzzer for the piv_box / ebox / stream / template
 # wire parsers. Test-only. See #40.
 proptest = "1"
+# Project Wycheproof test vectors for cross-checking primitives
+# (ECDH P-256/P-384, ChaCha20-Poly1305, AES-256-GCM, HMAC-SHA-256)
+# against adversarial / malformed inputs. Test-only; piggy-box's
+# production binary never compiles against it.
+wycheproof = "0.6"
