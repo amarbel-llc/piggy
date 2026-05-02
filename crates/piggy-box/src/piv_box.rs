@@ -1048,4 +1048,169 @@ mod tests {
             assert_eq!(ids.len(), 3, "RFC 0002 §A pins exactly 3 vectors");
         }
     }
+
+    /// Project Wycheproof ECDH test vectors replayed against piggy's
+    /// `ecdh_derive` decode chain (`EcPoint::from_bytes` ->
+    /// `EcKey::from_public_key` -> `ecdh_derive`). The vectors carry
+    /// adversarial public keys: off-curve points, identity, low-order,
+    /// wrong-curve, malformed encodings. The expected outcome of each
+    /// vector is encoded in `result`:
+    ///
+    ///   Valid       => derive must succeed AND match `shared_secret`
+    ///   Invalid     => derive must error somewhere in the chain
+    ///   Acceptable  => either outcome is permitted (typically a
+    ///                  compatibility carve-out the upstream policy
+    ///                  flags but does not require)
+    ///
+    /// Failure in any of `EcPoint::from_bytes`, `EcKey::from_public_key`,
+    /// or `Deriver::set_peer/derive` counts as "errored" — that mirrors
+    /// what an attacker-controlled box would actually exercise via
+    /// `PivBox::open_offline` (see piv_box.rs:189).
+    ///
+    /// The `_ecpoint_` schema is the right one for piggy: the wire
+    /// `eckey8` field carries raw SEC1 octets (uncompressed `04‖X‖Y`
+    /// or compressed `02/03‖X`), not ASN.1 SubjectPublicKeyInfo.
+    /// Vectors whose public key uses a compressed encoding flow
+    /// through unchanged — `EcPoint::from_bytes` accepts both forms,
+    /// matching what `piv_box.rs::open_offline` accepts on the wire.
+    mod wycheproof_ecdh {
+        use super::*;
+        use openssl::bn::{BigNum, BigNumContext};
+        use wycheproof::ecdh::{EcdhEncoding, TestName, TestSet};
+        use wycheproof::{EllipticCurve, TestResult};
+
+        fn priv_key_from_scalar(curve: EcCurve, scalar_bytes: &[u8]) -> Option<EcKey<Private>> {
+            let group = EcGroup::from_curve_name(curve.nid()).ok()?;
+            let ctx = BigNumContext::new().ok()?;
+            let scalar = BigNum::from_slice(scalar_bytes).ok()?;
+            let mut pub_point = EcPoint::new(&group).ok()?;
+            pub_point.mul_generator(&group, &scalar, &ctx).ok()?;
+            // Guard the degenerate scalar=0 case: mul_generator yields
+            // the point-at-infinity, which `from_private_components`
+            // would happily wrap into an unusable EcKey. Wycheproof's
+            // ECDH sets never carry such scalars, but be defensive.
+            if pub_point.is_infinity(&group) {
+                return None;
+            }
+            EcKey::from_private_components(&group, &scalar, &pub_point).ok()
+        }
+
+        /// Mirror of `PivBox::open_offline`'s decode chain (piv_box.rs:189):
+        /// raw SEC1 bytes -> EcPoint -> EcKey<Public> -> ecdh_derive.
+        /// Any step erroring is reported as `Err`.
+        fn try_derive(
+            curve: EcCurve,
+            priv_scalar: &[u8],
+            pub_bytes: &[u8],
+        ) -> std::result::Result<Vec<u8>, String> {
+            let group = EcGroup::from_curve_name(curve.nid())
+                .map_err(|e| format!("group: {e}"))?;
+            let mut ctx = BigNumContext::new().map_err(|e| format!("ctx: {e}"))?;
+            let priv_key = priv_key_from_scalar(curve, priv_scalar)
+                .ok_or_else(|| "priv scalar invalid".to_string())?;
+            let pub_point = EcPoint::from_bytes(&group, pub_bytes, &mut ctx)
+                .map_err(|e| format!("from_bytes: {e}"))?;
+            let pub_key = EcKey::from_public_key(&group, &pub_point)
+                .map_err(|e| format!("from_public_key: {e}"))?;
+            ecdh_derive(&priv_key, &pub_key).map_err(|e| format!("derive: {e}"))
+        }
+
+        fn wycheproof_curve_to_piggy(c: EllipticCurve) -> Option<EcCurve> {
+            match c {
+                EllipticCurve::Secp256r1 => Some(EcCurve::NistP256),
+                EllipticCurve::Secp384r1 => Some(EcCurve::NistP384),
+                _ => None,
+            }
+        }
+
+        fn run_set(name: TestName, expected: EcCurve) {
+            let set = TestSet::load(name).expect("load wycheproof set");
+            let mut valid_seen = 0usize;
+            let mut invalid_seen = 0usize;
+            for group in &set.test_groups {
+                if group.encoding != EcdhEncoding::EcPoint {
+                    continue;
+                }
+                let curve = match wycheproof_curve_to_piggy(group.curve) {
+                    Some(c) if c == expected => c,
+                    _ => continue,
+                };
+                for tc in &group.tests {
+                    match tc.result {
+                        TestResult::Valid => valid_seen += 1,
+                        TestResult::Invalid => invalid_seen += 1,
+                        TestResult::Acceptable => {}
+                    }
+                    let got = try_derive(curve, &tc.private_key, &tc.public_key);
+                    match (&tc.result, &got) {
+                        (TestResult::Valid, Ok(secret)) => {
+                            assert_eq!(
+                                secret.as_slice(),
+                                tc.shared_secret.as_slice(),
+                                "tcId {} ({}): valid vector produced wrong shared secret \
+                                 (flags={:?})",
+                                tc.tc_id,
+                                tc.comment,
+                                tc.flags,
+                            );
+                        }
+                        (TestResult::Valid, Err(e)) => panic!(
+                            "tcId {} ({}): valid vector errored: {e} (flags={:?})",
+                            tc.tc_id, tc.comment, tc.flags,
+                        ),
+                        (TestResult::Invalid, Ok(secret)) => {
+                            // The only safe way an "invalid" vector
+                            // can succeed is if the derived secret
+                            // happens to equal the listed value AND
+                            // every flag is in the "acceptable for
+                            // compat" allow-list. We don't grant any
+                            // such compat here — invalid means error.
+                            panic!(
+                                "tcId {} ({}): invalid vector unexpectedly produced \
+                                 secret {} (flags={:?})",
+                                tc.tc_id,
+                                tc.comment,
+                                hex::encode(secret),
+                                tc.flags,
+                            );
+                        }
+                        (TestResult::Invalid, Err(_)) => {}
+                        (TestResult::Acceptable, _) => {
+                            // Either outcome permitted; if it
+                            // succeeded, the secret must still match.
+                            if let Ok(secret) = &got {
+                                assert_eq!(
+                                    secret.as_slice(),
+                                    tc.shared_secret.as_slice(),
+                                    "tcId {} ({}): acceptable vector succeeded but \
+                                     produced wrong shared secret (flags={:?})",
+                                    tc.tc_id,
+                                    tc.comment,
+                                    tc.flags,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // Both buckets MUST be non-empty: a regression that silently
+            // drops the invalid-vector groups would otherwise pass.
+            assert!(
+                valid_seen > 0 && invalid_seen > 0,
+                "wycheproof set {name:?} produced \
+                 {valid_seen} valid / {invalid_seen} invalid vectors — \
+                 expected both buckets populated; group filter is wrong",
+            );
+        }
+
+        #[test]
+        fn wycheproof_p256_ecpoint() {
+            run_set(TestName::EcdhSecp256r1Ecpoint, EcCurve::NistP256);
+        }
+
+        #[test]
+        fn wycheproof_p384_ecpoint() {
+            run_set(TestName::EcdhSecp384r1Ecpoint, EcCurve::NistP384);
+        }
+    }
 }
