@@ -77,4 +77,4 @@ macOS support.
 
 # SEE ALSO
 
-*piggy*(1), *piggy-agent*(1)
+*piggy*(1), *piggy-agent*(1), *piggy-piv-slots*(7)

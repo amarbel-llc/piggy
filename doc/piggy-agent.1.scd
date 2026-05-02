@@ -164,4 +164,4 @@ eval $(piggy agent -k)
 # SEE ALSO
 
 *piggy*(1), *pivy-agent*(1), *pivy-box*(1), *pivy-tool*(1), *ssh-agent*(1),
-*ssh-add*(1)
+*ssh-add*(1), *piggy-piv-slots*(7)

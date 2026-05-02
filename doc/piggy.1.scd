@@ -344,7 +344,8 @@ _EDITOR_
 # SEE ALSO
 
 *piggy-agent*(1), *pivy-box*(1), *pivy-tool*(1), *pivy-agent*(1), *git*(1),
-*tree*(1), *tr*(1), *xclip*(1), *wl-clipboard*(1), *qrencode*(1)
+*tree*(1), *tr*(1), *xclip*(1), *wl-clipboard*(1), *qrencode*(1),
+*piggy-piv-slots*(7)
 
 # AUTHOR
 
