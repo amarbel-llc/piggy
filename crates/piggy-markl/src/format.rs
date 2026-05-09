@@ -53,19 +53,23 @@ impl FormatId {
         }
     }
 
-    /// Required payload size in bytes, or `None` for variable-size
-    /// formats (the SSH wire-format ones).
-    pub fn size(self) -> Option<usize> {
+    /// Required payload size in bytes. RFC 0002 §5 corrected the
+    /// `*_ssh` formats from "variable" to fixed sizes during the
+    /// landing of madder#150 — the SSH-agent integration is
+    /// implementation-internal, not part of the wire format.
+    pub fn size(self) -> usize {
         match self {
-            FormatId::PivyEcdhP256Pub | FormatId::EcdsaP256Pub => Some(33),
+            FormatId::PivyEcdhP256Pub
+            | FormatId::EcdsaP256Pub
+            | FormatId::EcdsaP256Ssh => 33,
             FormatId::Sha256
             | FormatId::Blake2b256
             | FormatId::Ed25519Pub
             | FormatId::AgeX25519Pub
             | FormatId::AgeX25519Sec
-            | FormatId::Nonce => Some(32),
-            FormatId::Ed25519Sec | FormatId::Ed25519Sig | FormatId::EcdsaP256Sig => Some(64),
-            FormatId::Ed25519Ssh | FormatId::EcdsaP256Ssh => None,
+            | FormatId::Nonce
+            | FormatId::Ed25519Ssh => 32,
+            FormatId::Ed25519Sec | FormatId::Ed25519Sig | FormatId::EcdsaP256Sig => 64,
         }
     }
 
@@ -130,12 +134,13 @@ mod tests {
 
     #[test]
     fn pivy_ecdh_p256_pub_size_is_33() {
-        assert_eq!(FormatId::PivyEcdhP256Pub.size(), Some(33));
+        assert_eq!(FormatId::PivyEcdhP256Pub.size(), 33);
     }
 
     #[test]
-    fn variable_size_formats_return_none() {
-        assert_eq!(FormatId::Ed25519Ssh.size(), None);
-        assert_eq!(FormatId::EcdsaP256Ssh.size(), None);
+    fn ssh_formats_have_fixed_sizes_per_rfc_0002() {
+        // RFC 0002 §5: ssh formats are fixed-size, not variable.
+        assert_eq!(FormatId::Ed25519Ssh.size(), 32);
+        assert_eq!(FormatId::EcdsaP256Ssh.size(), 33);
     }
 }

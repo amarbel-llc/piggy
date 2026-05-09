@@ -64,14 +64,13 @@ impl Id {
         format: FormatId,
         data: Vec<u8>,
     ) -> Result<Self, ParseError> {
-        if let Some(expected) = format.size() {
-            if data.len() != expected {
-                return Err(ParseError::WrongSize {
-                    format,
-                    expected,
-                    actual: data.len(),
-                });
-            }
+        let expected = format.size();
+        if data.len() != expected {
+            return Err(ParseError::WrongSize {
+                format,
+                expected,
+                actual: data.len(),
+            });
         }
         if let Some(p) = &purpose {
             p.validate_format(format)?;
@@ -92,26 +91,31 @@ impl Id {
     }
 
     /// Render the markl ID in wire form. Always lowercase.
+    ///
+    /// When a purpose is present the blech32 HRP is the combined
+    /// string `purpose@format` so the checksum covers both parts —
+    /// matches madder's MarshalText (RFC 0002 §3) after the
+    /// purpose-aware fix that landed with madder#150.
     pub fn to_wire(&self) -> String {
-        let body = blech32::encode(self.format.as_str(), &self.data)
-            .expect("encode of validated payload cannot fail");
-        match &self.purpose {
-            Some(p) => format!("{}@{}", p.as_str(), body),
-            None => body,
-        }
+        let hrp = match &self.purpose {
+            Some(p) => format!("{}@{}", p.as_str(), self.format.as_str()),
+            None => self.format.as_str().to_string(),
+        };
+        blech32::encode(&hrp, &self.data).expect("encode of validated payload cannot fail")
     }
 
-    /// Parse a wire-form markl ID. Splits at the first `@` (matches
-    /// Go's `strings.Cut`).
+    /// Parse a wire-form markl ID per RFC 0002 §4. blech32-decodes
+    /// the whole input first (HRP may include `purpose@format`),
+    /// then splits the decoded HRP on the first `@` to recover the
+    /// purpose.
     pub fn parse(s: &str) -> Result<Self, ParseError> {
-        let (purpose_str, body) = match s.find('@') {
-            Some(i) => (Some(&s[..i]), &s[i + 1..]),
-            None => (None, s),
+        let (combined_hrp, data) = blech32::decode(s)?;
+        let (purpose_str, format_str) = match combined_hrp.find('@') {
+            Some(i) => (Some(&combined_hrp[..i]), &combined_hrp[i + 1..]),
+            None => (None, combined_hrp.as_str()),
         };
         let purpose = purpose_str.map(PurposeId::parse);
-
-        let (hrp, data) = blech32::decode(body)?;
-        let format = FormatId::parse(&hrp)?;
+        let format = FormatId::parse(format_str)?;
 
         Self::new(purpose, format, data)
     }
@@ -211,25 +215,29 @@ mod tests {
     #[test]
     fn purpose_carrying_unknown_string_parses_but_rejects_validation() {
         let payload = pivy_pubkey_payload();
-        // Encode a body with a known format, then prepend a non-piggy
-        // purpose. Constructed Id::parse goes through Id::new which
-        // calls validate_format → Other rejects everything.
-        let body = blech32::encode("pivy_ecdh_p256_pub", &payload).unwrap();
-        let wire = format!("future-purpose-v0@{body}");
+        // Build a canonical (RFC 0002) wire string with HRP =
+        // "future-purpose-v0@pivy_ecdh_p256_pub", then assert
+        // parse → Id::new → validate_format → Other rejects.
+        let wire =
+            blech32::encode("future-purpose-v0@pivy_ecdh_p256_pub", &payload).unwrap();
         let err = Id::parse(&wire).unwrap_err();
         assert!(matches!(err, ParseError::Incompatible(_)));
     }
 
     #[test]
-    fn first_at_is_the_purpose_separator() {
-        // If a wire string somehow contained a second `@`, the first
-        // one is what's split. (This shouldn't occur in practice
-        // because the purpose-id lexical rule excludes `@`, but
-        // documenting the parse rule.)
+    fn purpose_split_uses_first_at_in_hrp() {
+        // The `applyDecodedHRPAndData` step splits the decoded HRP
+        // on the first `@`. Since the purpose-id lexical rule
+        // excludes `@`, in practice there's only one — but document
+        // the parse rule.
         let payload = pivy_pubkey_payload();
-        let body = blech32::encode("pivy_ecdh_p256_pub", &payload).unwrap();
-        let wire = format!("piggy-recipient-v1@{body}");
+        let wire = blech32::encode(
+            "piggy-recipient-v1@pivy_ecdh_p256_pub",
+            &payload,
+        )
+        .unwrap();
         let parsed = Id::parse(&wire).unwrap();
         assert_eq!(parsed.purpose(), Some(&PurposeId::PiggyRecipientV1));
+        assert_eq!(parsed.format(), FormatId::PivyEcdhP256Pub);
     }
 }

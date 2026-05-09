@@ -1,0 +1,203 @@
+{
+  "vectors": [
+    {
+      "name": "format/sha256/non_trivial",
+      "format": "sha256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6"
+    },
+    {
+      "name": "format/sha256/all_zeros",
+      "format": "sha256",
+      "payload_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "encoded": "sha256-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqhtn2mr"
+    },
+    {
+      "name": "format/blake2b256/non_trivial",
+      "format": "blake2b256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400"
+    },
+    {
+      "name": "format/blake2b256/all_zeros",
+      "format": "blake2b256",
+      "payload_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "encoded": "blake2b256-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqncah0k"
+    },
+    {
+      "name": "format/ed25519_pub/non_trivial",
+      "format": "ed25519_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0srk9anc"
+    },
+    {
+      "name": "format/ed25519_sec/non_trivial",
+      "format": "ed25519_sec",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "ed25519_sec-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cw8gvm3"
+    },
+    {
+      "name": "format/ed25519_sig/non_trivial",
+      "format": "ed25519_sig",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cy4lu83"
+    },
+    {
+      "name": "format/ed25519_ssh/non_trivial",
+      "format": "ed25519_ssh",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "ed25519_ssh-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0slgq3w8"
+    },
+    {
+      "name": "format/ecdsa_p256_pub/non_trivial",
+      "format": "ecdsa_p256_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "ecdsa_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq8pfena"
+    },
+    {
+      "name": "format/ecdsa_p256_sig/non_trivial",
+      "format": "ecdsa_p256_sig",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "ecdsa_p256_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cywvqw8"
+    },
+    {
+      "name": "format/ecdsa_p256_ssh/non_trivial",
+      "format": "ecdsa_p256_ssh",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "ecdsa_p256_ssh-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqamtkgf"
+    },
+    {
+      "name": "format/age_x25519_pub/non_trivial",
+      "format": "age_x25519_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "age_x25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0scveleg"
+    },
+    {
+      "name": "format/age_x25519_sec/non_trivial",
+      "format": "age_x25519_sec",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "age_x25519_sec-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s56j7la"
+    },
+    {
+      "name": "format/pivy_ecdh_p256_pub/non_trivial",
+      "format": "pivy_ecdh_p256_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu"
+    },
+    {
+      "name": "format/nonce/non_trivial",
+      "format": "nonce",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "nonce-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0sy5af5l"
+    },
+    {
+      "name": "purpose/dodder-blob-digest-sha256-v1/blake2b256",
+      "purpose": "dodder-blob-digest-sha256-v1",
+      "format": "blake2b256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "dodder-blob-digest-sha256-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0spygtsw"
+    },
+    {
+      "name": "purpose/dodder-blob-digest-sha256-v1/sha256",
+      "purpose": "dodder-blob-digest-sha256-v1",
+      "format": "sha256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "dodder-blob-digest-sha256-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s45qmq9"
+    },
+    {
+      "name": "purpose/dodder-object-digest-v2/blake2b256",
+      "purpose": "dodder-object-digest-v2",
+      "format": "blake2b256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "dodder-object-digest-v2@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0swkplxd"
+    },
+    {
+      "name": "purpose/dodder-object-digest-v2/sha256",
+      "purpose": "dodder-object-digest-v2",
+      "format": "sha256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "dodder-object-digest-v2@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0sg87xuh"
+    },
+    {
+      "name": "purpose/dodder-object-sig-v2/ecdsa_p256_sig",
+      "purpose": "dodder-object-sig-v2",
+      "format": "ecdsa_p256_sig",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "dodder-object-sig-v2@ecdsa_p256_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0chf9n8a"
+    },
+    {
+      "name": "purpose/dodder-object-sig-v2/ed25519_sig",
+      "purpose": "dodder-object-sig-v2",
+      "format": "ed25519_sig",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "dodder-object-sig-v2@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0c57hs7s"
+    },
+    {
+      "name": "purpose/dodder-repo-public_key-v1/ecdsa_p256_pub",
+      "purpose": "dodder-repo-public_key-v1",
+      "format": "ecdsa_p256_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "dodder-repo-public_key-v1@ecdsa_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqc8380e"
+    },
+    {
+      "name": "purpose/dodder-repo-public_key-v1/ed25519_pub",
+      "purpose": "dodder-repo-public_key-v1",
+      "format": "ed25519_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "dodder-repo-public_key-v1@ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0stmhcu9"
+    },
+    {
+      "name": "purpose/dodder-repo-private_key-v1/ecdsa_p256_ssh",
+      "purpose": "dodder-repo-private_key-v1",
+      "format": "ecdsa_p256_ssh",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "dodder-repo-private_key-v1@ecdsa_p256_ssh-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqp3h7ur"
+    },
+    {
+      "name": "purpose/dodder-repo-private_key-v1/ed25519_sec",
+      "purpose": "dodder-repo-private_key-v1",
+      "format": "ed25519_sec",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "dodder-repo-private_key-v1@ed25519_sec-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0ckzz4dg"
+    },
+    {
+      "name": "purpose/dodder-repo-private_key-v1/ed25519_ssh",
+      "purpose": "dodder-repo-private_key-v1",
+      "format": "ed25519_ssh",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "dodder-repo-private_key-v1@ed25519_ssh-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6j7fuf"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "mixed_case",
+      "encoded": "sha256-QQQSYQCYQ5RQWZQFPG9SCRGWPUGPZYSNZS23V9CCRYDPK8QARC0S7LCGM6",
+      "error": "MixedCase"
+    },
+    {
+      "name": "missing_separator",
+      "encoded": "sha256qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6",
+      "error": "SeparatorMissing"
+    },
+    {
+      "name": "wrong_checksum",
+      "encoded": "sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgmq",
+      "error": "InvalidChecksum"
+    },
+    {
+      "name": "charset_violation",
+      "encoded": "sha256-bqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6",
+      "error": "InvalidCharacter"
+    },
+    {
+      "name": "wrong_size_for_format",
+      "encoded": "sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarckn6685",
+      "error": "WrongSize"
+    },
+    {
+      "name": "incompatible_purpose_format",
+      "encoded": "dodder-blob-digest-sha256-v1@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cx2pej3",
+      "error": "IncompatiblePurposeAndFormat"
+    }
+  ]
+}
