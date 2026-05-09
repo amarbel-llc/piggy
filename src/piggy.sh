@@ -292,8 +292,18 @@ cmd_usage() {
 }
 
 cmd_init() {
-  local opts id_path="" guid="" edit=0 interactive=0
-  opts="$($GETOPT -o p:g:ei -l path:,guid:,edit,interactive -n "$PROGRAM" -- "$@")"
+  # piggy 2.x: writes a piggy-owned `.piggy-ids` text file (RFC 0003)
+  # instead of pivy's binary `.pivy-id`. The recipient is identified
+  # by a markl ID of format `pivy_ecdh_p256_pub` carrying the
+  # `piggy-recipient-v1` purpose tag — see madder RFC 0002.
+  #
+  # Pre-2.x flags --edit / -i / -g were dropped (#69 / #74). Use
+  # `piggy pass recipients add/remove/sync` (phase 5) for incremental
+  # recipient management and `-k <markl-id>` here for the initial
+  # set. The auto-detect path (read pubkey from attached card →
+  # markl) is tracked separately and not yet wired.
+  local opts id_path="" key=""
+  opts="$($GETOPT -o p:k: -l path:,key: -n "$PROGRAM" -- "$@")"
   local err=$?
   eval set -- "$opts"
   while true; do case $1 in
@@ -301,17 +311,9 @@ cmd_init() {
       id_path="$2"
       shift 2
       ;;
-    -g | --guid)
-      guid="$2"
+    -k | --key)
+      key="$2"
       shift 2
-      ;;
-    -e | --edit)
-      edit=1
-      shift
-      ;;
-    -i | --interactive)
-      interactive=1
-      shift
       ;;
     --)
       shift
@@ -319,51 +321,54 @@ cmd_init() {
       ;;
     esac done
 
-  [[ $err -ne 0 ]] && die "Usage: $PROGRAM_PASS $COMMAND [-p subfolder] [-g guid] [-e] [-i]"
+  [[ $err -ne 0 ]] && die "Usage: $PROGRAM_PASS $COMMAND [-p subfolder] -k <markl-id>"
   [[ -n $id_path ]] && check_sneaky_paths "$id_path"
   [[ -n $id_path && ! -d $PREFIX/$id_path && -e $PREFIX/$id_path ]] && die "Error: $PREFIX/$id_path exists but is not a directory."
 
-  local pivy_id="$PREFIX/$id_path/.pivy-id"
+  local piggy_ids="$PREFIX/$id_path/.piggy-ids"
   local tpl_dir="$PREFIX/$id_path"
-  set_git "$pivy_id"
-
-  # pivy-box tpl create with local-guid defaults to slot 9D (Key Management),
-  # which is the correct PIV slot for encryption/decryption (ECDH key agreement)
-  # per NIST SP 800-73. Slot 9A (PIV Authentication) is for signing only.
-  #
-  # tpl create resolves template names via a path search (not direct file
-  # paths) and always prefers its compiled-in default dirs. We use a unique
-  # temp name, let pivy-box write it wherever it wants, then move the result
-  # into our store directory.
-  local tpl_name
-  tpl_name="piggy-init-$$"
+  set_git "$piggy_ids"
 
   mkdir -v -p "$tpl_dir"
 
-  if [[ $edit -eq 1 ]]; then
-    [[ ! -f $pivy_id ]] && die "Error: $pivy_id does not exist. Run '$PROGRAM_PASS init' first."
-    pivy-box tpl edit -i "$pivy_id" || die "Template editing failed."
-  elif [[ $interactive -eq 1 ]]; then
-    pivy-box tpl create -i "$tpl_name" || die "Template creation failed."
-    _piggy_move_tpl "$tpl_name" "$pivy_id"
-  elif [[ -n $guid ]]; then
-    pivy-box tpl create "$tpl_name" primary local-guid "$guid" || die "Template creation failed."
-    _piggy_move_tpl "$tpl_name" "$pivy_id"
-  else
-    # Auto-detect: find the first inserted PIV device
-    local detected_guid
-    detected_guid="$(pivy-tool list 2>/dev/null | grep '^ *guid:' | head -1 | awk '{print $2}')" || true
-    [[ -z $detected_guid ]] && die "Error: no PIV device found. Insert a YubiKey or specify -g <guid>."
-    echo "Using PIV device: $detected_guid"
-    pivy-box tpl create "$tpl_name" primary local-guid "$detected_guid" || die "Template creation failed."
-    _piggy_move_tpl "$tpl_name" "$pivy_id"
+  if [[ -z $key ]]; then
+    die "Error: piggy pass init requires -k <markl-id> in piggy 2.x. Auto-detect from attached card is not yet wired (see #74 follow-up)."
   fi
 
-  echo "Password store initialized${id_path:+ ($id_path)}"
-  git_add_file "$pivy_id" "Set pivy template${id_path:+ ($id_path)}."
+  # Validate the markl-id has the piggy 2.x recipient shape — bare
+  # `pivy_ecdh_p256_pub-...` or purpose-tagged
+  # `piggy-recipient-v1@pivy_ecdh_p256_pub-...`. RFC 0003 permits
+  # both as input; the next `piggy pass recipients` rewrite will
+  # canonicalise to the purpose-tagged form via the Rust
+  # piggy-markl codec (which re-checksums under the combined HRP).
+  # Canonicalising here in bash would need re-checksumming and
+  # bash can't do blech32, so we write the user's input verbatim.
+  if [[ $key != pivy_ecdh_p256_pub-* &&
+        $key != piggy-recipient-v1@pivy_ecdh_p256_pub-* ]]; then
+    die "Error: -k value must be a markl ID with format=pivy_ecdh_p256_pub (got: ${key%%-*}...)."
+  fi
 
+  # Atomic write: build the file, then mv into place.
+  local tmp="${piggy_ids}.tmp.$$"
+  {
+    echo "# .piggy-ids — piggy 2.x recipient template"
+    echo "# format: piggy-recipient-v1@pivy_ecdh_p256_pub-<blech32>  # optional comment"
+    echo "$key"
+  } >"$tmp"
+  mv "$tmp" "$piggy_ids" || {
+    rm -f "$tmp"
+    die "Error: failed to write $piggy_ids."
+  }
+
+  echo "Password store initialized${id_path:+ ($id_path)}"
+  git_add_file "$piggy_ids" "Set piggy recipients${id_path:+ ($id_path)}."
+
+  # Re-encrypt any pre-existing entries against the new recipient
+  # set. Fresh init is a no-op (no `.ebox` files in the tree). For
+  # re-init over an existing store, reencrypt_path needs the
+  # encrypt-path transition to land first (#75 / phase 5).
   reencrypt_path "$PREFIX/$id_path"
-  git_add_file "$PREFIX/$id_path" "Reencrypt password store using new pivy template${id_path:+ ($id_path)}."
+  git_add_file "$PREFIX/$id_path" "Reencrypt password store using new piggy recipients${id_path:+ ($id_path)}."
 }
 
 cmd_show() {
