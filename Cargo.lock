@@ -999,6 +999,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "piggy-ids"
+version = "0.1.0"
+dependencies = [
+ "piggy-markl",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "piggy-markl"
 version = "0.1.0"
 dependencies = [

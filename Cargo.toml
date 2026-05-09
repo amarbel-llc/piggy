@@ -4,6 +4,7 @@ members = [
     "crates/fib-wait-ready",
     "crates/piggy",
     "crates/piggy-box",
+    "crates/piggy-ids",
     "crates/piggy-markl",
     "crates/piggy-piv",
 ]

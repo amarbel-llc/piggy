@@ -23,7 +23,7 @@ use crate::blech32;
 use crate::format::{FormatId, UnknownFormat};
 use crate::purpose::{Incompatible, PurposeId};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Id {
     purpose: Option<PurposeId>,
     format: FormatId,

@@ -1,0 +1,17 @@
+[package]
+name = "piggy-ids"
+version = "0.1.0"
+edition = "2021"
+description = "Reader/writer for `.piggy-ids` text recipient files"
+# Lives outside piggy-box so consumers that only need to read or
+# manipulate recipient files (the `recipients` CLI verb family in
+# phase 5, the `init` rewrite in phase 4) don't drag PCSC or other
+# encrypt-internals into their dep graph. See piggy#72 for the phase
+# tracker and piggy#69 for the v2.0 cutover umbrella.
+
+[dependencies]
+piggy-markl = { path = "../piggy-markl" }
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
