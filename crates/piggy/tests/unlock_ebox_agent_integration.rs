@@ -169,7 +169,7 @@ fn unlock_ebox_against_real_agent() {
             config_type: EboxConfigType::Primary,
             n: 1,
             parts: vec![EboxTplPart {
-                guid: card_guid.clone(),
+                guid: Some(card_guid.clone()),
                 slot: DEFAULT_SLOT,
                 name: Some("piggy-test:unlock-integration".into()),
                 pubkey: card_sec1_compressed,
