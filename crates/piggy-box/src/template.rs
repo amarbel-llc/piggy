@@ -43,7 +43,12 @@ impl EboxConfigType {
 
 #[derive(Debug, Clone)]
 pub struct EboxTplPart {
-    pub guid: Guid,
+    /// Optional PIV card hardware GUID. Piggy 2.x produces guid-less
+    /// templates (#69 / #70); the runtime in `vendor/pivy/src/piv.c`
+    /// `piv_box_find_token` matches by pubkey alone via its
+    /// `allslots:` fallback when `pdb_guidslot_valid` is false. Set
+    /// to `Some(_)` for back-compat with guid-bearing templates.
+    pub guid: Option<Guid>,
     pub slot: u8,
     pub name: Option<String>,
     pub pubkey: Vec<u8>,
@@ -158,9 +163,11 @@ fn write_tpl_part(w: &mut WireWriter, part: &EboxTplPart) -> Result<()> {
     w.put_cstring8(part.pubkey_curve.wire_name())?;
     w.put_eckey8(&part.pubkey)?;
 
-    // GUID tag
-    w.put_u8(PART_GUID);
-    w.put_string8(part.guid.as_bytes())?;
+    // GUID tag — optional in piggy 2.x; emitted only when present
+    if let Some(guid) = &part.guid {
+        w.put_u8(PART_GUID);
+        w.put_string8(guid.as_bytes())?;
+    }
 
     // NAME tag (optional)
     if let Some(name) = &part.name {
@@ -225,7 +232,9 @@ pub(crate) fn read_tpl_part(r: &mut WireReader) -> Result<EboxTplPart> {
         tag = r.get_u8()?;
     }
 
-    let guid = guid.ok_or_else(|| BoxError::Wire("template part missing GUID".into()))?;
+    // GUID is optional in piggy 2.x — the patched pivy parser
+    // accepts templates without it, and the runtime falls back to
+    // pubkey-only matching. PUBKEY and curve remain compulsory.
     let pubkey = pubkey.ok_or_else(|| BoxError::Wire("template part missing PUBKEY".into()))?;
     let pubkey_curve =
         pubkey_curve.ok_or_else(|| BoxError::Wire("template part missing curve".into()))?;
@@ -293,7 +302,7 @@ mod tests {
             .unwrap();
 
         EboxTplPart {
-            guid: Guid::from_hex("AABBCCDD11223344AABBCCDD11223344").unwrap(),
+            guid: Some(Guid::from_hex("AABBCCDD11223344AABBCCDD11223344").unwrap()),
             slot: DEFAULT_SLOT,
             name: Some("piggy-test:template-fixture".to_string()),
             pubkey,
@@ -326,7 +335,11 @@ mod tests {
             Some("piggy-test:template-fixture")
         );
         assert_eq!(
-            tpl2.configs[0].parts[0].guid.to_hex(),
+            tpl2.configs[0].parts[0]
+                .guid
+                .as_ref()
+                .expect("test fixture sets guid; round-trip must preserve it")
+                .to_hex(),
             "AABBCCDD11223344AABBCCDD11223344"
         );
         assert_eq!(tpl2.configs[0].parts[0].slot, DEFAULT_SLOT);
@@ -509,7 +522,7 @@ mod tests {
             )
                 .prop_map(|(guid_bytes, slot, name, (pubkey_curve, pubkey), cak)| {
                     EboxTplPart {
-                        guid: Guid::from_bytes(&guid_bytes).unwrap(),
+                        guid: Some(Guid::from_bytes(&guid_bytes).unwrap()),
                         slot,
                         name,
                         pubkey,

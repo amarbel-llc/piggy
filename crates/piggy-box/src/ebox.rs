@@ -129,7 +129,14 @@ impl Ebox {
                 let recipient_pub = EcKey::from_public_key(&group, &recipient_point)?;
 
                 let mut pbox = PivBox::new(curve);
-                pbox.guid_slot = Some((tpl_part.guid.clone(), tpl_part.slot));
+                // Piggy 2.x: guid is optional. When the template part
+                // has no guid, the produced PivBox carries no
+                // guid_slot and decryption falls through to the
+                // pubkey-only `allslots:` path in pivy's runtime.
+                pbox.guid_slot = tpl_part
+                    .guid
+                    .as_ref()
+                    .map(|g| (g.clone(), tpl_part.slot));
 
                 let plaintext = match &shares {
                     Some(ss) => ss[i].clone(),
@@ -139,7 +146,7 @@ impl Ebox {
                 pbox.seal_offline_with_ephemeral(&recipient_pub, ephem)?;
 
                 parts.push(EboxPart {
-                    guid: Some(tpl_part.guid.clone()),
+                    guid: tpl_part.guid.clone(),
                     slot: tpl_part.slot,
                     name: tpl_part.name.clone(),
                     pubkey: Some(tpl_part.pubkey.clone()),
@@ -600,7 +607,7 @@ mod tests {
                 config_type: EboxConfigType::Primary,
                 n: 1,
                 parts: vec![EboxTplPart {
-                    guid: Guid::from_hex("AABBCCDD11223344AABBCCDD11223344").unwrap(),
+                    guid: Some(Guid::from_hex("AABBCCDD11223344AABBCCDD11223344").unwrap()),
                     slot: DEFAULT_SLOT,
                     name: Some("piggy-test:ebox-fixture".to_string()),
                     pubkey,
@@ -709,7 +716,7 @@ mod tests {
                 prop::option::of("piggy-test:proptest-[a-z0-9]{1,8}"),
             )
                 .prop_map(|(guid_bytes, (pubkey_curve, pubkey), name)| EboxTplPart {
-                    guid: piggy_piv::Guid::from_bytes(&guid_bytes).unwrap(),
+                    guid: Some(piggy_piv::Guid::from_bytes(&guid_bytes).unwrap()),
                     slot: DEFAULT_SLOT,
                     name,
                     pubkey,

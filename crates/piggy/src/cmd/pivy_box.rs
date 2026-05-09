@@ -414,7 +414,7 @@ fn cmd_tpl_create(args: &[&str]) -> i32 {
             config_type: piggy_box::EboxConfigType::Primary,
             n: 1,
             parts: vec![piggy_box::EboxTplPart {
-                guid: guid.clone(),
+                guid: Some(guid.clone()),
                 slot: piggy_box::template::DEFAULT_SLOT,
                 name: None,
                 pubkey: ec_pubkey_bytes,
@@ -491,7 +491,12 @@ fn cmd_tpl_show(args: &[&str]) -> i32 {
             config.parts.len()
         );
         for (j, part) in config.parts.iter().enumerate() {
-            print!("  part {j}: guid={}", part.guid.to_hex());
+            let guid_str = part
+                .guid
+                .as_ref()
+                .map(|g| g.to_hex())
+                .unwrap_or_else(|| "(none — piggy 2.x guid-less)".to_string());
+            print!("  part {j}: guid={guid_str}");
             println!(", slot={:02x}", part.slot);
             if let Some(ref name) = part.name {
                 println!("    name: {name}");

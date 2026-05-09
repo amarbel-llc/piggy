@@ -186,7 +186,7 @@ mod tests {
                 config_type: EboxConfigType::Primary,
                 n: 1,
                 parts: vec![EboxTplPart {
-                    guid: Guid::from_hex("AABBCCDD11223344AABBCCDD11223344").unwrap(),
+                    guid: Some(Guid::from_hex("AABBCCDD11223344AABBCCDD11223344").unwrap()),
                     slot: crate::template::DEFAULT_SLOT,
                     name: Some("piggy-test:stream-fixture".to_string()),
                     pubkey,
@@ -319,7 +319,7 @@ mod tests {
                         config_type: EboxConfigType::Primary,
                         n: 1,
                         parts: vec![EboxTplPart {
-                            guid: Guid::from_bytes(&[0u8; 16]).unwrap(),
+                            guid: Some(Guid::from_bytes(&[0u8; 16]).unwrap()),
                             slot: DEFAULT_SLOT,
                             name: Some("piggy-test:proptest-stream".to_string()),
                             pubkey,
