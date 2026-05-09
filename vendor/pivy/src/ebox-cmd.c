@@ -478,16 +478,13 @@ errf_t *local_unlock(struct piv_ecdh_box *box, struct sshkey *cak,
   if (agerr == ERRF_OK)
     return (ERRF_OK);
 
-  if (!piv_box_has_guidslot(box)) {
-    if (agerr) {
-      return (errf("AgentError", agerr,
-                   "ssh-agent unlock "
-                   "failed, and box does not have GUID/slot info"));
-    }
-    return (errf("NoGUIDSlot", NULL,
-                 "box does not have GUID "
-                 "and slot information, can't unlock with local hardware"));
-  }
+  /*
+   * piggy 2.x: guid-less boxes are permitted (see amarbel-llc/piggy
+   * #70). The runtime in piv.c piv_box_find_token already supports
+   * matching by pubkey alone via its allslots: fallback when
+   * pdb_guidslot_valid is false. We no longer early-return here —
+   * fall through to enumerate-and-match.
+   */
 
   if (ebox_ctx == NULL) {
     ebox_ctx = piv_open();
@@ -509,7 +506,7 @@ errf_t *local_unlock(struct piv_ecdh_box *box, struct sshkey *cak,
   if (ebox_enum_tokens != NULL) {
     tokens = ebox_enum_tokens;
     err = NULL;
-  } else {
+  } else if (piv_box_has_guidslot(box)) {
     err = piv_find(ebox_ctx, piv_box_guid(box), GUID_LEN, &tokens);
     if (errf_caused_by(err, "NotFoundError")) {
       errf_free(err);
@@ -523,16 +520,37 @@ errf_t *local_unlock(struct piv_ecdh_box *box, struct sshkey *cak,
         ebox_enum_tokens = tokens;
       }
     }
+  } else {
+    /*
+     * piggy 2.x: no GUID hint, so skip piv_find (which would
+     * VERIFY-abort calling piv_box_guid) and enumerate every
+     * attached token. piv_box_find_token's allslots: path
+     * matches by pubkey alone.
+     */
+    err = piv_enumerate(ebox_ctx, &tokens);
+    if (err && agerr) {
+      err = errf("AgentError", agerr,
+                 "ssh-agent unlock failed, and no PIV tokens were "
+                 "detected on the local system");
+    } else if (!err) {
+      ebox_enum_tokens = tokens;
+    }
   }
   if (err)
     goto out;
 
   err = piv_box_find_token(tokens, box, &token, &slot);
   if (err) {
-    err = errf("LocalUnlockError", err,
-               "failed to find token "
-               "with GUID %s and key for box",
-               piv_box_guid_hex(box));
+    if (piv_box_has_guidslot(box)) {
+      err = errf("LocalUnlockError", err,
+                 "failed to find token "
+                 "with GUID %s and key for box",
+                 piv_box_guid_hex(box));
+    } else {
+      err = errf("LocalUnlockError", err,
+                 "failed to find token "
+                 "with key for box (no GUID hint; piggy 2.x guid-less)");
+    }
     goto out;
   }
 

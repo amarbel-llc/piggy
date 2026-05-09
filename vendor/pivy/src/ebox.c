@@ -865,9 +865,20 @@ sshbuf_get_ebox_tpl_part(struct sshbuf *buf, struct ebox_tpl_part **ppart)
 
 	part->etp_slot = slotid;
 
-	if (part->etp_pubkey == NULL || !gotguid) {
+	/*
+	 * piggy 2.x: guid is no longer compulsory. The runtime path
+	 * (piv_box_find_token in piv.c) already supports identifying
+	 * the right card by pubkey alone via its allslots: fallback
+	 * when pdb_guidslot_valid is false. Silence the gotguid lint:
+	 * it remains useful for documenting which inputs carried a
+	 * guid tag, but is no longer load-bearing for parser
+	 * acceptance. See amarbel-llc/piggy #70 for the cutover.
+	 */
+	(void) gotguid;
+
+	if (part->etp_pubkey == NULL) {
 		err = errf("IncompletePartError", NULL, "ebox part missing "
-		    "compulsory tags (pubkey or guid) at +%zx",
+		    "compulsory tag (pubkey) at +%zx",
 		    sshbuf_offset(buf));
 		goto out;
 	}
@@ -1843,7 +1854,12 @@ sshbuf_get_ebox_part(struct sshbuf *buf, const struct ebox *ebox,
 				err = ERRF_NOMEM;
 				goto out;
 			}
-			box->pdb_guidslot_valid = B_TRUE;
+			/*
+			 * pdb_guidslot_valid is finalised after the parse
+			 * loop based on whether a guid tag was actually
+			 * seen. piggy 2.x permits guid-less boxes (#70).
+			 */
+			box->pdb_guidslot_valid = B_FALSE;
 			box->pdb_slot = PIV_SLOT_KEY_MGMT;
 			box->pdb_free_str = B_TRUE;
 			rc = sshbuf_get_cstring8(buf, (char **)&box->pdb_cipher,
@@ -1934,16 +1950,20 @@ sshbuf_get_ebox_part(struct sshbuf *buf, const struct ebox *ebox,
 		goto out;
 	}
 
-	if (!gotguid) {
-		err = errf("MissingTagError", NULL,
-		    "ebox part did not contain 'guid' tag");
-		goto out;
-	}
-
+	/*
+	 * piggy 2.x: guid is optional. When present, copy it into the
+	 * inner box for the fast-path GUID match in piv_box_find_token;
+	 * when absent, leave pdb_guidslot_valid false so the runtime
+	 * uses the slot-9D-by-pubkey or allslots-by-pubkey fallback
+	 * paths. See amarbel-llc/piggy #70 for the cutover.
+	 */
 	part->ep_box->pdb_slot = slot;
 	tpart->etp_slot = slot;
-	bcopy(tpart->etp_guid, part->ep_box->pdb_guid,
-	    sizeof (part->ep_box->pdb_guid));
+	if (gotguid) {
+		bcopy(tpart->etp_guid, part->ep_box->pdb_guid,
+		    sizeof (part->ep_box->pdb_guid));
+		part->ep_box->pdb_guidslot_valid = B_TRUE;
+	}
 
 	if (tpart->etp_pubkey == NULL) {
 		rc = sshkey_demote(part->ep_box->pdb_pub, &tpart->etp_pubkey);
