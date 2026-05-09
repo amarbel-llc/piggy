@@ -1,0 +1,18 @@
+[package]
+name = "piggy-markl"
+version = "0.1.0"
+edition = "2021"
+# Prototype shim for the markl ID format used by amarbel-llc/madder.
+# Hand-ported from the Go reference at
+# https://github.com/amarbel-llc/madder/tree/main/go/internal/{alfa/blech32,bravo/markl}
+# while RFC 0002 (madder#150) is still in flight. See piggy#71 for the
+# umbrella tracker; once the official spec lands the public API here
+# stays stable but the impl can be swapped or deferred to a real
+# upstream crate.
+description = "Markl ID codec (blech32 + format-id dispatch + purpose validation) — prototype shim"
+
+[dependencies]
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
