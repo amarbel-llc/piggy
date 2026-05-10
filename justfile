@@ -82,6 +82,9 @@ test-bats-conformance-interop: build-rust
   # escapes — without them subprocesses cannot connect to pcscd.comm
   # (a Unix socket) and libpcsclite reports "Smart card resource
   # manager is not running". See CLAUDE.md "Debugging → bats + PCSC".
+  # PIGGY_IDS_REAL is set by zz-tests_bats/common.bash; tests under
+  # conformance/ that bypass the mock-piggy-ids symlink (notably
+  # piggy_box_decrypt_interop.bats) reference it directly.
   INTEROP_GUID="$guid" \
     REAL_PIVY_BOX="$real_pivy_box" \
     PCSCLITE_CSOCK_NAME="$PCSCLITE_CSOCK_NAME" \
@@ -90,7 +93,8 @@ test-bats-conformance-interop: build-rust
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
     BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding --tap \
-    zz-tests_bats/conformance/piggy_box_interop.bats
+    zz-tests_bats/conformance/piggy_box_interop.bats \
+    zz-tests_bats/conformance/piggy_box_decrypt_interop.bats
 
 test-bats-file *FILES: build-rust
     BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
