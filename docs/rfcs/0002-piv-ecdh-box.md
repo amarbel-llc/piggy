@@ -37,6 +37,18 @@ variant with a 0-byte wire IV. Boxes sealed under that earlier revision are
 not interoperable with this one. piggy is greenfield; no real-world data was
 sealed under the earlier shape.
 
+A further revision under #81 (2026-05-10) renamed the wire cipher string
+from the bare `chacha20-poly1305` to `chacha20-poly1305@piggy.amarbel.net`
+to disambiguate from the OpenSSH-compat alias that pivy's vendored
+`openssh.patch` registers under the bare name (and which carries
+`iv_len=0`, key=64, internal sequence-number nonce — fundamentally
+different cipher). Wire layout and cipher semantics are otherwise
+unchanged from #36; only the cstring8 cipher field's bytes shift, and
+the post-#36 RFC 7539 / RFC 8439 construction is preserved verbatim.
+Boxes sealed under the bare name are not interoperable with this
+revision; again, piggy is greenfield, no real-world data was sealed
+under the prior name.
+
 ## Introduction
 
 piggy encrypts data to PIV smart card holders using a construction inspired by
@@ -127,8 +139,8 @@ be generated on the same curve.
 The cipher MUST be an authenticated encryption algorithm (AEAD or equivalent).
 Implementations MUST NOT use non-authenticated ciphers.
 
-The default and RECOMMENDED cipher is `chacha20-poly1305`, which in this spec
-denotes the IETF construction defined in [RFC 7539] / [RFC 8439]:
+The default and RECOMMENDED cipher is `chacha20-poly1305@piggy.amarbel.net`,
+which denotes the IETF construction defined in [RFC 7539] / [RFC 8439]:
 
 - 256-bit key
 - 12-byte AEAD nonce, supplied per box and serialized verbatim into the wire
@@ -137,10 +149,15 @@ denotes the IETF construction defined in [RFC 7539] / [RFC 8439]:
 - Empty associated data
 - 16-byte Poly1305 authentication tag appended to the ciphertext
 
-Within this spec, the wire string `chacha20-poly1305` denotes RFC 7539
-unconditionally. It is NOT the OpenSSH `chacha20-poly1305@openssh.com`
-construction, which uses two ChaCha20 keys, a sequence-number-derived nonce,
-and a 0-byte wire IV. The two are incompatible.
+Within this spec, the wire string `chacha20-poly1305@piggy.amarbel.net`
+denotes RFC 7539 unconditionally. It is NOT the OpenSSH
+`chacha20-poly1305@openssh.com` construction (and not pivy's bare
+`chacha20-poly1305` alias of that construction), which uses two ChaCha20
+keys, a sequence-number-derived nonce, and a 0-byte wire IV. The two are
+incompatible. The `@piggy.amarbel.net` suffix follows OpenSSH's namespace
+convention and is registered as a distinct cipher table entry by the
+vendored pivy `openssh.patch` so piggy↔pivy round-trip works without
+ambiguity.
 
 Other authenticated ciphers MAY be used in future revisions. Each MUST
 advertise its own wire `cipher` string and define its own wire `iv` length;
@@ -194,9 +211,10 @@ To seal a Box with plaintext `P` and recipient public key `Q`:
 4. **Derive symmetric key.** Compute `K = Hash(S || N)` (V2) or `K = Hash(S)`
    (V1). Truncate `K` to the cipher's key length.
 
-5. **Generate IV.** For `chacha20-poly1305`, generate 12 bytes of uniform
-   random data `IV` from a cryptographically-secure source. `IV` is both the
-   AEAD nonce passed to the cipher and the value serialized verbatim into the
+5. **Generate IV.** For `chacha20-poly1305@piggy.amarbel.net`, generate 12
+   bytes of uniform random data `IV` from a cryptographically-secure source.
+   `IV` is both the AEAD nonce passed to the cipher and the value serialized
+   verbatim into the
    wire `iv` field. Implementations MUST NOT reuse an `IV` across boxes
    sealed under the same KDF-derived key.
 
@@ -234,8 +252,8 @@ To unseal a Box:
    (V1). Truncate to the cipher's key length.
 
 4. **Validate IV length.** The IV length MUST match the cipher's expected IV
-   length. For `chacha20-poly1305` this is 12 bytes. If it does not match, the
-   implementation MUST return a `LengthError`.
+   length. For `chacha20-poly1305@piggy.amarbel.net` this is 12 bytes. If it
+   does not match, the implementation MUST return a `LengthError`.
 
 5. **Validate ciphertext length.** The ciphertext MUST be at least
    `authlen + blocksz` bytes long. If it is not, the implementation MUST
@@ -275,13 +293,13 @@ uint8      version             0x01 (V1) or 0x02 (V2)
 uint8      guid_slot_valid     0x00 (false) or 0x01 (true)
 string8    guid                16 bytes if valid, 0 bytes if not
 uint8      slot_id             PIV slot (e.g., 0x9D); 0x00 if not valid
-cstring8   cipher              e.g., "chacha20-poly1305"
+cstring8   cipher              e.g., "chacha20-poly1305@piggy.amarbel.net"
 cstring8   kdf                 e.g., "sha512"
 string8    nonce               V2 only; at least 16 bytes (omitted in V1)
 cstring8   curve               e.g., "nistp256"
 eckey8     recipient_pubkey    compressed EC point
 eckey8     ephemeral_pubkey    compressed EC point
-string8    iv                  initialization vector (12 bytes for chacha20-poly1305)
+string8    iv                  initialization vector (12 bytes for chacha20-poly1305@piggy.amarbel.net)
 string     ciphertext_and_tag  ciphertext with appended authentication tag
 ```
 
@@ -403,20 +421,27 @@ V1 Boxes (without nonce) are a legacy format. Implementations MUST continue to
 support V1 deserialization for backwards compatibility. Implementations MUST
 produce V2 Boxes with a random nonce when creating new Boxes.
 
-The KDF name `sha512` follows the OpenSSH `digest.c` registry. The cipher name
-`chacha20-poly1305` is reused from that registry's spelling but denotes the
-RFC 7539 / RFC 8439 construction in this spec, NOT the OpenSSH
-`chacha20-poly1305@openssh.com` construction. Implementations using a
-different crypto library MUST map `chacha20-poly1305` to RFC 7539 specifically.
+The KDF name `sha512` follows the OpenSSH `digest.c` registry. The cipher
+name `chacha20-poly1305@piggy.amarbel.net` is registered as a new entry in
+the vendored pivy `openssh.patch` cipher table mapping to
+`EVP_chacha20_poly1305` with `key_len=32, iv_len=12, auth_len=16` — the
+RFC 7539 / RFC 8439 construction. The `@piggy.amarbel.net` suffix follows
+OpenSSH's namespace convention; the bare `chacha20-poly1305` is a separate
+(and incompatible) entry that the vendored patch leaves aliased to OpenSSH's
+split-key construction. Implementations using a different crypto library
+MUST map `chacha20-poly1305@piggy.amarbel.net` to RFC 7539 specifically.
 
-This revision (#36, 2026-04-25) is wire-incompatible with two earlier shapes:
+This revision (#81, 2026-05-10) is wire-incompatible with three earlier shapes:
 
 - The vendored pivy `pivy-box` C tool (and pivy-derived libraries) produces
-  `chacha20-poly1305@openssh.com`-flavoured boxes with a 0-byte wire IV.
+  `chacha20-poly1305`-aliased OpenSSH-style boxes with a 0-byte wire IV.
 - piggy at `f8ab33f`..`be83aeb` produced 0-byte-IV boxes for the same reason.
+- piggy at `be83aeb`..`5e8a9cc` produced RFC 7539 boxes whose wire cipher
+  string was the bare `chacha20-poly1305` (#36); semantically RFC 7539 but
+  collided with pivy's OpenSSH-compat alias under the same name.
 
 Implementations conforming to this revision MUST reject any v2 Box whose
-`chacha20-poly1305` `iv` field is not exactly 12 bytes.
+`chacha20-poly1305@piggy.amarbel.net` `iv` field is not exactly 12 bytes.
 
 ## Conformance
 
@@ -437,7 +462,7 @@ MSB-first).
 ### A.1 — P-256, no GUID/slot, empty plaintext
 
 Smallest realistic box: empty plaintext PKCS#7-padded to one 16-byte block,
-plus the 16-byte AEAD tag. Total wire length 174 bytes.
+plus the 16-byte AEAD tag. Total wire length 192 bytes.
 
 **Inputs**
 
@@ -451,15 +476,15 @@ plaintext          = (empty)
 guid_slot          = absent
 ```
 
-**Expected wire bytes** (hex, 174 bytes)
+**Expected wire bytes** (hex, 192 bytes)
 
 ```
-b0c5020000001163686163686132302d706f6c79313330350673686135313210
-a0a1a2a3a4a5a6a7a8a9aaabacadaeaf086e697374703235362102515c3d6eb9
-e396b904d3feca7f54fdcd0cc1e997bf375dca515ad0a6c3b4035f21031f1401
-46bfb1b251f84f4ddbe0d4cdcfd77afd984a9520e35794021f8312bb9e0cd0d1
-d2d3d4d5d6d7d8d9dadb000000208dd88e114913dc759f69c7590b369008a754
-ee2d0528e4386c46661631e7fbfd
+b0c5020000002363686163686132302d706f6c79313330354070696767792e61
+6d617262656c2e6e65740673686135313210a0a1a2a3a4a5a6a7a8a9aaabacad
+aeaf086e697374703235362102515c3d6eb9e396b904d3feca7f54fdcd0cc1e9
+97bf375dca515ad0a6c3b4035f21031f140146bfb1b251f84f4ddbe0d4cdcfd7
+7afd984a9520e35794021f8312bb9e0cd0d1d2d3d4d5d6d7d8d9dadb00000020
+8dd88e114913dc759f69c7590b369008a754ee2d0528e4386c46661631e7fbfd
 ```
 
 Replayed by `tests::rfc0002_vectors::vector_a_1`.
@@ -468,7 +493,7 @@ Replayed by `tests::rfc0002_vectors::vector_a_1`.
 
 Exercises the `guid_slot_valid = 0x01` branch of the wire format and a
 non-empty payload (5 bytes of plaintext + 11 bytes PKCS#7 padding + 16-byte
-tag). Total wire length 190 bytes.
+tag). Total wire length 208 bytes.
 
 **Inputs**
 
@@ -483,15 +508,16 @@ guid               = 000102030405060708090a0b0c0d0e0f
 slot               = 0x9D
 ```
 
-**Expected wire bytes** (hex, 190 bytes)
+**Expected wire bytes** (hex, 208 bytes)
 
 ```
-b0c5020110000102030405060708090a0b0c0d0e0f9d1163686163686132302d
-706f6c79313330350673686135313210b0b1b2b3b4b5b6b7b8b9babbbcbdbebf
-086e6973747032353621038e71ca9d7a62917be7f0db9896b47bf9b91c8b8662
-8eed55d47fe750e65e5bcb21038ed57ec2b8f5e75e9192327b51e5661c87c8e5
-db0170721309a517fc6e1046b10ce0e1e2e3e4e5e6e7e8e9eaeb00000020f0a8
-350c88929a3f68dd0d5a74b5d339c5d3624f6b5be4a3b7aa86eac9e0e0db
+b0c5020110000102030405060708090a0b0c0d0e0f9d2363686163686132302d
+706f6c79313330354070696767792e616d617262656c2e6e6574067368613531
+3210b0b1b2b3b4b5b6b7b8b9babbbcbdbebf086e6973747032353621038e71ca
+9d7a62917be7f0db9896b47bf9b91c8b86628eed55d47fe750e65e5bcb21038e
+d57ec2b8f5e75e9192327b51e5661c87c8e5db0170721309a517fc6e1046b10c
+e0e1e2e3e4e5e6e7e8e9eaeb00000020f0a8350c88929a3f68dd0d5a74b5d339
+c5d3624f6b5be4a3b7aa86eac9e0e0db
 ```
 
 Replayed by `tests::rfc0002_vectors::vector_a_2`.
@@ -500,7 +526,7 @@ Replayed by `tests::rfc0002_vectors::vector_a_2`.
 
 Exercises the second supported curve. Compressed P-384 points are 49 bytes
 each (vs. 33 for P-256), and the 24-byte ASCII plaintext PKCS#7-pads to two
-16-byte blocks. Total wire length 222 bytes.
+16-byte blocks. Total wire length 240 bytes.
 
 **Inputs**
 
@@ -516,16 +542,17 @@ plaintext          = "piggy rfc0002 vector A.3"   (24 bytes ASCII)
 guid_slot          = absent
 ```
 
-**Expected wire bytes** (hex, 222 bytes)
+**Expected wire bytes** (hex, 240 bytes)
 
 ```
-b0c5020000001163686163686132302d706f6c79313330350673686135313210
-c0c1c2c3c4c5c6c7c8c9cacbcccdcecf086e697374703338343103c76f2283dd
-a95cd49b0ed9e733d2904474e37216f124e13d2c9ab4cf01021c49ad9cabb3d0
-b97499aef2f0ab313fa0283103db89855d1980b2aacdec0752249bea9e0630c1
-6b69c095f6c752b2547b520d8109511d908881491780594f03cfee8a0a0cf0f1
-f2f3f4f5f6f7f8f9fafb0000003001ed7daba77156dd87a22208274ce93706f3
-261619acf1f52c8c3d12e71380f30fe5091f18b17ccdfbcefe2a15d0d6df
+b0c5020000002363686163686132302d706f6c79313330354070696767792e61
+6d617262656c2e6e65740673686135313210c0c1c2c3c4c5c6c7c8c9cacbcccd
+cecf086e697374703338343103c76f2283dda95cd49b0ed9e733d2904474e372
+16f124e13d2c9ab4cf01021c49ad9cabb3d0b97499aef2f0ab313fa0283103db
+89855d1980b2aacdec0752249bea9e0630c16b69c095f6c752b2547b520d8109
+511d908881491780594f03cfee8a0a0cf0f1f2f3f4f5f6f7f8f9fafb00000030
+01ed7daba77156dd87a22208274ce93706f3261619acf1f52c8c3d12e71380f3
+0fe5091f18b17ccdfbcefe2a15d0d6df
 ```
 
 Replayed by `tests::rfc0002_vectors::vector_a_3`.

@@ -9,7 +9,13 @@ use piggy_piv::Guid;
 
 const BOX_MAGIC: u16 = 0xB0C5;
 const BOX_VERSION: u8 = 2;
-const DEFAULT_CIPHER: &str = "chacha20-poly1305";
+// Distinct from pivy's bare `chacha20-poly1305` (which aliases
+// OpenSSH's split-key construction with `iv_len=0`). The
+// `@piggy.amarbel.net` suffix follows OpenSSH's namespace convention
+// and registers a new entry in `vendor/pivy/openssh.patch` mapping to
+// `EVP_chacha20_poly1305` with key=32, iv=12, auth=16 — RFC 7539 / RFC
+// 8439 ChaCha20-Poly1305 AEAD. See piggy#81.
+const DEFAULT_CIPHER: &str = "chacha20-poly1305@piggy.amarbel.net";
 const DEFAULT_KDF: &str = "sha512";
 const NONCE_LEN: usize = 16;
 const CIPHER_IV_LEN: usize = 12;
@@ -472,26 +478,29 @@ mod tests {
         // value other than 0x0C there, RFC 7539 conformance breaks —
         // this test fails before vector tests do.
         //
-        // Layout up to the IV field (RFC 0002 §Binary Serialization):
+        // Layout up to the IV field (RFC 0002 §Binary Serialization).
+        // DEFAULT_CIPHER is "chacha20-poly1305@piggy.amarbel.net" (35
+        // bytes); the older "chacha20-poly1305" alias was 17 bytes,
+        // shifting every offset below by +18 vs the pre-#81 version.
         //   off 0..2   magic "B0 C5"
         //   off 2      version (0x02)
         //   off 3      guid_valid flag (0x00 here)
         //   off 4      guid string8 len (0x00)
         //   off 5      slot u8 (0x00)
-        //   off 6      cipher cstring8 len (0x11 for "chacha20-poly1305")
-        //   off 7..24  "chacha20-poly1305"        (17 bytes)
-        //   off 24     kdf cstring8 len (0x06 for "sha512")
-        //   off 25..31 "sha512"                   (6 bytes)
-        //   off 31     nonce string8 len (0x10, NONCE_LEN=16)
-        //   off 32..48 nonce                      (16 bytes)
-        //   off 48     curve cstring8 len (0x08 for "nistp256")
-        //   off 49..57 "nistp256"                 (8 bytes)
-        //   off 57     recipient eckey8 len (0x21, compressed P-256 = 33)
-        //   off 58..91 recipient pubkey           (33 bytes)
-        //   off 91     ephemeral eckey8 len (0x21)
-        //   off 92..125 ephemeral pubkey          (33 bytes)
-        //   off 125    IV string8 len             <-- MUST be 0x0C
-        //   off 126..138 IV bytes                 (12 bytes)
+        //   off 6      cipher cstring8 len (0x23 = 35)
+        //   off 7..42  "chacha20-poly1305@piggy.amarbel.net"  (35 bytes)
+        //   off 42     kdf cstring8 len (0x06 for "sha512")
+        //   off 43..49 "sha512"                   (6 bytes)
+        //   off 49     nonce string8 len (0x10, NONCE_LEN=16)
+        //   off 50..66 nonce                      (16 bytes)
+        //   off 66     curve cstring8 len (0x08 for "nistp256")
+        //   off 67..75 "nistp256"                 (8 bytes)
+        //   off 75     recipient eckey8 len (0x21, compressed P-256 = 33)
+        //   off 76..109 recipient pubkey          (33 bytes)
+        //   off 109    ephemeral eckey8 len (0x21)
+        //   off 110..143 ephemeral pubkey         (33 bytes)
+        //   off 143    IV string8 len             <-- MUST be 0x0C
+        //   off 144..156 IV bytes                 (12 bytes)
         let (pub_key, _) = generate_keypair(EcCurve::NistP256);
         let mut b = PivBox::new(EcCurve::NistP256);
         b.set_data(b"payload");
@@ -499,15 +508,15 @@ mod tests {
         let bytes = b.to_bytes().unwrap();
 
         assert_eq!(
-            bytes.get(125),
+            bytes.get(143),
             Some(&0x0C),
-            "IV length byte at offset 125 must be 0x0C ({CIPHER_IV_LEN}) for \
-             chacha20-poly1305 (got {:?}). If the layout above shifted, \
+            "IV length byte at offset 143 must be 0x0C ({CIPHER_IV_LEN}) for \
+             {DEFAULT_CIPHER} (got {:?}). If the layout above shifted, \
              update the offset AND the spec.",
-            bytes.get(125)
+            bytes.get(143)
         );
         assert!(
-            bytes.len() >= 138,
+            bytes.len() >= 156,
             "wire must contain the full 12-byte IV before ciphertext (len {})",
             bytes.len()
         );
@@ -959,8 +968,9 @@ mod tests {
 
         /// docs/rfcs/0002-piv-ecdh-box.md §A.1 — P-256, no GUID/slot,
         /// empty plaintext. Smallest realistic box (one PKCS7 block of
-        /// padding, 16-byte AEAD tag). 174 bytes total.
-        const A1_WIRE_HEX: &str = "b0c5020000001163686163686132302d706f6c79313330350673686135313210a0a1a2a3a4a5a6a7a8a9aaabacadaeaf086e697374703235362102515c3d6eb9e396b904d3feca7f54fdcd0cc1e997bf375dca515ad0a6c3b4035f21031f140146bfb1b251f84f4ddbe0d4cdcfd77afd984a9520e35794021f8312bb9e0cd0d1d2d3d4d5d6d7d8d9dadb000000208dd88e114913dc759f69c7590b369008a754ee2d0528e4386c46661631e7fbfd";
+        /// padding, 16-byte AEAD tag). 192 bytes total (post-#81: 18
+        /// bytes added by the longer cipher cstring8).
+        const A1_WIRE_HEX: &str = "b0c5020000002363686163686132302d706f6c79313330354070696767792e616d617262656c2e6e65740673686135313210a0a1a2a3a4a5a6a7a8a9aaabacadaeaf086e697374703235362102515c3d6eb9e396b904d3feca7f54fdcd0cc1e997bf375dca515ad0a6c3b4035f21031f140146bfb1b251f84f4ddbe0d4cdcfd77afd984a9520e35794021f8312bb9e0cd0d1d2d3d4d5d6d7d8d9dadb000000208dd88e114913dc759f69c7590b369008a754ee2d0528e4386c46661631e7fbfd";
 
         #[test]
         fn vector_a_1() {
@@ -982,9 +992,9 @@ mod tests {
 
         /// docs/rfcs/0002-piv-ecdh-box.md §A.2 — P-256, GUID
         /// 000102…0f / slot 0x9D, plaintext "hello". Exercises the
-        /// guid_slot path on the wire and a non-empty payload. 190
-        /// bytes total.
-        const A2_WIRE_HEX: &str = "b0c5020110000102030405060708090a0b0c0d0e0f9d1163686163686132302d706f6c79313330350673686135313210b0b1b2b3b4b5b6b7b8b9babbbcbdbebf086e6973747032353621038e71ca9d7a62917be7f0db9896b47bf9b91c8b86628eed55d47fe750e65e5bcb21038ed57ec2b8f5e75e9192327b51e5661c87c8e5db0170721309a517fc6e1046b10ce0e1e2e3e4e5e6e7e8e9eaeb00000020f0a8350c88929a3f68dd0d5a74b5d339c5d3624f6b5be4a3b7aa86eac9e0e0db";
+        /// guid_slot path on the wire and a non-empty payload. 208
+        /// bytes total (post-#81).
+        const A2_WIRE_HEX: &str = "b0c5020110000102030405060708090a0b0c0d0e0f9d2363686163686132302d706f6c79313330354070696767792e616d617262656c2e6e65740673686135313210b0b1b2b3b4b5b6b7b8b9babbbcbdbebf086e6973747032353621038e71ca9d7a62917be7f0db9896b47bf9b91c8b86628eed55d47fe750e65e5bcb21038ed57ec2b8f5e75e9192327b51e5661c87c8e5db0170721309a517fc6e1046b10ce0e1e2e3e4e5e6e7e8e9eaeb00000020f0a8350c88929a3f68dd0d5a74b5d339c5d3624f6b5be4a3b7aa86eac9e0e0db";
 
         #[test]
         fn vector_a_2() {
@@ -1009,8 +1019,8 @@ mod tests {
         /// docs/rfcs/0002-piv-ecdh-box.md §A.3 — P-384, no GUID/slot,
         /// plaintext "piggy rfc0002 vector A.3". Exercises the second
         /// supported curve (49-byte compressed points, longer wire).
-        /// 222 bytes total.
-        const A3_WIRE_HEX: &str = "b0c5020000001163686163686132302d706f6c79313330350673686135313210c0c1c2c3c4c5c6c7c8c9cacbcccdcecf086e697374703338343103c76f2283dda95cd49b0ed9e733d2904474e37216f124e13d2c9ab4cf01021c49ad9cabb3d0b97499aef2f0ab313fa0283103db89855d1980b2aacdec0752249bea9e0630c16b69c095f6c752b2547b520d8109511d908881491780594f03cfee8a0a0cf0f1f2f3f4f5f6f7f8f9fafb0000003001ed7daba77156dd87a22208274ce93706f3261619acf1f52c8c3d12e71380f30fe5091f18b17ccdfbcefe2a15d0d6df";
+        /// 240 bytes total (post-#81).
+        const A3_WIRE_HEX: &str = "b0c5020000002363686163686132302d706f6c79313330354070696767792e616d617262656c2e6e65740673686135313210c0c1c2c3c4c5c6c7c8c9cacbcccdcecf086e697374703338343103c76f2283dda95cd49b0ed9e733d2904474e37216f124e13d2c9ab4cf01021c49ad9cabb3d0b97499aef2f0ab313fa0283103db89855d1980b2aacdec0752249bea9e0630c16b69c095f6c752b2547b520d8109511d908881491780594f03cfee8a0a0cf0f1f2f3f4f5f6f7f8f9fafb0000003001ed7daba77156dd87a22208274ce93706f3261619acf1f52c8c3d12e71380f30fe5091f18b17ccdfbcefe2a15d0d6df";
 
         #[test]
         fn vector_a_3() {

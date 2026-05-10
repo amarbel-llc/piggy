@@ -62,7 +62,16 @@ diff --git a/cipher.c b/cipher.c
 index 8a18da2df..6754a294d 100644
 --- openssh/cipher.c
 +++ openssh/cipher.c
-@@ -94,16 +94,16 @@ static const struct sshcipher ciphers[] = {
+@@ -75,6 +75,8 @@ struct sshcipher {
+ #define CFLAG_CHACHAPOLY	(1<<1)
+ #define CFLAG_AESCTR		(1<<2)
+ #define CFLAG_NONE		(1<<3)
++/* RFC 7539 ChaCha20-Poly1305 via EVP — used by the piggy-owned cipher */
++#define CFLAG_CHACHAPOLY_EVP	(1<<4)
+ #define CFLAG_INTERNAL		CFLAG_NONE /* Don't use "none" for packets */
+ #ifdef WITH_OPENSSL
+ 	const EVP_CIPHER	*(*evptype)(void);
+@@ -94,16 +96,18 @@ static const struct sshcipher ciphers[] = {
  	{ "aes128-ctr",		16, 16, 0, 0, 0, EVP_aes_128_ctr },
  	{ "aes192-ctr",		16, 24, 0, 0, 0, EVP_aes_192_ctr },
  	{ "aes256-ctr",		16, 32, 0, 0, 0, EVP_aes_256_ctr },
@@ -72,6 +81,8 @@ index 8a18da2df..6754a294d 100644
 -	{ "aes256-gcm@openssh.com",
 +	{ "aes256-gcm",
  				16, 32, 12, 16, 0, EVP_aes_256_gcm },
++	{ "chacha20-poly1305@piggy.amarbel.net",
++				16, 32, 12, 16, CFLAG_CHACHAPOLY_EVP, EVP_chacha20_poly1305 },
  #else
  	{ "aes128-ctr",		16, 16, 0, 0, CFLAG_AESCTR, NULL },
  	{ "aes192-ctr",		16, 24, 0, 0, CFLAG_AESCTR, NULL },
@@ -81,7 +92,28 @@ index 8a18da2df..6754a294d 100644
 +	{ "chacha20-poly1305",
  				8, 64, 0, 16, CFLAG_CHACHAPOLY, NULL },
  	{ "none",		8, 0, 0, 0, CFLAG_NONE, NULL },
- 
+
+@@ -278,7 +282,7 @@ cipher_init(struct sshcipher_ctx **ccp, const struct sshcipher *cipher,
+ 		ret = SSH_ERR_LIBCRYPTO_ERROR;
+ 		goto out;
+ 	}
+-	if (cipher_authlen(cipher) &&
++	if (cipher_authlen(cipher) && (cipher->flags & CFLAG_CHACHAPOLY_EVP) == 0 &&
+ 	    EVP_CIPHER_CTX_ctrl(cc->evp, EVP_CTRL_GCM_SET_IV_FIXED,
+ 	    -1, (u_char *)iv) <= 0) {
+ 		ret = SSH_ERR_LIBCRYPTO_ERROR;
+@@ -340,8 +344,9 @@ cipher_crypt(struct sshcipher_ctx *cc, u_int seqnr, u_char *dest,
+
+ 		if (authlen != cipher_authlen(cc->cipher))
+ 			return SSH_ERR_INVALID_ARGUMENT;
+-		/* increment IV */
+-		if (EVP_CIPHER_CTX_ctrl(cc->evp, EVP_CTRL_GCM_IV_GEN,
++		/* increment IV (GCM only — ChaCha20-Poly1305 EVP uses raw IV) */
++		if ((cc->cipher->flags & CFLAG_CHACHAPOLY_EVP) == 0 &&
++		    EVP_CIPHER_CTX_ctrl(cc->evp, EVP_CTRL_GCM_IV_GEN,
+ 		    1, lastiv) <= 0)
+ 			return SSH_ERR_LIBCRYPTO_ERROR;
+ 		/* set tag on decryption */
 diff --git a/defines.h b/defines.h
 index d2baeb940..8614882d5 100644
 --- openssh/defines.h

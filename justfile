@@ -50,6 +50,20 @@ test-bats-conformance-interop: build-rust
   #!/usr/bin/env bash
   set -euo pipefail
   trap 'just fib-down' EXIT
+  # Rebuild vendored pivy first so any changes to vendor/pivy/openssh.patch
+  # (e.g. #81's chacha20-poly1305@piggy.amarbel.net cipher entry) take
+  # effect — the freshly-built nix output lives at vendor/pivy/result.
+  # Use that path explicitly rather than $(command -v pivy-box), which
+  # may resolve to a stale direnv-cached binary.
+  cd vendor/pivy && nix build && cd -
+  real_pivy_box="$PWD/vendor/pivy/result/bin/pivy-box"
+  if [[ ! -x "$real_pivy_box" ]]; then
+    echo "vendor/pivy/result/bin/pivy-box not executable — nix build failed" >&2
+    exit 1
+  fi
+  # Prepend it to PATH so subprocesses also see the fresh binary
+  # (pivy-tool, etc.) consistently.
+  export PATH="$PWD/vendor/pivy/result/bin:$PATH"
   just fib-up
   eval "$(cat .fib/env)"
   # Generate a key on the fib card's 9D slot (Key Management / ECDH)
@@ -60,11 +74,6 @@ test-bats-conformance-interop: build-rust
   # Discover the card's GUID for template creation. pivy-tool prints
   # GUIDs in uppercase, so the grep must be case-insensitive.
   guid=$(pivy-tool list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
-  # Capture the real C pivy-box path NOW, before common.bash inside
-  # bats prepends a mock tmpdir to PATH that masks it with a base64
-  # stand-in. Interop tests need the real binary to actually cross
-  # the wire boundary.
-  real_pivy_box=$(command -v pivy-box)
   # Safety net for PIN prompts. See CLAUDE.md "Test harness safety
   # net for PIN prompts" and amarbel-llc/piggy#35. Required by the
   # global policy for any recipe that could reach pivy's
