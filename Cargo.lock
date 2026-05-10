@@ -1003,6 +1003,8 @@ dependencies = [
 name = "piggy-ids"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "piggy-box",
  "piggy-markl",
  "proptest",
  "thiserror",

@@ -67,6 +67,11 @@ mkdir -p "$SECURE_TMPDIR"
 # Mock pivy-box and pivy-tool (base64 encode/decode instead of real crypto)
 ln -sf "$REPO_ROOT/zz-tests_bats/helpers/mock-pivy-box.sh" "$BATS_TEST_TMPDIR/pivy-box"
 ln -sf "$REPO_ROOT/zz-tests_bats/helpers/mock-pivy-tool.sh" "$BATS_TEST_TMPDIR/pivy-tool"
+# Mock piggy-ids: encrypt → base64 (compatible with mock-pivy-box's
+# decrypt). validate / canonicalize / diff delegate to the real Rust
+# binary (PIGGY_IDS_REAL set below).
+export PIGGY_IDS_REAL="$REPO_ROOT/target/debug/piggy-ids"
+ln -sf "$REPO_ROOT/zz-tests_bats/helpers/mock-piggy-ids.sh" "$BATS_TEST_TMPDIR/piggy-ids"
 export PATH="$BATS_TEST_TMPDIR:$PATH"
 
 # Pre-init git repo with --separate-git-dir so the actual git data lives
@@ -75,9 +80,15 @@ init_test_git() {
   git init --separate-git-dir="$BATS_TEST_TMPDIR/git-dir" --template="" "$PIGGY_STORE_DIR"
 }
 
-# Create a test .pivy-id template (marker file for the mock)
+# Create a test .piggy-ids file with a canonical RFC 0002 recipient
+# (the `pivy_ecdh_p256_pub` non-trivial vector at madder fd53684).
+# The mock piggy-ids encrypt only checks file existence, so any valid
+# .piggy-ids works for tests that don't drive the recipients flow.
 create_test_template() {
   local dir="${1:-$PIGGY_STORE_DIR}"
   mkdir -p "$dir"
-  echo "MOCK_PIVY_TEMPLATE_v1" >"$dir/.pivy-id"
+  cat >"$dir/.piggy-ids" <<-_EOF
+		# test fixture — canonical RFC 0002 vector
+		piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu
+		_EOF
 }

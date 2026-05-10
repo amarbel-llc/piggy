@@ -211,6 +211,11 @@ enum PassCommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
+    /// Manage recipients in `.piggy-ids` (list/add/remove/sync).
+    Recipients {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
 }
 
 fn main() {
@@ -229,6 +234,7 @@ fn main() {
             PassCommand::Mv { rest } => fallback::exec_bash("mv", &rest),
             PassCommand::Cp { rest } => fallback::exec_bash("cp", &rest),
             PassCommand::Git { rest } => fallback::exec_bash("git", &rest),
+            PassCommand::Recipients { rest } => fallback::exec_bash("recipients", &rest),
         },
 
         Command::Help { rest } => fallback::exec_bash("help", &rest),

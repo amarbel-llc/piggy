@@ -153,11 +153,15 @@
                      $out/libexec/piggy/platform \
                      $out/share/man/man1
 
-            # Stash the rust dispatcher and bash script at known paths,
-            # then wrap the rust binary as $out/bin/piggy with PIGGY_SH_PATH
-            # set so fallback::find_piggy_sh locates the bash script.
+            # Stash the rust dispatcher, the piggy-ids helper binary,
+            # and the bash script at known paths, then wrap the rust
+            # binary as $out/bin/piggy with PIGGY_SH_PATH +
+            # PIGGY_IDS_PATH set so fallback::find_piggy_sh and
+            # piggy.sh's recipients/encrypt paths locate them.
             install -m 0755 ${piggy-rs}/bin/piggy \
                             $out/libexec/piggy/piggy-rs
+            install -m 0755 ${piggy-rs}/bin/piggy-ids \
+                            $out/libexec/piggy/piggy-ids
             install -m 0755 src/piggy.sh \
                             $out/libexec/piggy/piggy.sh
             if [ -f src/platform/darwin.sh ]; then
@@ -178,6 +182,7 @@
 
             makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
               --set PIGGY_SH_PATH $out/libexec/piggy/piggy.sh \
+              --set PIGGY_IDS_PATH $out/libexec/piggy/piggy-ids \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
           '';
 

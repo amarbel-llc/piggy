@@ -61,16 +61,35 @@ passthroughs for the C pivy binaries:
 
 ## piggy pass
 
-*pass init* [*--path*=_sub-folder_, *-p* _sub-folder_] [*--guid*=_GUID_, *-g* _GUID_] [*--edit*, *-e*] [*--interactive*, *-i*]
-	Initialize new password storage with a pivy-box ebox template. Without
-	flags, the first inserted PIV device is auto-detected via *pivy-tool*(1).
-	If *--guid* or *-g* is specified, create a template for the given PIV
-	device GUID. If *--interactive* or *-i* is specified, run the interactive
-	*pivy-box*(1) template creation menu. If *--edit* or *-e* is specified,
-	edit an existing _.pivy-id_ template interactively. If *--path* or *-p* is
-	specified, assign a template for that specific sub-folder of the password
-	store. If the specified template is different from the one used in any
-	existing files, those files will be re-encrypted to the new template.
+*pass init* [*--path*=_sub-folder_, *-p* _sub-folder_] *-k* _markl-id_
+	Initialize new password storage with a piggy 2.x recipient template
+	written to _.piggy-ids_ (RFC 0003). The recipient is identified by a
+	markl ID of format *pivy_ecdh_p256_pub* — typically obtained from a
+	YubiKey's slot 9D pubkey. The bare-format _markl-id_ is also accepted
+	on input; it is canonicalized to the *piggy-recipient-v1@* purpose-tagged
+	form on disk. If *--path* or *-p* is specified, the template covers that
+	sub-folder. If the resulting recipient set differs from any existing
+	files, those files are re-encrypted to the new template.
+
+*pass recipients list* [*--path*=_sub-folder_, *-p* _sub-folder_]
+	Print the recipients listed in the relevant _.piggy-ids_, one per line.
+
+*pass recipients add* _markl-id_... [*--path*=_sub-folder_, *-p* _sub-folder_]
+	Append one or more recipients to _.piggy-ids_ (canonicalizing on write)
+	and re-encrypt the affected store. The two-commit pattern from
+	*pass init* applies: one commit for the _.piggy-ids_ change and one
+	for the re-encryption.
+
+*pass recipients remove* _markl-id_... [*--path*=_sub-folder_, *-p* _sub-folder_]
+	Remove one or more recipients (matched by full markl ID against the
+	canonicalized form) and re-encrypt. Idempotent: if no recipients
+	match, no commit is made.
+
+*pass recipients sync* _file_ [*--path*=_sub-folder_, *-p* _sub-folder_]
+	Replace the recipient set with the contents of _file_, which must be
+	a valid _.piggy-ids_ text file. Idempotent: if the on-disk and
+	declared sets match, no commit is made and no re-encryption happens.
+	Validation rejects markl IDs whose format is not *pivy_ecdh_p256_pub*.
 
 *pass ls* _subfolder_
 	List names of passwords inside the tree at _subfolder_ by using the

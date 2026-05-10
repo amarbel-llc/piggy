@@ -53,17 +53,19 @@ die() {
   echo "$@" >&2
   exit 1
 }
-set_pivy_template() {
+find_piggy_ids() {
+  # Walk up from $PREFIX/$1 looking for .piggy-ids; sets $PIGGY_IDS.
+  # Replaces the legacy set_pivy_template walker (#75 phase 5).
   local current="$PREFIX/$1"
-  while [[ $current != "$PREFIX" && ! -f $current/.pivy-id ]]; do
+  while [[ $current != "$PREFIX" && ! -f $current/.piggy-ids ]]; do
     current="${current%/*}"
   done
-  PIVY_TPL="$current/.pivy-id"
+  PIGGY_IDS="$current/.piggy-ids"
 
-  if [[ ! -f $PIVY_TPL ]]; then
+  if [[ ! -f $PIGGY_IDS ]]; then
     cat >&2 <<-_EOF
 		Error: You must run:
-		    $PROGRAM_PASS init
+		    $PROGRAM_PASS init -k <markl-id>
 		before you may use the password store.
 
 		_EOF
@@ -72,9 +74,12 @@ set_pivy_template() {
   fi
 }
 piggy_encrypt() {
-  # Usage: echo "secret" | piggy_encrypt <output-file> <tpl-path>
-  local outfile="$1" tpl="$2"
-  pivy-box stream encrypt "$tpl" >"$outfile" || die "Encryption aborted."
+  # Usage: echo "secret" | piggy_encrypt <output-file> <piggy-ids-path>
+  # Shells to the piggy-ids Rust helper (PIGGY_IDS_PATH baked in by
+  # flake.nix's makeWrapper; falls back to a `piggy-ids` on PATH for
+  # bats-driven tests where the mock symlink takes over).
+  local outfile="$1" piggy_ids="$2"
+  "${PIGGY_IDS_PATH:-piggy-ids}" encrypt "$piggy_ids" >"$outfile" || die "Encryption aborted."
 }
 piggy_decrypt() {
   # Usage: piggy_decrypt <input-file>
@@ -109,9 +114,9 @@ reencrypt_path() {
     passfile_display="${passfile_display%.ebox}"
     passfile_temp="${passfile}.tmp.${RANDOM}.${RANDOM}.${RANDOM}.${RANDOM}.--"
 
-    set_pivy_template "$passfile_dir"
+    find_piggy_ids "$passfile_dir"
     echo "$passfile_display: reencrypting"
-    pivy-box stream decrypt <"$passfile" | pivy-box stream encrypt "$PIVY_TPL" >"$passfile_temp" &&
+    pivy-box stream decrypt <"$passfile" | "${PIGGY_IDS_PATH:-piggy-ids}" encrypt "$PIGGY_IDS" >"$passfile_temp" &&
       mv "$passfile_temp" "$passfile" || rm -f "$passfile_temp"
   done < <(find "$1" -path '*/.git' -prune -o -iname '*.ebox' -print0)
 }
@@ -249,12 +254,11 @@ cmd_usage() {
   echo
   cat <<-_EOF
 	Usage:
-	    $PROGRAM_PASS init [-p subfolder] [-g guid] [-e] [-i]
-	        Initialize new password storage with a pivy-box template.
-	        -g: Use a specific PIV device GUID (from pivy-tool list).
-	        -e: Edit existing .pivy-id template interactively.
-	        -i: Interactive pivy-box tpl create.
-	        Without flags: auto-detect inserted PIV device.
+	    $PROGRAM_PASS init [-p subfolder] -k <markl-id>
+	        Initialize new password storage with a piggy-recipient-v1
+	        markl ID. Writes <store>/[subfolder/].piggy-ids.
+	    $PROGRAM_PASS recipients <list|add|remove|sync> [-p subfolder] ...
+	        Manage recipients in .piggy-ids. See "$PROGRAM_PASS recipients --help".
 	    $PROGRAM_PASS ls [subfolder]
 	        List passwords.
 	    $PROGRAM_PASS find pass-names...
@@ -364,9 +368,9 @@ cmd_init() {
   git_add_file "$piggy_ids" "Set piggy recipients${id_path:+ ($id_path)}."
 
   # Re-encrypt any pre-existing entries against the new recipient
-  # set. Fresh init is a no-op (no `.ebox` files in the tree). For
-  # re-init over an existing store, reencrypt_path needs the
-  # encrypt-path transition to land first (#75 / phase 5).
+  # set. Fresh init is a no-op (no `.ebox` files in the tree); for
+  # re-init over an existing store, reencrypt_path now drives the
+  # Rust `piggy-ids encrypt` path (#75 phase 5).
   reencrypt_path "$PREFIX/$id_path"
   git_add_file "$PREFIX/$id_path" "Reencrypt password store using new piggy recipients${id_path:+ ($id_path)}."
 }
@@ -483,12 +487,12 @@ cmd_insert() {
   [[ $force -eq 0 && -e $passfile ]] && yesno "An entry already exists for $path. Overwrite it?"
 
   mkdir -p -v "$PREFIX/$(dirname -- "$path")"
-  set_pivy_template "$(dirname -- "$path")"
+  find_piggy_ids "$(dirname -- "$path")"
 
   if [[ $multiline -eq 1 ]]; then
     echo "Enter contents of $path and press Ctrl+D when finished:"
     echo
-    piggy_encrypt "$passfile" "$PIVY_TPL"
+    piggy_encrypt "$passfile" "$PIGGY_IDS"
   elif [[ $noecho -eq 1 ]]; then
     local password password_again
     while true; do
@@ -497,7 +501,7 @@ cmd_insert() {
       read -r -p "Retype password for $path: " -s password_again || exit 1
       echo
       if [[ $password == "$password_again" ]]; then
-        echo "$password" | piggy_encrypt "$passfile" "$PIVY_TPL"
+        echo "$password" | piggy_encrypt "$passfile" "$PIGGY_IDS"
         break
       else
         die "Error: the entered passwords do not match."
@@ -506,7 +510,7 @@ cmd_insert() {
   else
     local password
     read -r -p "Enter password for $path: " -e password
-    echo "$password" | piggy_encrypt "$passfile" "$PIVY_TPL"
+    echo "$password" | piggy_encrypt "$passfile" "$PIGGY_IDS"
   fi
   git_add_file "$passfile" "Add given password for $path to store."
 }
@@ -517,7 +521,7 @@ cmd_edit() {
   local path="${1%/}"
   check_sneaky_paths "$path"
   mkdir -p -v "$PREFIX/$(dirname -- "$path")"
-  set_pivy_template "$(dirname -- "$path")"
+  find_piggy_ids "$(dirname -- "$path")"
   local passfile="$PREFIX/$path.ebox"
   set_git "$passfile"
 
@@ -532,7 +536,7 @@ cmd_edit() {
   ${EDITOR:-vi} "$tmp_file"
   [[ -f $tmp_file ]] || die "New password not saved."
   piggy_decrypt "$passfile" 2>/dev/null | diff - "$tmp_file" &>/dev/null && die "Password unchanged."
-  while ! cat "$tmp_file" | piggy_encrypt "$passfile" "$PIVY_TPL"; do
+  while ! cat "$tmp_file" | piggy_encrypt "$passfile" "$PIGGY_IDS"; do
     yesno "Encryption failed. Would you like to try again?"
   done
   git_add_file "$passfile" "$action password for $path using ${EDITOR:-vi}."
@@ -577,7 +581,7 @@ cmd_generate() {
   [[ $length =~ ^[0-9]+$ ]] || die "Error: pass-length \"$length\" must be a number."
   [[ $length -gt 0 ]] || die "Error: pass-length must be greater than zero."
   mkdir -p -v "$PREFIX/$(dirname -- "$path")"
-  set_pivy_template "$(dirname -- "$path")"
+  find_piggy_ids "$(dirname -- "$path")"
   local passfile="$PREFIX/$path.ebox"
   set_git "$passfile"
 
@@ -586,13 +590,13 @@ cmd_generate() {
   read -r -n $length pass < <(LC_ALL=C tr -dc "$characters" </dev/urandom)
   [[ ${#pass} -eq $length ]] || die "Could not generate password from /dev/urandom."
   if [[ $inplace -eq 0 ]]; then
-    echo "$pass" | piggy_encrypt "$passfile" "$PIVY_TPL"
+    echo "$pass" | piggy_encrypt "$passfile" "$PIGGY_IDS"
   else
     local passfile_temp="${passfile}.tmp.${RANDOM}.${RANDOM}.${RANDOM}.${RANDOM}.--"
     if {
       echo "$pass"
       piggy_decrypt "$passfile" | tail -n +2
-    } | piggy_encrypt "$passfile_temp" "$PIVY_TPL"; then
+    } | piggy_encrypt "$passfile_temp" "$PIGGY_IDS"; then
       mv "$passfile_temp" "$passfile"
     else
       rm -f "$passfile_temp"
@@ -734,6 +738,182 @@ cmd_git() {
   fi
 }
 
+cmd_pass_recipients() {
+  local sub="${1:-}"
+  case "$sub" in
+  list)
+    shift
+    cmd_pass_recipients_list "$@"
+    ;;
+  add)
+    shift
+    cmd_pass_recipients_add "$@"
+    ;;
+  remove)
+    shift
+    cmd_pass_recipients_remove "$@"
+    ;;
+  sync)
+    shift
+    cmd_pass_recipients_sync "$@"
+    ;;
+  "" | -h | --help)
+    cat <<-_EOF
+		Usage:
+		    $PROGRAM_PASS recipients list [-p subfolder]
+		        Print recipients in the relevant .piggy-ids, one per line.
+		    $PROGRAM_PASS recipients add <markl-id>... [-p subfolder]
+		        Append recipients to .piggy-ids and re-encrypt.
+		    $PROGRAM_PASS recipients remove <markl-id>... [-p subfolder]
+		        Remove recipients (matched by full markl ID) and re-encrypt.
+		    $PROGRAM_PASS recipients sync <file> [-p subfolder]
+		        Replace .piggy-ids with <file>'s contents (idempotent).
+		_EOF
+    [[ $sub = "" ]] && exit 1 || exit 0
+    ;;
+  *)
+    die "Error: unknown subcommand: $PROGRAM_PASS recipients $sub"
+    ;;
+  esac
+}
+
+cmd_pass_recipients_list() {
+  local subfolder=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -p)
+      subfolder="$2"
+      shift 2
+      ;;
+    *)
+      die "Error: unexpected argument to recipients list: $1"
+      ;;
+    esac
+  done
+  find_piggy_ids "$subfolder"
+  cat "$PIGGY_IDS"
+}
+
+cmd_pass_recipients_add() {
+  local subfolder=""
+  local -a ids=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -p)
+      subfolder="$2"
+      shift 2
+      ;;
+    *)
+      ids+=("$1")
+      shift
+      ;;
+    esac
+  done
+  [[ ${#ids[@]} -gt 0 ]] || die "Usage: $PROGRAM_PASS recipients add <markl-id>... [-p subfolder]"
+  find_piggy_ids "$subfolder"
+  set_git "$PIGGY_IDS"
+
+  for id in "${ids[@]}"; do
+    echo "$id" >>"$PIGGY_IDS"
+  done
+  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: invalid recipient(s); aborting."
+
+  local id_dir="${PIGGY_IDS%/.piggy-ids}"
+  git_add_file "$PIGGY_IDS" "Add recipient(s) to .piggy-ids."
+  reencrypt_path "$id_dir"
+  git_add_file "$id_dir" "Reencrypt password store after adding recipient(s)."
+}
+
+cmd_pass_recipients_remove() {
+  local subfolder=""
+  local -a ids=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -p)
+      subfolder="$2"
+      shift 2
+      ;;
+    *)
+      ids+=("$1")
+      shift
+      ;;
+    esac
+  done
+  [[ ${#ids[@]} -gt 0 ]] || die "Usage: $PROGRAM_PASS recipients remove <markl-id>... [-p subfolder]"
+  find_piggy_ids "$subfolder"
+  set_git "$PIGGY_IDS"
+
+  # Canonicalise so user-supplied IDs (which may be bare-format) match
+  # the on-disk form.
+  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: existing .piggy-ids invalid."
+
+  local tmp="${PIGGY_IDS}.tmp.$$"
+  awk -v target_blob="$(printf '%s\n' "${ids[@]}")" '
+    BEGIN {
+      n = split(target_blob, arr, "\n")
+      for (i = 1; i <= n; i++) if (arr[i] != "") targets[arr[i]] = 1
+    }
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { print; next }
+    {
+      id = $0
+      sub(/[[:space:]]+#.*$/, "", id)
+      sub(/^[[:space:]]+/, "", id)
+      sub(/[[:space:]]+$/, "", id)
+      if (!(id in targets)) print
+    }
+  ' "$PIGGY_IDS" >"$tmp"
+
+  if cmp -s "$PIGGY_IDS" "$tmp"; then
+    rm -f "$tmp"
+    echo "No matching recipients in $PIGGY_IDS."
+    return 0
+  fi
+  mv "$tmp" "$PIGGY_IDS"
+
+  local id_dir="${PIGGY_IDS%/.piggy-ids}"
+  git_add_file "$PIGGY_IDS" "Remove recipient(s) from .piggy-ids."
+  reencrypt_path "$id_dir"
+  git_add_file "$id_dir" "Reencrypt password store after removing recipient(s)."
+}
+
+cmd_pass_recipients_sync() {
+  local subfolder=""
+  local file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -p)
+      subfolder="$2"
+      shift 2
+      ;;
+    *)
+      [[ -z $file ]] || die "Error: only one <file> argument permitted."
+      file="$1"
+      shift
+      ;;
+    esac
+  done
+  [[ -n $file ]] || die "Usage: $PROGRAM_PASS recipients sync <file> [-p subfolder]"
+  [[ -f $file ]] || die "Error: file not found: $file"
+
+  find_piggy_ids "$subfolder"
+  set_git "$PIGGY_IDS"
+
+  "${PIGGY_IDS_PATH:-piggy-ids}" validate "$file" || die "Error: $file failed validation."
+
+  # Idempotency: if no diff, no commit, no reencryption.
+  if "${PIGGY_IDS_PATH:-piggy-ids}" diff "$PIGGY_IDS" "$file" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  cp "$file" "$PIGGY_IDS" || die "Error: failed to copy $file → $PIGGY_IDS."
+  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: post-copy canonicalize failed."
+
+  local id_dir="${PIGGY_IDS%/.piggy-ids}"
+  git_add_file "$PIGGY_IDS" "Sync recipients in .piggy-ids."
+  reencrypt_path "$id_dir"
+  git_add_file "$id_dir" "Reencrypt password store after syncing recipients."
+}
+
 #
 # END subcommand functions
 #
@@ -793,6 +973,10 @@ copy | cp)
 git)
   shift
   cmd_git "$@"
+  ;;
+recipients)
+  shift
+  cmd_pass_recipients "$@"
   ;;
 *)
   COMMAND="show"

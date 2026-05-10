@@ -10,5 +10,5 @@ function piggy_help_mentions_piggy { # @test
 
 function initialize_test_store { # @test
   create_test_template
-  assert [ -e "$PIGGY_STORE_DIR/.pivy-id" ]
+  assert [ -e "$PIGGY_STORE_DIR/.piggy-ids" ]
 }
