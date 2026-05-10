@@ -85,24 +85,6 @@ piggy_decrypt() {
   # Usage: piggy_decrypt <input-file>
   pivy-box stream decrypt <"$1" || exit $?
 }
-_piggy_move_tpl() {
-  # pivy-box tpl create writes to its default template path, not to a
-  # direct file path. Find where it wrote the template and move it.
-  local tpl_name="$1" dest="$2"
-  local src=""
-  local candidate
-  for candidate in \
-    "$HOME/Library/Preferences/pivy/tpl/$tpl_name" \
-    "$HOME/.pivy/tpl/$tpl_name" \
-    "$HOME/.ebox/tpl/$tpl_name"; do
-    if [[ -f $candidate ]]; then
-      src="$candidate"
-      break
-    fi
-  done
-  [[ -z $src ]] && die "Error: could not find created template '$tpl_name'."
-  mv "$src" "$dest" || die "Error: failed to move template to $dest."
-}
 reencrypt_path() {
   local passfile passfile_dir passfile_display passfile_temp
   while read -r -d "" passfile; do
