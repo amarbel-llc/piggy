@@ -60,11 +60,19 @@ function piggy_box_tpl_create_forwards_to_pivy_box { # @test
   local tpl_dir="$BATS_TEST_TMPDIR/tpl"
   mkdir -p "$tpl_dir"
 
-  HOME="$BATS_TEST_TMPDIR" run "$PIGGY" box tpl create rust-interop primary local-guid "$INTEROP_GUID"
+  # XDG_CONFIG_HOME is pinned because pivy's primary user template
+  # path is `$XDG_CONFIG_HOME/pivy/tpl/$TPL` (vendor/pivy/src/ebox-cmd.c:67).
+  # Without this override the operator's real $XDG_CONFIG_HOME leaks
+  # through and pivy-box writes outside BATS_TEST_TMPDIR.
+  HOME="$BATS_TEST_TMPDIR" \
+    XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/.config" \
+    run "$PIGGY" box tpl create rust-interop primary local-guid "$INTEROP_GUID"
   assert_success
 
   local tpl_file
-  if [[ -f "$BATS_TEST_TMPDIR/.pivy/tpl/rust-interop" ]]; then
+  if [[ -f "$BATS_TEST_TMPDIR/.config/pivy/tpl/rust-interop" ]]; then
+    tpl_file="$BATS_TEST_TMPDIR/.config/pivy/tpl/rust-interop"
+  elif [[ -f "$BATS_TEST_TMPDIR/.pivy/tpl/rust-interop" ]]; then
     tpl_file="$BATS_TEST_TMPDIR/.pivy/tpl/rust-interop"
   elif [[ -f "$BATS_TEST_TMPDIR/Library/Preferences/pivy/tpl/rust-interop" ]]; then
     tpl_file="$BATS_TEST_TMPDIR/Library/Preferences/pivy/tpl/rust-interop"
