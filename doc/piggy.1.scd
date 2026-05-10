@@ -61,15 +61,17 @@ passthroughs for the C pivy binaries:
 
 ## piggy pass
 
-*pass init* [*--path*=_sub-folder_, *-p* _sub-folder_] *-k* _markl-id_
+*pass init* [*--path*=_sub-folder_, *-p* _sub-folder_] [*-k* _markl-id_ | *-g* _guid_]
 	Initialize new password storage with a piggy 2.x recipient template
 	written to _.piggy-ids_ (RFC 0003). The recipient is identified by a
-	markl ID of format *pivy_ecdh_p256_pub* — typically obtained from a
-	YubiKey's slot 9D pubkey. The bare-format _markl-id_ is also accepted
-	on input; it is canonicalized to the *piggy-recipient-v1@* purpose-tagged
-	form on disk. If *--path* or *-p* is specified, the template covers that
-	sub-folder. If the resulting recipient set differs from any existing
-	files, those files are re-encrypted to the new template.
+	markl ID of format *pivy_ecdh_p256_pub*. With *-k* the recipient is
+	provided declaratively (bare-format also accepted; canonicalized to
+	*piggy-recipient-v1@* on disk). Without *-k*, slot 9D of the attached
+	PIV card is auto-detected via *piggy-ids detect-pubkey*; pass *-g*
+	to disambiguate when more than one card is attached. If *--path* or
+	*-p* is specified, the template covers that sub-folder. If the
+	resulting recipient set differs from any existing files, those files
+	are re-encrypted to the new template.
 
 *pass recipients list* [*--path*=_sub-folder_, *-p* _sub-folder_]
 	Print the recipients listed in the relevant _.piggy-ids_, one per line.

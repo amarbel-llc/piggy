@@ -11,6 +11,10 @@
 //!   * `diff <current> <desired>` — exit 0 if equal, exit 1 with `+/-`
 //!     output on stdout otherwise. Used by `piggy pass recipients sync`
 //!     for its idempotency check.
+//!   * `detect-pubkey [--guid <hex>]` — read the attached PIV card's
+//!     slot 9D pubkey, SEC1-compress, and emit a `piggy-recipient-v1@
+//!     pivy_ecdh_p256_pub-…` markl ID on stdout. Drives the no-flags
+//!     `piggy pass init` path (#79).
 //!
 //! Reachable from `piggy.sh` via the `PIGGY_IDS_PATH` env var that
 //! `flake.nix`'s `makeWrapper` bakes into the user-facing `piggy`
@@ -27,7 +31,8 @@ use clap::{Parser, Subcommand};
 use piggy_box::recipients::template_from_recipients;
 use piggy_box::stream::EboxStream;
 use piggy_ids::RecipientFile;
-use piggy_markl::Id as MarklId;
+use piggy_markl::{FormatId, Id as MarklId, PurposeId};
+use piggy_piv::{Guid, PivAlgorithm, PivContext, PivToken};
 
 #[derive(Parser, Debug)]
 #[command(name = "piggy-ids", version, about)]
@@ -64,6 +69,14 @@ enum Cmd {
         /// Desired state.
         desired: PathBuf,
     },
+    /// Read the attached PIV card's slot 9D pubkey and emit a
+    /// piggy-recipient-v1 markl ID on stdout.
+    DetectPubkey {
+        /// Optional PIV card GUID (hex, 32 chars). Required when more
+        /// than one PIV card is attached.
+        #[arg(long)]
+        guid: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -85,6 +98,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, DynErr> {
         Cmd::Validate { ids } => cmd_validate(&ids),
         Cmd::Canonicalize { ids } => cmd_canonicalize(&ids),
         Cmd::Diff { current, desired } => cmd_diff(&current, &desired),
+        Cmd::DetectPubkey { guid } => cmd_detect_pubkey(guid.as_deref()),
     }
 }
 
@@ -171,4 +185,90 @@ fn cmd_encrypt(path: &Path) -> Result<ExitCode, DynErr> {
     }
     out.flush()?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Read slot 9D from the attached PIV card and emit the canonical
+/// `piggy-recipient-v1@pivy_ecdh_p256_pub-…` markl ID. When more than
+/// one PIV card is attached, callers must pass the desired GUID via
+/// `--guid <hex>`.
+fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
+    let ctx = PivContext::new()?;
+    let tokens = ctx.enumerate_tokens()?;
+    if tokens.is_empty() {
+        return Err("no PIV cards detected".into());
+    }
+
+    let token = pick_token(&tokens, guid_hex)?;
+    let slot = token.read_slot(0x9D)?;
+    if slot.algorithm() != PivAlgorithm::EcP256 {
+        return Err(format!(
+            "slot 9D is {:?}; piggy 2.x recipients require P-256 (EcP256)",
+            slot.algorithm()
+        )
+        .into());
+    }
+
+    let compressed = compress_p256_pubkey(slot.cert_der())?;
+    let id = MarklId::new(
+        Some(PurposeId::PiggyRecipientV1),
+        FormatId::PivyEcdhP256Pub,
+        compressed,
+    )?;
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    writeln!(out, "{}", id)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn pick_token<'a>(
+    tokens: &'a [PivToken],
+    guid_hex: Option<&str>,
+) -> Result<&'a PivToken, DynErr> {
+    match guid_hex {
+        Some(hex) => {
+            let want = Guid::from_hex(hex)?;
+            tokens
+                .iter()
+                .find(|t| t.guid() == &want)
+                .ok_or_else(|| format!("no PIV card with GUID {hex} attached").into())
+        }
+        None => {
+            if tokens.len() > 1 {
+                let attached = tokens
+                    .iter()
+                    .map(|t| t.guid().to_hex())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "{} PIV cards attached; pass --guid <hex> to disambiguate (attached: {})",
+                    tokens.len(),
+                    attached
+                )
+                .into());
+            }
+            Ok(&tokens[0])
+        }
+    }
+}
+
+fn compress_p256_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, DynErr> {
+    let cert = openssl::x509::X509::from_der(cert_der)?;
+    let pubkey = cert.public_key()?;
+    let ec = pubkey.ec_key()?;
+    let group = ec.group();
+    let mut bn_ctx = openssl::bn::BigNumContext::new()?;
+    let compressed = ec.public_key().to_bytes(
+        group,
+        openssl::ec::PointConversionForm::COMPRESSED,
+        &mut bn_ctx,
+    )?;
+    if compressed.len() != 33 {
+        return Err(format!(
+            "expected 33-byte compressed P-256 point, got {}",
+            compressed.len()
+        )
+        .into());
+    }
+    Ok(compressed)
 }

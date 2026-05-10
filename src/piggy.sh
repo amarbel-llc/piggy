@@ -254,9 +254,11 @@ cmd_usage() {
   echo
   cat <<-_EOF
 	Usage:
-	    $PROGRAM_PASS init [-p subfolder] -k <markl-id>
+	    $PROGRAM_PASS init [-p subfolder] [-k <markl-id> | -g <guid>]
 	        Initialize new password storage with a piggy-recipient-v1
 	        markl ID. Writes <store>/[subfolder/].piggy-ids.
+	        With no -k, auto-detects from the attached PIV card's slot 9D.
+	        Use -g <guid> to disambiguate when multiple cards are attached.
 	    $PROGRAM_PASS recipients <list|add|remove|sync> [-p subfolder] ...
 	        Manage recipients in .piggy-ids. See "$PROGRAM_PASS recipients --help".
 	    $PROGRAM_PASS ls [subfolder]
@@ -301,13 +303,14 @@ cmd_init() {
   # by a markl ID of format `pivy_ecdh_p256_pub` carrying the
   # `piggy-recipient-v1` purpose tag — see madder RFC 0002.
   #
-  # Pre-2.x flags --edit / -i / -g were dropped (#69 / #74). Use
-  # `piggy pass recipients add/remove/sync` (phase 5) for incremental
-  # recipient management and `-k <markl-id>` here for the initial
-  # set. The auto-detect path (read pubkey from attached card →
-  # markl) is tracked separately and not yet wired.
-  local opts id_path="" key=""
-  opts="$($GETOPT -o p:k: -l path:,key: -n "$PROGRAM" -- "$@")"
+  # Modes:
+  #   -k <markl-id>   declarative; user supplies the recipient (any
+  #                   shape that piggy-ids canonicalize accepts).
+  #   no -k           auto-detect; shells to `piggy-ids detect-pubkey`
+  #                   to read slot 9D of the attached PIV card. -g is
+  #                   forwarded as `--guid` for multi-card setups.
+  local opts id_path="" key="" guid=""
+  opts="$($GETOPT -o p:k:g: -l path:,key:,guid: -n "$PROGRAM" -- "$@")"
   local err=$?
   eval set -- "$opts"
   while true; do case $1 in
@@ -319,13 +322,18 @@ cmd_init() {
       key="$2"
       shift 2
       ;;
+    -g | --guid)
+      guid="$2"
+      shift 2
+      ;;
     --)
       shift
       break
       ;;
     esac done
 
-  [[ $err -ne 0 ]] && die "Usage: $PROGRAM_PASS $COMMAND [-p subfolder] -k <markl-id>"
+  [[ $err -ne 0 ]] && die "Usage: $PROGRAM_PASS $COMMAND [-p subfolder] [-k <markl-id> | -g <guid>]"
+  [[ -n $key && -n $guid ]] && die "Error: -k and -g are mutually exclusive (-g only applies to auto-detect)."
   [[ -n $id_path ]] && check_sneaky_paths "$id_path"
   [[ -n $id_path && ! -d $PREFIX/$id_path && -e $PREFIX/$id_path ]] && die "Error: $PREFIX/$id_path exists but is not a directory."
 
@@ -336,7 +344,10 @@ cmd_init() {
   mkdir -v -p "$tpl_dir"
 
   if [[ -z $key ]]; then
-    die "Error: piggy pass init requires -k <markl-id> in piggy 2.x. Auto-detect from attached card is not yet wired (see #74 follow-up)."
+    local detect_args=()
+    [[ -n $guid ]] && detect_args+=(--guid "$guid")
+    key="$("${PIGGY_IDS_PATH:-piggy-ids}" detect-pubkey "${detect_args[@]}")" ||
+      die "Error: piggy-ids detect-pubkey failed; pass -k <markl-id> if no PIV card is attached."
   fi
 
   # Validate the markl-id has the piggy 2.x recipient shape — bare

@@ -18,7 +18,9 @@ path = "src/main.rs"
 [dependencies]
 piggy-markl = { path = "../piggy-markl" }
 piggy-box = { path = "../piggy-box" }
+piggy-piv = { path = "../piggy-piv" }
 clap = { version = "4", features = ["derive"] }
+openssl = "0.10"
 thiserror = "2"
 
 [dev-dependencies]

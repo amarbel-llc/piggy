@@ -19,11 +19,33 @@ function pass_init_with_k_writes_piggy_ids { # @test
   assert_output --partial "$RECIPIENT_BARE"
 }
 
-function pass_init_without_k_dies_with_helpful_message { # @test
+function pass_init_without_k_uses_auto_detect { # @test
+  # With no -k, cmd_init shells to `piggy-ids detect-pubkey` (mocked
+  # to emit the canonical RFC 0002 vector). The .piggy-ids file
+  # ends up with the auto-detected recipient.
   init_test_git
   run "$PIGGY" pass init
+  assert_success
+  assert [ -e "$PIGGY_STORE_DIR/.piggy-ids" ]
+  run cat "$PIGGY_STORE_DIR/.piggy-ids"
+  assert_output --partial "$RECIPIENT_BARE"
+}
+
+function pass_init_without_k_no_card_dies_helpfully { # @test
+  # PIGGY_TEST_DETECT_FAIL flips the mock detect-pubkey to a failure;
+  # cmd_init's fall-through reports it.
+  init_test_git
+  PIGGY_TEST_DETECT_FAIL="no PIV cards detected" \
+    run "$PIGGY" pass init
   assert_failure
-  assert_output --partial "requires -k <markl-id>"
+  assert_output --partial "piggy-ids detect-pubkey failed"
+}
+
+function pass_init_k_and_g_are_mutually_exclusive { # @test
+  init_test_git
+  run "$PIGGY" pass init -k "$RECIPIENT_BARE" -g 0102030405060708090a0b0c0d0e0f10
+  assert_failure
+  assert_output --partial "mutually exclusive"
 }
 
 function pass_init_rejects_wrong_format_id { # @test
