@@ -6,12 +6,13 @@
 //! encoding of the binary payload.
 //!
 //! **Status: prototype shim.** Hand-ported from the Go reference at
-//! `go/internal/{alfa/blech32,bravo/markl}/` while RFC 0002
-//! (madder#150) is still in flight. The public API here is intended
-//! to be stable; the implementation may be replaced once madder
-//! ships RFC 0002 and a portable JSON test-vector fixture
-//! (`docs/rfcs/0002-markl-id-format-vectors.json`). See
-//! amarbel-llc/piggy#71 for the umbrella tracker.
+//! `go/internal/{alfa/blech32,bravo/markl}/`. RFC 0002 landed via
+//! madder#150 and was patched by madder#159 to restore the split-HRP
+//! checksum binding (purpose textually prepended after blech32, never
+//! folded into the HRP); this crate matches the post-#159 wire form.
+//! Conformance vectors are pinned from madder's
+//! `go/internal/charlie/markl_registrations/testdata/0002-markl-id-format-vectors.json`.
+//! See amarbel-llc/piggy#71 for the umbrella tracker.
 //!
 //! Scope: piggy 2.x's recipient template (`pivy_ecdh_p256_pub` payloads
 //! tagged with the `piggy-recipient-v1` purpose). Other format IDs and

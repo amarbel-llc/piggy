@@ -95,77 +95,77 @@
       "purpose": "dodder-blob-digest-sha256-v1",
       "format": "blake2b256",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-      "encoded": "dodder-blob-digest-sha256-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0spygtsw"
+      "encoded": "dodder-blob-digest-sha256-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400"
     },
     {
       "name": "purpose/dodder-blob-digest-sha256-v1/sha256",
       "purpose": "dodder-blob-digest-sha256-v1",
       "format": "sha256",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-      "encoded": "dodder-blob-digest-sha256-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s45qmq9"
+      "encoded": "dodder-blob-digest-sha256-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6"
     },
     {
       "name": "purpose/dodder-object-digest-v2/blake2b256",
       "purpose": "dodder-object-digest-v2",
       "format": "blake2b256",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-      "encoded": "dodder-object-digest-v2@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0swkplxd"
+      "encoded": "dodder-object-digest-v2@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400"
     },
     {
       "name": "purpose/dodder-object-digest-v2/sha256",
       "purpose": "dodder-object-digest-v2",
       "format": "sha256",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-      "encoded": "dodder-object-digest-v2@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0sg87xuh"
+      "encoded": "dodder-object-digest-v2@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6"
     },
     {
       "name": "purpose/dodder-object-sig-v2/ecdsa_p256_sig",
       "purpose": "dodder-object-sig-v2",
       "format": "ecdsa_p256_sig",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
-      "encoded": "dodder-object-sig-v2@ecdsa_p256_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0chf9n8a"
+      "encoded": "dodder-object-sig-v2@ecdsa_p256_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cywvqw8"
     },
     {
       "name": "purpose/dodder-object-sig-v2/ed25519_sig",
       "purpose": "dodder-object-sig-v2",
       "format": "ed25519_sig",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
-      "encoded": "dodder-object-sig-v2@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0c57hs7s"
+      "encoded": "dodder-object-sig-v2@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cy4lu83"
     },
     {
       "name": "purpose/dodder-repo-public_key-v1/ecdsa_p256_pub",
       "purpose": "dodder-repo-public_key-v1",
       "format": "ecdsa_p256_pub",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-      "encoded": "dodder-repo-public_key-v1@ecdsa_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqc8380e"
+      "encoded": "dodder-repo-public_key-v1@ecdsa_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq8pfena"
     },
     {
       "name": "purpose/dodder-repo-public_key-v1/ed25519_pub",
       "purpose": "dodder-repo-public_key-v1",
       "format": "ed25519_pub",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-      "encoded": "dodder-repo-public_key-v1@ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0stmhcu9"
+      "encoded": "dodder-repo-public_key-v1@ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0srk9anc"
     },
     {
       "name": "purpose/dodder-repo-private_key-v1/ecdsa_p256_ssh",
       "purpose": "dodder-repo-private_key-v1",
       "format": "ecdsa_p256_ssh",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-      "encoded": "dodder-repo-private_key-v1@ecdsa_p256_ssh-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqp3h7ur"
+      "encoded": "dodder-repo-private_key-v1@ecdsa_p256_ssh-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqamtkgf"
     },
     {
       "name": "purpose/dodder-repo-private_key-v1/ed25519_sec",
       "purpose": "dodder-repo-private_key-v1",
       "format": "ed25519_sec",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
-      "encoded": "dodder-repo-private_key-v1@ed25519_sec-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0ckzz4dg"
+      "encoded": "dodder-repo-private_key-v1@ed25519_sec-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cw8gvm3"
     },
     {
       "name": "purpose/dodder-repo-private_key-v1/ed25519_ssh",
       "purpose": "dodder-repo-private_key-v1",
       "format": "ed25519_ssh",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-      "encoded": "dodder-repo-private_key-v1@ed25519_ssh-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6j7fuf"
+      "encoded": "dodder-repo-private_key-v1@ed25519_ssh-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0slgq3w8"
     }
   ],
   "invalid": [
@@ -196,7 +196,7 @@
     },
     {
       "name": "incompatible_purpose_format",
-      "encoded": "dodder-blob-digest-sha256-v1@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cx2pej3",
+      "encoded": "dodder-blob-digest-sha256-v1@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cy4lu83",
       "error": "IncompatiblePurposeAndFormat"
     }
   ]

@@ -120,7 +120,7 @@ fn convert_bits(data: &[u8], from_bits: u32, to_bits: u32, pad: bool) -> Result<
     let max_v: u32 = (1u32 << to_bits) - 1;
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
-    let mut out = Vec::with_capacity((data.len() * from_bits as usize + to_bits as usize - 1) / to_bits as usize);
+    let mut out = Vec::with_capacity((data.len() * from_bits as usize).div_ceil(to_bits as usize));
 
     for (idx, &v) in data.iter().enumerate() {
         if (v as u32) >> from_bits != 0 {

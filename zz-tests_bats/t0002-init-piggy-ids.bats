@@ -5,8 +5,8 @@ setup() {
 # A real markl ID for piggy 2.x recipient use, sourced from madder
 # RFC 0002's official test fixture
 # (go/internal/charlie/markl_registrations/testdata/0002-markl-id-format-vectors.json
-# at madder commit 0989083). The 33-byte payload is the canonical
-# non-trivial sequence 00..20.
+# at madder commit fd53684, post-#159 split-HRP revert). The 33-byte
+# payload is the canonical non-trivial sequence 00..20.
 RECIPIENT_BARE="pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu"
 
 function pass_init_with_k_writes_piggy_ids { # @test
@@ -45,17 +45,12 @@ function pass_init_with_p_creates_subfolder_template { # @test
 
 function pass_init_accepts_purpose_tagged_form_unchanged { # @test
   # Purpose-tagged form must round-trip byte-for-byte through
-  # cmd_init's writer. Use a real RFC 0002 vector so the checksum
-  # is valid: the `purpose/dodder-repo-public_key-v1/ecdsa_p256_pub`
-  # vector hex is the same 33-byte payload used in the bare
-  # `pivy_ecdh_p256_pub` vector — re-encoded under the
-  # `piggy-recipient-v1@pivy_ecdh_p256_pub` HRP gives a
-  # piggy-shape recipient. We don't have a piggy-recipient-v1
-  # vector pinned upstream yet, so test the input-validation gate
-  # by feeding a structurally-valid (purpose-tag prefix matches)
-  # input — even one whose checksum the rust codec would later
-  # reject. cmd_init only checks the prefix shape; piggy pass
-  # recipients (#75) will run the full codec.
+  # cmd_init's writer. Under RFC 0002 §3.3 (post-#159 split-HRP
+  # rule) the blech32 portion of `piggy-recipient-v1@<bare>` is
+  # byte-identical to the bare-format encoding — purpose is
+  # textually prepended after blech32, so the checksum binds to
+  # `pivy_ecdh_p256_pub` only. cmd_init only checks the prefix
+  # shape; piggy pass recipients (#75) will run the full codec.
   init_test_git
   local tagged="piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu"
   run "$PIGGY" pass init -k "$tagged"

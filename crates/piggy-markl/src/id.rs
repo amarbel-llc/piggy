@@ -6,11 +6,18 @@
 //! [purpose@]format-data
 //! ```
 //!
-//! where `format-data` is the blech32 (HRP=format, data=blech32-encoded
-//! payload + 6-char checksum). Splitting the optional purpose off uses
-//! the **first** `@` (matching Go's `strings.Cut`); since the
-//! purpose-id lexical rule disallows `@`, "first" and "last" coincide
-//! for valid inputs.
+//! where `format-data` is a blech32 string with HRP=`format` (the
+//! purpose, when present, is **textually prepended** as `purpose@`
+//! after blech32 encoding — the checksum binds to `(format, data)`
+//! only). Splitting the optional purpose off uses the **first** `@`
+//! in the input (matching Go's `strings.Cut`); since the purpose-id
+//! lexical rule disallows `@`, "first" and "last" coincide for valid
+//! inputs.
+//!
+//! The split-HRP rule was restored by amarbel-llc/madder#159 after
+//! the brief combined-HRP form (madder#150 / commit 8dc78c7) broke
+//! cross-purpose digest equality. RFC 0002 §3.3 + §4 reflect the
+//! restored rule.
 //!
 //! ADR-0001 invariant: any `Id` whose `data` is non-empty MUST carry
 //! a `format`, and `data.len()` MUST equal that format's declared
@@ -92,30 +99,31 @@ impl Id {
 
     /// Render the markl ID in wire form. Always lowercase.
     ///
-    /// When a purpose is present the blech32 HRP is the combined
-    /// string `purpose@format` so the checksum covers both parts —
-    /// matches madder's MarshalText (RFC 0002 §3) after the
-    /// purpose-aware fix that landed with madder#150.
+    /// blech32-encodes `(format, data)` only; if a purpose is present
+    /// it is textually prepended as `purpose@`. The checksum covers
+    /// the format + data, never the purpose — matches madder's
+    /// `StringWithFormat` after the split-HRP revert (madder#159).
     pub fn to_wire(&self) -> String {
-        let hrp = match &self.purpose {
-            Some(p) => format!("{}@{}", p.as_str(), self.format.as_str()),
-            None => self.format.as_str().to_string(),
-        };
-        blech32::encode(&hrp, &self.data).expect("encode of validated payload cannot fail")
+        let body = blech32::encode(self.format.as_str(), &self.data)
+            .expect("encode of validated payload cannot fail");
+        match &self.purpose {
+            Some(p) => format!("{}@{}", p.as_str(), body),
+            None => body,
+        }
     }
 
-    /// Parse a wire-form markl ID per RFC 0002 §4. blech32-decodes
-    /// the whole input first (HRP may include `purpose@format`),
-    /// then splits the decoded HRP on the first `@` to recover the
-    /// purpose.
+    /// Parse a wire-form markl ID per RFC 0002 §4. Splits on the
+    /// first `@` *textually* to recover the purpose, then
+    /// blech32-decodes the body with HRP=`format`. Mirrors madder's
+    /// `Set` after madder#159.
     pub fn parse(s: &str) -> Result<Self, ParseError> {
-        let (combined_hrp, data) = blech32::decode(s)?;
-        let (purpose_str, format_str) = match combined_hrp.find('@') {
-            Some(i) => (Some(&combined_hrp[..i]), &combined_hrp[i + 1..]),
-            None => (None, combined_hrp.as_str()),
+        let (purpose_str, body) = match s.find('@') {
+            Some(i) => (Some(&s[..i]), &s[i + 1..]),
+            None => (None, s),
         };
+        let (format_str, data) = blech32::decode(body)?;
         let purpose = purpose_str.map(PurposeId::parse);
-        let format = FormatId::parse(format_str)?;
+        let format = FormatId::parse(&format_str)?;
 
         Self::new(purpose, format, data)
     }
@@ -215,29 +223,59 @@ mod tests {
     #[test]
     fn purpose_carrying_unknown_string_parses_but_rejects_validation() {
         let payload = pivy_pubkey_payload();
-        // Build a canonical (RFC 0002) wire string with HRP =
-        // "future-purpose-v0@pivy_ecdh_p256_pub", then assert
-        // parse → Id::new → validate_format → Other rejects.
-        let wire =
-            blech32::encode("future-purpose-v0@pivy_ecdh_p256_pub", &payload).unwrap();
+        // Build a canonical (RFC 0002) wire string textually:
+        // "future-purpose-v0@" prepended to blech32(pivy_ecdh_p256_pub,
+        // payload). Assert parse → Id::new → validate_format → Other
+        // rejects.
+        let body = blech32::encode("pivy_ecdh_p256_pub", &payload).unwrap();
+        let wire = format!("future-purpose-v0@{body}");
         let err = Id::parse(&wire).unwrap_err();
         assert!(matches!(err, ParseError::Incompatible(_)));
     }
 
     #[test]
-    fn purpose_split_uses_first_at_in_hrp() {
-        // The `applyDecodedHRPAndData` step splits the decoded HRP
-        // on the first `@`. Since the purpose-id lexical rule
-        // excludes `@`, in practice there's only one — but document
-        // the parse rule.
+    fn purpose_split_uses_first_at_in_input() {
+        // RFC 0002 §4 splits the input on the first `@` textually
+        // (before blech32-decoding the body). Since the purpose-id
+        // lexical rule excludes `@`, in practice there's only one —
+        // but document the parse rule.
         let payload = pivy_pubkey_payload();
-        let wire = blech32::encode(
-            "piggy-recipient-v1@pivy_ecdh_p256_pub",
-            &payload,
-        )
-        .unwrap();
+        let body = blech32::encode("pivy_ecdh_p256_pub", &payload).unwrap();
+        let wire = format!("piggy-recipient-v1@{body}");
         let parsed = Id::parse(&wire).unwrap();
         assert_eq!(parsed.purpose(), Some(&PurposeId::PiggyRecipientV1));
         assert_eq!(parsed.format(), FormatId::PivyEcdhP256Pub);
+    }
+
+    #[test]
+    fn cross_purpose_blech32_body_is_identical() {
+        // RFC 0002 §3.3 (post-#159) property: the same (format, data)
+        // under different purposes produces the same blech32 byte
+        // sequence; only the textual purpose@ prefix differs.
+        // Mirrors madder's TestRFC0002CrossPurposeBlech32Equal.
+        let data = vec![0u8; 32];
+        let purposeless = Id::new(None, FormatId::Sha256, data.clone()).unwrap();
+        let blob_digest = Id::new(
+            Some(PurposeId::DodderBlobDigestSha256V1),
+            FormatId::Sha256,
+            data.clone(),
+        )
+        .unwrap();
+        let object_digest = Id::new(
+            Some(PurposeId::DodderObjectDigestV2),
+            FormatId::Sha256,
+            data,
+        )
+        .unwrap();
+
+        let purposeless_wire = purposeless.to_wire();
+        let blob_body = blob_digest.to_wire();
+        let object_body = object_digest.to_wire();
+
+        let blob_after_at = blob_body.split_once('@').expect("purpose@body").1;
+        let object_after_at = object_body.split_once('@').expect("purpose@body").1;
+        assert_eq!(blob_after_at, purposeless_wire);
+        assert_eq!(object_after_at, purposeless_wire);
+        assert_eq!(blob_after_at, object_after_at);
     }
 }

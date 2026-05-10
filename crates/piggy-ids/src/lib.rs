@@ -260,11 +260,7 @@ fn parse_line(raw: &str, line_no: usize) -> Result<Recipient, ParseError> {
     // Validate purpose AND format. Permit bare format on input
     // (no purpose) — we'll canonicalise on render.
     let format_ok = matches!(id.format(), FormatId::PivyEcdhP256Pub);
-    let purpose_ok = match id.purpose() {
-        None => true,
-        Some(PurposeId::PiggyRecipientV1) => true,
-        _ => false,
-    };
+    let purpose_ok = matches!(id.purpose(), None | Some(PurposeId::PiggyRecipientV1));
     if !(purpose_ok && format_ok) {
         return Err(ParseError::InvalidRecipientShape {
             line: line_no,

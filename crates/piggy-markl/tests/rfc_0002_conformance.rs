@@ -1,8 +1,8 @@
 //! Conformance tests against madder RFC 0002's portable test
-//! vectors (madder#150). Sourced from
+//! vectors (madder#150 + #159). Sourced from
 //! `go/internal/charlie/markl_registrations/testdata/0002-markl-id-format-vectors.json`
-//! at madder commit `0989083` and pinned in this crate's
-//! `testdata/` directory.
+//! at madder commit `fd53684` (the split-HRP revert) and pinned in
+//! this crate's `testdata/` directory.
 //!
 //! Round-trips every valid vector (encode-from-bytes match,
 //! decode-from-string match) and asserts each invalid vector fails
@@ -37,7 +37,7 @@ struct Invalid {
 
 fn hex_decode(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
-    assert!(bytes.len() % 2 == 0, "odd-length hex string: {s:?}");
+    assert!(bytes.len().is_multiple_of(2), "odd-length hex string: {s:?}");
     let mut out = Vec::with_capacity(bytes.len() / 2);
     for chunk in bytes.chunks(2) {
         let hi = (chunk[0] as char).to_digit(16).expect("hex digit") as u8;
@@ -160,16 +160,16 @@ fn rfc_0002_invalid_vectors_reject() {
 
 /// Map RFC 0002 error names to piggy-markl error variants.
 fn matches_expected_error(actual: &ParseError, expected_name: &str) -> bool {
-    match (actual, expected_name) {
-        (ParseError::Blech32(blech32::Error::MixedCase), "MixedCase") => true,
-        (ParseError::Blech32(blech32::Error::SeparatorMissing), "SeparatorMissing") => true,
-        (ParseError::Blech32(blech32::Error::InvalidChecksum), "InvalidChecksum") => true,
-        (
-            ParseError::Blech32(blech32::Error::InvalidCharacterInData { .. }),
-            "InvalidCharacter",
-        ) => true,
-        (ParseError::WrongSize { .. }, "WrongSize") => true,
-        (ParseError::Incompatible(_), "IncompatiblePurposeAndFormat") => true,
-        _ => false,
-    }
+    matches!(
+        (actual, expected_name),
+        (ParseError::Blech32(blech32::Error::MixedCase), "MixedCase")
+            | (ParseError::Blech32(blech32::Error::SeparatorMissing), "SeparatorMissing")
+            | (ParseError::Blech32(blech32::Error::InvalidChecksum), "InvalidChecksum")
+            | (
+                ParseError::Blech32(blech32::Error::InvalidCharacterInData { .. }),
+                "InvalidCharacter",
+            )
+            | (ParseError::WrongSize { .. }, "WrongSize")
+            | (ParseError::Incompatible(_), "IncompatiblePurposeAndFormat")
+    )
 }

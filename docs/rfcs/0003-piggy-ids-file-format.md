@@ -29,10 +29,10 @@ piggy 2.x. It replaces the binary `.pivy-id` template that piggy 1.x
 inherited from pivy.
 
 The normative referent for the markl ID wire format used in each
-recipient line is amarbel-llc/madder RFC 0002 (tracked at
-amarbel-llc/madder#150 at this RFC's draft date). Until madder ships
-RFC 0002, piggy's `crates/piggy-markl` crate is the de facto
-reference implementation.
+recipient line is amarbel-llc/madder RFC 0002 (madder#150, patched
+by madder#159 to restore the split-HRP checksum binding — purpose is
+textually prepended after blech32, never folded into the HRP).
+piggy's `crates/piggy-markl` crate mirrors the post-#159 form.
 
 ## Requirements Language
 
