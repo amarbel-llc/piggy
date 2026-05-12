@@ -45,3 +45,61 @@ function add_attached_already_present_prints_info_line { # @test
   after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
   [[ "$before_sha" = "$after_sha" ]] || fail "expected no new commit when all attached cards are already recipients"
 }
+
+function add_attached_unsupported_without_yes_aborts { # @test
+  local sup_guid="DEADBEEF00000000AABBCCDDEEFF0011"
+  local unsup_guid="CAFEF00D11223344556677889900AABB"
+  export PIGGY_TEST_DETECT_ALL_SUPPORTED="$RECIPIENT_SECONDARY"$'\t'"$sup_guid"
+  export PIGGY_TEST_DETECT_ALL_UNSUPPORTED="$unsup_guid"$'\t'"slot 9D is Rsa2048"
+
+  local before_sha
+  before_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
+
+  run "$PIGGY" pass recipients add --all-attached
+  assert_failure
+  assert_output --partial "Cannot encrypt to 1 attached card"
+  assert_output --partial "$unsup_guid: slot 9D is Rsa2048"
+  assert_output --partial "stdin is not a TTY"
+
+  local after_sha
+  after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
+  [[ "$before_sha" = "$after_sha" ]] || fail "expected no commit when aborted"
+}
+
+function add_attached_unsupported_with_yes_adds_supported_only { # @test
+  local sup_guid="DEADBEEF00000000AABBCCDDEEFF0011"
+  local unsup_guid="CAFEF00D11223344556677889900AABB"
+  export PIGGY_TEST_DETECT_ALL_SUPPORTED="$RECIPIENT_SECONDARY"$'\t'"$sup_guid"
+  export PIGGY_TEST_DETECT_ALL_UNSUPPORTED="$unsup_guid"$'\t'"slot 9D is Rsa2048"
+
+  run "$PIGGY" pass recipients add --all-attached --yes
+  assert_success
+  assert_output --partial "Cannot encrypt to 1 attached card"
+  run cat "$PIGGY_STORE_DIR/piggy-ids"
+  assert_output --partial "$RECIPIENT_SECONDARY"
+}
+
+function add_attached_only_unsupported_yes_is_nothing_to_add { # @test
+  local unsup_guid="CAFEF00D11223344556677889900AABB"
+  unset PIGGY_TEST_DETECT_ALL_SUPPORTED
+  export PIGGY_TEST_DETECT_ALL_UNSUPPORTED="$unsup_guid"$'\t'"slot 9D is Rsa2048"
+
+  local before_sha
+  before_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
+
+  run "$PIGGY" pass recipients add --all-attached --yes
+  assert_success
+  assert_output --partial "Cannot encrypt to 1 attached card"
+  assert_output --partial "nothing to add"
+
+  local after_sha
+  after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
+  [[ "$before_sha" = "$after_sha" ]] || fail "expected no commit when nothing to add"
+}
+
+function add_attached_no_cards_errors { # @test
+  unset PIGGY_TEST_DETECT_ALL_SUPPORTED PIGGY_TEST_DETECT_ALL_UNSUPPORTED || true
+  run "$PIGGY" pass recipients add --all-attached
+  assert_failure
+  assert_output --partial "no PIV cards detected"
+}

@@ -922,6 +922,31 @@ _cmd_pass_recipients_add_all_attached() {
     i=$((i + 1))
   done
 
+  if [[ ${#unsupported_guids[@]} -gt 0 ]]; then
+    {
+      echo "Cannot encrypt to ${#unsupported_guids[@]} attached card(s) (slot 9D is not P-256 ECDH):"
+      local j=0
+      while [[ $j -lt ${#unsupported_guids[@]} ]]; do
+        echo "  ${unsupported_guids[$j]}: ${unsupported_reasons[$j]}"
+        j=$((j + 1))
+      done
+    } >&2
+
+    if [[ $assume_yes -ne 1 ]]; then
+      if [[ -t 0 ]]; then
+        echo -n "Continue and add the ${#to_add[@]} supported card(s)? [y/N] " >&2
+        local reply
+        IFS= read -r reply </dev/tty || reply=""
+        case "$reply" in
+        y | Y | yes | Yes | YES) : ;;
+        *) die "aborted" ;;
+        esac
+      else
+        die "aborted: unsupported cards detected and stdin is not a TTY; pass --yes to proceed"
+      fi
+    fi
+  fi
+
   if [[ ${#to_add[@]} -eq 0 ]]; then
     echo "nothing to add" >&2
     return 0
