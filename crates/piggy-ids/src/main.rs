@@ -15,6 +15,15 @@
 //!     slot 9D pubkey, SEC1-compress, and emit a `piggy-recipient-v1@
 //!     pivy_ecdh_p256_pub-…` markl ID on stdout. Drives the no-flags
 //!     `piggy pass init` path (#79).
+//!   * `detect-all-pubkeys` — enumerate every attached PIV card and
+//!     emit one line per card, tab-separated:
+//!     `supported<TAB><markl-id><TAB><guid-hex>` or
+//!     `unsupported<TAB><guid-hex><TAB><reason>`. Tab is the field
+//!     separator (not two spaces) so `reason` strings containing
+//!     arbitrary whitespace (e.g. OpenSSL error stacks, free-form
+//!     `PivError` messages) remain unambiguously parseable by downstream
+//!     bash. Lines are sorted by GUID for stable output. Drives
+//!     `piggy pass recipients add --all-attached`.
 //!
 //! Reachable from `piggy.sh` via the `PIGGY_IDS_PATH` env var that
 //! `flake.nix`'s `makeWrapper` bakes into the user-facing `piggy`
@@ -77,6 +86,19 @@ enum Cmd {
         #[arg(long)]
         guid: Option<String>,
     },
+    /// Enumerate every attached PIV card and emit one line per card,
+    /// tab-separated:
+    ///
+    ///   supported<TAB><markl-id><TAB><guid-hex>
+    ///   unsupported<TAB><guid-hex><TAB><reason>
+    ///
+    /// Tab is the field separator (not two spaces) so reason strings
+    /// containing arbitrary whitespace (e.g. OpenSSL error stacks,
+    /// free-form PivError messages) remain unambiguously parseable.
+    /// Lines are sorted by GUID for stable output. Exit 0 even when all
+    /// cards are unsupported or no cards are attached; nonzero only on
+    /// PCSC failure.
+    DetectAllPubkeys,
 }
 
 fn main() -> ExitCode {
@@ -99,6 +121,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, DynErr> {
         Cmd::Canonicalize { ids } => cmd_canonicalize(&ids),
         Cmd::Diff { current, desired } => cmd_diff(&current, &desired),
         Cmd::DetectPubkey { guid } => cmd_detect_pubkey(guid.as_deref()),
+        Cmd::DetectAllPubkeys => cmd_detect_all_pubkeys(),
     }
 }
 
@@ -244,3 +267,47 @@ fn pick_token<'a>(
     }
 }
 
+/// Enumerate every attached PIV card, classify each card's slot 9D, and
+/// emit one line per card on stdout, sorted by GUID hex for stable
+/// output. Exit 0 even when all cards are unsupported or no cards are
+/// attached; nonzero only on PCSC failure.
+fn cmd_detect_all_pubkeys() -> Result<ExitCode, DynErr> {
+    use piggy_ids::{classify_slot_9d, Classification};
+
+    let ctx = PivContext::new()?;
+    let tokens = ctx.enumerate_tokens()?;
+
+    let mut classifications: Vec<Classification> = Vec::with_capacity(tokens.len());
+    for token in &tokens {
+        match token.read_slot(0x9D) {
+            Ok(slot) => classifications.push(classify_slot_9d(
+                token.guid().clone(),
+                slot.algorithm(),
+                slot.cert_der(),
+            )),
+            Err(e) => classifications.push(Classification::Unsupported {
+                guid: token.guid().clone(),
+                reason: format!("slot 9D unreadable: {e}"),
+            }),
+        }
+    }
+
+    classifications.sort_by_key(|c| match c {
+        Classification::Supported { guid, .. } => guid.to_hex(),
+        Classification::Unsupported { guid, .. } => guid.to_hex(),
+    });
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    for c in &classifications {
+        match c {
+            Classification::Supported { id, guid } => {
+                writeln!(out, "supported\t{}\t{}", id, guid.to_hex())?;
+            }
+            Classification::Unsupported { guid, reason } => {
+                writeln!(out, "unsupported\t{}\t{}", guid.to_hex(), reason)?;
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
