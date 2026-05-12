@@ -843,7 +843,65 @@ cmd_pass_recipients_add() {
 _cmd_pass_recipients_add_all_attached() {
   local subfolder="$1"
   local assume_yes="$2"
-  die "Error: --all-attached not yet implemented."
+
+  find_piggy_ids "$subfolder"
+  set_git "$PIGGY_IDS"
+
+  local helper_out
+  helper_out="$("${PIGGY_IDS_PATH:-piggy-ids}" detect-all-pubkeys)" ||
+    die "Error: detect-all-pubkeys failed; see stderr."
+
+  local -a supported_ids=()
+  local -a supported_guids=()
+  local -a unsupported_guids=()
+  local -a unsupported_reasons=()
+  local status f1 f2
+  while IFS=$'\t' read -r status f1 f2; do
+    [[ -z $status ]] && continue
+    case "$status" in
+    supported)
+      [[ -n $f1 && -n $f2 ]] || die "Error: malformed supported line from detect-all-pubkeys: id=[$f1] guid=[$f2]"
+      supported_ids+=("$f1")
+      supported_guids+=("$f2")
+      ;;
+    unsupported)
+      [[ -n $f1 && -n $f2 ]] || die "Error: malformed unsupported line from detect-all-pubkeys: guid=[$f1] reason=[$f2]"
+      unsupported_guids+=("$f1")
+      unsupported_reasons+=("$f2")
+      ;;
+    *)
+      die "Error: malformed line from piggy-ids detect-all-pubkeys: status=[$status]"
+      ;;
+    esac
+  done <<<"$helper_out"
+
+  if [[ ${#supported_ids[@]} -eq 0 && ${#unsupported_guids[@]} -eq 0 ]]; then
+    die "Error: no PIV cards detected."
+  fi
+
+  # Dedup support and the unsupported-cards dialog are added in
+  # subsequent commits. Those tasks consume the four parallel arrays
+  # above (supported_ids/supported_guids, unsupported_guids/
+  # unsupported_reasons). The plan's Task 8 snippet was authored
+  # before the helper switched to tab-separated three-column output;
+  # do NOT copy the plan's `unsupported_lines` / `${line%%  *}` shape
+  # verbatim — use these arrays instead.
+  # For now: assume all supported are new.
+  local -a to_add=("${supported_ids[@]}")
+  if [[ ${#to_add[@]} -eq 0 ]]; then
+    echo "nothing to add" >&2
+    return 0
+  fi
+
+  for id in "${to_add[@]}"; do
+    echo "$id" >>"$PIGGY_IDS"
+  done
+  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: invalid recipient(s); aborting."
+
+  local id_dir="${PIGGY_IDS%/piggy-ids}"
+  git_add_file "$PIGGY_IDS" "Add ${#to_add[@]} attached card(s) to piggy-ids."
+  reencrypt_path "$id_dir"
+  git_add_file "$id_dir" "Reencrypt password store after adding ${#to_add[@]} attached card(s)."
 }
 
 cmd_pass_recipients_remove() {
