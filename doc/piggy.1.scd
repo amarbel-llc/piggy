@@ -76,11 +76,22 @@ passthroughs for the C pivy binaries:
 *pass recipients list* [*--path*=_sub-folder_, *-p* _sub-folder_]
 	Print the recipients listed in the relevant _piggy-ids_, one per line.
 
-*pass recipients add* _markl-id_... [*--path*=_sub-folder_, *-p* _sub-folder_]
-	Append one or more recipients to _piggy-ids_ (canonicalizing on write)
-	and re-encrypt the affected store. The two-commit pattern from
-	*pass init* applies: one commit for the _piggy-ids_ change and one
-	for the re-encryption.
+*pass recipients add* [*-A* | *--all-attached*] [*--yes*] [*-p* _subfolder_] [_markl-id_...]
+	Append recipients to the store's _piggy-ids_ and re-encrypt.
+
+	With one or more _markl-id_ arguments, append each as a literal
+	recipient.
+
+	With *-A* / *--all-attached*, enumerate every attached PIV card
+	and add the supported ones (slot 9D, P-256 ECDH). Cards already
+	present are reported on stdout as
+	"_already a recipient: <markl-id>  # GUID <guid>_" and skipped.
+	Cards with an unsupported algorithm in slot 9D are listed in a
+	single stderr dialog; the command then prompts on /dev/tty
+	or, when stdin is not a TTY, aborts unless *--yes* was passed.
+
+	*--all-attached* and explicit _markl-id_ arguments are mutually
+	exclusive.
 
 *pass recipients remove* _markl-id_... [*--path*=_sub-folder_, *-p* _sub-folder_]
 	Remove one or more recipients (matched by full markl ID against the
