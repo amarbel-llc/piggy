@@ -19,6 +19,9 @@ use thiserror::Error;
 
 use piggy_markl::{FormatId, Id, ParseError as MarklParseError, PurposeId};
 
+pub mod classify;
+pub use classify::{classify_slot_9d, Classification};
+
 /// One recipient line: a markl ID plus an optional human comment.
 /// Equality is by markl ID alone — comments don't participate in
 /// `Diff` so re-running `recipients sync` after a rename is a no-op.
