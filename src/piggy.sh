@@ -808,6 +808,9 @@ cmd_pass_recipients_add() {
       assume_yes=1
       shift
       ;;
+    -*)
+      die "Error: unknown flag: $1"
+      ;;
     *)
       ids+=("$1")
       shift
@@ -829,10 +832,24 @@ cmd_pass_recipients_add() {
   find_piggy_ids "$subfolder"
   set_git "$PIGGY_IDS"
 
+  # Build candidate in a tempfile, validate, then atomically install.
+  # Same pattern as cmd_pass_recipients_remove — prevents a malformed
+  # input from corrupting the live piggy-ids when canonicalize rejects.
+  local tmp="${PIGGY_IDS}.tmp.$$"
+  trap 'rm -f "$tmp"' EXIT
+  cp "$PIGGY_IDS" "$tmp" || die "Error: failed to stage candidate piggy-ids."
   for id in "${ids[@]}"; do
-    echo "$id" >>"$PIGGY_IDS"
+    echo "$id" >>"$tmp"
   done
-  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: invalid recipient(s); aborting."
+  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$tmp" || {
+    rm -f "$tmp"
+    die "Error: invalid recipient(s); aborting."
+  }
+  mv "$tmp" "$PIGGY_IDS" || {
+    rm -f "$tmp"
+    die "Error: failed to install candidate piggy-ids."
+  }
+  trap - EXIT
 
   local id_dir="${PIGGY_IDS%/piggy-ids}"
   git_add_file "$PIGGY_IDS" "Add recipient(s) to piggy-ids."
@@ -952,10 +969,21 @@ _cmd_pass_recipients_add_all_attached() {
     return 0
   fi
 
+  local tmp="${PIGGY_IDS}.tmp.$$"
+  trap 'rm -f "$tmp"' EXIT
+  cp "$PIGGY_IDS" "$tmp" || die "Error: failed to stage candidate piggy-ids."
   for id in "${to_add[@]}"; do
-    echo "$id" >>"$PIGGY_IDS"
+    echo "$id" >>"$tmp"
   done
-  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: invalid recipient(s); aborting."
+  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$tmp" || {
+    rm -f "$tmp"
+    die "Error: invalid recipient(s); aborting."
+  }
+  mv "$tmp" "$PIGGY_IDS" || {
+    rm -f "$tmp"
+    die "Error: failed to install candidate piggy-ids."
+  }
+  trap - EXIT
 
   local id_dir="${PIGGY_IDS%/piggy-ids}"
   git_add_file "$PIGGY_IDS" "Add ${#to_add[@]} attached card(s) to piggy-ids."

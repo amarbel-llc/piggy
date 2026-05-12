@@ -125,6 +125,32 @@ function add_attached_respects_p_subfolder { # @test
   refute_output --partial "$RECIPIENT_SECONDARY"
 }
 
+function add_attached_lowercase_a_rejected_as_unknown_flag { # @test
+  # Regression: `pass recipients add -a` used to fall through the parser's
+  # * arm and corrupt piggy-ids. Now the leading `-` triggers a clear
+  # unknown-flag error BEFORE the file is touched.
+  local before
+  before="$(cat "$PIGGY_STORE_DIR/piggy-ids")"
+  run "$PIGGY" pass recipients add -a
+  assert_failure
+  assert_output --partial "unknown flag: -a"
+  local after
+  after="$(cat "$PIGGY_STORE_DIR/piggy-ids")"
+  [[ "$before" = "$after" ]] || fail "piggy-ids should be unchanged after unknown-flag rejection"
+}
+
+function add_attached_typo_long_flag_rejected_as_unknown_flag { # @test
+  # Regression: `--all-attachedc` typo. Same defense as the -a case.
+  local before
+  before="$(cat "$PIGGY_STORE_DIR/piggy-ids")"
+  run "$PIGGY" pass recipients add --all-attachedc
+  assert_failure
+  assert_output --partial "unknown flag: --all-attachedc"
+  local after
+  after="$(cat "$PIGGY_STORE_DIR/piggy-ids")"
+  [[ "$before" = "$after" ]] || fail "piggy-ids should be unchanged after unknown-flag rejection"
+}
+
 function add_attached_two_cards_both_already_recipients { # @test
   # First add RECIPIENT_SECONDARY to the store so both detected cards
   # are already present.

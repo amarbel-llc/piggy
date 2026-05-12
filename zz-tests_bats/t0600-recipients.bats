@@ -97,3 +97,30 @@ function recipients_add_commits_piggy_ids_change { # @test
   run git -C "$PIGGY_STORE_DIR" log -1 --pretty=%s
   assert_output --partial "Add recipient(s) to piggy-ids."
 }
+
+function recipients_add_invalid_id_does_not_corrupt_piggy_ids { # @test
+  # Regression: append-before-validate. Previously, an invalid markl ID
+  # got appended to piggy-ids and canonicalize then failed — leaving
+  # the file corrupted. Now we validate via a tempfile first.
+  local before_sha
+  before_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
+  local before_contents
+  before_contents="$(cat "$PIGGY_STORE_DIR/piggy-ids")"
+
+  # 'pivy_ecdh_p256_pub-bogus' starts with the right HRP but has only
+  # 5 charset chars in the body — below the 7-char minimum. canonicalize
+  # rejects.
+  run "$PIGGY" pass recipients add "pivy_ecdh_p256_pub-bogus"
+  assert_failure
+  assert_output --partial "invalid recipient"
+
+  # File MUST be unchanged.
+  local after_contents
+  after_contents="$(cat "$PIGGY_STORE_DIR/piggy-ids")"
+  [[ "$before_contents" = "$after_contents" ]] || fail "piggy-ids was modified despite the canonicalize rejection"
+
+  # No new commit lands.
+  local after_sha
+  after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
+  [[ "$before_sha" = "$after_sha" ]] || fail "expected no commit when add fails validation"
+}
