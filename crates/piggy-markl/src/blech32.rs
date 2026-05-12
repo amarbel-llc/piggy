@@ -217,7 +217,7 @@ pub fn decode(input: &str) -> Result<(String, Vec<u8>)> {
 
     let pos = input.rfind(SEPARATOR).ok_or(Error::SeparatorMissing)?;
     if pos < 1 {
-        return Err(Error::SeparatorMissing);
+        return Err(Error::EmptyHrp);
     }
     let data_str = &input[pos + 1..];
     if data_str.len() < DATA_PORTION_MIN {
@@ -301,8 +301,10 @@ mod tests {
 
     #[test]
     fn missing_separator_rejected() {
-        let err = decode("noseparator").unwrap_err();
-        assert_eq!(err, Error::SeparatorMissing);
+        assert_eq!(decode("noseparator").unwrap_err(), Error::SeparatorMissing);
+        // Also cover the all-charset case to confirm rfind, not something else,
+        // is the source of the rejection.
+        assert_eq!(decode("abc").unwrap_err(), Error::SeparatorMissing);
     }
 
     #[test]
@@ -345,6 +347,78 @@ mod tests {
         let (hrp, data) = decode(&encoded).unwrap();
         assert_eq!(hrp, "TEST");
         assert_eq!(data, payload);
+    }
+
+    #[test]
+    fn empty_input_is_separator_missing() {
+        // Truly empty: rfind returns None.
+        let err = decode("").unwrap_err();
+        assert_eq!(err, Error::SeparatorMissing);
+    }
+
+    #[test]
+    fn separator_only_is_empty_hrp() {
+        // "-" — rfind returns Some(0), HRP is empty.
+        let err = decode("-").unwrap_err();
+        assert_eq!(err, Error::EmptyHrp);
+    }
+
+    #[test]
+    fn leading_separator_is_empty_hrp() {
+        // Regression: "-a" / "-abc" are exactly what end up in piggy-ids
+        // when a user typos `pass recipients add -a`. Before the variant
+        // split, these resolved to SeparatorMissing with the literally-false
+        // message "separator '-' missing from input".
+        assert_eq!(decode("-a").unwrap_err(), Error::EmptyHrp);
+        assert_eq!(decode("-abc").unwrap_err(), Error::EmptyHrp);
+    }
+
+    #[test]
+    fn double_dash_hrp_resolves_to_invalid_checksum() {
+        // `--all-attachedc` is the exact regression input from a piggy
+        // pass recipients add typo. rfind picks the LAST '-' (between
+        // "--all" and "attachedc"), so the HRP is the non-empty "--all"
+        // — passes validate_hrp (ASCII 33-126 admits '-'). The data
+        // portion "attachedc" passes charset (every char in the bech32
+        // alphabet) and length checks. Failure surfaces at checksum
+        // verification.
+        //
+        // Forward hazard: if a future change tightens validate_hrp to
+        // forbid leading '-' in HRPs, this test will break with
+        // InvalidHrpCharacter at the leading dash instead. That's a
+        // user-visible behavior shift worth catching loudly.
+        assert_eq!(
+            decode("--all-attachedc").unwrap_err(),
+            Error::InvalidChecksum,
+        );
+    }
+
+    #[test]
+    fn separator_at_end_is_data_portion_too_short() {
+        // "a-" — HRP "a" is fine, data is empty (0 chars < 7 min).
+        let err = decode("a-").unwrap_err();
+        assert!(
+            matches!(err, Error::DataPortionTooShort { actual: 0, .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn empty_hrp_message_does_not_claim_separator_missing() {
+        // Regression: the original bug was that EmptyHrp and
+        // SeparatorMissing returned the same variant, producing a
+        // message that said "separator '-' missing" when in fact the
+        // separator was present.
+        let err = decode("-a").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("missing"),
+            "EmptyHrp must not be reported as missing-separator: {msg}"
+        );
+        assert!(
+            msg.contains("empty") || msg.contains("HRP"),
+            "EmptyHrp message should mention 'empty' or 'HRP': {msg}"
+        );
     }
 
     #[test]

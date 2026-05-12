@@ -248,6 +248,64 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_dash_a_with_clear_error() {
+        // Regression: `-a` was producing the misleading "separator missing"
+        // error before the EmptyHrp split (and was unrecoverable in a
+        // user's piggy-ids when it got appended via cmd_pass_recipients_add).
+        let err = Id::parse("-a").unwrap_err();
+        assert!(
+            matches!(err, ParseError::Blech32(blech32::Error::EmptyHrp)),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_double_dash_attachedc_with_clear_error() {
+        // Regression: `--all-attachedc` typo. Behavior depends on rfind
+        // semantics; lock whatever the current variant is so a future
+        // refactor doesn't silently change user-visible error.
+        let err = Id::parse("--all-attachedc").unwrap_err();
+        assert!(matches!(err, ParseError::Blech32(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn parse_rejects_purpose_only_no_at() {
+        // "piggy-recipient-v1" without `@<body>`: falls through to bare
+        // blech32 decode. HRP becomes "piggy" (everything before the LAST
+        // '-' is "piggy-recipient", but rfind picks the LAST one, so HRP
+        // is "piggy-recipient" and body is "v1"). Body too short.
+        let err = Id::parse("piggy-recipient-v1").unwrap_err();
+        assert!(matches!(err, ParseError::Blech32(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn parse_rejects_empty_string() {
+        let err = Id::parse("").unwrap_err();
+        assert!(
+            matches!(err, ParseError::Blech32(blech32::Error::SeparatorMissing)),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_empty_body_after_at() {
+        let err = Id::parse("piggy-recipient-v1@").unwrap_err();
+        assert!(
+            matches!(err, ParseError::Blech32(blech32::Error::SeparatorMissing)),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_dash_only_body_after_at() {
+        let err = Id::parse("piggy-recipient-v1@-foo").unwrap_err();
+        assert!(
+            matches!(err, ParseError::Blech32(blech32::Error::EmptyHrp)),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
     fn cross_purpose_blech32_body_is_identical() {
         // RFC 0002 §3.3 (post-#159) property: the same (format, data)
         // under different purposes produces the same blech32 byte

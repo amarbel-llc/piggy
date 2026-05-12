@@ -176,9 +176,10 @@ impl<'a> Diff<'a> {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
-    #[error("line {line}: failed to parse markl ID: {source}")]
+    #[error("line {line}: failed to parse markl ID {token:?}: {source}")]
     Markl {
         line: usize,
+        token: String,
         #[source]
         source: MarklParseError,
     },
@@ -257,6 +258,7 @@ fn parse_line(raw: &str, line_no: usize) -> Result<Recipient, ParseError> {
 
     let id = Id::parse(token).map_err(|e| ParseError::Markl {
         line: line_no,
+        token: token.to_string(),
         source: e,
     })?;
 
@@ -406,6 +408,34 @@ mod tests {
         let d = current.diff(&desired);
         assert!(d.is_empty(), "comment-only changes should not appear in diff");
         assert_eq!(d.retained.len(), 1);
+    }
+
+    #[test]
+    fn parse_error_includes_offending_token() {
+        // Regression: ParseError::Markl used to omit the offending token,
+        // so users hit "line 4: failed to parse markl ID: ..." without
+        // knowing which input was bad. The token is now part of the error.
+        let input = "# comment\n-a\n";
+        let err = RecipientFile::parse(input).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("-a") || msg.contains("\"-a\""),
+            "expected error to mention the offending token '-a': {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_error_includes_correct_line_number() {
+        // Two comment lines, one valid recipient, one broken line at line 4.
+        // The error should report line 4.
+        let id = sample_id(7);
+        let input = format!(
+            "# header\n# more header\n{}\n-a\n",
+            id.to_wire()
+        );
+        let err = RecipientFile::parse(&input).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("line 4"), "expected line 4 in error: {msg}");
     }
 
     #[test]
