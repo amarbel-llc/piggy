@@ -756,7 +756,9 @@ cmd_pass_recipients() {
 		    $PROGRAM_PASS recipients list [-p subfolder]
 		        Print recipients in the relevant piggy-ids, one per line.
 		    $PROGRAM_PASS recipients add <markl-id>... [-p subfolder]
-		        Append recipients to piggy-ids and re-encrypt.
+		    $PROGRAM_PASS recipients add -A | --all-attached [--yes] [-p subfolder]
+		        Append recipients to piggy-ids and re-encrypt. With -A,
+		        enumerate attached PIV cards and add supported ones.
 		    $PROGRAM_PASS recipients remove <markl-id>... [-p subfolder]
 		        Remove recipients (matched by full markl ID) and re-encrypt.
 		    $PROGRAM_PASS recipients sync <file> [-p subfolder]
@@ -789,6 +791,8 @@ cmd_pass_recipients_list() {
 
 cmd_pass_recipients_add() {
   local subfolder=""
+  local all_attached=0
+  local assume_yes=0
   local -a ids=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -796,13 +800,32 @@ cmd_pass_recipients_add() {
       subfolder="$2"
       shift 2
       ;;
+    -A | --all-attached)
+      all_attached=1
+      shift
+      ;;
+    --yes)
+      assume_yes=1
+      shift
+      ;;
     *)
       ids+=("$1")
       shift
       ;;
     esac
   done
-  [[ ${#ids[@]} -gt 0 ]] || die "Usage: $PROGRAM_PASS recipients add <markl-id>... [-p subfolder]"
+
+  if [[ $all_attached -eq 1 && ${#ids[@]} -gt 0 ]]; then
+    die "Error: --all-attached and explicit markl IDs are mutually exclusive."
+  fi
+
+  if [[ $all_attached -eq 1 ]]; then
+    _cmd_pass_recipients_add_all_attached "$subfolder" "$assume_yes"
+    return
+  fi
+
+  [[ ${#ids[@]} -gt 0 ]] || die "Usage: $PROGRAM_PASS recipients add <markl-id>... [-p subfolder]
+       $PROGRAM_PASS recipients add -A | --all-attached [--yes] [-p subfolder]"
   find_piggy_ids "$subfolder"
   set_git "$PIGGY_IDS"
 
@@ -815,6 +838,12 @@ cmd_pass_recipients_add() {
   git_add_file "$PIGGY_IDS" "Add recipient(s) to piggy-ids."
   reencrypt_path "$id_dir"
   git_add_file "$id_dir" "Reencrypt password store after adding recipient(s)."
+}
+
+_cmd_pass_recipients_add_all_attached() {
+  local subfolder="$1"
+  local assume_yes="$2"
+  die "Error: --all-attached not yet implemented."
 }
 
 cmd_pass_recipients_remove() {
