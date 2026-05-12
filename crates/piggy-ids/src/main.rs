@@ -31,8 +31,8 @@ use clap::{Parser, Subcommand};
 use piggy_box::recipients::template_from_recipients;
 use piggy_box::stream::EboxStream;
 use piggy_ids::RecipientFile;
-use piggy_markl::{FormatId, Id as MarklId, PurposeId};
-use piggy_piv::{Guid, PivAlgorithm, PivContext, PivToken};
+use piggy_markl::Id as MarklId;
+use piggy_piv::{Guid, PivContext, PivToken};
 
 #[derive(Parser, Debug)]
 #[command(name = "piggy-ids", version, about)]
@@ -192,6 +192,8 @@ fn cmd_encrypt(path: &Path) -> Result<ExitCode, DynErr> {
 /// one PIV card is attached, callers must pass the desired GUID via
 /// `--guid <hex>`.
 fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
+    use piggy_ids::{classify_slot_9d, Classification};
+
     let ctx = PivContext::new()?;
     let tokens = ctx.enumerate_tokens()?;
     if tokens.is_empty() {
@@ -200,25 +202,15 @@ fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
 
     let token = pick_token(&tokens, guid_hex)?;
     let slot = token.read_slot(0x9D)?;
-    if slot.algorithm() != PivAlgorithm::EcP256 {
-        return Err(format!(
-            "slot 9D is {:?}; piggy 2.x recipients require P-256 (EcP256)",
-            slot.algorithm()
-        )
-        .into());
+    match classify_slot_9d(token.guid().clone(), slot.algorithm(), slot.cert_der()) {
+        Classification::Supported { id, .. } => {
+            let stdout = io::stdout();
+            let mut out = stdout.lock();
+            writeln!(out, "{}", id)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Classification::Unsupported { reason, .. } => Err(reason.into()),
     }
-
-    let compressed = compress_p256_pubkey(slot.cert_der())?;
-    let id = MarklId::new(
-        Some(PurposeId::PiggyRecipientV1),
-        FormatId::PivyEcdhP256Pub,
-        compressed,
-    )?;
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    writeln!(out, "{}", id)?;
-    Ok(ExitCode::SUCCESS)
 }
 
 fn pick_token<'a>(
@@ -252,23 +244,3 @@ fn pick_token<'a>(
     }
 }
 
-fn compress_p256_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, DynErr> {
-    let cert = openssl::x509::X509::from_der(cert_der)?;
-    let pubkey = cert.public_key()?;
-    let ec = pubkey.ec_key()?;
-    let group = ec.group();
-    let mut bn_ctx = openssl::bn::BigNumContext::new()?;
-    let compressed = ec.public_key().to_bytes(
-        group,
-        openssl::ec::PointConversionForm::COMPRESSED,
-        &mut bn_ctx,
-    )?;
-    if compressed.len() != 33 {
-        return Err(format!(
-            "expected 33-byte compressed P-256 point, got {}",
-            compressed.len()
-        )
-        .into());
-    }
-    Ok(compressed)
-}
