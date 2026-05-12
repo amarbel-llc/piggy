@@ -25,3 +25,23 @@ function add_attached_happy_path_one_new_card { # @test
   assert_output --partial "$RECIPIENT_SECONDARY"  # new card
   assert_output --partial "$RECIPIENT_PRIMARY"    # original still present
 }
+
+function add_attached_already_present_prints_info_line { # @test
+  # Mock emits exactly the recipient the store was init'd with.
+  # GUID must be 32 uppercase hex chars to match the real binary's
+  # hex::encode_upper output (mock normalizes via ${guid^^}).
+  local guid="CAFEF00D00000000DDEE000112233444"
+  export PIGGY_TEST_DETECT_ALL_SUPPORTED="$RECIPIENT_PRIMARY"$'\t'"$guid"
+
+  local before_sha
+  before_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
+
+  run "$PIGGY" pass recipients add --all-attached
+  assert_success
+  assert_output --partial "already a recipient: $RECIPIENT_PRIMARY"
+  assert_output --partial "GUID $guid"
+
+  local after_sha
+  after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
+  [[ "$before_sha" = "$after_sha" ]] || fail "expected no new commit when all attached cards are already recipients"
+}

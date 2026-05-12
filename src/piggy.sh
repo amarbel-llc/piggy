@@ -879,15 +879,49 @@ _cmd_pass_recipients_add_all_attached() {
     die "Error: no PIV cards detected."
   fi
 
-  # Dedup support and the unsupported-cards dialog are added in
-  # subsequent commits. Those tasks consume the four parallel arrays
-  # above (supported_ids/supported_guids, unsupported_guids/
-  # unsupported_reasons). The plan's Task 8 snippet was authored
-  # before the helper switched to tab-separated three-column output;
-  # do NOT copy the plan's `unsupported_lines` / `${line%%  *}` shape
-  # verbatim — use these arrays instead.
-  # For now: assume all supported are new.
-  local -a to_add=("${supported_ids[@]}")
+  # Canonicalize current piggy-ids so equality below is byte-equality
+  # on the markl-ID column. canonicalize is idempotent.
+  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: existing piggy-ids invalid."
+
+  # Build a set of currently-present markl IDs (column 1, stripped of
+  # inline comments and surrounding whitespace).
+  local -A current_set=()
+  local current_id
+  while IFS= read -r line; do
+    case "$line" in
+    "#"* | "") continue ;;
+    esac
+    # piggy-ids canonical form (RFC 0003) uses exactly two ASCII
+    # spaces between the markl ID and any inline `#` comment. The
+    # canonicalize call above just normalized the file, so the
+    # two-space strip is correct here. Do NOT relax to "one or more
+    # spaces" — that would also strip a single space accidentally
+    # present in a markl ID's blech32 (impossible by grammar, but
+    # the relaxed pattern still risks future drift).
+    #
+    # markl IDs contain no internal whitespace (RFC 0003); read -r
+    # with default IFS strips both leading and trailing whitespace
+    # cleanly.
+    current_id="${line%%  #*}"
+    read -r current_id <<<"$current_id"
+    [[ -n $current_id ]] && current_set["$current_id"]=1
+  done <"$PIGGY_IDS"
+
+  # Partition supported cards into to_add vs already_present.
+  local -a to_add=()
+  local i=0
+  local id guid
+  while [[ $i -lt ${#supported_ids[@]} ]]; do
+    id="${supported_ids[$i]}"
+    guid="${supported_guids[$i]}"
+    if [[ -n ${current_set["$id"]:-} ]]; then
+      echo "already a recipient: $id  # GUID $guid"
+    else
+      to_add+=("$id")
+    fi
+    i=$((i + 1))
+  done
+
   if [[ ${#to_add[@]} -eq 0 ]]; then
     echo "nothing to add" >&2
     return 0
