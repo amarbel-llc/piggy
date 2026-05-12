@@ -23,7 +23,7 @@ function recipients_add_appends_canonical_form { # @test
   local bare="pivy_ecdh_p256_pub-qvqq6x38x3q5ukmgwkpgl89fkmpaph027uzpz83t8pz4yhmv0xrfxgs3lef"
   run "$PIGGY" pass recipients add "$bare"
   assert_success
-  run cat "$PIGGY_STORE_DIR/.piggy-ids"
+  run cat "$PIGGY_STORE_DIR/piggy-ids"
   assert_success
   assert_output --partial "$RECIPIENT_SECONDARY"
 }
@@ -32,18 +32,18 @@ function recipients_remove_drops_matching_id { # @test
   "$PIGGY" pass recipients add "$RECIPIENT_SECONDARY"
   run "$PIGGY" pass recipients remove "$RECIPIENT_SECONDARY"
   assert_success
-  run cat "$PIGGY_STORE_DIR/.piggy-ids"
+  run cat "$PIGGY_STORE_DIR/piggy-ids"
   assert_success
   refute_output --partial "$RECIPIENT_SECONDARY"
   assert_output --partial "$RECIPIENT_PRIMARY"
 }
 
 function recipients_sync_from_empty_replaces_set { # @test
-  local desired="$BATS_TEST_TMPDIR/desired.piggy-ids"
+  local desired="$BATS_TEST_TMPDIR/desired-piggy-ids"
   echo "$RECIPIENT_SECONDARY" >"$desired"
   run "$PIGGY" pass recipients sync "$desired"
   assert_success
-  run cat "$PIGGY_STORE_DIR/.piggy-ids"
+  run cat "$PIGGY_STORE_DIR/piggy-ids"
   assert_success
   assert_output --partial "$RECIPIENT_SECONDARY"
   refute_output --partial "$RECIPIENT_PRIMARY"
@@ -51,18 +51,18 @@ function recipients_sync_from_empty_replaces_set { # @test
 
 function recipients_sync_to_declared_subset { # @test
   "$PIGGY" pass recipients add "$RECIPIENT_SECONDARY"
-  local desired="$BATS_TEST_TMPDIR/desired.piggy-ids"
+  local desired="$BATS_TEST_TMPDIR/desired-piggy-ids"
   echo "$RECIPIENT_PRIMARY" >"$desired"
   run "$PIGGY" pass recipients sync "$desired"
   assert_success
-  run cat "$PIGGY_STORE_DIR/.piggy-ids"
+  run cat "$PIGGY_STORE_DIR/piggy-ids"
   assert_success
   assert_output --partial "$RECIPIENT_PRIMARY"
   refute_output --partial "$RECIPIENT_SECONDARY"
 }
 
 function recipients_sync_idempotent { # @test
-  local desired="$BATS_TEST_TMPDIR/desired.piggy-ids"
+  local desired="$BATS_TEST_TMPDIR/desired-piggy-ids"
   echo "$RECIPIENT_PRIMARY" >"$desired"
   local before
   before="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
@@ -74,7 +74,7 @@ function recipients_sync_idempotent { # @test
 }
 
 function recipients_sync_rejects_wrong_format { # @test
-  local desired="$BATS_TEST_TMPDIR/desired.piggy-ids"
+  local desired="$BATS_TEST_TMPDIR/desired-piggy-ids"
   echo "$WRONG_FORMAT" >"$desired"
   run "$PIGGY" pass recipients sync "$desired"
   assert_failure
@@ -82,7 +82,7 @@ function recipients_sync_rejects_wrong_format { # @test
 }
 
 function recipients_add_commits_piggy_ids_change { # @test
-  # `add` lands a commit for the .piggy-ids change. Under real
+  # `add` lands a commit for the piggy-ids change. Under real
   # crypto a second commit lands for the reencryption pass too, but
   # the bats mock's base64 round-trips bit-identically so re-encryption
   # is a content no-op that git won't commit.
@@ -95,5 +95,5 @@ function recipients_add_commits_piggy_ids_change { # @test
   after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
   [[ "$before_sha" != "$after_sha" ]] || fail "expected a new commit after recipients add"
   run git -C "$PIGGY_STORE_DIR" log -1 --pretty=%s
-  assert_output --partial "Add recipient(s) to .piggy-ids."
+  assert_output --partial "Add recipient(s) to piggy-ids."
 }

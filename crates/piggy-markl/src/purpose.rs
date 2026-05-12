@@ -4,7 +4,7 @@
 //! `validatePurposeAndFormatId` check from `id_blech_coding.go`.
 //! Prototype scope: only the purposes piggy uses or expects to see in
 //! the wild are registered. The dodder-* purposes are scaffolded so
-//! a `.piggy-ids` file mistakenly carrying a dodder purpose fails
+//! a `piggy-ids` file mistakenly carrying a dodder purpose fails
 //! cleanly (and so we have a place to add them when madder hands off
 //! its registry).
 

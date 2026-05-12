@@ -1,4 +1,4 @@
-//! `.piggy-ids` text recipient file format.
+//! `piggy-ids` text recipient file format.
 //!
 //! Pinned by piggy RFC 0003 (`docs/rfcs/0003-piggy-ids-file-format.md`).
 //! One recipient per line, with optional inline comment:
@@ -68,7 +68,7 @@ impl core::hash::Hash for Recipient {
     }
 }
 
-/// Parsed contents of a `.piggy-ids` file. Input order is preserved;
+/// Parsed contents of a `piggy-ids` file. Input order is preserved;
 /// `render()` emits recipients in the same order they were parsed.
 #[derive(Debug, Default, Clone)]
 pub struct RecipientFile {
@@ -92,7 +92,7 @@ impl RecipientFile {
         self.recipients.push(recipient);
     }
 
-    /// Parse a `.piggy-ids` text file. Blank lines and comment-only
+    /// Parse a `piggy-ids` text file. Blank lines and comment-only
     /// lines (starting with `#` after optional leading whitespace)
     /// are skipped. All other lines must contain a markl ID
     /// satisfying the recipient shape; trailing `# ...` is parsed

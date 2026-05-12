@@ -31,7 +31,7 @@ tpl)
   case "${2:-}" in
   create)
     # Usage: mock-pivy-box tpl create <name>
-    # Phase 5: tests pre-create .piggy-ids via create_test_template;
+    # Phase 5: tests pre-create piggy-ids via create_test_template;
     # this branch should never fire under the post-cutover flow.
     echo "error: use create_test_template instead" >&2
     exit 1

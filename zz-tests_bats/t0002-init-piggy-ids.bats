@@ -13,21 +13,21 @@ function pass_init_with_k_writes_piggy_ids { # @test
   init_test_git
   run "$PIGGY" pass init -k "$RECIPIENT_BARE"
   assert_success
-  assert [ -e "$PIGGY_STORE_DIR/.piggy-ids" ]
-  run cat "$PIGGY_STORE_DIR/.piggy-ids"
+  assert [ -e "$PIGGY_STORE_DIR/piggy-ids" ]
+  run cat "$PIGGY_STORE_DIR/piggy-ids"
   assert_success
   assert_output --partial "$RECIPIENT_BARE"
 }
 
 function pass_init_without_k_uses_auto_detect { # @test
   # With no -k, cmd_init shells to `piggy-ids detect-pubkey` (mocked
-  # to emit the canonical RFC 0002 vector). The .piggy-ids file
+  # to emit the canonical RFC 0002 vector). The piggy-ids file
   # ends up with the auto-detected recipient.
   init_test_git
   run "$PIGGY" pass init
   assert_success
-  assert [ -e "$PIGGY_STORE_DIR/.piggy-ids" ]
-  run cat "$PIGGY_STORE_DIR/.piggy-ids"
+  assert [ -e "$PIGGY_STORE_DIR/piggy-ids" ]
+  run cat "$PIGGY_STORE_DIR/piggy-ids"
   assert_output --partial "$RECIPIENT_BARE"
 }
 
@@ -61,8 +61,8 @@ function pass_init_with_p_creates_subfolder_template { # @test
   init_test_git
   run "$PIGGY" pass init -p team-a -k "$RECIPIENT_BARE"
   assert_success
-  assert [ -e "$PIGGY_STORE_DIR/team-a/.piggy-ids" ]
-  assert [ ! -e "$PIGGY_STORE_DIR/.piggy-ids" ]
+  assert [ -e "$PIGGY_STORE_DIR/team-a/piggy-ids" ]
+  assert [ ! -e "$PIGGY_STORE_DIR/piggy-ids" ]
 }
 
 function pass_init_accepts_purpose_tagged_form_unchanged { # @test
@@ -77,7 +77,7 @@ function pass_init_accepts_purpose_tagged_form_unchanged { # @test
   local tagged="piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu"
   run "$PIGGY" pass init -k "$tagged"
   assert_success
-  run cat "$PIGGY_STORE_DIR/.piggy-ids"
+  run cat "$PIGGY_STORE_DIR/piggy-ids"
   assert_output --partial "$tagged"
 }
 

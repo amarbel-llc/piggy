@@ -2,7 +2,7 @@
 name = "piggy-ids"
 version = "0.1.0"
 edition = "2021"
-description = "Reader/writer for `.piggy-ids` text recipient files + piggy-ids CLI helper"
+description = "Reader/writer for `piggy-ids` text recipient files + piggy-ids CLI helper"
 # The library half stays slim (only piggy-markl + thiserror) so
 # consumers that only need to read or manipulate recipient files don't
 # pay for the encrypt path. The `piggy-ids` binary that piggy.sh

@@ -4,18 +4,19 @@ date: 2026-05-09
 provenance: |
   Authored alongside the Phase 2 work of piggy#69 / piggy#72 — the
   hard cutover from `.pivy-id` (pivy's binary tpl format) to
-  `.piggy-ids` (piggy-owned text format). References madder#150 for
+  `piggy-ids` (piggy-owned text format). References madder#150 for
   the markl ID wire format the recipient lines depend on; once that
   RFC settles, this file pins down only the line/file grammar
-  specific to piggy.
+  specific to piggy. The original draft used a leading dot
+  (`.piggy-ids`); this revision drops it (see "Filename" below).
 ---
 
-# `.piggy-ids` File Format (piggy normative)
+# `piggy-ids` File Format (piggy normative)
 
 ## Abstract
 
-This RFC specifies the `.piggy-ids` text file format used by piggy 2.x
-to declare the recipient set for a password store. A `.piggy-ids`
+This RFC specifies the `piggy-ids` text file format used by piggy 2.x
+to declare the recipient set for a password store. A `piggy-ids`
 file carries one recipient per line, each identified by a markl ID of
 format `pivy_ecdh_p256_pub` tagged with the piggy-owned purpose
 `piggy-recipient-v1`. The format is hand-editable, version-controlled,
@@ -24,7 +25,7 @@ config-as-code-driven recipient management is idempotent.
 
 ## Status and Provenance
 
-This document is the normative spec for `.piggy-ids` files in
+This document is the normative spec for `piggy-ids` files in
 piggy 2.x. It replaces the binary `.pivy-id` template that piggy 1.x
 inherited from pivy.
 
@@ -44,7 +45,7 @@ document are to be interpreted as described in RFC 2119.
 
 ### Overview
 
-A `.piggy-ids` file lives at the root of a piggy password store (and
+A `piggy-ids` file lives at the root of a piggy password store (and
 optionally inside any subdirectory, scoping a recipient set to that
 subtree, mirroring the placement rules `.pivy-id` enjoyed in piggy 1.x).
 It declares the set of recipient public keys that the entries below
@@ -55,9 +56,17 @@ ECDH) on a PIV smart card, encoded as a markl ID per madder RFC 0002.
 The piggy-owned `piggy-recipient-v1` purpose constrains the format
 to `pivy_ecdh_p256_pub` (33 bytes, SEC 1 compressed-point form).
 
+### Filename
+
+The file MUST be named `piggy-ids` (no leading dot). The store
+directory (`$PIGGY_STORE_DIR`, default `$XDG_DATA_HOME/piggy`) is
+already a hidden location on POSIX systems; hiding the recipient file
+inside it would obscure the most-edited operational artifact in the
+store for no defensive benefit.
+
 ### File-level Properties
 
-A `.piggy-ids` file:
+A `piggy-ids` file:
 
 - MUST be encoded in UTF-8.
 - SHOULD use LF line terminators. CRLF MAY be tolerated by readers
@@ -70,7 +79,7 @@ A `.piggy-ids` file:
 
 ### Line Grammar
 
-Each line of a `.piggy-ids` file is exactly one of the following
+Each line of a `piggy-ids` file is exactly one of the following
 forms:
 
 ```text
@@ -120,7 +129,7 @@ re-encryption, no git commit).
 
 ### Order
 
-Recipient order in a `.piggy-ids` file is preserved by writers but
+Recipient order in a `piggy-ids` file is preserved by writers but
 NOT semantically significant. Piggy MUST encrypt to all recipients in
 the file regardless of order. Tools that rewrite the file (the
 `recipients add/remove/sync` family in #75) MUST preserve input order
@@ -129,7 +138,7 @@ the end.
 
 ### Canonical Form
 
-The canonical form of a `.piggy-ids` file is what `piggy pass
+The canonical form of a `piggy-ids` file is what `piggy pass
 recipients` writes, which is:
 
 - Each recipient line carries the `piggy-recipient-v1@` purpose
@@ -146,12 +155,12 @@ A file that already matches its canonical form is unchanged by a
 rewrite. Combined with the equality rule, this means
 `piggy pass recipients sync <file>` over an already-synced store is
 truly a no-op: the recipient set is unchanged, the on-disk
-`.piggy-ids` byte representation is unchanged, no git commit is made.
+`piggy-ids` byte representation is unchanged, no git commit is made.
 
 ### Example
 
 ```
-# .piggy-ids — recipients for ~/.local/share/piggy
+# piggy-ids — recipients for ~/.local/share/piggy
 piggy-recipient-v1@pivy_ecdh_p256_pub-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd  # primary yubikey
 piggy-recipient-v1@pivy_ecdh_p256_pub-qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw7n8w8c0ydp7s8jtgqnxa  # backup
 ```
@@ -161,15 +170,15 @@ piggy-recipient-v1@pivy_ecdh_p256_pub-qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw7n8w
 1. **Recipient pubkey is not authenticated by the file format.** The
    markl ID's blech32 checksum detects transcription errors but
    provides no protection against deliberate substitution. A
-   `.piggy-ids` file under attacker control can be rewritten to
+   `piggy-ids` file under attacker control can be rewritten to
    redirect future `piggy pass insert`/`generate` calls to an
-   attacker-controlled card. Piggy SHOULD treat `.piggy-ids` as
+   attacker-controlled card. Piggy SHOULD treat `piggy-ids` as
    sensitive configuration, store it in a version-controlled and
    reviewed location, and surface visible diffs when it changes
    (the existing `git_add_file` pattern in `src/piggy.sh` provides
    this).
 
-2. **No private key material on disk.** A `.piggy-ids` file carries
+2. **No private key material on disk.** A `piggy-ids` file carries
    only public keys. Loss of the file does not expose secrets;
    however, recreating it from scratch requires re-collecting every
    recipient's pubkey.
@@ -182,11 +191,16 @@ piggy-recipient-v1@pivy_ecdh_p256_pub-qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw7n8w
 
 ## Backwards Compatibility
 
-`.piggy-ids` is a new file. Existing piggy 1.x stores carry
+`piggy-ids` is a new file. Existing piggy 1.x stores carry
 `.pivy-id` (binary). piggy 2.x performs a hard cutover (#76):
-encountering a `.pivy-id` with no neighbouring `.piggy-ids` produces a
+encountering a `.pivy-id` with no neighbouring `piggy-ids` produces a
 clear error directing the user to re-init. There is no in-place
 migration tool. See piggy#69 for the cutover umbrella.
+
+Stores produced by a pre-rename revision of this RFC carry the file
+under its original dotted name (`.piggy-ids`). piggy 2.x rejects them
+the same way it rejects a `.pivy-id`: re-init under the new filename.
+No in-place migration tool is provided.
 
 ## Implementation
 
@@ -206,7 +220,7 @@ codec.
 ### Informative
 
 - piggy#69 — v2.0 cutover umbrella
-- piggy#72 — `.piggy-ids` reader/writer phase
+- piggy#72 — `piggy-ids` reader/writer phase
 - piggy#75 — `piggy pass recipients` verb family
 - `vendor/pivy/docs/rfcs/0003-box-ebox-formats.adoc` — pivy's binary
   template format (the artifact this RFC's text format replaces)

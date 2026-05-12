@@ -1,5 +1,5 @@
 //! `piggy-ids` — internal helper binary used by `piggy.sh` to read,
-//! write, validate, and encrypt against `.piggy-ids` recipient files.
+//! write, validate, and encrypt against `piggy-ids` recipient files.
 //!
 //! Subcommands:
 //!   * `encrypt <piggy-ids-file>` — stdin → ebox stream → stdout, using
@@ -44,24 +44,24 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Encrypt stdin to a piggy 2.x ebox stream on stdout. Recipients
-    /// are read from the given .piggy-ids file.
+    /// are read from the given piggy-ids file.
     Encrypt {
-        /// Path to a .piggy-ids file.
+        /// Path to a piggy-ids file.
         ids: PathBuf,
     },
-    /// Parse and validate a .piggy-ids file. Exit 0 on success, 1 with
+    /// Parse and validate a piggy-ids file. Exit 0 on success, 1 with
     /// a line-precise error on failure.
     Validate {
-        /// Path to a .piggy-ids file.
+        /// Path to a piggy-ids file.
         ids: PathBuf,
     },
     /// Parse + render the file in place, promoting bare-format
     /// recipients to the canonical `piggy-recipient-v1@…` form.
     Canonicalize {
-        /// Path to a .piggy-ids file.
+        /// Path to a piggy-ids file.
         ids: PathBuf,
     },
-    /// Diff two .piggy-ids files by markl ID. Exit 0 if equal, exit 1
+    /// Diff two piggy-ids files by markl ID. Exit 0 if equal, exit 1
     /// with `+ added` / `- removed` lines otherwise.
     Diff {
         /// Current state.

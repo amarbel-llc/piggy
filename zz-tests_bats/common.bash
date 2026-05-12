@@ -80,14 +80,14 @@ init_test_git() {
   git init --separate-git-dir="$BATS_TEST_TMPDIR/git-dir" --template="" "$PIGGY_STORE_DIR"
 }
 
-# Create a test .piggy-ids file with a canonical RFC 0002 recipient
+# Create a test piggy-ids file with a canonical RFC 0002 recipient
 # (the `pivy_ecdh_p256_pub` non-trivial vector at madder fd53684).
 # The mock piggy-ids encrypt only checks file existence, so any valid
-# .piggy-ids works for tests that don't drive the recipients flow.
+# piggy-ids works for tests that don't drive the recipients flow.
 create_test_template() {
   local dir="${1:-$PIGGY_STORE_DIR}"
   mkdir -p "$dir"
-  cat >"$dir/.piggy-ids" <<-_EOF
+  cat >"$dir/piggy-ids" <<-_EOF
 		# test fixture — canonical RFC 0002 vector
 		piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu
 		_EOF

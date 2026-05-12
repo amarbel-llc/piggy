@@ -2,7 +2,7 @@
 # Mock piggy-ids for testing without real ECDH crypto.
 #
 # `encrypt` is mocked: stdin → base64 → stdout (so the mock pivy-box's
-# `stream decrypt` can round-trip via `base64 -d`). The .piggy-ids
+# `stream decrypt` can round-trip via `base64 -d`). The piggy-ids
 # file is only checked for existence; its contents are not parsed.
 #
 # `detect-pubkey` is mocked: tests don't have a real PIV card, so
@@ -19,7 +19,7 @@ case "${1:-}" in
 encrypt)
   ids="${2:-}"
   [[ -f $ids ]] || {
-    echo "mock-piggy-ids: .piggy-ids not found: $ids" >&2
+    echo "mock-piggy-ids: piggy-ids not found: $ids" >&2
     exit 1
   }
   base64

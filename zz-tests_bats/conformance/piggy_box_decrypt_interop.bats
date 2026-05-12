@@ -43,8 +43,8 @@ function rust_encrypt_through_pivy_box_stream_decrypt_via_fib { # @test
   recipient="$("$PIGGY_IDS_REAL" detect-pubkey --guid "$INTEROP_GUID")"
   [[ -n $recipient ]] || fail "detect-pubkey returned empty markl ID"
 
-  # 2. Build a single-recipient .piggy-ids and encrypt to a temp file.
-  local piggy_ids="$BATS_TEST_TMPDIR/decrypt-interop.piggy-ids"
+  # 2. Build a single-recipient piggy-ids and encrypt to a temp file.
+  local piggy_ids="$BATS_TEST_TMPDIR/decrypt-interop-piggy-ids"
   local ebox="$BATS_TEST_TMPDIR/decrypt-interop.ebox"
   echo "$recipient" >"$piggy_ids"
   local plaintext='phase 3 c-decrypt interop: rust encrypt -> pivy-box stream decrypt'

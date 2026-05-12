@@ -211,7 +211,7 @@ enum PassCommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
-    /// Manage recipients in `.piggy-ids` (list/add/remove/sync).
+    /// Manage recipients in `piggy-ids` (list/add/remove/sync).
     Recipients {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,

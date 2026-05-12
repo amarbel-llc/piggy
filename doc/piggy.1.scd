@@ -63,7 +63,7 @@ passthroughs for the C pivy binaries:
 
 *pass init* [*--path*=_sub-folder_, *-p* _sub-folder_] [*-k* _markl-id_ | *-g* _guid_]
 	Initialize new password storage with a piggy 2.x recipient template
-	written to _.piggy-ids_ (RFC 0003). The recipient is identified by a
+	written to _piggy-ids_ (RFC 0003). The recipient is identified by a
 	markl ID of format *pivy_ecdh_p256_pub*. With *-k* the recipient is
 	provided declaratively (bare-format also accepted; canonicalized to
 	*piggy-recipient-v1@* on disk). Without *-k*, slot 9D of the attached
@@ -74,12 +74,12 @@ passthroughs for the C pivy binaries:
 	are re-encrypted to the new template.
 
 *pass recipients list* [*--path*=_sub-folder_, *-p* _sub-folder_]
-	Print the recipients listed in the relevant _.piggy-ids_, one per line.
+	Print the recipients listed in the relevant _piggy-ids_, one per line.
 
 *pass recipients add* _markl-id_... [*--path*=_sub-folder_, *-p* _sub-folder_]
-	Append one or more recipients to _.piggy-ids_ (canonicalizing on write)
+	Append one or more recipients to _piggy-ids_ (canonicalizing on write)
 	and re-encrypt the affected store. The two-commit pattern from
-	*pass init* applies: one commit for the _.piggy-ids_ change and one
+	*pass init* applies: one commit for the _piggy-ids_ change and one
 	for the re-encryption.
 
 *pass recipients remove* _markl-id_... [*--path*=_sub-folder_, *-p* _sub-folder_]
@@ -89,7 +89,7 @@ passthroughs for the C pivy binaries:
 
 *pass recipients sync* _file_ [*--path*=_sub-folder_, *-p* _sub-folder_]
 	Replace the recipient set with the contents of _file_, which must be
-	a valid _.piggy-ids_ text file. Idempotent: if the on-disk and
+	a valid _piggy-ids_ text file. Idempotent: if the on-disk and
 	declared sets match, no commit is made and no re-encryption happens.
 	Validation rejects markl IDs whose format is not *pivy_ecdh_p256_pub*.
 

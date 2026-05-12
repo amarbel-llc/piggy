@@ -54,13 +54,13 @@ die() {
   exit 1
 }
 find_piggy_ids() {
-  # Walk up from $PREFIX/$1 looking for .piggy-ids; sets $PIGGY_IDS.
+  # Walk up from $PREFIX/$1 looking for piggy-ids; sets $PIGGY_IDS.
   # Replaces the legacy set_pivy_template walker (#75 phase 5).
   local current="$PREFIX/$1"
-  while [[ $current != "$PREFIX" && ! -f $current/.piggy-ids ]]; do
+  while [[ $current != "$PREFIX" && ! -f $current/piggy-ids ]]; do
     current="${current%/*}"
   done
-  PIGGY_IDS="$current/.piggy-ids"
+  PIGGY_IDS="$current/piggy-ids"
 
   if [[ ! -f $PIGGY_IDS ]]; then
     cat >&2 <<-_EOF
@@ -238,11 +238,11 @@ cmd_usage() {
 	Usage:
 	    $PROGRAM_PASS init [-p subfolder] [-k <markl-id> | -g <guid>]
 	        Initialize new password storage with a piggy-recipient-v1
-	        markl ID. Writes <store>/[subfolder/].piggy-ids.
+	        markl ID. Writes <store>/[subfolder/]piggy-ids.
 	        With no -k, auto-detects from the attached PIV card's slot 9D.
 	        Use -g <guid> to disambiguate when multiple cards are attached.
 	    $PROGRAM_PASS recipients <list|add|remove|sync> [-p subfolder] ...
-	        Manage recipients in .piggy-ids. See "$PROGRAM_PASS recipients --help".
+	        Manage recipients in piggy-ids. See "$PROGRAM_PASS recipients --help".
 	    $PROGRAM_PASS ls [subfolder]
 	        List passwords.
 	    $PROGRAM_PASS find pass-names...
@@ -280,7 +280,7 @@ cmd_usage() {
 }
 
 cmd_init() {
-  # piggy 2.x: writes a piggy-owned `.piggy-ids` text file (RFC 0003)
+  # piggy 2.x: writes a piggy-owned `piggy-ids` text file (RFC 0003)
   # instead of pivy's binary `.pivy-id`. The recipient is identified
   # by a markl ID of format `pivy_ecdh_p256_pub` carrying the
   # `piggy-recipient-v1` purpose tag — see madder RFC 0002.
@@ -319,7 +319,7 @@ cmd_init() {
   [[ -n $id_path ]] && check_sneaky_paths "$id_path"
   [[ -n $id_path && ! -d $PREFIX/$id_path && -e $PREFIX/$id_path ]] && die "Error: $PREFIX/$id_path exists but is not a directory."
 
-  local piggy_ids="$PREFIX/$id_path/.piggy-ids"
+  local piggy_ids="$PREFIX/$id_path/piggy-ids"
   local tpl_dir="$PREFIX/$id_path"
   set_git "$piggy_ids"
 
@@ -348,7 +348,7 @@ cmd_init() {
   # Atomic write: build the file, then mv into place.
   local tmp="${piggy_ids}.tmp.$$"
   {
-    echo "# .piggy-ids — piggy 2.x recipient template"
+    echo "# piggy-ids — piggy 2.x recipient template"
     echo "# format: piggy-recipient-v1@pivy_ecdh_p256_pub-<blech32>  # optional comment"
     echo "$key"
   } >"$tmp"
@@ -754,13 +754,13 @@ cmd_pass_recipients() {
     cat <<-_EOF
 		Usage:
 		    $PROGRAM_PASS recipients list [-p subfolder]
-		        Print recipients in the relevant .piggy-ids, one per line.
+		        Print recipients in the relevant piggy-ids, one per line.
 		    $PROGRAM_PASS recipients add <markl-id>... [-p subfolder]
-		        Append recipients to .piggy-ids and re-encrypt.
+		        Append recipients to piggy-ids and re-encrypt.
 		    $PROGRAM_PASS recipients remove <markl-id>... [-p subfolder]
 		        Remove recipients (matched by full markl ID) and re-encrypt.
 		    $PROGRAM_PASS recipients sync <file> [-p subfolder]
-		        Replace .piggy-ids with <file>'s contents (idempotent).
+		        Replace piggy-ids with <file>'s contents (idempotent).
 		_EOF
     [[ $sub = "" ]] && exit 1 || exit 0
     ;;
@@ -811,8 +811,8 @@ cmd_pass_recipients_add() {
   done
   "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: invalid recipient(s); aborting."
 
-  local id_dir="${PIGGY_IDS%/.piggy-ids}"
-  git_add_file "$PIGGY_IDS" "Add recipient(s) to .piggy-ids."
+  local id_dir="${PIGGY_IDS%/piggy-ids}"
+  git_add_file "$PIGGY_IDS" "Add recipient(s) to piggy-ids."
   reencrypt_path "$id_dir"
   git_add_file "$id_dir" "Reencrypt password store after adding recipient(s)."
 }
@@ -838,7 +838,7 @@ cmd_pass_recipients_remove() {
 
   # Canonicalise so user-supplied IDs (which may be bare-format) match
   # the on-disk form.
-  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: existing .piggy-ids invalid."
+  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: existing piggy-ids invalid."
 
   local tmp="${PIGGY_IDS}.tmp.$$"
   awk -v target_blob="$(printf '%s\n' "${ids[@]}")" '
@@ -863,8 +863,8 @@ cmd_pass_recipients_remove() {
   fi
   mv "$tmp" "$PIGGY_IDS"
 
-  local id_dir="${PIGGY_IDS%/.piggy-ids}"
-  git_add_file "$PIGGY_IDS" "Remove recipient(s) from .piggy-ids."
+  local id_dir="${PIGGY_IDS%/piggy-ids}"
+  git_add_file "$PIGGY_IDS" "Remove recipient(s) from piggy-ids."
   reencrypt_path "$id_dir"
   git_add_file "$id_dir" "Reencrypt password store after removing recipient(s)."
 }
@@ -901,8 +901,8 @@ cmd_pass_recipients_sync() {
   cp "$file" "$PIGGY_IDS" || die "Error: failed to copy $file → $PIGGY_IDS."
   "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: post-copy canonicalize failed."
 
-  local id_dir="${PIGGY_IDS%/.piggy-ids}"
-  git_add_file "$PIGGY_IDS" "Sync recipients in .piggy-ids."
+  local id_dir="${PIGGY_IDS%/piggy-ids}"
+  git_add_file "$PIGGY_IDS" "Sync recipients in piggy-ids."
   reencrypt_path "$id_dir"
   git_add_file "$id_dir" "Reencrypt password store after syncing recipients."
 }
