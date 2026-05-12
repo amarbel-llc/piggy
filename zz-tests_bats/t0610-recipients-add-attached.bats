@@ -103,3 +103,24 @@ function add_attached_no_cards_errors { # @test
   assert_failure
   assert_output --partial "no PIV cards detected"
 }
+
+function add_attached_respects_p_subfolder { # @test
+  # Init a subfolder with its own piggy-ids and assert add --all-attached
+  # operates on that subfolder, not the root.
+  mkdir -p "$PIGGY_STORE_DIR/sub"
+  "$PIGGY" pass init -p sub -k "$RECIPIENT_SECONDARY"
+
+  local guid="DEADBEEF00000000AABBCCDDEEFF0011"
+  export PIGGY_TEST_DETECT_ALL_SUPPORTED="$RECIPIENT_PRIMARY"$'\t'"$guid"
+
+  run "$PIGGY" pass recipients add --all-attached -p sub
+  assert_success
+
+  run cat "$PIGGY_STORE_DIR/sub/piggy-ids"
+  assert_output --partial "$RECIPIENT_PRIMARY"
+  assert_output --partial "$RECIPIENT_SECONDARY"
+
+  # Root piggy-ids unchanged — secondary belongs only to sub.
+  run cat "$PIGGY_STORE_DIR/piggy-ids"
+  refute_output --partial "$RECIPIENT_SECONDARY"
+}
