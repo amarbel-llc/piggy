@@ -124,3 +124,26 @@ function add_attached_respects_p_subfolder { # @test
   run cat "$PIGGY_STORE_DIR/piggy-ids"
   refute_output --partial "$RECIPIENT_SECONDARY"
 }
+
+function add_attached_two_cards_both_already_recipients { # @test
+  # First add RECIPIENT_SECONDARY to the store so both detected cards
+  # are already present.
+  "$PIGGY" pass recipients add "$RECIPIENT_SECONDARY"
+
+  local guid1="DEADBEEF00000000AABBCCDDEEFF0011"
+  local guid2="CAFEF00D11223344556677889900AABB"
+  export PIGGY_TEST_DETECT_ALL_SUPPORTED="$RECIPIENT_PRIMARY"$'\t'"$guid1"$'\n'"$RECIPIENT_SECONDARY"$'\t'"$guid2"
+
+  local before_sha
+  before_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
+
+  run "$PIGGY" pass recipients add --all-attached
+  assert_success
+  assert_output --partial "already a recipient: $RECIPIENT_PRIMARY"
+  assert_output --partial "already a recipient: $RECIPIENT_SECONDARY"
+  assert_output --partial "nothing to add"
+
+  local after_sha
+  after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
+  [[ "$before_sha" = "$after_sha" ]] || fail "expected no commit when nothing to add"
+}
