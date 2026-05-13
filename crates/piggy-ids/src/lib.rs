@@ -156,7 +156,11 @@ impl RecipientFile {
             .filter(|r| next.contains(&r.id))
             .collect();
 
-        Diff { added, removed, retained }
+        Diff {
+            added,
+            removed,
+            retained,
+        }
     }
 }
 
@@ -308,10 +312,7 @@ mod tests {
         let reparsed = RecipientFile::parse(&rendered).unwrap();
         assert_eq!(reparsed.recipients().len(), 1);
         assert_eq!(reparsed.recipients()[0].id(), file.recipients()[0].id());
-        assert_eq!(
-            reparsed.recipients()[0].comment(),
-            Some("primary yubikey")
-        );
+        assert_eq!(reparsed.recipients()[0].comment(), Some("primary yubikey"));
     }
 
     #[test]
@@ -399,14 +400,19 @@ mod tests {
     #[test]
     fn diff_with_changed_comments_only_is_no_op() {
         let id = sample_id(19);
-        let current = RecipientFile::new(vec![
-            Recipient::new(id.clone(), Some("old comment".into())).unwrap(),
-        ]);
-        let desired = RecipientFile::new(vec![
-            Recipient::new(id.clone(), Some("new comment".into())).unwrap(),
-        ]);
+        let current =
+            RecipientFile::new(vec![
+                Recipient::new(id.clone(), Some("old comment".into())).unwrap()
+            ]);
+        let desired =
+            RecipientFile::new(vec![
+                Recipient::new(id.clone(), Some("new comment".into())).unwrap()
+            ]);
         let d = current.diff(&desired);
-        assert!(d.is_empty(), "comment-only changes should not appear in diff");
+        assert!(
+            d.is_empty(),
+            "comment-only changes should not appear in diff"
+        );
         assert_eq!(d.retained.len(), 1);
     }
 
@@ -429,10 +435,7 @@ mod tests {
         // Two comment lines, one valid recipient, one broken line at line 4.
         // The error should report line 4.
         let id = sample_id(7);
-        let input = format!(
-            "# header\n# more header\n{}\n-a\n",
-            id.to_wire()
-        );
+        let input = format!("# header\n# more header\n{}\n-a\n", id.to_wire());
         let err = RecipientFile::parse(&input).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("line 4"), "expected line 4 in error: {msg}");
@@ -442,11 +445,7 @@ mod tests {
     fn idempotent_parse_render_parse() {
         let id_a = sample_id(23);
         let id_b = sample_id(29);
-        let input = format!(
-            "{}  # alpha\n{}  # beta\n",
-            id_a.to_wire(),
-            id_b.to_wire(),
-        );
+        let input = format!("{}  # alpha\n{}  # beta\n", id_a.to_wire(), id_b.to_wire(),);
         let first = RecipientFile::parse(&input).unwrap();
         let rendered = first.render();
         let second = RecipientFile::parse(&rendered).unwrap();

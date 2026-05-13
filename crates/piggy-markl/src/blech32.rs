@@ -38,9 +38,7 @@ pub enum Error {
     MixedCase,
     #[error("separator '{}' missing from input", SEPARATOR)]
     SeparatorMissing,
-    #[error(
-        "data portion too short: need >= {expected}, got {actual}"
-    )]
+    #[error("data portion too short: need >= {expected}, got {actual}")]
     DataPortionTooShort { expected: usize, actual: usize },
     #[error("invalid character at position {pos}: {char:?}")]
     InvalidCharacterInData { pos: usize, char: char },
@@ -236,13 +234,14 @@ pub fn decode(input: &str) -> Result<(String, Vec<u8>)> {
 
     let mut data_5bit = Vec::with_capacity(data_lower.len());
     for (p, c) in data_lower.char_indices() {
-        let idx = CHARSET
-            .iter()
-            .position(|&x| x as char == c)
-            .ok_or(Error::InvalidCharacterInData {
-                pos: p + pos + 1,
-                char: c,
-            })?;
+        let idx =
+            CHARSET
+                .iter()
+                .position(|&x| x as char == c)
+                .ok_or(Error::InvalidCharacterInData {
+                    pos: p + pos + 1,
+                    char: c,
+                })?;
         data_5bit.push(idx as u8);
     }
 

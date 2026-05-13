@@ -88,7 +88,8 @@ fn fresh_p256_keypair() -> (EcKey<openssl::pkey::Private>, Vec<u8>) {
 
 #[test]
 fn rust_encrypt_then_rust_decrypt_round_trips_through_guid_less_wire_format() {
-    let plaintext = b"Phase 3 tracer-bullet: encrypt via markl recipient, decrypt via local oracle.";
+    let plaintext =
+        b"Phase 3 tracer-bullet: encrypt via markl recipient, decrypt via local oracle.";
 
     // ---- Encrypt side ----
     let (priv_key, pubkey_bytes) = fresh_p256_keypair();
@@ -139,7 +140,9 @@ fn rust_encrypt_then_rust_decrypt_round_trips_through_guid_less_wire_format() {
         "ebox must be unlocked after oracle returns the shared secret"
     );
 
-    let (seqnr, recovered) = received.decrypt_chunk(Some(0), &chunk_bytes).expect("decrypt_chunk");
+    let (seqnr, recovered) = received
+        .decrypt_chunk(Some(0), &chunk_bytes)
+        .expect("decrypt_chunk");
     assert_eq!(seqnr, 0);
     assert_eq!(recovered, plaintext);
 }

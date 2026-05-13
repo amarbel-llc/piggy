@@ -133,10 +133,7 @@ impl Ebox {
                 // has no guid, the produced PivBox carries no
                 // guid_slot and decryption falls through to the
                 // pubkey-only `allslots:` path in pivy's runtime.
-                pbox.guid_slot = tpl_part
-                    .guid
-                    .as_ref()
-                    .map(|g| (g.clone(), tpl_part.slot));
+                pbox.guid_slot = tpl_part.guid.as_ref().map(|g| (g.clone(), tpl_part.slot));
 
                 let plaintext = match &shares {
                     Some(ss) => ss[i].clone(),

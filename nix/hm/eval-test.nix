@@ -641,8 +641,7 @@ let
       check =
         result:
         let
-          stderrPath =
-            result.config.launchd.agents.piggy-agent.config.StandardErrorPath or null;
+          stderrPath = result.config.launchd.agents.piggy-agent.config.StandardErrorPath or null;
           isAbsolute = stderrPath != null && lib.hasPrefix "/" stderrPath;
           noLiteralHome = stderrPath == null || !(lib.hasInfix "$HOME" stderrPath);
         in

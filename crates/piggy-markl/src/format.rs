@@ -59,9 +59,7 @@ impl FormatId {
     /// implementation-internal, not part of the wire format.
     pub fn size(self) -> usize {
         match self {
-            FormatId::PivyEcdhP256Pub
-            | FormatId::EcdsaP256Pub
-            | FormatId::EcdsaP256Ssh => 33,
+            FormatId::PivyEcdhP256Pub | FormatId::EcdsaP256Pub | FormatId::EcdsaP256Ssh => 33,
             FormatId::Sha256
             | FormatId::Blake2b256
             | FormatId::Ed25519Pub

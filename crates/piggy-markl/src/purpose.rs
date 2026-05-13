@@ -138,7 +138,11 @@ mod tests {
     fn other_purpose_rejects_every_format() {
         let p = PurposeId::parse("future-purpose-v0");
         assert!(matches!(p, PurposeId::Other(_)));
-        for f in [FormatId::PivyEcdhP256Pub, FormatId::Sha256, FormatId::Ed25519Sig] {
+        for f in [
+            FormatId::PivyEcdhP256Pub,
+            FormatId::Sha256,
+            FormatId::Ed25519Sig,
+        ] {
             assert!(p.validate_format(f).is_err(), "should reject {f}");
         }
     }

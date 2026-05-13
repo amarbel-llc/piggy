@@ -43,9 +43,7 @@ pub enum ParseError {
     Blech32(#[from] blech32::Error),
     #[error("unknown format id: {0}")]
     UnknownFormat(String),
-    #[error(
-        "wrong payload size: format {format:?} requires {expected} bytes, decoded {actual}"
-    )]
+    #[error("wrong payload size: format {format:?} requires {expected} bytes, decoded {actual}")]
     WrongSize {
         format: FormatId,
         expected: usize,
@@ -82,7 +80,11 @@ impl Id {
         if let Some(p) = &purpose {
             p.validate_format(format)?;
         }
-        Ok(Self { purpose, format, data })
+        Ok(Self {
+            purpose,
+            format,
+            data,
+        })
     }
 
     pub fn purpose(&self) -> Option<&PurposeId> {
@@ -174,8 +176,7 @@ mod tests {
     #[test]
     fn round_trip_without_purpose() {
         let payload = pivy_pubkey_payload();
-        let id =
-            Id::new(None, FormatId::PivyEcdhP256Pub, payload.clone()).unwrap();
+        let id = Id::new(None, FormatId::PivyEcdhP256Pub, payload.clone()).unwrap();
         let wire = id.to_wire();
         assert!(!wire.contains('@'));
         assert!(wire.starts_with("pivy_ecdh_p256_pub-"));
@@ -186,8 +187,7 @@ mod tests {
 
     #[test]
     fn wrong_size_rejected_at_construction() {
-        let err =
-            Id::new(None, FormatId::PivyEcdhP256Pub, vec![0xff; 32]).unwrap_err();
+        let err = Id::new(None, FormatId::PivyEcdhP256Pub, vec![0xff; 32]).unwrap_err();
         assert!(matches!(
             err,
             ParseError::WrongSize {

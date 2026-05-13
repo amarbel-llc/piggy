@@ -50,9 +50,7 @@ pub fn tpl_part_from_markl(id: &MarklId) -> Result<EboxTplPart> {
 /// of these card holders" templates.
 pub fn template_from_recipients(ids: &[MarklId]) -> Result<EboxTemplate> {
     if ids.is_empty() {
-        return Err(BoxError::Wire(
-            "at least one recipient is required".into(),
-        ));
+        return Err(BoxError::Wire("at least one recipient is required".into()));
     }
 
     let parts: Result<Vec<EboxTplPart>> = ids.iter().map(tpl_part_from_markl).collect();

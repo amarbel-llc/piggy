@@ -37,7 +37,10 @@ struct Invalid {
 
 fn hex_decode(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
-    assert!(bytes.len().is_multiple_of(2), "odd-length hex string: {s:?}");
+    assert!(
+        bytes.len().is_multiple_of(2),
+        "odd-length hex string: {s:?}"
+    );
     let mut out = Vec::with_capacity(bytes.len() / 2);
     for chunk in bytes.chunks(2) {
         let hi = (chunk[0] as char).to_digit(16).expect("hex digit") as u8;
@@ -97,10 +100,7 @@ fn rfc_0002_valid_vectors_round_trip() {
             ));
         }
         if parsed.data() != payload.as_slice() {
-            failures.push(format!(
-                "[{}] parsed payload differs from expected",
-                v.name
-            ));
+            failures.push(format!("[{}] parsed payload differs from expected", v.name));
         }
         match (parsed.purpose(), purpose.as_ref()) {
             (Some(a), Some(b)) if a == b => {}
@@ -163,8 +163,14 @@ fn matches_expected_error(actual: &ParseError, expected_name: &str) -> bool {
     matches!(
         (actual, expected_name),
         (ParseError::Blech32(blech32::Error::MixedCase), "MixedCase")
-            | (ParseError::Blech32(blech32::Error::SeparatorMissing), "SeparatorMissing")
-            | (ParseError::Blech32(blech32::Error::InvalidChecksum), "InvalidChecksum")
+            | (
+                ParseError::Blech32(blech32::Error::SeparatorMissing),
+                "SeparatorMissing"
+            )
+            | (
+                ParseError::Blech32(blech32::Error::InvalidChecksum),
+                "InvalidChecksum"
+            )
             | (
                 ParseError::Blech32(blech32::Error::InvalidCharacterInData { .. }),
                 "InvalidCharacter",
