@@ -86,6 +86,18 @@
           pkgs.coreutils
         ];
 
+        # Runtime deps for contrib/piggy-askpass.sh when invoked by
+        # pivy-agent's launchd job (PATH is unset there). `ps` is in
+        # `procps` on Linux; macOS provides /bin/ps in the base system
+        # so we don't add a darwin-specific dep. `zenity` is the GUI
+        # fallback when /dev/tty isn't connected (the typical agent
+        # case).
+        askpassRuntimeDeps = [
+          pkgs.coreutils
+          pkgs.zenity
+        ]
+        ++ pkgs.lib.optional pkgs.stdenv.isLinux pkgs.procps;
+
         # Native rust workspace: `piggy` (binary) + `piggy-piv` (library).
         # pcsclite is only needed on linux; macOS has PC/SC in CoreServices.
         # Uses pkgs-master (2.4.1) for backward-compatible IPC protocol
@@ -164,6 +176,21 @@
                             $out/libexec/piggy/piggy-ids
             install -m 0755 src/piggy.sh \
                             $out/libexec/piggy/piggy.sh
+            # User-facing SSH_ASKPASS helper. Lives under libexec/piggy/
+            # so consumers can reference it as
+            # `''${piggy}/libexec/piggy/piggy-askpass.sh`, matching the
+            # pattern pivy uses for its bundled pivy-askpass. We install
+            # the raw script (preserves shebang + comments) then wrap
+            # it to pin runtime deps (ps, zenity) on PATH — the script
+            # is invoked by pivy-agent's launchd job where PATH is
+            # otherwise unset. Replaces pivy's `exec zenity --password`
+            # one-liner whose GTK4 AdwMessageDialog deprecation
+            # triggers GLib NULL-str warnings on every prompt.
+            install -m 0755 contrib/piggy-askpass.sh \
+                            $out/libexec/piggy/piggy-askpass.sh.unwrapped
+            makeWrapper $out/libexec/piggy/piggy-askpass.sh.unwrapped \
+                        $out/libexec/piggy/piggy-askpass.sh \
+              --prefix PATH : ${pkgs.lib.makeBinPath askpassRuntimeDeps}
             if [ -f src/platform/darwin.sh ]; then
               install -m 0644 src/platform/darwin.sh \
                               $out/libexec/piggy/platform/darwin.sh
