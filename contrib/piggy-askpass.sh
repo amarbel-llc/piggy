@@ -23,7 +23,10 @@
 # Render targets (in priority order):
 #
 #   /dev/tty  — terminal-attached sessions; reads with echo disabled.
-#   zenity    — graphical sessions ($DISPLAY set, zenity installed).
+#   zenity    — graphical sessions (zenity installed; we don't gate
+#               on $DISPLAY/$WAYLAND_DISPLAY, since macOS zenity finds
+#               the Aqua session without either, and launchd-spawned
+#               agents reach this script with a scrubbed env).
 #   error     — neither available; refuses with stderr explanation.
 #
 # This is the user-facing sibling to
@@ -76,7 +79,14 @@ fi
 # stdin/stdout may be piped to the parent (ssh-add does this), but
 # the controlling terminal usually still answers. read -s suppresses
 # echo without an external dep.
-if [[ -e /dev/tty ]] && exec 3</dev/tty 4>/dev/tty 2>/dev/null; then
+#
+# Probe /dev/tty before the real `exec` redirect: when there's no
+# controlling terminal (pivy-agent fork, launchd-spawned context),
+# bash emits "/dev/tty: Device not configured" on stderr *before*
+# any `2>/dev/null` on the same `exec` line takes effect. A subshell
+# probe contains that noise so it never reaches pivy-agent's logs.
+if [[ -e /dev/tty ]] && (: >/dev/tty) 2>/dev/null; then
+  exec 3</dev/tty 4>/dev/tty
   render_context >&4
   pin=""
   IFS= read -r -s pin <&3
@@ -86,8 +96,14 @@ if [[ -e /dev/tty ]] && exec 3</dev/tty 4>/dev/tty 2>/dev/null; then
   exit 0
 fi
 
-# Render target 2: zenity (graphical sessions).
-if [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]] && command -v zenity >/dev/null 2>&1; then
+# Render target 2: zenity. We don't gate on $DISPLAY/$WAYLAND_DISPLAY —
+# macOS zenity reaches the Aqua session without either var being set,
+# and launchd-spawned agents (pivy-agent) reach this script with a
+# scrubbed env. The previous gate caused pivy-agent's SSH_CONFIRM fork
+# to exit 2, which pivy-agent (pivy-agent.c:1067) treats as a confirm
+# failure → AUTHZ_DENIED → every signature refused. Trust zenity itself
+# to fail with a clear nonzero exit if there's truly no GUI to talk to.
+if command -v zenity >/dev/null 2>&1; then
   body="$(render_context)"
   # zenity --entry --hide-text reads a single line of obscured input
   # and writes it to stdout; non-zero exit on cancel.
@@ -99,7 +115,7 @@ fi
 # Neither render target available. Refuse; explain why.
 {
   printf '[piggy-askpass] no render target available.\n'
-  printf '[piggy-askpass] /dev/tty unreadable AND no zenity-on-$DISPLAY.\n'
+  printf '[piggy-askpass] /dev/tty unreadable AND zenity not on PATH.\n'
   printf '[piggy-askpass] prompt was: %s\n' "$prompt"
   printf '[piggy-askpass] context:    %s\n' "${context:-(unset)}"
   printf '[piggy-askpass] parent:     %s (PID %s)\n' "$parent_comm" "$parent_pid"

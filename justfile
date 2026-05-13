@@ -320,6 +320,57 @@ debug-pcsclite-linkage:
       echo
     done
 
+# Reproduce the launchd environment that pivy-agent invokes piggy-askpass.sh
+# under: no controlling TTY, no DISPLAY, scrubbed env. `setsid` detaches the
+# controlling terminal so the script's `/dev/tty` open-test fails the same
+# way it does under pivy-agent's fork+pipe. Exercises both call shapes
+# pivy-agent uses (askpass at pivy-agent.c:841, plain-branch confirm at
+# pivy-agent.c:1055).
+#
+# Expected pre-fix output: `exit=2`, stderr says "no render target
+# available". That's what pivy-agent saw on Nov 14 2026 when home-manager
+# pointed SSH_ASKPASS/SSH_CONFIRM at this script and signing failed with
+# "agent refused operation".
+[group('debug')]
+debug-askpass-launchd-env: build-nix
+    #!/usr/bin/env bash
+    set -uo pipefail
+    askpass=./result/libexec/piggy/piggy-askpass.sh
+    [[ -x $askpass ]] || { echo "missing $askpass — run 'just build-nix' first" >&2; exit 1; }
+
+    # Detach from the controlling TTY before exec. `setsid` is Linux-only
+    # (not in BSD/Darwin coreutils), so we shell out to python3 — present
+    # by default on both macOS and most Linux distros — to call os.setsid()
+    # before execve. Same effect: child has no controlling terminal, so
+    # opening /dev/tty fails, mirroring pivy-agent's fork+pipe context.
+    detach_and_exec() {
+      python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+    }
+
+    run_case() {
+      local label="$1" prompt="$2"
+      local stderr_file
+      stderr_file=$(mktemp -t piggy-askpass-stderr.XXXXXX)
+      echo "=== $label ==="
+      local stdout exit_code
+      # `env -i` reproduces the scrubbed environment a launchd-spawned
+      # process sees. `< /dev/null` closes stdin like pivy-agent's fork does.
+      # Export the detach helper via a function-export so the env -i child
+      # can still call it; simpler to inline the python invocation.
+      stdout=$(env -i HOME="$HOME" PATH="/usr/bin:/bin" \
+        python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+        "$askpass" "$prompt" 2>"$stderr_file" < /dev/null)
+      exit_code=$?
+      echo "exit=$exit_code"
+      echo "stdout=[$stdout]"
+      echo "stderr=[$(cat "$stderr_file")]"
+      rm -f "$stderr_file"
+      echo
+    }
+
+    run_case "askpass-call (pivy-agent.c:841)" "Enter PIV PIN for token 12345"
+    run_case "confirm-call (pivy-agent.c:1055)" "A new client is trying to use PIV token 12345"
+
 # Like debug-conformance-run, but with --hardware. Prompts for the card PIN
 # via `ssh-add -X` so the sign test can actually execute against the card.
 [group('debug')]
