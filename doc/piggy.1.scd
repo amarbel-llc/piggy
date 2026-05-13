@@ -79,21 +79,26 @@ passthroughs for the C pivy binaries:
 *pass recipients list-available* [*--format* _human_|_ndjson_]
 	Enumerate every attached PIV card and emit one record per card on
 	stdout. Output describes the slot-9D markl ID, the card's CHUID
-	*guid*, the PCSC *reader* name, and the (currently fixed) *slot=9D*.
+	*guid*, the YubiKey factory *serial* (when the card is a YubiKey
+	v5+), the PCSC *reader* name, and the (currently fixed) *slot=9D*.
 
 	Format auto-selects from stdout's TTY status: human-readable when
 	interactive (the markl ID, followed by a trailing
-	"_# guid=<hex>, reader=<name>, slot=9D_" comment), NDJSON
-	otherwise (one JSON object per line with keys *id*, *guid*,
-	*reader*, *slot*). Pass *--format* to override.
+	"_# guid=<hex>, [serial=<dec>, ]reader=<name>, slot=9D_" comment),
+	NDJSON otherwise (one JSON object per line with keys *id*, *guid*,
+	*reader*, *slot*, and *serial* when present). Pass *--format* to
+	override.
+
+	The YubiKey *serial* is read at connect time via the YubicoPIV
+	vendor-specific *INS_GET_SERIAL* (0xF8) against the PIV applet;
+	non-YubiKey PIV cards reject the instruction and the field is
+	simply omitted. In NDJSON output, *serial* is emitted as a JSON
+	*number* (not a string) so consumers can compare or sort
+	numerically.
 
 	Cards with an unsupported slot-9D configuration are emitted too:
 	prefixed with "_# unsupported: ..._" in human mode, or with
 	*"unsupported":true* and a *reason* field in NDJSON mode.
-
-	"_serial_" is intentionally absent today — _piggy-piv_ only
-	exposes the CHUID *guid*. Vendor-specific factory serials (e.g.
-	YubiKey's 7-digit decimal serial) are tracked in piggy#84.
 
 *pass recipients add* [*-A* | *--all-attached*] [*--yes*] [*-p* _subfolder_] [_markl-id_...]
 	Append recipients to the store's _piggy-ids_ and re-encrypt.

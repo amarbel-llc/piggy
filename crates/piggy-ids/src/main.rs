@@ -27,13 +27,13 @@
 //!   * `list-available [--format human|ndjson]` — enumerate every
 //!     attached PIV card and emit one record per card on stdout.
 //!     Default format auto-selects based on TTY: human-readable when
-//!     stdout is a TTY, NDJSON otherwise. Unsupported cards are
-//!     prefixed with `# unsupported:` in human mode and marked
-//!     `"unsupported":true` in NDJSON mode. Drives
-//!     `piggy pass recipients list-available`. `serial=` is
-//!     intentionally absent: today `PivToken` only exposes the CHUID
-//!     GUID, so `guid=<hex>` is emitted instead (vendor-specific
-//!     factory serials tracked in #84).
+//!     stdout is a TTY, NDJSON otherwise. Records carry the CHUID
+//!     `guid`, the PCSC `reader`, the fixed `slot=9D`, and the
+//!     YubiKey factory `serial` when the card is a YubiKey v5+ (the
+//!     vendor `INS_GET_SERIAL` extension). Non-YubiKey PIV cards
+//!     simply omit `serial`. Unsupported cards are prefixed with
+//!     `# unsupported:` in human mode and marked `"unsupported":true`
+//!     in NDJSON mode. Drives `piggy pass recipients list-available`.
 //!
 //! Reachable from `piggy.sh` via the `PIGGY_IDS_PATH` env var that
 //! `flake.nix`'s `makeWrapper` bakes into the user-facing `piggy`
@@ -253,6 +253,7 @@ fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
     match classify_slot_9d(
         token.guid().clone(),
         token.reader_name().to_string(),
+        token.yk_serial(),
         slot.algorithm(),
         slot.cert_der(),
     ) {
@@ -307,16 +308,19 @@ fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
     let mut classifications: Vec<Classification> = Vec::with_capacity(tokens.len());
     for token in &tokens {
         let reader = token.reader_name().to_string();
+        let serial = token.yk_serial();
         match token.read_slot(0x9D) {
             Ok(slot) => classifications.push(classify_slot_9d(
                 token.guid().clone(),
                 reader,
+                serial,
                 slot.algorithm(),
                 slot.cert_der(),
             )),
             Err(e) => classifications.push(Classification::Unsupported {
                 guid: token.guid().clone(),
                 reader,
+                serial,
                 reason: format!("slot 9D unreadable: {e}"),
             }),
         }
@@ -355,8 +359,6 @@ fn cmd_detect_all_pubkeys() -> Result<ExitCode, DynErr> {
 /// `piggy pass recipients list-available | xargs piggy pass
 /// recipients add ...` Just Works.
 fn cmd_list_available(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
-    use piggy_ids::Classification;
-
     let classifications = enumerate_and_classify()?;
 
     let stdout = io::stdout();
@@ -369,64 +371,98 @@ fn cmd_list_available(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
         }
     });
 
-    match effective_format {
-        ListFormat::Human => {
-            for c in &classifications {
-                match c {
-                    Classification::Supported {
-                        id, guid, reader, ..
-                    } => {
-                        writeln!(
-                            out,
-                            "{}  # guid={}, reader={}, slot=9D",
-                            id,
-                            guid.to_hex(),
-                            reader,
-                        )?;
-                    }
-                    Classification::Unsupported {
-                        guid,
-                        reader,
-                        reason,
-                    } => {
-                        writeln!(
-                            out,
-                            "# unsupported: guid={}, reader={}, slot=9D, reason={}",
-                            guid.to_hex(),
-                            reader,
-                            reason,
-                        )?;
-                    }
-                }
-            }
-        }
-        ListFormat::Ndjson => {
-            for c in &classifications {
-                let line = match c {
-                    Classification::Supported {
-                        id, guid, reader, ..
-                    } => format!(
-                        "{{\"id\":{},\"guid\":{},\"reader\":{},\"slot\":\"9D\"}}",
-                        json_string(&id.to_wire()),
-                        json_string(&guid.to_hex()),
-                        json_string(reader),
-                    ),
-                    Classification::Unsupported {
-                        guid,
-                        reader,
-                        reason,
-                    } => format!(
-                        "{{\"unsupported\":true,\"guid\":{},\"reader\":{},\"slot\":\"9D\",\"reason\":{}}}",
-                        json_string(&guid.to_hex()),
-                        json_string(reader),
-                        json_string(reason),
-                    ),
-                };
-                writeln!(out, "{line}")?;
-            }
-        }
+    for c in &classifications {
+        let line = match effective_format {
+            ListFormat::Human => format_human(c),
+            ListFormat::Ndjson => format_ndjson(c),
+        };
+        writeln!(out, "{line}")?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Render a `Classification` as a single human-readable line. Supported
+/// cards print the markl ID followed by a `# guid=..., serial=...,
+/// reader=..., slot=9D` comment (with `serial=` omitted when the card
+/// has no YubiKey serial). Unsupported cards are commented out entirely
+/// so the output round-trips through `xargs piggy pass recipients
+/// add` without picking up rejected entries.
+fn format_human(c: &piggy_ids::Classification) -> String {
+    use piggy_ids::Classification;
+    match c {
+        Classification::Supported {
+            id,
+            guid,
+            reader,
+            serial,
+        } => format!("{}  # {}", id, human_metadata(guid, *serial, reader),),
+        Classification::Unsupported {
+            guid,
+            reader,
+            serial,
+            reason,
+        } => format!(
+            "# unsupported: {}, reason={}",
+            human_metadata(guid, *serial, reader),
+            reason,
+        ),
+    }
+}
+
+fn human_metadata(guid: &piggy_piv::Guid, serial: Option<u32>, reader: &str) -> String {
+    match serial {
+        Some(s) => format!(
+            "guid={}, serial={}, reader={}, slot=9D",
+            guid.to_hex(),
+            s,
+            reader,
+        ),
+        None => format!("guid={}, reader={}, slot=9D", guid.to_hex(), reader),
+    }
+}
+
+/// Render a `Classification` as a single NDJSON record. The `serial`
+/// key is emitted as a JSON number (not a string) when present, and
+/// omitted entirely when absent so consumers can write `record.serial
+/// ?? null` cleanly. `slot` is always the string `"9D"`.
+fn format_ndjson(c: &piggy_ids::Classification) -> String {
+    use piggy_ids::Classification;
+    match c {
+        Classification::Supported {
+            id,
+            guid,
+            reader,
+            serial,
+        } => {
+            let serial_field = serial
+                .map(|s| format!(",\"serial\":{}", s))
+                .unwrap_or_default();
+            format!(
+                "{{\"id\":{},\"guid\":{}{},\"reader\":{},\"slot\":\"9D\"}}",
+                json_string(&id.to_wire()),
+                json_string(&guid.to_hex()),
+                serial_field,
+                json_string(reader),
+            )
+        }
+        Classification::Unsupported {
+            guid,
+            reader,
+            serial,
+            reason,
+        } => {
+            let serial_field = serial
+                .map(|s| format!(",\"serial\":{}", s))
+                .unwrap_or_default();
+            format!(
+                "{{\"unsupported\":true,\"guid\":{}{},\"reader\":{},\"slot\":\"9D\",\"reason\":{}}}",
+                json_string(&guid.to_hex()),
+                serial_field,
+                json_string(reader),
+                json_string(reason),
+            )
+        }
+    }
 }
 
 /// JSON-encode a string with surrounding quotes. We do this by hand
@@ -456,7 +492,10 @@ fn json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::json_string;
+    use super::{format_human, format_ndjson, json_string};
+    use piggy_ids::Classification;
+    use piggy_markl::{FormatId, Id as MarklId, PurposeId};
+    use piggy_piv::Guid;
 
     #[test]
     fn json_string_quotes_basic_ascii() {
@@ -474,5 +513,100 @@ mod tests {
         assert_eq!(json_string("a\nb"), "\"a\\nb\"");
         assert_eq!(json_string("a\tb"), "\"a\\tb\"");
         assert_eq!(json_string("a\x01b"), "\"a\\u0001b\"");
+    }
+
+    fn sample_supported(serial: Option<u32>) -> Classification {
+        let id = MarklId::new(
+            Some(PurposeId::PiggyRecipientV1),
+            FormatId::PivyEcdhP256Pub,
+            {
+                let mut v = vec![0x03];
+                v.extend(0u8..32);
+                v
+            },
+        )
+        .expect("valid recipient id");
+        Classification::Supported {
+            id,
+            guid: Guid::from_hex("00112233445566778899aabbccddeeff").expect("valid hex"),
+            reader: "Yubico YubiKey OTP+FIDO+CCID 00 00".into(),
+            serial,
+        }
+    }
+
+    fn sample_unsupported(serial: Option<u32>) -> Classification {
+        Classification::Unsupported {
+            guid: Guid::from_hex("ffeeddccbbaa99887766554433221100").expect("valid hex"),
+            reader: "Some Other Reader 00 00".into(),
+            serial,
+            reason: "slot 9D is Rsa2048".into(),
+        }
+    }
+
+    #[test]
+    fn format_human_includes_serial_when_present() {
+        let line = format_human(&sample_supported(Some(12_345_678)));
+        assert!(line.contains("serial=12345678"), "missing serial=: {line}");
+        // Guid::to_hex emits uppercase; match the literal it produces.
+        assert!(
+            line.contains("guid=00112233445566778899AABBCCDDEEFF"),
+            "guid not present: {line}"
+        );
+        assert!(line.contains("slot=9D"), "slot missing: {line}");
+    }
+
+    #[test]
+    fn format_human_omits_serial_when_absent() {
+        let line = format_human(&sample_supported(None));
+        assert!(
+            !line.contains("serial="),
+            "expected no serial= when None: {line}"
+        );
+    }
+
+    #[test]
+    fn format_human_unsupported_is_comment_with_reason() {
+        let line = format_human(&sample_unsupported(None));
+        assert!(
+            line.starts_with("# unsupported: "),
+            "expected leading '# unsupported: ': {line}"
+        );
+        assert!(
+            line.contains("reason=slot 9D is Rsa2048"),
+            "missing reason: {line}"
+        );
+    }
+
+    #[test]
+    fn format_ndjson_emits_numeric_serial() {
+        let line = format_ndjson(&sample_supported(Some(7_654_321)));
+        // Numeric, not string: there should be `"serial":7654321` literally.
+        assert!(
+            line.contains("\"serial\":7654321"),
+            "expected numeric serial field: {line}"
+        );
+    }
+
+    #[test]
+    fn format_ndjson_omits_serial_key_when_absent() {
+        let line = format_ndjson(&sample_supported(None));
+        assert!(
+            !line.contains("\"serial\""),
+            "expected no serial key when None: {line}"
+        );
+    }
+
+    #[test]
+    fn format_ndjson_unsupported_marks_unsupported_true() {
+        let line = format_ndjson(&sample_unsupported(Some(99)));
+        assert!(
+            line.contains("\"unsupported\":true"),
+            "expected unsupported flag: {line}"
+        );
+        assert!(line.contains("\"serial\":99"), "serial dropped: {line}");
+        assert!(
+            line.contains("\"reason\":\"slot 9D is Rsa2048\""),
+            "reason missing: {line}"
+        );
     }
 }

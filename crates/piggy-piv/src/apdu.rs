@@ -23,6 +23,12 @@ pub mod ins {
     pub const GEN_ASYM: u8 = 0x47;
     pub const CONTINUE: u8 = 0xC0;
     pub const YK_ATTEST: u8 = 0xF9;
+    /// YubicoPIV vendor-specific: read the YubiKey factory serial as
+    /// a 4-byte big-endian u32 against the already-selected PIV
+    /// applet. Mirrors pivy's `INS_GET_SERIAL` (vendor/pivy/src/piv.c
+    /// `ykpiv_read_serial`). Non-YubiKey cards reject the INS with a
+    /// non-9000 status word; callers treat that as "no serial".
+    pub const YK_GET_SERIAL: u8 = 0xF8;
 }
 
 /// PIV slot IDs

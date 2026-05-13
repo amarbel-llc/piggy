@@ -15,10 +15,15 @@ pub enum Classification {
         id: MarklId,
         guid: Guid,
         reader: String,
+        /// YubiKey factory serial when the card is a YubiKey v5+ with
+        /// the vendor `INS_GET_SERIAL` extension. `None` for every
+        /// other PIV card. Populated upstream by `PivToken::yk_serial`.
+        serial: Option<u32>,
     },
     Unsupported {
         guid: Guid,
         reader: String,
+        serial: Option<u32>,
         reason: String,
     },
 }
@@ -37,11 +42,19 @@ impl Classification {
             Classification::Unsupported { reader, .. } => reader,
         }
     }
+
+    pub fn serial(&self) -> Option<u32> {
+        match self {
+            Classification::Supported { serial, .. } => *serial,
+            Classification::Unsupported { serial, .. } => *serial,
+        }
+    }
 }
 
 pub fn classify_slot_9d(
     guid: Guid,
     reader: String,
+    serial: Option<u32>,
     algo: PivAlgorithm,
     cert_der: &[u8],
 ) -> Classification {
@@ -49,6 +62,7 @@ pub fn classify_slot_9d(
         return Classification::Unsupported {
             guid,
             reader,
+            serial,
             reason: format!("slot 9D is {algo:?}"),
         };
     }
@@ -58,6 +72,7 @@ pub fn classify_slot_9d(
             return Classification::Unsupported {
                 guid,
                 reader,
+                serial,
                 reason: format!("pubkey decode failed: {e}"),
             };
         }
@@ -74,10 +89,16 @@ pub fn classify_slot_9d(
         FormatId::PivyEcdhP256Pub,
         compressed,
     ) {
-        Ok(id) => Classification::Supported { id, guid, reader },
+        Ok(id) => Classification::Supported {
+            id,
+            guid,
+            reader,
+            serial,
+        },
         Err(e) => Classification::Unsupported {
             guid,
             reader,
+            serial,
             reason: format!("markl ID build failed: {e}"),
         },
     }

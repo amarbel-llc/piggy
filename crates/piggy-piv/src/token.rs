@@ -18,6 +18,11 @@ pub struct PivToken {
     card: pcsc::Card,
     guid: Guid,
     reader_name: String,
+    /// YubiKey factory serial, cached at connect() time. `None` for
+    /// non-YubiKey PIV cards (the vendor-specific INS rejects with a
+    /// non-9000 SW) or YubiKey firmware too old to support the INS.
+    /// See `read_yk_serial` for the failure-as-None policy.
+    yk_serial: Option<u32>,
 }
 
 impl PivToken {
@@ -30,9 +35,11 @@ impl PivToken {
             card,
             guid: Guid::from_bytes(&[0; 16])?,
             reader_name: reader.to_string(),
+            yk_serial: None,
         };
         token.select_piv()?;
         token.read_chuid()?;
+        token.yk_serial = token.read_yk_serial();
         Ok(token)
     }
 
@@ -118,6 +125,29 @@ impl PivToken {
 
     pub fn reader_name(&self) -> &str {
         &self.reader_name
+    }
+
+    /// Cached YubiKey factory serial. `None` for non-YubiKey PIV cards
+    /// or YubiKey firmware that pre-dates the `INS_GET_SERIAL` (0xF8)
+    /// vendor extension. Populated at `connect()` time via
+    /// `read_yk_serial`; never re-queries the card.
+    pub fn yk_serial(&self) -> Option<u32> {
+        self.yk_serial
+    }
+
+    /// Probe the YubiKey factory-serial vendor INS (0xF8) against the
+    /// already-selected PIV applet. Returns the serial on `SW=9000`
+    /// with a >=4-byte response, `None` on every other outcome. We
+    /// deliberately swallow errors: non-YubiKey cards routinely reject
+    /// this INS, and a missing serial is not a connect-time failure.
+    /// Mirrors pivy's `ykpiv_read_serial` (vendor/pivy/src/piv.c:644).
+    fn read_yk_serial(&self) -> Option<u32> {
+        let apdu = Apdu::new(0x00, crate::apdu::ins::YK_GET_SERIAL, 0x00, 0x00);
+        let (data, sw) = self.transmit(&apdu).ok()?;
+        if !sw.is_success() || data.len() < 4 {
+            return None;
+        }
+        Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
     }
 
     pub fn transmit_apdu(&self, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord), PivError> {

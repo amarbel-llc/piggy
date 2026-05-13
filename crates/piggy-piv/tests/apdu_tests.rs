@@ -1,4 +1,4 @@
-use piggy_piv::apdu::{alg, Apdu, StatusWord, PIV_AID};
+use piggy_piv::apdu::{alg, ins, Apdu, StatusWord, PIV_AID};
 
 #[test]
 fn build_select_piv() {
@@ -95,6 +95,17 @@ fn apdu_with_le() {
     let bytes = apdu.to_bytes();
     // Le=256 encoded as 0x00 in short form
     assert_eq!(bytes, &[0x00, 0xC0, 0x00, 0x00, 0x00]);
+}
+
+#[test]
+fn build_yk_get_serial() {
+    // Pinned to pivy's `ykpiv_read_serial` (vendor/pivy/src/piv.c:644):
+    // `piv_apdu_make(CLA_ISO, INS_GET_SERIAL, 0x00, 0x00)` → 4-byte
+    // header with no data and no Le. Drift between this byte sequence
+    // and pivy's would surface YubiKeys reporting no serial.
+    let apdu = Apdu::new(0x00, ins::YK_GET_SERIAL, 0x00, 0x00);
+    let bytes = apdu.to_bytes();
+    assert_eq!(bytes, &[0x00, 0xF8, 0x00, 0x00]);
 }
 
 #[test]
