@@ -12,8 +12,13 @@ fn fake_guid() -> Guid {
 fn rsa_in_9d_is_unsupported() {
     let guid = fake_guid();
     let cert: &[u8] = &[]; // irrelevant when algorithm rejects the slot
-    match classify_slot_9d(guid, PivAlgorithm::Rsa2048, cert) {
-        Classification::Unsupported { reason, .. } => {
+    match classify_slot_9d(
+        guid,
+        "Yubico YubiKey 00 00".into(),
+        PivAlgorithm::Rsa2048,
+        cert,
+    ) {
+        Classification::Unsupported { reason, reader, .. } => {
             assert!(
                 reason.starts_with("slot 9D is"),
                 "reason missing expected prefix 'slot 9D is': {reason}"
@@ -22,6 +27,7 @@ fn rsa_in_9d_is_unsupported() {
                 reason.contains("Rsa2048"),
                 "reason missing algorithm name 'Rsa2048': {reason}"
             );
+            assert_eq!(reader, "Yubico YubiKey 00 00");
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }
@@ -31,8 +37,8 @@ fn rsa_in_9d_is_unsupported() {
 fn malformed_cert_in_9d_is_unsupported() {
     let guid = fake_guid();
     let cert: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF]; // not a valid X.509 cert
-    match classify_slot_9d(guid, PivAlgorithm::EcP256, cert) {
-        Classification::Unsupported { reason, .. } => {
+    match classify_slot_9d(guid, "fake-reader".into(), PivAlgorithm::EcP256, cert) {
+        Classification::Unsupported { reason, reader, .. } => {
             assert!(
                 reason.starts_with("pubkey decode failed:"),
                 "reason missing expected prefix 'pubkey decode failed:': {reason}"
@@ -41,6 +47,7 @@ fn malformed_cert_in_9d_is_unsupported() {
                 reason.contains("decode"),
                 "reason missing inner 'decode' substring: {reason}"
             );
+            assert_eq!(reader, "fake-reader");
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }

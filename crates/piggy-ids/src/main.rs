@@ -24,6 +24,16 @@
 //!     `PivError` messages) remain unambiguously parseable by downstream
 //!     bash. Lines are sorted by GUID for stable output. Drives
 //!     `piggy pass recipients add --all-attached`.
+//!   * `list-available [--format human|ndjson]` — enumerate every
+//!     attached PIV card and emit one record per card on stdout.
+//!     Default format auto-selects based on TTY: human-readable when
+//!     stdout is a TTY, NDJSON otherwise. Unsupported cards are
+//!     prefixed with `# unsupported:` in human mode and marked
+//!     `"unsupported":true` in NDJSON mode. Drives
+//!     `piggy pass recipients list-available`. `serial=` is
+//!     intentionally absent: today `PivToken` only exposes the CHUID
+//!     GUID, so `guid=<hex>` is emitted instead (vendor-specific
+//!     factory serials tracked in #84).
 //!
 //! Reachable from `piggy.sh` via the `PIGGY_IDS_PATH` env var that
 //! `flake.nix`'s `makeWrapper` bakes into the user-facing `piggy`
@@ -31,11 +41,11 @@
 //! the user-facing surface is `piggy pass recipients`).
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use piggy_box::recipients::template_from_recipients;
 use piggy_box::stream::EboxStream;
@@ -99,6 +109,26 @@ enum Cmd {
     /// cards are unsupported or no cards are attached; nonzero only on
     /// PCSC failure.
     DetectAllPubkeys,
+    /// Enumerate every attached PIV card and emit one record per card
+    /// suitable for `piggy pass recipients list-available`.
+    ///
+    /// Format auto-selects based on TTY: human-readable when stdout is
+    /// a TTY, NDJSON otherwise. Pass --format to override.
+    ///
+    /// Lines are sorted by GUID for stable output. Exit 0 even when no
+    /// cards are attached; nonzero only on PCSC failure.
+    ListAvailable {
+        /// Output format. Default: `human` when stdout is a TTY,
+        /// `ndjson` otherwise.
+        #[arg(long)]
+        format: Option<ListFormat>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ListFormat {
+    Human,
+    Ndjson,
 }
 
 fn main() -> ExitCode {
@@ -122,14 +152,14 @@ fn dispatch(cli: Cli) -> Result<ExitCode, DynErr> {
         Cmd::Diff { current, desired } => cmd_diff(&current, &desired),
         Cmd::DetectPubkey { guid } => cmd_detect_pubkey(guid.as_deref()),
         Cmd::DetectAllPubkeys => cmd_detect_all_pubkeys(),
+        Cmd::ListAvailable { format } => cmd_list_available(format),
     }
 }
 
 fn read_recipient_file(path: &Path) -> Result<RecipientFile, DynErr> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let file = RecipientFile::parse(&text)
-        .map_err(|e| format!("parsing {}: {e}", path.display()))?;
+    let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let file =
+        RecipientFile::parse(&text).map_err(|e| format!("parsing {}: {e}", path.display()))?;
     Ok(file)
 }
 
@@ -142,8 +172,7 @@ fn cmd_canonicalize(path: &Path) -> Result<ExitCode, DynErr> {
     let file = read_recipient_file(path)?;
     let rendered = file.render();
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, rendered.as_bytes())
-        .map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+    fs::write(&tmp, rendered.as_bytes()).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
     fs::rename(&tmp, path)
         .map_err(|e| format!("renaming {} → {}: {e}", tmp.display(), path.display()))?;
     Ok(ExitCode::SUCCESS)
@@ -169,11 +198,7 @@ fn cmd_diff(current: &Path, desired: &Path) -> Result<ExitCode, DynErr> {
 
 fn cmd_encrypt(path: &Path) -> Result<ExitCode, DynErr> {
     let file = read_recipient_file(path)?;
-    let ids: Vec<MarklId> = file
-        .recipients()
-        .iter()
-        .map(|r| r.id().clone())
-        .collect();
+    let ids: Vec<MarklId> = file.recipients().iter().map(|r| r.id().clone()).collect();
 
     let tpl = template_from_recipients(&ids)?;
     let stream = EboxStream::new(&tpl)?;
@@ -225,7 +250,12 @@ fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
 
     let token = pick_token(&tokens, guid_hex)?;
     let slot = token.read_slot(0x9D)?;
-    match classify_slot_9d(token.guid().clone(), slot.algorithm(), slot.cert_der()) {
+    match classify_slot_9d(
+        token.guid().clone(),
+        token.reader_name().to_string(),
+        slot.algorithm(),
+        slot.cert_der(),
+    ) {
         Classification::Supported { id, .. } => {
             let stdout = io::stdout();
             let mut out = stdout.lock();
@@ -236,10 +266,7 @@ fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
     }
 }
 
-fn pick_token<'a>(
-    tokens: &'a [PivToken],
-    guid_hex: Option<&str>,
-) -> Result<&'a PivToken, DynErr> {
+fn pick_token<'a>(tokens: &'a [PivToken], guid_hex: Option<&str>) -> Result<&'a PivToken, DynErr> {
     match guid_hex {
         Some(hex) => {
             let want = Guid::from_hex(hex)?;
@@ -267,11 +294,11 @@ fn pick_token<'a>(
     }
 }
 
-/// Enumerate every attached PIV card, classify each card's slot 9D, and
-/// emit one line per card on stdout, sorted by GUID hex for stable
-/// output. Exit 0 even when all cards are unsupported or no cards are
-/// attached; nonzero only on PCSC failure.
-fn cmd_detect_all_pubkeys() -> Result<ExitCode, DynErr> {
+/// Enumerate every attached PIV card and return one `Classification`
+/// per card, sorted by GUID hex for stable output. Used by both
+/// `detect-all-pubkeys` (bash-friendly TSV) and `list-available`
+/// (TTY/NDJSON).
+fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
     use piggy_ids::{classify_slot_9d, Classification};
 
     let ctx = PivContext::new()?;
@@ -279,35 +306,173 @@ fn cmd_detect_all_pubkeys() -> Result<ExitCode, DynErr> {
 
     let mut classifications: Vec<Classification> = Vec::with_capacity(tokens.len());
     for token in &tokens {
+        let reader = token.reader_name().to_string();
         match token.read_slot(0x9D) {
             Ok(slot) => classifications.push(classify_slot_9d(
                 token.guid().clone(),
+                reader,
                 slot.algorithm(),
                 slot.cert_der(),
             )),
             Err(e) => classifications.push(Classification::Unsupported {
                 guid: token.guid().clone(),
+                reader,
                 reason: format!("slot 9D unreadable: {e}"),
             }),
         }
     }
 
-    classifications.sort_by_key(|c| match c {
-        Classification::Supported { guid, .. } => guid.to_hex(),
-        Classification::Unsupported { guid, .. } => guid.to_hex(),
-    });
+    classifications.sort_by_key(|c| c.guid().to_hex());
+    Ok(classifications)
+}
+
+/// Enumerate every attached PIV card, classify each card's slot 9D, and
+/// emit one line per card on stdout, sorted by GUID hex for stable
+/// output. Exit 0 even when all cards are unsupported or no cards are
+/// attached; nonzero only on PCSC failure.
+fn cmd_detect_all_pubkeys() -> Result<ExitCode, DynErr> {
+    use piggy_ids::Classification;
+
+    let classifications = enumerate_and_classify()?;
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
     for c in &classifications {
         match c {
-            Classification::Supported { id, guid } => {
+            Classification::Supported { id, guid, .. } => {
                 writeln!(out, "supported\t{}\t{}", id, guid.to_hex())?;
             }
-            Classification::Unsupported { guid, reason } => {
+            Classification::Unsupported { guid, reason, .. } => {
                 writeln!(out, "unsupported\t{}\t{}", guid.to_hex(), reason)?;
             }
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// User-facing recipient list. Default format follows stdout's TTY
+/// status — human-readable when interactive, NDJSON when piped — so
+/// `piggy pass recipients list-available | xargs piggy pass
+/// recipients add ...` Just Works.
+fn cmd_list_available(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
+    use piggy_ids::Classification;
+
+    let classifications = enumerate_and_classify()?;
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let effective_format = format.unwrap_or_else(|| {
+        if io::stdout().is_terminal() {
+            ListFormat::Human
+        } else {
+            ListFormat::Ndjson
+        }
+    });
+
+    match effective_format {
+        ListFormat::Human => {
+            for c in &classifications {
+                match c {
+                    Classification::Supported {
+                        id, guid, reader, ..
+                    } => {
+                        writeln!(
+                            out,
+                            "{}  # guid={}, reader={}, slot=9D",
+                            id,
+                            guid.to_hex(),
+                            reader,
+                        )?;
+                    }
+                    Classification::Unsupported {
+                        guid,
+                        reader,
+                        reason,
+                    } => {
+                        writeln!(
+                            out,
+                            "# unsupported: guid={}, reader={}, slot=9D, reason={}",
+                            guid.to_hex(),
+                            reader,
+                            reason,
+                        )?;
+                    }
+                }
+            }
+        }
+        ListFormat::Ndjson => {
+            for c in &classifications {
+                let line = match c {
+                    Classification::Supported {
+                        id, guid, reader, ..
+                    } => format!(
+                        "{{\"id\":{},\"guid\":{},\"reader\":{},\"slot\":\"9D\"}}",
+                        json_string(&id.to_wire()),
+                        json_string(&guid.to_hex()),
+                        json_string(reader),
+                    ),
+                    Classification::Unsupported {
+                        guid,
+                        reader,
+                        reason,
+                    } => format!(
+                        "{{\"unsupported\":true,\"guid\":{},\"reader\":{},\"slot\":\"9D\",\"reason\":{}}}",
+                        json_string(&guid.to_hex()),
+                        json_string(reader),
+                        json_string(reason),
+                    ),
+                };
+                writeln!(out, "{line}")?;
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// JSON-encode a string with surrounding quotes. We do this by hand
+/// rather than pulling in serde_json — output is small, escape rules
+/// are RFC 8259-minimal, and avoiding the dep keeps `piggy-ids` slim.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_string;
+
+    #[test]
+    fn json_string_quotes_basic_ascii() {
+        assert_eq!(json_string("hello"), "\"hello\"");
+    }
+
+    #[test]
+    fn json_string_escapes_quote_and_backslash() {
+        assert_eq!(json_string("he said \"hi\""), "\"he said \\\"hi\\\"\"");
+        assert_eq!(json_string("a\\b"), "\"a\\\\b\"");
+    }
+
+    #[test]
+    fn json_string_escapes_control_chars() {
+        assert_eq!(json_string("a\nb"), "\"a\\nb\"");
+        assert_eq!(json_string("a\tb"), "\"a\\tb\"");
+        assert_eq!(json_string("a\x01b"), "\"a\\u0001b\"");
+    }
 }

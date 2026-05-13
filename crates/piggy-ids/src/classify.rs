@@ -11,14 +11,44 @@ use piggy_piv::{Guid, PivAlgorithm};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Classification {
-    Supported { id: MarklId, guid: Guid },
-    Unsupported { guid: Guid, reason: String },
+    Supported {
+        id: MarklId,
+        guid: Guid,
+        reader: String,
+    },
+    Unsupported {
+        guid: Guid,
+        reader: String,
+        reason: String,
+    },
 }
 
-pub fn classify_slot_9d(guid: Guid, algo: PivAlgorithm, cert_der: &[u8]) -> Classification {
+impl Classification {
+    pub fn guid(&self) -> &Guid {
+        match self {
+            Classification::Supported { guid, .. } => guid,
+            Classification::Unsupported { guid, .. } => guid,
+        }
+    }
+
+    pub fn reader(&self) -> &str {
+        match self {
+            Classification::Supported { reader, .. } => reader,
+            Classification::Unsupported { reader, .. } => reader,
+        }
+    }
+}
+
+pub fn classify_slot_9d(
+    guid: Guid,
+    reader: String,
+    algo: PivAlgorithm,
+    cert_der: &[u8],
+) -> Classification {
     if algo != PivAlgorithm::EcP256 {
         return Classification::Unsupported {
             guid,
+            reader,
             reason: format!("slot 9D is {algo:?}"),
         };
     }
@@ -27,6 +57,7 @@ pub fn classify_slot_9d(guid: Guid, algo: PivAlgorithm, cert_der: &[u8]) -> Clas
         Err(e) => {
             return Classification::Unsupported {
                 guid,
+                reader,
                 reason: format!("pubkey decode failed: {e}"),
             };
         }
@@ -43,9 +74,10 @@ pub fn classify_slot_9d(guid: Guid, algo: PivAlgorithm, cert_der: &[u8]) -> Clas
         FormatId::PivyEcdhP256Pub,
         compressed,
     ) {
-        Ok(id) => Classification::Supported { id, guid },
+        Ok(id) => Classification::Supported { id, guid, reader },
         Err(e) => Classification::Unsupported {
             guid,
+            reader,
             reason: format!("markl ID build failed: {e}"),
         },
     }

@@ -341,7 +341,7 @@ cmd_init() {
   # Canonicalising here in bash would need re-checksumming and
   # bash can't do blech32, so we write the user's input verbatim.
   if [[ $key != pivy_ecdh_p256_pub-* &&
-        $key != piggy-recipient-v1@pivy_ecdh_p256_pub-* ]]; then
+    $key != piggy-recipient-v1@pivy_ecdh_p256_pub-* ]]; then
     die "Error: -k value must be a markl ID with format=pivy_ecdh_p256_pub (got: ${key%%-*}...)."
   fi
 
@@ -738,6 +738,10 @@ cmd_pass_recipients() {
     shift
     cmd_pass_recipients_list "$@"
     ;;
+  list-available)
+    shift
+    cmd_pass_recipients_list_available "$@"
+    ;;
   add)
     shift
     cmd_pass_recipients_add "$@"
@@ -755,6 +759,10 @@ cmd_pass_recipients() {
 		Usage:
 		    $PROGRAM_PASS recipients list [-p subfolder]
 		        Print recipients in the relevant piggy-ids, one per line.
+		    $PROGRAM_PASS recipients list-available [--format human|ndjson]
+		        Enumerate attached PIV cards and print one record per card
+		        with its slot-9D markl ID. Output is human-readable on a
+		        TTY and NDJSON when piped (override with --format).
 		    $PROGRAM_PASS recipients add <markl-id>... [-p subfolder]
 		    $PROGRAM_PASS recipients add -A | --all-attached [--yes] [-p subfolder]
 		        Append recipients to piggy-ids and re-encrypt. With -A,
@@ -764,7 +772,7 @@ cmd_pass_recipients() {
 		    $PROGRAM_PASS recipients sync <file> [-p subfolder]
 		        Replace piggy-ids with <file>'s contents (idempotent).
 		_EOF
-    [[ $sub = "" ]] && exit 1 || exit 0
+    [[ $sub == "" ]] && exit 1 || exit 0
     ;;
   *)
     die "Error: unknown subcommand: $PROGRAM_PASS recipients $sub"
@@ -787,6 +795,13 @@ cmd_pass_recipients_list() {
   done
   find_piggy_ids "$subfolder"
   cat "$PIGGY_IDS"
+}
+
+cmd_pass_recipients_list_available() {
+  # Thin shim: the Rust helper owns TTY-detection and output formatting
+  # for both `human` and `ndjson`. `exec` so stdout's TTY status is the
+  # one the user sees, not whatever the bash subshell would compute.
+  exec "${PIGGY_IDS_PATH:-piggy-ids}" list-available "$@"
 }
 
 cmd_pass_recipients_add() {

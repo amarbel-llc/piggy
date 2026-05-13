@@ -76,6 +76,25 @@ passthroughs for the C pivy binaries:
 *pass recipients list* [*--path*=_sub-folder_, *-p* _sub-folder_]
 	Print the recipients listed in the relevant _piggy-ids_, one per line.
 
+*pass recipients list-available* [*--format* _human_|_ndjson_]
+	Enumerate every attached PIV card and emit one record per card on
+	stdout. Output describes the slot-9D markl ID, the card's CHUID
+	*guid*, the PCSC *reader* name, and the (currently fixed) *slot=9D*.
+
+	Format auto-selects from stdout's TTY status: human-readable when
+	interactive (the markl ID, followed by a trailing
+	"_# guid=<hex>, reader=<name>, slot=9D_" comment), NDJSON
+	otherwise (one JSON object per line with keys *id*, *guid*,
+	*reader*, *slot*). Pass *--format* to override.
+
+	Cards with an unsupported slot-9D configuration are emitted too:
+	prefixed with "_# unsupported: ..._" in human mode, or with
+	*"unsupported":true* and a *reason* field in NDJSON mode.
+
+	"_serial_" is intentionally absent today — _piggy-piv_ only
+	exposes the CHUID *guid*. Vendor-specific factory serials (e.g.
+	YubiKey's 7-digit decimal serial) are tracked in piggy#84.
+
 *pass recipients add* [*-A* | *--all-attached*] [*--yes*] [*-p* _subfolder_] [_markl-id_...]
 	Append recipients to the store's _piggy-ids_ and re-encrypt.
 
