@@ -8,6 +8,8 @@ piggy - stores, retrieves, generates, and synchronizes passwords using PIV smart
 
 *piggy pass* _SUBCOMMAND_ [_OPTIONS_]... [_ARGS_]...
 
+*piggy list* [*--format* _human_|_ndjson_]
+
 *piggy help*
 
 *piggy version*
@@ -243,6 +245,29 @@ passthroughs for the C pivy binaries:
 	may be turned on using: *piggy pass git config --bool --add piggy.signcommits true*
 
 ## piggy (top-level)
+
+*list* [*--format* _human_|_ndjson_]
+	Enumerate every populated PIV slot across all attached cards.
+	Superset of *piggy pass recipients list-available*: in addition to
+	the recipient-eligible slots (*9D* + retired *82*..=*95*), it also
+	includes the SSH-style slots *9A* (authentication), *9C* (digital
+	signature), and *9E* (card authentication).
+
+	The markl purpose attached to each record depends on the slot:
+
+	- 9D + retired 82..95 → *piggy-recipient-v1*
+	- 9A (authentication) → *piggy-piv_auth-v1*
+	- 9C (digital signature) → *piggy-piv_sig-v1*
+	- 9E (card authentication) → *piggy-piv_card_auth-v1*
+
+	The format ID for *piggy-piv_\** purposes is *ssh_ecdsa_nistp256_pub*
+	(33-byte SEC1-compressed P-256 point). Only ECDSA P-256 keys are
+	recognised in v1; RSA, ECDSA P-384, and Ed25519 in 9A/9C/9E emit
+	*# unsupported:* lines.
+
+	Same per-record fields (guid, serial, reader, slot, cn, pin_policy,
+	touch_policy) and same human/ndjson auto-selection as *piggy pass
+	recipients list-available*.
 
 *help*
 	Show piggy's pass-style usage message.

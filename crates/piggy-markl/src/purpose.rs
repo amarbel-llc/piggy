@@ -23,6 +23,17 @@ pub enum PurposeId {
     /// (drafted in piggy at madder#150). Until the official RFC lands
     /// this is the de facto definition.
     PiggyRecipientV1,
+    /// `piggy-piv_auth-v1` — public key from PIV slot 9A (PIV
+    /// Authentication). Constrained to `ssh_ecdsa_nistp256_pub` for now;
+    /// other algorithms (Ed25519, RSA, P-384) are not yet enumerated in
+    /// `piggy list` output and will need new compatible format IDs.
+    PiggyPivAuthV1,
+    /// `piggy-piv_sig-v1` — public key from PIV slot 9C (Digital
+    /// Signature). Same constraint as `PiggyPivAuthV1`.
+    PiggyPivSigV1,
+    /// `piggy-piv_card_auth-v1` — public key from PIV slot 9E (Card
+    /// Authentication). Same constraint as `PiggyPivAuthV1`.
+    PiggyPivCardAuthV1,
     /// `dodder-blob-digest-sha256-v1` — blob content hash. Piggy does
     /// not produce these, but accepts them for round-trip purposes.
     DodderBlobDigestSha256V1,
@@ -51,6 +62,9 @@ impl PurposeId {
     pub fn as_str(&self) -> &str {
         match self {
             PurposeId::PiggyRecipientV1 => "piggy-recipient-v1",
+            PurposeId::PiggyPivAuthV1 => "piggy-piv_auth-v1",
+            PurposeId::PiggyPivSigV1 => "piggy-piv_sig-v1",
+            PurposeId::PiggyPivCardAuthV1 => "piggy-piv_card_auth-v1",
             PurposeId::DodderBlobDigestSha256V1 => "dodder-blob-digest-sha256-v1",
             PurposeId::DodderObjectDigestV2 => "dodder-object-digest-v2",
             PurposeId::DodderObjectSigV2 => "dodder-object-sig-v2",
@@ -63,6 +77,9 @@ impl PurposeId {
     pub fn parse(s: &str) -> Self {
         match s {
             "piggy-recipient-v1" => PurposeId::PiggyRecipientV1,
+            "piggy-piv_auth-v1" => PurposeId::PiggyPivAuthV1,
+            "piggy-piv_sig-v1" => PurposeId::PiggyPivSigV1,
+            "piggy-piv_card_auth-v1" => PurposeId::PiggyPivCardAuthV1,
             "dodder-blob-digest-sha256-v1" => PurposeId::DodderBlobDigestSha256V1,
             "dodder-object-digest-v2" => PurposeId::DodderObjectDigestV2,
             "dodder-object-sig-v2" => PurposeId::DodderObjectSigV2,
@@ -79,6 +96,11 @@ impl PurposeId {
     pub fn validate_format(&self, format: FormatId) -> Result<(), Incompatible> {
         let ok = match self {
             PurposeId::PiggyRecipientV1 => matches!(format, FormatId::PivyEcdhP256Pub),
+            PurposeId::PiggyPivAuthV1
+            | PurposeId::PiggyPivSigV1
+            | PurposeId::PiggyPivCardAuthV1 => {
+                matches!(format, FormatId::SshEcdsaNistp256Pub)
+            }
             PurposeId::DodderBlobDigestSha256V1 => {
                 matches!(format, FormatId::Sha256 | FormatId::Blake2b256)
             }
@@ -119,9 +141,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn piggy_piv_purposes_accept_only_ssh_ecdsa_nistp256_pub() {
+        for p in [
+            PurposeId::PiggyPivAuthV1,
+            PurposeId::PiggyPivSigV1,
+            PurposeId::PiggyPivCardAuthV1,
+        ] {
+            assert!(
+                p.validate_format(FormatId::SshEcdsaNistp256Pub).is_ok(),
+                "{p:?} should accept ssh_ecdsa_nistp256_pub"
+            );
+            assert!(
+                p.validate_format(FormatId::PivyEcdhP256Pub).is_err(),
+                "{p:?} should reject pivy_ecdh_p256_pub — that's a recipient format"
+            );
+            assert!(
+                p.validate_format(FormatId::EcdsaP256Pub).is_err(),
+                "{p:?} should reject ecdsa_p256_pub — distinct from ssh form"
+            );
+        }
+    }
+
+    #[test]
     fn piggy_recipient_v1_accepts_only_pivy_ecdh_p256_pub() {
         let p = PurposeId::PiggyRecipientV1;
         assert!(p.validate_format(FormatId::PivyEcdhP256Pub).is_ok());
+        assert!(
+            p.validate_format(FormatId::SshEcdsaNistp256Pub).is_err(),
+            "PiggyRecipientV1 should reject the SSH format — that's for piggy-piv_* purposes"
+        );
         assert!(p.validate_format(FormatId::Sha256).is_err());
         assert!(p.validate_format(FormatId::EcdsaP256Pub).is_err());
     }
@@ -151,6 +199,9 @@ mod tests {
     fn round_trip_purpose_names() {
         for p in [
             PurposeId::PiggyRecipientV1,
+            PurposeId::PiggyPivAuthV1,
+            PurposeId::PiggyPivSigV1,
+            PurposeId::PiggyPivCardAuthV1,
             PurposeId::DodderBlobDigestSha256V1,
             PurposeId::DodderObjectDigestV2,
             PurposeId::DodderObjectSigV2,

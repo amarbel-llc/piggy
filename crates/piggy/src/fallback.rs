@@ -31,6 +31,27 @@ pub fn exec_bash(subcmd: &str, rest: &[String]) -> ! {
     std::process::exit(127);
 }
 
+/// Exec `piggy-ids <subcmd> <rest...>`. Used by top-level commands
+/// that drive piggy-ids directly rather than going through piggy.sh —
+/// avoids name collisions with pass-style bash subcommands (e.g. the
+/// top-level `piggy list` versus the `piggy pass list` alias for
+/// `show`).
+///
+/// Locates the binary via the makeWrapper-set `PIGGY_IDS_PATH`,
+/// falling back to a bare `piggy-ids` PATH lookup so devshell builds
+/// without `flake.nix`'s wrapper still work. Never returns on success.
+pub fn exec_piggy_ids(subcmd: &str, rest: &[String]) -> ! {
+    let binary = std::env::var_os("PIGGY_IDS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("piggy-ids"));
+    let mut cmd = Command::new(&binary);
+    cmd.arg(subcmd);
+    cmd.args(rest);
+    let err = cmd.exec();
+    eprintln!("piggy: failed to launch {}: {}", binary.display(), err);
+    std::process::exit(127);
+}
+
 /// Exec `pivy-<tool> <rest...>`. Used by the C-pivy shortcut handlers
 /// (`tool/ca/luks/zfs`) and by the `piggy pivy <tool>` passthrough.
 /// Never returns on success.

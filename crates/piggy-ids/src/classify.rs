@@ -197,6 +197,115 @@ pub fn classify_slot(
     }
 }
 
+/// Classify a non-recipient PIV slot (9A authentication, 9C digital
+/// signature, 9E card authentication) as a signing/SSH-style key.
+///
+/// Each of these slots gets a distinct markl purpose mirroring its
+/// NIST 800-73 slot semantics — `piggy-piv_auth-v1`, `piggy-piv_sig-v1`,
+/// or `piggy-piv_card_auth-v1` — so a downstream tool seeing the
+/// markl ID can immediately tell what the key is meant for without
+/// needing to know which slot id it came from. The payload format is
+/// `ssh_ecdsa_nistp256_pub` (33-byte SEC1-compressed P-256 point).
+///
+/// Only ECDSA P-256 is supported in v1; RSA, P-384, and Ed25519 in
+/// these slots are reported as `Unsupported` until the markl registry
+/// grows compatible format IDs.
+pub fn classify_ssh_slot(
+    slot_id: u8,
+    guid: Guid,
+    reader: String,
+    serial: Option<u32>,
+    algo: PivAlgorithm,
+    cert_der: &[u8],
+    pin_policy: Option<PinPolicy>,
+    touch_policy: Option<TouchPolicy>,
+) -> Classification {
+    let cn = extract_subject_cn(cert_der);
+
+    let purpose = match purpose_for_ssh_slot(slot_id) {
+        Some(p) => p,
+        None => {
+            return Classification::Unsupported {
+                guid,
+                reader,
+                serial,
+                slot_id,
+                cn,
+                pin_policy,
+                touch_policy,
+                reason: format!(
+                    "slot {} is not an SSH-style PIV slot (expected 9A/9C/9E)",
+                    format_slot_id(slot_id),
+                ),
+            };
+        }
+    };
+
+    if algo != PivAlgorithm::EcP256 {
+        return Classification::Unsupported {
+            guid,
+            reader,
+            serial,
+            slot_id,
+            cn,
+            pin_policy,
+            touch_policy,
+            reason: format!(
+                "slot {} is {algo:?}; only EcP256 has a markl format in v1",
+                format_slot_id(slot_id),
+            ),
+        };
+    }
+
+    let compressed = match compress_p256_pubkey(cert_der) {
+        Ok(c) => c,
+        Err(e) => {
+            return Classification::Unsupported {
+                guid,
+                reader,
+                serial,
+                slot_id,
+                cn,
+                pin_policy,
+                touch_policy,
+                reason: format!("pubkey decode failed: {e}"),
+            };
+        }
+    };
+
+    match MarklId::new(Some(purpose), FormatId::SshEcdsaNistp256Pub, compressed) {
+        Ok(id) => Classification::Supported {
+            id,
+            guid,
+            reader,
+            serial,
+            slot_id,
+            cn,
+            pin_policy,
+            touch_policy,
+        },
+        Err(e) => Classification::Unsupported {
+            guid,
+            reader,
+            serial,
+            slot_id,
+            cn,
+            pin_policy,
+            touch_policy,
+            reason: format!("markl ID build failed: {e}"),
+        },
+    }
+}
+
+fn purpose_for_ssh_slot(slot_id: u8) -> Option<PurposeId> {
+    match slot_id {
+        0x9A => Some(PurposeId::PiggyPivAuthV1),
+        0x9C => Some(PurposeId::PiggyPivSigV1),
+        0x9E => Some(PurposeId::PiggyPivCardAuthV1),
+        _ => None,
+    }
+}
+
 /// Format a slot id as the conventional uppercase 2-digit hex (e.g.
 /// `9D`, `82`). No `0x` prefix — matches the convention used by
 /// `pivy-tool list` and `piggy tool list`.

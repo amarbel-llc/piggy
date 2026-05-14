@@ -60,6 +60,18 @@ struct Cli {
 enum Command {
     /// Password-store commands (init/show/find/grep/insert/edit/generate/rm/mv/cp/git).
     Pass(PassArgs),
+    /// Enumerate every populated PIV slot across all attached cards.
+    ///
+    /// Like `piggy pass recipients list-available` but also includes
+    /// slots 9A (auth), 9C (signature), and 9E (card auth) — each with
+    /// its own slot-semantic markl purpose (`piggy-piv_auth-v1`,
+    /// `piggy-piv_sig-v1`, `piggy-piv_card_auth-v1`). Recipient-eligible
+    /// slots (9D + retired 0x82..=0x95) keep the existing
+    /// `piggy-recipient-v1` purpose.
+    List {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
     /// Print piggy.sh's pass-style usage text.
     Help {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -237,6 +249,7 @@ fn main() {
             PassCommand::Recipients { rest } => fallback::exec_bash("recipients", &rest),
         },
 
+        Command::List { rest } => fallback::exec_piggy_ids("list-all", &rest),
         Command::Help { rest } => fallback::exec_bash("help", &rest),
         Command::Version { rest } => fallback::exec_bash("version", &rest),
 

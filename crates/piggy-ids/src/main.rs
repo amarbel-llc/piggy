@@ -127,6 +127,20 @@ enum Cmd {
         #[arg(long)]
         format: Option<ListFormat>,
     },
+    /// Enumerate every populated PIV slot — both recipient-eligible
+    /// slots (9D + retired 0x82..=0x95, same as `list-available`) and
+    /// SSH-style slots (9A authentication, 9C signature, 9E card
+    /// authentication) — and emit one record per (card, slot) on
+    /// stdout. Recipient slots carry the `piggy-recipient-v1` markl
+    /// purpose; SSH slots carry `piggy-piv_auth-v1`, `piggy-piv_sig-v1`,
+    /// or `piggy-piv_card_auth-v1` per slot semantics.
+    ///
+    /// Same format/sort/skip-empty rules as `list-available`. Drives
+    /// `piggy list`.
+    ListAll {
+        #[arg(long)]
+        format: Option<ListFormat>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -157,6 +171,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, DynErr> {
         Cmd::DetectPubkey { guid } => cmd_detect_pubkey(guid.as_deref()),
         Cmd::DetectAllPubkeys => cmd_detect_all_pubkeys(),
         Cmd::ListAvailable { format } => cmd_list_available(format),
+        Cmd::ListAll { format } => cmd_list_all(format),
     }
 }
 
@@ -439,6 +454,109 @@ fn cmd_detect_all_pubkeys() -> Result<ExitCode, DynErr> {
                 writeln!(out, "unsupported\t{}\t{}", guid.to_hex(), reason)?;
             }
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// SSH-style slots (9A authentication, 9C signature, 9E card
+/// authentication). Distinct from recipient-eligible slots (9D + retired
+/// 0x82..=0x95) — each set gets its own enumerator + classifier so the
+/// markl purpose attached to each record matches the slot's intended
+/// semantic role.
+fn ssh_eligible_slots() -> &'static [u8] {
+    &[0x9A, 0x9C, 0x9E]
+}
+
+/// Enumerate every populated slot across all attached cards:
+///   * 9D + retired 0x82..=0x95 → `classify_slot` (recipient purpose)
+///   * 9A, 9C, 9E              → `classify_ssh_slot` (per-slot SSH purpose)
+///
+/// Empty/unreadable slots are skipped silently. Sort by (guid_hex,
+/// slot_id) for stable output. Each populated slot incurs one
+/// INS_ATTEST round-trip to recover PIN/touch policies; non-YubiKey
+/// cards and YubiKeys with the F9 attestation key cleared get `None`
+/// policies (graceful degradation, same as `enumerate_all_recipient_slots`).
+fn enumerate_all_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
+    use piggy_ids::{classify_slot, classify_ssh_slot, Classification};
+
+    let ctx = PivContext::new()?;
+    let tokens = ctx.enumerate_tokens()?;
+
+    let recipient_slots = recipient_eligible_slots();
+    let ssh_slots = ssh_eligible_slots();
+
+    let mut classifications: Vec<Classification> = Vec::new();
+    for token in &tokens {
+        let reader = token.reader_name().to_string();
+        let serial = token.yk_serial();
+
+        for &slot_id in recipient_slots.iter().chain(ssh_slots.iter()) {
+            let slot = match token.read_slot(slot_id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let (pin_policy, touch_policy) = match token.read_slot_policy(slot_id) {
+                Ok((p, t)) => (Some(p), Some(t)),
+                Err(_) => (None, None),
+            };
+            let classification = if ssh_slots.contains(&slot_id) {
+                classify_ssh_slot(
+                    slot_id,
+                    token.guid().clone(),
+                    reader.clone(),
+                    serial,
+                    slot.algorithm(),
+                    slot.cert_der(),
+                    pin_policy,
+                    touch_policy,
+                )
+            } else {
+                classify_slot(
+                    slot_id,
+                    token.guid().clone(),
+                    reader.clone(),
+                    serial,
+                    slot.algorithm(),
+                    slot.cert_der(),
+                    pin_policy,
+                    touch_policy,
+                )
+            };
+            classifications.push(classification);
+        }
+    }
+
+    classifications.sort_by(|a, b| {
+        a.guid()
+            .to_hex()
+            .cmp(&b.guid().to_hex())
+            .then_with(|| a.slot_id().cmp(&b.slot_id()))
+    });
+    Ok(classifications)
+}
+
+/// User-facing full-slot list. Same output shape as `cmd_list_available`
+/// but covers 9A/9C/9E in addition to recipient slots. Drives
+/// `piggy list`.
+fn cmd_list_all(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
+    let classifications = enumerate_all_slots()?;
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let effective_format = format.unwrap_or_else(|| {
+        if io::stdout().is_terminal() {
+            ListFormat::Human
+        } else {
+            ListFormat::Ndjson
+        }
+    });
+
+    for c in &classifications {
+        let line = match effective_format {
+            ListFormat::Human => format_human(c),
+            ListFormat::Ndjson => format_ndjson(c),
+        };
+        writeln!(out, "{line}")?;
     }
     Ok(ExitCode::SUCCESS)
 }

@@ -20,7 +20,9 @@ use thiserror::Error;
 use piggy_markl::{FormatId, Id, ParseError as MarklParseError, PurposeId};
 
 pub mod classify;
-pub use classify::{classify_slot, classify_slot_9d, format_slot_id, Classification};
+pub use classify::{
+    classify_slot, classify_slot_9d, classify_ssh_slot, format_slot_id, Classification,
+};
 
 /// One recipient line: a markl ID plus an optional human comment.
 /// Equality is by markl ID alone — comments don't participate in

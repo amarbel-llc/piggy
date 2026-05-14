@@ -1,8 +1,8 @@
-//! Unit tests for `piggy_ids::classify_slot_9d` and `classify_slot`.
-//! No PIV context needed — we feed synthetic algorithm values and cert
-//! bytes.
+//! Unit tests for `piggy_ids::classify_slot_9d`, `classify_slot`, and
+//! `classify_ssh_slot`. No PIV context needed — we feed synthetic
+//! algorithm values and cert bytes.
 
-use piggy_ids::{classify_slot, classify_slot_9d, Classification};
+use piggy_ids::{classify_slot, classify_slot_9d, classify_ssh_slot, Classification};
 use piggy_piv::{Guid, PinPolicy, PivAlgorithm, TouchPolicy};
 
 fn fake_guid() -> Guid {
@@ -115,6 +115,60 @@ fn rsa_in_retired_slot_reason_names_that_slot() {
             assert_eq!(slot_id, 0x82);
             assert_eq!(pin_policy, None);
             assert_eq!(touch_policy, None);
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_ssh_slot_rejects_non_9a_9c_9e() {
+    // SSH slot classifier should refuse recipient slots — those go
+    // through classify_slot.
+    let cert: &[u8] = &[];
+    let result = classify_ssh_slot(
+        0x9D,
+        fake_guid(),
+        "reader".into(),
+        None,
+        PivAlgorithm::EcP256,
+        cert,
+        None,
+        None,
+    );
+    match result {
+        Classification::Unsupported { reason, .. } => {
+            assert!(
+                reason.contains("9A/9C/9E"),
+                "expected slot-set reason, got: {reason}"
+            );
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_ssh_slot_rejects_rsa() {
+    let cert: &[u8] = &[];
+    let result = classify_ssh_slot(
+        0x9A,
+        fake_guid(),
+        "reader".into(),
+        None,
+        PivAlgorithm::Rsa2048,
+        cert,
+        None,
+        None,
+    );
+    match result {
+        Classification::Unsupported { reason, .. } => {
+            assert!(
+                reason.contains("Rsa2048"),
+                "expected Rsa2048 in reason: {reason}"
+            );
+            assert!(
+                reason.contains("EcP256"),
+                "expected EcP256 mention in reason: {reason}"
+            );
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }

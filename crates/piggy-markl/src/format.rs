@@ -27,6 +27,12 @@ pub enum FormatId {
     Nonce,
     Ed25519Ssh,
     EcdsaP256Ssh,
+    /// SSH-suitable ECDSA P-256 public key, SEC1-compressed (33 bytes).
+    /// Distinct from `ecdsa_p256_pub` so the purpose registry can
+    /// distinguish SSH-key recipients (9A/9C/9E PIV slots) from
+    /// dodder/recipient pubkeys that happen to share the same byte
+    /// shape.
+    SshEcdsaNistp256Pub,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -50,6 +56,7 @@ impl FormatId {
             FormatId::Nonce => "nonce",
             FormatId::Ed25519Ssh => "ed25519_ssh",
             FormatId::EcdsaP256Ssh => "ecdsa_p256_ssh",
+            FormatId::SshEcdsaNistp256Pub => "ssh_ecdsa_nistp256_pub",
         }
     }
 
@@ -59,7 +66,10 @@ impl FormatId {
     /// implementation-internal, not part of the wire format.
     pub fn size(self) -> usize {
         match self {
-            FormatId::PivyEcdhP256Pub | FormatId::EcdsaP256Pub | FormatId::EcdsaP256Ssh => 33,
+            FormatId::PivyEcdhP256Pub
+            | FormatId::EcdsaP256Pub
+            | FormatId::EcdsaP256Ssh
+            | FormatId::SshEcdsaNistp256Pub => 33,
             FormatId::Sha256
             | FormatId::Blake2b256
             | FormatId::Ed25519Pub
@@ -86,6 +96,7 @@ impl FormatId {
             "nonce" => Ok(FormatId::Nonce),
             "ed25519_ssh" => Ok(FormatId::Ed25519Ssh),
             "ecdsa_p256_ssh" => Ok(FormatId::EcdsaP256Ssh),
+            "ssh_ecdsa_nistp256_pub" => Ok(FormatId::SshEcdsaNistp256Pub),
             other => Err(UnknownFormat(other.to_string())),
         }
     }
@@ -117,11 +128,18 @@ mod tests {
             FormatId::Nonce,
             FormatId::Ed25519Ssh,
             FormatId::EcdsaP256Ssh,
+            FormatId::SshEcdsaNistp256Pub,
         ] {
             let s = f.as_str();
             let parsed = FormatId::parse(s).unwrap();
             assert_eq!(parsed, f, "round-trip failed for {s}");
         }
+    }
+
+    #[test]
+    fn ssh_ecdsa_nistp256_pub_size_is_33() {
+        // P-256 compressed point: 1-byte y-parity + 32-byte x-coord.
+        assert_eq!(FormatId::SshEcdsaNistp256Pub.size(), 33);
     }
 
     #[test]
