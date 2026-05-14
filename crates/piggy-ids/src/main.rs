@@ -378,6 +378,15 @@ fn recipient_eligible_slots() -> Vec<u8> {
     slots
 }
 
+/// Sort key that puts non-retired slots (9A, 9C, 9D, 9E) before retired
+/// key-management slots (0x82..=0x95), preserving slot-id order within
+/// each group. The leading 0/1 tier is what flips retired to the bottom
+/// even though `0x82` < `0x9A` numerically.
+fn slot_sort_key(slot_id: u8) -> (u8, u8) {
+    let retired = (0x82..=0x95).contains(&slot_id);
+    (retired as u8, slot_id)
+}
+
 /// Enumerate every attached PIV card and emit one `Classification` per
 /// populated recipient-eligible slot. Skip empty/unreadable slots
 /// silently — a card with only a populated 9D produces one row, a card
@@ -429,7 +438,7 @@ fn enumerate_all_recipient_slots() -> Result<Vec<piggy_ids::Classification>, Dyn
         a.guid()
             .to_hex()
             .cmp(&b.guid().to_hex())
-            .then_with(|| a.slot_id().cmp(&b.slot_id()))
+            .then_with(|| slot_sort_key(a.slot_id()).cmp(&slot_sort_key(b.slot_id())))
     });
     Ok(classifications)
 }
@@ -530,7 +539,7 @@ fn enumerate_all_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
         a.guid()
             .to_hex()
             .cmp(&b.guid().to_hex())
-            .then_with(|| a.slot_id().cmp(&b.slot_id()))
+            .then_with(|| slot_sort_key(a.slot_id()).cmp(&slot_sort_key(b.slot_id())))
     });
     Ok(classifications)
 }
@@ -799,7 +808,7 @@ fn json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_human, format_ndjson, json_string};
+    use super::{format_human, format_ndjson, json_string, slot_sort_key};
     use piggy_ids::Classification;
     use piggy_markl::{FormatId, Id as MarklId, PurposeId};
     use piggy_piv::{Guid, PinPolicy, TouchPolicy};
@@ -1065,5 +1074,36 @@ mod tests {
             line.contains("\"reason\":\"slot 9D is Rsa2048\""),
             "reason missing: {line}"
         );
+    }
+
+    #[test]
+    fn slot_sort_key_groups_non_retired_before_retired() {
+        // Direct comparison: 9A < 9D < 82 < 95 under the new key.
+        // (Numerically 0x82 < 0x9A, so the only way 9A precedes 82 is
+        // via the (non_retired, retired) tier.)
+        let mut slots = [0x82_u8, 0x9A, 0x95, 0x9D, 0x83, 0x9C, 0x9E];
+        slots.sort_by_key(|&s| slot_sort_key(s));
+        assert_eq!(slots, [0x9A, 0x9C, 0x9D, 0x9E, 0x82, 0x83, 0x95]);
+    }
+
+    #[test]
+    fn slot_sort_key_treats_full_retired_range_uniformly() {
+        // Every slot in 0x82..=0x95 must land in the retired tier
+        // (sort_key.0 == 1); every other slot must land in the
+        // non-retired tier.
+        for slot_id in 0x82_u8..=0x95 {
+            assert_eq!(
+                slot_sort_key(slot_id).0,
+                1,
+                "slot 0x{slot_id:02X} should be retired"
+            );
+        }
+        for slot_id in [0x9A_u8, 0x9C, 0x9D, 0x9E] {
+            assert_eq!(
+                slot_sort_key(slot_id).0,
+                0,
+                "slot 0x{slot_id:02X} should be non-retired"
+            );
+        }
     }
 }
