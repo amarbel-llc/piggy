@@ -272,6 +272,10 @@ cmd_usage() {
 	    $PROGRAM_PASS git git-command-args...
 	        If the password store is a git repository, execute a git command
 	        specified by git-command-args.
+	    $PROGRAM_TOP list [--format human|ndjson]
+	        Enumerate every populated PIV slot across all attached cards
+	        (9A/9C/9D/9E + retired 82-95) with their markl IDs. See
+	        piggy(1) for the per-slot purpose mapping.
 	    $PROGRAM_TOP help
 	        Show this text.
 	    $PROGRAM_TOP version
