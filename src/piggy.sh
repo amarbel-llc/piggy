@@ -760,9 +760,10 @@ cmd_pass_recipients() {
 		    $PROGRAM_PASS recipients list [-p subfolder]
 		        Print recipients in the relevant piggy-ids, one per line.
 		    $PROGRAM_PASS recipients list-available [--format human|ndjson]
-		        Enumerate attached PIV cards and print one record per card
-		        with its slot-9D markl ID. Output is human-readable on a
-		        TTY and NDJSON when piped (override with --format).
+		        Enumerate attached PIV cards and print one record per
+		        populated recipient-eligible slot (9D + retired 82-95).
+		        Output is human-readable on a TTY and NDJSON when piped
+		        (override with --format).
 		    $PROGRAM_PASS recipients add <markl-id>... [-p subfolder]
 		    $PROGRAM_PASS recipients add -A | --all-attached [--yes] [-p subfolder]
 		        Append recipients to piggy-ids and re-encrypt. With -A,

@@ -77,14 +77,22 @@ passthroughs for the C pivy binaries:
 	Print the recipients listed in the relevant _piggy-ids_, one per line.
 
 *pass recipients list-available* [*--format* _human_|_ndjson_]
-	Enumerate every attached PIV card and emit one record per card on
-	stdout. Output describes the slot-9D markl ID, the card's CHUID
-	*guid*, the YubiKey factory *serial* (when the card is a YubiKey
-	v5+), the PCSC *reader* name, and the (currently fixed) *slot=9D*.
+	Enumerate every populated recipient-eligible slot on every attached
+	PIV card and emit one record per (card, slot) on stdout. The
+	eligible slot set is *9D* (key management) plus the retired
+	key-management slots *82*..=*95*; empty/unreadable slots are
+	skipped silently. Records describe the slot's markl ID, the card's
+	CHUID *guid*, the YubiKey factory *serial* (when the card is a
+	YubiKey v5+), the PCSC *reader* name, and the *slot* id (uppercase
+	2-digit hex, e.g. *9D*, *82*).
+
+	Records are sorted by (*guid*, *slot*) so output is stable across
+	runs. A card with multiple populated key-management slots produces
+	multiple records — one per slot.
 
 	Format auto-selects from stdout's TTY status: human-readable when
 	interactive (the markl ID, followed by a trailing
-	"_# guid=<hex>, [serial=<dec>, ]reader=<name>, slot=9D_" comment),
+	"_# guid=<hex>, [serial=<dec>, ]reader=<name>, slot=<id>_" comment),
 	NDJSON otherwise (one JSON object per line with keys *id*, *guid*,
 	*reader*, *slot*, and *serial* when present). Pass *--format* to
 	override.
@@ -96,9 +104,10 @@ passthroughs for the C pivy binaries:
 	*number* (not a string) so consumers can compare or sort
 	numerically.
 
-	Cards with an unsupported slot-9D configuration are emitted too:
-	prefixed with "_# unsupported: ..._" in human mode, or with
-	*"unsupported":true* and a *reason* field in NDJSON mode.
+	Populated slots with an unsupported algorithm (e.g. RSA) or a
+	malformed cert are emitted too: prefixed with
+	"_# unsupported: ..._" in human mode, or with *"unsupported":true*
+	and a *reason* field in NDJSON mode.
 
 *pass recipients add* [*-A* | *--all-attached*] [*--yes*] [*-p* _subfolder_] [_markl-id_...]
 	Append recipients to the store's _piggy-ids_ and re-encrypt.
