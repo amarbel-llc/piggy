@@ -135,18 +135,30 @@ enum Cmd {
     /// purpose; SSH slots carry `piggy-piv_auth-v1`, `piggy-piv_sig-v1`,
     /// or `piggy-piv_card_auth-v1` per slot semantics.
     ///
-    /// Same format/sort/skip-empty rules as `list-available`. Drives
-    /// `piggy list`.
+    /// Same format/sort/skip-empty rules as `list-available`, plus a
+    /// third `--format=ssh` mode that renders OpenSSH
+    /// `authorized_keys`-style lines for SSH slots (9A/9C/9E) and
+    /// suppresses every other slot entirely. Drives `piggy list`.
     ListAll {
         #[arg(long)]
         format: Option<ListFormat>,
     },
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 enum ListFormat {
     Human,
     Ndjson,
+    /// OpenSSH `authorized_keys`-style output: one
+    /// `ecdsa-sha2-nistp256 <base64> piggy slot=<id> guid=<hex> [cn=<name>]`
+    /// line per supported SSH-style slot (9A/9C/9E). Every other slot
+    /// — recipient slots (9D + retired 0x82..=0x95), unsupported keys
+    /// (RSA, P-384, Ed25519), attestation failures — is suppressed
+    /// entirely, so the output is a strict `authorized_keys`-compatible
+    /// feed of SSH-capable keys. Re-run with `--format=human` to
+    /// enumerate every slot. Rejected by `list-available`. Drives
+    /// `piggy list --format=ssh`.
+    Ssh,
 }
 
 fn main() -> ExitCode {
@@ -562,10 +574,13 @@ fn cmd_list_all(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
 
     for c in &classifications {
         let line = match effective_format {
-            ListFormat::Human => format_human(c),
-            ListFormat::Ndjson => format_ndjson(c),
+            ListFormat::Human => Some(format_human(c)),
+            ListFormat::Ndjson => Some(format_ndjson(c)),
+            ListFormat::Ssh => format_ssh(c),
         };
-        writeln!(out, "{line}")?;
+        if let Some(line) = line {
+            writeln!(out, "{line}")?;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -575,6 +590,17 @@ fn cmd_list_all(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
 /// `piggy pass recipients list-available | xargs piggy pass
 /// recipients add ...` Just Works.
 fn cmd_list_available(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
+    // `list-available` only enumerates ECDH recipient slots, which by
+    // design have no `authorized_keys`-style representation. Rather
+    // than emit a file of all-`#`-comment lines, refuse loudly so the
+    // caller knows to switch to `piggy list --format=ssh`.
+    if format == Some(ListFormat::Ssh) {
+        return Err("--format=ssh is only supported by `piggy list` \
+            (list-all); recipient slots have no authorized_keys-style \
+            representation"
+            .into());
+    }
+
     let classifications = enumerate_all_recipient_slots()?;
 
     let stdout = io::stdout();
@@ -591,6 +617,7 @@ fn cmd_list_available(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
         let line = match effective_format {
             ListFormat::Human => format_human(c),
             ListFormat::Ndjson => format_ndjson(c),
+            ListFormat::Ssh => unreachable!("rejected at function entry"),
         };
         writeln!(out, "{line}")?;
     }
@@ -767,6 +794,75 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
     }
 }
 
+/// Render a `Classification` as a single OpenSSH `authorized_keys`-style
+/// line, or `None` to suppress the line entirely.
+///
+/// Supported 9A/9C/9E slots become `ecdsa-sha2-nistp256 <b64> piggy
+/// slot=<id> guid=<hex> [cn=<name>]` — safe to pipe straight into a
+/// remote `authorized_keys`. Every other slot returns `None`:
+/// recipient slots (9D + retired 0x82..=0x95) have no
+/// `authorized_keys`-style representation, unsupported classifications
+/// (RSA, P-384, Ed25519, attestation failures) have no SSH wire form,
+/// and any classification whose payload fails to decompress as a P-256
+/// point cannot be safely rendered. Callers wanting to enumerate
+/// recipient and unsupported slots should re-run with `--format=human`
+/// or `--format=ndjson`.
+fn format_ssh(c: &piggy_ids::Classification) -> Option<String> {
+    use piggy_ids::Classification;
+    let Classification::Supported {
+        id,
+        guid,
+        slot_id,
+        cn,
+        ..
+    } = c
+    else {
+        return None;
+    };
+    if !is_ssh_slot(*slot_id) {
+        return None;
+    }
+    let prefix = openssh_line_from_compressed_p256(id.data()).ok()?;
+    let cn_field = cn
+        .as_deref()
+        .map(|n| format!(" cn={n}"))
+        .unwrap_or_default();
+    Some(format!(
+        "{prefix} piggy slot={} guid={}{cn_field}",
+        piggy_ids::format_slot_id(*slot_id),
+        guid.to_hex(),
+    ))
+}
+
+fn is_ssh_slot(slot_id: u8) -> bool {
+    matches!(slot_id, 0x9A | 0x9C | 0x9E)
+}
+
+/// Decompress a 33-byte SEC1-compressed P-256 point and render the
+/// `ecdsa-sha2-nistp256 <base64-blob>` half of an OpenSSH
+/// `authorized_keys` line. The caller appends the trailing comment.
+///
+/// Uses openssl (already a direct dep) to decompress and
+/// `piggy_box::agent_ext::ec_point_to_ssh_pubkey_blob` to frame the
+/// SSH wire blob, so byte-for-byte output matches what `ssh-key`'s
+/// `PublicKey::to_bytes` would produce for the same point —
+/// verified by the parity test in `agent_ext::tests`.
+fn openssh_line_from_compressed_p256(compressed: &[u8]) -> Result<String, DynErr> {
+    use openssl::bn::BigNumContext;
+    use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
+    use openssl::nid::Nid;
+    use piggy_box::agent_ext::ec_point_to_ssh_pubkey_blob;
+    use piggy_box::piv_box::EcCurve;
+
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
+    let mut ctx = BigNumContext::new()?;
+    let point = EcPoint::from_bytes(&group, compressed, &mut ctx)?;
+    let uncompressed = point.to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)?;
+    let blob = ec_point_to_ssh_pubkey_blob(EcCurve::NistP256, &uncompressed);
+    let b64 = openssl::base64::encode_block(&blob);
+    Ok(format!("ecdsa-sha2-nistp256 {b64}"))
+}
+
 fn policy_ndjson_fields(
     pin: Option<piggy_piv::PinPolicy>,
     touch: Option<piggy_piv::TouchPolicy>,
@@ -808,7 +904,10 @@ fn json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_human, format_ndjson, json_string, slot_sort_key};
+    use super::{
+        format_human, format_ndjson, format_ssh, json_string, openssh_line_from_compressed_p256,
+        slot_sort_key,
+    };
     use piggy_ids::Classification;
     use piggy_markl::{FormatId, Id as MarklId, PurposeId};
     use piggy_piv::{Guid, PinPolicy, TouchPolicy};
@@ -1105,5 +1204,241 @@ mod tests {
                 "slot 0x{slot_id:02X} should be non-retired"
             );
         }
+    }
+
+    /// Generate a fresh on-curve P-256 keypair via openssl and return
+    /// the SEC1 (compressed, uncompressed) byte forms of its public
+    /// point. Used to seed `format_ssh` fixtures with payloads that
+    /// `openssh_line_from_compressed_p256` can actually decompress.
+    fn fresh_p256_point() -> (Vec<u8>, Vec<u8>) {
+        let group =
+            openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
+        let key = openssl::ec::EcKey::generate(&group).unwrap();
+        let mut ctx = openssl::bn::BigNumContext::new().unwrap();
+        let compressed = key
+            .public_key()
+            .to_bytes(
+                &group,
+                openssl::ec::PointConversionForm::COMPRESSED,
+                &mut ctx,
+            )
+            .unwrap();
+        let uncompressed = key
+            .public_key()
+            .to_bytes(
+                &group,
+                openssl::ec::PointConversionForm::UNCOMPRESSED,
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(compressed.len(), 33);
+        assert_eq!(uncompressed.len(), 65);
+        (compressed, uncompressed)
+    }
+
+    fn purpose_for_ssh_slot(slot_id: u8) -> PurposeId {
+        match slot_id {
+            0x9A => PurposeId::PiggyPivAuthV1,
+            0x9C => PurposeId::PiggyPivSigV1,
+            0x9E => PurposeId::PiggyPivCardAuthV1,
+            other => panic!("not an SSH slot: 0x{other:02X}"),
+        }
+    }
+
+    /// Build a `Classification::Supported` for an SSH-style slot
+    /// (9A/9C/9E) backed by a real on-curve P-256 compressed point.
+    /// Returns `(classification, compressed, uncompressed)` so the
+    /// parity test can independently re-derive the expected SSH wire
+    /// blob without re-extracting the point from the markl ID.
+    fn sample_supported_ssh_with_point(
+        slot_id: u8,
+        cn: Option<&str>,
+    ) -> (Classification, Vec<u8>, Vec<u8>) {
+        let (compressed, uncompressed) = fresh_p256_point();
+        let id = MarklId::new(
+            Some(purpose_for_ssh_slot(slot_id)),
+            FormatId::SshEcdsaNistp256Pub,
+            compressed.clone(),
+        )
+        .expect("valid SSH-slot markl id");
+        let classification = Classification::Supported {
+            id,
+            guid: Guid::from_hex("00112233445566778899aabbccddeeff").expect("valid hex"),
+            reader: "Yubico YubiKey OTP+FIDO+CCID 00 00".into(),
+            serial: Some(12_345_678),
+            slot_id,
+            cn: cn.map(str::to_string),
+            pin_policy: None,
+            touch_policy: None,
+        };
+        (classification, compressed, uncompressed)
+    }
+
+    #[test]
+    fn format_ssh_emits_clean_authorized_keys_line_for_9a() {
+        let (c, _, _) = sample_supported_ssh_with_point(0x9A, None);
+        let line = format_ssh(&c).expect("9A is a supported SSH slot");
+        assert!(
+            line.starts_with("ecdsa-sha2-nistp256 "),
+            "expected ecdsa keytype prefix: {line}"
+        );
+        assert!(
+            line.contains(" piggy slot=9A guid=00112233445566778899AABBCCDDEEFF"),
+            "expected piggy metadata after b64 blob: {line}"
+        );
+        assert!(
+            !line.contains("cn="),
+            "no cn provided, expected no cn= field: {line}"
+        );
+        // Must not start with `#` — recipient-comment shape would break
+        // authorized_keys consumers.
+        assert!(!line.starts_with('#'), "SSH-slot line is not a comment");
+    }
+
+    #[test]
+    fn format_ssh_emits_clean_line_for_9c_and_9e() {
+        for slot in [0x9C_u8, 0x9E] {
+            let (c, _, _) = sample_supported_ssh_with_point(slot, None);
+            let line = format_ssh(&c).unwrap_or_else(|| panic!("slot {slot:02X} produced None"));
+            assert!(
+                line.starts_with("ecdsa-sha2-nistp256 "),
+                "slot {slot:02X}: missing keytype prefix: {line}"
+            );
+            assert!(
+                line.contains(&format!(" piggy slot={slot:02X} ")),
+                "slot {slot:02X}: missing piggy slot=… metadata: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_ssh_includes_cn_when_present() {
+        let (c, _, _) = sample_supported_ssh_with_point(0x9A, Some("user@host"));
+        let line = format_ssh(&c).expect("supported");
+        assert!(
+            line.ends_with(" cn=user@host"),
+            "expected trailing cn=user@host: {line}"
+        );
+    }
+
+    #[test]
+    fn format_ssh_blob_matches_independent_encode() {
+        // Parity check: the b64 segment of `format_ssh`'s output must
+        // equal base64(ec_point_to_ssh_pubkey_blob(P256, uncompressed))
+        // computed independently from the same point. Catches drift in
+        // either the wire framing or the base64 step.
+        let (c, _, uncompressed) = sample_supported_ssh_with_point(0x9A, None);
+        let line = format_ssh(&c).expect("supported");
+
+        let expected_blob = piggy_box::agent_ext::ec_point_to_ssh_pubkey_blob(
+            piggy_box::piv_box::EcCurve::NistP256,
+            &uncompressed,
+        );
+        let expected_b64 = openssl::base64::encode_block(&expected_blob);
+        let expected_prefix = format!("ecdsa-sha2-nistp256 {expected_b64}");
+        assert!(
+            line.starts_with(&expected_prefix),
+            "format_ssh blob diverged from independent encode\n  got:      {line}\n  expected: {expected_prefix} …"
+        );
+    }
+
+    #[test]
+    fn format_ssh_recipient_slot_9d_returns_none() {
+        // 9D carries `PivyEcdhP256Pub` (recipient format) — it has no
+        // `authorized_keys`-style representation, so --format=ssh
+        // suppresses it entirely. Use --format=human to enumerate.
+        let c = sample_supported_slot(None, 0x9D);
+        assert!(
+            format_ssh(&c).is_none(),
+            "recipient slot must suppress the line entirely under --format=ssh"
+        );
+    }
+
+    #[test]
+    fn format_ssh_retired_recipient_slot_returns_none() {
+        // Retired key-management slots (0x82..=0x95) are recipient
+        // slots too — same suppression as 9D.
+        let c = sample_supported_slot(None, 0x82);
+        assert!(
+            format_ssh(&c).is_none(),
+            "retired recipient slot must suppress the line entirely under --format=ssh"
+        );
+    }
+
+    #[test]
+    fn format_ssh_unsupported_returns_none() {
+        // Unsupported classifications drop out of --format=ssh
+        // entirely (no `# unsupported:` comment, unlike --format=human).
+        let c = sample_unsupported(None);
+        assert!(
+            format_ssh(&c).is_none(),
+            "unsupported slot must suppress the line entirely"
+        );
+    }
+
+    #[test]
+    fn format_ssh_off_curve_payload_returns_none() {
+        // If the markl payload happens not to decompress as a valid
+        // P-256 point (e.g. corrupt cert data sneaks through), we
+        // suppress the line rather than panic.
+        //
+        // 0x05 is not a valid SEC1 leading byte — valid compressed
+        // points start with 0x02 or 0x03 (and uncompressed with 0x04,
+        // hybrid with 0x06/0x07). Openssl rejects this at the prefix
+        // check, so we don't have to worry about the trailing 32 bytes
+        // accidentally landing on the curve.
+        let mut bogus = vec![0x05_u8];
+        bogus.extend(0u8..32);
+        assert!(
+            openssh_line_from_compressed_p256(&bogus).is_err(),
+            "invalid SEC1 prefix must not decode as a P-256 point"
+        );
+
+        // And the wrapping format_ssh must absorb that error and
+        // suppress the line entirely rather than emit a malformed
+        // `ecdsa-sha2-nistp256 …` entry. MarklId::new accepts any
+        // 33-byte payload — curve validation lives in
+        // openssh_line_from_compressed_p256, not in markl.
+        let bogus_id = MarklId::new(
+            Some(PurposeId::PiggyPivAuthV1),
+            FormatId::SshEcdsaNistp256Pub,
+            bogus,
+        )
+        .expect("markl-level payload size is the only constraint");
+        let c = Classification::Supported {
+            id: bogus_id,
+            guid: Guid::from_hex("00112233445566778899aabbccddeeff").unwrap(),
+            reader: "Test Reader".into(),
+            serial: None,
+            slot_id: 0x9A,
+            cn: None,
+            pin_policy: None,
+            touch_policy: None,
+        };
+        assert!(
+            format_ssh(&c).is_none(),
+            "format_ssh must suppress lines whose payload fails decompression"
+        );
+    }
+
+    #[test]
+    fn openssh_line_from_compressed_p256_round_trips_through_ssh_wire_format() {
+        // Sanity: feed a real compressed point in, get a parseable SSH
+        // line out whose b64 body decodes back to a structurally-valid
+        // sshkey blob (`string(keytype) | string(curve) | string(point)`)
+        // with the original 65-byte uncompressed point as the third
+        // string.
+        let (compressed, uncompressed) = fresh_p256_point();
+        let line = openssh_line_from_compressed_p256(&compressed).expect("on-curve");
+        let mut parts = line.splitn(2, ' ');
+        let keytype = parts.next().expect("keytype");
+        let b64 = parts.next().expect("b64 body");
+        assert_eq!(keytype, "ecdsa-sha2-nistp256");
+        let blob = openssl::base64::decode_block(b64).expect("valid base64");
+        // string(keytype): 4 + 19; string(curve): 4 + 8; string(point): 4 + 65.
+        assert_eq!(blob.len(), 4 + 19 + 4 + 8 + 4 + 65);
+        // Third string is the uncompressed point; tail of the blob.
+        let point_tail = &blob[blob.len() - 65..];
+        assert_eq!(point_tail, &uncompressed[..]);
     }
 }
