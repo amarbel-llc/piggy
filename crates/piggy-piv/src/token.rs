@@ -264,6 +264,21 @@ impl PivToken {
         parse_ga_response(&resp)
     }
 
+    /// Read the configured PIN policy and touch policy for the given
+    /// slot. Backed by an INS_ATTEST round-trip plus a walk of the
+    /// returned attestation cert's `1.3.6.1.4.1.41482.3.8` extension.
+    ///
+    /// Fails when the card doesn't support attestation (no F9 key, or
+    /// non-YubiKey card returning 6A88/6A82). Callers that just want to
+    /// surface "policy not known" should treat any `Err` here as `None`.
+    pub fn read_slot_policy(
+        &self,
+        slot_id: u8,
+    ) -> Result<(crate::policy::PinPolicy, crate::policy::TouchPolicy), PivError> {
+        let cert_der = self.yk_attest(slot_id)?;
+        crate::attest::parse_policy(&cert_der)
+    }
+
     /// Generate a YubiKey attestation certificate for the given slot.
     /// Returns the DER-encoded X.509 attestation statement signed by the F9 key.
     pub fn yk_attest(&self, slot_id: u8) -> Result<Vec<u8>, PivError> {

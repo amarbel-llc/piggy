@@ -84,9 +84,12 @@ passthroughs for the C pivy binaries:
 	skipped silently. Records describe the slot's markl ID, the card's
 	CHUID *guid*, the YubiKey factory *serial* (when the card is a
 	YubiKey v5+), the PCSC *reader* name, the *slot* id (uppercase
-	2-digit hex, e.g. *9D*, *82*), and the slot cert's Subject Common
-	Name *cn* (the *-n* argument passed to *pivy-tool generate*; omitted
-	when the cert has no CN).
+	2-digit hex, e.g. *9D*, *82*), the slot cert's Subject Common
+	Name *cn* (the *-n* argument passed to *pivy-tool generate*;
+	omitted when the cert has no CN), and the YubiKey *pin_policy* and
+	*touch_policy* (the *-i* and *-t* arguments to *pivy-tool generate*;
+	omitted on non-YubiKey cards and on YubiKeys whose attestation key
+	has been cleared).
 
 	Records are sorted by (*guid*, *slot*) so output is stable across
 	runs. A card with multiple populated key-management slots produces
@@ -94,10 +97,18 @@ passthroughs for the C pivy binaries:
 
 	Format auto-selects from stdout's TTY status: human-readable when
 	interactive (the markl ID, followed by a trailing
-	"_# guid=<hex>, [serial=<dec>, ]reader=<name>, slot=<id>[, cn=<name>]_"
-	comment), NDJSON otherwise (one JSON object per line with keys *id*,
-	*guid*, *reader*, *slot*, and *serial*/*cn* when present). Pass
-	*--format* to override.
+	"_# guid=<hex>, [serial=<dec>, ]reader=<name>, slot=<id>[, cn=<name>][, pin=<policy>, touch=<policy>]_"
+	comment), NDJSON otherwise (one JSON object per line with keys
+	*id*, *guid*, *reader*, *slot*, and *serial*/*cn*/*pin_policy*/
+	*touch_policy* when present). Pass *--format* to override.
+
+	Policy values are the lowercase names accepted by *pivy-tool
+	generate -i/-t*: *default*, *never*, *once*, *always* for PIN
+	policy; *default*, *never*, *always*, *cached* for touch policy.
+	Policy info is read via INS_ATTEST (the YubiKey attestation
+	certificate carries the policy as the *1.3.6.1.4.1.41482.3.8*
+	extension); per-slot attestation costs roughly one ECDSA signing
+	operation against the card.
 
 	The YubiKey *serial* is read at connect time via the YubicoPIV
 	vendor-specific *INS_GET_SERIAL* (0xF8) against the PIV applet;

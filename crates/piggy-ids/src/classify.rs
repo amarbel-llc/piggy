@@ -10,7 +10,7 @@
 //! when populated with P-256 keys.
 
 use piggy_markl::{FormatId, Id as MarklId, PurposeId};
-use piggy_piv::{Guid, PivAlgorithm};
+use piggy_piv::{Guid, PinPolicy, PivAlgorithm, TouchPolicy};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Classification {
@@ -29,6 +29,15 @@ pub enum Classification {
         /// `-n` value passed to `pivy-tool generate`). `None` when the
         /// cert lacks a CN or fails to parse.
         cn: Option<String>,
+        /// YubicoPIV PIN policy (the `-i` value passed to
+        /// `pivy-tool generate`). `None` when the card doesn't support
+        /// attestation (non-YubiKey, F9 cleared) or attestation parsing
+        /// failed.
+        pin_policy: Option<PinPolicy>,
+        /// YubicoPIV touch policy (the `-t` value passed to
+        /// `pivy-tool generate`). Same `None` semantics as
+        /// `pin_policy`.
+        touch_policy: Option<TouchPolicy>,
     },
     Unsupported {
         guid: Guid,
@@ -40,6 +49,12 @@ pub enum Classification {
         /// can't act as recipients. `None` when the cert lacks a CN or
         /// fails to parse.
         cn: Option<String>,
+        /// YubicoPIV PIN policy. Same `None` semantics as the
+        /// `Supported` variant — populated when attestation succeeds.
+        pin_policy: Option<PinPolicy>,
+        /// YubicoPIV touch policy. Same `None` semantics as the
+        /// `Supported` variant.
+        touch_policy: Option<TouchPolicy>,
         reason: String,
     },
 }
@@ -79,10 +94,26 @@ impl Classification {
             Classification::Unsupported { cn, .. } => cn.as_deref(),
         }
     }
+
+    pub fn pin_policy(&self) -> Option<PinPolicy> {
+        match self {
+            Classification::Supported { pin_policy, .. } => *pin_policy,
+            Classification::Unsupported { pin_policy, .. } => *pin_policy,
+        }
+    }
+
+    pub fn touch_policy(&self) -> Option<TouchPolicy> {
+        match self {
+            Classification::Supported { touch_policy, .. } => *touch_policy,
+            Classification::Unsupported { touch_policy, .. } => *touch_policy,
+        }
+    }
 }
 
 /// Classify the given slot. Convenience wrapper for the common
-/// `classify_slot(0x9D, ...)` case.
+/// `classify_slot(0x9D, ...)` case. The 9D-only caller paths in
+/// `detect-pubkey` and `detect-all-pubkeys` don't surface policies, so
+/// this wrapper passes `None` for both.
 pub fn classify_slot_9d(
     guid: Guid,
     reader: String,
@@ -90,7 +121,7 @@ pub fn classify_slot_9d(
     algo: PivAlgorithm,
     cert_der: &[u8],
 ) -> Classification {
-    classify_slot(0x9D, guid, reader, serial, algo, cert_der)
+    classify_slot(0x9D, guid, reader, serial, algo, cert_der, None, None)
 }
 
 pub fn classify_slot(
@@ -100,6 +131,8 @@ pub fn classify_slot(
     serial: Option<u32>,
     algo: PivAlgorithm,
     cert_der: &[u8],
+    pin_policy: Option<PinPolicy>,
+    touch_policy: Option<TouchPolicy>,
 ) -> Classification {
     let cn = extract_subject_cn(cert_der);
     if algo != PivAlgorithm::EcP256 {
@@ -109,6 +142,8 @@ pub fn classify_slot(
             serial,
             slot_id,
             cn,
+            pin_policy,
+            touch_policy,
             reason: format!("slot {} is {algo:?}", format_slot_id(slot_id)),
         };
     }
@@ -121,6 +156,8 @@ pub fn classify_slot(
                 serial,
                 slot_id,
                 cn,
+                pin_policy,
+                touch_policy,
                 reason: format!("pubkey decode failed: {e}"),
             };
         }
@@ -144,6 +181,8 @@ pub fn classify_slot(
             serial,
             slot_id,
             cn,
+            pin_policy,
+            touch_policy,
         },
         Err(e) => Classification::Unsupported {
             guid,
@@ -151,6 +190,8 @@ pub fn classify_slot(
             serial,
             slot_id,
             cn,
+            pin_policy,
+            touch_policy,
             reason: format!("markl ID build failed: {e}"),
         },
     }

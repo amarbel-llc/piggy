@@ -3,7 +3,7 @@
 //! bytes.
 
 use piggy_ids::{classify_slot, classify_slot_9d, Classification};
-use piggy_piv::{Guid, PivAlgorithm};
+use piggy_piv::{Guid, PinPolicy, PivAlgorithm, TouchPolicy};
 
 fn fake_guid() -> Guid {
     Guid::from_hex("00112233445566778899aabbccddeeff").expect("valid hex")
@@ -26,6 +26,8 @@ fn rsa_in_9d_is_unsupported() {
             serial,
             slot_id,
             cn,
+            pin_policy,
+            touch_policy,
             ..
         } => {
             assert!(
@@ -41,6 +43,9 @@ fn rsa_in_9d_is_unsupported() {
             assert_eq!(slot_id, 0x9D);
             // Empty cert can't carry a CN.
             assert_eq!(cn, None);
+            // classify_slot_9d wrapper passes None for both policies.
+            assert_eq!(pin_policy, None);
+            assert_eq!(touch_policy, None);
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }
@@ -57,6 +62,8 @@ fn malformed_cert_in_9d_is_unsupported() {
             serial,
             slot_id,
             cn,
+            pin_policy,
+            touch_policy,
             ..
         } => {
             assert!(
@@ -72,6 +79,8 @@ fn malformed_cert_in_9d_is_unsupported() {
             assert_eq!(slot_id, 0x9D);
             // Malformed cert can't be parsed for a CN either.
             assert_eq!(cn, None);
+            assert_eq!(pin_policy, None);
+            assert_eq!(touch_policy, None);
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }
@@ -88,15 +97,54 @@ fn rsa_in_retired_slot_reason_names_that_slot() {
         None,
         PivAlgorithm::Rsa2048,
         cert,
+        // No policy info plumbed in.
+        None,
+        None,
     ) {
         Classification::Unsupported {
-            reason, slot_id, ..
+            reason,
+            slot_id,
+            pin_policy,
+            touch_policy,
+            ..
         } => {
             assert!(
                 reason.starts_with("slot 82 is"),
                 "reason missing expected prefix 'slot 82 is': {reason}"
             );
             assert_eq!(slot_id, 0x82);
+            assert_eq!(pin_policy, None);
+            assert_eq!(touch_policy, None);
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_slot_threads_policies_into_unsupported_record() {
+    // Even when the slot is unsupported (RSA), the caller's policy
+    // info should still appear on the record — useful for showing the
+    // user *why* their RSA-in-retired-slot is unusable while still
+    // surfacing the slot's other metadata.
+    let guid = fake_guid();
+    let cert: &[u8] = &[];
+    match classify_slot(
+        0x83,
+        guid,
+        "Yubico YubiKey 00 00".into(),
+        None,
+        PivAlgorithm::Rsa2048,
+        cert,
+        Some(PinPolicy::Once),
+        Some(TouchPolicy::Cached),
+    ) {
+        Classification::Unsupported {
+            pin_policy,
+            touch_policy,
+            ..
+        } => {
+            assert_eq!(pin_policy, Some(PinPolicy::Once));
+            assert_eq!(touch_policy, Some(TouchPolicy::Cached));
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }

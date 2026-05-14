@@ -261,6 +261,9 @@ fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
         token.yk_serial(),
         slot.algorithm(),
         slot.cert_der(),
+        // detect-pubkey doesn't surface PIN/touch policy.
+        None,
+        None,
     ) {
         Classification::Supported { id, .. } => {
             let stdout = io::stdout();
@@ -316,6 +319,9 @@ fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
         let reader = token.reader_name().to_string();
         let serial = token.yk_serial();
         match token.read_slot(0x9D) {
+            // detect-all-pubkeys is the bash-friendly TSV path; it
+            // doesn't surface PIN/touch policy, so skip the
+            // attestation round-trip entirely.
             Ok(slot) => classifications.push(classify_slot(
                 0x9D,
                 token.guid().clone(),
@@ -323,6 +329,8 @@ fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
                 serial,
                 slot.algorithm(),
                 slot.cert_der(),
+                None,
+                None,
             )),
             Err(e) => classifications.push(Classification::Unsupported {
                 guid: token.guid().clone(),
@@ -330,6 +338,8 @@ fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
                 serial,
                 slot_id: 0x9D,
                 cn: None,
+                pin_policy: None,
+                touch_policy: None,
                 reason: format!("slot 9D unreadable: {e}"),
             }),
         }
@@ -358,6 +368,13 @@ fn recipient_eligible_slots() -> Vec<u8> {
 /// silently — a card with only a populated 9D produces one row, a card
 /// with both 9D and 82 populated produces two. Sort by (guid_hex,
 /// slot_id) for stable output.
+///
+/// For each populated slot we also issue an INS_ATTEST round-trip to
+/// recover the slot's configured PIN and touch policies. Attestation
+/// is best-effort: non-YubiKey cards, YubiKeys with the F9 attestation
+/// key cleared, and pre-4.3 firmware all return errors that the caller
+/// treats as "policy unknown" (`None`) rather than failing the whole
+/// enumeration.
 fn enumerate_all_recipient_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
     use piggy_ids::{classify_slot, Classification};
 
@@ -370,19 +387,26 @@ fn enumerate_all_recipient_slots() -> Result<Vec<piggy_ids::Classification>, Dyn
         let reader = token.reader_name().to_string();
         let serial = token.yk_serial();
         for &slot_id in &slots {
-            match token.read_slot(slot_id) {
-                Ok(slot) => classifications.push(classify_slot(
-                    slot_id,
-                    token.guid().clone(),
-                    reader.clone(),
-                    serial,
-                    slot.algorithm(),
-                    slot.cert_der(),
-                )),
+            let slot = match token.read_slot(slot_id) {
+                Ok(s) => s,
                 // Empty/unreadable slots are not an error in
                 // list-available's contract — skip silently.
                 Err(_) => continue,
-            }
+            };
+            let (pin_policy, touch_policy) = match token.read_slot_policy(slot_id) {
+                Ok((p, t)) => (Some(p), Some(t)),
+                Err(_) => (None, None),
+            };
+            classifications.push(classify_slot(
+                slot_id,
+                token.guid().clone(),
+                reader.clone(),
+                serial,
+                slot.algorithm(),
+                slot.cert_der(),
+                pin_policy,
+                touch_policy,
+            ));
         }
     }
 
@@ -448,10 +472,13 @@ fn cmd_list_available(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
 
 /// Render a `Classification` as a single human-readable line. Supported
 /// cards print the markl ID followed by a `# guid=..., serial=...,
-/// reader=..., slot=<id>[, cn=<name>]` comment (with `serial=` and
-/// `cn=` omitted when the source doesn't carry them). Unsupported slots
-/// are commented out entirely so the output round-trips through `xargs
-/// piggy pass recipients add` without picking up rejected entries.
+/// reader=..., slot=<id>[, cn=<name>][, pin=<policy>, touch=<policy>]`
+/// comment (with `serial=`, `cn=`, `pin=`, and `touch=` omitted when
+/// the source doesn't carry them — non-YubiKey cards have no policies
+/// and a few older firmware revisions block attestation). Unsupported
+/// slots are commented out entirely so the output round-trips through
+/// `xargs piggy pass recipients add` without picking up rejected
+/// entries.
 fn format_human(c: &piggy_ids::Classification) -> String {
     use piggy_ids::Classification;
     match c {
@@ -462,10 +489,20 @@ fn format_human(c: &piggy_ids::Classification) -> String {
             serial,
             slot_id,
             cn,
+            pin_policy,
+            touch_policy,
         } => format!(
             "{}  # {}",
             id,
-            human_metadata(guid, *serial, reader, *slot_id, cn.as_deref()),
+            human_metadata(
+                guid,
+                *serial,
+                reader,
+                *slot_id,
+                cn.as_deref(),
+                *pin_policy,
+                *touch_policy,
+            ),
         ),
         Classification::Unsupported {
             guid,
@@ -473,10 +510,20 @@ fn format_human(c: &piggy_ids::Classification) -> String {
             serial,
             slot_id,
             cn,
+            pin_policy,
+            touch_policy,
             reason,
         } => format!(
             "# unsupported: {}, reason={}",
-            human_metadata(guid, *serial, reader, *slot_id, cn.as_deref()),
+            human_metadata(
+                guid,
+                *serial,
+                reader,
+                *slot_id,
+                cn.as_deref(),
+                *pin_policy,
+                *touch_policy,
+            ),
             reason,
         ),
     }
@@ -488,6 +535,8 @@ fn human_metadata(
     reader: &str,
     slot_id: u8,
     cn: Option<&str>,
+    pin_policy: Option<piggy_piv::PinPolicy>,
+    touch_policy: Option<piggy_piv::TouchPolicy>,
 ) -> String {
     let slot = piggy_ids::format_slot_id(slot_id);
     let serial_field = match serial {
@@ -498,13 +547,23 @@ fn human_metadata(
         Some(name) => format!(", cn={}", name),
         None => String::new(),
     };
+    let pin_field = match pin_policy {
+        Some(p) => format!(", pin={}", p),
+        None => String::new(),
+    };
+    let touch_field = match touch_policy {
+        Some(t) => format!(", touch={}", t),
+        None => String::new(),
+    };
     format!(
-        "guid={}{}, reader={}, slot={}{}",
+        "guid={}{}, reader={}, slot={}{}{}{}",
         guid.to_hex(),
         serial_field,
         reader,
         slot,
         cn_field,
+        pin_field,
+        touch_field,
     )
 }
 
@@ -512,8 +571,11 @@ fn human_metadata(
 /// key is emitted as a JSON number (not a string) when present, and
 /// omitted entirely when absent so consumers can write `record.serial
 /// ?? null` cleanly. `slot` is the uppercase 2-digit hex slot id
-/// (e.g. `"9D"`, `"82"`). The `cn` key is the slot cert's Subject
-/// Common Name, omitted when the cert has no CN.
+/// (e.g. `"9D"`, `"82"`). The `cn`, `pin_policy`, and `touch_policy`
+/// keys are omitted when the source doesn't carry them. Policy values
+/// are the lowercase names accepted by `pivy-tool generate -i/-t`:
+/// `default`, `never`, `once`, `always` (pin); `default`, `never`,
+/// `always`, `cached` (touch).
 fn format_ndjson(c: &piggy_ids::Classification) -> String {
     use piggy_ids::Classification;
     match c {
@@ -524,6 +586,8 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
             serial,
             slot_id,
             cn,
+            pin_policy,
+            touch_policy,
         } => {
             let serial_field = serial
                 .map(|s| format!(",\"serial\":{}", s))
@@ -532,14 +596,16 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
                 .as_deref()
                 .map(|n| format!(",\"cn\":{}", json_string(n)))
                 .unwrap_or_default();
+            let policy_fields = policy_ndjson_fields(*pin_policy, *touch_policy);
             format!(
-                "{{\"id\":{},\"guid\":{}{},\"reader\":{},\"slot\":{}{}}}",
+                "{{\"id\":{},\"guid\":{}{},\"reader\":{},\"slot\":{}{}{}}}",
                 json_string(&id.to_wire()),
                 json_string(&guid.to_hex()),
                 serial_field,
                 json_string(reader),
                 json_string(&piggy_ids::format_slot_id(*slot_id)),
                 cn_field,
+                policy_fields,
             )
         }
         Classification::Unsupported {
@@ -548,6 +614,8 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
             serial,
             slot_id,
             cn,
+            pin_policy,
+            touch_policy,
             reason,
         } => {
             let serial_field = serial
@@ -557,17 +625,33 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
                 .as_deref()
                 .map(|n| format!(",\"cn\":{}", json_string(n)))
                 .unwrap_or_default();
+            let policy_fields = policy_ndjson_fields(*pin_policy, *touch_policy);
             format!(
-                "{{\"unsupported\":true,\"guid\":{}{},\"reader\":{},\"slot\":{}{},\"reason\":{}}}",
+                "{{\"unsupported\":true,\"guid\":{}{},\"reader\":{},\"slot\":{}{}{},\"reason\":{}}}",
                 json_string(&guid.to_hex()),
                 serial_field,
                 json_string(reader),
                 json_string(&piggy_ids::format_slot_id(*slot_id)),
                 cn_field,
+                policy_fields,
                 json_string(reason),
             )
         }
     }
+}
+
+fn policy_ndjson_fields(
+    pin: Option<piggy_piv::PinPolicy>,
+    touch: Option<piggy_piv::TouchPolicy>,
+) -> String {
+    let mut out = String::new();
+    if let Some(p) = pin {
+        out.push_str(&format!(",\"pin_policy\":{}", json_string(p.as_str())));
+    }
+    if let Some(t) = touch {
+        out.push_str(&format!(",\"touch_policy\":{}", json_string(t.as_str())));
+    }
+    out
 }
 
 /// JSON-encode a string with surrounding quotes. We do this by hand
@@ -600,7 +684,7 @@ mod tests {
     use super::{format_human, format_ndjson, json_string};
     use piggy_ids::Classification;
     use piggy_markl::{FormatId, Id as MarklId, PurposeId};
-    use piggy_piv::Guid;
+    use piggy_piv::{Guid, PinPolicy, TouchPolicy};
 
     #[test]
     fn json_string_quotes_basic_ascii() {
@@ -621,21 +705,27 @@ mod tests {
     }
 
     fn sample_supported(serial: Option<u32>) -> Classification {
-        sample_supported_full(serial, 0x9D, None)
+        sample_supported_full(serial, 0x9D, None, None, None)
     }
 
     fn sample_supported_slot(serial: Option<u32>, slot_id: u8) -> Classification {
-        sample_supported_full(serial, slot_id, None)
+        sample_supported_full(serial, slot_id, None, None, None)
     }
 
     fn sample_supported_with_cn(cn: &str) -> Classification {
-        sample_supported_full(None, 0x9D, Some(cn.into()))
+        sample_supported_full(None, 0x9D, Some(cn.into()), None, None)
+    }
+
+    fn sample_supported_with_policies(pin: PinPolicy, touch: TouchPolicy) -> Classification {
+        sample_supported_full(None, 0x9D, None, Some(pin), Some(touch))
     }
 
     fn sample_supported_full(
         serial: Option<u32>,
         slot_id: u8,
         cn: Option<String>,
+        pin_policy: Option<PinPolicy>,
+        touch_policy: Option<TouchPolicy>,
     ) -> Classification {
         let id = MarklId::new(
             Some(PurposeId::PiggyRecipientV1),
@@ -654,6 +744,8 @@ mod tests {
             serial,
             slot_id,
             cn,
+            pin_policy,
+            touch_policy,
         }
     }
 
@@ -664,6 +756,8 @@ mod tests {
             serial,
             slot_id: 0x9D,
             cn: None,
+            pin_policy: None,
+            touch_policy: None,
             reason: "slot 9D is Rsa2048".into(),
         }
     }
@@ -714,6 +808,24 @@ mod tests {
             !line.contains("cn="),
             "expected no cn= when CN is None: {line}"
         );
+    }
+
+    #[test]
+    fn format_human_includes_policies_when_present() {
+        let line =
+            format_human(&sample_supported_with_policies(PinPolicy::Never, TouchPolicy::Never));
+        assert!(line.contains(", pin=never"), "missing pin=never: {line}");
+        assert!(
+            line.contains(", touch=never"),
+            "missing touch=never: {line}"
+        );
+    }
+
+    #[test]
+    fn format_human_omits_policies_when_absent() {
+        let line = format_human(&sample_supported(None));
+        assert!(!line.contains("pin="), "expected no pin= field: {line}");
+        assert!(!line.contains("touch="), "expected no touch= field: {line}");
     }
 
     #[test]
@@ -791,6 +903,35 @@ mod tests {
         assert!(
             line.contains("\"cn\":\"weird \\\"cn\\\"\\\\name\""),
             "expected escaped cn in NDJSON: {line}"
+        );
+    }
+
+    #[test]
+    fn format_ndjson_includes_policies_when_present() {
+        let line = format_ndjson(&sample_supported_with_policies(
+            PinPolicy::Once,
+            TouchPolicy::Cached,
+        ));
+        assert!(
+            line.contains("\"pin_policy\":\"once\""),
+            "missing pin_policy in NDJSON: {line}"
+        );
+        assert!(
+            line.contains("\"touch_policy\":\"cached\""),
+            "missing touch_policy in NDJSON: {line}"
+        );
+    }
+
+    #[test]
+    fn format_ndjson_omits_policy_keys_when_absent() {
+        let line = format_ndjson(&sample_supported(None));
+        assert!(
+            !line.contains("\"pin_policy\""),
+            "expected no pin_policy key: {line}"
+        );
+        assert!(
+            !line.contains("\"touch_policy\""),
+            "expected no touch_policy key: {line}"
         );
     }
 
