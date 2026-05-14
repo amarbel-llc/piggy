@@ -25,6 +25,7 @@ fn rsa_in_9d_is_unsupported() {
             reader,
             serial,
             slot_id,
+            cn,
             ..
         } => {
             assert!(
@@ -38,6 +39,8 @@ fn rsa_in_9d_is_unsupported() {
             assert_eq!(reader, "Yubico YubiKey 00 00");
             assert_eq!(serial, Some(12_345_678));
             assert_eq!(slot_id, 0x9D);
+            // Empty cert can't carry a CN.
+            assert_eq!(cn, None);
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }
@@ -53,6 +56,7 @@ fn malformed_cert_in_9d_is_unsupported() {
             reader,
             serial,
             slot_id,
+            cn,
             ..
         } => {
             assert!(
@@ -66,6 +70,8 @@ fn malformed_cert_in_9d_is_unsupported() {
             assert_eq!(reader, "fake-reader");
             assert_eq!(serial, None);
             assert_eq!(slot_id, 0x9D);
+            // Malformed cert can't be parsed for a CN either.
+            assert_eq!(cn, None);
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }

@@ -329,6 +329,7 @@ fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
                 reader,
                 serial,
                 slot_id: 0x9D,
+                cn: None,
                 reason: format!("slot 9D unreadable: {e}"),
             }),
         }
@@ -447,10 +448,10 @@ fn cmd_list_available(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
 
 /// Render a `Classification` as a single human-readable line. Supported
 /// cards print the markl ID followed by a `# guid=..., serial=...,
-/// reader=..., slot=<id>` comment (with `serial=` omitted when the card
-/// has no YubiKey serial). Unsupported slots are commented out entirely
-/// so the output round-trips through `xargs piggy pass recipients
-/// add` without picking up rejected entries.
+/// reader=..., slot=<id>[, cn=<name>]` comment (with `serial=` and
+/// `cn=` omitted when the source doesn't carry them). Unsupported slots
+/// are commented out entirely so the output round-trips through `xargs
+/// piggy pass recipients add` without picking up rejected entries.
 fn format_human(c: &piggy_ids::Classification) -> String {
     use piggy_ids::Classification;
     match c {
@@ -460,20 +461,22 @@ fn format_human(c: &piggy_ids::Classification) -> String {
             reader,
             serial,
             slot_id,
+            cn,
         } => format!(
             "{}  # {}",
             id,
-            human_metadata(guid, *serial, reader, *slot_id),
+            human_metadata(guid, *serial, reader, *slot_id, cn.as_deref()),
         ),
         Classification::Unsupported {
             guid,
             reader,
             serial,
             slot_id,
+            cn,
             reason,
         } => format!(
             "# unsupported: {}, reason={}",
-            human_metadata(guid, *serial, reader, *slot_id),
+            human_metadata(guid, *serial, reader, *slot_id, cn.as_deref()),
             reason,
         ),
     }
@@ -484,30 +487,33 @@ fn human_metadata(
     serial: Option<u32>,
     reader: &str,
     slot_id: u8,
+    cn: Option<&str>,
 ) -> String {
     let slot = piggy_ids::format_slot_id(slot_id);
-    match serial {
-        Some(s) => format!(
-            "guid={}, serial={}, reader={}, slot={}",
-            guid.to_hex(),
-            s,
-            reader,
-            slot,
-        ),
-        None => format!(
-            "guid={}, reader={}, slot={}",
-            guid.to_hex(),
-            reader,
-            slot,
-        ),
-    }
+    let serial_field = match serial {
+        Some(s) => format!(", serial={}", s),
+        None => String::new(),
+    };
+    let cn_field = match cn {
+        Some(name) => format!(", cn={}", name),
+        None => String::new(),
+    };
+    format!(
+        "guid={}{}, reader={}, slot={}{}",
+        guid.to_hex(),
+        serial_field,
+        reader,
+        slot,
+        cn_field,
+    )
 }
 
 /// Render a `Classification` as a single NDJSON record. The `serial`
 /// key is emitted as a JSON number (not a string) when present, and
 /// omitted entirely when absent so consumers can write `record.serial
 /// ?? null` cleanly. `slot` is the uppercase 2-digit hex slot id
-/// (e.g. `"9D"`, `"82"`).
+/// (e.g. `"9D"`, `"82"`). The `cn` key is the slot cert's Subject
+/// Common Name, omitted when the cert has no CN.
 fn format_ndjson(c: &piggy_ids::Classification) -> String {
     use piggy_ids::Classification;
     match c {
@@ -517,17 +523,23 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
             reader,
             serial,
             slot_id,
+            cn,
         } => {
             let serial_field = serial
                 .map(|s| format!(",\"serial\":{}", s))
                 .unwrap_or_default();
+            let cn_field = cn
+                .as_deref()
+                .map(|n| format!(",\"cn\":{}", json_string(n)))
+                .unwrap_or_default();
             format!(
-                "{{\"id\":{},\"guid\":{}{},\"reader\":{},\"slot\":{}}}",
+                "{{\"id\":{},\"guid\":{}{},\"reader\":{},\"slot\":{}{}}}",
                 json_string(&id.to_wire()),
                 json_string(&guid.to_hex()),
                 serial_field,
                 json_string(reader),
                 json_string(&piggy_ids::format_slot_id(*slot_id)),
+                cn_field,
             )
         }
         Classification::Unsupported {
@@ -535,17 +547,23 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
             reader,
             serial,
             slot_id,
+            cn,
             reason,
         } => {
             let serial_field = serial
                 .map(|s| format!(",\"serial\":{}", s))
                 .unwrap_or_default();
+            let cn_field = cn
+                .as_deref()
+                .map(|n| format!(",\"cn\":{}", json_string(n)))
+                .unwrap_or_default();
             format!(
-                "{{\"unsupported\":true,\"guid\":{}{},\"reader\":{},\"slot\":{},\"reason\":{}}}",
+                "{{\"unsupported\":true,\"guid\":{}{},\"reader\":{},\"slot\":{}{},\"reason\":{}}}",
                 json_string(&guid.to_hex()),
                 serial_field,
                 json_string(reader),
                 json_string(&piggy_ids::format_slot_id(*slot_id)),
+                cn_field,
                 json_string(reason),
             )
         }
@@ -603,10 +621,22 @@ mod tests {
     }
 
     fn sample_supported(serial: Option<u32>) -> Classification {
-        sample_supported_slot(serial, 0x9D)
+        sample_supported_full(serial, 0x9D, None)
     }
 
     fn sample_supported_slot(serial: Option<u32>, slot_id: u8) -> Classification {
+        sample_supported_full(serial, slot_id, None)
+    }
+
+    fn sample_supported_with_cn(cn: &str) -> Classification {
+        sample_supported_full(None, 0x9D, Some(cn.into()))
+    }
+
+    fn sample_supported_full(
+        serial: Option<u32>,
+        slot_id: u8,
+        cn: Option<String>,
+    ) -> Classification {
         let id = MarklId::new(
             Some(PurposeId::PiggyRecipientV1),
             FormatId::PivyEcdhP256Pub,
@@ -623,6 +653,7 @@ mod tests {
             reader: "Yubico YubiKey OTP+FIDO+CCID 00 00".into(),
             serial,
             slot_id,
+            cn,
         }
     }
 
@@ -632,6 +663,7 @@ mod tests {
             reader: "Some Other Reader 00 00".into(),
             serial,
             slot_id: 0x9D,
+            cn: None,
             reason: "slot 9D is Rsa2048".into(),
         }
     }
@@ -663,6 +695,24 @@ mod tests {
         assert!(
             line.contains("slot=82"),
             "expected slot=82 in human output: {line}"
+        );
+    }
+
+    #[test]
+    fn format_human_includes_cn_when_present() {
+        let line = format_human(&sample_supported_with_cn("piv-key-mgmt@TESTCARD"));
+        assert!(
+            line.contains("cn=piv-key-mgmt@TESTCARD"),
+            "missing cn= field: {line}"
+        );
+    }
+
+    #[test]
+    fn format_human_omits_cn_when_absent() {
+        let line = format_human(&sample_supported(None));
+        assert!(
+            !line.contains("cn="),
+            "expected no cn= when CN is None: {line}"
         );
     }
 
@@ -713,6 +763,34 @@ mod tests {
         assert!(
             line.contains("\"slot\":\"9D\""),
             "expected slot=\"9D\" in NDJSON: {line}"
+        );
+    }
+
+    #[test]
+    fn format_ndjson_includes_cn_when_present() {
+        let line = format_ndjson(&sample_supported_with_cn("piv-key-mgmt@TESTCARD"));
+        assert!(
+            line.contains("\"cn\":\"piv-key-mgmt@TESTCARD\""),
+            "missing cn key in NDJSON: {line}"
+        );
+    }
+
+    #[test]
+    fn format_ndjson_omits_cn_key_when_absent() {
+        let line = format_ndjson(&sample_supported(None));
+        assert!(
+            !line.contains("\"cn\""),
+            "expected no cn key when None: {line}"
+        );
+    }
+
+    #[test]
+    fn format_ndjson_escapes_cn_with_special_chars() {
+        // CN with double-quote + backslash exercises json_string escaping.
+        let line = format_ndjson(&sample_supported_with_cn("weird \"cn\"\\name"));
+        assert!(
+            line.contains("\"cn\":\"weird \\\"cn\\\"\\\\name\""),
+            "expected escaped cn in NDJSON: {line}"
         );
     }
 

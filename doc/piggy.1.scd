@@ -83,8 +83,10 @@ passthroughs for the C pivy binaries:
 	key-management slots *82*..=*95*; empty/unreadable slots are
 	skipped silently. Records describe the slot's markl ID, the card's
 	CHUID *guid*, the YubiKey factory *serial* (when the card is a
-	YubiKey v5+), the PCSC *reader* name, and the *slot* id (uppercase
-	2-digit hex, e.g. *9D*, *82*).
+	YubiKey v5+), the PCSC *reader* name, the *slot* id (uppercase
+	2-digit hex, e.g. *9D*, *82*), and the slot cert's Subject Common
+	Name *cn* (the *-n* argument passed to *pivy-tool generate*; omitted
+	when the cert has no CN).
 
 	Records are sorted by (*guid*, *slot*) so output is stable across
 	runs. A card with multiple populated key-management slots produces
@@ -92,10 +94,10 @@ passthroughs for the C pivy binaries:
 
 	Format auto-selects from stdout's TTY status: human-readable when
 	interactive (the markl ID, followed by a trailing
-	"_# guid=<hex>, [serial=<dec>, ]reader=<name>, slot=<id>_" comment),
-	NDJSON otherwise (one JSON object per line with keys *id*, *guid*,
-	*reader*, *slot*, and *serial* when present). Pass *--format* to
-	override.
+	"_# guid=<hex>, [serial=<dec>, ]reader=<name>, slot=<id>[, cn=<name>]_"
+	comment), NDJSON otherwise (one JSON object per line with keys *id*,
+	*guid*, *reader*, *slot*, and *serial*/*cn* when present). Pass
+	*--format* to override.
 
 	The YubiKey *serial* is read at connect time via the YubicoPIV
 	vendor-specific *INS_GET_SERIAL* (0xF8) against the PIV applet;

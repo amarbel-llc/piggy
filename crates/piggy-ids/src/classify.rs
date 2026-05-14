@@ -25,12 +25,21 @@ pub enum Classification {
         /// PIV slot id (e.g. 0x9D for key management, 0x82..=0x95 for
         /// retired key management).
         slot_id: u8,
+        /// Subject Common Name from the slot's self-signed cert (the
+        /// `-n` value passed to `pivy-tool generate`). `None` when the
+        /// cert lacks a CN or fails to parse.
+        cn: Option<String>,
     },
     Unsupported {
         guid: Guid,
         reader: String,
         serial: Option<u32>,
         slot_id: u8,
+        /// Subject Common Name from the slot's self-signed cert. Useful
+        /// for identifying RSA-bearing retired slots even though they
+        /// can't act as recipients. `None` when the cert lacks a CN or
+        /// fails to parse.
+        cn: Option<String>,
         reason: String,
     },
 }
@@ -63,6 +72,13 @@ impl Classification {
             Classification::Unsupported { slot_id, .. } => *slot_id,
         }
     }
+
+    pub fn cn(&self) -> Option<&str> {
+        match self {
+            Classification::Supported { cn, .. } => cn.as_deref(),
+            Classification::Unsupported { cn, .. } => cn.as_deref(),
+        }
+    }
 }
 
 /// Classify the given slot. Convenience wrapper for the common
@@ -85,12 +101,14 @@ pub fn classify_slot(
     algo: PivAlgorithm,
     cert_der: &[u8],
 ) -> Classification {
+    let cn = extract_subject_cn(cert_der);
     if algo != PivAlgorithm::EcP256 {
         return Classification::Unsupported {
             guid,
             reader,
             serial,
             slot_id,
+            cn,
             reason: format!("slot {} is {algo:?}", format_slot_id(slot_id)),
         };
     }
@@ -102,6 +120,7 @@ pub fn classify_slot(
                 reader,
                 serial,
                 slot_id,
+                cn,
                 reason: format!("pubkey decode failed: {e}"),
             };
         }
@@ -124,12 +143,14 @@ pub fn classify_slot(
             reader,
             serial,
             slot_id,
+            cn,
         },
         Err(e) => Classification::Unsupported {
             guid,
             reader,
             serial,
             slot_id,
+            cn,
             reason: format!("markl ID build failed: {e}"),
         },
     }
@@ -140,6 +161,19 @@ pub fn classify_slot(
 /// `pivy-tool list` and `piggy tool list`.
 pub fn format_slot_id(slot_id: u8) -> String {
     format!("{:02X}", slot_id)
+}
+
+/// Extract the first Subject Common Name from a DER-encoded X.509 cert.
+/// Returns `None` if the cert fails to parse, has no Subject, has no CN
+/// entry, or the CN bytes are not valid UTF-8. The `-n` argument to
+/// `pivy-tool generate` ends up in this field.
+fn extract_subject_cn(cert_der: &[u8]) -> Option<String> {
+    let cert = openssl::x509::X509::from_der(cert_der).ok()?;
+    let entry = cert
+        .subject_name()
+        .entries_by_nid(openssl::nid::Nid::COMMONNAME)
+        .next()?;
+    entry.data().as_utf8().ok().map(|s| s.to_string())
 }
 
 fn compress_p256_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
