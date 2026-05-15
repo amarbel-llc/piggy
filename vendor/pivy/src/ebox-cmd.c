@@ -1851,6 +1851,15 @@ again:
                          ebox_tpl_part_name(tpart));
     if (error) {
       warnfx(error, "failed to activate config %c", a->a_key);
+      if (nconfigs == 1) {
+        /*
+         * piggy #95: with only one config there is no
+         * question_prompt above, so `goto again` would
+         * re-enter local_unlock on identical inputs forever.
+         * Propagate the error instead.
+         */
+        return (error);
+      }
       errf_free(error);
       goto again;
     }
@@ -1862,6 +1871,10 @@ again:
   error = interactive_recovery(config, fn);
   if (error) {
     warnfx(error, "failed to activate config %c", a->a_key);
+    if (nconfigs == 1) {
+      /* piggy #95: same single-config infinite-loop hazard. */
+      return (error);
+    }
     errf_free(error);
     goto again;
   }
