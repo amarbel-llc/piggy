@@ -355,4 +355,77 @@ mod tests {
             }
         }
     }
+
+    /// Project Wycheproof HMAC-SHA-256 vectors replayed against
+    /// [`hmac_sha256`], the per-chunk MAC used by
+    /// [`EboxStream::encrypt_chunk`] / [`EboxStream::decrypt_chunk`]
+    /// (stream.rs:76 / stream.rs:117). Verification semantics match
+    /// the stream's: compute the full 32-byte MAC and constant-time
+    /// compare against the candidate tag.
+    ///
+    /// Filter shape: 256-bit key, 256-bit tag — piggy's stream layer
+    /// uses AES_KEY_LEN=32 keys and HMAC_LEN=32 full tags. The
+    /// truncated-tag groups (tag_size=128) are skipped because the
+    /// stream's verifier never truncates.
+    mod wycheproof_hmac_sha256 {
+        use super::*;
+        use wycheproof::mac::{TestName, TestSet};
+        use wycheproof::TestResult;
+
+        #[test]
+        fn wycheproof_hmac_sha256_rfc4231() {
+            let set = TestSet::load(TestName::HmacSha256).expect("load wycheproof set");
+            let mut valid_seen = 0usize;
+            let mut invalid_seen = 0usize;
+            for group in &set.test_groups {
+                if group.key_size != 256 || group.tag_size != 256 {
+                    continue;
+                }
+                for tc in &group.tests {
+                    match tc.result {
+                        TestResult::Valid => valid_seen += 1,
+                        TestResult::Invalid => invalid_seen += 1,
+                        TestResult::Acceptable => {}
+                    }
+
+                    let computed = hmac_sha256(&tc.key, &tc.msg).expect("compute hmac");
+
+                    // Mirror stream.rs:118 — openssl::memcmp::eq is
+                    // length-strict (returns false on unequal
+                    // lengths), exactly matching piggy's production
+                    // verifier. Truncated-tag vectors in this group
+                    // still flow through (rejected here), covering
+                    // the same rejection path the stream's chunk
+                    // decode relies on.
+                    let verifies = openssl::memcmp::eq(&computed, &tc.tag);
+
+                    match (&tc.result, verifies) {
+                        (TestResult::Valid, true) => {}
+                        (TestResult::Valid, false) => panic!(
+                            "tcId {} ({}): valid vector did not verify \
+                             (computed={}, expected={}, flags={:?})",
+                            tc.tc_id,
+                            tc.comment,
+                            hex::encode(&computed),
+                            hex::encode(&*tc.tag),
+                            tc.flags,
+                        ),
+                        (TestResult::Invalid, true) => panic!(
+                            "tcId {} ({}): invalid vector unexpectedly verified \
+                             (flags={:?})",
+                            tc.tc_id, tc.comment, tc.flags,
+                        ),
+                        (TestResult::Invalid, false) => {}
+                        (TestResult::Acceptable, _) => {}
+                    }
+                }
+            }
+            assert!(
+                valid_seen > 0 && invalid_seen > 0,
+                "wycheproof HmacSha256 produced \
+                 {valid_seen} valid / {invalid_seen} invalid vectors — \
+                 expected both buckets populated; group filter is wrong",
+            );
+        }
+    }
 }
