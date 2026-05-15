@@ -120,10 +120,29 @@ STUB_EOF
   # failure mode (script honestly reports no render target); pivy-agent
   # still sees a nonzero exit and denies, but at least the script's
   # behavior is what the comments at lines 105-113 promise.
+  #
+  # A prior version of this test set PATH=/usr/bin:/bin and assumed
+  # zenity wasn't installed system-wide — which silently broke on
+  # Linux hosts where /usr/bin/zenity exists (the script entered the
+  # zenity branch, zenity exited 1 because $DISPLAY was unset, and
+  # the script propagated exit 1 instead of the refuse-branch exit 2).
+  # To make the precondition deterministic across hosts, build a
+  # minimal stub dir with just the tools the askpass script needs
+  # (bash for the `#!/usr/bin/env bash` shebang, ps + tr for the
+  # parent-process banner) and deliberately omit zenity, then invoke
+  # python3 by absolute path so env -i doesn't need PATH for its own
+  # lookup.
   unset PIGGY_ASKPASS_DRY_RUN
 
-  run env -i HOME="$HOME" PATH="/usr/bin:/bin" \
-    python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-nozenity.XXXXXX")"
+  for tool in bash ps tr; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$HOME" PATH="$stub_dir" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
   [[ "$status" -eq 2 ]] || {
@@ -132,4 +151,43 @@ STUB_EOF
     return 1
   }
   assert_output --partial "no render target available"
+}
+
+@test "launchd_env_zenity_no_display_propagates_zenity_exit" {
+  # Pin commit 3b95620's deliberate behavior: when zenity is findable
+  # but cannot reach a display, the script trusts zenity to fail with
+  # a clear nonzero exit and propagates it. The previous design gated
+  # on $DISPLAY ourselves and exited 2 — which pivy-agent.c:1067
+  # treats as confirm-failure → AUTHZ_DENIED → every signature refused
+  # under the launchd fork env (scrubbed $DISPLAY). A future
+  # maintainer must not silently re-add the $DISPLAY gate; this test
+  # catches that regression.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-zenityfail.XXXXXX")"
+  for tool in bash ps tr; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  # Stub zenity that mimics real zenity when DISPLAY is unset: writes
+  # the Gtk-WARNING to stderr and exits 1. The script must propagate
+  # this exit 1 (NOT transform it into the refuse-branch exit 2).
+  cat >"$stub_dir/zenity" <<'STUB_EOF'
+#!/usr/bin/env bash
+echo "Gtk-WARNING **: cannot open display: " >&2
+exit 1
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$HOME" PATH="$stub_dir" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  [[ "$status" -eq 1 ]] || {
+    echo "expected exit 1 (zenity's exit, propagated), got $status"
+    echo "stdout: $output"
+    return 1
+  }
+  refute_output --partial "no render target available"
 }
