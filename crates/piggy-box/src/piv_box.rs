@@ -1213,4 +1213,116 @@ mod tests {
             run_set(TestName::EcdhSecp384r1Ecpoint, EcCurve::NistP384);
         }
     }
+
+    /// Project Wycheproof ChaCha20-Poly1305 vectors replayed against
+    /// piggy's `chacha20_poly1305_{encrypt,decrypt}` wrappers (the
+    /// openssl-backed production AEAD path used by `PivBox::seal_offline`
+    /// / `open_offline`, not the rustcrypto oracle in
+    /// `chacha20_poly1305_oracle`).
+    ///
+    /// Piggy's wrappers hardcode three of the four AEAD parameters
+    /// from RFC 0002 §Cipher: 256-bit key, 128-bit tag (appended), and
+    /// empty AAD. Vectors that diverge on those three are skipped —
+    /// they don't correspond to anything piggy would feed its AEAD
+    /// layer. We do NOT filter on nonce size: the wycheproof set
+    /// places its adversarial bit-flip-the-tag coverage in groups
+    /// whose AAD is non-empty (filtered out), and the only empty-AAD
+    /// invalid vectors are in groups with bad IV sizes (0/64/88/104/
+    /// 112/128/160/192/256 bits). Routing those through piggy's
+    /// wrapper exercises its defensive IV-length check at
+    /// `piv_box.rs:350-355` — that's the gate guarding against the
+    /// pre-#36 0-byte-IV legacy bug. The `both buckets non-empty`
+    /// guard catches a regression that silently drops *that* coverage.
+    mod wycheproof_chacha20_poly1305 {
+        use super::*;
+        use wycheproof::aead::{TestName, TestSet};
+        use wycheproof::TestResult;
+
+        #[test]
+        fn wycheproof_chacha20_poly1305_rfc7539() {
+            let set = TestSet::load(TestName::ChaCha20Poly1305).expect("load wycheproof set");
+            let mut valid_seen = 0usize;
+            let mut invalid_seen = 0usize;
+            for group in &set.test_groups {
+                if group.key_size != 256 || group.tag_size != 128 {
+                    continue;
+                }
+                for tc in &group.tests {
+                    if !tc.aad.is_empty() {
+                        continue;
+                    }
+                    match tc.result {
+                        TestResult::Valid => valid_seen += 1,
+                        TestResult::Invalid => invalid_seen += 1,
+                        TestResult::Acceptable => {}
+                    }
+
+                    // Piggy stores ct||tag concatenated; reconstruct
+                    // that wire shape from the wycheproof split fields.
+                    let mut framed = tc.ct.to_vec();
+                    framed.extend_from_slice(&tc.tag);
+
+                    let got = chacha20_poly1305_decrypt(&tc.key, &tc.nonce, &framed);
+                    match (&tc.result, &got) {
+                        (TestResult::Valid, Ok(pt)) => assert_eq!(
+                            pt.as_slice(),
+                            tc.pt.as_slice(),
+                            "tcId {} ({}): valid vector decrypted to wrong pt \
+                             (flags={:?})",
+                            tc.tc_id,
+                            tc.comment,
+                            tc.flags,
+                        ),
+                        (TestResult::Valid, Err(e)) => panic!(
+                            "tcId {} ({}): valid vector decrypt errored: {e} \
+                             (flags={:?})",
+                            tc.tc_id, tc.comment, tc.flags,
+                        ),
+                        (TestResult::Invalid, Ok(_)) => panic!(
+                            "tcId {} ({}): invalid vector unexpectedly decrypted \
+                             (flags={:?})",
+                            tc.tc_id, tc.comment, tc.flags,
+                        ),
+                        (TestResult::Invalid, Err(_)) => {}
+                        (TestResult::Acceptable, _) => {
+                            if let Ok(pt) = &got {
+                                assert_eq!(
+                                    pt.as_slice(),
+                                    tc.pt.as_slice(),
+                                    "tcId {} ({}): acceptable vector decrypted to \
+                                     wrong pt (flags={:?})",
+                                    tc.tc_id,
+                                    tc.comment,
+                                    tc.flags,
+                                );
+                            }
+                        }
+                    }
+
+                    // Encrypt-side round-trip on valid vectors: piggy's
+                    // wrapper is deterministic given key/nonce/pt/aad,
+                    // so it MUST produce ct||tag bit-for-bit.
+                    if tc.result == TestResult::Valid {
+                        let out = chacha20_poly1305_encrypt(&tc.key, &tc.nonce, &tc.pt)
+                            .expect("encrypt valid vector");
+                        assert_eq!(
+                            out.as_slice(),
+                            framed.as_slice(),
+                            "tcId {} ({}): encrypt produced wrong ct||tag \
+                             (flags={:?})",
+                            tc.tc_id,
+                            tc.comment,
+                            tc.flags,
+                        );
+                    }
+                }
+            }
+            assert!(
+                valid_seen > 0 && invalid_seen > 0,
+                "wycheproof ChaCha20Poly1305 produced \
+                 {valid_seen} valid / {invalid_seen} invalid vectors — \
+                 expected both buckets populated; group/aad filter is wrong",
+            );
+        }
+    }
 }
