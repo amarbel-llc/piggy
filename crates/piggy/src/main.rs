@@ -39,6 +39,7 @@
 //! - #59 — restore probe-loop PIN-clearing in `piggy agent`.
 
 mod fallback;
+mod verify;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -228,6 +229,16 @@ enum PassCommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
+    /// Decrypt every entry under the store (or under SUBPATH) and
+    /// report each one as ok / not ok in tree form.
+    ///
+    /// Unlike the other `pass` subcommands this is handled in Rust and
+    /// does not delegate to piggy.sh, so plain clap flag parsing
+    /// applies (`--help` works, no `--` passthrough).
+    Verify {
+        /// Optional sub-directory within the store to limit the walk.
+        subpath: Option<String>,
+    },
 }
 
 fn main() {
@@ -247,6 +258,9 @@ fn main() {
             PassCommand::Cp { rest } => fallback::exec_bash("cp", &rest),
             PassCommand::Git { rest } => fallback::exec_bash("git", &rest),
             PassCommand::Recipients { rest } => fallback::exec_bash("recipients", &rest),
+            PassCommand::Verify { subpath } => {
+                std::process::exit(verify::run(subpath.as_deref()))
+            }
         },
 
         Command::List { rest } => fallback::exec_piggy_ids("list-all", &rest),
