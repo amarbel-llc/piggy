@@ -31,6 +31,23 @@ pub fn exec_bash(subcmd: &str, rest: &[String]) -> ! {
     std::process::exit(127);
 }
 
+/// Exec `piggy.sh <subcmd> <op> <rest...>`. Used by structured pass
+/// subcommand groups (e.g. `pass recipients add/remove/sync`) that
+/// dispatch through bash via a parent + nested operation pair. The
+/// piggy.sh `cmd_pass_<subcmd>` function dispatches on its first
+/// positional, so we feed it `op` followed by `rest`. Never returns on
+/// success.
+pub fn exec_bash_subcmds(subcmd: &str, op: &str, rest: &[String]) -> ! {
+    let script = find_piggy_sh();
+    let mut cmd = Command::new(&script);
+    cmd.arg(subcmd);
+    cmd.arg(op);
+    cmd.args(rest);
+    let err = cmd.exec();
+    eprintln!("piggy: failed to launch {}: {}", script.display(), err);
+    std::process::exit(127);
+}
+
 /// Exec `piggy-ids <subcmd> <rest...>`. Used by top-level commands
 /// that drive piggy-ids directly rather than going through piggy.sh —
 /// avoids name collisions with pass-style bash subcommands (e.g. the

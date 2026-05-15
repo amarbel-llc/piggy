@@ -114,11 +114,14 @@ fn build_glob(terms: &[String]) -> String {
 ///
 /// Equivalent to the sed `s/\.ebox(\x1B\[[0-9]+m)?( ->|$)/\1\2/g`.
 fn strip_ebox_suffix(line: &str) -> String {
-    // Process iteratively: at each `.ebox` occurrence, check whether
-    // the next byte run is `<ESC>[<digits>m` then either ` ->` or end.
-    let mut out = String::with_capacity(line.len());
+    // Operate on bytes so the `.ebox` / ANSI scan is unambiguous,
+    // then push uncopied byte runs verbatim — UTF-8 stays intact
+    // because the matches we cut around (`.ebox`, `<ESC>[<digits>m`,
+    // ` ->`) are all 7-bit ASCII.
     let bytes = line.as_bytes();
+    let mut out_bytes: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
+    let mut last_copied = 0;
     while i < bytes.len() {
         if bytes[i..].starts_with(b".ebox") {
             let after = i + 5;
@@ -132,18 +135,24 @@ fn strip_ebox_suffix(line: &str) -> String {
             }
             let rest = &bytes[tail..];
             if rest.is_empty() || rest.starts_with(b" ->") {
-                // Drop the `.ebox`; copy the ANSI (if any) verbatim,
-                // then continue from `tail` (the byte after the ANSI
-                // or after `.ebox` if no ANSI).
-                out.push_str(std::str::from_utf8(&bytes[after..tail]).unwrap_or(""));
+                // Copy everything before the `.ebox` verbatim, then
+                // the ANSI run (if any), and skip the `.ebox` chars.
+                out_bytes.extend_from_slice(&bytes[last_copied..i]);
+                out_bytes.extend_from_slice(&bytes[after..tail]);
+                last_copied = tail;
                 i = tail;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
         i += 1;
     }
-    out
+    out_bytes.extend_from_slice(&bytes[last_copied..]);
+    // Safety: the only bytes we ever skipped are pure ASCII (".ebox"
+    // and `<ESC>[<digits>m`), so cutting them out preserves UTF-8
+    // validity of the surrounding runs.
+    String::from_utf8(out_bytes).unwrap_or_else(|e| {
+        String::from_utf8_lossy(&e.into_bytes()).into_owned()
+    })
 }
 
 /// If `bytes[start]` begins an ANSI CSI like `<ESC>[12m`, return the

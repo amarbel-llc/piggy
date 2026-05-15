@@ -42,6 +42,7 @@ mod fallback;
 mod find;
 mod git;
 mod grep;
+mod recipients;
 mod store;
 mod verify;
 
@@ -229,10 +230,7 @@ enum PassCommand {
         rest: Vec<String>,
     },
     /// Manage recipients in `piggy-ids` (list/add/remove/sync).
-    Recipients {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
+    Recipients(RecipientsArgs),
     /// Decrypt every entry under the store (or under SUBPATH) and
     /// report each one as ok / not ok in tree form.
     ///
@@ -242,6 +240,44 @@ enum PassCommand {
     Verify {
         /// Optional sub-directory within the store to limit the walk.
         subpath: Option<String>,
+    },
+}
+
+#[derive(Args, Debug)]
+struct RecipientsArgs {
+    #[command(subcommand)]
+    cmd: RecipientsCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum RecipientsCommand {
+    /// Print recipients in the relevant piggy-ids, one per line.
+    List {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Enumerate attached PIV cards and print one record per
+    /// populated recipient-eligible slot. Delegates to
+    /// `piggy-ids list-available`.
+    #[command(name = "list-available")]
+    ListAvailable {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Append recipients to piggy-ids and re-encrypt.
+    Add {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Remove recipients (matched by full markl ID) and re-encrypt.
+    Remove {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Replace piggy-ids with another file's contents (idempotent).
+    Sync {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
     },
 }
 
@@ -261,7 +297,23 @@ fn main() {
             PassCommand::Mv { rest } => fallback::exec_bash("mv", &rest),
             PassCommand::Cp { rest } => fallback::exec_bash("cp", &rest),
             PassCommand::Git { rest } => std::process::exit(git::run(&rest)),
-            PassCommand::Recipients { rest } => fallback::exec_bash("recipients", &rest),
+            PassCommand::Recipients(args) => match args.cmd {
+                RecipientsCommand::List { rest } => {
+                    std::process::exit(recipients::list(&rest))
+                }
+                RecipientsCommand::ListAvailable { rest } => {
+                    fallback::exec_piggy_ids("list-available", &rest)
+                }
+                RecipientsCommand::Add { rest } => {
+                    fallback::exec_bash_subcmds("recipients", "add", &rest)
+                }
+                RecipientsCommand::Remove { rest } => {
+                    fallback::exec_bash_subcmds("recipients", "remove", &rest)
+                }
+                RecipientsCommand::Sync { rest } => {
+                    fallback::exec_bash_subcmds("recipients", "sync", &rest)
+                }
+            },
             PassCommand::Verify { subpath } => {
                 std::process::exit(verify::run(subpath.as_deref()))
             }

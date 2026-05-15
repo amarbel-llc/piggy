@@ -133,6 +133,41 @@ pub(crate) fn is_ebox(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("ebox"))
 }
 
+/// Walk up from `root/subfolder` toward `root`, returning the first
+/// directory that contains a `piggy-ids` file. Mirrors
+/// `find_piggy_ids` in piggy.sh.
+///
+/// `subfolder` is empty for top-level recipients commands. The walk
+/// short-circuits at `root` regardless of whether `root/piggy-ids`
+/// exists; callers receive `Err` if no `piggy-ids` is found in the
+/// walk chain.
+pub(crate) fn find_piggy_ids(root: &Path, subfolder: &str) -> Result<PathBuf, String> {
+    let mut current = if subfolder.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(subfolder)
+    };
+
+    loop {
+        let candidate = current.join("piggy-ids");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        if current == root {
+            break;
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => break,
+        }
+    }
+
+    Err(format!(
+        "no piggy-ids found under {} (run `piggy pass init -k <markl-id>` first)",
+        root.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +255,41 @@ mod tests {
     fn resolve_target_none_returns_root() {
         let tmp = tempdir();
         assert_eq!(resolve_target(&tmp, None).unwrap(), tmp);
+    }
+
+    #[test]
+    fn find_piggy_ids_at_root() {
+        let tmp = tempdir();
+        std::fs::write(tmp.join("piggy-ids"), b"x").unwrap();
+        let got = find_piggy_ids(&tmp, "").unwrap();
+        assert_eq!(got, tmp.join("piggy-ids"));
+    }
+
+    #[test]
+    fn find_piggy_ids_walks_up_to_root() {
+        let tmp = tempdir();
+        std::fs::create_dir_all(tmp.join("a/b/c")).unwrap();
+        std::fs::write(tmp.join("piggy-ids"), b"x").unwrap();
+        let got = find_piggy_ids(&tmp, "a/b/c").unwrap();
+        assert_eq!(got, tmp.join("piggy-ids"));
+    }
+
+    #[test]
+    fn find_piggy_ids_prefers_nearest() {
+        let tmp = tempdir();
+        std::fs::create_dir_all(tmp.join("a/b")).unwrap();
+        std::fs::write(tmp.join("piggy-ids"), b"outer").unwrap();
+        std::fs::write(tmp.join("a/piggy-ids"), b"inner").unwrap();
+        let got = find_piggy_ids(&tmp, "a/b").unwrap();
+        assert_eq!(got, tmp.join("a/piggy-ids"));
+    }
+
+    #[test]
+    fn find_piggy_ids_errors_when_missing() {
+        let tmp = tempdir();
+        std::fs::create_dir_all(tmp.join("a")).unwrap();
+        let err = find_piggy_ids(&tmp, "a").unwrap_err();
+        assert!(err.contains("no piggy-ids"), "got: {err}");
     }
 
     fn tempdir() -> PathBuf {
