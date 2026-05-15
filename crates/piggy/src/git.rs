@@ -25,6 +25,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
+use crate::git_ops::{add_and_commit, git_at, is_inside_work_tree};
 use crate::store::store_root;
 
 const PIGGY_DIFF_TEXTCONV: &str = "pivy-box stream decrypt";
@@ -51,7 +52,7 @@ fn run_init(root: &Path, args: &[String]) -> i32 {
     if let Err(rc) = git_at(root, args) {
         return rc;
     }
-    if let Err(rc) = git_add_file(root, root, "Add current contents of password store.") {
+    if let Err(rc) = add_and_commit(root, root, "Add current contents of password store.") {
         return rc;
     }
 
@@ -64,7 +65,7 @@ fn run_init(root: &Path, args: &[String]) -> i32 {
         );
         return 1;
     }
-    if let Err(rc) = git_add_file(
+    if let Err(rc) = add_and_commit(
         root,
         Path::new(".gitattributes"),
         "Configure git repository for ebox file diff.",
@@ -127,93 +128,7 @@ fn run_passthrough(root: &Path, args: &[String]) -> i32 {
     127
 }
 
-/// Mirrors `git_add_file` in piggy.sh: `git add <path>`, then commit
-/// only if there are actual staged changes. Returns Err(exit_code) on
-/// fatal failure (refuse to continue init); returns Ok(()) when the
-/// path was added cleanly or there was nothing to commit.
-fn git_add_file(root: &Path, path: &Path, message: &str) -> Result<(), i32> {
-    let add_status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("add")
-        .arg(path)
-        .status();
-    match add_status {
-        Ok(s) if s.success() => {}
-        Ok(_) | Err(_) => return Ok(()),
-    }
-
-    // Anything staged for this path? `git status --porcelain <path>`
-    // outputs lines only when there are pending changes.
-    let porcelain = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("status")
-        .arg("--porcelain")
-        .arg(path)
-        .output();
-    let Ok(out) = porcelain else { return Ok(()) };
-    if out.stdout.iter().all(|b| b.is_ascii_whitespace()) {
-        return Ok(());
-    }
-
-    let sign = signing_flag(root);
-    let mut commit = Command::new("git");
-    commit.arg("-C").arg(root).arg("commit");
-    if sign {
-        commit.arg("-S");
-    }
-    commit.arg("-m").arg(message);
-    match commit.status() {
-        Ok(s) if s.success() => Ok(()),
-        // A non-zero commit (e.g. nothing-to-commit race) is not
-        // fatal for the init flow; mirror the bash, which just
-        // returns the git exit code and continues.
-        _ => Ok(()),
-    }
-}
-
-fn signing_flag(root: &Path) -> bool {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("config")
-        .arg("--bool")
-        .arg("--get")
-        .arg("piggy.signcommits")
-        .output();
-    match out {
-        Ok(o) if o.status.success() => o.stdout.trim_ascii() == b"true",
-        _ => false,
-    }
-}
-
-fn git_at(root: &Path, args: &[String]) -> Result<(), i32> {
-    let status = Command::new("git").arg("-C").arg(root).args(args).status();
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(s.code().unwrap_or(1)),
-        Err(err) => {
-            eprintln!("piggy pass git: spawn git failed: {err}");
-            Err(127)
-        }
-    }
-}
-
-fn is_inside_work_tree(root: &Path) -> bool {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("rev-parse")
-        .arg("--is-inside-work-tree")
-        .output();
-    match out {
-        Ok(o) if o.status.success() => o.stdout.trim_ascii() == b"true",
-        _ => false,
-    }
-}
-
 // No unit tests in this module — every behavior reaches a real git
 // binary or filesystem, and the bats integration tests (t0050, t0055,
 // t0060, t0100, t0200, t0300, t0500, t0600) cover the full surface
-// end-to-end.
+// end-to-end. Shared git helpers live in `git_ops`.

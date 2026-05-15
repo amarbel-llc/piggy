@@ -41,8 +41,10 @@
 mod fallback;
 mod find;
 mod git;
+mod git_ops;
 mod grep;
 mod recipients;
+mod rm;
 mod store;
 mod verify;
 
@@ -293,7 +295,7 @@ fn main() {
             PassCommand::Insert { rest } => fallback::exec_bash("insert", &rest),
             PassCommand::Edit { rest } => fallback::exec_bash("edit", &rest),
             PassCommand::Generate { rest } => fallback::exec_bash("generate", &rest),
-            PassCommand::Rm { rest } => fallback::exec_bash("rm", &rest),
+            PassCommand::Rm { rest } => std::process::exit(rm::run(&rest)),
             PassCommand::Mv { rest } => fallback::exec_bash("mv", &rest),
             PassCommand::Cp { rest } => fallback::exec_bash("cp", &rest),
             PassCommand::Git { rest } => std::process::exit(git::run(&rest)),
