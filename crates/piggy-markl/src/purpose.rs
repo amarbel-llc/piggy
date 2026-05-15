@@ -18,10 +18,16 @@ use crate::format::FormatId;
 /// `Incompatible` since piggy can't reason about them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PurposeId {
-    /// `piggy-recipient-v1` — piggy 2.x recipient pubkey, constrained
-    /// to `pivy_ecdh_p256_pub`. **Reserved by piggy** in RFC 0002 §6.3
-    /// (drafted in piggy at madder#150). Until the official RFC lands
-    /// this is the de facto definition.
+    /// `piggy-recipient-v1` — piggy 2.x recipient pubkey. **Reserved
+    /// by piggy** in RFC 0002 §6.3 (drafted in piggy at madder#150).
+    /// Accepts two formats:
+    ///   * `pivy_ecdh_p256_pub` — PIV slot 9D (Key Management, ECDH
+    ///     over NIST P-256). The piggy 1.x → 2.x cutover format.
+    ///   * `age_x25519_pub` — age v1 X25519 recipient pubkey. Same
+    ///     purpose, different cryptographic family. Wire-format
+    ///     integration is in progress (see piggy RFC 0004); markl-level
+    ///     parsing already accepts age recipients so `piggy-ids` files
+    ///     declaring them validate cleanly.
     PiggyRecipientV1,
     /// `piggy-piv_auth-v1` — public key from PIV slot 9A (PIV
     /// Authentication). Constrained to `ssh_ecdsa_nistp256_pub` for now;
@@ -89,13 +95,23 @@ impl PurposeId {
         }
     }
 
+    /// Boolean form of `validate_format` — same predicate, no
+    /// `Incompatible` allocation. Use this when set membership is
+    /// the question rather than a parser error.
+    pub fn accepts(&self, format: FormatId) -> bool {
+        self.validate_format(format).is_ok()
+    }
+
     /// Verify that `format` is one of the formats this purpose
     /// constrains itself to. For `Other`, conservatively rejects
     /// every format — piggy doesn't know the registry's rules for
     /// purposes it didn't enumerate.
     pub fn validate_format(&self, format: FormatId) -> Result<(), Incompatible> {
         let ok = match self {
-            PurposeId::PiggyRecipientV1 => matches!(format, FormatId::PivyEcdhP256Pub),
+            PurposeId::PiggyRecipientV1 => matches!(
+                format,
+                FormatId::PivyEcdhP256Pub | FormatId::AgeX25519Pub
+            ),
             PurposeId::PiggyPivAuthV1
             | PurposeId::PiggyPivSigV1
             | PurposeId::PiggyPivCardAuthV1 => {
@@ -163,9 +179,12 @@ mod tests {
     }
 
     #[test]
-    fn piggy_recipient_v1_accepts_only_pivy_ecdh_p256_pub() {
+    fn piggy_recipient_v1_accepts_pivy_and_age_recipient_formats() {
         let p = PurposeId::PiggyRecipientV1;
         assert!(p.validate_format(FormatId::PivyEcdhP256Pub).is_ok());
+        assert!(p.validate_format(FormatId::AgeX25519Pub).is_ok());
+        // age_x25519_sec is an identity, not a recipient.
+        assert!(p.validate_format(FormatId::AgeX25519Sec).is_err());
         assert!(
             p.validate_format(FormatId::SshEcdsaNistp256Pub).is_err(),
             "PiggyRecipientV1 should reject the SSH format — that's for piggy-piv_* purposes"

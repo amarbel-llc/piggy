@@ -20,6 +20,12 @@ pub enum BoxError {
     #[error("unsupported curve: {0}")]
     UnsupportedCurve(String),
 
+    /// A markl recipient ID parsed cleanly but the encrypt pipeline
+    /// has no wrapper for that format yet. See docs/rfcs/0004 for the
+    /// age_x25519_pub case.
+    #[error("recipient format {0} not yet wired into the encrypt pipeline")]
+    UnsupportedRecipientFormat(piggy_markl::FormatId),
+
     #[error("crypto: {0}")]
     Crypto(String),
 

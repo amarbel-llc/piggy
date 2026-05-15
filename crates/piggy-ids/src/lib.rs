@@ -7,13 +7,22 @@
 //! # comments and blank lines ignored
 //! piggy-recipient-v1@pivy_ecdh_p256_pub-<blech32>  # primary yubikey
 //! piggy-recipient-v1@pivy_ecdh_p256_pub-<blech32>  # backup
+//! piggy-recipient-v1@age_x25519_pub-<blech32>      # age identity (laptop)
 //! ```
 //!
+//! Two recipient formats are accepted under the `piggy-recipient-v1`
+//! purpose: `pivy_ecdh_p256_pub` (PIV 9D, ECDH P-256) and
+//! `age_x25519_pub` (age v1 X25519). Files may mix the two families
+//! freely. Encrypt-pipeline support for producing ebox files with
+//! age parts ships under piggy RFC 0004; markl-level parsing,
+//! validation, canonicalisation, and diffing accept age recipients
+//! today regardless of pipeline readiness.
+//!
 //! Parser is permissive about purpose tagging on input — bare
-//! `pivy_ecdh_p256_pub-<blech32>` is accepted as syntactic sugar for
-//! the purpose-tagged form. Renderer always emits the purpose-tagged
-//! canonical form so `parse → render → parse` round-trips to a stable
-//! representation.
+//! `<format>-<blech32>` is accepted as syntactic sugar for the
+//! purpose-tagged form for either format family. Renderer always
+//! emits the purpose-tagged canonical form so `parse → render →
+//! parse` round-trips to a stable representation.
 
 use thiserror::Error;
 
@@ -35,8 +44,9 @@ pub struct Recipient {
 
 impl Recipient {
     /// Construct a recipient. The id MUST carry the
-    /// `piggy-recipient-v1` purpose and the `pivy_ecdh_p256_pub`
-    /// format; otherwise `InvalidRecipientShape` is returned.
+    /// `piggy-recipient-v1` purpose and one of the recipient formats
+    /// (`pivy_ecdh_p256_pub` or `age_x25519_pub`); otherwise
+    /// `InvalidRecipientShape` is returned.
     pub fn new(id: Id, comment: Option<String>) -> Result<Self, ParseError> {
         validate_recipient_shape(&id)?;
         Ok(Self { id, comment })
@@ -191,7 +201,8 @@ pub enum ParseError {
     },
     #[error(
         "line {line}: recipient shape requires purpose=piggy-recipient-v1 and \
-         format=pivy_ecdh_p256_pub (got purpose={purpose:?}, format={format:?})"
+         format in {{pivy_ecdh_p256_pub, age_x25519_pub}} \
+         (got purpose={purpose:?}, format={format:?})"
     )]
     InvalidRecipientShape {
         line: usize,
@@ -204,7 +215,7 @@ pub enum ParseError {
 
 fn validate_recipient_shape(id: &Id) -> Result<(), ParseError> {
     let purpose_ok = matches!(id.purpose(), Some(PurposeId::PiggyRecipientV1));
-    let format_ok = matches!(id.format(), FormatId::PivyEcdhP256Pub);
+    let format_ok = PurposeId::PiggyRecipientV1.accepts(id.format());
     if purpose_ok && format_ok {
         Ok(())
     } else {
@@ -221,8 +232,8 @@ fn canonicalize_for_render(id: &Id) -> Id {
         id.clone()
     } else {
         // Bare markl ID (no purpose): promote to purpose-tagged form.
-        // Validated at parse-time that the format is
-        // pivy_ecdh_p256_pub, so re-construction can't fail.
+        // The parser already verified the format is accepted by
+        // PiggyRecipientV1, so re-construction can't fail.
         Id::new(
             Some(PurposeId::PiggyRecipientV1),
             id.format(),
@@ -268,9 +279,9 @@ fn parse_line(raw: &str, line_no: usize) -> Result<Recipient, ParseError> {
         source: e,
     })?;
 
-    // Validate purpose AND format. Permit bare format on input
-    // (no purpose) — we'll canonicalise on render.
-    let format_ok = matches!(id.format(), FormatId::PivyEcdhP256Pub);
+    // Permit bare format on input (no purpose) — we'll canonicalise
+    // on render.
+    let format_ok = PurposeId::PiggyRecipientV1.accepts(id.format());
     let purpose_ok = matches!(id.purpose(), None | Some(PurposeId::PiggyRecipientV1));
     if !(purpose_ok && format_ok) {
         return Err(ParseError::InvalidRecipientShape {
@@ -301,6 +312,16 @@ mod tests {
             Some(PurposeId::PiggyRecipientV1),
             FormatId::PivyEcdhP256Pub,
             sample_pubkey(seed),
+        )
+        .unwrap()
+    }
+
+    fn sample_age_id(seed: u8) -> Id {
+        let payload: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(seed)).collect();
+        Id::new(
+            Some(PurposeId::PiggyRecipientV1),
+            FormatId::AgeX25519Pub,
+            payload,
         )
         .unwrap()
     }
@@ -453,5 +474,67 @@ mod tests {
         let second = RecipientFile::parse(&rendered).unwrap();
         assert_eq!(second.recipients(), first.recipients());
         assert_eq!(second.render(), rendered);
+    }
+
+    #[test]
+    fn parse_accepts_age_recipient_with_purpose() {
+        let id = sample_age_id(11);
+        let input = format!("{}  # age-laptop\n", id.to_wire());
+        let file = RecipientFile::parse(&input).unwrap();
+        assert_eq!(file.recipients().len(), 1);
+        assert_eq!(file.recipients()[0].id(), &id);
+        assert_eq!(file.recipients()[0].comment(), Some("age-laptop"));
+    }
+
+    #[test]
+    fn parse_accepts_bare_age_format_and_canonicalises_to_purpose_tagged() {
+        let id = sample_age_id(13);
+        let bare = Id::new(None, FormatId::AgeX25519Pub, id.data().to_vec())
+            .unwrap()
+            .to_wire();
+        let input = format!("{bare}\n");
+        let file = RecipientFile::parse(&input).unwrap();
+        let rendered = file.render();
+        assert!(
+            rendered.starts_with("piggy-recipient-v1@age_x25519_pub-"),
+            "render must promote bare age recipient to purpose-tagged form, got: {rendered}",
+        );
+    }
+
+    #[test]
+    fn parse_accepts_mixed_pivy_and_age_recipients() {
+        let piv = sample_id(7);
+        let age = sample_age_id(11);
+        let input = format!(
+            "{}  # primary yubikey\n{}  # age laptop\n",
+            piv.to_wire(),
+            age.to_wire(),
+        );
+        let file = RecipientFile::parse(&input).unwrap();
+        assert_eq!(file.recipients().len(), 2);
+        assert_eq!(file.recipients()[0].id().format(), FormatId::PivyEcdhP256Pub);
+        assert_eq!(file.recipients()[1].id().format(), FormatId::AgeX25519Pub);
+    }
+
+    #[test]
+    fn age_recipient_idempotent_parse_render_parse() {
+        let piv = sample_id(23);
+        let age = sample_age_id(29);
+        let input = format!("{}  # piv\n{}  # age\n", piv.to_wire(), age.to_wire());
+        let first = RecipientFile::parse(&input).unwrap();
+        let rendered = first.render();
+        let second = RecipientFile::parse(&rendered).unwrap();
+        assert_eq!(second.recipients(), first.recipients());
+        assert_eq!(second.render(), rendered);
+    }
+
+    #[test]
+    fn recipient_new_accepts_age_format() {
+        // Separate gate from RecipientFile::parse — exercise it
+        // directly so a validate_recipient_shape regression slips
+        // through neither.
+        let id = sample_age_id(17);
+        let r = Recipient::new(id.clone(), Some("age".into())).unwrap();
+        assert_eq!(r.id(), &id);
     }
 }
