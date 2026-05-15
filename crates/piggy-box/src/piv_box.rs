@@ -1238,8 +1238,17 @@ mod tests {
         use wycheproof::aead::{TestName, TestSet};
         use wycheproof::TestResult;
 
+        // Named for what this actually exercises, not what wycheproof
+        // promises. The 45 valid vectors round-trip cleanly through
+        // piggy's wrapper; the 9 invalid vectors all have malformed
+        // IV sizes and are rejected at piv_box.rs:350-355 before the
+        // AEAD math runs. wycheproof's bit-flip-the-tag adversarial
+        // coverage lives in groups whose AAD is non-empty (filtered
+        // out by piggy's empty-AAD call shape) and is therefore NOT
+        // covered here. See piggy#90 for the design discussion of
+        // alternative ways to recover that adversarial reach.
         #[test]
-        fn wycheproof_chacha20_poly1305_rfc7539() {
+        fn wycheproof_chacha20_poly1305_round_trip_and_iv_validation() {
             let set = TestSet::load(TestName::ChaCha20Poly1305).expect("load wycheproof set");
             let mut valid_seen = 0usize;
             let mut invalid_seen = 0usize;
