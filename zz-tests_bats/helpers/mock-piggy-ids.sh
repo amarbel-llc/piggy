@@ -38,6 +38,14 @@ encrypt)
     echo "mock-piggy-ids: piggy-ids not found: $ids" >&2
     exit 1
   }
+  # Mirror the real binary's age-recipient rejection so bats tests
+  # can exercise the bash-level error path. Real piggy-ids encrypt
+  # surfaces BoxError::UnsupportedRecipientFormat for any
+  # age_x25519_pub recipient until piggy RFC 0004 lands.
+  if grep -q '@age_x25519_pub-\|^age_x25519_pub-' "$ids"; then
+    echo "recipient format AgeX25519Pub not yet wired into the encrypt pipeline" >&2
+    exit 1
+  fi
   base64
   ;;
 detect-pubkey)
