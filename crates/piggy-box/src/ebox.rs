@@ -757,4 +757,97 @@ mod tests {
             }
         }
     }
+
+    /// Project Wycheproof AES-256-GCM vectors replayed against
+    /// `aes256_gcm_decrypt`, the recovery-box wrapper used by
+    /// [`Ebox::seal`] / [`Ebox::unlock`] (ebox.rs:94 / ebox.rs:233).
+    ///
+    /// Piggy's wrapper hardcodes the call shape: 256-bit key, 96-bit
+    /// IV, 128-bit tag (appended), empty AAD. Vectors that diverge
+    /// on any of those are skipped — they don't correspond to
+    /// anything piggy would feed its recovery layer.
+    ///
+    /// Encrypt is not round-tripped here because piggy's
+    /// `aes256_gcm_encrypt` generates a fresh random IV internally,
+    /// so the wycheproof IV can't drive it deterministically.
+    /// Decrypt-side coverage is sufficient — wycheproof concentrates
+    /// adversarial AEAD coverage there.
+    mod wycheproof_aes_gcm {
+        use super::*;
+        use wycheproof::aead::{TestName, TestSet};
+        use wycheproof::TestResult;
+
+        #[test]
+        fn wycheproof_aes_256_gcm() {
+            let set = TestSet::load(TestName::AesGcm).expect("load wycheproof set");
+            let mut valid_seen = 0usize;
+            let mut invalid_seen = 0usize;
+            for group in &set.test_groups {
+                if group.key_size != 256
+                    || group.nonce_size != 96
+                    || group.tag_size != 128
+                {
+                    continue;
+                }
+                for tc in &group.tests {
+                    if !tc.aad.is_empty() {
+                        continue;
+                    }
+                    match tc.result {
+                        TestResult::Valid => valid_seen += 1,
+                        TestResult::Invalid => invalid_seen += 1,
+                        TestResult::Acceptable => {}
+                    }
+
+                    // Piggy expects ct||tag concatenated; reconstruct
+                    // that wire shape from the wycheproof split fields.
+                    let mut framed = tc.ct.to_vec();
+                    framed.extend_from_slice(&tc.tag);
+
+                    let got = aes256_gcm_decrypt(&tc.key, &tc.nonce, &framed);
+                    match (&tc.result, &got) {
+                        (TestResult::Valid, Ok(pt)) => assert_eq!(
+                            pt.as_slice(),
+                            tc.pt.as_slice(),
+                            "tcId {} ({}): valid vector decrypted to wrong pt \
+                             (flags={:?})",
+                            tc.tc_id,
+                            tc.comment,
+                            tc.flags,
+                        ),
+                        (TestResult::Valid, Err(e)) => panic!(
+                            "tcId {} ({}): valid vector decrypt errored: {e} \
+                             (flags={:?})",
+                            tc.tc_id, tc.comment, tc.flags,
+                        ),
+                        (TestResult::Invalid, Ok(_)) => panic!(
+                            "tcId {} ({}): invalid vector unexpectedly decrypted \
+                             (flags={:?})",
+                            tc.tc_id, tc.comment, tc.flags,
+                        ),
+                        (TestResult::Invalid, Err(_)) => {}
+                        (TestResult::Acceptable, _) => {
+                            if let Ok(pt) = &got {
+                                assert_eq!(
+                                    pt.as_slice(),
+                                    tc.pt.as_slice(),
+                                    "tcId {} ({}): acceptable vector decrypted to \
+                                     wrong pt (flags={:?})",
+                                    tc.tc_id,
+                                    tc.comment,
+                                    tc.flags,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(
+                valid_seen > 0 && invalid_seen > 0,
+                "wycheproof AesGcm produced \
+                 {valid_seen} valid / {invalid_seen} invalid vectors — \
+                 expected both buckets populated; group/aad filter is wrong",
+            );
+        }
+    }
 }
