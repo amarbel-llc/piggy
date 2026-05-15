@@ -428,29 +428,6 @@ cmd_show() {
   fi
 }
 
-cmd_find() {
-  [[ $# -eq 0 ]] && die "Usage: $PROGRAM_PASS $COMMAND pass-names..."
-  IFS="," eval 'echo "Search Terms: $*"'
-  local terms="*$(printf '%s*|*' "$@")"
-  tree -N -C -l --noreport -P "${terms%|*}" --prune --matchdirs --ignore-case "$PREFIX" 3>&- | tail -n +2 | sed -E 's/\.ebox(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
-}
-
-cmd_grep() {
-  [[ $# -lt 1 ]] && die "Usage: $PROGRAM_PASS $COMMAND [GREPOPTIONS] search-string"
-  local passfile grepresults
-  while read -r -d "" passfile; do
-    grepresults="$(piggy_decrypt "$passfile" | grep --color=always "$@")"
-    [[ $? -ne 0 ]] && continue
-    passfile="${passfile%.ebox}"
-    passfile="${passfile#$PREFIX/}"
-    local passfile_dir="${passfile%/*}/"
-    [[ $passfile_dir == "${passfile}/" ]] && passfile_dir=""
-    passfile="${passfile##*/}"
-    printf "\e[94m%s\e[1m%s\e[0m:\n" "$passfile_dir" "$passfile"
-    echo "$grepresults"
-  done < <(find -L "$PREFIX" -path '*/.git' -prune -o -iname '*.ebox' -print0)
-}
-
 cmd_insert() {
   local opts multiline=0 noecho=1 force=0
   opts="$($GETOPT -o mef -l multiline,echo,force -n "$PROGRAM" -- "$@")"
@@ -613,47 +590,6 @@ cmd_generate() {
   fi
 }
 
-cmd_delete() {
-  local opts recursive="" force=0
-  opts="$($GETOPT -o rf -l recursive,force -n "$PROGRAM" -- "$@")"
-  local err=$?
-  eval set -- "$opts"
-  while true; do case $1 in
-    -r | --recursive)
-      recursive="-r"
-      shift
-      ;;
-    -f | --force)
-      force=1
-      shift
-      ;;
-    --)
-      shift
-      break
-      ;;
-    esac done
-  [[ $# -ne 1 ]] && die "Usage: $PROGRAM_PASS $COMMAND [--recursive,-r] [--force,-f] pass-name"
-  local path="$1"
-  check_sneaky_paths "$path"
-
-  local passdir="$PREFIX/${path%/}"
-  local passfile="$PREFIX/$path.ebox"
-  [[ -f $passfile && -d $passdir && $path == */ || ! -f $passfile ]] && passfile="${passdir%/}/"
-  [[ -e $passfile ]] || die "Error: $path is not in the password store."
-  set_git "$passfile"
-
-  [[ $force -eq 1 ]] || yesno "Are you sure you would like to delete $path?"
-
-  rm $recursive -f -v "$passfile"
-  set_git "$passfile"
-  if [[ -n $INNER_GIT_DIR && ! -e $passfile ]]; then
-    git -C "$INNER_GIT_DIR" rm -qr "$passfile"
-    set_git "$passfile"
-    git_commit "Remove $path from store."
-  fi
-  rmdir -p "${passfile%/*}" 2>/dev/null
-}
-
 cmd_copy_move() {
   local opts move=1 force=0
   [[ $1 == "copy" ]] && move=0
@@ -715,37 +651,12 @@ cmd_copy_move() {
   fi
 }
 
-cmd_git() {
-  set_git "$PREFIX/"
-  if [[ $1 == "init" ]]; then
-    INNER_GIT_DIR="$PREFIX"
-    git -C "$INNER_GIT_DIR" "$@" || exit 1
-    git_add_file "$PREFIX" "Add current contents of password store."
-
-    echo '*.ebox diff=ebox' >"$PREFIX/.gitattributes"
-    git_add_file .gitattributes "Configure git repository for ebox file diff."
-    git -C "$INNER_GIT_DIR" config --local diff.ebox.binary true
-    git -C "$INNER_GIT_DIR" config --local diff.ebox.textconv "pivy-box stream decrypt"
-  elif [[ -n $INNER_GIT_DIR ]]; then
-    tmpdir nowarn #Defines $SECURE_TMPDIR. We don't warn, because at most, this only copies encrypted files.
-    export TMPDIR="$SECURE_TMPDIR"
-    git -C "$INNER_GIT_DIR" "$@"
-  else
-    die "Error: the password store is not a git repository. Try \"$PROGRAM_PASS git init\"."
-  fi
-}
-
 cmd_pass_recipients() {
+  # `list` and `list-available` are handled entirely in the Rust
+  # dispatcher and never reach this function. `add`, `remove`, and
+  # `sync` still arrive here via `fallback::exec_bash_subcmds`.
   local sub="${1:-}"
   case "$sub" in
-  list)
-    shift
-    cmd_pass_recipients_list "$@"
-    ;;
-  list-available)
-    shift
-    cmd_pass_recipients_list_available "$@"
-    ;;
   add)
     shift
     cmd_pass_recipients_add "$@"
@@ -758,55 +669,10 @@ cmd_pass_recipients() {
     shift
     cmd_pass_recipients_sync "$@"
     ;;
-  "" | -h | --help)
-    cat <<-_EOF
-		Usage:
-		    $PROGRAM_PASS recipients list [-p subfolder]
-		        Print recipients in the relevant piggy-ids, one per line.
-		    $PROGRAM_PASS recipients list-available [--format human|ndjson]
-		        Enumerate attached PIV cards and print one record per
-		        populated recipient-eligible slot (9D + retired 82-95).
-		        Output is human-readable on a TTY and NDJSON when piped
-		        (override with --format).
-		    $PROGRAM_PASS recipients add <markl-id>... [-p subfolder]
-		    $PROGRAM_PASS recipients add -A | --all-attached [--yes] [-p subfolder]
-		        Append recipients to piggy-ids and re-encrypt. With -A,
-		        enumerate attached PIV cards and add supported ones.
-		    $PROGRAM_PASS recipients remove <markl-id>... [-p subfolder]
-		        Remove recipients (matched by full markl ID) and re-encrypt.
-		    $PROGRAM_PASS recipients sync <file> [-p subfolder]
-		        Replace piggy-ids with <file>'s contents (idempotent).
-		_EOF
-    [[ $sub == "" ]] && exit 1 || exit 0
-    ;;
   *)
     die "Error: unknown subcommand: $PROGRAM_PASS recipients $sub"
     ;;
   esac
-}
-
-cmd_pass_recipients_list() {
-  local subfolder=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-    -p)
-      subfolder="$2"
-      shift 2
-      ;;
-    *)
-      die "Error: unexpected argument to recipients list: $1"
-      ;;
-    esac
-  done
-  find_piggy_ids "$subfolder"
-  cat "$PIGGY_IDS"
-}
-
-cmd_pass_recipients_list_available() {
-  # Thin shim: the Rust helper owns TTY-detection and output formatting
-  # for both `human` and `ndjson`. `exec` so stdout's TTY status is the
-  # one the user sees, not whatever the bash subshell would compute.
-  exec "${PIGGY_IDS_PATH:-piggy-ids}" list-available "$@"
 }
 
 cmd_pass_recipients_add() {
@@ -1125,14 +991,6 @@ show | ls | list)
   shift
   cmd_show "$@"
   ;;
-find | search)
-  shift
-  cmd_find "$@"
-  ;;
-grep)
-  shift
-  cmd_grep "$@"
-  ;;
 insert | add)
   shift
   cmd_insert "$@"
@@ -1145,10 +1003,6 @@ generate)
   shift
   cmd_generate "$@"
   ;;
-delete | rm | remove)
-  shift
-  cmd_delete "$@"
-  ;;
 rename | mv)
   shift
   cmd_copy_move "move" "$@"
@@ -1156,10 +1010,6 @@ rename | mv)
 copy | cp)
   shift
   cmd_copy_move "copy" "$@"
-  ;;
-git)
-  shift
-  cmd_git "$@"
   ;;
 recipients)
   shift
