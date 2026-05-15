@@ -20,6 +20,14 @@ pub enum BoxError {
     #[error("unsupported curve: {0}")]
     UnsupportedCurve(String),
 
+    /// A markl recipient ID parsed cleanly (correct purpose, known
+    /// format) but the encrypt pipeline does not yet know how to wrap
+    /// the recovery share for that format. Currently the only format
+    /// in this state is `age_x25519_pub`, pending the RFC 0004
+    /// wire-format extension (piggy-box `AgeBox` part type).
+    #[error("recipient format not yet wired into the encrypt pipeline: {0}")]
+    UnsupportedRecipientFormat(String),
+
     #[error("crypto: {0}")]
     Crypto(String),
 

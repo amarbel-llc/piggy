@@ -14,10 +14,13 @@
 //! `go/internal/charlie/markl_registrations/testdata/0002-markl-id-format-vectors.json`.
 //! See amarbel-llc/piggy#71 for the umbrella tracker.
 //!
-//! Scope: piggy 2.x's recipient template (`pivy_ecdh_p256_pub` payloads
-//! tagged with the `piggy-recipient-v1` purpose). Other format IDs and
-//! purposes from the registry are scaffolded so unrecognised inputs
-//! fail cleanly rather than silently mismatching.
+//! Scope: piggy 2.x's recipient identifiers — two format families
+//! are accepted under the `piggy-recipient-v1` purpose:
+//! `pivy_ecdh_p256_pub` (33-byte SEC1 compressed P-256 point, PIV
+//! slot 9D) and `age_x25519_pub` (32-byte X25519 pubkey, age v1
+//! recipient; wire-format integration ships under piggy RFC 0004).
+//! Other format IDs and purposes from the registry are scaffolded so
+//! unrecognised inputs fail cleanly rather than silently mismatching.
 
 pub mod blech32;
 pub mod format;
@@ -56,6 +59,28 @@ mod proptest_round_trips {
             prop_assert_eq!(parsed.purpose(), Some(&PurposeId::PiggyRecipientV1));
             prop_assert_eq!(parsed.format(), FormatId::PivyEcdhP256Pub);
             prop_assert_eq!(parsed.data(), bytes.as_slice());
+        }
+
+        /// Parallel of `pivy_ecdh_p256_pub_round_trips` for the age
+        /// X25519 recipient format. X25519 pubkeys are 32 raw bytes
+        /// with no on-curve prefix (unlike SEC1 P-256), so we sample
+        /// the full 32-byte payload uniformly.
+        #[test]
+        fn age_x25519_pub_round_trips(
+            bytes in proptest::array::uniform32(any::<u8>()),
+        ) {
+            let payload = bytes.to_vec();
+            let id = Id::new(
+                Some(PurposeId::PiggyRecipientV1),
+                FormatId::AgeX25519Pub,
+                payload.clone(),
+            ).unwrap();
+            let wire = id.to_wire();
+            prop_assert!(wire.starts_with("piggy-recipient-v1@age_x25519_pub-"));
+            let parsed = Id::parse(&wire).unwrap();
+            prop_assert_eq!(parsed.purpose(), Some(&PurposeId::PiggyRecipientV1));
+            prop_assert_eq!(parsed.format(), FormatId::AgeX25519Pub);
+            prop_assert_eq!(parsed.data(), payload.as_slice());
         }
 
         /// Random ascii-charset perturbations of a valid encoded ID

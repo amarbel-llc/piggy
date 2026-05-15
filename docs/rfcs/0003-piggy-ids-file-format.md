@@ -17,11 +17,21 @@ provenance: |
 
 This RFC specifies the `piggy-ids` text file format used by piggy 2.x
 to declare the recipient set for a password store. A `piggy-ids`
-file carries one recipient per line, each identified by a markl ID of
-format `pivy_ecdh_p256_pub` tagged with the piggy-owned purpose
-`piggy-recipient-v1`. The format is hand-editable, version-controlled,
-and round-trips cleanly through tooling so that
-config-as-code-driven recipient management is idempotent.
+file carries one recipient per line, each identified by a markl ID
+tagged with the piggy-owned purpose `piggy-recipient-v1`. Two
+recipient formats are accepted under that purpose:
+
+- `pivy_ecdh_p256_pub` — PIV slot 9D (Key Management, ECDH over NIST
+  P-256). The piggy 1.x → 2.x cutover format.
+- `age_x25519_pub` — age v1 X25519 recipient. Markl-level parsing
+  accepts these so `piggy-ids` files declaring age recipients
+  validate, canonicalise, and diff cleanly; encrypt-pipeline support
+  for producing ebox files with `AgeBox` parts ships under piggy
+  RFC 0004 (in progress).
+
+The format is hand-editable, version-controlled, and round-trips
+cleanly through tooling so that config-as-code-driven recipient
+management is idempotent.
 
 ## Status and Provenance
 
@@ -51,10 +61,21 @@ subtree, mirroring the placement rules `.pivy-id` enjoyed in piggy 1.x).
 It declares the set of recipient public keys that the entries below
 it are encrypted to.
 
-Each recipient is the public key of slot 9D (PIV Key Management,
-ECDH) on a PIV smart card, encoded as a markl ID per madder RFC 0002.
-The piggy-owned `piggy-recipient-v1` purpose constrains the format
-to `pivy_ecdh_p256_pub` (33 bytes, SEC 1 compressed-point form).
+Each recipient is encoded as a markl ID per madder RFC 0002. The
+piggy-owned `piggy-recipient-v1` purpose accepts two formats:
+
+- `pivy_ecdh_p256_pub` (33 bytes, SEC 1 compressed-point form) — the
+  public key of slot 9D (PIV Key Management, ECDH) on a PIV smart
+  card.
+- `age_x25519_pub` (32 bytes) — an age v1 X25519 recipient. The
+  payload bytes are the raw X25519 pubkey; the equivalent `age1…`
+  string from native age tooling and this markl form encode the same
+  32 bytes under two different envelopes (bech32 vs blech32). Files
+  containing only age recipients, or a mix of age and pivy
+  recipients, parse and validate at the markl layer today; the
+  encrypt pipeline gains an `AgeBox` part variant under piggy RFC
+  0004 (`crates/piggy-box::age_part_from_markl` currently surfaces a
+  `BoxError::UnsupportedRecipientFormat` for age inputs).
 
 ### Filename
 
@@ -87,10 +108,12 @@ blank-line     = *WSP LF
 comment-line   = *WSP "#" *VCHAR LF
 recipient-line = *WSP markl-id [comment-suffix] LF
 comment-suffix = 1*WSP "#" [WSP *VCHAR]
-markl-id       = piggy-purpose-tagged / bare-pivy-format
-piggy-purpose-tagged = "piggy-recipient-v1" "@" pivy-blech32
-bare-pivy-format     = pivy-blech32
+markl-id       = piggy-purpose-tagged / bare-format
+piggy-purpose-tagged = "piggy-recipient-v1" "@" recipient-blech32
+bare-format    = recipient-blech32
+recipient-blech32 = pivy-blech32 / age-blech32
 pivy-blech32   = "pivy_ecdh_p256_pub" "-" 1*charset
+age-blech32    = "age_x25519_pub"    "-" 1*charset
 charset        = %x71 / %x70 / ...   ; bech32 alphabet, see madder RFC 0002 §3.1
 ```
 
@@ -108,13 +131,24 @@ Notes:
 
 For every recipient line:
 
-- The markl ID's format MUST be `pivy_ecdh_p256_pub`.
+- The markl ID's format MUST be one of `pivy_ecdh_p256_pub` or
+  `age_x25519_pub`. Other formats MUST be rejected at the
+  markl/piggy-ids layer.
 - The markl ID's purpose, if present, MUST be `piggy-recipient-v1`.
   Bare-format markl IDs (no purpose) MUST be accepted as input
   syntactic sugar; writers MUST canonicalise them to the
   purpose-tagged form on rewrite.
-- Readers MUST reject recipient lines whose markl ID violates either
-  rule, with an error that names the offending line number.
+- A `piggy-ids` file MAY mix `pivy_ecdh_p256_pub` and
+  `age_x25519_pub` recipients in any order; the encrypt pipeline
+  produces a single ebox whose Primary config carries one part per
+  recipient, with `n=1` (any one recipient can decrypt). Producing
+  age parts requires piggy RFC 0004; until that lands the encrypt
+  pipeline raises `BoxError::UnsupportedRecipientFormat` on any age
+  recipient. Markl-level parsing, validation, canonicalisation, and
+  diffing remain available for age recipients regardless.
+- Readers MUST reject recipient lines whose markl ID violates the
+  format-or-purpose rule above, with an error that names the
+  offending line number.
 
 ### Equality
 
@@ -161,8 +195,9 @@ truly a no-op: the recipient set is unchanged, the on-disk
 
 ```
 # piggy-ids — recipients for ~/.local/share/piggy
-piggy-recipient-v1@pivy_ecdh_p256_pub-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd  # primary yubikey
-piggy-recipient-v1@pivy_ecdh_p256_pub-qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw7n8w8c0ydp7s8jtgqnxa  # backup
+piggy-recipient-v1@pivy_ecdh_p256_pub-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd  # primary yubikey (9D)
+piggy-recipient-v1@pivy_ecdh_p256_pub-qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw7n8w8c0ydp7s8jtgqnxa  # backup yubikey (9D)
+piggy-recipient-v1@age_x25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu     # age identity (laptop, RFC 0004)
 ```
 
 ## Security Considerations
@@ -186,8 +221,20 @@ piggy-recipient-v1@pivy_ecdh_p256_pub-qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw7n8w
 3. **Format-confusion across markl ID formats is prevented at parse
    time.** Per madder RFC 0002 §8.3, the `(purpose, format)` pair is
    validated. piggy's reader additionally rejects any markl ID whose
-   format is not `pivy_ecdh_p256_pub` or whose purpose is not
-   `piggy-recipient-v1` (or absent).
+   format is not one of `pivy_ecdh_p256_pub` or `age_x25519_pub`, or
+   whose purpose is not `piggy-recipient-v1` (or absent). The
+   `piggy-recipient-v1` purpose binds equally to both recipient
+   formats; the cryptographic family is determined entirely by the
+   markl `format` field, never by purpose-string inspection.
+
+4. **Mixing recipient families does not weaken individual shares.**
+   When `piggy-ids` lists both pivy and age recipients, the produced
+   ebox carries one independently-wrapped share per recipient in a
+   single Primary config with `n=1`. Compromise of one identity
+   (e.g. an exfiltrated age secret) exposes that secret's share but
+   does not affect the PIV-card-protected shares, and vice versa.
+   The threat model is identical to the all-pivy case: any one held
+   identity is sufficient and necessary to decrypt.
 
 ## Backwards Compatibility
 

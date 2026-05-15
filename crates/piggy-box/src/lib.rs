@@ -12,7 +12,9 @@ pub mod wire;
 pub use ebox::{Ebox, EboxConfig, EboxPart, EboxType};
 pub use error::BoxError;
 pub use piv_box::PivBox;
-pub use recipients::{template_from_recipients, tpl_part_from_markl};
+pub use recipients::{
+    age_part_from_markl, piv_part_from_markl, template_from_recipients, tpl_part_from_markl,
+};
 pub use stream::EboxStream;
 pub use template::EboxConfigType;
 pub use template::{EboxTemplate, EboxTplConfig, EboxTplPart};
