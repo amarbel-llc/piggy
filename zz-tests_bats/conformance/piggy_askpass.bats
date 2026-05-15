@@ -93,7 +93,7 @@ setup() {
 
   # Stub zenity that echoes a canned PIN on stdout, mimicking what real
   # zenity does on Enter.
-  local stub_dir
+  local stub_dir python3_path
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-stub.XXXXXX")"
   cat >"$stub_dir/zenity" <<'STUB_EOF'
 #!/usr/bin/env bash
@@ -106,8 +106,17 @@ STUB_EOF
   # so we shell out to python3 (present on macOS + most Linuxes) and
   # call os.setsid() before execve. < /dev/null mimics pivy-agent
   # closing stdin (pivy-agent.c:1040).
+  #
+  # Resolve python3 to absolute path BEFORE `env -i` because on darwin
+  # /usr/bin/python3 is an xcrun shim that needs TMPDIR to write its
+  # cache at /var/folders/.../xcrun_db-* — `env -i` strips TMPDIR and
+  # the shim exits 126 with EPERM. Calling python3 by absolute path
+  # (nix-store or any non-shim path) sidesteps xcrun entirely. The
+  # sibling tests below already do this; test 8 was missed. See #91.
+  python3_path="$(command -v python3)"
+
   run env -i HOME="$HOME" PATH="$stub_dir:/usr/bin:/bin" \
-    python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "A new client is trying to use PIV token 9D5C" </dev/null
 
   assert_success
