@@ -39,6 +39,10 @@
 //! - #59 — restore probe-loop PIN-clearing in `piggy agent`.
 
 mod fallback;
+mod find;
+mod git;
+mod grep;
+mod store;
 mod verify;
 
 use clap::{Args, Parser, Subcommand};
@@ -248,15 +252,15 @@ fn main() {
         Command::Pass(args) => match args.cmd {
             PassCommand::Init { rest } => fallback::exec_bash("init", &rest),
             PassCommand::Show { rest } => fallback::exec_bash("show", &rest),
-            PassCommand::Find { rest } => fallback::exec_bash("find", &rest),
-            PassCommand::Grep { rest } => fallback::exec_bash("grep", &rest),
+            PassCommand::Find { rest } => std::process::exit(find::run(&rest)),
+            PassCommand::Grep { rest } => std::process::exit(grep::run(&rest)),
             PassCommand::Insert { rest } => fallback::exec_bash("insert", &rest),
             PassCommand::Edit { rest } => fallback::exec_bash("edit", &rest),
             PassCommand::Generate { rest } => fallback::exec_bash("generate", &rest),
             PassCommand::Rm { rest } => fallback::exec_bash("rm", &rest),
             PassCommand::Mv { rest } => fallback::exec_bash("mv", &rest),
             PassCommand::Cp { rest } => fallback::exec_bash("cp", &rest),
-            PassCommand::Git { rest } => fallback::exec_bash("git", &rest),
+            PassCommand::Git { rest } => std::process::exit(git::run(&rest)),
             PassCommand::Recipients { rest } => fallback::exec_bash("recipients", &rest),
             PassCommand::Verify { subpath } => {
                 std::process::exit(verify::run(subpath.as_deref()))
