@@ -81,6 +81,36 @@ setup() {
   refute_output --partial "[TEST]"
 }
 
+@test "ps_failure_falls_through_to_question_mark_parent_marker" {
+  # Regression guard for the `|| true` defense added in #92 (commit
+  # 5b22031). When ps fails — chrooted, hardened-runtime env on
+  # darwin, /usr/bin/ps stripped/missing, etc — the askpass must NOT
+  # silently die under `set -euo pipefail`. parent_comm should fall
+  # through to "?" and the rest of the prompt should render.
+  #
+  # We exercise the failure path with a stub ps that always exits 1.
+  # Without the `|| true` patch this would propagate through pipefail,
+  # trip set -e, and exit the whole script (with the symptom shape
+  # observed on macos-15 CI: silent 126 + no stderr).
+  local stub_dir
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-failps.XXXXXX")"
+  cat >"$stub_dir/ps" <<'STUB_EOF'
+#!/usr/bin/env bash
+exit 1
+STUB_EOF
+  chmod +x "$stub_dir/ps"
+  # tr is still needed for the second leg of the pipeline; symlink the
+  # real one rather than stubbing so this test exercises only the
+  # ps-failure path, not a compound failure.
+  ln -s "$(command -v tr)" "$stub_dir/tr"
+
+  PATH="$stub_dir:$PATH" run "$ASKPASS" "Enter PIV PIN for token 9D5C:"
+
+  assert_success
+  assert_output --partial "Enter PIV PIN for token 9D5C:"
+  assert_output --partial "Parent: ?"
+}
+
 @test "launchd_env_uses_zenity_branch_when_tty_unreachable" {
   # Regression for the bug where the script's $DISPLAY/$WAYLAND_DISPLAY
   # gate caused exit=2 under pivy-agent's fork+pipe env (no controlling

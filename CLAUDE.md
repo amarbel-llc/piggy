@@ -109,6 +109,33 @@ User config is via `PIGGY_*` env vars (store dir, clip time, generated length, c
 
 ## Debugging
 
+### darwin CI: silent exit 126 under `env -i` with `set -euo pipefail`
+
+On the macos-15 GitHub Actions runner, `/usr/bin/ps` (or `/usr/bin/tr`,
+the bisect is inconclusive at the system level — see #100) exits 126
+when invoked under a stripped environment (`env -i HOME=$HOME
+PATH=/usr/bin:/bin ...`), while `/bin/echo` and other binaries from
+`/bin` run fine. Linux runners don't exhibit this. Root cause is
+suspected to be macOS hardened-runtime + stripped DYLD env, but not
+proven; tracked at #100.
+
+The consequence for any shell script using `set -euo pipefail`: a
+pipeline like `var="$(ps ... | tr ...)"` whose RHS exits 126
+propagates through pipefail, the assignment inherits 126, and `set
+-e` exits the script silently with 126 — **no stderr, no failing
+command shown**. This bit us in #92; the fix landed in
+`contrib/piggy-askpass.sh` (commit `5b22031`) by appending `|| true`
+to the pipeline.
+
+When writing or porting a shell helper that strips its environment
+or runs under launchd-style fork+exec, prefer one of:
+- pin `|| true` on pipelines whose output is decorative (parent name,
+  diagnostic strings); the trailing `[[ -z "$var" ]] && var="?"`
+  handles the empty case
+- pin specific exec paths (e.g. `command ps` invoked by absolute
+  `/usr/bin/ps`) and add a diagnostic test that exercises the
+  failure path explicitly
+
 ### bats + PCSC
 
 Any bats recipe whose tests exercise pcscd (directly, via pivy-tool, or
