@@ -21,11 +21,17 @@ use std::process::Command;
 
 /// Exec `piggy.sh <subcmd> <rest...>`. Used by every pass-style clap
 /// handler. Never returns on success.
+///
+/// Sets `$PIGGY_BIN` to the current executable path so any bash
+/// function that needs to call back into the Rust binary (e.g. the
+/// `reencrypt_path` shim that exec's `piggy internal-reencrypt-path`)
+/// has an absolute path to use without depending on `$PATH`.
 pub fn exec_bash(subcmd: &str, rest: &[String]) -> ! {
     let script = find_piggy_sh();
     let mut cmd = Command::new(&script);
     cmd.arg(subcmd);
     cmd.args(rest);
+    set_piggy_bin(&mut cmd);
     let err = cmd.exec();
     eprintln!("piggy: failed to launch {}: {}", script.display(), err);
     std::process::exit(127);
@@ -43,9 +49,25 @@ pub fn exec_bash_subcmds(subcmd: &str, op: &str, rest: &[String]) -> ! {
     cmd.arg(subcmd);
     cmd.arg(op);
     cmd.args(rest);
+    set_piggy_bin(&mut cmd);
     let err = cmd.exec();
     eprintln!("piggy: failed to launch {}: {}", script.display(), err);
     std::process::exit(127);
+}
+
+/// Set `$PIGGY_BIN=<current_exe>` on the command unless the caller's
+/// environment already pins it. The bats harness sets `$PIGGY` to the
+/// debug binary; we mirror that with `$PIGGY_BIN` so bash helpers can
+/// call back into the same binary deterministically. `current_exe()`
+/// can fail in unusual environments; we silently skip in that case
+/// and let the bash side fall back to a bare-PATH lookup.
+fn set_piggy_bin(cmd: &mut Command) {
+    if std::env::var_os("PIGGY_BIN").is_some() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        cmd.env("PIGGY_BIN", exe);
+    }
 }
 
 /// Exec `piggy-ids <subcmd> <rest...>`. Used by top-level commands

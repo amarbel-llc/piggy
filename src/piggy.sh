@@ -86,21 +86,16 @@ piggy_decrypt() {
   pivy-box stream decrypt <"$1" || exit $?
 }
 reencrypt_path() {
-  local passfile passfile_dir passfile_display passfile_temp
-  while read -r -d "" passfile; do
-    [[ -L $passfile ]] && continue
-    passfile_dir="${passfile%/*}"
-    passfile_dir="${passfile_dir#$PREFIX}"
-    passfile_dir="${passfile_dir#/}"
-    passfile_display="${passfile#$PREFIX/}"
-    passfile_display="${passfile_display%.ebox}"
-    passfile_temp="${passfile}.tmp.${RANDOM}.${RANDOM}.${RANDOM}.${RANDOM}.--"
-
-    find_piggy_ids "$passfile_dir"
-    echo "$passfile_display: reencrypting"
-    pivy-box stream decrypt <"$passfile" | "${PIGGY_IDS_PATH:-piggy-ids}" encrypt "$PIGGY_IDS" >"$passfile_temp" &&
-      mv "$passfile_temp" "$passfile" || rm -f "$passfile_temp"
-  done < <(find "$1" -path '*/.git' -prune -o -iname '*.ebox' -print0)
+  # Delegates to the Rust handler. Bash callers (cmd_init,
+  # cmd_copy_move, cmd_pass_recipients_{add,remove,sync}) keep their
+  # existing invocations unchanged; only the body of this function
+  # has moved to Rust.
+  #
+  # $PIGGY_BIN is set by the Rust dispatcher's exec_bash before
+  # exec-ing piggy.sh, so this shim always has an absolute path to
+  # the same binary that invoked us.
+  "${PIGGY_BIN:?reencrypt_path: PIGGY_BIN not set (called outside the piggy dispatcher?)}" \
+    internal-reencrypt-path "$1"
 }
 check_sneaky_paths() {
   local path

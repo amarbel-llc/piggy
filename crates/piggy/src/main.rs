@@ -44,9 +44,12 @@ mod git;
 mod git_ops;
 mod grep;
 mod recipients;
+mod reencrypt;
 mod rm;
 mod store;
 mod verify;
+
+use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -153,6 +156,14 @@ enum Command {
         tool: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
+    },
+    /// Internal: re-encrypt every entry under DIR to the nearest
+    /// piggy-ids. Invoked by piggy.sh's `reencrypt_path` shim; not a
+    /// user-facing command. Hidden from `--help`.
+    #[command(name = "internal-reencrypt-path", hide = true)]
+    InternalReencryptPath {
+        /// Directory under the store to walk.
+        dir: PathBuf,
     },
 }
 
@@ -341,5 +352,9 @@ fn main() {
                 std::process::exit(2);
             }
         },
+
+        Command::InternalReencryptPath { dir } => {
+            std::process::exit(reencrypt::run(&dir))
+        }
     }
 }
