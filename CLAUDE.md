@@ -35,9 +35,16 @@ appears in the worktree.
 
 ## Architecture
 
-**Rust-on-top, bash-on-back CLI** — top-level argv parsing is a Rust `clap` subcommand tree in `crates/piggy/src/main.rs`. The password-management commands (`init`, `show`, `insert`, `edit`, `generate`, `rm`, `mv`, `cp`, `find`, `grep`, `git`) live as nested subcommands under a top-level `pass` namespace: `piggy pass <X>` `exec(2)`s into `src/piggy.sh <X>` to run the corresponding `cmd_*` function. `piggy help` and `piggy version` stay top-level and dispatch into `cmd_usage`/`cmd_version` directly. `piggy.sh` is the implementation backing every pass-style subcommand and is installed under `$out/libexec/piggy/`, not on `$PATH`. The remaining clap handlers (`agent`, `box`, `tool`, `ca`, `luks`, `zfs`, and the generic `piggy pivy <tool>` passthrough) `exec(2)` into the matching C `pivy-*` binary via `fallback::exec_pivy`. Top-level dispatch is exhaustive in clap; `fallback.rs` no longer has a catch-all bash branch. Bare `piggy` and bare `piggy pass` print clap help (no implicit `cmd_show ""`).
+**Rust-on-top, bash-on-back CLI** — top-level argv parsing is a Rust `clap` subcommand tree in `crates/piggy/src/main.rs`. Password-management commands live as nested subcommands under a top-level `pass` namespace. Each `pass <X>` is dispatched in one of two ways:
+
+- **Pure Rust handlers** (no bash hop): `find`, `grep`, `git`, `rm`, `verify`, `recipients list`, `recipients list-available`. Implemented in `crates/piggy/src/{find,grep,git,rm,verify,recipients}.rs`. Shared substrate (store walk, sneaky-path check, git ops) in `store.rs` and `git_ops.rs`. See umbrella #96 for the ongoing port; the `piggy pass *` map there tracks the current state.
+- **Bash dispatch** (`fallback::exec_bash` / `exec_bash_subcmds` `exec(2)` into `src/piggy.sh`): `init`, `show`, `insert`, `edit`, `generate`, `mv`, `cp`, `recipients add`/`remove`/`sync`. These keep their `cmd_*` functions in `piggy.sh`. The bash subprocesses receive `$PIGGY_BIN=current_exe()` so any helper that needs to call back into Rust (currently only `reencrypt_path`, which exec's the hidden `piggy internal-reencrypt-path <dir>` subcommand) has an absolute path to the same binary.
+
+`piggy help` and `piggy version` stay top-level and dispatch into `cmd_usage`/`cmd_version` directly. `piggy.sh` is installed under `$out/libexec/piggy/`, not on `$PATH`; the Rust dispatcher reaches it via `PIGGY_SH_PATH` baked in by `flake.nix`'s makeWrapper. The remaining top-level clap handlers (`agent`, `box`, `tool`, `ca`, `luks`, `zfs`, and the generic `piggy pivy <tool>` passthrough) `exec(2)` into the matching C `pivy-*` binary via `fallback::exec_pivy`. Top-level dispatch is exhaustive in clap; `fallback.rs` has no catch-all bash branch. Bare `piggy` and bare `piggy pass` print clap help (no implicit `cmd_show ""`).
 
 Rust re-implementations of `agent` and `box` live under `crates/piggy/src/cmd/{agent,pivy_box}` (reachable via the `piggy::cmd` library surface) but stay off the user-facing dispatch path in v1.0. They will be re-pointed at once they reach feature parity with the C binaries; see #56 (PC/SC transactions in `piggy-piv`), #57 (direct-PCSC ECDH oracle for `piggy box stream decrypt`), #58 (askpass `[piggy-test]` context tagging), and #59 (probe-loop PIN-clearing in `piggy agent`) for the maturation roadmap.
+
+**Known v1 acceptance**: the Rust `pass git` port (commit `03fb0ca`) does not allocate a ramdisk before exec-ing git on the non-init passthrough path. Bash `cmd_git` called `tmpdir nowarn` to set `$TMPDIR=$SECURE_TMPDIR`; the Rust port forwards `$SECURE_TMPDIR` to git as `$TMPDIR` if already set in the environment but does not create one itself. Documented inline in `crates/piggy/src/git.rs`; restored once umbrella #96 step 9 (Rust platform layer) lands.
 
 **Crypto layer:**
 - Encrypt: `pivy-box stream encrypt <template> < plaintext > file.ebox`
@@ -51,17 +58,22 @@ Rust re-implementations of `agent` and `box` live under `crates/piggy/src/cmd/{a
 
 ## Key Files
 
-- `crates/piggy/src/main.rs` — clap subcommand tree; top-level dispatch
-- `crates/piggy/src/fallback.rs` — `exec_bash` (pass-style handlers) + `exec_pivy` (C-pivy handlers + `piggy pivy <tool>` passthrough)
-- `src/piggy.sh` — bash command bodies: env setup, helpers, all `cmd_*` implementations. Installed under `$out/libexec/piggy/`, not on `$PATH`; reached via `PIGGY_SH_PATH` baked in by `flake.nix`'s makeWrapper.
-- `src/platform/darwin.sh` — macOS platform overrides (sourced by `piggy.sh` at runtime)
-- `zz-tests_bats/common.bash` — bats test harness (mock PATH, temp store, git identity)
-- `zz-tests_bats/helpers/mock-pivy-box.sh` — mock pivy-box using base64 encode/decode
-- `flake.nix` — nix package definition and dev shell
-- `go/main.go` — Go SSH agent conformance test binary (protocol wire format validation)
-- `zz-tests_bats/conformance/piggy_agent_protocol.bats` — bats harness for protocol conformance
-- `zz-tests_bats/conformance/piggy_pivy.bats` — bats harness for the `piggy pivy <tool>` passthrough
-- `contrib/emacs/piggy.el` — Emacs integration package
+- `crates/piggy/src/main.rs` — clap subcommand tree; top-level dispatch.
+- `crates/piggy/src/fallback.rs` — `exec_bash(subcmd, rest)` + `exec_bash_subcmds(subcmd, op, rest)` (pass-style handlers still in bash) + `exec_pivy(tool, rest)` (C-pivy handlers + `piggy pivy <tool>` passthrough) + `exec_piggy_ids(subcmd, rest)`. All bash-bound exec paths forward `$PIGGY_BIN=current_exe()` so bash helpers can call back into Rust.
+- `crates/piggy/src/{verify,find,grep,git,rm,recipients,reencrypt}.rs` — Rust handlers for the pass-style subcommands that have moved off the bash dispatch path.
+- `crates/piggy/src/store.rs` — shared store helpers: `store_root` (`$PIGGY_STORE_DIR > $XDG_DATA_HOME/piggy > $HOME/.local/share/piggy`), `resolve_target` (sneaky-path check), `collect_eboxes` (the canonical `find -L $PREFIX -path '*/.git' -prune -o -iname '*.ebox'` walk), `find_piggy_ids` (walk-up-from-subfolder).
+- `crates/piggy/src/git_ops.rs` — shared git helpers: `find_inner_git_dir` (mirrors `set_git`), `add_and_commit`, `commit`, `rm`, `is_inside_work_tree`, `signing_flag`, `git_at`.
+- `src/piggy.sh` — bash command bodies for the still-bash pass-style subcommands (init, show, insert, edit, generate, mv, cp, recipients add/remove/sync). Installed under `$out/libexec/piggy/`, not on `$PATH`; reached via `PIGGY_SH_PATH` baked in by `flake.nix`'s makeWrapper.
+- `src/platform/darwin.sh` — macOS platform overrides (sourced by `piggy.sh` at runtime).
+- `zz-tests_bats/common.bash` — bats test harness (mock PATH, temp store, git identity).
+- `zz-tests_bats/helpers/mock-pivy-box.sh` — mock pivy-box using base64 encode/decode.
+- `flake.nix` — nix package definition and dev shell.
+- `go/main.go` — Go SSH agent conformance test binary (protocol wire format validation).
+- `zz-tests_bats/conformance/piggy_agent_protocol.bats` — bats harness for protocol conformance.
+- `zz-tests_bats/conformance/piggy_pivy.bats` — bats harness for the `piggy pivy <tool>` passthrough.
+- `zz-tests_bats/t0700-verify.bats` — bats coverage for `piggy pass verify`.
+- `sweatfile` (repo root) — piggy-level spinclass override: `pre-merge = "just"` so `merge-this-session` blocks on full local test pass (not just `nix build`).
+- `contrib/emacs/piggy.el` — Emacs integration package.
 
 ## Specs
 
