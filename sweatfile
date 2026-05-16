@@ -1,0 +1,18 @@
+# vim: ft=toml
+#
+# piggy-level spinclass overrides. Sits between the eng-level
+# defaults at ~/eng/sweatfile and anything dropped under
+# ~/eng/repos/piggy/.worktrees/. Run `spinclass validate` to see the
+# active lookup chain.
+
+[hooks]
+# Override the eng-level `just build-nix` with the full local test
+# pipeline. `just` (no args) resolves to the default justfile
+# recipe, which is `build test` — i.e. `nix build` + `cargo test
+# --workspace` + bats. The build-only default doesn't catch bats
+# regressions on darwin, which is where piggy's most fragile code
+# paths live (askpass, ramdisk-tmpdir, clipboard). Spinclass's
+# `merge-this-session` runs this hook locally before pushing, so a
+# darwin-specific bats failure on the maintainer's host blocks the
+# merge instead of waiting for post-merge CI to flag it.
+pre-merge = "just"
