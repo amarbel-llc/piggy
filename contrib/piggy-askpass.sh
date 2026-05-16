@@ -46,8 +46,17 @@ context="${PIGGY_ASKPASS_CONTEXT:-}"
 
 # Parent-process info. ps is universal on Linux + Darwin and avoids
 # the /proc-vs-no-/proc split. Tolerate ps failing (chrooted, etc).
+#
+# `|| true` is load-bearing: under `set -euo pipefail`, a pipeline
+# that exits non-zero would propagate to the assignment, trip `set
+# -e`, and exit the whole script with the pipeline's exit code
+# (silently, without writing anything to stderr — bash exits at the
+# assignment, before the next line runs). This bit us on macOS-15
+# CI under `env -i` where one of ps/tr exits 126 — see #92. The
+# trailing `|| true` matches the "Tolerate ps failing" intent stated
+# above.
 parent_pid="$PPID"
-parent_comm="$(ps -o comm= -p "$parent_pid" 2>/dev/null | tr -d '[:space:]')"
+parent_comm="$(ps -o comm= -p "$parent_pid" 2>/dev/null | tr -d '[:space:]' || true)"
 [[ -z "$parent_comm" ]] && parent_comm="?"
 
 # [TEST] heuristic: caller env OR prompt itself carries the test marker.
