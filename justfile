@@ -24,11 +24,21 @@ run-nix *ARGS:
 # is a hard prerequisite — `zz-tests_bats/common.bash` aborts with a
 # clear error if `target/debug/piggy` is missing.
 
-test: build-rust test-bats test-rust
+test: test-bats-default test-bats-conformance test-rust
 
-test-bats: test-bats-piggy test-bats-conformance
+# Sandboxed bats lane: runs every top-level t*.bats NOT tagged
+# `# bats file_tags=hardware` inside the nix build sandbox. See
+# ./bats.nix for the lane builder and CLAUDE.md "Architecture" for the
+# tag convention. This replaces the previous `test-bats-piggy` recipe
+# as the authoritative gate for the core suite; the bare-`bats`
+# fallback lives at `test-bats-piggy-local` for fast iteration.
+test-bats-default:
+    nix build .#bats-default --no-link --print-build-logs
 
-test-bats-piggy: build-rust
+# Local-iteration shortcut: re-runs the same t*.bats files outside the
+# nix sandbox against `target/debug/piggy`. Faster than `nix build` on
+# small edits; CI / pre-merge should use `test-bats-default` instead.
+test-bats-piggy-local: build-rust
   BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/t*.bats
 
 test-bats-conformance: build-rust

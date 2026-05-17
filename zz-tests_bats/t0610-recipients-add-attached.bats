@@ -1,3 +1,10 @@
+# bats file_tags=hardware
+#
+# Requires fib (virtual PIV) + pcscd reachable via PCSCLITE_CSOCK_NAME
+# + the real (non-mock) piggy-ids binary. Excluded from the sandboxed
+# `bats-default` lane; runs only via `just test-bats-piggy` (which
+# expects fib to be brought up externally) or the matching conformance
+# recipe.
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   init_test_git

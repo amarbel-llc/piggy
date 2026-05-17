@@ -1,4 +1,5 @@
 #! /usr/bin/env bats
+# bats file_tags=hardware
 #
 # Wrapper-integrity smoke tests for `piggy box`. Confirms argv- and
 # template-path forwarding from the Rust clap dispatcher in

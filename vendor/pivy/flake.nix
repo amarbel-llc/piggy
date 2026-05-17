@@ -1,13 +1,15 @@
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/4590696c8693fea477850fe379a01544293ca4e2";
+    # Fork of upstream nixpkgs. The overlay (`overlays.default`) is
+    # what the transitive amarbel-llc/bats flake assumes; without it
+    # `nix flake check` errors on `attribute 'overlays' missing`.
+    # See amarbel-llc/nixpkgs.
+    nixpkgs.url = "github:amarbel-llc/nixpkgs";
     nixpkgs-master.url = "github:NixOS/nixpkgs/e2dde111aea2c0699531dc616112a96cd55ab8b5";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
-    bob = {
-      url = "github:amarbel-llc/bob";
+    bats = {
+      url = "github:amarbel-llc/bats";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.nixpkgs-master.follows = "nixpkgs-master";
-      inputs.utils.follows = "utils";
     };
   };
 
@@ -17,13 +19,14 @@
       nixpkgs,
       nixpkgs-master,
       utils,
-      bob,
+      bats,
     }:
     (utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs {
           inherit system;
+          overlays = [ nixpkgs.overlays.default ];
         };
 
         pkgs-master = import nixpkgs-master {
@@ -385,9 +388,11 @@
               gum
             ])
             ++ [
-              bob.packages.${system}.batman
-              bob.packages.${system}.sandcastle
-              bob.packages.${system}.tap-dancer
+              # batman moved from amarbel-llc/bob to amarbel-llc/bats
+              # in 2026. sandcastle was retired (fence is the only
+              # remaining sandbox backend); tap-dancer is unused in
+              # vendor/pivy and was dropped with the migration.
+              bats.packages.${system}.batman
             ];
         };
 

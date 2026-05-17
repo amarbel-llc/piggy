@@ -1,4 +1,5 @@
 #! /usr/bin/env bats
+# bats file_tags=hardware
 #
 # Phase 3 close-out (#73): Rust `piggy-ids encrypt` -> real C
 # `pivy-box stream decrypt` via fib. Validates the full Rust->C

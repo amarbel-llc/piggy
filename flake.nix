@@ -1,14 +1,15 @@
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/4590696c8693fea477850fe379a01544293ca4e2";
+    # Fork of upstream nixpkgs. The overlay (`overlays.default`) adds
+    # pkgs.testers.batsLane (consumed by ./bats.nix) plus the
+    # amarbel-llc package additions. See amarbel-llc/nixpkgs.
+    nixpkgs.url = "github:amarbel-llc/nixpkgs";
     nixpkgs-master.url = "github:NixOS/nixpkgs/ae921939fcbd44874664477bd1d22543c10a8306";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
 
-    bob = {
-      url = "github:amarbel-llc/bob";
+    bats = {
+      url = "github:amarbel-llc/bats";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.nixpkgs-master.follows = "nixpkgs-master";
-      inputs.utils.follows = "utils";
     };
 
     # Software PIV smart card for tests — see nix/virtual-piv.nix.
@@ -44,7 +45,7 @@
       nixpkgs,
       nixpkgs-master,
       utils,
-      bob,
+      bats,
       jcardsim,
       pivapplet,
       oracle-javacard-sdks,
@@ -52,7 +53,14 @@
     (utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        # `pkgs.testers.batsLane` lives in the amarbel-llc/nixpkgs
+        # overlay; ./bats.nix imports it from here. Keeping the overlay
+        # in scope for every consumer of `pkgs` so the rest of the
+        # flake doesn't need to special-case the lane builder import.
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ nixpkgs.overlays.default ];
+        };
         pkgs-master = import nixpkgs-master { inherit system; };
 
         # Software PIV smart card for tests. Only built on Linux — vsmartcard
@@ -259,6 +267,33 @@
             platforms = platforms.linux ++ platforms.darwin;
           };
         };
+
+        # Sandboxed bats lane. See ./bats.nix for the lane builder and
+        # the `# bats file_tags=hardware` convention that filters
+        # pcscd/hardware-requiring tests out of the default lane.
+        #
+        # batsSrc is passed as a plain path (not `cleanSourceWith`)
+        # because the auto-discovery in bats.nix does
+        # `builtins.readDir batsSrc` at eval time. cleanSourceWith
+        # produces a derivation whose store path must be realized
+        # before readDir can introspect it; in eval-only mode (e.g.
+        # `nix flake check --no-build`) that realization can't happen,
+        # surfacing as `error: path '<hash>-source' is not valid`.
+        # Store-path stability across unrelated repo edits can be
+        # re-added later via `cleanSourceWith` if it becomes worth it.
+        batsLib = import ./bats.nix {
+          inherit pkgs;
+          # Unwrapped rust dispatcher: lets test-PATH overrides
+          # (mock-pivy-box.sh etc.) win over what piggy.sh invokes.
+          piggyRs = piggy-rs;
+          # Wrapped piggy: source of `$out/libexec/piggy/piggy.sh`
+          # and `$out/libexec/piggy/piggy-ids` referenced by the
+          # extraEnv (PIGGY_SH_PATH, PIGGY_IDS_REAL).
+          piggyWrapped = piggy;
+          batsLane = bats.lib.${system}.batsLane;
+          bats-libs = bats.packages.${system}.bats-libs;
+          batsSrc = ./zz-tests_bats;
+        };
       in
       {
         packages = {
@@ -267,6 +302,7 @@
           piggy-rs = piggy-rs;
           piggy-agent-conformance = piggy-agent-conformance;
         }
+        // batsLib.batsLaneOutputs
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           fib = virtualPiv.fib;
           fib-bundle = virtualPiv.fibBundle;
@@ -274,6 +310,10 @@
           fib-pcscd = virtualPiv.pcscdForFib;
           jcardsim = virtualPiv.jcardsim;
           pivapplet = virtualPiv.pivapplet;
+        };
+
+        checks = {
+          bats-default = batsLib.batsLaneOutputs.bats-default;
         };
 
         devShells.default = pkgs.mkShell {
@@ -290,7 +330,13 @@
               pkgs-master.rust-analyzer
               pkgs.nixfmt-rfc-style
               pkgs.scdoc
-              bob.packages.${system}.batman
+              # In amarbel-llc/bats's new package layout, `batman`
+              # (the test orchestrator) and `bats` (the bats-core
+              # binary the bats CLI calls live under) are separate
+              # outputs. We need both on PATH so plain `bats` and
+              # `batman` invocations from justfile recipes resolve.
+              bats.packages.${system}.batman
+              bats.packages.${system}.bats
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
               # `just fib-up` needs pcscd + fib + opensc-tool on PATH.

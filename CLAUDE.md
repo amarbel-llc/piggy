@@ -13,13 +13,14 @@ Piggy is a passwordstore.org fork that replaces GPG encryption with PIV smart ca
 ## Build & Test Commands
 
 ```sh
-just build          # Build nix package (nix build --show-trace)
-just test           # Run bats test suite
-just codemod-fmt    # Format nix (nixfmt) and shell (shfmt -s -i=2)
-just clean          # Remove build artifacts
+just build              # Build nix package (nix build --show-trace)
+just test               # Full suite: test-bats-default + test-bats-conformance + test-rust
+just test-bats-default  # Sandboxed bats lane via nix build .#bats-default
+just codemod-fmt        # Format nix (nixfmt) and shell (shfmt -s -i=2)
+just clean              # Remove build artifacts
 ```
 
-Run a single bats test file:
+Run a single bats test file outside the sandbox (fast iteration):
 ```sh
 bats --no-sandbox zz-tests_bats/t0100-insert.bats
 ```
@@ -56,6 +57,8 @@ Rust re-implementations of `agent` and `box` live under `crates/piggy/src/cmd/{a
 
 **Test framework** — BATS (Bash Automated Testing System) in `zz-tests_bats/`. Tests use mock scripts (`helpers/mock-pivy-box.sh`, `helpers/mock-pivy-tool.sh`) that substitute base64 for real encryption, so no physical PIV card is needed.
 
+**Bats lane builder** — `bats.nix` wraps `pkgs.testers.batsLane` (provided by the `amarbel-llc/nixpkgs` overlay; pulled in via `amarbel-llc/bats`). Auto-discovers `# bats file_tags=` directives in top-level `zz-tests_bats/t*.bats` files and generates one `bats-<tag>` derivation per unique tag plus `bats-default`. The default lane filter is `!hardware`: tests tagged `# bats file_tags=hardware` (currently `t0610-recipients-add-attached.bats`, `conformance/piggy_box_interop.bats`, `conformance/piggy_box_decrypt_interop.bats`, `conformance/piggy_recipients_add_attached.bats`, `explore/explore_local_guid_pcsc.bats`) are excluded from `bats-default` because they need a real pcscd talking to fib or hardware, which can't run inside the nix build sandbox. Those tests stay invoked via the existing `just test-bats-conformance-*` recipes. The wrapped piggy is injected into the lane via the `binaries` map (`PIGGY=${piggy}/bin/piggy`) and `PIGGY_SH_PATH` / `PIGGY_IDS_REAL` are pinned at the wrapped `$out/libexec/piggy/` via `extraEnv`.
+
 ## Key Files
 
 - `crates/piggy/src/main.rs` — clap subcommand tree; top-level dispatch.
@@ -67,7 +70,8 @@ Rust re-implementations of `agent` and `box` live under `crates/piggy/src/cmd/{a
 - `src/platform/darwin.sh` — macOS platform overrides (sourced by `piggy.sh` at runtime).
 - `zz-tests_bats/common.bash` — bats test harness (mock PATH, temp store, git identity).
 - `zz-tests_bats/helpers/mock-pivy-box.sh` — mock pivy-box using base64 encode/decode.
-- `flake.nix` — nix package definition and dev shell.
+- `flake.nix` — nix package definition and dev shell. Roots both `nixpkgs` and the transitive `amarbel-llc/bats` flake at `amarbel-llc/nixpkgs` (the fork whose overlay supplies `pkgs.testers.batsLane`).
+- `bats.nix` — sandboxed bats lane builder (see Architecture). Generates `bats-default` plus per-tag derivations from `# bats file_tags=` directives.
 - `go/main.go` — Go SSH agent conformance test binary (protocol wire format validation).
 - `zz-tests_bats/conformance/piggy_agent_protocol.bats` — bats harness for protocol conformance.
 - `zz-tests_bats/conformance/piggy_pivy.bats` — bats harness for the `piggy pivy <tool>` passthrough.

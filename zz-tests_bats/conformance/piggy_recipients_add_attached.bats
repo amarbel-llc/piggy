@@ -1,4 +1,5 @@
 #! /usr/bin/env bats
+# bats file_tags=hardware
 #
 # Conformance tier-2 tests for piggy pass recipients add --all-attached
 # against the real fib virtual PIV card. Multi-card permutations

@@ -1,4 +1,5 @@
 #! /usr/bin/env bats
+# bats file_tags=hardware
 #
 # Exploratory: why does `piggy box tpl create … local-guid …` fail with
 # "PCSC: Smart card resource manager not running" when invoked from the
