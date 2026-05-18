@@ -75,12 +75,20 @@ let
         # them on PATH the sandboxed tests get cryptic
         # "<tool>: command not found" errors. pivy-* are NOT here
         # on purpose — the mock symlinks must win.
+        #
+        # `openssl` is darwin-only in practice: src/platform/darwin.sh
+        # overrides BASE64 to "openssl base64" because BSD base64 has
+        # line-wrapping quirks. Linux uses coreutils' base64 directly
+        # (src/piggy.sh BASE64="base64"). Keeping openssl in the
+        # closure on both platforms is cheap and avoids a platform
+        # split here.
         pkgs.bash
         pkgs.coreutils
         pkgs.getopt
         pkgs.git
         pkgs.gnugrep
         pkgs.gnused
+        pkgs.openssl
         pkgs.qrencode
         pkgs.tree
       ];
