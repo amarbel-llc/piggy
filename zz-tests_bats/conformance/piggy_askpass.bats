@@ -230,3 +230,258 @@ STUB_EOF
   }
   refute_output --partial "no render target available"
 }
+
+@test "zenity_timeout_propagates_zenity_exit_when_prompt_self_cancels" {
+  # piggy#103: zenity is invoked with --timeout=$PIGGY_ASKPASS_TIMEOUT so
+  # an off-screen / unnoticed prompt cannot wedge the agent forever. On
+  # timeout expiry zenity exits non-zero (5 in real zenity); the script
+  # must propagate that exit so pivy-agent gets a deterministic auth-
+  # denied signal in bounded time. We stub zenity to exit 5 immediately
+  # regardless of args — what the test pins is "script honors the
+  # timeout fork by propagating its non-zero exit", not zenity's own
+  # wall-clock behavior.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-timeout.XXXXXX")"
+  for tool in bash ps tr; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  cat >"$stub_dir/zenity" <<'STUB_EOF'
+#!/usr/bin/env bash
+# Mimic real zenity's --timeout behavior: exit 5 on timer expiry.
+exit 5
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$HOME" PATH="$stub_dir" PIGGY_ASKPASS_TIMEOUT=1 \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  [[ "$status" -eq 5 ]] || {
+    echo "expected exit 5 (zenity timeout propagated), got $status"
+    echo "stdout: $output"
+    return 1
+  }
+}
+
+@test "zenity_invocation_includes_timeout_flag" {
+  # Pin that --timeout=$PIGGY_ASKPASS_TIMEOUT is actually on the zenity
+  # argv. A future maintainer who drops the flag silently re-introduces
+  # the head-of-line-blocking failure mode from piggy#103. This test
+  # uses a zenity stub that records its argv to a sentinel file and
+  # echoes a canned PIN, so we can assert on the recorded argv after
+  # the script exits.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path argv_log
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-argv.XXXXXX")"
+  argv_log="$stub_dir/argv.log"
+  for tool in bash ps tr; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  cat >"$stub_dir/zenity" <<STUB_EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >"$argv_log"
+echo "stubbed-pin-timeout-check"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$HOME" PATH="$stub_dir" PIGGY_ASKPASS_TIMEOUT=7 \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  assert_success
+  assert_output "stubbed-pin-timeout-check"
+  [[ -f "$argv_log" ]] || {
+    echo "expected argv log at $argv_log, missing"
+    return 1
+  }
+  grep -qx -- "--timeout=7" "$argv_log" || {
+    echo "expected --timeout=7 in zenity argv; got:"
+    cat "$argv_log"
+    return 1
+  }
+}
+
+@test "zenity_timeout_defaults_to_30_when_env_var_unset" {
+  # Pin the default value advertised in the header comment. If the
+  # default changes, this test must be updated in lockstep with the
+  # comment — they're the contract.
+  unset PIGGY_ASKPASS_DRY_RUN
+  unset PIGGY_ASKPASS_TIMEOUT
+
+  local stub_dir python3_path argv_log
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-default.XXXXXX")"
+  argv_log="$stub_dir/argv.log"
+  for tool in bash ps tr; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  cat >"$stub_dir/zenity" <<STUB_EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >"$argv_log"
+echo "stubbed-pin-default-timeout"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$HOME" PATH="$stub_dir" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  assert_success
+  grep -qx -- "--timeout=30" "$argv_log" || {
+    echo "expected default --timeout=30 in zenity argv; got:"
+    cat "$argv_log"
+    return 1
+  }
+}
+
+@test "notifier_invoked_before_zenity_when_PIGGY_ASKPASS_NOTIFIER_set" {
+  # piggy#103: when a notifier is configured, it must fire BEFORE
+  # zenity opens so the user sees a heads-up even if the zenity window
+  # is hidden or off-screen. The notifier is fired detached so a
+  # hanging notifier cannot block the prompt — this test verifies the
+  # fork-and-detach also reliably DOES run the notifier (i.e. the
+  # detach isn't so eager that it loses the invocation).
+  #
+  # The notifier writes a sentinel file from a subshell. Because it's
+  # detached, the file may appear AFTER the askpass exits; the test
+  # polls briefly to absorb that race.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path notifier_log argv_log
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-notify.XXXXXX")"
+  notifier_log="$stub_dir/notifier.log"
+  argv_log="$stub_dir/argv.log"
+  for tool in bash ps tr; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  cat >"$stub_dir/zenity" <<STUB_EOF
+#!/usr/bin/env bash
+printf 'zenity\n' >"$argv_log"
+echo "stubbed-pin-notify"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  cat >"$stub_dir/notifier" <<STUB_EOF
+#!/usr/bin/env bash
+printf 'title=%s\nbody=%s\n' "\${1:-}" "\${2:-}" >"$notifier_log"
+STUB_EOF
+  chmod +x "$stub_dir/notifier"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$HOME" PATH="$stub_dir" \
+    PIGGY_ASKPASS_NOTIFIER="$stub_dir/notifier" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN for token 9D5C" </dev/null
+
+  assert_success
+  assert_output "stubbed-pin-notify"
+
+  # Poll up to 2s for the detached notifier to land its sentinel.
+  local waited=0
+  while [[ ! -s "$notifier_log" && "$waited" -lt 20 ]]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  [[ -s "$notifier_log" ]] || {
+    echo "notifier never wrote sentinel within 2s"
+    ls -la "$stub_dir"
+    return 1
+  }
+  grep -q '^title=piggy-agent: PIN required' "$notifier_log" || {
+    echo "notifier title mismatch; got:"
+    cat "$notifier_log"
+    return 1
+  }
+  grep -q 'Enter PIV PIN for token 9D5C' "$notifier_log" || {
+    echo "notifier body missing prompt text; got:"
+    cat "$notifier_log"
+    return 1
+  }
+}
+
+@test "ssh_notify_send_env_var_used_when_PIGGY_ASKPASS_NOTIFIER_unset" {
+  # The fallback chain: $PIGGY_ASKPASS_NOTIFIER > $SSH_NOTIFY_SEND >
+  # terminal-notifier/notify-send on PATH. piggy-agent's nix module
+  # already exports SSH_NOTIFY_SEND when services.piggy-agent.notifySend
+  # is configured (see nix/hm/piggy-agent.nix), so honoring it here
+  # means no extra config is needed when the module is in use.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path notifier_log
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-ssh-notify.XXXXXX")"
+  notifier_log="$stub_dir/notifier.log"
+  for tool in bash ps tr; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  cat >"$stub_dir/zenity" <<'STUB_EOF'
+#!/usr/bin/env bash
+echo "stubbed-pin-ssh-notify"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  cat >"$stub_dir/notifier-from-ssh" <<STUB_EOF
+#!/usr/bin/env bash
+printf 'from-ssh-notify-send\n' >"$notifier_log"
+STUB_EOF
+  chmod +x "$stub_dir/notifier-from-ssh"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$HOME" PATH="$stub_dir" \
+    SSH_NOTIFY_SEND="$stub_dir/notifier-from-ssh" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  assert_success
+
+  local waited=0
+  while [[ ! -s "$notifier_log" && "$waited" -lt 20 ]]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  [[ -s "$notifier_log" ]] || {
+    echo "SSH_NOTIFY_SEND-resolved notifier never fired"
+    return 1
+  }
+  grep -q 'from-ssh-notify-send' "$notifier_log" || {
+    echo "wrong notifier ran; expected SSH_NOTIFY_SEND. got:"
+    cat "$notifier_log"
+    return 1
+  }
+}
+
+@test "missing_notifier_does_not_block_or_fail_prompt" {
+  # When no notifier is reachable (no env var, no terminal-notifier /
+  # notify-send on PATH), the script must silently skip the heads-up
+  # and proceed straight to zenity. The script's hard deps stay
+  # zenity + coreutils — adding a soft notifier must not break the
+  # contract that the script works in a minimal stub env.
+  unset PIGGY_ASKPASS_DRY_RUN
+  unset PIGGY_ASKPASS_NOTIFIER
+  unset SSH_NOTIFY_SEND
+
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-no-notifier.XXXXXX")"
+  for tool in bash ps tr; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  # Deliberately omit terminal-notifier and notify-send so resolve_notifier
+  # falls through all paths.
+  cat >"$stub_dir/zenity" <<'STUB_EOF'
+#!/usr/bin/env bash
+echo "stubbed-pin-no-notifier"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$HOME" PATH="$stub_dir" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  assert_success
+  assert_output "stubbed-pin-no-notifier"
+}

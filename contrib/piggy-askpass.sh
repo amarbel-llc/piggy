@@ -38,11 +38,38 @@
 # See piggy#33 for the design discussion. To smoke-test without
 # entering a PIN, set PIGGY_ASKPASS_DRY_RUN=1 — the script will emit
 # the rendered context to stderr and exit 0 without reading.
+#
+# Env vars consumed by the zenity render target (piggy#103):
+#
+#   PIGGY_ASKPASS_TIMEOUT   Seconds before zenity self-cancels.
+#                           Default 30. Bounds head-of-line blocking
+#                           when a zenity window appears off-screen
+#                           or the user is AFK. On timeout zenity
+#                           exits non-zero (5), which propagates as
+#                           auth-denied — the request that triggered
+#                           the prompt fails, but the agent's poll
+#                           loop is freed within the deadline.
+#
+#   PIGGY_ASKPASS_NOTIFIER  Path to a `notify-send`-style dispatcher
+#                           (argv: title, message). When set, fired
+#                           detached just before zenity opens so the
+#                           user sees a heads-up even if zenity
+#                           itself is hidden / off-screen / on a
+#                           different display. Falls back to
+#                           $SSH_NOTIFY_SEND (the same env-var
+#                           piggy-agent's nix module already plumbs),
+#                           then `terminal-notifier` (darwin) /
+#                           `notify-send` (linux) on PATH. Best-
+#                           effort: skipped silently when no
+#                           dispatcher is reachable. Detached so a
+#                           hanging notifier cannot wedge the
+#                           prompt.
 
 set -euo pipefail
 
 prompt="${1:-<no prompt supplied>}"
 context="${PIGGY_ASKPASS_CONTEXT:-}"
+zenity_timeout="${PIGGY_ASKPASS_TIMEOUT:-30}"
 
 # Parent-process info. ps is universal on Linux + Darwin and avoids
 # the /proc-vs-no-/proc split. Tolerate ps failing (chrooted, etc).
@@ -105,6 +132,46 @@ if [[ -e /dev/tty ]] && (: >/dev/tty) 2>/dev/null; then
   exit 0
 fi
 
+# Resolve a heads-up notifier (piggy#103). Priority order:
+#   1. $PIGGY_ASKPASS_NOTIFIER (explicit caller override)
+#   2. $SSH_NOTIFY_SEND        (set by piggy-agent's nix module)
+#   3. terminal-notifier       (darwin nix-pkg)
+#   4. notify-send             (linux libnotify)
+# Empty result = silent skip. The dispatcher is invoked detached
+# (subshell + background) so a hanging notify implementation cannot
+# block the zenity prompt or wedge the agent further.
+resolve_notifier() {
+  if [[ -n "${PIGGY_ASKPASS_NOTIFIER:-}" ]]; then
+    printf '%s\n' "$PIGGY_ASKPASS_NOTIFIER"
+    return 0
+  fi
+  if [[ -n "${SSH_NOTIFY_SEND:-}" ]]; then
+    printf '%s\n' "$SSH_NOTIFY_SEND"
+    return 0
+  fi
+  local cand
+  for cand in terminal-notifier notify-send; do
+    if command -v "$cand" >/dev/null 2>&1; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fire_heads_up() {
+  local notifier title body
+  notifier="$(resolve_notifier)" || return 0
+  title="piggy-agent: PIN required"
+  body="${prompt} (${parent_comm} PID ${parent_pid})"
+  # Detached: subshell with backgrounded invocation. stderr/stdout
+  # silenced so a broken notifier cannot pollute pivy-agent's logs.
+  # The outer subshell exits immediately; the inner process is
+  # adopted by init / launchd and runs to completion or death on
+  # its own.
+  ( "$notifier" "$title" "$body" >/dev/null 2>&1 & ) >/dev/null 2>&1 || true
+}
+
 # Render target 2: zenity. We don't gate on $DISPLAY/$WAYLAND_DISPLAY —
 # macOS zenity reaches the Aqua session without either var being set,
 # and launchd-spawned agents (pivy-agent) reach this script with a
@@ -114,9 +181,18 @@ fi
 # to fail with a clear nonzero exit if there's truly no GUI to talk to.
 if command -v zenity >/dev/null 2>&1; then
   body="$(render_context)"
+  # Heads-up: fire BEFORE zenity opens. When the zenity window is
+  # hidden / off-screen / on a non-focused display this is the only
+  # in-band signal the user gets that the agent is waiting.
+  fire_heads_up
   # zenity --entry --hide-text reads a single line of obscured input
-  # and writes it to stdout; non-zero exit on cancel.
-  pin="$(zenity --entry --hide-text --title="piggy PIV PIN" --text="$body" 2>/dev/null)" || exit $?
+  # and writes it to stdout; non-zero exit on cancel. --timeout
+  # bounds the wait: zenity self-cancels with exit 5 after
+  # $zenity_timeout seconds, which propagates here as a normal
+  # auth-denied — the agent's poll loop is freed even if the user
+  # never saw the window. See piggy#103 and companion piggy#104 for
+  # the agent-side backstop.
+  pin="$(zenity --timeout="$zenity_timeout" --entry --hide-text --title="piggy PIV PIN" --text="$body" 2>/dev/null)" || exit $?
   printf '%s\n' "$pin"
   exit 0
 fi
