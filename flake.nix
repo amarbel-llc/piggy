@@ -322,6 +322,13 @@
           piggy = piggy;
           piggy-rs = piggy-rs;
           piggy-agent-conformance = piggy-agent-conformance;
+          # The C pivy stack (pivy-agent / pivy-tool / pivy-box etc.).
+          # Exposed so the hardware bats lane can `nix build .#pivy`
+          # to get a freshly-built pivy-agent under
+          # `result/bin/pivy-agent`. See
+          # zz-tests_bats/conformance/pivy_agent_hardware.bats and
+          # the test-bats-conformance-pivy-agent-hardware just recipe.
+          pivy = pivyPkg;
         }
         // batsLib.batsLaneOutputs
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {

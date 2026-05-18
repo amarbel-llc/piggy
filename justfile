@@ -135,6 +135,35 @@ test-bats-conformance-recipients-add-attached: build-rust
       BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding --tap \
       zz-tests_bats/conformance/piggy_recipients_add_attached.bats
 
+# Hardware lane for the C pivy-agent built from vendor/pivy/. Runs
+# pivy_agent_hardware.bats against the user's plugged-in PIV card.
+# Read-only PIN-free operations (REQUEST_IDENTITIES). Verifies the
+# piggy#107 (piggy#105 step 3) state-machine plumbing doesn't break
+# the simple identity-listing case. Opt-in — not part of the default
+# `just test` lane. Requires a real card plugged in.
+[group('test')]
+test-bats-conformance-pivy-agent-hardware: build-rust
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Build the C pivy-agent binary (and its wrapper) on demand and
+    # resolve its store path without creating a `./result-pivy`
+    # symlink in the worktree. The package is exposed as
+    # `pivy` (see flake.nix); nix caches aggressively so repeat
+    # invocations are free.
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    # PIGGY_TEST_REAL_CARD gates the entire lane (see the bats
+    # setup()). PIGGY_TEST_FIB_PIN is DELIBERATELY NOT set — these
+    # tests assert no PIN prompt occurs, so the askpass helper must
+    # refuse rather than supply a PIN.
+    PIVY_AGENT="$pivy_out/bin/pivy-agent" \
+      PIGGY_TEST_REAL_CARD=1 \
+      SSH_ASKPASS="$askpass" \
+      SSH_ASKPASS_REQUIRE=force \
+      DISPLAY="" \
+      BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/pivy_agent_hardware.bats
+
 test-bats-file *FILES: build-rust
     BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
 
