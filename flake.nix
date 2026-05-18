@@ -57,9 +57,30 @@
         # overlay; ./bats.nix imports it from here. Keeping the overlay
         # in scope for every consumer of `pkgs` so the rest of the
         # flake doesn't need to special-case the lane builder import.
+        #
+        # The second overlay strips a malformed " none required" token
+        # from libfyaml's pkg-config Libs: line on darwin, which leaks
+        # into appstream's link command as literal filename arguments
+        # and breaks the build of zenity → libadwaita → appstream's
+        # transitive consumers. Tracked at NixOS/nixpkgs#514566; fix
+        # ported from NixOS/nixpkgs#513484. Drop once that PR merges
+        # and is pulled into amarbel-llc/nixpkgs.
+        libfyamlFix =
+          final: prev:
+          prev.lib.optionalAttrs prev.stdenv.hostPlatform.isDarwin {
+            libfyaml = prev.libfyaml.overrideAttrs (old: {
+              postInstall = (old.postInstall or "") + ''
+                substituteInPlace "$dev/lib/pkgconfig/libfyaml.pc" \
+                  --replace-fail " none required" ""
+              '';
+            });
+          };
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ nixpkgs.overlays.default ];
+          overlays = [
+            nixpkgs.overlays.default
+            libfyamlFix
+          ];
         };
         pkgs-master = import nixpkgs-master { inherit system; };
 
