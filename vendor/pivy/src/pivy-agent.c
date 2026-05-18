@@ -264,6 +264,23 @@ typedef struct socket_entry {
 u_int sockets_alloc = 0;
 socket_entry_t *sockets = NULL;
 
+/*
+ * Which client connection currently "owns" the card transaction —
+ * meaning the request handler is mid-flight and may still need the
+ * txn (e.g. it's about to call piv_sign after a pending PIN prompt).
+ * NULL when no client is mid-flight; the txn may still be batched-
+ * open (txnopen == B_TRUE) without an owner if a prior handler left
+ * it open for the 2s txntimeout window.
+ *
+ * Used by process_request_identities to skip its card-touching
+ * refresh path when another socket is mid-flight, so REQUEST_IDENTITIES
+ * probes (notably from ssh-agent-mux) don't queue behind an in-flight
+ * sign / decrypt. Part of the piggy#105 async-restructure series;
+ * this socknum-tracking is the cheap REQUEST_IDENTITIES-bypass step
+ * (corresponds to #104 ask 1).
+ */
+static socket_entry_t *txn_owner = NULL;
+
 pid_entry_t *pids = NULL;
 uint pids_alloc = 0;
 
@@ -404,6 +421,17 @@ static void agent_piv_close(boolean_t force) {
                BNY_UINT64, txntimeout, NULL);
     piv_txn_end(selk);
     txnopen = B_FALSE;
+    /*
+     * Clear the txn owner only when the txn ACTUALLY closes (#105
+     * step 1). When agent_piv_close(B_FALSE) is called during the
+     * 2s batching window the txn stays open and ownership is
+     * preserved — this matters because try_askpass internally
+     * calls agent_piv_open/close around piv_verify_pin while the
+     * outer handler (sign / ECDH / rebox / prehash) still owns the
+     * txn. Clearing eagerly here would orphan the outer handler's
+     * txn from REQUEST_IDENTITIES bypass's perspective.
+     */
+    txn_owner = NULL;
   }
 }
 
@@ -926,15 +954,107 @@ static unsigned askpass_deadline_secs(void) {
   return PIVY_ASKPASS_DEFAULT_DEADLINE_S;
 }
 
-static void try_askpass(void) {
-  int p[2], status;
+/*
+ * Prompt-helper unification (piggy#105 step 2). try_askpass and
+ * try_confirm_client both fork a helper process, pipe its stdout
+ * back, wait for it (bounded since #104), and post-process the
+ * result. The fork/pipe/read/reap skeleton is identical; what
+ * differs is (a) the argv assembled before exec and (b) the
+ * post-reap interpretation. run_prompt_child centralises the
+ * skeleton.
+ *
+ * Output buffer is written up to bufmax-1 bytes, NUL-terminated.
+ * Returns the waited-on pid on success (status filled in), or -1 on
+ * any failure (pipe, fork, exec, deadline) — callers should treat
+ * -1 as auth-denied or askpass-failed per the original semantics.
+ *
+ * Reads ARE INTERLEAVED with the wait: drain the pipe until EOF, then
+ * waitpid_with_deadline. This eliminates the pre-existing PIPE_BUF
+ * deadlock risk in the old try_confirm_client (which did waitpid
+ * first and could hang if the confirm child wrote more than PIPE_BUF
+ * before exiting).
+ *
+ * exec_child is invoked in the forked child after stdin/stdout fixup
+ * — it MUST execlp() and not return; on exec failure it should exit
+ * nonzero. The void *ctx is passed through for caller-specific argv.
+ */
+typedef void (*prompt_exec_fn)(void *ctx);
+
+static pid_t run_prompt_child(prompt_exec_fn exec_child, void *ctx,
+                              boolean_t close_stdin, char *buf, size_t bufmax,
+                              size_t *out_len, int *out_status) {
+  int p[2];
   pid_t kid, ret;
+  size_t len = 0;
+
+  *out_len = 0;
+  *out_status = 0;
+
+  if (pipe(p) == -1)
+    return -1;
+  if ((kid = fork()) == -1) {
+    close(p[0]);
+    close(p[1]);
+    return -1;
+  }
+  if (kid == 0) {
+    if (close_stdin)
+      close(STDIN_FILENO);
+    close(p[0]);
+    if (dup2(p[1], STDOUT_FILENO) == -1)
+      exit(1);
+    exec_child(ctx);
+    /* exec_child must not return; if it does, fail. */
+    exit(1);
+  }
+  close(p[1]);
+
+  /*
+   * Interleave the read with the child's lifetime. Drain until EOF
+   * so we never block on a full PIPE_BUF after waitpid (the old
+   * try_confirm_client bug).
+   */
+  do {
+    ssize_t r = read(p[0], buf + len, bufmax - 1 - len);
+    if (r == -1 && errno == EINTR)
+      continue;
+    if (r <= 0)
+      break;
+    len += r;
+  } while (bufmax - 1 - len > 0);
+  buf[len] = '\0';
+  *out_len = len;
+
+  close(p[0]);
+  /* piggy#104: bounded wait. On deadline the child is force-killed
+   * and ret returns -1, telling the caller this was an effective
+   * auth-denied / askpass-failed. The agent's poll loop is freed
+   * within the deadline. */
+  ret = waitpid_with_deadline(kid, out_status, askpass_deadline_secs());
+  return ret;
+}
+
+struct askpass_ctx {
+  const char *askpass_path;
+  const char *prompt;
+};
+
+static void askpass_exec(void *vctx) {
+  struct askpass_ctx *c = vctx;
+  execlp(c->askpass_path, c->askpass_path, c->prompt, (char *)NULL);
+}
+
+static void try_askpass(void) {
+  int status;
+  pid_t ret;
   size_t len;
   errf_t *err;
   uint retries = 1;
   char prompt[64], buf[1024];
   char *guid = piv_token_shortid(selk);
   enum piv_pin auth = piv_token_default_auth(selk);
+  struct askpass_ctx ctx;
+
   snprintf(prompt, 64, "Enter %s for token %s", pin_type_to_name(auth), guid);
 
   if (askpass == NULL)
@@ -942,36 +1062,16 @@ static void try_askpass(void) {
   if (askpass == NULL)
     return;
 
-  if (pipe(p) == -1)
-    return;
-  if ((kid = fork()) == -1)
-    return;
-  if (kid == 0) {
-    close(p[0]);
-    if (dup2(p[1], STDOUT_FILENO) == -1)
-      exit(1);
-    execlp(askpass, askpass, prompt, (char *)NULL);
-    exit(1);
-  }
-  close(p[1]);
-
-  len = 0;
-  do {
-    ssize_t r = read(p[0], buf + len, sizeof(buf) - 1 - len);
-
-    if (r == -1 && errno == EINTR)
-      continue;
-    if (r <= 0)
-      break;
-    len += r;
-  } while (sizeof(buf) - 1 - len > 0);
-  buf[len] = '\0';
-
-  close(p[0]);
-  /* piggy#104: bounded wait. On deadline the child is force-killed
-   * and ret returns -1, falling through to the existing failure
-   * path. The agent's poll loop is freed within `secs`. */
-  ret = waitpid_with_deadline(kid, &status, askpass_deadline_secs());
+  ctx.askpass_path = askpass;
+  ctx.prompt = prompt;
+  /*
+   * try_askpass keeps stdin open (B_FALSE) — historical behavior;
+   * try_confirm_client closes stdin because confirm children don't
+   * read from it. Not a load-bearing difference for any in-tree
+   * askpass, but preserve it to minimize behavior change in step 2.
+   */
+  ret = run_prompt_child(askpass_exec, &ctx, B_FALSE, buf, sizeof(buf), &len,
+                         &status);
   if (ret == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
     explicit_bzero(buf, sizeof(buf));
     bunyan_log(BNY_WARN, "executing askpass failed", "exit_status", BNY_UINT,
@@ -1049,15 +1149,41 @@ static void send_touch_notify(socket_entry_t *e, enum piv_slotid slotid) {
   }
 }
 
+struct confirm_ctx {
+  const char *prog;          /* askpass or confirm binary path */
+  const char *prompt;
+  boolean_t use_zenity_argv; /* "--question --ok-label=... prompt" */
+  boolean_t use_notify_argv; /* "--app-name=pivy-agent ... prompt" */
+};
+
+static void confirm_exec(void *vctx) {
+  struct confirm_ctx *c = vctx;
+  if (c->use_zenity_argv) {
+    execlp(c->prog, c->prog, "--question", "--ok-label=Allow",
+           "--cancel-label=Block", "--width=300", "--title=pivy-agent",
+           "--icon-name=application-certificate-symbolic", c->prompt,
+           (char *)NULL);
+  } else if (c->use_notify_argv) {
+    execlp(c->prog, c->prog, "--app-name=pivy-agent", "--icon=user-info",
+           "--urgency=critical", "--expire-time=0", "--wait",
+           "--action=allow=Allow", "--action=deny=Deny",
+           "pivy-agent confirmation", c->prompt, (char *)NULL);
+  } else {
+    setenv("SSH_ASKPASS_PROMPT", "confirm", 1);
+    execlp(c->prog, c->prog, c->prompt, (char *)NULL);
+  }
+  exit(128);
+}
+
 static void try_confirm_client(socket_entry_t *e, enum piv_slotid slotid) {
   int status;
-  pid_t kid, ret;
+  pid_t ret;
   boolean_t add_zenity_args = B_FALSE;
   boolean_t add_notify_send_args = B_FALSE;
   char prompt[1024], buf[64];
   size_t len;
   char *guid;
-  int p[2];
+  struct confirm_ctx ctx;
 
   if (confirm_mode == C_NEVER) {
     e->se_authz = AUTHZ_ALLOWED;
@@ -1144,62 +1270,30 @@ static void try_confirm_client(socket_entry_t *e, enum piv_slotid slotid) {
   free(guid);
   guid = NULL;
 
-  if (pipe(p) == -1)
-    return;
-  if ((kid = fork()) == -1)
-    return;
-  if (kid == 0) {
-    close(STDOUT_FILENO);
-    close(STDIN_FILENO);
-    close(p[0]);
-    if (dup2(p[1], STDOUT_FILENO) == -1)
-      exit(1);
-    if (confirm && add_zenity_args) {
-      execlp(confirm, confirm, "--question", "--ok-label=Allow",
-             "--cancel-label=Block", "--width=300", "--title=pivy-agent",
-             "--icon-name=application-certificate-symbolic", prompt,
-             (char *)NULL);
-    } else if (confirm && add_notify_send_args) {
-      execlp(confirm, confirm, "--app-name=pivy-agent", "--icon=user-info",
-             "--urgency=critical", "--expire-time=0", "--wait",
-             "--action=allow=Allow", "--action=deny=Deny",
-             "pivy-agent confirmation", prompt, (char *)NULL);
-    } else if (confirm) {
-      execlp(confirm, confirm, prompt, (char *)NULL);
-    } else {
-      setenv("SSH_ASKPASS_PROMPT", "confirm", 1);
-      execlp(askpass, askpass, prompt, (char *)NULL);
-    }
-    exit(128);
-  }
-  close(p[1]);
-  /* piggy#104: bounded wait. Confirm prompts share the same head-
-   * of-line-blocking failure mode as askpass — an off-screen zenity
-   * confirm dialog freezes every other client request including
-   * REQUEST_IDENTITIES from a mux upstream. Backstop with the same
-   * deadline so the poll loop is unblocked even if the user never
-   * answers. */
-  ret = waitpid_with_deadline(kid, &status, askpass_deadline_secs());
+  ctx.prog = confirm ? confirm : askpass;
+  ctx.prompt = prompt;
+  ctx.use_zenity_argv = confirm && add_zenity_args;
+  ctx.use_notify_argv = confirm && add_notify_send_args;
+
+  /*
+   * Confirm children don't read stdin (B_TRUE for close_stdin),
+   * matching the historical try_confirm_client behavior.
+   *
+   * piggy#105 step 2: this also fixes the pre-existing PIPE_BUF
+   * deadlock from the old code path — read was done AFTER waitpid,
+   * which could hang if the confirm child wrote more than PIPE_BUF
+   * (typically 4KB-64KB) before exiting. run_prompt_child
+   * interleaves read with reap so an unboundedly chatty confirm
+   * child can no longer deadlock.
+   */
+  ret = run_prompt_child(confirm_exec, &ctx, B_TRUE, buf, sizeof(buf), &len,
+                         &status);
   if (ret == -1 || !WIFEXITED(status) ||
       (WEXITSTATUS(status) != 0 && WEXITSTATUS(status) != 1)) {
     bunyan_log(BNY_WARN, "executing confirm failed", "exit_status", BNY_UINT,
                (uint)WEXITSTATUS(status), NULL);
     return;
   }
-
-  len = 0;
-  do {
-    ssize_t r = read(p[0], buf + len, sizeof(buf) - 1 - len);
-
-    if (r == -1 && errno == EINTR)
-      continue;
-    if (r <= 0)
-      break;
-    len += r;
-  } while (sizeof(buf) - 1 - len > 0);
-  buf[len] = '\0';
-
-  close(p[0]);
 
   if (WEXITSTATUS(status) == 0 &&
       (!add_notify_send_args || strcmp(buf, "allow\n") == 0)) {
@@ -1519,21 +1613,39 @@ static errf_t *process_request_identities(socket_entry_t *e) {
       }
     }
   } else {
-    if ((err = agent_piv_open()))
-      goto out;
-
-    now = monotime();
-    if ((now - last_update) >= card_probe_interval * 1000) {
-      last_update = now;
-      err = piv_read_all_certs(selk);
-      errf_free(err);
-      if (cak != NULL && (err = auth_cak())) {
-        agent_piv_close(B_TRUE);
-        drop_pin();
+    /*
+     * piggy#105 step 1: REQUEST_IDENTITIES bypass. When another
+     * socket is mid-flight (typically blocked on an askpass/confirm
+     * prompt), don't queue behind its txn — serve from cached selk
+     * slot state directly. The idle probe_card refreshes the cache
+     * on its own schedule, so skipping the periodic refresh here
+     * during a contended moment doesn't degrade correctness.
+     *
+     * Requires selk != NULL (cached state exists). On a cold start
+     * with no card yet detected, fall through to the normal path
+     * which will perform detection.
+     */
+    if (txn_owner != NULL && txn_owner != e && selk != NULL) {
+      bunyan_log(BNY_DEBUG,
+                 "REQUEST_IDENTITIES bypassing card refresh: txn busy",
+                 NULL);
+    } else {
+      if ((err = agent_piv_open()))
         goto out;
+
+      now = monotime();
+      if ((now - last_update) >= card_probe_interval * 1000) {
+        last_update = now;
+        err = piv_read_all_certs(selk);
+        errf_free(err);
+        if (cak != NULL && (err = auth_cak())) {
+          agent_piv_close(B_TRUE);
+          drop_pin();
+          goto out;
+        }
       }
+      agent_piv_close(B_FALSE);
     }
-    agent_piv_close(B_FALSE);
 
     n = 0;
     while ((slot = piv_slot_next(selk, slot)) != NULL) {
@@ -1614,6 +1726,13 @@ static errf_t *process_sign_request2(socket_entry_t *e) {
       goto out;
     }
   }
+  /*
+   * piggy#105 step 1: claim txn ownership across the upcoming
+   * confirm + askpass + sign work. process_request_identities on a
+   * different socket will see txn_owner != self and serve from cache
+   * rather than queueing behind our txn. Cleared by agent_piv_close.
+   */
+  txn_owner = e;
   bunyan_add_vars(msg_log_frame, "slotid", BNY_UINT, (uint)piv_slot_id(slot),
                   NULL);
 
@@ -1783,6 +1902,11 @@ static errf_t *process_ext_ecdh(socket_entry_t *e, struct sshbuf *buf) {
       goto out;
     }
   }
+  /*
+   * piggy#105 step 1: claim txn ownership across the upcoming
+   * confirm + askpass + ECDH work. (See process_sign_request2.)
+   */
+  txn_owner = e;
   bunyan_add_vars(msg_log_frame, "slotid", BNY_UINT, (uint)piv_slot_id(slot),
                   NULL);
 
@@ -1932,6 +2056,11 @@ static errf_t *process_ext_rebox(socket_entry_t *e, struct sshbuf *buf) {
     if ((err = agent_piv_open()))
       goto out;
   }
+  /*
+   * piggy#105 step 1: claim txn ownership across the upcoming
+   * askpass + box_open work. (See process_sign_request2.)
+   */
+  txn_owner = e;
 pin_again:
   if ((err = agent_piv_try_pin(canskip))) {
     agent_piv_close(B_TRUE);
@@ -2108,6 +2237,12 @@ static errf_t *process_ext_prehash(socket_entry_t *e, struct sshbuf *inbuf) {
       goto out;
     }
   }
+  /*
+   * piggy#105 step 1: claim txn ownership across the upcoming
+   * confirm + askpass + prehash-sign work. (See process_sign_request2
+   * for the cross-handler rationale.)
+   */
+  txn_owner = e;
   bunyan_add_vars(msg_log_frame, "slotid", BNY_UINT, (uint)piv_slot_id(slot),
                   NULL);
 
