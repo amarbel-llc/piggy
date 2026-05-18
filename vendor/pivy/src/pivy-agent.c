@@ -231,6 +231,137 @@ typedef enum sessbind {
   SESSBIND_FWD
 } sessbind_t;
 
+/*
+ * piggy#105 step 3: per-socket state machine plumbing.
+ *
+ * Each socket carries an se_state that indicates whether a request
+ * handler is "active" (running on the dispatch stack) or "awaiting"
+ * the result of a forked prompt child (askpass / confirm). In step 3
+ * the prompt I/O remains synchronous — the AWAITING_PROMPT state is
+ * unreachable from a different stack frame because run_prompt_child
+ * is invoked inline by start_prompt. The plumbing is in place so
+ * steps 4 + 5 can swap "synchronously run + reap" for "register the
+ * wait_fd in prepare_poll, return to the poll loop, dispatch the
+ * resume from after_poll" without touching the handler bodies.
+ */
+enum se_state {
+  SE_ACTIVE = 0,      /* default; no yield in flight */
+  SE_AWAITING_PROMPT, /* mid-yield on askpass or confirm */
+  /* SE_AWAITING_CARD_TXN added in piggy#105 step 6 (not used here). */
+};
+
+enum prompt_kind {
+  PROMPT_ASKPASS,
+  PROMPT_CONFIRM,
+};
+
+/*
+ * Each handler that can yield is broken into a pre-yield body plus
+ * one resume_* function per yield point. The continuation tag tells
+ * after_prompt_reap which resume_* to dispatch.
+ */
+enum continuation {
+  CONT_NONE = 0,
+  /* sign */
+  CONT_SIGN_AFTER_CONFIRM,
+  CONT_SIGN_AFTER_PIN,
+  CONT_SIGN_AFTER_PIN_RETRY,
+  /* ECDH */
+  CONT_ECDH_AFTER_CONFIRM,
+  CONT_ECDH_AFTER_PIN,
+  CONT_ECDH_AFTER_PIN_RETRY,
+  /* rebox (confirm yields BEFORE opening the txn — AFTER_CONFIRM's
+   * resume does parse-box + find-token + open-txn before going on
+   * to PIN handling). */
+  CONT_REBOX_AFTER_CONFIRM,
+  CONT_REBOX_AFTER_PIN,
+  CONT_REBOX_AFTER_PIN_RETRY,
+  /* prehash */
+  CONT_PREHASH_AFTER_CONFIRM,
+  CONT_PREHASH_AFTER_PIN,
+  CONT_PREHASH_AFTER_PIN_RETRY,
+};
+
+/*
+ * Per-handler saved-locals structs. The resume_* functions read
+ * their inputs from one of these (selected via the union below
+ * by the continuation tag). All malloc'd pointers in these structs
+ * must be freed by free_continuation_locals when the request
+ * completes or the connection closes mid-yield.
+ *
+ * Gotcha 1 from piggy#105 step 3: payloads that arrive as
+ * sshbuf_get_string_direct pointers into se_request must be deep-
+ * copied into the *_copy fields because se_request can be reused on
+ * the next message. data_copy is the explicit owned buffer for those.
+ */
+struct sign_cont_locals {
+  struct sshkey *key;
+  struct sshbuf *msg; /* output buffer being built */
+  u_char *data_copy;  /* malloc'd copy of the SIGN payload */
+  size_t dlen;
+  u_int flags;
+  struct piv_slot *slot;
+  struct piv_token *tk;
+  boolean_t canskip;
+};
+
+struct ecdh_cont_locals {
+  struct sshkey *key;
+  struct sshkey *partner;
+  struct sshbuf *msg;
+  struct piv_slot *slot;
+  struct piv_token *tk;
+  boolean_t canskip;
+};
+
+struct rebox_cont_locals {
+  struct sshbuf *msg;
+  struct sshbuf *boxbuf;
+  struct sshbuf *guidb;
+  struct sshkey *partner;
+  uint8_t slotid;
+  u_int flags;
+  /* Filled in by resume_rebox_after_confirm, used by AFTER_PIN: */
+  struct piv_ecdh_box *box;
+  struct piv_slot *slot;
+  struct piv_token *tk;
+  boolean_t canskip;
+};
+
+struct prehash_cont_locals {
+  struct sshkey *key;
+  struct sshbuf *msg;
+  u_char *data_copy;
+  size_t dlen;
+  u_int flags;
+  struct piv_slot *slot;
+  struct piv_token *tk;
+  boolean_t canskip;
+};
+
+struct request_continuation {
+  enum continuation tag;
+  union {
+    struct sign_cont_locals sign;
+    struct ecdh_cont_locals ecdh;
+    struct rebox_cont_locals rebox;
+    struct prehash_cont_locals prehash;
+  } u;
+};
+
+/*
+ * Out-of-band state for an in-flight prompt child. The pid /
+ * wait_fd / pipe_fd / deadline fields are reserved for piggy#105
+ * step 5's poll-loop yield — in step 3 they remain unused.
+ */
+struct prompt_state {
+  enum prompt_kind kind;
+  pid_t pid;
+  int wait_fd;
+  int pipe_fd;
+  uint64_t deadline;
+};
+
 typedef struct pid_entry {
   boolean_t pe_valid;
   uint64_t pe_time;
@@ -259,6 +390,11 @@ typedef struct socket_entry {
   zoneid_t se_zid;
   char se_zname[128];
 #endif
+  /* piggy#105 step 3 state-machine fields */
+  enum se_state se_state;
+  struct prompt_state se_prompt;
+  struct request_continuation se_cont;
+  struct bunyan_frame *se_log_frame;
 } socket_entry_t;
 
 u_int sockets_alloc = 0;
@@ -1044,7 +1180,15 @@ static void askpass_exec(void *vctx) {
   execlp(c->askpass_path, c->askpass_path, c->prompt, (char *)NULL);
 }
 
-static void try_askpass(void) {
+/*
+ * NOTE: try_askpass is unreachable after piggy#105 step 3 — its body
+ * was duplicated into start_prompt's PROMPT_ASKPASS branch. Kept in
+ * place (with __attribute__((unused))) for diffability against
+ * pre-step-3 versions; physically removed in piggy#107 follow-up
+ * (tracked separately) when start_prompt becomes its canonical home
+ * in step 5.
+ */
+__attribute__((unused)) static void try_askpass(void) {
   int status;
   pid_t ret;
   size_t len;
@@ -1175,7 +1319,14 @@ static void confirm_exec(void *vctx) {
   exit(128);
 }
 
-static void try_confirm_client(socket_entry_t *e, enum piv_slotid slotid) {
+/*
+ * NOTE: try_confirm_client is unreachable after piggy#105 step 3 —
+ * its body was duplicated into start_prompt's PROMPT_CONFIRM branch.
+ * Kept in place (with __attribute__((unused))) for diffability;
+ * removed in piggy#107 follow-up.
+ */
+__attribute__((unused)) static void
+try_confirm_client(socket_entry_t *e, enum piv_slotid slotid) {
   int status;
   pid_t ret;
   boolean_t add_zenity_args = B_FALSE;
@@ -1307,8 +1458,19 @@ static void try_confirm_client(socket_entry_t *e, enum piv_slotid slotid) {
 static errf_t *agent_piv_try_pin(boolean_t canskip) {
   errf_t *err = NULL;
   uint retries = 1;
-  if (pin_len == 0 && !canskip)
-    try_askpass();
+  /*
+   * piggy#105 step 3: removed the in-line try_askpass() that
+   * historically lived here (`if (pin_len == 0 && !canskip)
+   * try_askpass();`). In the current handler structure the call
+   * was unreachable — handlers always call agent_piv_try_pin with
+   * canskip=B_TRUE on the first iteration (PIN not yet needed),
+   * and by the time they loop back with canskip=B_FALSE the PIN
+   * has already been collected by the handler's explicit
+   * try_askpass() at its retry site. The async-prompt restructure
+   * (steps F-I) replaces those retry-site try_askpass() calls with
+   * start_prompt(PROMPT_ASKPASS, ...) yields, so the "no PIN, need
+   * one" branch is owned by the resume_* functions exclusively.
+   */
   if (pin_len != 0) {
     err = piv_verify_pin(selk, piv_token_default_auth(selk), pin, &retries,
                          canskip);
@@ -1318,6 +1480,422 @@ static errf_t *agent_piv_try_pin(boolean_t canskip) {
   }
   return (err);
 }
+
+/*
+ * Forward declarations of the resume_* functions, dispatched on
+ * e->se_cont.tag by after_prompt_reap. Each runs the tail of one
+ * handler (the code after a try_confirm_client / try_askpass yield
+ * point) and either:
+ *   - Completes the request: writes the response to e->se_output
+ *     and returns NULL.
+ *   - Initiates another yield (only for AFTER_PIN -> AFTER_PIN_RETRY):
+ *     calls start_prompt(...) and returns NULL (the next continuation
+ *     will resume).
+ *   - Errors out: returns the errf_t * so after_prompt_reap can
+ *     send_status(0) the client.
+ */
+static errf_t *resume_sign_after_confirm(socket_entry_t *e);
+static errf_t *resume_sign_after_pin(socket_entry_t *e);
+static errf_t *resume_sign_after_pin_retry(socket_entry_t *e);
+static errf_t *resume_ecdh_after_confirm(socket_entry_t *e);
+static errf_t *resume_ecdh_after_pin(socket_entry_t *e);
+static errf_t *resume_ecdh_after_pin_retry(socket_entry_t *e);
+static errf_t *resume_rebox_after_confirm(socket_entry_t *e);
+static errf_t *resume_rebox_after_pin(socket_entry_t *e);
+static errf_t *resume_rebox_after_pin_retry(socket_entry_t *e);
+static errf_t *resume_prehash_after_confirm(socket_entry_t *e);
+static errf_t *resume_prehash_after_pin(socket_entry_t *e);
+static errf_t *resume_prehash_after_pin_retry(socket_entry_t *e);
+
+static void after_prompt_reap(socket_entry_t *e);
+static void free_continuation_locals(socket_entry_t *e);
+static void send_status(socket_entry_t *e, int success);
+
+/*
+ * piggy#105 step 3: yield-to-prompt entry point.
+ *
+ * Records the continuation tag the caller wants to resume at, saves
+ * msg_log_frame so the resume runs inside the original
+ * process_message bunyan push/pop pair (Gotcha 2), and synchronously
+ * runs the prompt child via run_prompt_child + after_prompt_reap.
+ *
+ * In step 3 the reap is synchronous, so the call chain becomes:
+ *     handler-pre-yield
+ *       -> start_prompt(CONFIRM, AFTER_CONFIRM)
+ *         -> run_prompt_child(...)   (forks zenity/askpass, waits)
+ *         -> after_prompt_reap(e)
+ *           -> resume_<handler>_after_confirm(e)
+ *             -> (maybe) start_prompt(ASKPASS, AFTER_PIN)
+ *               -> ... another sync reap + resume tail
+ *
+ * In step 5 the body of start_prompt will be replaced with "register
+ * wait_fd in prepare_poll, return to the agent's main poll loop,
+ * dispatch the reap from after_poll." The handler code is unchanged
+ * by that swap.
+ *
+ * Callers MUST return to their caller immediately after invoking
+ * start_prompt — the response gets written into e->se_output by the
+ * resume_* function on success, or send_status(e, 0) by
+ * after_prompt_reap on error.
+ */
+static void start_prompt(socket_entry_t *e, enum prompt_kind kind,
+                         enum continuation tag) {
+  int status;
+  size_t len;
+  pid_t ret;
+  char buf[1024]; /* askpass needs up to 1024; confirm reads only ~6 */
+  errf_t *err;
+
+  e->se_state = SE_AWAITING_PROMPT;
+  e->se_cont.tag = tag;
+  e->se_prompt.kind = kind;
+  /*
+   * Save msg_log_frame so resume_* functions can bunyan_add_vars
+   * against the correct frame even after returning across other
+   * push/pop pairs (Gotcha 2). LIFO is preserved by the synchronous
+   * reap in step 3 — step 5 will need to ensure the same.
+   */
+  e->se_log_frame = msg_log_frame;
+
+  if (kind == PROMPT_ASKPASS) {
+    /*
+     * Body duplicated from try_askpass (line ~1047 historically).
+     * The post-processing — validate PIN, agent_piv_open,
+     * piv_verify_pin, stash into pin[] — is done inside
+     * after_prompt_reap's PROMPT_ASKPASS branch so the resume
+     * function sees pin_len updated.
+     */
+    char prompt[64];
+    struct askpass_ctx ctx;
+    char *guid;
+    enum piv_pin auth;
+
+    if (askpass == NULL)
+      askpass = getenv("SSH_ASKPASS");
+    if (askpass == NULL) {
+      /* No askpass configured; treat as immediate "no PIN
+       * provided" — buf stays empty so the resume sees pin_len
+       * unchanged. */
+      e->se_state = SE_ACTIVE;
+      after_prompt_reap(e);
+      return;
+    }
+
+    guid = piv_token_shortid(selk);
+    auth = piv_token_default_auth(selk);
+    snprintf(prompt, 64, "Enter %s for token %s", pin_type_to_name(auth),
+             guid);
+    free(guid);
+
+    ctx.askpass_path = askpass;
+    ctx.prompt = prompt;
+    /* try_askpass historically passed B_FALSE for close_stdin; preserve. */
+    ret = run_prompt_child(askpass_exec, &ctx, B_FALSE, buf, sizeof(buf),
+                           &len, &status);
+    if (ret == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+      explicit_bzero(buf, sizeof(buf));
+      bunyan_log(BNY_WARN, "executing askpass failed", "exit_status", BNY_UINT,
+                 (uint)WEXITSTATUS(status), NULL);
+      e->se_state = SE_ACTIVE;
+      after_prompt_reap(e);
+      return;
+    }
+
+    buf[strcspn(buf, "\r\n")] = '\0';
+    if ((err = valid_pin(buf))) {
+      errf_free(err);
+      explicit_bzero(buf, sizeof(buf));
+      e->se_state = SE_ACTIVE;
+      after_prompt_reap(e);
+      return;
+    }
+    if ((err = agent_piv_open())) {
+      errf_free(err);
+      explicit_bzero(buf, sizeof(buf));
+      e->se_state = SE_ACTIVE;
+      after_prompt_reap(e);
+      return;
+    }
+    {
+      uint retries = 1;
+      err =
+          piv_verify_pin(selk, auth, buf, &retries, B_FALSE);
+      if (err != ERRF_OK) {
+        err = wrap_pin_error(err, retries);
+        bunyan_log(BNY_WARN, "failed to use PIN provided by askpass", "error",
+                   BNY_ERF, err, NULL);
+        errf_free(err);
+        agent_piv_close(B_FALSE);
+        explicit_bzero(buf, sizeof(buf));
+        e->se_state = SE_ACTIVE;
+        after_prompt_reap(e);
+        return;
+      }
+    }
+    extend_probe_deadline();
+    agent_piv_close(B_FALSE);
+    if (pin_len != 0)
+      explicit_bzero(pin, pin_len);
+    pin_len = strlen(buf);
+    bcopy(buf, pin, pin_len);
+    bunyan_log(BNY_INFO, "storing PIN in memory", NULL);
+    set_probe_interval(B_TRUE);
+    explicit_bzero(buf, sizeof(buf));
+
+    e->se_state = SE_ACTIVE;
+    after_prompt_reap(e);
+    return;
+  }
+
+  /*
+   * PROMPT_CONFIRM — body duplicated from try_confirm_client
+   * (line ~1178 historically). The C_NEVER / C_FORWARDED fast paths
+   * are not reachable here because the handlers consult them before
+   * calling start_prompt (currently via the existing
+   * try_confirm_client wrapper — which is left in place until step 5
+   * lands).
+   */
+  {
+    boolean_t add_zenity_args = B_FALSE;
+    boolean_t add_notify_send_args = B_FALSE;
+    char prompt[1024];
+    char *guid;
+    struct confirm_ctx ctx;
+    enum piv_slotid slotid;
+
+    /*
+     * In step 3, slotid is carried inside the per-handler continuation
+     * locals — pull it out by tag. (Cleaner abstraction will land in
+     * step 5 when confirm-prompt setup moves into a helper that
+     * accepts a slotid argument.)
+     */
+    switch (tag) {
+    case CONT_SIGN_AFTER_CONFIRM:
+      slotid = (enum piv_slotid)piv_slot_id(e->se_cont.u.sign.slot);
+      break;
+    case CONT_ECDH_AFTER_CONFIRM:
+      slotid = (enum piv_slotid)piv_slot_id(e->se_cont.u.ecdh.slot);
+      break;
+    case CONT_REBOX_AFTER_CONFIRM:
+      /* rebox confirm precedes find-token/find-slot; report 9D. */
+      slotid = PIV_SLOT_KEY_MGMT;
+      break;
+    case CONT_PREHASH_AFTER_CONFIRM:
+      slotid = (enum piv_slotid)piv_slot_id(e->se_cont.u.prehash.slot);
+      break;
+    default:
+      bunyan_log(BNY_FATAL, "start_prompt(CONFIRM) with non-confirm tag",
+                 "tag", BNY_INT, (int)tag, NULL);
+      abort();
+    }
+
+    if (confirm_mode == C_NEVER) {
+      e->se_authz = AUTHZ_ALLOWED;
+      e->se_state = SE_ACTIVE;
+      after_prompt_reap(e);
+      return;
+    }
+
+    if (confirm_mode == C_FORWARDED) {
+      const char *ssh = NULL;
+      const size_t plen = strlen(e->se_exepath);
+      const uint64_t now = monotime();
+      const int64_t delta = now - e->se_pid_ent->pe_last_auth;
+      if (e->se_sbind == SESSBIND_AUTH) {
+        e->se_authz = AUTHZ_ALLOWED;
+        e->se_state = SE_ACTIVE;
+        after_prompt_reap(e);
+        return;
+      }
+      if (e->se_sbind == SESSBIND_NONE) {
+        if (plen >= 4)
+          ssh = &e->se_exepath[plen - 4];
+        if (ssh != NULL && strcmp(ssh, "/ssh") != 0)
+          ssh = NULL;
+        if (plen == 3 && strcmp(e->se_exepath, "ssh") == 0)
+          ssh = e->se_exepath;
+        if (e->se_pid_idx == 0 || ssh == NULL) {
+          e->se_authz = AUTHZ_ALLOWED;
+          e->se_state = SE_ACTIVE;
+          after_prompt_reap(e);
+          return;
+        }
+      }
+      if (e->se_pid_ent->pe_pid != 0 && pid_auth_cache_time > 0 &&
+          delta < pid_auth_cache_time) {
+        e->se_pid_ent->pe_last_auth = now;
+        e->se_authz = AUTHZ_ALLOWED;
+        e->se_state = SE_ACTIVE;
+        after_prompt_reap(e);
+        return;
+      }
+    }
+
+    if (askpass == NULL)
+      askpass = getenv("SSH_ASKPASS");
+    if (confirm == NULL)
+      confirm = getenv("SSH_CONFIRM");
+    if (askpass == NULL && confirm == NULL) {
+      e->se_authz = AUTHZ_DENIED;
+      e->se_state = SE_ACTIVE;
+      after_prompt_reap(e);
+      return;
+    }
+
+    if (confirm != NULL) {
+      char *tmp = strdup(confirm);
+      const char *execname = basename(tmp);
+      if (strcmp(execname, "zenity") == 0)
+        add_zenity_args = B_TRUE;
+      if (strcmp(execname, "notify-send") == 0)
+        add_notify_send_args = B_TRUE;
+      free(tmp);
+    }
+
+    bunyan_log(BNY_INFO, "requesting user confirmation", "exec", BNY_STRING,
+               confirm, "zenity", BNY_INT, add_zenity_args, "notify-send",
+               BNY_INT, add_notify_send_args, NULL);
+
+    guid = piv_token_shortid(selk);
+    snprintf(prompt, sizeof(prompt),
+             "%sA new client is trying to use PIV token %s\r\n\r\n"
+             "Client PID: %d\r\nClient executable: %s\r\nClient cmd: %s\r\n"
+             "Slot requested: %02x",
+             (add_zenity_args ? "--text=" : ""), guid, (int)e->se_pid,
+             (e->se_exepath == NULL) ? "(unknown)" : e->se_exepath,
+             (e->se_exeargs == NULL) ? "(unknown)" : e->se_exeargs,
+             (uint)slotid);
+    free(guid);
+
+    ctx.prog = confirm ? confirm : askpass;
+    ctx.prompt = prompt;
+    ctx.use_zenity_argv = confirm && add_zenity_args;
+    ctx.use_notify_argv = confirm && add_notify_send_args;
+
+    ret = run_prompt_child(confirm_exec, &ctx, B_TRUE, buf, sizeof(buf),
+                           &len, &status);
+    if (ret == -1 || !WIFEXITED(status) ||
+        (WEXITSTATUS(status) != 0 && WEXITSTATUS(status) != 1)) {
+      bunyan_log(BNY_WARN, "executing confirm failed", "exit_status", BNY_UINT,
+                 (uint)WEXITSTATUS(status), NULL);
+      e->se_authz = AUTHZ_DENIED;
+      e->se_state = SE_ACTIVE;
+      after_prompt_reap(e);
+      return;
+    }
+
+    if (WEXITSTATUS(status) == 0 &&
+        (!add_notify_send_args || strcmp(buf, "allow\n") == 0)) {
+      e->se_authz = AUTHZ_ALLOWED;
+      e->se_pid_ent->pe_last_auth = monotime();
+    } else {
+      e->se_authz = AUTHZ_DENIED;
+    }
+
+    e->se_state = SE_ACTIVE;
+    after_prompt_reap(e);
+    return;
+  }
+}
+
+/*
+ * piggy#105 step 3: reap-prompt dispatch.
+ *
+ * Called by start_prompt after the prompt child has been fully
+ * processed (PIN stashed into pin[] / se_authz set). Restores
+ * msg_log_frame so the resume_* function bunyan_add_vars on the
+ * correct frame, then dispatches the right resume tail.
+ *
+ * Errors returned by a resume function are converted into client
+ * SSH_AGENT_FAILURE responses (mirroring the process_message error
+ * tail at line ~2765). Success means the resume already queued a
+ * reply into e->se_output.
+ */
+static void after_prompt_reap(socket_entry_t *e) {
+  enum continuation tag = e->se_cont.tag;
+  errf_t *err = NULL;
+
+  /* Restore the bunyan frame the original handler dispatch built. */
+  msg_log_frame = e->se_log_frame;
+
+  switch (tag) {
+  case CONT_NONE:
+    bunyan_log(BNY_FATAL, "after_prompt_reap with CONT_NONE", NULL);
+    abort();
+  case CONT_SIGN_AFTER_CONFIRM:
+    err = resume_sign_after_confirm(e);
+    break;
+  case CONT_SIGN_AFTER_PIN:
+    err = resume_sign_after_pin(e);
+    break;
+  case CONT_SIGN_AFTER_PIN_RETRY:
+    err = resume_sign_after_pin_retry(e);
+    break;
+  case CONT_ECDH_AFTER_CONFIRM:
+    err = resume_ecdh_after_confirm(e);
+    break;
+  case CONT_ECDH_AFTER_PIN:
+    err = resume_ecdh_after_pin(e);
+    break;
+  case CONT_ECDH_AFTER_PIN_RETRY:
+    err = resume_ecdh_after_pin_retry(e);
+    break;
+  case CONT_REBOX_AFTER_CONFIRM:
+    err = resume_rebox_after_confirm(e);
+    break;
+  case CONT_REBOX_AFTER_PIN:
+    err = resume_rebox_after_pin(e);
+    break;
+  case CONT_REBOX_AFTER_PIN_RETRY:
+    err = resume_rebox_after_pin_retry(e);
+    break;
+  case CONT_PREHASH_AFTER_CONFIRM:
+    err = resume_prehash_after_confirm(e);
+    break;
+  case CONT_PREHASH_AFTER_PIN:
+    err = resume_prehash_after_pin(e);
+    break;
+  case CONT_PREHASH_AFTER_PIN_RETRY:
+    err = resume_prehash_after_pin_retry(e);
+    break;
+  }
+
+  /*
+   * If the resume function initiated another yield, se_state is now
+   * SE_AWAITING_PROMPT and the next start_prompt -> after_prompt_reap
+   * chain will dispatch the new tag. Don't touch the continuation
+   * state in that case; the new continuation owns it.
+   *
+   * Otherwise the request has either completed (err == NULL, response
+   * is in se_output) or errored (err != NULL). Free continuation
+   * locals and send the error response if needed.
+   */
+  if (e->se_state == SE_AWAITING_PROMPT)
+    return;
+
+  free_continuation_locals(e);
+  e->se_state = SE_ACTIVE;
+  e->se_log_frame = NULL;
+
+  if (err != NULL) {
+    /*
+     * Mirror process_message's error tail (line ~2765). We're inside
+     * process_message's dynamic extent (still on its stack) so the
+     * outer bunyan_pop runs after we return.
+     */
+    bunyan_log(BNY_WARN, "failed to process command", "error", BNY_ERF, err,
+               NULL);
+    if (errf_caused_by(err, "NoPINError") && bunyan_get_level() > BNY_WARN) {
+      warnfx(err, "denied command due to lack of PIN");
+    }
+    sshbuf_reset(e->se_request);
+    send_status(e, 0);
+    errf_free(err);
+  } else {
+    bunyan_log(BNY_INFO, "processed ssh-agent message", NULL);
+  }
+}
+
 
 static uint64_t get_pid_start_time(pid_t pid) {
   uint64_t val = 0;
@@ -1463,9 +2041,88 @@ static void init_socket(socket_entry_t *e) {
   e->se_type = AUTH_UNUSED;
   e->se_authz = AUTHZ_NOT_YET;
   e->se_sbind = SESSBIND_NONE;
+  /* New fields (piggy#105 step 3) are covered by bzero:
+   *   se_state = SE_ACTIVE (0)
+   *   se_cont.tag = CONT_NONE (0)
+   *   se_log_frame = NULL
+   *   se_prompt.* = zeroed
+   */
+}
+
+/*
+ * Free any heap state owned by an in-flight continuation. Called
+ * from close_socket so a connection that closes mid-yield (steps
+ * 4/5; unreachable in step 3) doesn't leak. The dispatch on
+ * se_cont.tag mirrors the resume_* dispatch in after_prompt_reap,
+ * so each tag's union member is interpreted correctly.
+ *
+ * Note: any sshkey / sshbuf / box pointers that survived past the
+ * yield are still owned by the continuation locals (the resume
+ * function's "out:" tail hasn't run). Free them here.
+ */
+static void free_continuation_locals(socket_entry_t *e) {
+  switch (e->se_cont.tag) {
+  case CONT_NONE:
+    break;
+  case CONT_SIGN_AFTER_CONFIRM:
+  case CONT_SIGN_AFTER_PIN:
+  case CONT_SIGN_AFTER_PIN_RETRY: {
+    struct sign_cont_locals *c = &e->se_cont.u.sign;
+    sshkey_free(c->key);
+    sshbuf_free(c->msg);
+    if (c->data_copy != NULL) {
+      explicit_bzero(c->data_copy, c->dlen);
+      free(c->data_copy);
+    }
+    break;
+  }
+  case CONT_ECDH_AFTER_CONFIRM:
+  case CONT_ECDH_AFTER_PIN:
+  case CONT_ECDH_AFTER_PIN_RETRY: {
+    struct ecdh_cont_locals *c = &e->se_cont.u.ecdh;
+    sshkey_free(c->key);
+    sshkey_free(c->partner);
+    sshbuf_free(c->msg);
+    break;
+  }
+  case CONT_REBOX_AFTER_CONFIRM:
+  case CONT_REBOX_AFTER_PIN:
+  case CONT_REBOX_AFTER_PIN_RETRY: {
+    struct rebox_cont_locals *c = &e->se_cont.u.rebox;
+    sshbuf_free(c->msg);
+    sshbuf_free(c->boxbuf);
+    sshbuf_free(c->guidb);
+    sshkey_free(c->partner);
+    piv_box_free(c->box);
+    break;
+  }
+  case CONT_PREHASH_AFTER_CONFIRM:
+  case CONT_PREHASH_AFTER_PIN:
+  case CONT_PREHASH_AFTER_PIN_RETRY: {
+    struct prehash_cont_locals *c = &e->se_cont.u.prehash;
+    sshkey_free(c->key);
+    sshbuf_free(c->msg);
+    if (c->data_copy != NULL) {
+      explicit_bzero(c->data_copy, c->dlen);
+      free(c->data_copy);
+    }
+    break;
+  }
+  }
+  bzero(&e->se_cont, sizeof(e->se_cont));
 }
 
 static void close_socket(socket_entry_t *e) {
+  /* If a request was mid-yield (steps 4/5 — unreachable in step 3),
+   * free any continuation-owned heap. txn_owner is cleared by the
+   * agent_piv_close in the resume path, but if the socket closes
+   * before the resume runs we may still own the txn — clear it
+   * defensively. */
+  if (txn_owner == e)
+    txn_owner = NULL;
+  free_continuation_locals(e);
+  e->se_state = SE_ACTIVE;
+  e->se_log_frame = NULL;
   close(e->se_fd);
   e->se_fd = -1;
   e->se_type = AUTH_UNUSED;
@@ -1686,23 +2343,29 @@ out:
   return (err);
 }
 
-/* ssh2 only */
+/*
+ * ssh2 only. piggy#105 step 3: pre-yield body. Parses the request,
+ * finds the token + slot, opens the txn, claims txn ownership, then
+ * saves locals into e->se_cont and yields to the confirm prompt.
+ * The resume_sign_* tail runs from after_prompt_reap once the
+ * prompt child has been processed.
+ *
+ * Error paths that bail before the yield return errf as before.
+ * Once start_prompt is called, the function returns NULL — the
+ * resume functions take over error reporting via after_prompt_reap.
+ */
 static errf_t *process_sign_request2(socket_entry_t *e) {
   const u_char *data;
-  u_char *signature = NULL;
-  u_char *rawsig = NULL;
-  size_t dlen, rslen = 0, slen = 0;
+  size_t dlen;
   u_int flags;
   int r;
   errf_t *err = NULL;
-  struct sshbuf *msg;
-  struct sshbuf *buf;
+  struct sshbuf *msg = NULL;
   struct sshkey *key = NULL;
   struct piv_slot *slot = NULL;
   struct piv_token *tk = NULL;
-  enum sshdigest_types hashalg, ohashalg;
-  boolean_t canskip = B_TRUE;
-  enum piv_slot_auth rauth;
+  u_char *data_copy = NULL;
+  struct sign_cont_locals *c;
 
   if ((msg = sshbuf_new()) == NULL)
     fatal("%s: sshbuf_new failed", __func__);
@@ -1736,30 +2399,89 @@ static errf_t *process_sign_request2(socket_entry_t *e) {
   bunyan_add_vars(msg_log_frame, "slotid", BNY_UINT, (uint)piv_slot_id(slot),
                   NULL);
 
-  try_confirm_client(e, piv_slot_id(slot));
-  if (e->se_authz == AUTHZ_DENIED) {
-    err = errf("AuthzError", NULL, "client blocked");
-    goto out;
-  }
+  /*
+   * Gotcha 1: data is a pointer into e->se_request and gets
+   * invalidated when the next message arrives. Deep-copy before
+   * yielding so resume_sign_after_pin can hand it to piv_sign.
+   */
+  data_copy = malloc(dlen > 0 ? dlen : 1);
+  if (data_copy == NULL)
+    fatal("%s: malloc(data_copy) failed", __func__);
+  if (dlen > 0)
+    memcpy(data_copy, data, dlen);
 
-  if (piv_slot_id(slot) == PIV_SLOT_KEY_MGMT && !sign_9d) {
-    err = errf("PermissionError", NULL,
-               "key management key (9d) "
-               "is not allowed to sign data without the -m option");
-    goto out;
-  }
+  c = &e->se_cont.u.sign;
+  c->key = key;
+  c->msg = msg;
+  c->data_copy = data_copy;
+  c->dlen = dlen;
+  c->flags = flags;
+  c->slot = slot;
+  c->tk = tk;
+  c->canskip = B_TRUE;
 
-  rauth = piv_slot_get_auth(tk, slot);
-  if (rauth & PIV_SLOT_AUTH_PIN)
-    canskip = B_FALSE;
-  if (rauth & PIV_SLOT_AUTH_TOUCH)
-    send_touch_notify(e, piv_slot_id(slot));
+  /* Yield to the confirm prompt. resume_sign_after_confirm picks up
+   * at "check authz, set canskip/touch, dispatch PIN check". */
+  start_prompt(e, PROMPT_CONFIRM, CONT_SIGN_AFTER_CONFIRM);
+  return (NULL);
 
-pin_again:
-  if ((err = agent_piv_try_pin(canskip))) {
-    agent_piv_close(B_TRUE);
-    goto out;
-  }
+out:
+  sshkey_free(key);
+  sshbuf_free(msg);
+  free(data_copy);
+  return (err);
+}
+
+/*
+ * piggy#105 step 3 resume tails for process_sign_request2.
+ *
+ * after_confirm: post-confirm authz + slot 9D guard + rauth check;
+ * decides whether a PIN is needed or whether the cached pin[] can
+ * be used directly.
+ *
+ * after_pin: handles the result of an askpass prompt. If a PIN was
+ * captured, retries piv_sign. If piv_sign returns PermissionError
+ * again, yields to a second askpass (the AFTER_PIN_RETRY path) or
+ * gives up.
+ *
+ * after_pin_retry: single-shot retry — no further askpass after
+ * this one. Matches the historical behavior of the pin_again loop
+ * which only ever cycled twice (initial + one retry).
+ */
+
+/* Helper: emit the signed-response payload after piv_sign succeeds. */
+static void sign_emit_response(socket_entry_t *e,
+                               enum sshdigest_types hashalg,
+                               u_char *rawsig, size_t rslen) {
+  struct sshbuf *buf;
+  u_char *signature;
+  size_t slen;
+  int r;
+  struct sign_cont_locals *c = &e->se_cont.u.sign;
+
+  buf = sshbuf_new();
+  VERIFY(buf != NULL);
+  VERIFY0(sshkey_sig_from_asn1(piv_slot_pubkey(c->slot), hashalg, rawsig, rslen,
+                               buf));
+
+  signature = calloc(1, sshbuf_len(buf));
+  slen = sshbuf_len(buf);
+  VERIFY0(sshbuf_get(buf, signature, slen));
+  sshbuf_free(buf);
+
+  if ((r = sshbuf_put_u8(c->msg, SSH2_AGENT_SIGN_RESPONSE)) != 0 ||
+      (r = sshbuf_put_string(c->msg, signature, slen)) != 0)
+    fatal("%s: sshbuf_put: %s", __func__, ssh_err(r));
+  if ((r = sshbuf_put_stringb(e->se_output, c->msg)) != 0)
+    fatal("%s: sshbuf_put_stringb: %s", __func__, ssh_err(r));
+
+  explicit_bzero(signature, slen);
+  free(signature);
+}
+
+/* Helper: figure out the digest algorithm for the request's key type. */
+static enum sshdigest_types sign_hashalg_for(struct sshkey *key, u_int flags) {
+  enum sshdigest_types hashalg = SSH_DIGEST_SHA256;
   if (key->type == KEY_RSA) {
     hashalg = SSH_DIGEST_SHA1;
     if (flags & SSH_AGENT_RSA_SHA2_256)
@@ -1785,65 +2507,138 @@ pin_again:
   } else {
     VERIFY(0);
   }
+  return (hashalg);
+}
+
+/*
+ * Shared post-pin path used by resume_sign_after_pin and
+ * resume_sign_after_pin_retry. is_retry distinguishes between the
+ * first PIN attempt (which may yield a SECOND askpass on
+ * PermissionError) and the retry attempt (which gives up on a
+ * second PermissionError).
+ */
+static errf_t *sign_try_signing(socket_entry_t *e, boolean_t is_retry) {
+  errf_t *err;
+  u_char *rawsig = NULL;
+  size_t rslen = 0;
+  enum sshdigest_types hashalg, ohashalg;
+  struct sign_cont_locals *c = &e->se_cont.u.sign;
+
+  if ((err = agent_piv_try_pin(c->canskip))) {
+    agent_piv_close(B_TRUE);
+    return (err);
+  }
+  hashalg = sign_hashalg_for(c->key, c->flags);
   ohashalg = hashalg;
-  err = piv_sign(tk, slot, data, dlen, &hashalg, &rawsig, &rslen);
+  err = piv_sign(c->tk, c->slot, c->data_copy, c->dlen, &hashalg, &rawsig,
+                 &rslen);
 
   if (errf_caused_by(err, "PermissionError") && pin_len != 0 &&
-      piv_token_is_ykpiv(tk) && canskip) {
-    /*
-     * On a YubiKey, slots other than 9C (SIGNATURE) can also be
-     * set to "PIN Always" mode. We might have one, so try again
-     * with forced PIN entry.
-     */
-    canskip = B_FALSE;
-    goto pin_again;
-  } else if (errf_caused_by(err, "PermissionError")) {
-    try_askpass();
-    if (pin_len != 0) {
-      canskip = B_FALSE;
-      goto pin_again;
+      piv_token_is_ykpiv(c->tk) && c->canskip) {
+    /* YubiKey "PIN Always" — try again with canskip cleared.
+     * Treat as a no-prompt retry: keep the cached PIN, just
+     * re-run sign with canskip=B_FALSE. We do this synchronously
+     * here (no askpass yield) to mirror the legacy goto-pin_again
+     * shape; if it errors again, the AFTER_PIN_RETRY case below
+     * will yield to askpass. */
+    errf_free(err);
+    c->canskip = B_FALSE;
+    hashalg = sign_hashalg_for(c->key, c->flags);
+    ohashalg = hashalg;
+    err = piv_sign(c->tk, c->slot, c->data_copy, c->dlen, &hashalg, &rawsig,
+                   &rslen);
+  }
+  if (errf_caused_by(err, "PermissionError")) {
+    if (is_retry) {
+      /* Second failure — no more retries. */
+      agent_piv_close(B_TRUE);
+      return (nopinerrf(err));
     }
-    agent_piv_close(B_TRUE);
-    err = nopinerrf(err);
-    goto out;
+    /* First failure with a PIN already in hand — yield to a fresh
+     * askpass. The retry resume will get one more shot. */
+    errf_free(err);
+    c->canskip = B_FALSE;
+    start_prompt(e, PROMPT_ASKPASS, CONT_SIGN_AFTER_PIN_RETRY);
+    return (NULL);
   } else if (err) {
     agent_piv_close(B_TRUE);
-    goto out;
+    return (err);
   }
+
   agent_piv_close(B_FALSE);
 
   if (hashalg != ohashalg) {
-    err = errf("HashMismatch", NULL,
-               "PIV device signed with a different hash algorithm to "
-               "the one requested (wanted %d, got %d)",
-               (int)ohashalg, (int)hashalg);
-    goto out;
+    explicit_bzero(rawsig, rslen);
+    free(rawsig);
+    return (errf("HashMismatch", NULL,
+                 "PIV device signed with a different hash algorithm to "
+                 "the one requested (wanted %d, got %d)",
+                 (int)ohashalg, (int)hashalg));
   }
 
-  buf = sshbuf_new();
-  VERIFY(buf != NULL);
-  VERIFY0(
-      sshkey_sig_from_asn1(piv_slot_pubkey(slot), hashalg, rawsig, rslen, buf));
+  sign_emit_response(e, hashalg, rawsig, rslen);
   explicit_bzero(rawsig, rslen);
   free(rawsig);
+  return (NULL);
+}
 
-  signature = calloc(1, sshbuf_len(buf));
-  slen = sshbuf_len(buf);
-  VERIFY0(sshbuf_get(buf, signature, slen));
-  sshbuf_free(buf);
+static errf_t *resume_sign_after_confirm(socket_entry_t *e) {
+  struct sign_cont_locals *c = &e->se_cont.u.sign;
+  enum piv_slot_auth rauth;
 
-  if ((r = sshbuf_put_u8(msg, SSH2_AGENT_SIGN_RESPONSE)) != 0 ||
-      (r = sshbuf_put_string(msg, signature, slen)) != 0)
-    fatal("%s: buffer error: %s", __func__, ssh_err(r));
-  if ((r = sshbuf_put_stringb(e->se_output, msg)) != 0)
-    fatal("%s: buffer error: %s", __func__, ssh_err(r));
+  if (e->se_authz == AUTHZ_DENIED) {
+    /* The handler bailed on AuthzError historically without
+     * calling agent_piv_close — preserve that. */
+    return (errf("AuthzError", NULL, "client blocked"));
+  }
 
-out:
-  sshkey_free(key);
-  sshbuf_free(msg);
-  explicit_bzero(signature, slen);
-  free(signature);
-  return (err);
+  if (piv_slot_id(c->slot) == PIV_SLOT_KEY_MGMT && !sign_9d) {
+    return (errf("PermissionError", NULL,
+                 "key management key (9d) "
+                 "is not allowed to sign data without the -m option"));
+  }
+
+  rauth = piv_slot_get_auth(c->tk, c->slot);
+  if (rauth & PIV_SLOT_AUTH_PIN)
+    c->canskip = B_FALSE;
+  if (rauth & PIV_SLOT_AUTH_TOUCH)
+    send_touch_notify(e, piv_slot_id(c->slot));
+
+  /* No cached PIN and we need one — yield to askpass. */
+  if (pin_len == 0 && !c->canskip) {
+    start_prompt(e, PROMPT_ASKPASS, CONT_SIGN_AFTER_PIN);
+    return (NULL);
+  }
+
+  /* Either canskip is true (no PIN needed) or we have a cached
+   * PIN. Run the sign attempt directly; on PermissionError it'll
+   * yield to a retry askpass via CONT_SIGN_AFTER_PIN_RETRY. */
+  return (sign_try_signing(e, B_FALSE));
+}
+
+static errf_t *resume_sign_after_pin(socket_entry_t *e) {
+  struct sign_cont_locals *c = &e->se_cont.u.sign;
+
+  if (pin_len == 0) {
+    /* askpass returned nothing usable — give up. */
+    agent_piv_close(B_TRUE);
+    return (nopinerrf(
+        errf("PermissionError", NULL, "no PIN available for sign")));
+  }
+  c->canskip = B_FALSE;
+  return (sign_try_signing(e, B_FALSE));
+}
+
+static errf_t *resume_sign_after_pin_retry(socket_entry_t *e) {
+  struct sign_cont_locals *c = &e->se_cont.u.sign;
+
+  if (pin_len == 0) {
+    agent_piv_close(B_TRUE);
+    return (nopinerrf(
+        errf("PermissionError", NULL, "no PIN available for sign retry")));
+  }
+  c->canskip = B_FALSE;
+  return (sign_try_signing(e, B_TRUE));
 }
 
 static errf_t *process_remove_all_identities(socket_entry_t *e) {
@@ -1859,19 +2654,21 @@ struct exthandler {
 };
 struct exthandler exthandlers[];
 
+/*
+ * piggy#105 step 3 pre-yield body for ecdh@joyent.com. Mirrors the
+ * sign handler: parse + token-find + txn-open + ownership claim,
+ * then yield to confirm. See process_sign_request2 for the shape.
+ */
 static errf_t *process_ext_ecdh(socket_entry_t *e, struct sshbuf *buf) {
   int r;
-  errf_t *err;
-  struct sshbuf *msg;
+  errf_t *err = NULL;
+  struct sshbuf *msg = NULL;
   struct sshkey *key = NULL;
   struct sshkey *partner = NULL;
   struct piv_slot *slot = NULL;
   struct piv_token *tk = NULL;
-  uint8_t *secret;
-  size_t seclen;
-  uint flags;
-  boolean_t canskip = B_TRUE;
-  enum piv_slot_auth rauth;
+  u_int flags;
+  struct ecdh_cont_locals *c;
 
   if ((msg = sshbuf_new()) == NULL)
     fatal("%s: sshbuf_new failed", __func__);
@@ -1883,7 +2680,6 @@ static errf_t *process_ext_ecdh(socket_entry_t *e, struct sshbuf *buf) {
     err = parserrf("sshbuf_get_u32(flags)", r);
     goto out;
   }
-
   if (flags != 0) {
     err = flagserrf(flags);
     goto out;
@@ -1902,72 +2698,20 @@ static errf_t *process_ext_ecdh(socket_entry_t *e, struct sshbuf *buf) {
       goto out;
     }
   }
-  /*
-   * piggy#105 step 1: claim txn ownership across the upcoming
-   * confirm + askpass + ECDH work. (See process_sign_request2.)
-   */
   txn_owner = e;
   bunyan_add_vars(msg_log_frame, "slotid", BNY_UINT, (uint)piv_slot_id(slot),
                   NULL);
 
-  try_confirm_client(e, piv_slot_id(slot));
-  if (e->se_authz == AUTHZ_DENIED) {
-    err = errf("AuthzError", NULL, "client blocked");
-    goto out;
-  }
+  c = &e->se_cont.u.ecdh;
+  c->key = key;
+  c->partner = partner;
+  c->msg = msg;
+  c->slot = slot;
+  c->tk = tk;
+  c->canskip = B_TRUE;
 
-  if (key->type != KEY_ECDSA || partner->type != KEY_ECDSA) {
-    agent_piv_close(B_FALSE);
-    err =
-        errf("InvalidKeysError", NULL, "keys are not both EC keys (%s and %s)",
-             sshkey_type(key), sshkey_type(partner));
-    goto out;
-  }
-
-  rauth = piv_slot_get_auth(tk, slot);
-  if (rauth & PIV_SLOT_AUTH_PIN)
-    canskip = B_FALSE;
-  if (rauth & PIV_SLOT_AUTH_TOUCH)
-    send_touch_notify(e, piv_slot_id(slot));
-
-pin_again:
-  if ((err = agent_piv_try_pin(canskip))) {
-    agent_piv_close(B_TRUE);
-    goto out;
-  }
-  err = piv_ecdh(tk, slot, partner, &secret, &seclen);
-  if (errf_caused_by(err, "PermissionError") && pin_len != 0 &&
-      piv_token_is_ykpiv(tk) && canskip) {
-    /* Yubikey can have slots other than 9C as "PIN Always" */
-    canskip = B_FALSE;
-    goto pin_again;
-  } else if (errf_caused_by(err, "PermissionError")) {
-    try_askpass();
-    if (pin_len != 0) {
-      canskip = B_FALSE;
-      goto pin_again;
-    }
-    agent_piv_close(B_TRUE);
-    err = nopinerrf(err);
-    goto out;
-  } else if (err) {
-    agent_piv_close(B_TRUE);
-    goto out;
-  }
-  agent_piv_close(B_FALSE);
-
-  bunyan_log(BNY_INFO, "performed ECDH operation", "partner_pk", BNY_SSHKEY,
-             partner, NULL);
-
-  if ((r = sshbuf_put_u8(msg, SSH2_AGENT_EXT_RESPONSE)) != 0 ||
-      (r = sshbuf_put_cstring(msg, "ecdh@joyent.com")) != 0 ||
-      (r = sshbuf_put_string(msg, secret, seclen)) != 0)
-    fatal("%s: buffer error: %s", __func__, ssh_err(r));
-  explicit_bzero(secret, seclen);
-  free(secret);
-
-  if ((r = sshbuf_put_stringb(e->se_output, msg)) != 0)
-    fatal("%s: buffer error: %s", __func__, ssh_err(r));
+  start_prompt(e, PROMPT_CONFIRM, CONT_ECDH_AFTER_CONFIRM);
+  return (NULL);
 
 out:
   sshbuf_free(msg);
@@ -1976,21 +2720,129 @@ out:
   return (err);
 }
 
+/*
+ * Shared post-pin path for resume_ecdh_after_pin /
+ * resume_ecdh_after_pin_retry. Mirrors sign_try_signing's shape.
+ */
+static errf_t *ecdh_try_op(socket_entry_t *e, boolean_t is_retry) {
+  errf_t *err;
+  uint8_t *secret = NULL;
+  size_t seclen = 0;
+  int r;
+  struct ecdh_cont_locals *c = &e->se_cont.u.ecdh;
+
+  if ((err = agent_piv_try_pin(c->canskip))) {
+    agent_piv_close(B_TRUE);
+    return (err);
+  }
+  err = piv_ecdh(c->tk, c->slot, c->partner, &secret, &seclen);
+
+  if (errf_caused_by(err, "PermissionError") && pin_len != 0 &&
+      piv_token_is_ykpiv(c->tk) && c->canskip) {
+    /* YubiKey "PIN Always" — retry synchronously with canskip cleared. */
+    errf_free(err);
+    c->canskip = B_FALSE;
+    err = piv_ecdh(c->tk, c->slot, c->partner, &secret, &seclen);
+  }
+  if (errf_caused_by(err, "PermissionError")) {
+    if (is_retry) {
+      agent_piv_close(B_TRUE);
+      return (nopinerrf(err));
+    }
+    errf_free(err);
+    c->canskip = B_FALSE;
+    start_prompt(e, PROMPT_ASKPASS, CONT_ECDH_AFTER_PIN_RETRY);
+    return (NULL);
+  } else if (err) {
+    agent_piv_close(B_TRUE);
+    return (err);
+  }
+  agent_piv_close(B_FALSE);
+
+  bunyan_log(BNY_INFO, "performed ECDH operation", "partner_pk", BNY_SSHKEY,
+             c->partner, NULL);
+
+  if ((r = sshbuf_put_u8(c->msg, SSH2_AGENT_EXT_RESPONSE)) != 0 ||
+      (r = sshbuf_put_cstring(c->msg, "ecdh@joyent.com")) != 0 ||
+      (r = sshbuf_put_string(c->msg, secret, seclen)) != 0)
+    fatal("%s: buffer error: %s", __func__, ssh_err(r));
+  explicit_bzero(secret, seclen);
+  free(secret);
+
+  if ((r = sshbuf_put_stringb(e->se_output, c->msg)) != 0)
+    fatal("%s: buffer error: %s", __func__, ssh_err(r));
+  return (NULL);
+}
+
+static errf_t *resume_ecdh_after_confirm(socket_entry_t *e) {
+  struct ecdh_cont_locals *c = &e->se_cont.u.ecdh;
+  enum piv_slot_auth rauth;
+
+  if (e->se_authz == AUTHZ_DENIED) {
+    return (errf("AuthzError", NULL, "client blocked"));
+  }
+
+  if (c->key->type != KEY_ECDSA || c->partner->type != KEY_ECDSA) {
+    agent_piv_close(B_FALSE);
+    return (errf("InvalidKeysError", NULL,
+                 "keys are not both EC keys (%s and %s)", sshkey_type(c->key),
+                 sshkey_type(c->partner)));
+  }
+
+  rauth = piv_slot_get_auth(c->tk, c->slot);
+  if (rauth & PIV_SLOT_AUTH_PIN)
+    c->canskip = B_FALSE;
+  if (rauth & PIV_SLOT_AUTH_TOUCH)
+    send_touch_notify(e, piv_slot_id(c->slot));
+
+  if (pin_len == 0 && !c->canskip) {
+    start_prompt(e, PROMPT_ASKPASS, CONT_ECDH_AFTER_PIN);
+    return (NULL);
+  }
+  return (ecdh_try_op(e, B_FALSE));
+}
+
+static errf_t *resume_ecdh_after_pin(socket_entry_t *e) {
+  struct ecdh_cont_locals *c = &e->se_cont.u.ecdh;
+
+  if (pin_len == 0) {
+    agent_piv_close(B_TRUE);
+    return (nopinerrf(
+        errf("PermissionError", NULL, "no PIN available for ECDH")));
+  }
+  c->canskip = B_FALSE;
+  return (ecdh_try_op(e, B_FALSE));
+}
+
+static errf_t *resume_ecdh_after_pin_retry(socket_entry_t *e) {
+  struct ecdh_cont_locals *c = &e->se_cont.u.ecdh;
+
+  if (pin_len == 0) {
+    agent_piv_close(B_TRUE);
+    return (nopinerrf(
+        errf("PermissionError", NULL, "no PIN available for ECDH retry")));
+  }
+  c->canskip = B_FALSE;
+  return (ecdh_try_op(e, B_TRUE));
+}
+
+/*
+ * piggy#105 step 3 pre-yield body for ecdh-rebox@joyent.com.
+ *
+ * Unlike sign / ECDH / prehash, rebox confirms BEFORE opening the
+ * card txn — so the AFTER_CONFIRM resume does the parse-box +
+ * find-token + open-txn work, then sets txn_owner. This is why
+ * rebox needs the AFTER_CONFIRM resume even though the other
+ * handlers could (notionally) collapse it.
+ */
 static errf_t *process_ext_rebox(socket_entry_t *e, struct sshbuf *buf) {
   int r;
-  errf_t *err;
-  struct sshbuf *msg, *boxbuf = NULL, *guidb = NULL;
+  errf_t *err = NULL;
+  struct sshbuf *msg = NULL, *boxbuf = NULL, *guidb = NULL;
   struct sshkey *partner = NULL;
-  struct piv_ecdh_box *box = NULL, *newbox = NULL;
   uint8_t slotid;
-  uint flags;
-  struct piv_slot *slot;
-  struct piv_token *tk;
-  uint8_t *secret = NULL, *out = NULL;
-  size_t seclen, outlen;
-  boolean_t canskip = B_TRUE;
-  enum piv_slot_auth rauth;
-  char *slotstr;
+  u_int flags;
+  struct rebox_cont_locals *c;
 
   if ((msg = sshbuf_new()) == NULL)
     fatal("%s: sshbuf_new failed", __func__);
@@ -2011,118 +2863,79 @@ static errf_t *process_ext_rebox(socket_entry_t *e, struct sshbuf *buf) {
     err = parserrf("sshbuf_get_u32(flags)", r);
     goto out;
   }
-
   if (flags != 0) {
     err = flagserrf(flags);
     goto out;
   }
 
-  try_confirm_client(e, PIV_SLOT_KEY_MGMT);
-  if (e->se_authz == AUTHZ_DENIED) {
-    err = errf("AuthzError", NULL, "client blocked");
-    goto out;
-  }
+  c = &e->se_cont.u.rebox;
+  c->msg = msg;
+  c->boxbuf = boxbuf;
+  c->guidb = guidb;
+  c->partner = partner;
+  c->slotid = slotid;
+  c->flags = flags;
+  c->box = NULL;
+  c->slot = NULL;
+  c->tk = NULL;
+  c->canskip = B_TRUE;
 
-  err = sshbuf_get_piv_box(boxbuf, &box);
-  if (err)
-    goto out;
+  /* Confirm runs before the card txn is opened. The AFTER_CONFIRM
+   * resume parses the box, finds the token, opens the txn, claims
+   * txn_owner, then dispatches the PIN check. */
+  start_prompt(e, PROMPT_CONFIRM, CONT_REBOX_AFTER_CONFIRM);
+  return (NULL);
 
-  err = piv_box_find_token(allcard_mode ? ks : selk, box, &tk, &slot);
-  if (err)
-    goto out;
-  if (!allcard_mode && tk != selk) {
-    err = errf("WrongTokenError", NULL,
-               "box can only be unlocked "
-               "by a different PIV device");
-    goto out;
-  }
-  if (!is_slot_enabled(slot)) {
-    err = errf("KeyDisabledError", NULL,
-               "box can only be unlocked "
-               "by a disabled key slot");
-    goto out;
-  }
+out:
+  sshbuf_free(msg);
+  sshbuf_free(boxbuf);
+  sshbuf_free(guidb);
+  sshkey_free(partner);
+  return (err);
+}
 
-  rauth = piv_slot_get_auth(tk, slot);
-  if (rauth & PIV_SLOT_AUTH_PIN)
-    canskip = B_FALSE;
-  if (rauth & PIV_SLOT_AUTH_TOUCH)
-    send_touch_notify(e, piv_slot_id(slot));
+/* Emit the rebox response: re-seal the box payload for partner. */
+static errf_t *rebox_emit_response(socket_entry_t *e) {
+  uint8_t *secret = NULL, *out = NULL;
+  size_t seclen = 0, outlen = 0;
+  struct piv_ecdh_box *newbox = NULL;
+  errf_t *err = NULL;
+  int r;
+  struct rebox_cont_locals *c = &e->se_cont.u.rebox;
+  char *slotstr;
 
-  if (allcard_mode) {
-    if ((err = agent_piv_open_token(tk)))
-      goto out;
-  } else {
-    if ((err = agent_piv_open()))
-      goto out;
-  }
-  /*
-   * piggy#105 step 1: claim txn ownership across the upcoming
-   * askpass + box_open work. (See process_sign_request2.)
-   */
-  txn_owner = e;
-pin_again:
-  if ((err = agent_piv_try_pin(canskip))) {
-    agent_piv_close(B_TRUE);
-    goto out;
-  }
-  err = piv_box_open(tk, slot, box);
-  if (errf_caused_by(err, "PermissionError") && pin_len != 0 &&
-      piv_token_is_ykpiv(tk) && canskip) {
-    /*
-     * On a Yubikey, slots other than 9C (SIGNATURE) can also be
-     * set to "PIN Always" mode. We might have one, so try again
-     * with forced PIN entry.
-     */
-    canskip = B_FALSE;
-    goto pin_again;
-  } else if (errf_caused_by(err, "PermissionError")) {
-    try_askpass();
-    if (pin_len != 0) {
-      canskip = B_FALSE;
-      goto pin_again;
-    }
-    agent_piv_close(B_TRUE);
-    err = nopinerrf(err);
-    goto out;
-  } else if (err) {
-    agent_piv_close(B_TRUE);
-    goto out;
-  }
-
-  slotstr = piv_slotid_to_string(piv_slot_id(slot));
+  slotstr = piv_slotid_to_string(piv_slot_id(c->slot));
   bunyan_log(BNY_INFO, "opened ECDH box", "key_slot", BNY_STRING, slotstr,
-             "partner_pk", BNY_SSHKEY, partner, "ephem_pk", BNY_SSHKEY,
-             piv_box_ephem_pubkey(box), "payload_size", BNY_SIZE_T,
-             piv_box_encsize(box), NULL);
+             "partner_pk", BNY_SSHKEY, c->partner, "ephem_pk", BNY_SSHKEY,
+             piv_box_ephem_pubkey(c->box), "payload_size", BNY_SIZE_T,
+             piv_box_encsize(c->box), NULL);
   free(slotstr);
 
-  VERIFY0(piv_box_take_data(box, &secret, &seclen));
+  VERIFY0(piv_box_take_data(c->box, &secret, &seclen));
   agent_piv_close(B_FALSE);
 
   newbox = piv_box_new();
   VERIFY(newbox != NULL);
 
-  if (sshbuf_len(guidb) > 0) {
-    piv_box_set_guid(newbox, sshbuf_ptr(guidb), GUID_LEN);
-    piv_box_set_slot(newbox, slotid);
+  if (sshbuf_len(c->guidb) > 0) {
+    piv_box_set_guid(newbox, sshbuf_ptr(c->guidb), GUID_LEN);
+    piv_box_set_slot(newbox, c->slotid);
   }
   VERIFY0(piv_box_set_data(newbox, secret, seclen));
-  if ((err = piv_box_seal_offline(partner, newbox)))
+  if ((err = piv_box_seal_offline(c->partner, newbox)))
     goto out;
 
   VERIFY0(piv_box_to_binary(newbox, &out, &outlen));
 
-  if ((r = sshbuf_put_u8(msg, SSH2_AGENT_EXT_RESPONSE)) != 0 ||
-      (r = sshbuf_put_cstring(msg, "ecdh-rebox@joyent.com")) != 0 ||
-      (r = sshbuf_put_string(msg, out, outlen)) != 0)
+  if ((r = sshbuf_put_u8(c->msg, SSH2_AGENT_EXT_RESPONSE)) != 0 ||
+      (r = sshbuf_put_cstring(c->msg, "ecdh-rebox@joyent.com")) != 0 ||
+      (r = sshbuf_put_string(c->msg, out, outlen)) != 0)
     fatal("%s: buffer error: %s", __func__, ssh_err(r));
 
-  if ((r = sshbuf_put_stringb(e->se_output, msg)) != 0)
+  if ((r = sshbuf_put_stringb(e->se_output, c->msg)) != 0)
     fatal("%s: buffer error: %s", __func__, ssh_err(r));
 
 out:
-  piv_box_free(box);
   piv_box_free(newbox);
   if (secret != NULL) {
     explicit_bzero(secret, seclen);
@@ -2132,11 +2945,115 @@ out:
     explicit_bzero(out, outlen);
     free(out);
   }
-  sshbuf_free(msg);
-  sshkey_free(partner);
-  sshbuf_free(boxbuf);
-  sshbuf_free(guidb);
   return (err);
+}
+
+static errf_t *rebox_try_op(socket_entry_t *e, boolean_t is_retry) {
+  errf_t *err;
+  struct rebox_cont_locals *c = &e->se_cont.u.rebox;
+
+  if ((err = agent_piv_try_pin(c->canskip))) {
+    agent_piv_close(B_TRUE);
+    return (err);
+  }
+  err = piv_box_open(c->tk, c->slot, c->box);
+
+  if (errf_caused_by(err, "PermissionError") && pin_len != 0 &&
+      piv_token_is_ykpiv(c->tk) && c->canskip) {
+    errf_free(err);
+    c->canskip = B_FALSE;
+    err = piv_box_open(c->tk, c->slot, c->box);
+  }
+  if (errf_caused_by(err, "PermissionError")) {
+    if (is_retry) {
+      agent_piv_close(B_TRUE);
+      return (nopinerrf(err));
+    }
+    errf_free(err);
+    c->canskip = B_FALSE;
+    start_prompt(e, PROMPT_ASKPASS, CONT_REBOX_AFTER_PIN_RETRY);
+    return (NULL);
+  } else if (err) {
+    agent_piv_close(B_TRUE);
+    return (err);
+  }
+
+  return (rebox_emit_response(e));
+}
+
+static errf_t *resume_rebox_after_confirm(socket_entry_t *e) {
+  struct rebox_cont_locals *c = &e->se_cont.u.rebox;
+  errf_t *err;
+  enum piv_slot_auth rauth;
+
+  if (e->se_authz == AUTHZ_DENIED) {
+    return (errf("AuthzError", NULL, "client blocked"));
+  }
+
+  err = sshbuf_get_piv_box(c->boxbuf, &c->box);
+  if (err)
+    return (err);
+
+  err = piv_box_find_token(allcard_mode ? ks : selk, c->box, &c->tk, &c->slot);
+  if (err)
+    return (err);
+  if (!allcard_mode && c->tk != selk) {
+    return (errf("WrongTokenError", NULL,
+                 "box can only be unlocked "
+                 "by a different PIV device"));
+  }
+  if (!is_slot_enabled(c->slot)) {
+    return (errf("KeyDisabledError", NULL,
+                 "box can only be unlocked "
+                 "by a disabled key slot"));
+  }
+
+  rauth = piv_slot_get_auth(c->tk, c->slot);
+  if (rauth & PIV_SLOT_AUTH_PIN)
+    c->canskip = B_FALSE;
+  if (rauth & PIV_SLOT_AUTH_TOUCH)
+    send_touch_notify(e, piv_slot_id(c->slot));
+
+  if (allcard_mode) {
+    if ((err = agent_piv_open_token(c->tk)))
+      return (err);
+  } else {
+    if ((err = agent_piv_open()))
+      return (err);
+  }
+  /* Now claim txn ownership; everything below this point could
+   * touch the card. */
+  txn_owner = e;
+
+  if (pin_len == 0 && !c->canskip) {
+    start_prompt(e, PROMPT_ASKPASS, CONT_REBOX_AFTER_PIN);
+    return (NULL);
+  }
+  return (rebox_try_op(e, B_FALSE));
+}
+
+static errf_t *resume_rebox_after_pin(socket_entry_t *e) {
+  struct rebox_cont_locals *c = &e->se_cont.u.rebox;
+
+  if (pin_len == 0) {
+    agent_piv_close(B_TRUE);
+    return (nopinerrf(
+        errf("PermissionError", NULL, "no PIN available for rebox")));
+  }
+  c->canskip = B_FALSE;
+  return (rebox_try_op(e, B_FALSE));
+}
+
+static errf_t *resume_rebox_after_pin_retry(socket_entry_t *e) {
+  struct rebox_cont_locals *c = &e->se_cont.u.rebox;
+
+  if (pin_len == 0) {
+    agent_piv_close(B_TRUE);
+    return (nopinerrf(
+        errf("PermissionError", NULL, "no PIN available for rebox retry")));
+  }
+  c->canskip = B_FALSE;
+  return (rebox_try_op(e, B_TRUE));
 }
 
 static errf_t *process_ext_x509_certs(socket_entry_t *e, struct sshbuf *buf) {
@@ -2199,20 +3116,22 @@ out:
   return (err);
 }
 
+/*
+ * piggy#105 step 3 pre-yield body for sign-prehash@arekinath.github.io.
+ * Mirror of process_sign_request2 — same shape, different piv op.
+ */
 static errf_t *process_ext_prehash(socket_entry_t *e, struct sshbuf *inbuf) {
   const u_char *data;
-  u_char *signature = NULL;
-  u_char *rawsig = NULL;
-  size_t dlen, rslen = 0;
+  size_t dlen;
   u_int flags;
   int r;
   errf_t *err = NULL;
-  struct sshbuf *msg;
+  struct sshbuf *msg = NULL;
   struct sshkey *key = NULL;
   struct piv_slot *slot = NULL;
   struct piv_token *tk = NULL;
-  boolean_t canskip = B_TRUE;
-  enum piv_slot_auth rauth;
+  u_char *data_copy = NULL;
+  struct prehash_cont_locals *c;
 
   if ((msg = sshbuf_new()) == NULL)
     fatal("%s: sshbuf_new failed", __func__);
@@ -2237,80 +3156,137 @@ static errf_t *process_ext_prehash(socket_entry_t *e, struct sshbuf *inbuf) {
       goto out;
     }
   }
-  /*
-   * piggy#105 step 1: claim txn ownership across the upcoming
-   * confirm + askpass + prehash-sign work. (See process_sign_request2
-   * for the cross-handler rationale.)
-   */
   txn_owner = e;
   bunyan_add_vars(msg_log_frame, "slotid", BNY_UINT, (uint)piv_slot_id(slot),
                   NULL);
 
-  try_confirm_client(e, piv_slot_id(slot));
-  if (e->se_authz == AUTHZ_DENIED) {
-    err = errf("AuthzError", NULL, "client blocked");
-    goto out;
-  }
+  /* Gotcha 1: deep-copy data — see process_sign_request2. */
+  data_copy = malloc(dlen > 0 ? dlen : 1);
+  if (data_copy == NULL)
+    fatal("%s: malloc(data_copy) failed", __func__);
+  if (dlen > 0)
+    memcpy(data_copy, data, dlen);
 
-  if (piv_slot_id(slot) == PIV_SLOT_KEY_MGMT && !sign_9d) {
-    err = errf("PermissionError", NULL,
-               "key management key (9d) "
-               "is not allowed to sign data without the -m option");
-    goto out;
-  }
+  c = &e->se_cont.u.prehash;
+  c->key = key;
+  c->msg = msg;
+  c->data_copy = data_copy;
+  c->dlen = dlen;
+  c->flags = flags;
+  c->slot = slot;
+  c->tk = tk;
+  c->canskip = B_TRUE;
 
-  rauth = piv_slot_get_auth(tk, slot);
-  if (rauth & PIV_SLOT_AUTH_PIN)
-    canskip = B_FALSE;
-  if (rauth & PIV_SLOT_AUTH_TOUCH)
-    send_touch_notify(e, piv_slot_id(slot));
-
-pin_again:
-  if ((err = agent_piv_try_pin(canskip))) {
-    agent_piv_close(B_TRUE);
-    goto out;
-  }
-  err = piv_sign_prehash(tk, slot, data, dlen, &rawsig, &rslen);
-
-  if (errf_caused_by(err, "PermissionError") && pin_len != 0 &&
-      piv_token_is_ykpiv(tk) && canskip) {
-    /*
-     * On a Yubikey, slots other than 9C (SIGNATURE) can also be
-     * set to "PIN Always" mode. We might have one, so try again
-     * with forced PIN entry.
-     */
-    canskip = B_FALSE;
-    goto pin_again;
-  } else if (errf_caused_by(err, "PermissionError")) {
-    try_askpass();
-    if (pin_len != 0) {
-      canskip = B_FALSE;
-      goto pin_again;
-    }
-    agent_piv_close(B_TRUE);
-    err = nopinerrf(err);
-    goto out;
-  } else if (err) {
-    agent_piv_close(B_TRUE);
-    goto out;
-  }
-  agent_piv_close(B_FALSE);
-
-  if ((r = sshbuf_put_u8(msg, SSH2_AGENT_EXT_RESPONSE)) != 0 ||
-      (r = sshbuf_put_cstring(msg, "sign-prehash@arekinath.github.io")) != 0 ||
-      (r = sshbuf_put_string(msg, rawsig, rslen)) != 0)
-    fatal("%s: buffer error: %s", __func__, ssh_err(r));
-
-  if ((r = sshbuf_put_stringb(e->se_output, msg)) != 0)
-    fatal("%s: buffer error: %s", __func__, ssh_err(r));
+  start_prompt(e, PROMPT_CONFIRM, CONT_PREHASH_AFTER_CONFIRM);
+  return (NULL);
 
 out:
   sshkey_free(key);
   sshbuf_free(msg);
+  free(data_copy);
+  return (err);
+}
+
+static errf_t *prehash_try_signing(socket_entry_t *e, boolean_t is_retry) {
+  errf_t *err;
+  u_char *rawsig = NULL;
+  size_t rslen = 0;
+  int r;
+  struct prehash_cont_locals *c = &e->se_cont.u.prehash;
+
+  if ((err = agent_piv_try_pin(c->canskip))) {
+    agent_piv_close(B_TRUE);
+    return (err);
+  }
+  err = piv_sign_prehash(c->tk, c->slot, c->data_copy, c->dlen, &rawsig,
+                         &rslen);
+
+  if (errf_caused_by(err, "PermissionError") && pin_len != 0 &&
+      piv_token_is_ykpiv(c->tk) && c->canskip) {
+    errf_free(err);
+    c->canskip = B_FALSE;
+    err = piv_sign_prehash(c->tk, c->slot, c->data_copy, c->dlen, &rawsig,
+                           &rslen);
+  }
+  if (errf_caused_by(err, "PermissionError")) {
+    if (is_retry) {
+      agent_piv_close(B_TRUE);
+      return (nopinerrf(err));
+    }
+    errf_free(err);
+    c->canskip = B_FALSE;
+    start_prompt(e, PROMPT_ASKPASS, CONT_PREHASH_AFTER_PIN_RETRY);
+    return (NULL);
+  } else if (err) {
+    agent_piv_close(B_TRUE);
+    return (err);
+  }
+
+  agent_piv_close(B_FALSE);
+
+  if ((r = sshbuf_put_u8(c->msg, SSH2_AGENT_EXT_RESPONSE)) != 0 ||
+      (r = sshbuf_put_cstring(c->msg, "sign-prehash@arekinath.github.io")) !=
+          0 ||
+      (r = sshbuf_put_string(c->msg, rawsig, rslen)) != 0)
+    fatal("%s: buffer error: %s", __func__, ssh_err(r));
+
+  if ((r = sshbuf_put_stringb(e->se_output, c->msg)) != 0)
+    fatal("%s: buffer error: %s", __func__, ssh_err(r));
+
   explicit_bzero(rawsig, rslen);
   free(rawsig);
-  free(signature);
-  return (err);
+  return (NULL);
+}
+
+static errf_t *resume_prehash_after_confirm(socket_entry_t *e) {
+  struct prehash_cont_locals *c = &e->se_cont.u.prehash;
+  enum piv_slot_auth rauth;
+
+  if (e->se_authz == AUTHZ_DENIED) {
+    return (errf("AuthzError", NULL, "client blocked"));
+  }
+
+  if (piv_slot_id(c->slot) == PIV_SLOT_KEY_MGMT && !sign_9d) {
+    return (errf("PermissionError", NULL,
+                 "key management key (9d) "
+                 "is not allowed to sign data without the -m option"));
+  }
+
+  rauth = piv_slot_get_auth(c->tk, c->slot);
+  if (rauth & PIV_SLOT_AUTH_PIN)
+    c->canskip = B_FALSE;
+  if (rauth & PIV_SLOT_AUTH_TOUCH)
+    send_touch_notify(e, piv_slot_id(c->slot));
+
+  if (pin_len == 0 && !c->canskip) {
+    start_prompt(e, PROMPT_ASKPASS, CONT_PREHASH_AFTER_PIN);
+    return (NULL);
+  }
+  return (prehash_try_signing(e, B_FALSE));
+}
+
+static errf_t *resume_prehash_after_pin(socket_entry_t *e) {
+  struct prehash_cont_locals *c = &e->se_cont.u.prehash;
+
+  if (pin_len == 0) {
+    agent_piv_close(B_TRUE);
+    return (nopinerrf(
+        errf("PermissionError", NULL, "no PIN available for prehash")));
+  }
+  c->canskip = B_FALSE;
+  return (prehash_try_signing(e, B_FALSE));
+}
+
+static errf_t *resume_prehash_after_pin_retry(socket_entry_t *e) {
+  struct prehash_cont_locals *c = &e->se_cont.u.prehash;
+
+  if (pin_len == 0) {
+    agent_piv_close(B_TRUE);
+    return (nopinerrf(
+        errf("PermissionError", NULL, "no PIN available for prehash retry")));
+  }
+  c->canskip = B_FALSE;
+  return (prehash_try_signing(e, B_TRUE));
 }
 
 static errf_t *process_ext_sessbind(socket_entry_t *e, struct sshbuf *buf) {
@@ -2702,6 +3678,18 @@ static int process_message(u_int socknum) {
   }
   e = &sockets[socknum];
 
+  /*
+   * piggy#105 step 3: if this socket is mid-yield on an
+   * askpass/confirm prompt, don't begin a second request on top of
+   * it — the resume continuation owns se_request / se_cont. Step 3
+   * makes this branch unreachable (the reap is synchronous so
+   * process_message returns before the next read), but step 5's
+   * poll-loop yield makes it reachable on a chatty client that
+   * sends a second message while awaiting a prompt.
+   */
+  if (e->se_state != SE_ACTIVE)
+    return 0;
+
   if (sshbuf_len(e->se_input) < 5)
     return 0; /* Incomplete message header. */
   cp = sshbuf_ptr(e->se_input);
@@ -3061,6 +4049,15 @@ static int handle_conn_read(u_int socknum) {
   char buf[1024];
   ssize_t len;
   int r;
+
+  /*
+   * piggy#105 step 3: if this socket is mid-yield, don't drain its
+   * read buffer — the kernel-side TCP buffering backpressures the
+   * client until the resume completes. Unreachable in step 3 (sync
+   * reap); reachable when step 5's poll-loop yield lands.
+   */
+  if (sockets[socknum].se_state != SE_ACTIVE)
+    return 0;
 
   if ((len = read(sockets[socknum].se_fd, buf, sizeof(buf))) <= 0) {
     if (len == -1) {
