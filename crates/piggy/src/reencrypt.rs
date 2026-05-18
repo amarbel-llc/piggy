@@ -123,7 +123,10 @@ fn collect_eboxes_no_symlinks(root: &Path) -> std::io::Result<Vec<PathBuf>> {
 fn display_name(path: &Path, store: &Path) -> String {
     let rel = path.strip_prefix(store).unwrap_or(path);
     let rel_str = rel.to_string_lossy();
-    rel_str.strip_suffix(".ebox").unwrap_or(&rel_str).to_string()
+    rel_str
+        .strip_suffix(".ebox")
+        .unwrap_or(&rel_str)
+        .to_string()
 }
 
 /// Run `pivy-box stream decrypt < passfile | piggy-ids encrypt $piggy_ids > tmp`
@@ -132,8 +135,7 @@ fn reencrypt_one(passfile: &Path, piggy_ids: &Path) -> Result<(), String> {
     let tmp = make_tmp_path(passfile);
 
     let pipeline_result = (|| -> Result<(), String> {
-        let input = std::fs::File::open(passfile)
-            .map_err(|e| format!("open passfile: {e}"))?;
+        let input = std::fs::File::open(passfile).map_err(|e| format!("open passfile: {e}"))?;
 
         let mut decrypt = Command::new("pivy-box")
             .arg("stream")
@@ -149,8 +151,8 @@ fn reencrypt_one(passfile: &Path, piggy_ids: &Path) -> Result<(), String> {
             .take()
             .ok_or_else(|| "pivy-box stdout unavailable".to_string())?;
 
-        let piggy_ids_bin: OsString = std::env::var_os("PIGGY_IDS_PATH")
-            .unwrap_or_else(|| OsString::from("piggy-ids"));
+        let piggy_ids_bin: OsString =
+            std::env::var_os("PIGGY_IDS_PATH").unwrap_or_else(|| OsString::from("piggy-ids"));
 
         let tmp_file = std::fs::File::create(&tmp)
             .map_err(|e| format!("create tmp {}: {}", tmp.display(), e))?;
@@ -177,12 +179,10 @@ fn reencrypt_one(passfile: &Path, piggy_ids: &Path) -> Result<(), String> {
     })();
 
     match pipeline_result {
-        Ok(()) => {
-            std::fs::rename(&tmp, passfile).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                format!("rename {} -> {}: {}", tmp.display(), passfile.display(), e)
-            })
-        }
+        Ok(()) => std::fs::rename(&tmp, passfile).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("rename {} -> {}: {}", tmp.display(), passfile.display(), e)
+        }),
         Err(err) => {
             let _ = std::fs::remove_file(&tmp);
             Err(err)

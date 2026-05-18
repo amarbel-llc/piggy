@@ -783,10 +783,7 @@ mod tests {
             let mut valid_seen = 0usize;
             let mut invalid_seen = 0usize;
             for group in &set.test_groups {
-                if group.key_size != 256
-                    || group.nonce_size != 96
-                    || group.tag_size != 128
-                {
+                if group.key_size != 256 || group.nonce_size != 96 || group.tag_size != 128 {
                     continue;
                 }
                 for tc in &group.tests {

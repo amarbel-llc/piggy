@@ -108,10 +108,9 @@ impl PurposeId {
     /// purposes it didn't enumerate.
     pub fn validate_format(&self, format: FormatId) -> Result<(), Incompatible> {
         let ok = match self {
-            PurposeId::PiggyRecipientV1 => matches!(
-                format,
-                FormatId::PivyEcdhP256Pub | FormatId::AgeX25519Pub
-            ),
+            PurposeId::PiggyRecipientV1 => {
+                matches!(format, FormatId::PivyEcdhP256Pub | FormatId::AgeX25519Pub)
+            }
             PurposeId::PiggyPivAuthV1
             | PurposeId::PiggyPivSigV1
             | PurposeId::PiggyPivCardAuthV1 => {

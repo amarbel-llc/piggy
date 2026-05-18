@@ -33,9 +33,7 @@ pub fn run(args: &[String]) -> i32 {
     };
 
     if let Some(reason) = sneaky_path_reason(&opts.path) {
-        eprintln!(
-            "Error: You've attempted to pass a sneaky path to piggy ({reason}). Go home."
-        );
+        eprintln!("Error: You've attempted to pass a sneaky path to piggy ({reason}). Go home.");
         return 1;
     }
 
@@ -56,7 +54,12 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
 
-    if !opts.force && !confirm(&format!("Are you sure you would like to delete {}?", opts.path)) {
+    if !opts.force
+        && !confirm(&format!(
+            "Are you sure you would like to delete {}?",
+            opts.path
+        ))
+    {
         return 0;
     }
 
@@ -123,9 +126,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
     }
 
     if positional.len() != 1 {
-        return Err(
-            "Usage: piggy pass rm [--recursive,-r] [--force,-f] <pass-name>".into(),
-        );
+        return Err("Usage: piggy pass rm [--recursive,-r] [--force,-f] <pass-name>".into());
     }
     Ok(Opts {
         recursive,
@@ -292,7 +293,11 @@ mod tests {
 
     #[test]
     fn parse_args_dashdash_terminates_flags() {
-        let v = vec!["-f".to_string(), "--".to_string(), "-weird-name".to_string()];
+        let v = vec![
+            "-f".to_string(),
+            "--".to_string(),
+            "-weird-name".to_string(),
+        ];
         let o = parse_args(&v).unwrap();
         assert!(o.force);
         assert_eq!(o.path, "-weird-name");

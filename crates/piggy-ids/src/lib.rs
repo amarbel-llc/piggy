@@ -512,7 +512,10 @@ mod tests {
         );
         let file = RecipientFile::parse(&input).unwrap();
         assert_eq!(file.recipients().len(), 2);
-        assert_eq!(file.recipients()[0].id().format(), FormatId::PivyEcdhP256Pub);
+        assert_eq!(
+            file.recipients()[0].id().format(),
+            FormatId::PivyEcdhP256Pub
+        );
         assert_eq!(file.recipients()[1].id().format(), FormatId::AgeX25519Pub);
     }
 

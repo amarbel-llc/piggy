@@ -1103,8 +1103,7 @@ mod tests {
             priv_scalar: &[u8],
             pub_bytes: &[u8],
         ) -> std::result::Result<Vec<u8>, String> {
-            let group = EcGroup::from_curve_name(curve.nid())
-                .map_err(|e| format!("group: {e}"))?;
+            let group = EcGroup::from_curve_name(curve.nid()).map_err(|e| format!("group: {e}"))?;
             let mut ctx = BigNumContext::new().map_err(|e| format!("ctx: {e}"))?;
             let priv_key = priv_key_from_scalar(curve, priv_scalar)
                 .ok_or_else(|| "priv scalar invalid".to_string())?;

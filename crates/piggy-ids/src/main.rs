@@ -1038,8 +1038,10 @@ mod tests {
 
     #[test]
     fn format_human_includes_policies_when_present() {
-        let line =
-            format_human(&sample_supported_with_policies(PinPolicy::Never, TouchPolicy::Never));
+        let line = format_human(&sample_supported_with_policies(
+            PinPolicy::Never,
+            TouchPolicy::Never,
+        ));
         assert!(line.contains(", pin=never"), "missing pin=never: {line}");
         assert!(
             line.contains(", touch=never"),

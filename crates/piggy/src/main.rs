@@ -311,9 +311,7 @@ fn main() {
             PassCommand::Cp { rest } => fallback::exec_bash("cp", &rest),
             PassCommand::Git { rest } => std::process::exit(git::run(&rest)),
             PassCommand::Recipients(args) => match args.cmd {
-                RecipientsCommand::List { rest } => {
-                    std::process::exit(recipients::list(&rest))
-                }
+                RecipientsCommand::List { rest } => std::process::exit(recipients::list(&rest)),
                 RecipientsCommand::ListAvailable { rest } => {
                     fallback::exec_piggy_ids("list-available", &rest)
                 }
@@ -327,9 +325,7 @@ fn main() {
                     fallback::exec_bash_subcmds("recipients", "sync", &rest)
                 }
             },
-            PassCommand::Verify { subpath } => {
-                std::process::exit(verify::run(subpath.as_deref()))
-            }
+            PassCommand::Verify { subpath } => std::process::exit(verify::run(subpath.as_deref())),
         },
 
         Command::List { rest } => fallback::exec_piggy_ids("list-all", &rest),
@@ -353,8 +349,6 @@ fn main() {
             }
         },
 
-        Command::InternalReencryptPath { dir } => {
-            std::process::exit(reencrypt::run(&dir))
-        }
+        Command::InternalReencryptPath { dir } => std::process::exit(reencrypt::run(&dir)),
     }
 }

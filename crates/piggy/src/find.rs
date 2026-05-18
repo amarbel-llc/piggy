@@ -150,9 +150,8 @@ fn strip_ebox_suffix(line: &str) -> String {
     // Safety: the only bytes we ever skipped are pure ASCII (".ebox"
     // and `<ESC>[<digits>m`), so cutting them out preserves UTF-8
     // validity of the surrounding runs.
-    String::from_utf8(out_bytes).unwrap_or_else(|e| {
-        String::from_utf8_lossy(&e.into_bytes()).into_owned()
-    })
+    String::from_utf8(out_bytes)
+        .unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).into_owned())
 }
 
 /// If `bytes[start]` begins an ANSI CSI like `<ESC>[12m`, return the

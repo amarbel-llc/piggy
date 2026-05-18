@@ -21,9 +21,7 @@ use crate::tlv::TlvReader;
 /// touch policy attestation extension). Encoded as the contents of an
 /// OID OBJECT IDENTIFIER tag, not including the leading `06 LL` tag
 /// and length bytes.
-const YK_POLICY_OID_BODY: &[u8] = &[
-    0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xC4, 0x0A, 0x03, 0x08,
-];
+const YK_POLICY_OID_BODY: &[u8] = &[0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xC4, 0x0A, 0x03, 0x08];
 
 /// Extract `(PinPolicy, TouchPolicy)` from a YubiKey attestation cert.
 ///

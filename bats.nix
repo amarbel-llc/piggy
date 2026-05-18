@@ -86,9 +86,7 @@ let
       ];
     };
 
-  batsFiles = lib.filter (f: lib.hasSuffix ".bats" f) (
-    builtins.attrNames (builtins.readDir batsSrc)
-  );
+  batsFiles = lib.filter (f: lib.hasSuffix ".bats" f) (builtins.attrNames (builtins.readDir batsSrc));
 
   extractFileTags =
     file:
@@ -106,7 +104,12 @@ let
 
   batsLaneOutputs =
     lib.listToAttrs (
-      map (tag: lib.nameValuePair "bats-${tag}" (mkBatsLane { filter = tag; })) allFileTags
+      map (
+        tag:
+        lib.nameValuePair "bats-${tag}" (mkBatsLane {
+          filter = tag;
+        })
+      ) allFileTags
     )
     // {
       bats-default = mkBatsLane { };
