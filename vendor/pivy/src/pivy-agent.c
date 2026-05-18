@@ -814,6 +814,118 @@ static const char *askpass = NULL;
 static const char *confirm = NULL;
 static const char *notify = NULL;
 
+/*
+ * Bounded waitpid (piggy#104). The agent's main loop is a single
+ * poll(2) driver — any unbounded waitpid inside try_askpass /
+ * try_confirm_client blocks every other client request (including
+ * routine REQUEST_IDENTITIES probes) until the user-interaction
+ * child exits. A hidden / off-screen zenity prompt converts one
+ * unanswered prompt into a process-wide DoS for SSH.
+ *
+ * This is the backstop side of that fix: register a one-shot
+ * SIGALRM handler, arm alarm(secs), waitpid with no WNOHANG so we
+ * keep the existing reap-and-status-check shape, and on EINTR-from-
+ * SIGALRM (alarm_fired) terminate the askpass/confirm child and
+ * reap it with WNOHANG. The companion user-facing fix landed in
+ * contrib/piggy-askpass.sh as a zenity --timeout bound — these are
+ * defense-in-depth; the agent-side backstop ensures even an
+ * uncooperative askpass cannot wedge the poll loop forever.
+ *
+ * The full async restructure (state machine that yields the poll
+ * loop while awaiting askpass output) is a follow-up; this backstop
+ * is the smallest change that bounds the blast radius.
+ *
+ * Returns the waited-on pid on success, -1 on timeout or any other
+ * waitpid error; sets *status to the child's exit status when the
+ * return value is positive, undefined otherwise.
+ */
+static volatile sig_atomic_t alarm_fired = 0;
+
+static void alarm_handler(int sig) {
+  (void)sig;
+  alarm_fired = 1;
+}
+
+static pid_t waitpid_with_deadline(pid_t kid, int *status, unsigned secs) {
+  struct sigaction sa, old_sa;
+  pid_t ret;
+  int saved_errno;
+
+  if (secs == 0)
+    return waitpid(kid, status, 0);
+
+  alarm_fired = 0;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = alarm_handler;
+  sigemptyset(&sa.sa_mask);
+  /* sa_flags = 0 (no SA_RESTART): waitpid must return EINTR on
+   * SIGALRM rather than transparently retrying. */
+  sa.sa_flags = 0;
+  if (sigaction(SIGALRM, &sa, &old_sa) != 0) {
+    /* Cannot install handler; fall back to unbounded wait so the
+     * agent still functions, just without the backstop. */
+    return waitpid(kid, status, 0);
+  }
+
+  alarm(secs);
+  for (;;) {
+    ret = waitpid(kid, status, 0);
+    if (ret != -1)
+      break;
+    saved_errno = errno;
+    if (saved_errno == EINTR && alarm_fired) {
+      /* Deadline hit. Try graceful termination, then force-kill if
+       * needed, and reap with WNOHANG so we never re-enter the
+       * unbounded wait. */
+      bunyan_log(BNY_WARN, "askpass/confirm deadline exceeded; killing child",
+                 "pid", BNY_INT, (int)kid, "deadline_s", BNY_UINT, secs, NULL);
+      (void)kill(kid, SIGTERM);
+      /* Brief grace period: poll WNOHANG every 50ms for up to 500ms.
+       * Most askpass children die promptly on SIGTERM. */
+      for (int i = 0; i < 10; i++) {
+        pid_t r = waitpid(kid, status, WNOHANG);
+        if (r == kid)
+          goto out;
+        if (r == -1 && errno != EINTR && errno != ECHILD)
+          break;
+        struct timespec ts = {0, 50 * 1000 * 1000}; /* 50ms */
+        (void)nanosleep(&ts, NULL);
+      }
+      (void)kill(kid, SIGKILL);
+      (void)waitpid(kid, status, WNOHANG);
+      ret = -1;
+      break;
+    }
+    if (saved_errno == EINTR)
+      continue; /* Spurious EINTR not from our alarm; retry. */
+    break;     /* Some other waitpid error; propagate. */
+  }
+
+out:
+  /* Cancel any pending alarm and restore the previous SIGALRM
+   * disposition before returning. */
+  alarm(0);
+  (void)sigaction(SIGALRM, &old_sa, NULL);
+  return ret;
+}
+
+/* Default deadline for the askpass / confirm backstop. 60s is
+ * generous enough for a real human PIN entry while still bounding
+ * the head-of-line blocking from a missed prompt. Tunable via
+ * PIVY_ASKPASS_DEADLINE_S. */
+#define PIVY_ASKPASS_DEFAULT_DEADLINE_S 60
+
+static unsigned askpass_deadline_secs(void) {
+  const char *env = getenv("PIVY_ASKPASS_DEADLINE_S");
+  if (env != NULL && env[0] != '\0') {
+    char *endp = NULL;
+    unsigned long v = strtoul(env, &endp, 10);
+    if (endp != env && *endp == '\0' && v > 0 && v <= 3600)
+      return (unsigned)v;
+  }
+  return PIVY_ASKPASS_DEFAULT_DEADLINE_S;
+}
+
 static void try_askpass(void) {
   int p[2], status;
   pid_t kid, ret;
@@ -856,9 +968,10 @@ static void try_askpass(void) {
   buf[len] = '\0';
 
   close(p[0]);
-  while ((ret = waitpid(kid, &status, 0)) == -1)
-    if (errno != EINTR)
-      break;
+  /* piggy#104: bounded wait. On deadline the child is force-killed
+   * and ret returns -1, falling through to the existing failure
+   * path. The agent's poll loop is freed within `secs`. */
+  ret = waitpid_with_deadline(kid, &status, askpass_deadline_secs());
   if (ret == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
     explicit_bzero(buf, sizeof(buf));
     bunyan_log(BNY_WARN, "executing askpass failed", "exit_status", BNY_UINT,
@@ -1060,9 +1173,13 @@ static void try_confirm_client(socket_entry_t *e, enum piv_slotid slotid) {
     exit(128);
   }
   close(p[1]);
-  while ((ret = waitpid(kid, &status, 0)) == -1)
-    if (errno != EINTR)
-      break;
+  /* piggy#104: bounded wait. Confirm prompts share the same head-
+   * of-line-blocking failure mode as askpass — an off-screen zenity
+   * confirm dialog freezes every other client request including
+   * REQUEST_IDENTITIES from a mux upstream. Backstop with the same
+   * deadline so the poll loop is unblocked even if the user never
+   * answers. */
+  ret = waitpid_with_deadline(kid, &status, askpass_deadline_secs());
   if (ret == -1 || !WIFEXITED(status) ||
       (WEXITSTATUS(status) != 0 && WEXITSTATUS(status) != 1)) {
     bunyan_log(BNY_WARN, "executing confirm failed", "exit_status", BNY_UINT,

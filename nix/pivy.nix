@@ -1,8 +1,14 @@
-# Local derivation for amarbel-llc/pivy, sourced from ./vendor/pivy.
+# Local derivation for the pivy tree vendored under ./vendor/pivy.
 #
 # Ported from vendor/pivy/flake.nix so piggy can consume pivy as a plain
 # nix derivation instead of a nested flake input. See piggy #21 for the
 # vendoring decision and the motivation to avoid nested flakes.
+#
+# Background: pivy itself originated at arekinath/pivy. amarbel-llc
+# previously maintained a fork at github.com/amarbel-llc/pivy, but
+# that fork is now archived — all ongoing pivy work happens in this
+# tree under vendor/pivy/. The vendored copy IS pivy as far as piggy
+# is concerned.
 #
 # This file reproduces only the outputs piggy actually uses today —
 # `packages.default` from the upstream flake, i.e. the C pivy binaries
@@ -268,8 +274,11 @@ pkgs.stdenv.mkDerivation {
   '';
 
   meta = with pkgs.lib; {
-    description = "PIV tools for YubiKey and similar hardware tokens (vendored from amarbel-llc/pivy)";
-    homepage = "https://github.com/amarbel-llc/pivy";
+    # The standalone amarbel-llc/pivy fork is archived; piggy now
+    # vendors pivy under vendor/pivy/ as the canonical source. The
+    # homepage points at piggy where issues are tracked.
+    description = "PIV tools for YubiKey and similar hardware tokens (vendored under piggy/vendor/pivy)";
+    homepage = "https://github.com/amarbel-llc/piggy";
     license = licenses.mpl20;
     platforms = platforms.linux ++ platforms.darwin;
   };

@@ -28,6 +28,8 @@ just build
 
 Dependencies (pinned by the devshell): `bash`, `pivy` (vendored at `vendor/pivy/`), `git`, a clipboard helper (`xclip` / `wl-clipboard` / `pbcopy`), `tree`, GNU `getopt`, `qrencode`.
 
+> **Note on the vendored pivy.** The standalone [`amarbel-llc/pivy`](https://github.com/amarbel-llc/pivy) fork (forked from [`arekinath/pivy`](https://github.com/arekinath/pivy)) is **archived**. All ongoing pivy work — bug fixes, new features, vendored patches — happens in this repository under `vendor/pivy/`. Do not open issues or send PRs against the archived fork; file them here against `vendor/pivy/...` instead. The vendored tree is the canonical source.
+
 ## Usage
 
 The user-facing CLI is `piggy <subcommand>`. `piggy --help` prints the full subcommand list. There are three groups:
