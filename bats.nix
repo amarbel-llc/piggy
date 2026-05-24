@@ -16,10 +16,13 @@
 # `bats-default` (which filters with `!hardware` to exclude tests
 # that need a real pcscd/PIV stack).
 #
-# Only top-level `*.bats` files under `batsSrc` are scanned (matches
-# clown's and tap's bats.nix). Tests under
-# `zz-tests_bats/conformance/` and `zz-tests_bats/explore/` stay
-# invoked through the existing `just test-bats-conformance-*` recipes.
+# Two scan roots: top-level `*.bats` plus `conformance/*.bats`. Both
+# are passed as `testFiles` globs to batsLane so the staged tests run
+# under the sandboxed lane; tests under `zz-tests_bats/explore/` are
+# deliberately omitted (see piggy#115). Hardware-tagged tests in
+# either root are filtered out of `bats-default` via the `!hardware`
+# tag filter and remain invokable via the
+# `just test-bats-conformance-*` recipes that hit real pcscd/cards.
 {
   pkgs,
   batsLane,
@@ -36,6 +39,11 @@
   # script and the real piggy-ids binary the dispatcher / mock
   # delegators need by absolute path.
   piggyWrapped,
+  # The Go-based SSH-agent protocol conformance binary. Plumbed into
+  # the lane as `CONFORMANCE_BIN` so
+  # `conformance/piggy_agent_protocol.bats` can run under the
+  # sandboxed lane instead of via `bats --no-sandbox` only.
+  conformanceBin,
   # batsSrc may be null when this file is imported outside a flake
   # context — `batsLaneOutputs` then returns `{ }` instead of crashing
   # in builtins.readDir. Matches madder's go/default.nix factoring.
@@ -52,10 +60,29 @@ let
     }:
     batsLane {
       inherit base filter batsSrc;
+      # Run the top-level `t*.bats` tests AND the non-hardware
+      # conformance tests under the sandboxed lane. Hardware-tagged
+      # tests in either root are filtered out at bats invocation time
+      # via the `!hardware` filter (see piggy#115). The `explore/`
+      # directory stays out of scope.
+      testFiles = [
+        "*.bats"
+        "conformance/*.bats"
+      ];
       binaries = {
         PIGGY = {
           inherit base;
           name = "piggy";
+        };
+        # CONFORMANCE_BIN drives the Go-based SSH-agent protocol
+        # conformance test (conformance/piggy_agent_protocol.bats).
+        # Before piggy#115 this binary was injected by the
+        # `just test-bats-conformance-protocol` recipe via
+        # `nix build .#piggy.tests.conformance`; now the same path is
+        # reachable from the sandboxed lane too.
+        CONFORMANCE_BIN = {
+          base = conformanceBin;
+          name = "piggy-agent-conformance";
         };
       };
       batsLibPath = [ bats-libs.batsLibPath ];
@@ -92,6 +119,12 @@ let
         pkgs.gnugrep
         pkgs.gnused
         pkgs.openssl
+        # python3: needed by conformance/piggy_askpass.bats — the test
+        # uses `python3 -c 'import os; os.setsid(); os.execvp(...)'` to
+        # detach the controlling TTY before invoking the askpass
+        # script under a scrubbed env, mimicking pivy-agent's
+        # launchd/systemd fork context. See piggy#115.
+        pkgs.python3
         pkgs.qrencode
         pkgs.tree
       ];
@@ -106,9 +139,22 @@ let
       { }
     else
       let
-        batsFiles = lib.filter (f: lib.hasSuffix ".bats" f) (
-          builtins.attrNames (builtins.readDir batsSrc)
-        );
+        # Scan two roots: top-level `t*.bats` plus `conformance/*.bats`.
+        # The conformance/ pass is keyed by the relative path so the
+        # builtins.readFile in extractFileTags resolves correctly. The
+        # tag extraction itself is path-agnostic; we just need the
+        # unique tag set across both roots.
+        scanDir =
+          subdir:
+          let
+            dir = if subdir == "" then batsSrc else batsSrc + "/${subdir}";
+            prefix = if subdir == "" then "" else "${subdir}/";
+            entries = builtins.attrNames (builtins.readDir dir);
+            batsEntries = lib.filter (f: lib.hasSuffix ".bats" f) entries;
+          in
+          map (f: "${prefix}${f}") batsEntries;
+
+        batsFiles = (scanDir "") ++ (scanDir "conformance");
 
         extractFileTags =
           file:

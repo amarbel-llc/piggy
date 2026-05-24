@@ -313,6 +313,9 @@
           # and `$out/libexec/piggy/piggy-ids` referenced by the
           # extraEnv (PIGGY_SH_PATH, PIGGY_IDS_REAL).
           piggyWrapped = piggy;
+          # Threaded through so the lane can inject CONFORMANCE_BIN
+          # for conformance/piggy_agent_protocol.bats. See piggy#115.
+          conformanceBin = piggy-agent-conformance;
           batsLane = bats.lib.${system}.batsLane;
           bats-libs = bats.packages.${system}.bats-libs;
           batsSrc = ./zz-tests_bats;
