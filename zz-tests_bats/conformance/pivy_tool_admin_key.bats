@@ -13,23 +13,34 @@ setup() {
   bats_load_library bats-support
   bats_load_library bats-assert
 
-  # Prefer the nix-built pivy-tool (from ./result) over the devshell's.
-  # The devshell binary may lag behind vendor/pivy source changes until
-  # the next `nix develop` rebuild. `just explore-pivy-tool-bats` always
-  # tests against the nix-built output.
-  local piggy_wrapper="$BATS_CWD/result/bin/piggy"
-  if [[ -f $piggy_wrapper ]]; then
-    local nix_pivy_bin
-    nix_pivy_bin=$(grep -oE '/nix/store/[a-z0-9]+-pivy-[^/]+/bin' "$piggy_wrapper" | head -1)
-    if [[ -n $nix_pivy_bin && -x "$nix_pivy_bin/pivy-tool" ]]; then
-      PIVY_TOOL="$nix_pivy_bin/pivy-tool"
+  # Prefer the sandboxed lane's injected REAL_PIVY_TOOL (set by
+  # bats.nix's extraEnv, see piggy#116). That path points at the C
+  # pivy derivation directly, bypassing the mock pivy-tool that
+  # common.bash installs at the front of $PATH for the rest of the
+  # suite.
+  if [[ -n ${REAL_PIVY_TOOL:-} && -x ${REAL_PIVY_TOOL:-} ]]; then
+    PIVY_TOOL="$REAL_PIVY_TOOL"
+  fi
+
+  # Local-invocation fallback: prefer the nix-built pivy-tool
+  # (from ./result) over the devshell's. The devshell binary may lag
+  # behind vendor/pivy source changes until the next `nix develop`
+  # rebuild.
+  if [[ -z ${PIVY_TOOL:-} ]]; then
+    local piggy_wrapper="$BATS_CWD/result/bin/piggy"
+    if [[ -f $piggy_wrapper ]]; then
+      local nix_pivy_bin
+      nix_pivy_bin=$(grep -oE '/nix/store/[a-z0-9]+-pivy-[^/]+/bin' "$piggy_wrapper" | head -1)
+      if [[ -n $nix_pivy_bin && -x "$nix_pivy_bin/pivy-tool" ]]; then
+        PIVY_TOOL="$nix_pivy_bin/pivy-tool"
+      fi
     fi
   fi
 
   if [[ -z ${PIVY_TOOL:-} ]]; then
     PIVY_TOOL="$(command -v pivy-tool)" || true
   fi
-  [[ -x ${PIVY_TOOL:-} ]] || skip "pivy-tool not found on PATH or in ./result"
+  [[ -x ${PIVY_TOOL:-} ]] || skip "pivy-tool not found via REAL_PIVY_TOOL, ./result, or PATH"
 }
 
 function k_default_version_prints_version { # @test

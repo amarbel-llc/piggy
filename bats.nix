@@ -44,6 +44,15 @@
   # `conformance/piggy_agent_protocol.bats` can run under the
   # sandboxed lane instead of via `bats --no-sandbox` only.
   conformanceBin,
+  # The C pivy package (pivyPkg in flake.nix). Threaded as
+  # `REAL_PIVY_TOOL` so `conformance/pivy_tool_admin_key.bats` can
+  # exercise its assertions against the lane-bundled pivy-tool rather
+  # than skipping when `./result/bin/piggy` is absent (the sandbox has
+  # no `result/` symlink). See piggy#116. Intentionally NOT on
+  # `nativeBuildInputs` — the mock `pivy-tool` installed by
+  # common.bash at the front of $PATH must still win for the other
+  # tests; we hand the real binary in by absolute path instead.
+  pivy,
   # batsSrc may be null when this file is imported outside a flake
   # context — `batsLaneOutputs` then returns `{ }` instead of crashing
   # in builtins.readDir. Matches madder's go/default.nix factoring.
@@ -95,6 +104,10 @@ let
         # dispatcher's find_piggy_sh().
         PIGGY_SH_PATH = "${piggyWrapped}/libexec/piggy/piggy.sh";
         PIGGY_IDS_REAL = "${piggyWrapped}/libexec/piggy/piggy-ids";
+        # The real C pivy-tool, used only by pivy_tool_admin_key.bats.
+        # Matches the REAL_PIVY_BOX convention used by the interop
+        # recipe (see justfile). See piggy#116.
+        REAL_PIVY_TOOL = "${pivy}/bin/pivy-tool";
         # Deliberately do NOT export PIGGY_IDS_PATH: when unset, the
         # rust dispatcher falls through to `command -v piggy-ids`,
         # which resolves to the mock symlink in $BATS_TEST_TMPDIR

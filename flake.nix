@@ -322,6 +322,9 @@
           # Threaded through so the lane can inject CONFORMANCE_BIN
           # for conformance/piggy_agent_protocol.bats. See piggy#115.
           conformanceBin = piggy-agent-conformance;
+          # Threaded through so the lane can inject REAL_PIVY_TOOL
+          # for conformance/pivy_tool_admin_key.bats. See piggy#116.
+          pivy = pivyPkg;
           batsLane = bats.lib.${system}.batsLane;
           bats-libs = bats.packages.${system}.bats-libs;
           batsSrc = ./zz-tests_bats;
