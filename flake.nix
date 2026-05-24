@@ -359,6 +359,11 @@
 
         checks = {
           bats-default = batsLib.batsLaneOutputs.bats-default;
+          # Read-only CI gate: builds in /nix/store off a source
+          # snapshot, runs treefmt, fails if any file would change.
+          # Driven from `just lint-fmt` and surfaced under `nix flake
+          # check`.
+          formatting = treefmtEval.config.build.check self;
         };
 
         formatter = treefmtEval.config.build.wrapper;

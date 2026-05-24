@@ -444,6 +444,18 @@ codemod-fmt-treefmt:
 lint-rust:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Read-only formatting gate: builds the `checks.formatting`
+# derivation, which runs treefmt against a /nix/store snapshot of
+# the source tree and fails if anything would change. Does NOT
+# modify files in the worktree -- the modifying counterpart is
+# `codemod-fmt`.
+[group('pre-build')]
+lint-fmt:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
+    nix build ".#checks.${system}.formatting" --no-link --print-build-logs
+
 # --- fib: virtual PIV smart card ---
 #
 # `fib` is a software PIV card built from PivApplet + jCardSim + vsmartcard-vpcd.
