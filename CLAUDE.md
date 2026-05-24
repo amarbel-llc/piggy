@@ -102,7 +102,7 @@ Recipes ensure consistent flags, proper dependencies, and keep the justfile as t
 
 ## Code Conventions
 
-- Bash: `set -o pipefail`, `[[ ]]` conditionals, all variables quoted
+- Bash: `set -o pipefail`, `[[ ]]` conditionals
 - Functions: `cmd_*` for user-facing commands, lowercase_with_underscores for helpers
 - Shell formatting: `shfmt -s -i=2` (2-space indent, simplified) — driven by treefmt
 - Nix formatting: `nixfmt` (RFC 166) — driven by treefmt
