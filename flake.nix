@@ -13,6 +13,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     # Software PIV smart card for tests — see nix/virtual-piv.nix.
     # Not flakes themselves; fetched as plain sources.
     jcardsim = {
@@ -47,6 +52,7 @@
       nixpkgs-master,
       utils,
       bats,
+      treefmt-nix,
       jcardsim,
       pivapplet,
       oracle-javacard-sdks,
@@ -320,6 +326,12 @@
           bats-libs = bats.packages.${system}.bats-libs;
           batsSrc = ./zz-tests_bats;
         };
+
+        # Tree-wide formatter: nixfmt + shfmt + rustfmt under one
+        # wrapper. Exposed as `formatter.${system}` (so `nix fmt`
+        # works) and dropped into the devShell so `treefmt` resolves
+        # there too. See ./treefmt.nix for the program config.
+        treefmtEval = treefmt-nix.lib.evalModule pkgs ./treefmt.nix;
       in
       {
         packages = {
@@ -349,6 +361,8 @@
           bats-default = batsLib.batsLaneOutputs.bats-default;
         };
 
+        formatter = treefmtEval.config.build.wrapper;
+
         devShells.default = pkgs.mkShell {
           packages =
             runtimeDeps
@@ -361,7 +375,7 @@
               pkgs-master.rustfmt
               pkgs-master.clippy
               pkgs-master.rust-analyzer
-              pkgs.nixfmt-rfc-style
+              treefmtEval.config.build.wrapper
               pkgs.scdoc
               # In amarbel-llc/bats's new package layout, `batman`
               # (the test orchestrator) and `bats` (the bats-core

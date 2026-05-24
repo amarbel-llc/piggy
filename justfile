@@ -430,18 +430,17 @@ debug-conformance-run-hw: build-rust
 
 # --- format / lint ---
 
-codemod-fmt: codemod-fmt-nix codemod-fmt-shell codemod-fmt-rust
+[group('codemod')]
+codemod-fmt: codemod-fmt-treefmt
 
-codemod-fmt-nix:
-    nix develop --command bash -c \
-      'git ls-files --others --cached --exclude-standard "*.nix" | xargs nixfmt'
+# Run treefmt via the flake's `formatter.${system}` wrapper, which
+# composes nixfmt + shfmt + rustfmt under one CLI. See treefmt.nix
+# for the program config.
+[group('codemod')]
+codemod-fmt-treefmt:
+    nix fmt
 
-codemod-fmt-shell:
-    nix develop --command shfmt -s -i=2 -w src/
-
-codemod-fmt-rust:
-    cargo fmt
-
+[group('pre-build')]
 lint-rust:
     cargo clippy --workspace --all-targets -- -D warnings
 
