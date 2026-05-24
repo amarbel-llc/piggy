@@ -1,5 +1,10 @@
 
-default: build test
+default: lint build test
+
+# Pre-build gate. lint-rust is intentionally NOT in here yet: clippy
+# is slow and not all targets are warning-clean today. See piggy#112
+# for the wider eng-justfile alignment.
+lint: lint-fmt
 
 # --- build ---
 
