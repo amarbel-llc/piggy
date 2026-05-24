@@ -9,11 +9,11 @@
         "utils": "utils"
       },
       "locked": {
-        "lastModified": 1779570323,
-        "narHash": "sha256-0urKW1FpMR84lmbwVvRyzAuhc1mUTs4uYq5yOqjA360=",
+        "lastModified": 1779584346,
+        "narHash": "sha256-CiYDeTmxfXVZ336y+ZSQp6t7U5a14MtA4Z+hfqN/wso=",
         "owner": "amarbel-llc",
         "repo": "bats",
-        "rev": "6a64e3162c7b6953f47db826db6a1055506b8502",
+        "rev": "55acd6a4faa77c9eea19eaa3c93f71cc56f15d1c",
         "type": "github"
       },
       "original": {
@@ -40,14 +40,14 @@
     },
     "nixpkgs": {
       "inputs": {
-        "nixpkgs": "nixpkgs_2"
+        "nixpkgs-master": "nixpkgs-master_2"
       },
       "locked": {
-        "lastModified": 1779554513,
-        "narHash": "sha256-NgonIXm93ktil26Ph6D+T1GQtFr2pzve9YKm1MOUEe0=",
+        "lastModified": 1779582857,
+        "narHash": "sha256-1J93f5Q7a6yHFX8vGjFbXfiNF6K119hRJcCm9BcOTUk=",
         "owner": "amarbel-llc",
         "repo": "nixpkgs",
-        "rev": "e5ee0b46769250ff17b756b9fc8f6f081455b717",
+        "rev": "8bbc20adbc893ce14130881fd5564a0964f1d8f9",
         "type": "github"
       },
       "original": {
@@ -88,19 +88,19 @@
         "type": "github"
       }
     },
-    "nixpkgs_2": {
+    "nixpkgs-master_3": {
       "locked": {
-        "lastModified": 1779279859,
-        "narHash": "sha256-qPbDIhrdm1o64QYpWPXYvET2eMrBKQsupzw0ZlTj47s=",
+        "lastModified": 1778869304,
+        "narHash": "sha256-30sZNZoA1cqF5JNO9fVX+wgiQYjB7HJqqJ4ztCDeBZE=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "b34d83610cfd10ef6b2fa97b77f5b0f91143ceb8",
+        "rev": "d233902339c02a9c334e7e593de68855ad26c4cb",
         "type": "github"
       },
       "original": {
         "owner": "NixOS",
-        "ref": "master",
         "repo": "nixpkgs",
+        "rev": "d233902339c02a9c334e7e593de68855ad26c4cb",
         "type": "github"
       }
     },
@@ -141,7 +141,7 @@
         "bats": "bats",
         "jcardsim": "jcardsim",
         "nixpkgs": "nixpkgs",
-        "nixpkgs-master": "nixpkgs-master_2",
+        "nixpkgs-master": "nixpkgs-master_3",
         "oracle-javacard-sdks": "oracle-javacard-sdks",
         "pivapplet": "pivapplet",
         "utils": "utils_2"
