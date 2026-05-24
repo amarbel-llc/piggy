@@ -36,7 +36,10 @@
   # script and the real piggy-ids binary the dispatcher / mock
   # delegators need by absolute path.
   piggyWrapped,
-  batsSrc,
+  # batsSrc may be null when this file is imported outside a flake
+  # context — `batsLaneOutputs` then returns `{ }` instead of crashing
+  # in builtins.readDir. Matches madder's go/default.nix factoring.
+  batsSrc ? null,
   batsTestTimeout ? "30",
 }:
 let
@@ -94,34 +97,44 @@ let
       ];
     };
 
-  batsFiles = lib.filter (f: lib.hasSuffix ".bats" f) (builtins.attrNames (builtins.readDir batsSrc));
-
-  extractFileTags =
-    file:
-    let
-      content = builtins.readFile (batsSrc + "/${file}");
-      lines = lib.splitString "\n" content;
-      tagLines = lib.filter (l: lib.hasPrefix "# bats file_tags=" l) lines;
-    in
-    if tagLines == [ ] then
-      [ ]
-    else
-      lib.splitString "," (lib.removePrefix "# bats file_tags=" (builtins.head tagLines));
-
-  allFileTags = lib.unique (lib.concatMap extractFileTags batsFiles);
-
+  # Defensive guard: when batsSrc is null (non-flake import paths
+  # without a flake context wiring it up), produce no lane outputs
+  # rather than crashing in builtins.readDir. Matches madder's
+  # go/default.nix factoring — see piggy#114 for context.
   batsLaneOutputs =
-    lib.listToAttrs (
-      map (
-        tag:
-        lib.nameValuePair "bats-${tag}" (mkBatsLane {
-          filter = tag;
-        })
-      ) allFileTags
-    )
-    // {
-      bats-default = mkBatsLane { };
-    };
+    if batsSrc == null then
+      { }
+    else
+      let
+        batsFiles = lib.filter (f: lib.hasSuffix ".bats" f) (
+          builtins.attrNames (builtins.readDir batsSrc)
+        );
+
+        extractFileTags =
+          file:
+          let
+            content = builtins.readFile (batsSrc + "/${file}");
+            lines = lib.splitString "\n" content;
+            tagLines = lib.filter (l: lib.hasPrefix "# bats file_tags=" l) lines;
+          in
+          if tagLines == [ ] then
+            [ ]
+          else
+            lib.splitString "," (lib.removePrefix "# bats file_tags=" (builtins.head tagLines));
+
+        allFileTags = lib.unique (lib.concatMap extractFileTags batsFiles);
+      in
+      lib.listToAttrs (
+        map (
+          tag:
+          lib.nameValuePair "bats-${tag}" (mkBatsLane {
+            filter = tag;
+          })
+        ) allFileTags
+      )
+      // {
+        bats-default = mkBatsLane { };
+      };
 in
 {
   inherit mkBatsLane batsLaneOutputs;

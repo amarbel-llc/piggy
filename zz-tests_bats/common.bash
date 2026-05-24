@@ -24,7 +24,7 @@ export PIGGY_GETOPT=getopt
 #
 # Two modes share this harness:
 #   - Local `bats --no-sandbox` from the repo root: $PWD = repo root.
-#   - Nix-sandboxed `pkgs.testers.batsLane`: $PWD = stage/zz-tests_bats/
+#   - Nix-sandboxed bats lane (`bats.lib.${system}.batsLane`): $PWD = stage/zz-tests_bats/
 #     and the helpers live at $PWD/helpers/ (no extra zz-tests_bats/
 #     prefix). The lane builder injects $PIGGY, $PIGGY_SH_PATH, and
 #     $PIGGY_IDS_REAL via extraEnv so we never need to resolve those
@@ -57,7 +57,7 @@ git config --global user.name "Piggy Automated Testing Suite"
 #   - $PIGGY_SH_PATH points the rust binary at the in-repo bash script.
 #
 # Resolution order: $PIGGY env var → target/debug/piggy → target/release/piggy.
-# The nix lane (`pkgs.testers.batsLane`) injects $PIGGY pre-set; the
+# The nix lane (`bats.lib.${system}.batsLane`) injects $PIGGY pre-set; the
 # `target/debug` fallback is only reached for local `bats --no-sandbox`
 # runs. We deliberately do NOT fall back to src/piggy.sh — bypassing
 # the rust dispatcher would hide regressions in the wrapper.

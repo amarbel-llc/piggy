@@ -1,8 +1,9 @@
 {
   inputs = {
-    # Fork of upstream nixpkgs. The overlay (`overlays.default`) adds
-    # pkgs.testers.batsLane (consumed by ./bats.nix) plus the
-    # amarbel-llc package additions. See amarbel-llc/nixpkgs.
+    # Fork of upstream nixpkgs with the amarbel-llc package additions.
+    # The bats lane builder (`batsLane`) is sourced directly from
+    # `amarbel-llc/bats` below — not from `pkgs.testers.batsLane`, which
+    # the bats flake no longer ships through this overlay.
     nixpkgs.url = "github:amarbel-llc/nixpkgs";
     nixpkgs-master.url = "github:NixOS/nixpkgs/d233902339c02a9c334e7e593de68855ad26c4cb";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
@@ -53,10 +54,11 @@
     (utils.lib.eachDefaultSystem (
       system:
       let
-        # `pkgs.testers.batsLane` lives in the amarbel-llc/nixpkgs
-        # overlay; ./bats.nix imports it from here. Keeping the overlay
-        # in scope for every consumer of `pkgs` so the rest of the
-        # flake doesn't need to special-case the lane builder import.
+        # The `amarbel-llc/nixpkgs` overlay supplies the fork's package
+        # additions; the bats lane builder itself comes from the
+        # `amarbel-llc/bats` flake input (see `batsLib` below). Keeping
+        # the overlay in scope for every consumer of `pkgs` so the rest
+        # of the flake picks up the fork additions uniformly.
         #
         # The second overlay strips a malformed " none required" token
         # from libfyaml's pkg-config Libs: line on darwin, which leaks
