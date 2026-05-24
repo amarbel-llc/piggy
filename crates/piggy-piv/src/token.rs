@@ -1,12 +1,12 @@
 use pcsc::{Protocols, ShareMode};
 
-use crate::apdu::{ga_tag, Apdu, StatusWord, PIV_AID};
+use crate::PivContext;
+use crate::apdu::{Apdu, PIV_AID, StatusWord, ga_tag};
 use crate::cert;
 use crate::error::PivError;
 use crate::guid::Guid;
 use crate::slot::{self, PivAlgorithm, PivSlot};
 use crate::tlv::{TlvReader, TlvWriter};
-use crate::PivContext;
 
 /// CHUID data object tag (NIST SP 800-73-4)
 const PIV_TAG_CHUID: u32 = 0x5FC102;
@@ -354,7 +354,7 @@ fn validate_ec_point(alg: PivAlgorithm, point: &[u8]) -> Result<(), PivError> {
         _ => {
             return Err(PivError::UnsupportedAlgorithm(
                 "ECDH requires an EC key (P-256 or P-384)".into(),
-            ))
+            ));
         }
     };
     if point.is_empty() || point[0] != 0x04 {

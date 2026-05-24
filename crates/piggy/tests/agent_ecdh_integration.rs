@@ -16,11 +16,11 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use piggy::agent_client::{unlock_agent_pin, AgentEcdhOracle};
+use piggy::agent_client::{AgentEcdhOracle, unlock_agent_pin};
 use piggy_box::oracle::EcdhOracle;
 use piggy_piv::{PivAlgorithm, PivContext};
-use ssh_key::public::{EcdsaPublicKey, KeyData};
 use ssh_key::PublicKey;
+use ssh_key::public::{EcdsaPublicKey, KeyData};
 
 /// RAII guard that kills the spawned piggy-agent on drop. Keeping the
 /// child around in a guard (rather than letting `Command::spawn` return)

@@ -1,5 +1,5 @@
-use piggy_piv::slot::PivAlgorithm;
 use piggy_piv::PivContext;
+use piggy_piv::slot::PivAlgorithm;
 
 #[test]
 fn algorithm_to_byte_matches_apdu_constants() {

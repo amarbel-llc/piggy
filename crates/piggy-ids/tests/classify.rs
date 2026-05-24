@@ -2,7 +2,7 @@
 //! `classify_ssh_slot`. No PIV context needed — we feed synthetic
 //! algorithm values and cert bytes.
 
-use piggy_ids::{classify_slot, classify_slot_9d, classify_ssh_slot, Classification};
+use piggy_ids::{Classification, classify_slot, classify_slot_9d, classify_ssh_slot};
 use piggy_piv::{Guid, PinPolicy, PivAlgorithm, TouchPolicy};
 
 fn fake_guid() -> Guid {

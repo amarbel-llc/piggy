@@ -1,7 +1,7 @@
 use openssl::nid::Nid;
 use openssl::x509::X509;
-use ssh_key::public::{EcdsaPublicKey, KeyData};
 use ssh_key::PublicKey;
+use ssh_key::public::{EcdsaPublicKey, KeyData};
 
 use crate::error::PivError;
 use crate::slot::PivAlgorithm;
@@ -22,7 +22,7 @@ pub fn extract_public_key(cert_der: &[u8]) -> Result<(PivAlgorithm, PublicKey), 
                 return Err(PivError::UnsupportedAlgorithm(format!(
                     "RSA key size {} bits",
                     n_bytes.len() * 8
-                )))
+                )));
             }
         };
 
@@ -56,7 +56,7 @@ pub fn extract_public_key(cert_der: &[u8]) -> Result<(PivAlgorithm, PublicKey), 
                 return Err(PivError::UnsupportedAlgorithm(format!(
                     "EC curve NID {:?}",
                     nid
-                )))
+                )));
             }
         };
 

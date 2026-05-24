@@ -271,7 +271,7 @@ fn cmd_encrypt(path: &Path) -> Result<ExitCode, DynErr> {
 /// one PIV card is attached, callers must pass the desired GUID via
 /// `--guid <hex>`.
 fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
-    use piggy_ids::{classify_slot, Classification};
+    use piggy_ids::{Classification, classify_slot};
 
     let ctx = PivContext::new()?;
     let tokens = ctx.enumerate_tokens()?;
@@ -336,7 +336,7 @@ fn pick_token<'a>(tokens: &'a [PivToken], guid_hex: Option<&str>) -> Result<&'a 
 /// row per card so unreadable 9D appears as `Unsupported` rather than
 /// being silently dropped.
 fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
-    use piggy_ids::{classify_slot, Classification};
+    use piggy_ids::{Classification, classify_slot};
 
     let ctx = PivContext::new()?;
     let tokens = ctx.enumerate_tokens()?;
@@ -412,7 +412,7 @@ fn slot_sort_key(slot_id: u8) -> (u8, u8) {
 /// treats as "policy unknown" (`None`) rather than failing the whole
 /// enumeration.
 fn enumerate_all_recipient_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
-    use piggy_ids::{classify_slot, Classification};
+    use piggy_ids::{Classification, classify_slot};
 
     let ctx = PivContext::new()?;
     let tokens = ctx.enumerate_tokens()?;
@@ -498,7 +498,7 @@ fn ssh_eligible_slots() -> &'static [u8] {
 /// cards and YubiKeys with the F9 attestation key cleared get `None`
 /// policies (graceful degradation, same as `enumerate_all_recipient_slots`).
 fn enumerate_all_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
-    use piggy_ids::{classify_slot, classify_ssh_slot, Classification};
+    use piggy_ids::{Classification, classify_slot, classify_ssh_slot};
 
     let ctx = PivContext::new()?;
     let tokens = ctx.enumerate_tokens()?;

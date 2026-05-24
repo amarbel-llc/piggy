@@ -15,10 +15,10 @@ use std::path::PathBuf;
 
 use openssl::bn::BigNumContext;
 use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
-use piggy::card_oracle::{askpass_pin_supplier, CardEcdhOracle};
+use piggy::card_oracle::{CardEcdhOracle, askpass_pin_supplier};
 use piggy_box::ebox::{Ebox, EboxType};
 use piggy_box::piv_box::EcCurve;
-use piggy_box::template::{EboxConfigType, EboxTemplate, EboxTplConfig, EboxTplPart, DEFAULT_SLOT};
+use piggy_box::template::{DEFAULT_SLOT, EboxConfigType, EboxTemplate, EboxTplConfig, EboxTplPart};
 use piggy_box::unlock::unlock_ebox;
 use piggy_piv::{PivAlgorithm, PivContext};
 use ssh_key::public::{EcdsaPublicKey, KeyData};

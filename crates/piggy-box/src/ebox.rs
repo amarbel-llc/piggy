@@ -1,6 +1,6 @@
 use openssl::ec::{EcGroup, EcKey, EcPoint};
 use openssl::pkey::Private;
-use openssl::symm::{decrypt_aead, encrypt_aead, Cipher as SymCipher};
+use openssl::symm::{Cipher as SymCipher, decrypt_aead, encrypt_aead};
 use zeroize::Zeroizing;
 
 use piggy_piv::Guid;
@@ -8,7 +8,7 @@ use piggy_piv::Guid;
 use crate::error::{BoxError, Result};
 use crate::piv_box::{EcCurve, PivBox};
 use crate::template::{
-    EboxConfigType, EboxTemplate, DEFAULT_SLOT, PART_BOX, PART_CAK, PART_END, PART_GUID, PART_NAME,
+    DEFAULT_SLOT, EboxConfigType, EboxTemplate, PART_BOX, PART_CAK, PART_END, PART_GUID, PART_NAME,
     PART_OPTIONAL_FLAG, PART_PUBKEY, PART_SLOT,
 };
 use crate::wire::{WireReader, WireWriter};
@@ -682,7 +682,7 @@ mod tests {
     /// iteration runs real ECDH + AEAD, so cases are capped low.
     mod proptest_wire {
         use super::*;
-        use crate::template::{EboxTplConfig, EboxTplPart, DEFAULT_SLOT};
+        use crate::template::{DEFAULT_SLOT, EboxTplConfig, EboxTplPart};
         use proptest::prelude::*;
 
         // Generate compressed-point bytes by spawning a real EcKey on
@@ -774,8 +774,8 @@ mod tests {
     /// adversarial AEAD coverage there.
     mod wycheproof_aes_gcm {
         use super::*;
-        use wycheproof::aead::{TestName, TestSet};
         use wycheproof::TestResult;
+        use wycheproof::aead::{TestName, TestSet};
 
         #[test]
         fn wycheproof_aes_256_gcm() {

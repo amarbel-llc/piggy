@@ -1,4 +1,4 @@
-use piggy_piv::apdu::{alg, ins, Apdu, StatusWord, PIV_AID};
+use piggy_piv::apdu::{Apdu, PIV_AID, StatusWord, alg, ins};
 
 #[test]
 fn build_select_piv() {
@@ -20,7 +20,7 @@ fn build_get_data() {
     assert_eq!(bytes[1], 0xCB); // INS = GET DATA
     assert_eq!(bytes[2], 0x3F); // P1
     assert_eq!(bytes[3], 0xFF); // P2
-                                // Data should contain a TLV-wrapped tag
+    // Data should contain a TLV-wrapped tag
     assert!(bytes.len() > 5);
 }
 
@@ -34,7 +34,7 @@ fn build_verify_pin() {
     assert_eq!(bytes[2], 0x00); // P1
     assert_eq!(bytes[3], 0x80); // P2 = PIV PIN
     assert_eq!(bytes[4], 0x08); // Lc = 8 (PIN padded to 8 bytes)
-                                // PIN data: "123456" + 0xFF padding
+    // PIN data: "123456" + 0xFF padding
     assert_eq!(&bytes[5..11], pin.as_slice());
     assert_eq!(bytes[11], 0xFF);
     assert_eq!(bytes[12], 0xFF);

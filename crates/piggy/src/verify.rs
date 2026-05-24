@@ -60,11 +60,7 @@ pub fn run(subpath: Option<&str>) -> i32 {
     let rendered = render_tree(&target, &results);
     print!("{rendered}");
 
-    if any_fail {
-        1
-    } else {
-        0
-    }
+    if any_fail { 1 } else { 0 }
 }
 
 #[derive(Debug, PartialEq, Eq)]

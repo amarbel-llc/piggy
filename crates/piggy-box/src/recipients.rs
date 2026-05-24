@@ -21,7 +21,7 @@ use piggy_markl::{FormatId, Id as MarklId, PurposeId};
 
 use crate::error::{BoxError, Result};
 use crate::piv_box::EcCurve;
-use crate::template::{EboxConfigType, EboxTemplate, EboxTplConfig, EboxTplPart, DEFAULT_SLOT};
+use crate::template::{DEFAULT_SLOT, EboxConfigType, EboxTemplate, EboxTplConfig, EboxTplPart};
 
 /// Build a piggy 2.x recipient template part from a markl ID. Routes
 /// on the markl format:

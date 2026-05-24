@@ -8,7 +8,7 @@
 //! decode-from-string match) and asserts each invalid vector fails
 //! with the expected error variant.
 
-use piggy_markl::{blech32, FormatId, Id, ParseError, PurposeId};
+use piggy_markl::{FormatId, Id, ParseError, PurposeId, blech32};
 use serde::Deserialize;
 
 const VECTORS: &str = include_str!("../testdata/0002-markl-id-format-vectors.json");

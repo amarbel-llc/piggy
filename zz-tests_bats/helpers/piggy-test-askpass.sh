@@ -54,7 +54,7 @@ banner() {
   printf '[piggy-test-askpass] %s\n' "$*" >&2
 }
 
-if [[ -n "${PIGGY_TEST_FIB_PIN:-}" ]]; then
+if [[ -n ${PIGGY_TEST_FIB_PIN:-} ]]; then
   banner "supplying PIGGY_TEST_FIB_PIN for prompt: $prompt"
   # No trailing newline manipulation: ssh-add and pivy-box both trim the
   # first line via strcspn / similar. A plain echo is the simplest.

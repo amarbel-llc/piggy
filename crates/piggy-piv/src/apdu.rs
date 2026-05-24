@@ -233,11 +233,7 @@ impl StatusWord {
     /// Number of remaining bytes when has_more_data() is true.
     /// SW2=0x00 means 256 per ISO 7816-4.
     pub fn remaining_bytes(&self) -> u16 {
-        if self.1 == 0 {
-            256
-        } else {
-            self.1 as u16
-        }
+        if self.1 == 0 { 256 } else { self.1 as u16 }
     }
 
     /// SW 63Cx: wrong PIN, x = retries remaining

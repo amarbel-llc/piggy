@@ -213,7 +213,7 @@ mod tests {
     use crate::ebox::{Ebox, EboxType};
     use crate::oracle::{EcdhOracle, OracleError};
     use crate::piv_box::EcCurve;
-    use crate::template::{EboxConfigType, EboxTemplate, EboxTplConfig, EboxTplPart, DEFAULT_SLOT};
+    use crate::template::{DEFAULT_SLOT, EboxConfigType, EboxTemplate, EboxTplConfig, EboxTplPart};
     use openssl::bn::BigNumContext;
     use openssl::ec::{EcGroup, EcKey, PointConversionForm};
     use piggy_piv::Guid;

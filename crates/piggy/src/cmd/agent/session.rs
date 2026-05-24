@@ -10,9 +10,9 @@ use tokio::sync::Mutex;
 use ssh_agent_lib::{
     agent::Session,
     error::AgentError,
-    proto::{signature, Extension, Identity, SignRequest},
+    proto::{Extension, Identity, SignRequest, signature},
 };
-use ssh_key::{public::KeyData, Algorithm, PublicKey, Signature};
+use ssh_key::{Algorithm, PublicKey, Signature, public::KeyData};
 
 use piggy_box::piv_box::{EcCurve, PivBox};
 use piggy_piv::{Guid, PivAlgorithm, PivContext};
@@ -728,7 +728,7 @@ mod tests {
 
     use super::*;
     use sha2::{Digest, Sha256, Sha384, Sha512};
-    use ssh_agent_lib::proto::{signature, Extension, SignRequest};
+    use ssh_agent_lib::proto::{Extension, SignRequest, signature};
     use ssh_key::public::{Ed25519PublicKey, KeyData};
 
     // -------- Helpers --------

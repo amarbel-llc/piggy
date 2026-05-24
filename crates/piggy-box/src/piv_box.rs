@@ -345,7 +345,7 @@ fn kdf_sha512(shared_secret: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
 /// verbatim into the piv_box `iv` field. AAD is empty; the 16-byte
 /// authentication tag is appended to the ciphertext.
 fn chacha20_poly1305_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    use openssl::symm::{encrypt_aead, Cipher};
+    use openssl::symm::{Cipher, encrypt_aead};
 
     if iv.len() != CIPHER_IV_LEN {
         return Err(BoxError::Crypto(format!(
@@ -366,7 +366,7 @@ fn chacha20_poly1305_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<
 /// Decrypt RFC 7539 ChaCha20-Poly1305 ciphertext (with appended 16-byte
 /// tag). See [`chacha20_poly1305_encrypt`].
 fn chacha20_poly1305_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
-    use openssl::symm::{decrypt_aead, Cipher};
+    use openssl::symm::{Cipher, decrypt_aead};
 
     if iv.len() != CIPHER_IV_LEN {
         return Err(BoxError::Crypto(format!(
@@ -786,7 +786,7 @@ mod tests {
     /// a regression canary against silent drift in the openssl AEAD impl.
     /// Reference: <https://www.rfc-editor.org/rfc/rfc8439.html#section-2.8.2>.
     mod chacha20_poly1305_rfc8439 {
-        use openssl::symm::{decrypt_aead, encrypt_aead, Cipher};
+        use openssl::symm::{Cipher, decrypt_aead, encrypt_aead};
 
         const KEY: [u8; 32] = [
             0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d,
@@ -1234,8 +1234,8 @@ mod tests {
     /// guard catches a regression that silently drops *that* coverage.
     mod wycheproof_chacha20_poly1305 {
         use super::*;
-        use wycheproof::aead::{TestName, TestSet};
         use wycheproof::TestResult;
+        use wycheproof::aead::{TestName, TestSet};
 
         // Named for what this actually exercises, not what wycheproof
         // promises. The 45 valid vectors round-trip cleanly through

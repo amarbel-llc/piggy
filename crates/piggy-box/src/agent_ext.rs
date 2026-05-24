@@ -319,8 +319,8 @@ mod tests {
     /// build of piggy-box stays ssh-key-free.
     #[test]
     fn blob_matches_ssh_key_crate_for_p256() {
-        use ssh_key::public::{EcdsaPublicKey, KeyData};
         use ssh_key::PublicKey;
+        use ssh_key::public::{EcdsaPublicKey, KeyData};
 
         // Arbitrary but valid P-256 point generated via openssl so this
         // test doesn't depend on a hard-coded key elsewhere.
@@ -352,8 +352,8 @@ mod tests {
     /// Mirror of the P-256 interop check for P-384.
     #[test]
     fn blob_matches_ssh_key_crate_for_p384() {
-        use ssh_key::public::{EcdsaPublicKey, KeyData};
         use ssh_key::PublicKey;
+        use ssh_key::public::{EcdsaPublicKey, KeyData};
 
         let group = openssl::ec::EcGroup::from_curve_name(EcCurve::NistP384.nid()).unwrap();
         let key = openssl::ec::EcKey::generate(&group).unwrap();

@@ -89,21 +89,21 @@ zenity_timeout="${PIGGY_ASKPASS_TIMEOUT:-30}"
 # above.
 parent_pid="$PPID"
 parent_comm="$(ps -o comm= -p "$parent_pid" 2>/dev/null | tr -d '[:space:]' || true)"
-[[ -z "$parent_comm" ]] && parent_comm="?"
+[[ -z $parent_comm ]] && parent_comm="?"
 
 # [TEST] heuristic: caller env OR prompt itself carries the test marker.
 test_tag=""
-if [[ "$context" == piggy-test:* ]] || [[ "$prompt" == *piggy-test:* ]]; then
+if [[ $context == piggy-test:* ]] || [[ $prompt == *piggy-test:* ]]; then
   test_tag="[TEST]"
 fi
 
 # Multi-line context block, used by all render targets.
 render_context() {
-  if [[ -n "$test_tag" ]]; then
+  if [[ -n $test_tag ]]; then
     printf '%s\n' "$test_tag"
   fi
   printf 'Parent: %s (PID %s)\n' "$parent_comm" "$parent_pid"
-  if [[ -n "$context" ]]; then
+  if [[ -n $context ]]; then
     printf 'Context: %s\n' "$context"
   fi
   printf '\n%s\n' "$prompt"
@@ -111,7 +111,7 @@ render_context() {
 
 # Dry-run: emit the rendered context to stderr and exit. No PIN read.
 # Used by the bats test in zz-tests_bats/conformance/piggy_askpass.bats.
-if [[ "${PIGGY_ASKPASS_DRY_RUN:-}" == "1" ]]; then
+if [[ ${PIGGY_ASKPASS_DRY_RUN:-} == "1" ]]; then
   render_context >&2
   exit 0
 fi
@@ -131,7 +131,7 @@ if [[ -e /dev/tty ]] && (: >/dev/tty) 2>/dev/null; then
   render_context >&4
   pin=""
   IFS= read -r -s pin <&3
-  echo >&4   # newline after the (silent) input
+  echo >&4 # newline after the (silent) input
   exec 3<&- 4>&-
   printf '%s\n' "$pin"
   exit 0
@@ -146,11 +146,11 @@ fi
 # (subshell + background) so a hanging notify implementation cannot
 # block the zenity prompt or wedge the agent further.
 resolve_notifier() {
-  if [[ -n "${PIGGY_ASKPASS_NOTIFIER:-}" ]]; then
+  if [[ -n ${PIGGY_ASKPASS_NOTIFIER:-} ]]; then
     printf '%s\n' "$PIGGY_ASKPASS_NOTIFIER"
     return 0
   fi
-  if [[ -n "${SSH_NOTIFY_SEND:-}" ]]; then
+  if [[ -n ${SSH_NOTIFY_SEND:-} ]]; then
     printf '%s\n' "$SSH_NOTIFY_SEND"
     return 0
   fi
@@ -174,7 +174,7 @@ fire_heads_up() {
   # The outer subshell exits immediately; the inner process is
   # adopted by init / launchd and runs to completion or death on
   # its own.
-  ( "$notifier" "$title" "$body" >/dev/null 2>&1 & ) >/dev/null 2>&1 || true
+  ("$notifier" "$title" "$body" >/dev/null 2>&1 &) >/dev/null 2>&1 || true
 }
 
 # Render target 2: zenity. We don't gate on $DISPLAY/$WAYLAND_DISPLAY —

@@ -30,7 +30,7 @@ use piggy_markl::{FormatId, Id, ParseError as MarklParseError, PurposeId};
 
 pub mod classify;
 pub use classify::{
-    classify_slot, classify_slot_9d, classify_ssh_slot, format_slot_id, Classification,
+    Classification, classify_slot, classify_slot_9d, classify_ssh_slot, format_slot_id,
 };
 
 /// One recipient line: a markl ID plus an optional human comment.
@@ -423,14 +423,12 @@ mod tests {
     #[test]
     fn diff_with_changed_comments_only_is_no_op() {
         let id = sample_id(19);
-        let current =
-            RecipientFile::new(vec![
-                Recipient::new(id.clone(), Some("old comment".into())).unwrap()
-            ]);
-        let desired =
-            RecipientFile::new(vec![
-                Recipient::new(id.clone(), Some("new comment".into())).unwrap()
-            ]);
+        let current = RecipientFile::new(vec![
+            Recipient::new(id.clone(), Some("old comment".into())).unwrap(),
+        ]);
+        let desired = RecipientFile::new(vec![
+            Recipient::new(id.clone(), Some("new comment".into())).unwrap(),
+        ]);
         let d = current.diff(&desired);
         assert!(
             d.is_empty(),

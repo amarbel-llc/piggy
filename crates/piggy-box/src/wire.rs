@@ -244,7 +244,9 @@ mod tests {
         w.put_cstring8("aes256-gcm").unwrap();
         assert_eq!(
             w.as_bytes(),
-            &[0x0a, b'a', b'e', b's', b'2', b'5', b'6', b'-', b'g', b'c', b'm'][..]
+            &[
+                0x0a, b'a', b'e', b's', b'2', b'5', b'6', b'-', b'g', b'c', b'm'
+            ][..]
         );
     }
 

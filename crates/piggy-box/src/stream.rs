@@ -295,7 +295,7 @@ mod tests {
     mod proptest_wire {
         use super::*;
         use crate::piv_box::EcCurve;
-        use crate::template::{EboxConfigType, EboxTplConfig, EboxTplPart, DEFAULT_SLOT};
+        use crate::template::{DEFAULT_SLOT, EboxConfigType, EboxTplConfig, EboxTplPart};
         use openssl::ec::{EcGroup, EcKey};
         use piggy_piv::Guid;
         use proptest::prelude::*;
@@ -369,8 +369,8 @@ mod tests {
     /// stream's verifier never truncates.
     mod wycheproof_hmac_sha256 {
         use super::*;
-        use wycheproof::mac::{TestName, TestSet};
         use wycheproof::TestResult;
+        use wycheproof::mac::{TestName, TestSet};
 
         #[test]
         fn wycheproof_hmac_sha256_rfc4231() {
