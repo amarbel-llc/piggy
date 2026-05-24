@@ -64,6 +64,11 @@
 #                           dispatcher is reachable. Detached so a
 #                           hanging notifier cannot wedge the
 #                           prompt.
+#
+# Diagnostic log: zenity's stderr and a per-invocation header are
+# appended to $XDG_LOG_HOME/piggy/askpass.log (default
+# $HOME/.local/log/piggy/askpass.log per XDG_LOG_HOME(7)). Safe to
+# delete at any time.
 
 set -euo pipefail
 
@@ -185,6 +190,18 @@ if command -v zenity >/dev/null 2>&1; then
   # hidden / off-screen / on a non-focused display this is the only
   # in-band signal the user gets that the agent is waiting.
   fire_heads_up
+  # Capture zenity's stderr to $XDG_LOG_HOME/piggy/askpass.log (default
+  # $HOME/.local/log per XDG_LOG_HOME(7)). Without this, a silently-
+  # failing zenity in the launchd/pivy-agent-spawned env leaves no
+  # diagnostic — the agent gets a nonzero exit and reports auth-denied
+  # with no clue what GTK/wayland/zenity emitted.
+  log_path="${XDG_LOG_HOME:-$HOME/.local/log}/piggy/askpass.log"
+  mkdir -p "$(dirname "$log_path")"
+  {
+    date '+--- %Y-%m-%dT%H:%M:%S%z ---'
+    printf 'parent=%s pid=%s context=%q prompt=%q\n' \
+      "$parent_comm" "$parent_pid" "$context" "$prompt"
+  } >>"$log_path"
   # zenity --entry --hide-text reads a single line of obscured input
   # and writes it to stdout; non-zero exit on cancel. --timeout
   # bounds the wait: zenity self-cancels with exit 5 after
@@ -192,7 +209,12 @@ if command -v zenity >/dev/null 2>&1; then
   # auth-denied — the agent's poll loop is freed even if the user
   # never saw the window. See piggy#103 and companion piggy#104 for
   # the agent-side backstop.
-  pin="$(zenity --timeout="$zenity_timeout" --entry --hide-text --title="piggy PIV PIN" --text="$body" 2>/dev/null)" || exit $?
+  if ! pin="$(zenity --timeout="$zenity_timeout" --entry --hide-text --title="piggy PIV PIN" --text="$body" 2>>"$log_path")"; then
+    rc=$?
+    printf 'zenity exit=%s\n' "$rc" >>"$log_path"
+    exit "$rc"
+  fi
+  printf 'zenity exit=0\n' >>"$log_path"
   printf '%s\n' "$pin"
   exit 0
 fi
