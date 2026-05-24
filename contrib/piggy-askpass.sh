@@ -209,14 +209,21 @@ if command -v zenity >/dev/null 2>&1; then
   # auth-denied — the agent's poll loop is freed even if the user
   # never saw the window. See piggy#103 and companion piggy#104 for
   # the agent-side backstop.
-  if ! pin="$(zenity --timeout="$zenity_timeout" --entry --hide-text --title="piggy PIV PIN" --text="$body" 2>>"$log_path")"; then
+  # NB: `$?` inside the failure branch must be read from the `else`
+  # of a non-inverted `if cmd; ...`. Under `if ! cmd; then ...; fi`
+  # the `then`-body sees `$?` as the exit of `! cmd` (always 0 when
+  # entered), masking zenity's real exit. After the `fi` of any `if`
+  # statement, `$?` is 0 regardless. Only the `else` branch preserves
+  # cmd's unmodified exit code.
+  if pin="$(zenity --timeout="$zenity_timeout" --entry --hide-text --title="piggy PIV PIN" --text="$body" 2>>"$log_path")"; then
+    printf 'zenity exit=0\n' >>"$log_path"
+    printf '%s\n' "$pin"
+    exit 0
+  else
     rc=$?
     printf 'zenity exit=%s\n' "$rc" >>"$log_path"
     exit "$rc"
   fi
-  printf 'zenity exit=0\n' >>"$log_path"
-  printf '%s\n' "$pin"
-  exit 0
 fi
 
 # Neither render target available. Refuse; explain why.

@@ -145,7 +145,7 @@ STUB_EOF
   # sibling tests below already do this; test 8 was missed. See #91.
   python3_path="$(command -v python3)"
 
-  run env -i HOME="$HOME" PATH="$stub_dir:/usr/bin:/bin" \
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir:/usr/bin:/bin" \
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "A new client is trying to use PIV token 9D5C" </dev/null
 
@@ -175,12 +175,12 @@ STUB_EOF
 
   local stub_dir python3_path
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-nozenity.XXXXXX")"
-  for tool in bash ps tr; do
+  for tool in bash ps tr dirname mkdir date; do
     ln -s "$(command -v "$tool")" "$stub_dir/$tool"
   done
   python3_path="$(command -v python3)"
 
-  run env -i HOME="$HOME" PATH="$stub_dir" \
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" \
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
@@ -205,7 +205,7 @@ STUB_EOF
 
   local stub_dir python3_path
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-zenityfail.XXXXXX")"
-  for tool in bash ps tr; do
+  for tool in bash ps tr dirname mkdir date; do
     ln -s "$(command -v "$tool")" "$stub_dir/$tool"
   done
   # Stub zenity that mimics real zenity when DISPLAY is unset: writes
@@ -219,7 +219,7 @@ STUB_EOF
   chmod +x "$stub_dir/zenity"
   python3_path="$(command -v python3)"
 
-  run env -i HOME="$HOME" PATH="$stub_dir" \
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" \
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
@@ -244,7 +244,7 @@ STUB_EOF
 
   local stub_dir python3_path
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-timeout.XXXXXX")"
-  for tool in bash ps tr; do
+  for tool in bash ps tr dirname mkdir date; do
     ln -s "$(command -v "$tool")" "$stub_dir/$tool"
   done
   cat >"$stub_dir/zenity" <<'STUB_EOF'
@@ -255,7 +255,7 @@ STUB_EOF
   chmod +x "$stub_dir/zenity"
   python3_path="$(command -v python3)"
 
-  run env -i HOME="$HOME" PATH="$stub_dir" PIGGY_ASKPASS_TIMEOUT=1 \
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" PIGGY_ASKPASS_TIMEOUT=1 \
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
@@ -278,7 +278,7 @@ STUB_EOF
   local stub_dir python3_path argv_log
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-argv.XXXXXX")"
   argv_log="$stub_dir/argv.log"
-  for tool in bash ps tr; do
+  for tool in bash ps tr dirname mkdir date; do
     ln -s "$(command -v "$tool")" "$stub_dir/$tool"
   done
   cat >"$stub_dir/zenity" <<STUB_EOF
@@ -289,7 +289,7 @@ STUB_EOF
   chmod +x "$stub_dir/zenity"
   python3_path="$(command -v python3)"
 
-  run env -i HOME="$HOME" PATH="$stub_dir" PIGGY_ASKPASS_TIMEOUT=7 \
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" PIGGY_ASKPASS_TIMEOUT=7 \
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
@@ -316,7 +316,7 @@ STUB_EOF
   local stub_dir python3_path argv_log
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-default.XXXXXX")"
   argv_log="$stub_dir/argv.log"
-  for tool in bash ps tr; do
+  for tool in bash ps tr dirname mkdir date; do
     ln -s "$(command -v "$tool")" "$stub_dir/$tool"
   done
   cat >"$stub_dir/zenity" <<STUB_EOF
@@ -327,7 +327,7 @@ STUB_EOF
   chmod +x "$stub_dir/zenity"
   python3_path="$(command -v python3)"
 
-  run env -i HOME="$HOME" PATH="$stub_dir" \
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" \
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
@@ -356,7 +356,7 @@ STUB_EOF
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-notify.XXXXXX")"
   notifier_log="$stub_dir/notifier.log"
   argv_log="$stub_dir/argv.log"
-  for tool in bash ps tr; do
+  for tool in bash ps tr dirname mkdir date; do
     ln -s "$(command -v "$tool")" "$stub_dir/$tool"
   done
   cat >"$stub_dir/zenity" <<STUB_EOF
@@ -372,7 +372,7 @@ STUB_EOF
   chmod +x "$stub_dir/notifier"
   python3_path="$(command -v python3)"
 
-  run env -i HOME="$HOME" PATH="$stub_dir" \
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" \
     PIGGY_ASKPASS_NOTIFIER="$stub_dir/notifier" \
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN for token 9D5C" </dev/null
@@ -415,7 +415,7 @@ STUB_EOF
   local stub_dir python3_path notifier_log
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-ssh-notify.XXXXXX")"
   notifier_log="$stub_dir/notifier.log"
-  for tool in bash ps tr; do
+  for tool in bash ps tr dirname mkdir date; do
     ln -s "$(command -v "$tool")" "$stub_dir/$tool"
   done
   cat >"$stub_dir/zenity" <<'STUB_EOF'
@@ -430,7 +430,7 @@ STUB_EOF
   chmod +x "$stub_dir/notifier-from-ssh"
   python3_path="$(command -v python3)"
 
-  run env -i HOME="$HOME" PATH="$stub_dir" \
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" \
     SSH_NOTIFY_SEND="$stub_dir/notifier-from-ssh" \
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
@@ -466,7 +466,7 @@ STUB_EOF
 
   local stub_dir python3_path
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-no-notifier.XXXXXX")"
-  for tool in bash ps tr; do
+  for tool in bash ps tr dirname mkdir date; do
     ln -s "$(command -v "$tool")" "$stub_dir/$tool"
   done
   # Deliberately omit terminal-notifier and notify-send so resolve_notifier
@@ -478,7 +478,7 @@ STUB_EOF
   chmod +x "$stub_dir/zenity"
   python3_path="$(command -v python3)"
 
-  run env -i HOME="$HOME" PATH="$stub_dir" \
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" \
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
