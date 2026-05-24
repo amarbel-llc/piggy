@@ -1,10 +1,9 @@
 
 default: lint build test
 
-# Pre-build gate. lint-rust is intentionally NOT in here yet: clippy
-# is slow and not all targets are warning-clean today. See piggy#112
-# for the wider eng-justfile alignment.
-lint: lint-fmt
+# Pre-build gate covering formatting (treefmt) and clippy. Both run on
+# the default `just` chain, which is also the pre-merge hook.
+lint: lint-fmt lint-rust
 
 # --- build ---
 

@@ -15,17 +15,13 @@ use std::path::PathBuf;
 fn main() {
     // CARGO_MANIFEST_DIR resolves to crates/piggy/. The workspace root
     // (where version.env lives) is two levels up.
-    let manifest_dir =
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let version_env = manifest_dir.join("../../version.env");
 
     // Re-run only when version.env changes. cargo:rerun-if-changed takes
     // a path relative to the crate manifest; pass the canonicalized path
     // so Cargo's deduplication works regardless of which form we use.
-    println!(
-        "cargo:rerun-if-changed={}",
-        version_env.display()
-    );
+    println!("cargo:rerun-if-changed={}", version_env.display());
 
     let version = match fs::read_to_string(&version_env) {
         Ok(content) => parse_piggy_version(&content).unwrap_or_else(|| {

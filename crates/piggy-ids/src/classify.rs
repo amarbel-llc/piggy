@@ -124,6 +124,12 @@ pub fn classify_slot_9d(
     classify_slot(0x9D, guid, reader, serial, algo, cert_der, None, None)
 }
 
+// 8 args is past the clippy default of 7 — the lint is a style
+// suggestion, not a bug. These all describe one slot's identity +
+// crypto material + policies; grouping into a struct is a meaningful
+// API refactor, not a drive-by lint fix. Tracked separately if/when
+// the callers want the change.
+#[allow(clippy::too_many_arguments)]
 pub fn classify_slot(
     slot_id: u8,
     guid: Guid,
@@ -210,6 +216,7 @@ pub fn classify_slot(
 /// Only ECDSA P-256 is supported in v1; RSA, P-384, and Ed25519 in
 /// these slots are reported as `Unsupported` until the markl registry
 /// grows compatible format IDs.
+#[allow(clippy::too_many_arguments)] // See note on classify_slot above.
 pub fn classify_ssh_slot(
     slot_id: u8,
     guid: Guid,

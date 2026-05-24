@@ -169,6 +169,12 @@ fn resolve_path(root: &Path, path: &str) -> Option<Resolved> {
 
     // Bash predicate, re-grouped:
     //   ( file_exists && dir_exists && ends_with_slash ) || !file_exists
+    // Kept in the parenthesized form (rather than clippy's
+    // "!file_exists || dir_exists && ends_with_slash") so the parallel
+    // to the bash source stays line-for-line obvious; the simplified
+    // form relies on && binding tighter than || which is easy to
+    // misread.
+    #[allow(clippy::nonminimal_bool)]
     let treat_as_dir = (file_exists && dir_exists && ends_with_slash) || !file_exists;
 
     if treat_as_dir {
