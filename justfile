@@ -786,3 +786,69 @@ clean-build:
 
 clean-rust:
     cargo clean
+
+# --- maint: version bump + tag + release ---
+#
+# Three recipes per eng-versioning(7). `version.env` is the single
+# source of truth: `bump-version` is a pure mutation, `tag` reads the
+# current value and pushes a signed tag, `release` orchestrates the
+# whole flow (changelog → bump → commit → tag → gh release).
+# `version.env` is also read by `flake.nix` at eval time and by
+# `crates/piggy/build.rs` at compile time.
+
+# Rewrite the PIGGY_VERSION line in version.env. Touches no other
+# file — committing is `release`'s job. Usage: just bump-version 0.1.1
+[group("maint")]
+bump-version new_version:
+    sed -E -i "s/^(export PIGGY_VERSION)=.*/\1={{new_version}}/" version.env
+
+# Sign + push a tag named after the current version.env. The "v"
+# prefix is added for you. Usage: just tag "release v0.1.1"
+[group("maint")]
+tag message:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . version.env
+    tag="v${PIGGY_VERSION:?missing PIGGY_VERSION in version.env}"
+    git tag -s -m "{{message}}" "$tag"
+    gum log --level info "Created tag: $tag"
+    git push origin "$tag"
+    gum log --level info "Pushed $tag"
+    git tag -v "$tag"
+
+# Cut a release: must be run on master. Generates an auto-changelog
+# (commits since the previous v* tag) BEFORE bumping so the bump
+# commit doesn't appear in its own changelog, then bumps version.env,
+# commits, signs+pushes a v<sem> tag, and creates a GitHub release
+# whose body is the changelog. Usage: just release 0.1.1
+[group("maint")]
+release new_version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    branch=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$branch" != "master" ]]; then
+        gum log --level error "release only allowed from master (on '$branch')"
+        exit 1
+    fi
+
+    prev=$(git tag --sort=-v:refname -l "v*" | head -1)
+    header="release v{{new_version}}"
+    if [[ -n "$prev" ]]; then
+        summary=$(git log --format='- %s' "$prev"..HEAD)
+        if [[ -n "$summary" ]]; then
+            msg="$header"$'\n\n'"$summary"
+        else
+            msg="$header"
+        fi
+    else
+        msg="$header"
+    fi
+
+    just bump-version "{{new_version}}"
+    git add version.env
+    git commit -m "$header"
+
+    just tag "$msg"
+
+    gh release create "v{{new_version}}" --title "$header" --notes "$msg"

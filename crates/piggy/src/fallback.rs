@@ -32,6 +32,7 @@ pub fn exec_bash(subcmd: &str, rest: &[String]) -> ! {
     cmd.arg(subcmd);
     cmd.args(rest);
     set_piggy_bin(&mut cmd);
+    set_piggy_version(&mut cmd);
     let err = cmd.exec();
     eprintln!("piggy: failed to launch {}: {}", script.display(), err);
     std::process::exit(127);
@@ -50,6 +51,7 @@ pub fn exec_bash_subcmds(subcmd: &str, op: &str, rest: &[String]) -> ! {
     cmd.arg(op);
     cmd.args(rest);
     set_piggy_bin(&mut cmd);
+    set_piggy_version(&mut cmd);
     let err = cmd.exec();
     eprintln!("piggy: failed to launch {}: {}", script.display(), err);
     std::process::exit(127);
@@ -68,6 +70,20 @@ fn set_piggy_bin(cmd: &mut Command) {
     if let Ok(exe) = std::env::current_exe() {
         cmd.env("PIGGY_BIN", exe);
     }
+}
+
+/// Set `$PIGGY_VERSION` on the command unless the caller's environment
+/// already pins it (e.g. flake.nix's makeWrapper `--set PIGGY_VERSION
+/// <piggyVersion>`). The value is injected at compile time by
+/// `build.rs`, which reads `version.env` at the repo root — the single
+/// source of truth shared with the Nix derivation. `piggy.sh`'s
+/// `cmd_version` reads this env var to render the banner; local cargo
+/// builds get the right value without the wrapper layer.
+fn set_piggy_version(cmd: &mut Command) {
+    if std::env::var_os("PIGGY_VERSION").is_some() {
+        return;
+    }
+    cmd.env("PIGGY_VERSION", env!("PIGGY_VERSION"));
 }
 
 /// Exec `piggy-ids <subcmd> <rest...>`. Used by top-level commands

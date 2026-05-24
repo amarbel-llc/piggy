@@ -60,6 +60,16 @@
     (utils.lib.eachDefaultSystem (
       system:
       let
+        # Single source of truth for piggy's user-visible version. Read
+        # from version.env at flake-eval time and threaded into the
+        # piggy/piggy-agent-conformance derivations' `version` attr and
+        # the makeWrapper `--set PIGGY_VERSION`. Cargo's build.rs
+        # (crates/piggy/build.rs) reads the same file at compile time.
+        # See eng-versioning(7) and piggy CLAUDE.md.
+        piggyVersion = builtins.head (
+          builtins.match ".*PIGGY_VERSION=([^\n]+).*" (builtins.readFile ./version.env)
+        );
+
         # The `amarbel-llc/nixpkgs` overlay supplies the fork's package
         # additions; the bats lane builder itself comes from the
         # `amarbel-llc/bats` flake input (see `batsLib` below). Keeping
@@ -158,7 +168,12 @@
                 rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
                 base = baseNameOf rel;
               in
-              base == "Cargo.toml" || base == "Cargo.lock" || pkgs.lib.hasPrefix "crates" rel;
+              base == "Cargo.toml"
+              || base == "Cargo.lock"
+              # version.env is read by crates/piggy/build.rs at compile
+              # time and must reach the sandboxed source tree.
+              || base == "version.env"
+              || pkgs.lib.hasPrefix "crates" rel;
           };
 
           cargoLock = {
@@ -185,7 +200,7 @@
         # fallback, bundled as a single symlink-joined package.
         piggy = pkgs.stdenv.mkDerivation {
           pname = "piggy";
-          version = "0.1.0";
+          version = piggyVersion;
 
           src = ./.;
 
@@ -247,6 +262,7 @@
             makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
               --set PIGGY_SH_PATH $out/libexec/piggy/piggy.sh \
               --set PIGGY_IDS_PATH $out/libexec/piggy/piggy-ids \
+              --set PIGGY_VERSION ${piggyVersion} \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
           '';
 
@@ -272,7 +288,7 @@
 
         piggy-agent-conformance = pkgs.buildGoModule {
           pname = "piggy-agent-conformance";
-          version = "0.1.0";
+          version = piggyVersion;
 
           src = pkgs.lib.fileset.toSource {
             root = ./go;
@@ -385,6 +401,10 @@
               pkgs-master.rust-analyzer
               treefmtEval.config.build.wrapper
               pkgs.scdoc
+              # gum drives terminal UI logging in the maint group recipes
+              # (`bump-version`, `tag`, `release`). See eng-versioning(7)
+              # "JUSTFILE RELEASE RECIPES".
+              pkgs.gum
               # In amarbel-llc/bats's new package layout, `batman`
               # (the test orchestrator) and `bats` (the bats-core
               # binary the bats CLI calls live under) are separate

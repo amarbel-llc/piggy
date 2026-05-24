@@ -18,6 +18,7 @@ just test               # Full suite: test-bats-default + test-bats-conformance 
 just test-bats-default  # Sandboxed bats lane via nix build .#bats-default
 just codemod-fmt        # Format nix + shell + rust via treefmt (= nix fmt)
 just clean              # Remove build artifacts
+just release X.Y.Z      # Cut a release: bump version.env, sign+push v<X.Y.Z>, gh release create
 ```
 
 Run a single bats test file outside the sandbox (fast iteration):
@@ -77,6 +78,7 @@ Rust re-implementations of `agent` and `box` live under `crates/piggy/src/cmd/{a
 - `zz-tests_bats/conformance/piggy_pivy.bats` — bats harness for the `piggy pivy <tool>` passthrough.
 - `zz-tests_bats/t0700-verify.bats` — bats coverage for `piggy pass verify`.
 - `sweatfile` (repo root) — piggy-level spinclass override: `pre-merge = "just"` so `merge-this-session` blocks on full local test pass (not just `nix build`).
+- `version.env` (repo root) — single source of truth for `PIGGY_VERSION`. Read by `flake.nix` at eval time, by `crates/piggy/build.rs` at compile time, and by the `just {bump-version,tag,release}` recipes. Follow eng-versioning(7).
 - `contrib/emacs/piggy.el` — Emacs integration package.
 
 ## Specs

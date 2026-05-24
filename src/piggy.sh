@@ -217,11 +217,14 @@ source "$(dirname "$0")/platform/$(uname | cut -d _ -f 1 | tr '[:upper:]' '[:low
 #
 
 cmd_version() {
+  # PIGGY_VERSION is injected by the rust dispatcher (set_piggy_version
+  # in crates/piggy/src/fallback.rs) and by flake.nix's makeWrapper.
+  # Falls back to "dev" for unusual invocations that bypass both layers.
   cat <<-_EOF
 	=================================
 	=    piggy: PIV password store  =
 	=                               =
-	=            v0.1.0             =
+	=            v${PIGGY_VERSION:-dev}
 	=================================
 	_EOF
 }

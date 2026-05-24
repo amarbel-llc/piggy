@@ -1,7 +1,13 @@
 [package]
 name = "piggy"
+# Internal Cargo metadata only; the user-visible piggy version lives in
+# version.env at the repo root, read by build.rs and exposed to the
+# dispatcher binary via env!("PIGGY_VERSION"). Bump via
+# `just bump-version` rather than editing this line. See
+# eng-versioning(7) and piggy CLAUDE.md.
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [[bin]]
 name = "piggy"
