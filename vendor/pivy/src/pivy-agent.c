@@ -4187,7 +4187,30 @@ static int prepare_poll(struct pollfd **pfdp, size_t *npfdp, int *timeoutp) {
   now = monotime();
   deadline = 0;
 
-  if (txnopen)
+  /*
+   * piggy#108 (#105 step 4): suspend the 2-second txntimeout
+   * contribution to the wake-up deadline while a client owns the
+   * txn and is mid-prompt (askpass / confirm). Step 5 will swap the
+   * synchronous prompt I/O for poll-driven reap, at which point a
+   * real human PIN entry — typically 10-30s, deadline 60s — would
+   * exceed txntimeout (default 2s) and `main` would force-close the
+   * card txn mid-prompt. `piv_sign` would then fail on resumption.
+   *
+   * The 2s timeout's purpose is to release the txn so a different
+   * socket's REQUEST_IDENTITIES can use the card; that goal is
+   * already covered by the txn_owner REQUEST_IDENTITIES bypass
+   * (process_request_identities, around the txn_owner != e branch).
+   * After the prompt resolves, the resume path either calls
+   * agent_piv_close(B_FALSE) on success (re-arming txntimeout from
+   * `now`) or yields again with a fresh prompt — either way the
+   * txntimeout invariant is restored once we leave AWAITING_PROMPT.
+   *
+   * On the current code (step 3 plumbing without step 5), the
+   * prompt I/O is still synchronous so AWAITING_PROMPT is never
+   * observed by prepare_poll; this guard is dormant for now. It
+   * makes step 5 safe to land without a follow-up change.
+   */
+  if (txnopen && !(txn_owner != NULL && txn_owner->se_state == SE_AWAITING_PROMPT))
     ADD_DEADLINE(deadline, txntimeout);
   if (parent_alive_interval != 0)
     ADD_DEADLINE(deadline, now + parent_alive_interval * 1000);
@@ -5363,7 +5386,18 @@ skip:
     now = monotime();
     if (card_probe_interval != 0 && now >= card_probe_next)
       probe_card();
-    if (txnopen && now >= txntimeout)
+    /*
+     * piggy#108 (#105 step 4): belt-and-suspenders companion to the
+     * guard in prepare_poll. If somehow a wake-up fired with
+     * txntimeout expired AND the owning socket is mid-prompt, do not
+     * force-close the txn — that would orphan the resume path's
+     * piv_sign / piv_ecdh call after the user finishes the prompt.
+     * prepare_poll's deadline-skip should prevent this from ever
+     * being observed under normal scheduling, but a SIGALRM / signal-
+     * driven wake-up could still slip through.
+     */
+    if (txnopen && now >= txntimeout &&
+        !(txn_owner != NULL && txn_owner->se_state == SE_AWAITING_PROMPT))
       agent_piv_close(B_TRUE);
     /*(void) reaper();*/ /* remove expired keys */
     if (result < 0) {
