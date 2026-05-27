@@ -46,6 +46,7 @@ mod grep;
 mod recipients;
 mod reencrypt;
 mod rm;
+mod show_batch;
 mod store;
 mod verify;
 
@@ -254,6 +255,48 @@ enum PassCommand {
         /// Optional sub-directory within the store to limit the walk.
         subpath: Option<String>,
     },
+    /// Decrypt N eboxes in a single PIV-card session (one PIN prompt)
+    /// and emit per-ebox progress per RFC 0005.
+    ///
+    /// Selects the first attached PIV card whose slot can decrypt the
+    /// first ebox in the batch, then reuses that (card, slot) for
+    /// every remaining ebox. Pre-flight failures (no card; no usable
+    /// slot) bail out before any PIN prompt. See
+    /// `docs/rfcs/0005-pass-show-batch-ndjson.md` and piggy#121.
+    #[command(name = "show-batch")]
+    ShowBatch(ShowBatchCmdArgs),
+}
+
+#[derive(Args, Debug)]
+struct ShowBatchCmdArgs {
+    /// Pass-names to decrypt, in source order. May be empty when
+    /// `--names-from` is set.
+    names: Vec<String>,
+    /// File containing additional pass-names, one per line. Lines are
+    /// trimmed; blank lines and `#`-prefixed comments are ignored.
+    /// Appended to any positional `names`.
+    #[arg(long = "names-from", value_name = "FILE")]
+    names_from: Option<PathBuf>,
+    /// Directory under which to write `<out-dir>/<pass-name>` for each
+    /// successfully decrypted ebox. Defaults to the current working
+    /// directory.
+    #[arg(long = "out-dir", value_name = "DIR")]
+    out_dir: Option<PathBuf>,
+    /// Output format. `human` is implementation-defined and intended
+    /// for terminal use; `ndjson` is normatively pinned by RFC 0005
+    /// and is what bridging tooling (eng's `2-piggy.bash`) consumes.
+    #[arg(long, value_enum, default_value_t = ShowBatchFormat::Human)]
+    format: ShowBatchFormat,
+    /// Wipe partial outputs in `--out-dir` if any decrypt fails.
+    /// Default: leave partials in place.
+    #[arg(long = "all-or-nothing")]
+    all_or_nothing: bool,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+enum ShowBatchFormat {
+    Ndjson,
+    Human,
 }
 
 #[derive(Args, Debug)]
@@ -326,6 +369,21 @@ fn main() {
                 }
             },
             PassCommand::Verify { subpath } => std::process::exit(verify::run(subpath.as_deref())),
+            PassCommand::ShowBatch(args) => {
+                let mapped = show_batch::ShowBatchArgs {
+                    names: args.names,
+                    names_from: args.names_from,
+                    out_dir: args
+                        .out_dir
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into())),
+                    format: match args.format {
+                        ShowBatchFormat::Ndjson => show_batch::OutputFormat::Ndjson,
+                        ShowBatchFormat::Human => show_batch::OutputFormat::Human,
+                    },
+                    all_or_nothing: args.all_or_nothing,
+                };
+                std::process::exit(show_batch::run(mapped))
+            }
         },
 
         Command::List { rest } => fallback::exec_piggy_ids("list-all", &rest),
