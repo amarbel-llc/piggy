@@ -139,6 +139,38 @@ test-bats-conformance-recipients-add-attached: build-rust
       BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding --tap \
       zz-tests_bats/conformance/piggy_recipients_add_attached.bats
 
+# Hardware lane for `piggy pass show-batch`. Seals real eboxes against
+# fib's 9D slot and verifies the end-to-end NDJSON event stream
+# including the single-PIN guarantee, the wrong-card bail-out, the
+# heterogeneous-batch per-ebox failure path, and the SIGINT bail-out
+# shape. Linux-only (fib is Linux-only). Opt-in — not part of the
+# default `just test` lane. Companion to the sandbox surface that
+# runs under `bats-default`; see #122.
+[group('test')]
+test-bats-conformance-show-batch: build-rust
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'just fib-down' EXIT
+    just fib-up
+    eval "$(cat .fib/env)"
+    pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
+    # Discover the card's GUID for `piggy-ids detect-pubkey --guid` —
+    # pivy-tool prints uppercase, so grep case-insensitively. Mirrors
+    # the same dance in test-bats-conformance-interop.
+    guid=$(pivy-tool list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    # BATS_TEST_TIMEOUT=60 (vs 30 elsewhere) — the SIGINT test
+    # background-spawns piggy with a slow askpass and waits on the
+    # first decrypt-ok line, which can take ~5–10s on a cold fib.
+    INTEROP_GUID="$guid" \
+      PCSCLITE_CSOCK_NAME="$PCSCLITE_CSOCK_NAME" \
+      SSH_ASKPASS="$askpass" \
+      SSH_ASKPASS_REQUIRE=force \
+      DISPLAY="" \
+      PIGGY_TEST_FIB_PIN=123456 \
+      BATS_TEST_TIMEOUT=60 bats --allow-unix-sockets --allow-local-binding --tap \
+      zz-tests_bats/conformance/piggy_pass_show_batch_hardware.bats
+
 # Hardware lane for the C pivy-agent built from vendor/pivy/. Runs
 # pivy_agent_hardware.bats against the user's plugged-in PIV card.
 # Read-only PIN-free operations (REQUEST_IDENTITIES). Verifies the
