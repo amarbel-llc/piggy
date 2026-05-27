@@ -24,9 +24,36 @@
     (utils.lib.eachDefaultSystem (
       system:
       let
+        # Mirror the parent piggy flake's `libfyamlFix` overlay
+        # (see ../../../flake.nix). libfyaml's pkg-config `.pc` file
+        # ships a malformed `Libs:` line on darwin that leaks
+        # `none required` as literal tokens into downstream linker
+        # commands. Without this fix, every package transitively
+        # depending on libfyaml fails at link time with
+        # `clang: error: no such file or directory: 'none' / 'required'`
+        # — and vendor/pivy hits it via `zenity → libadwaita →
+        # appstream → libfyaml`. The parent piggy flake doesn't
+        # actually build vendor/pivy (it imports nix/pivy.nix
+        # directly), so this overlay needed to be applied here
+        # independently. Tracked upstream at NixOS/nixpkgs#514566;
+        # fix ported from NixOS/nixpkgs#513484. Drop once that PR
+        # merges and is pulled into amarbel-llc/nixpkgs.
+        libfyamlFix =
+          final: prev:
+          prev.lib.optionalAttrs prev.stdenv.hostPlatform.isDarwin {
+            libfyaml = prev.libfyaml.overrideAttrs (old: {
+              postInstall = (old.postInstall or "") + ''
+                substituteInPlace "$dev/lib/pkgconfig/libfyaml.pc" \
+                  --replace-fail " none required" ""
+              '';
+            });
+          };
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ nixpkgs.overlays.default ];
+          overlays = [
+            nixpkgs.overlays.default
+            libfyamlFix
+          ];
         };
 
         pkgs-master = import nixpkgs-master {
