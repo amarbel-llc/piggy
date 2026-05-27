@@ -1,6 +1,7 @@
 ---
-status: draft
+status: accepted
 date: 2026-05-26
+accepted: 2026-05-27
 provenance: |
   Drafted alongside amarbel-llc/eng FDR-0004 (rcm piggy ebox decryption
   hook). The hook needs a single-PIN-per-batch decrypt primitive that
@@ -200,10 +201,11 @@ The `diagnostic` field of a failing `decrypt` record is an object with:
                                       the PIN prompt or the askpass returned non-zero), `pin-incorrect`
                                       (card rejected the PIN), `card-locked` (card refused with retries
                                       exhausted), `card-absent` (no PIV card available), `decrypt-failed`
-                                      (cryptographic failure unwrapping the ebox), `io-error` (write to
-                                      `out_path` failed), `internal` (any other error). Producers MUST emit
-                                      one of these values; consumers MUST treat any unrecognised value as
-                                      `internal`.
+                                      (cryptographic failure unwrapping the ebox, OR the selected card/slot
+                                      is not a recipient of this ebox — see §Single-card Operation),
+                                      `io-error` (write to `out_path` failed), `internal` (any other error).
+                                      Producers MUST emit one of these values; consumers MUST treat any
+                                      unrecognised value as `internal`.
   `message`     string    MUST        Human-readable error message. MUST be valid UTF-8. SHOULD be a single
                                       line; MAY contain LF if multi-line context is essential.
   `retryable`   boolean   OPTIONAL    `true` if a fresh `show-batch` invocation against the same pass-name
@@ -269,6 +271,36 @@ beyond one line). This guarantee enables stream-readers to react to
 each event with bounded latency rather than waiting for the
 subcommand to exit.
 
+### Single-card Operation
+
+A `show-batch` invocation operates against exactly one (card, slot)
+pair, selected at pre-flight before the PIN prompt:
+
+1. Producers MUST enumerate attached PIV cards via PC/SC.
+2. Producers MUST select the first attached card that holds a slot
+   capable of decrypting the first ebox in the batch. The slot used
+   for that decryption MUST then be reused for every subsequent ebox
+   in the batch.
+3. If no attached card has a usable slot for the first ebox, producers
+   MUST emit `bail-out` with a `reason` identifying the missing card or
+   slot. They MUST NOT prompt for a PIN.
+4. If no PIV cards are attached at all, producers MUST emit `bail-out`
+   with a `reason` such as `"no PIV cards attached"`. They MUST NOT
+   prompt for a PIN.
+5. For each subsequent ebox in the batch, producers MUST attempt
+   decryption against the selected (card, slot). If the ebox is not
+   encrypted to a recipient present on that (card, slot), producers
+   MUST emit a `decrypt` record with `ok: false` and
+   `diagnostic.kind: "decrypt-failed"`, whose `diagnostic.message`
+   SHOULD distinguish "wrong recipient for selected card/slot" from a
+   cryptographic failure.
+
+This rule preserves the single-PIN-prompt-per-batch guarantee against
+the realistic deployment where multiple PIV cards may be attached but
+the user only intends one of them to satisfy this batch. Consumers
+that need to drive multiple cards SHOULD re-invoke `show-batch` per
+card; this RFC does not define a multi-card batch shape.
+
 ## Bridging to TAP
 
 The amarbel-llc/eng `rcm/hooks/post-up/2-piggy.bash` consumer
@@ -327,17 +359,19 @@ TAP plan covers more than just the show-batch output.
 
 ## Conformance Testing
 
-The piggy reference implementation ships bats conformance tests under
-`zz-tests_bats/conformance/` (exact filename TBD; suggested
-`pass_show_batch_ndjson.bats` to match the existing naming pattern,
-verify against piggy's bats lane layout at implementation time). They
-cover:
+The piggy reference implementation ships bats conformance tests as
+`zz-tests_bats/conformance/piggy_pass_show_batch.bats` (matching the
+existing `piggy_<topic>.bats` naming pattern of `piggy_box_interop.bats`,
+`piggy_recipients_add_attached.bats`, etc.). They cover:
 
 - Empty-batch shape (plan + summary, no decrypts).
 - Non-empty shape (plan + N decrypts + summary), with N in {1, 2, 5}.
 - Bail-out shape (SIGINT mid-batch; no summary; non-zero exit).
+- Bail-out shape on pre-flight failure (no card attached; no card has
+  a usable slot for the first ebox). MUST NOT prompt for a PIN.
 - `decrypt` failure paths for every defined `kind` value, asserting
-  the field invariants above.
+  the field invariants above. Includes the "wrong recipient for
+  selected card/slot" path under `decrypt-failed`.
 - Field-ordering hint (producer emits `type` first).
 - `n` strictly increasing within a stream and bounded by `plan.count`.
 - `summary.ok + summary.failed == plan.count` invariant.
@@ -363,15 +397,13 @@ MUST bump this RFC to a new number.
 
 ## Implementation
 
-The piggy reference implementation is planned as a Rust handler under
-`crates/piggy/src/` (exact module path TBD; the current `pass *`
-Rust handlers live as siblings to `find.rs`, `grep.rs`, etc., so
-something like `crates/piggy/src/show_batch.rs` matches the existing
-layout — verify against piggy's clap dispatch tree at implementation
-time). Tracked in piggy's issue tracker once this RFC reaches
-`accepted`. The NDJSON encoder is a thin wrapper around
-`serde_json::to_string` with the field-ordering hint encoded via
-`#[serde]` attribute ordering and a post-serialize newline append.
+The piggy reference implementation is a Rust handler at
+`crates/piggy/src/show_batch.rs`, sibling to the existing pass-* handlers
+(`find.rs`, `grep.rs`, `git.rs`, `rm.rs`, `verify.rs`, `recipients.rs`,
+`reencrypt.rs`). Tracked at amarbel-llc/piggy#121. The NDJSON encoder is
+a thin wrapper around `serde_json::to_string` with the field-ordering
+hint encoded via `#[serde]` attribute ordering and a post-serialize
+newline append.
 
 The `2-piggy.bash` consumer in amarbel-llc/eng reads the stream via
 a `while IFS= read -r line` loop with `jq` for field extraction,
