@@ -977,6 +977,8 @@ dependencies = [
  "piggy-box",
  "piggy-piv",
  "rand 0.8.5",
+ "serde",
+ "serde_json",
  "sha2",
  "ssh-agent-lib",
  "ssh-key",
