@@ -216,6 +216,29 @@ passthroughs for the C pivy binaries:
 	(*not-found*, *pin-cancelled*, *pin-incorrect*, *card-locked*,
 	*card-absent*, *decrypt-failed*, *io-error*, *internal*).
 
+*pass verify* [_subpath_]
+	Decrypt every ebox file under the store (or the specified
+	_subpath_ within it) and emit a tree-decorated ok/not-ok report
+	mirroring the *tree*(1) layout used by *pass ls*. Each ebox is
+	tested by spawning *pivy-box stream decrypt -b*, which exercises
+	the full unlock path without writing plaintext to disk.
+
+	The walk is sequential by design — PIV-card serialization makes
+	parallelism a non-win and the simple model is easier to reason
+	about. PIN entry happens once (the user-running *pivy-agent*
+	caches the verify state) and every subsequent decrypt reuses it.
+
+	_subpath_ is canonicalised against the store root and rejected if
+	it contains parent-directory components (*..*), is absolute, or
+	escapes the store. Missing _subpath_ verifies the whole store. An
+	empty store (or missing root) is reported as a no-op success
+	(exit 0).
+
+	Exit codes:[*0*] every ebox under _subpath_ decrypted
+	successfully (or the tree was empty).[*1*] at least one ebox
+	failed to decrypt.[*2*] usage / IO error before verification
+	could begin (sneaky-path violation, walk error, …).
+
 *pass insert* [*--echo*, *-e* | *--multiline*, *-m*] [*--force*, *-f*] _pass-name_
 	Insert a new password into the password store called _pass-name_. This
 	will read the new password from standard input. If *--echo* or *-e* is
