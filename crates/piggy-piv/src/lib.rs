@@ -14,4 +14,4 @@ pub use error::PivError;
 pub use guid::Guid;
 pub use policy::{PinPolicy, TouchPolicy};
 pub use slot::{PivAlgorithm, PivSlot};
-pub use token::PivToken;
+pub use token::{PinSession, PivToken};
