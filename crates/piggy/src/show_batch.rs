@@ -814,12 +814,54 @@ struct DecryptError {
     fatal_for_batch: bool,
 }
 
+/// Pre-flight: if the ebox's first PRIMARY recipient uses a curve
+/// different from the chosen card's slot, return a single-line
+/// description so [`decrypt_one`] can surface it as `decrypt-failed`
+/// without calling `unlock_ebox`. Returns `None` when the curves
+/// match or when the ebox has no PRIMARY config (the latter would
+/// surface its own error from `unlock_ebox` shortly after).
+///
+/// Heterogeneous-curve batches are rare — within a single piggy
+/// store they only occur mid-migration when one folder's
+/// `piggy-ids` has been re-issued against a different curve — so
+/// the goal here is a clearer error message, not a separate
+/// `DiagnosticKind`. Per RFC 0005 decision 3c, "wrong recipient"
+/// stays under `decrypt-failed`.
+fn check_curve_mismatch(
+    stream: &EboxStream,
+    target_curve: piggy_box::piv_box::EcCurve,
+) -> Option<String> {
+    let primary = stream
+        .ebox
+        .configs
+        .iter()
+        .find(|c| c.config_type == EboxConfigType::Primary)?;
+    let part = primary.parts.first()?;
+    if part.piv_box.curve == target_curve {
+        return None;
+    }
+    Some(format!(
+        "ebox recipient curve {} does not match the chosen card's slot curve {} \
+         (heterogeneous batch — re-encrypt this ebox or run show-batch with a \
+         matching card)",
+        part.piv_box.curve.wire_name(),
+        target_curve.wire_name(),
+    ))
+}
+
 /// Use `unlock_ebox` to materialize the AES key inside `stream.ebox`,
 /// then walk the chunk frames in `bytes` and accumulate plaintext.
 /// `bytes` is the original on-disk ebox bytes — header + chunks.
 ///
-/// On `unlock_ebox` failure, drains the oracle's typed
-/// [`BatchFailure`] via [`BatchOracle::take_failure`] for an
+/// Pre-flights the heterogeneous-batch case first: if the ebox's
+/// first PRIMARY recipient uses a curve different from the one
+/// `BatchOracle` is configured for (i.e. the curve of the chosen
+/// card's 9D slot), we know the decrypt will fail without calling
+/// `unlock_ebox` — emit a specific `decrypt-failed` message rather
+/// than the generic "unlock failed" the runtime would surface.
+///
+/// On `unlock_ebox` failure (post pre-flight), drains the oracle's
+/// typed [`BatchFailure`] via [`BatchOracle::take_failure`] for an
 /// RFC-conformant `DiagnosticKind`. When no typed failure was
 /// recorded — i.e. every part returned NoKey — the failure is
 /// reported as a generic `decrypt-failed` (RFC 0005 decision 3c:
@@ -829,6 +871,17 @@ fn decrypt_one(
     bytes: &[u8],
     oracle: &mut BatchOracle<'_, '_>,
 ) -> Result<Vec<u8>, DecryptError> {
+    if let Some(mismatch) = check_curve_mismatch(stream, oracle.target_curve) {
+        return Err(DecryptError {
+            diagnostic: Diagnostic {
+                kind: DiagnosticKind::DecryptFailed,
+                message: mismatch,
+                retryable: None,
+            },
+            fatal_for_batch: false,
+        });
+    }
+
     let oracle_dyn: &mut dyn EcdhOracle = oracle;
     if let Err(e) = unlock_ebox(&mut stream.ebox, None, Some(oracle_dyn)) {
         return Err(match oracle.take_failure() {
@@ -1082,9 +1135,11 @@ struct BatchOracle<'sess, 'tok> {
     session: &'sess mut PinSession<'tok>,
     slot_id: u8,
     self_pubkey_uncompressed: Vec<u8>,
-    #[allow(dead_code)] // reserved for the heterogeneous-batch
-    // detection logic in a future polish pass — keep the field
-    // plumbed so we don't have to re-thread it later.
+    /// Curve of the chosen card's 9D slot. Used by
+    /// [`check_curve_mismatch`] to short-circuit decrypts whose
+    /// recipient curve doesn't match — produces a clearer error
+    /// than letting `unlock_ebox` fail with the generic
+    /// "UnlockFailed".
     target_curve: piggy_box::piv_box::EcCurve,
     pin_verified: bool,
     pin_supplier: PinSupplier,
@@ -1431,5 +1486,73 @@ mod tests {
         let d = BatchFailure::Other("x".into()).into_diagnostic();
         assert!(matches!(d.kind, DiagnosticKind::DecryptFailed));
         assert_eq!(d.retryable, None);
+    }
+
+    /// Construct an EboxStream sealed to a freshly-generated EC
+    /// keypair on the given curve, for use in curve-mismatch tests.
+    /// Mirrors the `seed_tpl_and_priv` helper in
+    /// `crates/piggy-box/src/unlock.rs::tests` — we need a real
+    /// `Ebox::create` because the `Ebox.key` field is private and the
+    /// struct can't be built directly.
+    fn make_stream_for_curve(curve: piggy_box::piv_box::EcCurve) -> piggy_box::stream::EboxStream {
+        use openssl::bn::BigNumContext;
+        use openssl::ec::{EcGroup, EcKey, PointConversionForm};
+        use piggy_box::stream::EboxStream;
+        use piggy_box::template::{DEFAULT_SLOT, EboxTplConfig, EboxTplPart};
+        use piggy_box::{EboxConfigType, EboxTemplate};
+
+        let group = EcGroup::from_curve_name(curve.nid()).unwrap();
+        let priv_key = EcKey::generate(&group).unwrap();
+        let mut ctx = BigNumContext::new().unwrap();
+        let pubkey = priv_key
+            .public_key()
+            .to_bytes(&group, PointConversionForm::COMPRESSED, &mut ctx)
+            .unwrap();
+
+        let tpl = EboxTemplate {
+            version: 1,
+            configs: vec![EboxTplConfig {
+                config_type: EboxConfigType::Primary,
+                n: 1,
+                parts: vec![EboxTplPart {
+                    guid: None,
+                    slot: DEFAULT_SLOT,
+                    name: Some("piggy-test:curve-mismatch".into()),
+                    pubkey,
+                    pubkey_curve: curve,
+                    cak: None,
+                }],
+            }],
+        };
+        EboxStream::new(&tpl).expect("stream creation should succeed")
+    }
+
+    /// `check_curve_mismatch` returns Some(...) when the ebox's
+    /// recipient curve differs from the chosen card's slot curve.
+    #[test]
+    fn curve_mismatch_p256_recipient_p384_card() {
+        use piggy_box::piv_box::EcCurve;
+
+        let stream = make_stream_for_curve(EcCurve::NistP256);
+        let result = super::check_curve_mismatch(&stream, EcCurve::NistP384);
+        let msg = result.expect("mismatch should be detected");
+        assert!(msg.contains("nistp256"), "got: {msg}");
+        assert!(msg.contains("nistp384"), "got: {msg}");
+        assert!(
+            msg.contains("heterogeneous batch"),
+            "should mention heterogeneous batch — got: {msg}"
+        );
+    }
+
+    /// Same-curve case is a no-op (returns None).
+    #[test]
+    fn curve_mismatch_returns_none_for_matching_curve() {
+        use piggy_box::piv_box::EcCurve;
+
+        let stream = make_stream_for_curve(EcCurve::NistP256);
+        assert!(super::check_curve_mismatch(&stream, EcCurve::NistP256).is_none());
+
+        let stream = make_stream_for_curve(EcCurve::NistP384);
+        assert!(super::check_curve_mismatch(&stream, EcCurve::NistP384).is_none());
     }
 }
