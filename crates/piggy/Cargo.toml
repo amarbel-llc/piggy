@@ -16,6 +16,11 @@ path = "src/main.rs"
 [dependencies]
 piggy-piv = { path = "../piggy-piv" }
 piggy-box = { path = "../piggy-box" }
+# Direct dep so `show_batch::classify_piv_error` can match against
+# `pcsc::Error::NoSmartcard | ReaderUnavailable | RemovedCard` for the
+# RFC 0005 `card-absent` mapping. Transitive via `piggy-piv` already;
+# the explicit entry just makes the use-site `match` legal.
+pcsc = "2.9"
 openssl = "0.10"
 ssh-agent-lib = "0.5"
 ssh-key = { version = "0.6", features = ["alloc", "ecdsa", "rsa", "ed25519"] }

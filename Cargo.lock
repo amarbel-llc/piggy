@@ -974,6 +974,7 @@ dependencies = [
  "libc",
  "openssl",
  "p256",
+ "pcsc",
  "piggy-box",
  "piggy-piv",
  "rand 0.8.5",

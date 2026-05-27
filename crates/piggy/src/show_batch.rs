@@ -18,13 +18,14 @@
 
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use piggy_box::agent_ext::extract_point_from_sshkey_blob;
 use piggy_box::oracle::{EcdhOracle, OracleError};
 use piggy_box::stream::EboxStream;
 use piggy_box::template::EboxConfigType;
 use piggy_box::unlock::unlock_ebox;
-use piggy_piv::{PinSession, PivContext, PivToken};
+use piggy_piv::{PinSession, PivContext, PivError, PivToken};
 use ssh_key::public::{EcdsaPublicKey, KeyData};
 
 use crate::store;
@@ -51,18 +52,9 @@ pub struct ShowBatchArgs {
     pub out_dir: PathBuf,
     /// Output format. `Ndjson` is normatively pinned by RFC 0005;
     /// `Human` is implementation-defined and meant for terminal use.
-    ///
-    /// Task #3 emits NDJSON unconditionally; the `human` format
-    /// renderer lands in task #8 (docs/plans/2026-05-27-show-batch-
-    /// plan.md). The field is plumbed through so the clap surface
-    /// stays stable.
-    #[allow(dead_code)]
     pub format: OutputFormat,
     /// When true, wipe partial outputs in `out_dir` if any decrypt
     /// fails. Default false (leave partials in place).
-    ///
-    /// Task #3 never wipes; task #8 implements the cleanup.
-    #[allow(dead_code)]
     pub all_or_nothing: bool,
 }
 
@@ -163,15 +155,6 @@ pub mod ndjson {
     /// 0005. Per decision 3c, the "wrong recipient for selected
     /// card/slot" case reuses `DecryptFailed` with explanatory
     /// message text rather than introducing a ninth value.
-    ///
-    /// Task #3's coarse error mapping only emits `NotFound`,
-    /// `DecryptFailed`, `IoError`, and `Internal`. The PIN/card
-    /// variants (`PinCancelled`, `PinIncorrect`, `CardLocked`,
-    /// `CardAbsent`) are wired in task #8 once we map `PivError`
-    /// variants individually. The unit tests below already exercise
-    /// every variant's serialization, so `dead_code` is suppressed
-    /// at the enum level.
-    #[allow(dead_code)]
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "kebab-case")]
     pub enum DiagnosticKind {
@@ -258,6 +241,122 @@ pub mod ndjson {
     }
 }
 
+/// SIGINT handler state. The handler stores `true` into this atomic
+/// and returns. The run loop polls it between decrypts so the user's
+/// Ctrl-C interrupts cleanly *after* the current ebox has finished
+/// (we don't abort mid-decrypt: that would leak a half-written file
+/// and could leave the card transaction in an undefined state).
+///
+/// Static lifetime is required so the signal handler — which has no
+/// closure environment — can reach it. `Ordering::Relaxed` is
+/// sufficient: the store + the load are the only synchronization
+/// points, and both run on the same thread (libc delivers signals on
+/// the same thread that registered the handler in single-threaded
+/// programs; show-batch is single-threaded). We never reset the flag
+/// — once Ctrl-C is pressed, every remaining iteration sees it.
+static SIGINT_CAUGHT: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn sigint_handler(_: libc::c_int) {
+    // SAFETY: atomic store is async-signal-safe per POSIX.
+    SIGINT_CAUGHT.store(true, Ordering::Relaxed);
+}
+
+/// Install the SIGINT handler. Idempotent — repeated installs just
+/// overwrite the disposition with the same value. Returns `Err` if
+/// the libc call fails (which would be... weird).
+fn install_sigint_handler() {
+    // SAFETY: libc::signal is the documented way to install a
+    // C-callable handler. The handler we install only touches an
+    // AtomicBool — async-signal-safe.
+    //
+    // The double-cast (fn item → *const () → sighandler_t) is
+    // needed because Rust's `function_casts_as_integer` lint (stable
+    // since 1.81) flags the direct fn-item-to-usize cast. The intermediate
+    // pointer cast is the documented workaround.
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            sigint_handler as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+fn sigint_caught() -> bool {
+    SIGINT_CAUGHT.load(Ordering::Relaxed)
+}
+
+/// Stdout adapter that abstracts NDJSON vs human formatting. Lets
+/// `run()` call uniform `emit_*` methods without per-call match arms;
+/// the renderer decides whether to emit a structured record or a
+/// human line. Human format intentionally does NOT round-trip through
+/// the RFC 0005 schema — it's a terminal-friendly convenience, not a
+/// machine surface. NDJSON consumers (eng's `2-piggy.bash`, etc.)
+/// MUST use `--format ndjson`.
+struct Emitter<W: std::io::Write> {
+    out: W,
+    format: OutputFormat,
+}
+
+impl<W: std::io::Write> Emitter<W> {
+    fn plan(&mut self, count: u32) -> std::io::Result<()> {
+        match self.format {
+            OutputFormat::Ndjson => ndjson::emit_plan(&mut self.out, count),
+            OutputFormat::Human => writeln!(self.out, "Decrypting {count} ebox(es):"),
+        }
+    }
+
+    fn decrypt_ok(
+        &mut self,
+        n: u32,
+        total: u32,
+        name: &str,
+        out_path: &Path,
+    ) -> std::io::Result<()> {
+        match self.format {
+            OutputFormat::Ndjson => ndjson::emit_decrypt_ok(&mut self.out, n, name, out_path),
+            OutputFormat::Human => {
+                writeln!(self.out, "[{n}/{total}] {name} → {} ok", out_path.display())
+            }
+        }
+    }
+
+    fn decrypt_failed(
+        &mut self,
+        n: u32,
+        total: u32,
+        name: &str,
+        diagnostic: ndjson::Diagnostic,
+    ) -> std::io::Result<()> {
+        match self.format {
+            OutputFormat::Ndjson => ndjson::emit_decrypt_failed(&mut self.out, n, name, diagnostic),
+            OutputFormat::Human => {
+                let kind = format!("{:?}", diagnostic.kind).to_ascii_lowercase();
+                writeln!(
+                    self.out,
+                    "[{n}/{total}] {name} FAIL {kind}: {}",
+                    diagnostic.message
+                )
+            }
+        }
+    }
+
+    fn summary(&mut self, ok: u32, failed: u32) -> std::io::Result<()> {
+        match self.format {
+            OutputFormat::Ndjson => ndjson::emit_summary(&mut self.out, ok, failed),
+            OutputFormat::Human => {
+                writeln!(self.out, "Summary: {ok} ok, {failed} failed")
+            }
+        }
+    }
+
+    fn bail_out(&mut self, reason: &str) -> std::io::Result<()> {
+        match self.format {
+            OutputFormat::Ndjson => ndjson::emit_bail_out(&mut self.out, reason),
+            OutputFormat::Human => writeln!(self.out, "Bail out! {reason}"),
+        }
+    }
+}
+
 /// Per-name pre-flight result. `Ready` carries everything needed to
 /// decrypt the ebox (parsed stream + original bytes for chunk
 /// slicing). `Failed` carries the diagnostic to emit in stream order
@@ -288,28 +387,39 @@ enum PreflightOutcome {
 /// `--all-or-nothing`, and the human-format renderer — lands in task
 /// #8 per docs/plans/2026-05-27-show-batch-plan.md.
 pub fn run(args: ShowBatchArgs) -> i32 {
-    let mut stdout = std::io::stdout().lock();
+    install_sigint_handler();
 
-    // Step 1: gather names. Task #3 slice only honors positional
-    // names; --names-from is parsed by clap and stashed in args but
-    // intentionally ignored here. Task #8 wires it.
+    let format = args.format;
+    let mut out = Emitter {
+        out: std::io::stdout().lock(),
+        format,
+    };
+
+    // Step 1: gather names. Positional `args.names` come first; any
+    // file passed via `--names-from` is appended in order. Either
+    // (but not both) may be empty; at least one resolved name is
+    // required. Per RFC 0005, empty pass-names are a usage error.
     if !args.names.iter().all(|n| !n.is_empty()) {
         eprintln!("piggy pass show-batch: empty pass-name in argument list");
         return 2;
     }
-    if args.names.is_empty() && args.names_from.is_none() {
-        eprintln!("piggy pass show-batch: no pass-names supplied");
+    let mut names: Vec<String> = args.names;
+    if let Some(path) = &args.names_from {
+        match read_names_from(path) {
+            Ok(extra) => names.extend(extra),
+            Err(e) => {
+                eprintln!(
+                    "piggy pass show-batch: --names-from {}: {e}",
+                    path.display()
+                );
+                return 2;
+            }
+        }
+    }
+    if names.is_empty() {
+        eprintln!("piggy pass show-batch: no pass-names supplied (positional or --names-from)");
         return 2;
     }
-    if args.names_from.is_some() {
-        // Surface the limitation rather than silently dropping the
-        // file. Task #8 removes this branch.
-        eprintln!(
-            "piggy pass show-batch: --names-from is not yet wired (piggy#121 task #8); \
-             pass names positionally for now"
-        );
-    }
-    let names: Vec<String> = args.names;
 
     // Step 2: out_dir setup. Create with 0o700 — the parent of
     // plaintext outputs should not be world-readable.
@@ -334,12 +444,14 @@ pub fn run(args: ShowBatchArgs) -> i32 {
 
     let store_root = store::store_root();
 
+    let total = names.len() as u32;
+
     // Step 3: pre-flight each name. Load bytes, parse stream. We
     // accumulate per-entry results so a name that fails pre-flight
     // (missing/unreadable/malformed) still gets a `decrypt` record
     // emitted in order. Plan record is emitted first with
     // `names.len()` as the count — that count never changes.
-    if let Err(e) = ndjson::emit_plan(&mut stdout, names.len() as u32) {
+    if let Err(e) = out.plan(total) {
         eprintln!("piggy pass show-batch: stdout write failed: {e}");
         return 1;
     }
@@ -404,15 +516,13 @@ pub fn run(args: ShowBatchArgs) -> i32 {
                 diagnostic,
             } = outcome
             {
-                if let Err(e) =
-                    ndjson::emit_decrypt_failed(&mut stdout, n, &canonical_name, diagnostic)
-                {
+                if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diagnostic) {
                     eprintln!("piggy pass show-batch: stdout write failed: {e}");
                     return 1;
                 }
             }
         }
-        let _ = ndjson::emit_summary(&mut stdout, 0, names.len() as u32);
+        let _ = out.summary(0, total);
         return 1;
     };
 
@@ -423,13 +533,10 @@ pub fn run(args: ShowBatchArgs) -> i32 {
     let (target_uncompressed, target_curve) = match select_target_pubkey(&preflight[first_idx]) {
         Ok(v) => v,
         Err(diag) => {
-            let _ = ndjson::emit_bail_out(
-                &mut stdout,
-                &format!(
-                    "cannot identify target recipient for batch: {}",
-                    diag.message
-                ),
-            );
+            let _ = out.bail_out(&format!(
+                "cannot identify target recipient for batch: {}",
+                diag.message
+            ));
             return 1;
         }
     };
@@ -439,14 +546,14 @@ pub fn run(args: ShowBatchArgs) -> i32 {
     let ctx = match PivContext::new() {
         Ok(c) => c,
         Err(e) => {
-            let _ = ndjson::emit_bail_out(&mut stdout, &format!("PCSC unavailable: {e}"));
+            let _ = out.bail_out(&format!("PCSC unavailable: {e}"));
             return 1;
         }
     };
     let tokens = match ctx.enumerate_tokens() {
         Ok(t) => t,
         Err(e) => {
-            let _ = ndjson::emit_bail_out(&mut stdout, &format!("PCSC enumerate failed: {e}"));
+            let _ = out.bail_out(&format!("PCSC enumerate failed: {e}"));
             return 1;
         }
     };
@@ -468,10 +575,8 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         }
     }
     let Some(mut token) = chosen else {
-        let _ = ndjson::emit_bail_out(
-            &mut stdout,
-            "no attached PIV card has a 9D slot matching the first ebox's recipient",
-        );
+        let _ =
+            out.bail_out("no attached PIV card has a 9D slot matching the first ebox's recipient");
         return 1;
     };
 
@@ -479,7 +584,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
     let mut session = match token.begin_pin_session() {
         Ok(s) => s,
         Err(e) => {
-            let _ = ndjson::emit_bail_out(&mut stdout, &format!("begin_pin_session failed: {e}"));
+            let _ = out.bail_out(&format!("begin_pin_session failed: {e}"));
             return 1;
         }
     };
@@ -491,20 +596,37 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         target_curve,
         pin_verified: false,
         pin_supplier: askpass_pin_supplier(),
+        last_failure: None,
     };
 
     let mut ok_count: u32 = 0;
     let mut failed_count: u32 = 0;
+    // Track which output paths we've written, so --all-or-nothing can
+    // unlink them if any decrypt later fails.
+    let mut written_paths: Vec<PathBuf> = Vec::new();
+    // When fatal_for_batch fires we record the bail-out reason and
+    // break out of the loop to skip the remaining names.
+    let mut bail_reason: Option<String> = None;
     for (i, outcome) in preflight.into_iter().enumerate() {
         let n = (i + 1) as u32;
+        // SIGINT bail-out: checked at iteration boundary so the
+        // current ebox isn't aborted mid-decrypt (which could leak
+        // a half-written plaintext or wedge the card transaction).
+        // K = n-1 because the prior iteration completed; the current
+        // ebox has not started yet.
+        if sigint_caught() {
+            bail_reason = Some(format!(
+                "SIGINT received after decrypt n={} of {total}",
+                n - 1
+            ));
+            break;
+        }
         match outcome {
             PreflightOutcome::Failed {
                 canonical_name,
                 diagnostic,
             } => {
-                if let Err(e) =
-                    ndjson::emit_decrypt_failed(&mut stdout, n, &canonical_name, diagnostic)
-                {
+                if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diagnostic) {
                     eprintln!("piggy pass show-batch: stdout write failed: {e}");
                     return 1;
                 }
@@ -517,9 +639,8 @@ pub fn run(args: ShowBatchArgs) -> i32 {
             } => match decrypt_one(&mut stream, &bytes, &mut oracle) {
                 Ok(plain) => match atomic_write_0600(&args.out_dir, &canonical_name, &plain) {
                     Ok(out_path) => {
-                        if let Err(e) =
-                            ndjson::emit_decrypt_ok(&mut stdout, n, &canonical_name, &out_path)
-                        {
+                        written_paths.push(out_path.clone());
+                        if let Err(e) = out.decrypt_ok(n, total, &canonical_name, &out_path) {
                             eprintln!("piggy pass show-batch: stdout write failed: {e}");
                             return 1;
                         }
@@ -531,23 +652,33 @@ pub fn run(args: ShowBatchArgs) -> i32 {
                             message: e,
                             retryable: None,
                         };
-                        if let Err(e) =
-                            ndjson::emit_decrypt_failed(&mut stdout, n, &canonical_name, diag)
-                        {
+                        if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diag) {
                             eprintln!("piggy pass show-batch: stdout write failed: {e}");
                             return 1;
                         }
                         failed_count += 1;
                     }
                 },
-                Err(diag) => {
-                    if let Err(e) =
-                        ndjson::emit_decrypt_failed(&mut stdout, n, &canonical_name, diag)
-                    {
+                Err(DecryptError {
+                    diagnostic,
+                    fatal_for_batch,
+                }) => {
+                    // Capture the kind+message *before* moving the
+                    // diagnostic into the emitter — we use it as the
+                    // bail-out reason when fatal.
+                    let kind_label = format!("{:?}", diagnostic.kind);
+                    let summary = diagnostic.message.clone();
+                    if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diagnostic) {
                         eprintln!("piggy pass show-batch: stdout write failed: {e}");
                         return 1;
                     }
                     failed_count += 1;
+                    if fatal_for_batch {
+                        bail_reason = Some(format!(
+                            "{kind_label} after decrypt n={n} of {total}: {summary}"
+                        ));
+                        break;
+                    }
                 }
             },
         }
@@ -555,19 +686,63 @@ pub fn run(args: ShowBatchArgs) -> i32 {
 
     // Explicit session end so we can propagate
     // `SCardEndTransaction` errors as a non-zero exit. If end fails,
-    // we've already emitted the per-decrypt records — surface as a
-    // bail-out so a downstream TAP bridge sees the truncation flag.
+    // and we haven't already decided to bail, surface as a bail-out
+    // so a downstream TAP bridge sees the truncation flag.
     if let Err(e) = session.end() {
-        let _ = ndjson::emit_bail_out(&mut stdout, &format!("SCardEndTransaction failed: {e}"));
+        if bail_reason.is_none() {
+            bail_reason = Some(format!("SCardEndTransaction failed: {e}"));
+        }
+    }
+
+    // --all-or-nothing: if any failure occurred and the flag is set,
+    // unlink every successfully-written plaintext. Best-effort; a
+    // consumer that has already read the decrypt-ok records may have
+    // copied the bytes — this cleanup reduces window-of-exposure but
+    // does NOT guarantee containment.
+    if args.all_or_nothing && (failed_count > 0 || bail_reason.is_some()) {
+        for path in &written_paths {
+            if let Err(e) = std::fs::remove_file(path) {
+                eprintln!(
+                    "piggy pass show-batch: all-or-nothing wipe failed to remove {}: {e}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    if let Some(reason) = bail_reason {
+        let _ = out.bail_out(&reason);
         return 1;
     }
 
-    if let Err(e) = ndjson::emit_summary(&mut stdout, ok_count, failed_count) {
+    if let Err(e) = out.summary(ok_count, failed_count) {
         eprintln!("piggy pass show-batch: stdout write failed: {e}");
         return 1;
     }
 
     if failed_count == 0 { 0 } else { 1 }
+}
+
+/// Read pass-names one per line from `path`. Trims whitespace,
+/// skips blank lines and `#`-prefixed comments. The file is read
+/// fully into memory — show-batch's design point is "tens to
+/// hundreds of secrets per batch", not millions, so a streaming
+/// reader is unnecessary overhead.
+///
+/// IO errors propagate as-is — callers map them to a usage-error
+/// exit (`2`) so misconfigured automation surfaces a clear failure
+/// before any decrypt records are emitted.
+fn read_names_from(path: &Path) -> std::io::Result<Vec<String>> {
+    let body = std::fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    Ok(out)
 }
 
 /// Canonical pass-name per RFC 0005 §Decrypt Record: strip leading
@@ -630,33 +805,70 @@ fn select_target_pubkey(
     Ok((uncompressed, curve))
 }
 
+/// Per-ebox failure carrying both the diagnostic to emit and a
+/// "fatal for the whole batch" flag. PIN exhaustion or card removal
+/// mean subsequent decrypts have no hope; the run loop bails out
+/// rather than re-prompting / retrying.
+struct DecryptError {
+    diagnostic: Diagnostic,
+    fatal_for_batch: bool,
+}
+
 /// Use `unlock_ebox` to materialize the AES key inside `stream.ebox`,
 /// then walk the chunk frames in `bytes` and accumulate plaintext.
 /// `bytes` is the original on-disk ebox bytes — header + chunks.
+///
+/// On `unlock_ebox` failure, drains the oracle's typed
+/// [`BatchFailure`] via [`BatchOracle::take_failure`] for an
+/// RFC-conformant `DiagnosticKind`. When no typed failure was
+/// recorded — i.e. every part returned NoKey — the failure is
+/// reported as a generic `decrypt-failed` (RFC 0005 decision 3c:
+/// wrong recipient).
 fn decrypt_one(
     stream: &mut EboxStream,
     bytes: &[u8],
     oracle: &mut BatchOracle<'_, '_>,
-) -> Result<Vec<u8>, Diagnostic> {
+) -> Result<Vec<u8>, DecryptError> {
     let oracle_dyn: &mut dyn EcdhOracle = oracle;
     if let Err(e) = unlock_ebox(&mut stream.ebox, None, Some(oracle_dyn)) {
-        return Err(Diagnostic {
-            kind: DiagnosticKind::DecryptFailed,
-            message: format!("unlock failed: {e}"),
-            retryable: None,
+        return Err(match oracle.take_failure() {
+            Some(failure) => DecryptError {
+                fatal_for_batch: failure.is_fatal_for_batch(),
+                diagnostic: failure.into_diagnostic(),
+            },
+            None => DecryptError {
+                diagnostic: Diagnostic {
+                    kind: DiagnosticKind::DecryptFailed,
+                    message: format!("unlock failed: {e}"),
+                    retryable: None,
+                },
+                fatal_for_batch: false,
+            },
         });
     }
+    // Defensive: drain any failure that may have been recorded on a
+    // part that ultimately resolved (e.g. a transient PC/SC blip on
+    // an early part followed by success on a later part). Without
+    // the drain, the *next* ebox's decrypt_one would consume a
+    // stale failure.
+    let _ = oracle.take_failure();
 
-    let header_bytes = stream.to_bytes().map_err(|e| Diagnostic {
-        kind: DiagnosticKind::Internal,
-        message: format!("re-serialize header: {e}"),
-        retryable: None,
+    let header_bytes = stream.to_bytes().map_err(|e| DecryptError {
+        diagnostic: Diagnostic {
+            kind: DiagnosticKind::Internal,
+            message: format!("re-serialize header: {e}"),
+            retryable: None,
+        },
+        fatal_for_batch: false,
     })?;
     if bytes.len() < header_bytes.len() {
-        return Err(Diagnostic {
-            kind: DiagnosticKind::DecryptFailed,
-            message: "ebox bytes shorter than re-serialized header".into(),
-            retryable: None,
+        return Err(DecryptError {
+            diagnostic: Diagnostic {
+                kind: DiagnosticKind::DecryptFailed,
+                message: "ebox bytes shorter than re-serialized header".into(),
+                retryable: None,
+            },
+            fatal_for_batch: false,
         });
     }
     let mut chunk_data = &bytes[header_bytes.len()..];
@@ -665,10 +877,13 @@ fn decrypt_one(
     let mut expected_seqnr: u32 = 0;
     while !chunk_data.is_empty() {
         if chunk_data.len() < 8 {
-            return Err(Diagnostic {
-                kind: DiagnosticKind::DecryptFailed,
-                message: "truncated chunk frame".into(),
-                retryable: None,
+            return Err(DecryptError {
+                diagnostic: Diagnostic {
+                    kind: DiagnosticKind::DecryptFailed,
+                    message: "truncated chunk frame".into(),
+                    retryable: None,
+                },
+                fatal_for_batch: false,
             });
         }
         let string_len =
@@ -676,19 +891,25 @@ fn decrypt_one(
                 as usize;
         let frame_len = 4 + 4 + string_len;
         if chunk_data.len() < frame_len {
-            return Err(Diagnostic {
-                kind: DiagnosticKind::DecryptFailed,
-                message: "truncated chunk data".into(),
-                retryable: None,
+            return Err(DecryptError {
+                diagnostic: Diagnostic {
+                    kind: DiagnosticKind::DecryptFailed,
+                    message: "truncated chunk data".into(),
+                    retryable: None,
+                },
+                fatal_for_batch: false,
             });
         }
         let frame = &chunk_data[..frame_len];
         let (_, plain) = stream
             .decrypt_chunk(Some(expected_seqnr), frame)
-            .map_err(|e| Diagnostic {
-                kind: DiagnosticKind::DecryptFailed,
-                message: format!("chunk {expected_seqnr}: {e}"),
-                retryable: None,
+            .map_err(|e| DecryptError {
+                diagnostic: Diagnostic {
+                    kind: DiagnosticKind::DecryptFailed,
+                    message: format!("chunk {expected_seqnr}: {e}"),
+                    retryable: None,
+                },
+                fatal_for_batch: false,
             })?;
         plaintext.extend_from_slice(&plain);
         chunk_data = &chunk_data[frame_len..];
@@ -735,6 +956,106 @@ fn atomic_write_0600(out_dir: &Path, name: &str, plaintext: &[u8]) -> Result<Pat
     Ok(out_path)
 }
 
+/// Most-recent typed failure surfaced from inside [`BatchOracle::ecdh`].
+///
+/// `unlock_ebox` wraps every oracle error into a flat
+/// [`piggy_box::error::BoxError::UnlockFailed`], so by the time the
+/// run loop sees an Err the original shape is gone. To preserve the
+/// fine-grained [`DiagnosticKind`] mapping the RFC asks for, the
+/// oracle stashes a typed snapshot here on every "real" failure (i.e.
+/// not [`OracleError::NoKey`], which `unlock_ebox` legitimately uses
+/// to fan out across parts). The run loop checks `last_failure` after
+/// `unlock_ebox` returns Err and consumes it via [`take_failure`]
+/// before the next decrypt attempt, so a stale failure can never
+/// mislabel a later ebox.
+#[derive(Debug)]
+enum BatchFailure {
+    PinIncorrect { retries: u32 },
+    PinBlocked,
+    PinCancelled(String),
+    CardAbsent(String),
+    Other(String),
+}
+
+impl BatchFailure {
+    /// True iff this failure makes every subsequent decrypt
+    /// hopeless: PIN exhaustion or card removal. Drives whether the
+    /// run loop bails out or continues with the next ebox.
+    fn is_fatal_for_batch(&self) -> bool {
+        matches!(
+            self,
+            BatchFailure::PinIncorrect { .. }
+                | BatchFailure::PinBlocked
+                | BatchFailure::PinCancelled(_)
+                | BatchFailure::CardAbsent(_)
+        )
+    }
+
+    fn into_diagnostic(self) -> Diagnostic {
+        match self {
+            BatchFailure::PinIncorrect { retries } => Diagnostic {
+                kind: DiagnosticKind::PinIncorrect,
+                message: format!("wrong PIN, {retries} retries remaining"),
+                retryable: Some(retries > 0),
+            },
+            BatchFailure::PinBlocked => Diagnostic {
+                kind: DiagnosticKind::CardLocked,
+                message: "PIN blocked — card requires PUK reset".into(),
+                retryable: Some(false),
+            },
+            BatchFailure::PinCancelled(msg) => Diagnostic {
+                kind: DiagnosticKind::PinCancelled,
+                message: msg,
+                retryable: Some(true),
+            },
+            BatchFailure::CardAbsent(msg) => Diagnostic {
+                kind: DiagnosticKind::CardAbsent,
+                message: msg,
+                retryable: Some(true),
+            },
+            BatchFailure::Other(msg) => Diagnostic {
+                kind: DiagnosticKind::DecryptFailed,
+                message: msg,
+                retryable: None,
+            },
+        }
+    }
+}
+
+/// Classify a [`PivError`] from `verify_pin` or `ecdh_derive` into a
+/// [`BatchFailure`]. PIN-shaped errors get the typed variants the RFC
+/// asks for; transport errors that look like card removal land in
+/// [`BatchFailure::CardAbsent`]; everything else degrades to
+/// [`BatchFailure::Other`].
+fn classify_piv_error(e: &PivError) -> BatchFailure {
+    match e {
+        PivError::PinIncorrect { retries } => BatchFailure::PinIncorrect { retries: *retries },
+        PivError::PinBlocked => BatchFailure::PinBlocked,
+        PivError::CardNotFound => BatchFailure::CardAbsent("card not found".into()),
+        PivError::Pcsc(pcsc_err) => match pcsc_err {
+            pcsc::Error::NoSmartcard
+            | pcsc::Error::ReaderUnavailable
+            | pcsc::Error::RemovedCard => BatchFailure::CardAbsent(format!("PC/SC: {pcsc_err}")),
+            _ => BatchFailure::Other(format!("PC/SC: {pcsc_err}")),
+        },
+        other => BatchFailure::Other(format!("{other}")),
+    }
+}
+
+/// Heuristic: classify an [`OracleError`] from the askpass pin
+/// supplier into a [`BatchFailure`]. `askpass_pin_supplier` reports
+/// "exited with..." or "spawn askpass..." via `OracleError::Other`;
+/// both should surface as `PinCancelled` so consumers can offer a
+/// retry. Other shapes fall through to `Other`.
+fn classify_pin_supplier_error(e: OracleError) -> BatchFailure {
+    match &e {
+        OracleError::Other(msg) if msg.contains("askpass") || msg.contains("SSH_ASKPASS") => {
+            BatchFailure::PinCancelled(msg.clone())
+        }
+        _ => BatchFailure::Other(format!("PIN supply failed: {e}")),
+    }
+}
+
 /// Session-aware ECDH oracle. Held across the whole show-batch run so
 /// the single `verify_pin` early in the batch authenticates every
 /// subsequent `ecdh_derive` against the same card transaction.
@@ -745,25 +1066,40 @@ fn atomic_write_0600(out_dir: &Path, name: &str, plaintext: &[u8]) -> Result<Pat
 ///   returns [`OracleError::NoKey`] so `unlock_ebox` tries the next
 ///   part. In show-batch's single-card-path posture, NoKey means the
 ///   ebox was sealed to a different recipient than the one we matched
-///   the first ebox against — a `decrypt-failed` (RFC 0005 decision
-///   3c, polished in task #8 — task #3 reports it as `decrypt-failed`
-///   via the catch-all error path).
+///   the first ebox against — a `decrypt-failed` per RFC 0005
+///   decision 3c, surfaced by the run loop's fallback when
+///   `last_failure` is None.
 /// - `target_curve` is captured at construction so we can build the
 ///   SSH wire blob without re-deriving from the slot every call.
 /// - `pin_verified` flips to true on first successful `verify_pin`.
 ///   The PIN supplier runs exactly once — `unlock_ebox` may make
 ///   multiple `ecdh` calls per ebox if a config has multiple parts,
 ///   and we don't want to prompt N times.
+/// - `last_failure` carries the typed shape of the most recent
+///   non-NoKey error so the run loop can map it to a precise
+///   [`DiagnosticKind`]. See [`BatchFailure`].
 struct BatchOracle<'sess, 'tok> {
     session: &'sess mut PinSession<'tok>,
     slot_id: u8,
     self_pubkey_uncompressed: Vec<u8>,
     #[allow(dead_code)] // reserved for the heterogeneous-batch
-    // detection logic in task #8 — keep the field plumbed so we
-    // don't have to re-thread it later.
+    // detection logic in a future polish pass — keep the field
+    // plumbed so we don't have to re-thread it later.
     target_curve: piggy_box::piv_box::EcCurve,
     pin_verified: bool,
     pin_supplier: PinSupplier,
+    last_failure: Option<BatchFailure>,
+}
+
+impl<'sess, 'tok> BatchOracle<'sess, 'tok> {
+    /// Consume the most recent failure, if any. Returns `None` when
+    /// the prior `unlock_ebox` call failed solely because no
+    /// recipient matched (a NoKey-only path), in which case the
+    /// caller should report the generic `decrypt-failed` per RFC
+    /// 0005 decision 3c.
+    fn take_failure(&mut self) -> Option<BatchFailure> {
+        self.last_failure.take()
+    }
 }
 
 impl<'sess, 'tok> EcdhOracle for BatchOracle<'sess, 'tok> {
@@ -775,22 +1111,40 @@ impl<'sess, 'tok> EcdhOracle for BatchOracle<'sess, 'tok> {
         let self_point = extract_point_from_sshkey_blob(self_pubkey_ssh_blob)?;
         let self_uncompressed = canonicalize_uncompressed(&self_point)?;
         if self_uncompressed != self.self_pubkey_uncompressed {
+            // NoKey lets `unlock_ebox` try the next part. Do NOT
+            // record a failure for this — NoKey is the trait's
+            // "this isn't my key" signal, not an error condition
+            // worth surfacing.
             return Err(OracleError::NoKey);
         }
 
         if !self.pin_verified {
-            let pin = (self.pin_supplier)("PIV PIN")?;
-            self.session
-                .verify_pin(&pin)
-                .map_err(piv_to_oracle_pin_error)?;
+            let pin = match (self.pin_supplier)("PIV PIN") {
+                Ok(p) => p,
+                Err(e) => {
+                    self.last_failure = Some(classify_pin_supplier_error(e));
+                    return Err(OracleError::Other("PIN supply failed".into()));
+                }
+            };
+            if let Err(e) = self.session.verify_pin(&pin) {
+                self.last_failure = Some(classify_piv_error(&e));
+                return Err(piv_to_oracle_pin_error(e));
+            }
             self.pin_verified = true;
         }
 
         let partner_point = extract_point_from_sshkey_blob(partner_pubkey_ssh_blob)?;
         let partner_uncompressed = canonicalize_uncompressed(&partner_point)?;
-        self.session
+        match self
+            .session
             .ecdh_derive(self.slot_id, &partner_uncompressed)
-            .map_err(|e| OracleError::Transport(format!("ecdh_derive: {e}")))
+        {
+            Ok(secret) => Ok(secret),
+            Err(e) => {
+                self.last_failure = Some(classify_piv_error(&e));
+                Err(OracleError::Transport(format!("ecdh_derive: {e}")))
+            }
+        }
     }
 }
 
@@ -920,5 +1274,162 @@ mod tests {
         assert!(lines[2].is_empty(), "final element should be empty");
         assert!(lines[0].starts_with(r#"{"type":"plan""#));
         assert!(lines[1].starts_with(r#"{"type":"summary""#));
+    }
+
+    /// `--names-from FILE` reads one pass-name per line, trims
+    /// whitespace, and skips blank + `#`-prefixed lines.
+    #[test]
+    fn read_names_from_skips_blanks_and_comments() {
+        let dir = std::env::temp_dir().join(format!(
+            "piggy-show-batch-names-from-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("names.txt");
+        std::fs::write(
+            &path,
+            "# header comment\n\
+             config/ssh/foo\n\
+             \n\
+             config/ssh/bar  \n\
+             # mid-file comment\n\
+             \t  config/api/baz\n",
+        )
+        .unwrap();
+
+        let names = super::read_names_from(&path).expect("read should succeed");
+        assert_eq!(
+            names,
+            vec!["config/ssh/foo", "config/ssh/bar", "config/api/baz"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Canonical pass-name strips leading `/` and trailing `.ebox`
+    /// per RFC 0005 §Decrypt Record. Names that already match the
+    /// canonical form pass through unchanged.
+    #[test]
+    fn canonicalize_pass_name_strips_prefix_and_suffix() {
+        assert_eq!(
+            super::canonicalize_pass_name("config/ssh/foo"),
+            "config/ssh/foo"
+        );
+        assert_eq!(
+            super::canonicalize_pass_name("/config/ssh/foo"),
+            "config/ssh/foo"
+        );
+        assert_eq!(
+            super::canonicalize_pass_name("config/ssh/foo.ebox"),
+            "config/ssh/foo"
+        );
+        assert_eq!(
+            super::canonicalize_pass_name("/config/ssh/foo.ebox"),
+            "config/ssh/foo"
+        );
+        // Only the trailing `.ebox` is stripped; embedded `.ebox`
+        // mid-path is preserved.
+        assert_eq!(
+            super::canonicalize_pass_name("config/.ebox/foo"),
+            "config/.ebox/foo"
+        );
+    }
+
+    /// PIN/card failures bail the whole batch; per-ebox decrypt
+    /// errors do not. This drives whether the run loop emits a
+    /// `bail-out` or keeps going after a `decrypt-failed`.
+    #[test]
+    fn batch_failure_fatal_for_batch() {
+        use super::BatchFailure;
+        assert!(BatchFailure::PinIncorrect { retries: 2 }.is_fatal_for_batch());
+        assert!(BatchFailure::PinBlocked.is_fatal_for_batch());
+        assert!(BatchFailure::PinCancelled("user hit Cancel".into()).is_fatal_for_batch());
+        assert!(BatchFailure::CardAbsent("card removed".into()).is_fatal_for_batch());
+        assert!(!BatchFailure::Other("transient PCSC blip".into()).is_fatal_for_batch());
+    }
+
+    /// PivError → BatchFailure classification (the inverse map back
+    /// to RFC 0005's `DiagnosticKind`).
+    #[test]
+    fn classify_piv_error_maps_to_expected_failure() {
+        use super::{BatchFailure, classify_piv_error};
+        use piggy_piv::PivError;
+
+        assert!(matches!(
+            classify_piv_error(&PivError::PinIncorrect { retries: 3 }),
+            BatchFailure::PinIncorrect { retries: 3 }
+        ));
+        assert!(matches!(
+            classify_piv_error(&PivError::PinBlocked),
+            BatchFailure::PinBlocked
+        ));
+        assert!(matches!(
+            classify_piv_error(&PivError::CardNotFound),
+            BatchFailure::CardAbsent(_)
+        ));
+        // PivError::Other → BatchFailure::Other (catch-all path)
+        assert!(matches!(
+            classify_piv_error(&PivError::Other("weird APDU".into())),
+            BatchFailure::Other(_)
+        ));
+    }
+
+    /// askpass cancel/failure messages map to PinCancelled so the
+    /// RFC 0005 consumer can offer a retry, rather than treating
+    /// them as opaque internal errors.
+    #[test]
+    fn classify_pin_supplier_error_recognizes_askpass_cancel() {
+        use super::{BatchFailure, classify_pin_supplier_error};
+        use piggy_box::oracle::OracleError;
+
+        assert!(matches!(
+            classify_pin_supplier_error(OracleError::Other("askpass exited with status 1".into())),
+            BatchFailure::PinCancelled(_)
+        ));
+        assert!(matches!(
+            classify_pin_supplier_error(OracleError::Other(
+                "no PIN source: SSH_ASKPASS not set".into()
+            )),
+            BatchFailure::PinCancelled(_)
+        ));
+        // Unrelated OracleError shapes fall through to Other.
+        assert!(matches!(
+            classify_pin_supplier_error(OracleError::Transport("socket eof".into())),
+            BatchFailure::Other(_)
+        ));
+    }
+
+    /// BatchFailure::into_diagnostic produces the right kind +
+    /// retryable hint for each shape.
+    #[test]
+    fn batch_failure_into_diagnostic_kinds() {
+        use super::BatchFailure;
+        use super::ndjson::DiagnosticKind;
+
+        let d = BatchFailure::PinIncorrect { retries: 2 }.into_diagnostic();
+        assert!(matches!(d.kind, DiagnosticKind::PinIncorrect));
+        assert_eq!(d.retryable, Some(true));
+
+        let d = BatchFailure::PinIncorrect { retries: 0 }.into_diagnostic();
+        assert_eq!(d.retryable, Some(false));
+
+        let d = BatchFailure::PinBlocked.into_diagnostic();
+        assert!(matches!(d.kind, DiagnosticKind::CardLocked));
+        assert_eq!(d.retryable, Some(false));
+
+        let d = BatchFailure::PinCancelled("x".into()).into_diagnostic();
+        assert!(matches!(d.kind, DiagnosticKind::PinCancelled));
+        assert_eq!(d.retryable, Some(true));
+
+        let d = BatchFailure::CardAbsent("x".into()).into_diagnostic();
+        assert!(matches!(d.kind, DiagnosticKind::CardAbsent));
+        assert_eq!(d.retryable, Some(true));
+
+        let d = BatchFailure::Other("x".into()).into_diagnostic();
+        assert!(matches!(d.kind, DiagnosticKind::DecryptFailed));
+        assert_eq!(d.retryable, None);
     }
 }
