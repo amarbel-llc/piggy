@@ -138,7 +138,13 @@ impl EcdhOracle for CardEcdhOracle {
 /// Convert a PIV PIN error into the closest `OracleError` variant we have.
 /// We use `Other` rather than `Transport` for PIN-shaped failures because
 /// retransmitting won't help — the wire is fine, the human got it wrong.
-fn piv_to_oracle_pin_error(e: PivError) -> OracleError {
+///
+/// `pub` because [`crate::show_batch`]'s `BatchOracle` reuses the same
+/// mapping: when `PinSession::verify_pin` returns `PinIncorrect`/
+/// `PinBlocked`, the oracle surface needs the equivalent `OracleError`
+/// shape so `unlock_ebox` propagates it as a normal oracle failure
+/// rather than dressing it up as a transport problem.
+pub fn piv_to_oracle_pin_error(e: PivError) -> OracleError {
     match e {
         PivError::PinIncorrect { retries } => {
             OracleError::Other(format!("wrong PIN, {retries} retries remaining"))
@@ -156,7 +162,11 @@ fn piv_to_oracle_pin_error(e: PivError) -> OracleError {
 /// (`agent_ext::ec_point_to_ssh_pubkey_blob` is fed uncompressed bytes
 /// after `decompress_ec_point`), but be tolerant here in case a future
 /// caller passes compressed bytes through.
-fn canonicalize_uncompressed(point: &[u8]) -> Result<Vec<u8>, OracleError> {
+///
+/// `pub` because [`crate::show_batch`]'s `BatchOracle` reuses this for
+/// the partner-point canonicalization step before handing the point to
+/// `PinSession::ecdh_derive`.
+pub fn canonicalize_uncompressed(point: &[u8]) -> Result<Vec<u8>, OracleError> {
     if point.first() == Some(&0x04) {
         return Ok(point.to_vec());
     }
