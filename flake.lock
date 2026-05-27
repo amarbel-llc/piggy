@@ -10,11 +10,11 @@
         "utils": "utils"
       },
       "locked": {
-        "lastModified": 1779730883,
-        "narHash": "sha256-WxLVRfjzZekrSnTtcFFE4uIDPwpNSE/3Y/ZX+8rtOXc=",
+        "lastModified": 1779829127,
+        "narHash": "sha256-E/woM9o5f3y3VE/K+MEwZXz2ipxPZ3FXF6g2hyr//xo=",
         "owner": "amarbel-llc",
         "repo": "bats",
-        "rev": "e1f442956e5229877fc7c346229b27470de86f6e",
+        "rev": "89e483fff742de745edb5cead67ca713f5026e72",
         "type": "github"
       },
       "original": {
