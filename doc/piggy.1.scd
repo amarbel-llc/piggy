@@ -174,6 +174,48 @@ passthroughs for the C pivy binaries:
 	print the password but instead display a QR code using *qrencode*(1)
 	either to the terminal or graphically if supported.
 
+*pass show-batch* [*--names-from*=_FILE_] [*--out-dir*=_DIR_] [*--format*=_human_|_ndjson_] [*--all-or-nothing*] [_pass-name_...]
+	Decrypt N eboxes in a single PIV-card session — one PIN prompt for
+	the whole batch — and emit per-ebox progress as the RFC 0005 NDJSON
+	event stream (or as a human-readable line list with *--format human*,
+	the default for terminal use).
+
+	Pass-names are read from positional arguments and, if *--names-from*
+	is supplied, from the named file (one per line; blank lines and
+	lines beginning with _#_ are skipped). The two sources combine in
+	order: positional first, file-supplied second.
+
+	Each successfully decrypted plaintext is written to
+	_out-dir/<pass-name>_ with mode *0600*. _out-dir_ itself is created
+	with mode *0700* if missing. The path is opened with O_CREAT|O_EXCL,
+	so an existing file at that path fails the per-ebox decrypt rather
+	than silently clobbering. Pass-names containing _/_ produce nested
+	directories under _out-dir_, mode *0700*. Defaults to the current
+	working directory when *--out-dir* is omitted.
+
+	With *--all-or-nothing*, every plaintext written during a batch
+	that subsequently encounters any failure (decrypt failure, PIN
+	error, SIGINT, …) is unlinked before the run terminates. Note that
+	this is best-effort cleanup: a consumer that has already read a
+	*decrypt {ok: true}* record may have copied the bytes out of band.
+
+	Exit codes:[*0*] every ebox decrypted successfully.[*1*] at least
+	one ebox failed, or the batch was bailed out (PIN exhaustion,
+	card removal, SIGINT, internal error).[*2*] usage error (no
+	pass-names supplied, empty positional name, *--names-from* file
+	unreadable).
+
+	A single PIN entry authenticates every decrypt in the batch.
+	show-batch opens a PIV transaction (*piggy_piv::PinSession*) once,
+	matches the first ebox's PRIMARY recipient against connected cards'
+	*9D* slots, prompts for the PIN, then issues one *ecdh_derive* per
+	ebox. The card transaction holds for the entire batch, so a
+	concurrent PC/SC client cannot clear the PIN-verified state between
+	decrypts. See *RFC 0005* (_docs/rfcs/0005-pass-show-batch-ndjson.md_)
+	for the NDJSON wire format and the diagnostic taxonomy
+	(*not-found*, *pin-cancelled*, *pin-incorrect*, *card-locked*,
+	*card-absent*, *decrypt-failed*, *io-error*, *internal*).
+
 *pass insert* [*--echo*, *-e* | *--multiline*, *-m*] [*--force*, *-f*] _pass-name_
 	Insert a new password into the password store called _pass-name_. This
 	will read the new password from standard input. If *--echo* or *-e* is
@@ -341,6 +383,35 @@ Copy existing password to clipboard:
 ```
 $ piggy pass show -c Email/work
 Copied Email/work to clipboard. Will clear in 45 seconds.
+```
+
+Decrypt several passwords in a single PIN-prompt batch
+(*--format human* is the terminal default; *--format ndjson* is the
+machine surface consumed by automation):
+
+```
+$ piggy pass show-batch --out-dir /tmp/secrets Email/work Business/some-site.com
+Decrypting 2 ebox(es):
+[1/2] Email/work → /tmp/secrets/Email/work ok
+[2/2] Business/some-site.com → /tmp/secrets/Business/some-site.com ok
+Summary: 2 ok, 0 failed
+```
+
+Or drive a longer list from a file (blank lines and _#_-comments
+ignored), wiping any partial output on the first failure:
+
+```
+$ cat secrets-to-rotate.txt
+# infra
+ops/aws-root
+ops/cloudflare
+
+$ piggy pass show-batch --names-from secrets-to-rotate.txt \
+    --out-dir ./batch --all-or-nothing --format ndjson
+{"type":"plan","count":2}
+{"type":"decrypt","n":1,"name":"ops/aws-root","ok":true,"out_path":"./batch/ops/aws-root","diagnostic":null}
+{"type":"decrypt","n":2,"name":"ops/cloudflare","ok":true,"out_path":"./batch/ops/cloudflare","diagnostic":null}
+{"type":"summary","ok":2,"failed":0}
 ```
 
 Add password to store:
