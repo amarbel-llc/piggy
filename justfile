@@ -840,6 +840,127 @@ explore-trace-agent-query sock="":
     s.close()
     PY
 
+# Verify the #119/#123 ssh-agent-mux ecdh decrypt fix end-to-end against the
+# real card, using a piggy built from THIS worktree. The worktree binary
+# bundles the patched vendored pivy-box on its PATH (flake.nix runtimeDeps),
+# so its `pass show` exercises the #119 query-response parse fix; its dispatch
+# honors PIGGY_AUTH_SOCK (#123). The installed nix-profile piggy predates the
+# fix, so this recipe deliberately builds + runs the worktree binary instead.
+#
+# Pins the mux scenario the issues describe: route piggy's own decrypts at
+# piggy-agent (PIGGY_AUTH_SOCK — advertises ecdh@joyent.com) while the ambient
+# SSH_AUTH_SOCK is ssh-agent-mux (drops ecdh, see ssh-agent-mux#10). Mirrors
+# eng/zz-pocs/piggy_pass_rcm_hook but against the freshly-built binary.
+#
+# INTERACTIVE + HARDWARE: piggy-agent prompts for your PIV PIN on the cold
+# show. SIDE EFFECTS: inserts then removes two throwaway entries in your real
+# piggy store (sign-commits if piggy.signcommits=true) and restarts your
+# piggy-agent to start from a cold PIN cache. Linux-only.
+#
+# NOT part of `just` / the pre-merge CI lane, and must never be: it needs
+# interactive PIN entry, so it stays an out-of-band manual verification
+# (explore group only, run by hand when you want to re-confirm the live path).
+#
+# Primary signal: `pass show` through the mux env succeeds with no
+# sshbuf_get_cstring / "failed to unlock ebox with agent" line. The client-side
+# askpass count is supplementary (a nonzero count means pivy-box fell back to a
+# direct-card unlock because the agent ecdh path failed; the agent's own PIN
+# prompt is rendered by piggy-agent and is NOT counted here).
+[group('explore')]
+[linux]
+explore-verify-auth-sock-cache piggy_auth_sock=env_var_or_default("PIGGY_AUTH_SOCK", "") ssh_auth_sock=env_var_or_default("SSH_AUTH_SOCK", ""):
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    piggy_sock="{{piggy_auth_sock}}"
+    mux_sock="{{ssh_auth_sock}}"
+    : "${piggy_sock:?set PIGGY_AUTH_SOCK (piggy-agent socket) or pass piggy_auth_sock=...}"
+    : "${mux_sock:?set SSH_AUTH_SOCK (mux socket) or pass ssh_auth_sock=...}"
+
+    echo "=== building worktree piggy (nix build .#piggy) ==="
+    out=$(nix build .#piggy --no-link --print-out-paths)
+    PIGGY="$out/bin/piggy"
+    echo "piggy        = $PIGGY ($("$PIGGY" version 2>/dev/null || echo '?'))"
+    echo "PIGGY_AUTH_SOCK (piggy-agent) = $piggy_sock"
+    echo "SSH_AUTH_SOCK   (mux)         = $mux_sock"
+
+    probe_dir="$HOME/.tmp/piggy-auth-sock-probe"
+    shim="$probe_dir/askpass-shim.sh"
+    counter="$probe_dir/askpass-count"
+    p1=piggy-authsock-probe-1
+    p2=piggy-authsock-probe-2
+    mkdir -p "$probe_dir"
+
+    # Every piggy call runs with the mux as the ambient SSH_AUTH_SOCK; the #123
+    # routing should redirect the decrypt at PIGGY_AUTH_SOCK.
+    export SSH_AUTH_SOCK="$mux_sock"
+    export PIGGY_AUTH_SOCK="$piggy_sock"
+
+    cleanup() {
+      "$PIGGY" pass rm -f "$p1" >/dev/null 2>&1 || true
+      "$PIGGY" pass rm -f "$p2" >/dev/null 2>&1 || true
+      rm -rf "$probe_dir"
+    }
+    trap cleanup EXIT
+
+    echo
+    echo "=== inserting throwaway probes into the real store ==="
+    printf 'authsock-probe-1\n' | "$PIGGY" pass insert -e -f "$p1"
+    printf 'authsock-probe-2\n' | "$PIGGY" pass insert -e -f "$p2"
+
+    # Counting shim: one line per invocation, then exec the real askpass.
+    # Catches CLIENT-side prompts (pivy-box falling back to a direct PCSC card
+    # unlock because the agent ecdh path failed). PIN prompts the agent renders
+    # itself are NOT counted here.
+    cat >"$shim" <<'SHIM'
+    #!/usr/bin/env bash
+    printf 'askpass invoked at %s\n' "$(date +%s.%N)" >>"$COUNTER"
+    exec "$REAL_SSH_ASKPASS" "$@"
+    SHIM
+    chmod +x "$shim"
+    : >"$counter"
+
+    echo
+    echo "=== restarting piggy-agent (cold PIN cache) ==="
+    systemctl --user restart piggy-agent || echo "WARN: could not restart piggy-agent (continuing)"
+    for _ in 1 2 3 4 5; do [[ -S "$piggy_sock" ]] && break; sleep 1; done
+    [[ -S "$piggy_sock" ]] || echo "WARN: $piggy_sock is not a live socket — is piggy-agent running?"
+
+    run_show() {
+      local name="$1" errf rc
+      errf="$probe_dir/$name.err"
+      echo
+      echo "=== piggy pass show $name (through mux env) ==="
+      set +e
+      env REAL_SSH_ASKPASS="${SSH_ASKPASS:-}" COUNTER="$counter" SSH_ASKPASS="$shim" \
+        "$PIGGY" pass show "$name" >/dev/null 2>"$errf"
+      rc=$?
+      set -e
+      echo "exit=$rc"
+      [[ -s "$errf" ]] && { echo "--- stderr ---"; cat "$errf"; }
+      if grep -qiE 'sshbuf_get_cstring|invalid format|failed to unlock ebox with agent' "$errf"; then
+        echo ">> agent-unlock error present (the #119/#123 symptom)"
+        return 1
+      fi
+      return "$rc"
+    }
+
+    show1_ok=0; show2_ok=0
+    run_show "$p1" && show1_ok=1 || true
+    run_show "$p2" && show2_ok=1 || true
+
+    count=$(wc -l <"$counter"); count="${count// /}"
+    echo
+    echo "=== summary ==="
+    echo "show1 clean: $([[ $show1_ok == 1 ]] && echo yes || echo NO)"
+    echo "show2 clean: $([[ $show2_ok == 1 ]] && echo yes || echo NO)"
+    echo "client-side askpass (direct-card fallback) invocations: $count"
+    if [[ $show1_ok == 1 && $show2_ok == 1 ]]; then
+      echo "RESULT: PASS — pass-show decrypts through the mux env with no agent-unlock error. #119/#123 verified end-to-end."
+    else
+      echo "RESULT: FAIL — at least one show hit the agent-unlock error path. See stderr above."
+    fi
+
 # Probe PivApplet (running under fib) for X25519 / Ed25519 algorithm
 # support. Sends GENERATE ASYMMETRIC KEY PAIR for several alg bytes and
 # captures each SW. Hardware-free: only touches the virtual card behind
