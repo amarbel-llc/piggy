@@ -10,11 +10,11 @@
         "utils": "utils"
       },
       "locked": {
-        "lastModified": 1779829127,
-        "narHash": "sha256-E/woM9o5f3y3VE/K+MEwZXz2ipxPZ3FXF6g2hyr//xo=",
+        "lastModified": 1779999819,
+        "narHash": "sha256-noh4SwI7xs+EC9gGMDd7kAyEfmRFLye8MKJxeMQReP0=",
         "owner": "amarbel-llc",
         "repo": "bats",
-        "rev": "89e483fff742de745edb5cead67ca713f5026e72",
+        "rev": "d266c8e5edf74468b1a3354f34ba9d508abb1b25",
         "type": "github"
       },
       "original": {
@@ -102,11 +102,11 @@
         "treefmt-nix": "treefmt-nix_2"
       },
       "locked": {
-        "lastModified": 1779730058,
-        "narHash": "sha256-LsPVF0s5ezDHtRjMDBaXFTgaT4fyswRgn8JT9WWXM5M=",
+        "lastModified": 1779973448,
+        "narHash": "sha256-h4YwtUnh7Wk7DoPi0KQOFC4dcMefXTHymkR1jb4eDgE=",
         "owner": "amarbel-llc",
         "repo": "nixpkgs",
-        "rev": "1de98199124f54b309f9db20b2e51935d3cfa77c",
+        "rev": "c5d455a0e9790aa84e6b0cbd89763c1bc70c133e",
         "type": "github"
       },
       "original": {
