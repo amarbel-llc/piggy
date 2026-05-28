@@ -766,6 +766,79 @@ explore-pivy-tool-bats: build-nix
       BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
       zz-tests_bats/conformance/pivy_tool_admin_key.bats
 
+# Send a pivy-shaped query extension request directly to $SSH_AUTH_SOCK
+# (typically ssh-agent-mux) and hex-dump the response. Hardware-free:
+# query does not touch the card. Used to investigate piggy#119 where
+# pivy's piv_box_open_agent() fails parsing the query response through
+# ssh-agent-mux at vendor/pivy/src/piv.c:7014.
+[group('explore')]
+explore-trace-agent-query:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${SSH_AUTH_SOCK:?SSH_AUTH_SOCK must be set}"
+    python3 <<'PY'
+    import os, socket, struct, sys
+    sock_path = os.environ['SSH_AUTH_SOCK']
+    print(f"SSH_AUTH_SOCK = {sock_path}")
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(sock_path)
+    SSH_AGENTC_EXTENSION = 27
+    name = b"query"
+    payload = bytes([SSH_AGENTC_EXTENSION]) \
+        + struct.pack(">I", len(name)) + name \
+        + struct.pack(">I", 0)
+    framed = struct.pack(">I", len(payload)) + payload
+    print(f"--- request ({len(framed)} bytes) ---")
+    print(framed.hex(' '))
+    s.sendall(framed)
+    raw = b''
+    while len(raw) < 4:
+        chunk = s.recv(4 - len(raw))
+        if not chunk: break
+        raw += chunk
+    length = struct.unpack(">I", raw)[0]
+    print(f"--- response (length={length}) ---")
+    body = b''
+    while len(body) < length:
+        chunk = s.recv(length - len(body))
+        if not chunk: break
+        body += chunk
+    print(body.hex(' '))
+    print()
+    if len(body) < 1:
+        print("response too short"); sys.exit(0)
+    code = body[0]
+    code_name = 'SSH2_AGENT_EXT_RESPONSE' if code==29 else 'SSH_AGENT_SUCCESS' if code==6 else '???'
+    print(f"code byte = {code} ({code_name})")
+    i = 1
+    idx = 0
+    while i + 4 <= len(body):
+        slen = struct.unpack(">I", body[i:i+4])[0]
+        i += 4
+        if i + slen > len(body):
+            print(f"  string[{idx}] OVERRUN: claimed_len={slen}, remaining={len(body)-i}")
+            print(f"  from-len4 hex: {body[i-4:].hex(' ')}")
+            break
+        s_bytes = body[i:i+slen]
+        i += slen
+        try:
+            s_str = s_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            s_str = f"<non-utf8: {s_bytes.hex(' ')}>"
+        nul_at = s_bytes.find(b'\x00')
+        nul_note = ""
+        if nul_at != -1:
+            if nul_at == len(s_bytes) - 1:
+                nul_note = "  [trailing NUL]"
+            else:
+                nul_note = f"  [!! embedded NUL at byte {nul_at} — pivy sshbuf_get_cstring -4 !!]"
+        print(f"  string[{idx}] len={slen} {s_str!r}{nul_note}")
+        idx += 1
+    if i < len(body):
+        print(f"trailing bytes ({len(body)-i}): {body[i:].hex(' ')}")
+    s.close()
+    PY
+
 # Probe PivApplet (running under fib) for X25519 / Ed25519 algorithm
 # support. Sends GENERATE ASYMMETRIC KEY PAIR for several alg bytes and
 # captures each SW. Hardware-free: only touches the virtual card behind

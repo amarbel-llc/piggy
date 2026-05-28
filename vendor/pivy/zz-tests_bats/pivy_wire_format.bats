@@ -18,5 +18,5 @@ setup() {
 function wire_format_unit_tests { # @test
   run "$WIRE_TEST" unit
   assert_success
-  assert_output --partial "8 passed, 0 failed"
+  assert_output --partial "9 passed, 0 failed"
 }

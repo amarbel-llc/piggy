@@ -6991,9 +6991,29 @@ errf_t *piv_box_open_agent(int fd, struct piv_ecdh_box *box) {
   }
   if (code == SSH2_AGENT_EXT_RESPONSE) {
     /*
-     * Spec format (matches OpenSSH): the response echoes the
-     * extension name "query", then lists supported extensions
-     * as flat cstrings.
+     * Per IETF draft-ietf-sshm-ssh-agent §3.8, all
+     * SSH_AGENT_EXTENSION_RESPONSE messages echo the extension name
+     * as the first cstring. The remaining bytes are extension-
+     * specific data — and for the joyent "query" extension two
+     * encodings exist in the wild:
+     *
+     *   1. Flat cstrings, one per supported extension. Emitted by
+     *      pivy-agent's process_ext_query and assumed by historical
+     *      pivy releases.
+     *
+     *   2. A single SSH-string blob wrapping flat cstrings. Emitted
+     *      by ssh-agent-lib's QueryResponse serialization, which
+     *      ssh-agent-mux uses to aggregate upstream responses
+     *      (piggy#119).
+     *
+     * Detect (2) by peeking the first u32 after the echo: if it
+     * equals the remaining buffer length minus the u32 itself, the
+     * rest of the reply is the wrapped blob. Otherwise read cstrings
+     * straight out of the reply. Both pivy-agent's 8-entry list and
+     * ssh-agent-mux's non-empty aggregate are unambiguous under this
+     * heuristic; a malicious agent could craft a single-entry flat
+     * response that aliases the wrapped shape, but that just causes
+     * a parse error here (no downstream impact).
      */
     char *echo = NULL;
     if ((rc = sshbuf_get_cstring(reply, &echo, NULL))) {
@@ -7009,9 +7029,25 @@ errf_t *piv_box_open_agent(int fd, struct piv_ecdh_box *box) {
       goto out;
     }
     free(echo);
-    while (sshbuf_len(reply) > 0) {
-      if ((rc = sshbuf_get_cstring(reply, &extname, &len))) {
+
+    struct sshbuf *exts = reply;
+    struct sshbuf *unwrapped = NULL;
+    if (sshbuf_len(reply) >= 4) {
+      const u_char *peek = sshbuf_ptr(reply);
+      size_t blob_len = ((size_t)peek[0] << 24) | ((size_t)peek[1] << 16) |
+                        ((size_t)peek[2] << 8) | (size_t)peek[3];
+      if (blob_len + 4 == sshbuf_len(reply)) {
+        if ((rc = sshbuf_froms(reply, &unwrapped))) {
+          err = ssherrf("sshbuf_froms", rc);
+          goto out;
+        }
+        exts = unwrapped;
+      }
+    }
+    while (sshbuf_len(exts) > 0) {
+      if ((rc = sshbuf_get_cstring(exts, &extname, &len))) {
         err = ssherrf("sshbuf_get_cstring", rc);
+        sshbuf_free(unwrapped);
         goto out;
       }
       if (strcmp("ecdh-rebox@joyent.com", extname) == 0)
@@ -7021,6 +7057,7 @@ errf_t *piv_box_open_agent(int fd, struct piv_ecdh_box *box) {
       free(extname);
       extname = NULL;
     }
+    sshbuf_free(unwrapped);
   } else {
     /*
      * Legacy pivy format: u32 count followed by count cstrings.

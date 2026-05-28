@@ -167,6 +167,101 @@ static void test_query(void) {
 }
 
 /*
+ * Test: query extension response in ssh-agent-mux's wrapped wire format.
+ * Wire format: u8(29) + cstring("query") + ssh-string(cstring(name)...)
+ *
+ * ssh-agent-mux (via ssh-agent-lib's QueryResponse encoding) wraps the
+ * extension list in an outer SSH string after the echo, instead of
+ * appending the cstrings flat as pivy-agent's process_ext_query does.
+ * piggy#119 traced piv_box_open_agent's `-4 INVALID_FORMAT` failure
+ * to this format: the outer length prefix's high bytes look like NUL
+ * bytes inside a cstring. Pivy now detects either format by peeking
+ * the first u32 after the echo. This test exercises the wrapped path.
+ */
+static void test_query_wrapped(void) {
+  struct sshbuf *msg, *inner;
+  int rc;
+  const char *label = "query (wrapped)";
+  const char *name = "query";
+  const char *ext1 = "ecdh@joyent.com";
+  const char *ext2 = "ecdh-rebox@joyent.com";
+
+  msg = sshbuf_new();
+  inner = sshbuf_new();
+  if (msg == NULL || inner == NULL) {
+    fail(label, "sshbuf_new failed");
+    return;
+  }
+
+  if ((rc = sshbuf_put_cstring(inner, ext1)) != 0 ||
+      (rc = sshbuf_put_cstring(inner, ext2)) != 0) {
+    fail(label, "inner construction failed");
+    sshbuf_free(inner);
+    sshbuf_free(msg);
+    return;
+  }
+
+  if ((rc = sshbuf_put_u8(msg, SSH2_AGENT_EXT_RESPONSE_VAL)) != 0 ||
+      (rc = sshbuf_put_cstring(msg, name)) != 0 ||
+      (rc = sshbuf_put_stringb(msg, inner)) != 0) {
+    fail(label, "outer construction failed");
+    sshbuf_free(inner);
+    sshbuf_free(msg);
+    return;
+  }
+
+  if (validate_ext_response(msg, name, SSH2_AGENT_EXT_RESPONSE_VAL) != 0) {
+    sshbuf_free(inner);
+    sshbuf_free(msg);
+    return;
+  }
+
+  struct sshbuf *exts = msg;
+  struct sshbuf *unwrapped = NULL;
+  if (sshbuf_len(msg) >= 4) {
+    const uint8_t *peek = sshbuf_ptr(msg);
+    size_t blob_len = ((size_t)peek[0] << 24) | ((size_t)peek[1] << 16) |
+                      ((size_t)peek[2] << 8) | (size_t)peek[3];
+    if (blob_len + 4 == sshbuf_len(msg)) {
+      if ((rc = sshbuf_froms(msg, &unwrapped)) != 0) {
+        fail(label, "sshbuf_froms failed");
+        sshbuf_free(inner);
+        sshbuf_free(msg);
+        return;
+      }
+      exts = unwrapped;
+    }
+  }
+
+  int got_ecdh = 0, got_rebox = 0;
+  while (sshbuf_len(exts) > 0) {
+    char *extname = NULL;
+    if ((rc = sshbuf_get_cstring(exts, &extname, NULL)) != 0) {
+      fail(label, "cstring read failed");
+      sshbuf_free(unwrapped);
+      sshbuf_free(inner);
+      sshbuf_free(msg);
+      return;
+    }
+    if (strcmp(extname, ext1) == 0)
+      got_ecdh = 1;
+    else if (strcmp(extname, ext2) == 0)
+      got_rebox = 1;
+    free(extname);
+  }
+  sshbuf_free(unwrapped);
+
+  if (!got_ecdh || !got_rebox) {
+    fail(label, "missing expected extensions");
+  } else {
+    pass(label, "type=29, echo, wrapped-blob unwrapped, ecdh + rebox present");
+  }
+
+  sshbuf_free(inner);
+  sshbuf_free(msg);
+}
+
+/*
  * Test: extension response with a single string payload.
  * Used for ecdh, ecdh-rebox, x509-certs, sign-prehash.
  */
@@ -520,18 +615,38 @@ static void test_agent_query(int fd) {
   if (validate_ext_response(reply, name, SSH2_AGENT_EXT_RESPONSE_VAL) != 0)
     goto out;
 
-  /* Count remaining cstrings */
+  /*
+   * Two formats are observed for the extensions list after the echo;
+   * see test_query_wrapped() and piv_box_open_agent() in src/piv.c.
+   */
+  struct sshbuf *exts = reply;
+  struct sshbuf *unwrapped = NULL;
+  if (sshbuf_len(reply) >= 4) {
+    const uint8_t *peek = sshbuf_ptr(reply);
+    size_t blob_len = ((size_t)peek[0] << 24) | ((size_t)peek[1] << 16) |
+                      ((size_t)peek[2] << 8) | (size_t)peek[3];
+    if (blob_len + 4 == sshbuf_len(reply)) {
+      if ((rc = sshbuf_froms(reply, &unwrapped)) != 0) {
+        fail(name, "sshbuf_froms failed");
+        goto out;
+      }
+      exts = unwrapped;
+    }
+  }
+
   int count = 0;
-  while (sshbuf_len(reply) > 0) {
+  while (sshbuf_len(exts) > 0) {
     char *s = NULL;
-    if ((rc = sshbuf_get_cstring(reply, &s, NULL)) != 0) {
+    if ((rc = sshbuf_get_cstring(exts, &s, NULL)) != 0) {
       fail(name, "failed to parse extension name from list");
       free(s);
+      sshbuf_free(unwrapped);
       goto out;
     }
     free(s);
     count++;
   }
+  sshbuf_free(unwrapped);
 
   char detail[128];
   snprintf(detail, sizeof(detail),
@@ -597,6 +712,7 @@ static int run_unit_tests(void) {
   printf("Running wire format unit tests...\n\n");
 
   test_query();
+  test_query_wrapped();
   test_string_payload("ecdh@joyent.com");
   test_string_payload("ecdh-rebox@joyent.com");
   test_string_payload("x509-certs@joyent.com");
