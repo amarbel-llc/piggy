@@ -19,6 +19,12 @@ stream)
     ;;
   decrypt)
     # Usage: mock-pivy-box stream decrypt < encrypted-data
+    # Test hook (#123): when PIGGY_TEST_SOCK_RECORD is set, record the
+    # SSH_AUTH_SOCK this invocation saw so tests can assert which agent
+    # socket piggy routed the decrypt at. No effect when unset.
+    if [[ -n ${PIGGY_TEST_SOCK_RECORD:-} ]]; then
+      printf '%s\n' "${SSH_AUTH_SOCK:-}" >>"$PIGGY_TEST_SOCK_RECORD"
+    fi
     base64 -d
     ;;
   *)

@@ -772,14 +772,15 @@ explore-pivy-tool-bats: build-nix
 # pivy's piv_box_open_agent() fails parsing the query response through
 # ssh-agent-mux at vendor/pivy/src/piv.c:7014.
 [group('explore')]
-explore-trace-agent-query:
+explore-trace-agent-query sock="":
     #!/usr/bin/env bash
     set -euo pipefail
-    : "${SSH_AUTH_SOCK:?SSH_AUTH_SOCK must be set}"
+    sock_arg="{{sock}}"
+    export PIGGY_PROBE_SOCK="${sock_arg:-${SSH_AUTH_SOCK:?set SSH_AUTH_SOCK or pass a socket arg}}"
     python3 <<'PY'
     import os, socket, struct, sys
-    sock_path = os.environ['SSH_AUTH_SOCK']
-    print(f"SSH_AUTH_SOCK = {sock_path}")
+    sock_path = os.environ['PIGGY_PROBE_SOCK']
+    print(f"probing socket = {sock_path}")
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(sock_path)
     SSH_AGENTC_EXTENSION = 27

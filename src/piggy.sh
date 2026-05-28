@@ -83,7 +83,15 @@ piggy_encrypt() {
 }
 piggy_decrypt() {
   # Usage: piggy_decrypt <input-file>
-  pivy-box stream decrypt <"$1" || exit $?
+  # Route the decrypt at piggy's own agent (PIGGY_AUTH_SOCK) when set, so
+  # it doesn't go through an ssh-agent-mux that may not advertise the
+  # ecdh@joyent.com extension. Falls back to the ambient SSH_AUTH_SOCK.
+  # See #123 (and ssh-agent-mux#10 for the mux-side capability drop).
+  if [[ -n ${PIGGY_AUTH_SOCK:-} ]]; then
+    SSH_AUTH_SOCK="$PIGGY_AUTH_SOCK" pivy-box stream decrypt <"$1" || exit $?
+  else
+    pivy-box stream decrypt <"$1" || exit $?
+  fi
 }
 reencrypt_path() {
   # Delegates to the Rust handler. Bash callers (cmd_init,

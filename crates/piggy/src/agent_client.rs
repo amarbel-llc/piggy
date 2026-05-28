@@ -126,6 +126,17 @@ pub fn unlock_agent_pin(socket_path: &Path, pin: &str) -> Result<(), OracleError
     })
 }
 
+/// The SSH-agent socket override piggy should prefer for PIV decrypt.
+///
+/// Returns `PIGGY_AUTH_SOCK` when it is set and non-empty, else `None`.
+/// Callers fall back to the ambient `SSH_AUTH_SOCK` themselves. The point
+/// is to route piggy's own decrypts at piggy-agent — which advertises the
+/// `ecdh@joyent.com` extension — rather than through an ssh-agent-mux that
+/// may not. See piggy#123.
+pub fn piggy_auth_sock_override() -> Option<std::ffi::OsString> {
+    std::env::var_os("PIGGY_AUTH_SOCK").filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +166,34 @@ mod tests {
             matches!(err, OracleError::Transport(_)),
             "expected Transport, got {err:?}"
         );
+    }
+
+    /// `piggy_auth_sock_override` returns the var only when set and
+    /// non-empty. No other test reads `PIGGY_AUTH_SOCK`, so mutating it
+    /// process-wide here is race-free; we restore it on exit regardless.
+    #[test]
+    fn auth_sock_override_prefers_set_nonempty() {
+        let saved = std::env::var_os("PIGGY_AUTH_SOCK");
+
+        std::env::set_var("PIGGY_AUTH_SOCK", "/run/piggy.sock");
+        assert_eq!(
+            piggy_auth_sock_override().as_deref(),
+            Some(std::ffi::OsStr::new("/run/piggy.sock"))
+        );
+
+        std::env::set_var("PIGGY_AUTH_SOCK", "");
+        assert_eq!(
+            piggy_auth_sock_override(),
+            None,
+            "empty must be treated as unset"
+        );
+
+        std::env::remove_var("PIGGY_AUTH_SOCK");
+        assert_eq!(piggy_auth_sock_override(), None);
+
+        match saved {
+            Some(v) => std::env::set_var("PIGGY_AUTH_SOCK", v),
+            None => std::env::remove_var("PIGGY_AUTH_SOCK"),
+        }
     }
 }

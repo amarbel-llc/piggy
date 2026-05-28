@@ -137,12 +137,22 @@ fn reencrypt_one(passfile: &Path, piggy_ids: &Path) -> Result<(), String> {
     let pipeline_result = (|| -> Result<(), String> {
         let input = std::fs::File::open(passfile).map_err(|e| format!("open passfile: {e}"))?;
 
-        let mut decrypt = Command::new("pivy-box")
+        let mut decrypt_cmd = Command::new("pivy-box");
+        decrypt_cmd
             .arg("stream")
             .arg("decrypt")
             .stdin(input)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        // Prefer piggy's own agent socket over the ambient SSH_AUTH_SOCK
+        // (commonly an ssh-agent-mux that may not advertise ecdh@joyent.com).
+        // The binary and library crates are disjoint, so this mirrors
+        // piggy::agent_client::piggy_auth_sock_override rather than calling
+        // it. See #123.
+        if let Some(sock) = std::env::var_os("PIGGY_AUTH_SOCK").filter(|s| !s.is_empty()) {
+            decrypt_cmd.env("SSH_AUTH_SOCK", sock);
+        }
+        let mut decrypt = decrypt_cmd
             .spawn()
             .map_err(|e| format!("spawn pivy-box: {e}"))?;
 

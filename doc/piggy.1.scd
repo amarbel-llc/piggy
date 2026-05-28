@@ -554,6 +554,13 @@ _PIGGY_GETOPT_
 	Override the path to GNU *getopt*(1). Useful in Nix environments where
 	getopt is provided on PATH.
 
+_PIGGY_AUTH_SOCK_
+	SSH-agent socket used for PIV decrypt (*pivy-box stream decrypt*). When
+	set and non-empty, it overrides _SSH_AUTH_SOCK_ for piggy's own decrypts
+	only; when unset, piggy uses _SSH_AUTH_SOCK_. Use it to route decrypts at
+	a piggy-agent that advertises the _ecdh@joyent.com_ extension rather than
+	through an *ssh-agent-mux*(1) that may not.
+
 _SECURE_TMPDIR_
 	If set, skip automatic secure temporary directory creation (ramdisk on
 	macOS, /dev/shm on Linux) and use this path instead. Useful in sandboxed

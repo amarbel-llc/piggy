@@ -125,6 +125,19 @@ improvements that build on this prefix.
 
 User config is via `PIGGY_*` env vars (store dir, clip time, generated length, character set, etc.) — defaults are set at the top of `src/piggy.sh`. `PIGGY_STORE_DIR` defaults to `~/.local/share/piggy`.
 
+`PIGGY_AUTH_SOCK` selects the SSH-agent socket used for PIV decrypt
+(`pivy-box stream decrypt`). When set and non-empty it overrides the
+ambient `SSH_AUTH_SOCK` for piggy's own decrypts only; when unset, piggy
+uses `SSH_AUTH_SOCK` as before. The point is to route decrypts at
+piggy-agent directly (which advertises the `ecdh@joyent.com` extension)
+rather than through an ssh-agent-mux that may not — see #123 (and
+ssh-agent-mux#10 for the mux-side capability drop). Honored at all three
+decrypt sites: bash `piggy_decrypt` (`src/piggy.sh`), Rust `reencrypt_one`
+(`crates/piggy/src/reencrypt.rs`), and the Rust `AgentEcdhOracle` source
+(`crates/piggy/src/cmd/pivy_box.rs`, off the v1.0 dispatch path). The
+canonical resolver is `agent_client::piggy_auth_sock_override` in the
+library crate; the disjoint binary crate mirrors the one-line lookup.
+
 ## Debugging
 
 ### darwin CI: silent exit 126 under `env -i` with `set -euo pipefail`
