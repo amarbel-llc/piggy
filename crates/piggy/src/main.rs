@@ -3,8 +3,8 @@
 //! Dispatch layout (top-level argv is parsed entirely by clap):
 //!
 //! 1. `piggy pass <X>` — every password-store subcommand (`init`, `show`,
-//!    `find`, `grep`, `insert`, `edit`, `generate`, `rm`, `mv`, `cp`,
-//!    `git`) lives under the `pass` namespace and `exec(2)`s into
+//!    `find`, `grep`, `insert`, `edit`, `generate`, `rm`, `git`) lives
+//!    under the `pass` namespace and `exec(2)`s into
 //!    `piggy.sh <X> <rest...>` via [`fallback::exec_bash`]. The case
 //!    statement at the bottom of `piggy.sh` does the second-level
 //!    dispatch to the matching `cmd_*` function. Per-subcommand
@@ -38,6 +38,7 @@
 //!   `piggy agent` returns to the user path.
 //! - #59 — restore probe-loop PIN-clearing in `piggy agent`.
 
+mod copy_move;
 mod fallback;
 mod find;
 mod git;
@@ -350,8 +351,8 @@ fn main() {
             PassCommand::Edit { rest } => fallback::exec_bash("edit", &rest),
             PassCommand::Generate { rest } => fallback::exec_bash("generate", &rest),
             PassCommand::Rm { rest } => std::process::exit(rm::run(&rest)),
-            PassCommand::Mv { rest } => fallback::exec_bash("mv", &rest),
-            PassCommand::Cp { rest } => fallback::exec_bash("cp", &rest),
+            PassCommand::Mv { rest } => std::process::exit(copy_move::run_move(&rest)),
+            PassCommand::Cp { rest } => std::process::exit(copy_move::run_copy(&rest)),
             PassCommand::Git { rest } => std::process::exit(git::run(&rest)),
             PassCommand::Recipients(args) => match args.cmd {
                 RecipientsCommand::List { rest } => std::process::exit(recipients::list(&rest)),

@@ -20,9 +20,9 @@
 //!
 //! This module is reachable two ways:
 //!
-//! 1. From Rust callers (future `mv`/`cp`/`recipients add/remove/sync`
-//!    ports), via `reencrypt::run`.
-//! 2. From the existing bash callers (today's `mv`/`cp`/recipients
+//! 1. From Rust callers (`mv`/`cp`, and future `recipients
+//!    add/remove/sync` ports), via `reencrypt::run`.
+//! 2. From the remaining bash callers (today's `init`/recipients
 //!    flows), via the hidden top-level `piggy internal-reencrypt-path
 //!    <dir>` subcommand, which `piggy.sh::reencrypt_path` exec's into.
 

@@ -596,67 +596,6 @@ cmd_generate() {
   fi
 }
 
-cmd_copy_move() {
-  local opts move=1 force=0
-  [[ $1 == "copy" ]] && move=0
-  shift
-  opts="$($GETOPT -o f -l force -n "$PROGRAM" -- "$@")"
-  local err=$?
-  eval set -- "$opts"
-  while true; do case $1 in
-    -f | --force)
-      force=1
-      shift
-      ;;
-    --)
-      shift
-      break
-      ;;
-    esac done
-  [[ $# -ne 2 ]] && die "Usage: $PROGRAM_PASS $COMMAND [--force,-f] old-path new-path"
-  check_sneaky_paths "$@"
-  local old_path="$PREFIX/${1%/}"
-  local old_dir="$old_path"
-  local new_path="$PREFIX/$2"
-
-  if ! [[ -f $old_path.ebox && -d $old_path && $1 == */ || ! -f $old_path.ebox ]]; then
-    old_dir="${old_path%/*}"
-    old_path="${old_path}.ebox"
-  fi
-  echo "$old_path"
-  [[ -e $old_path ]] || die "Error: $1 is not in the password store."
-
-  mkdir -p -v "${new_path%/*}"
-  [[ -d $old_path || -d $new_path || $new_path == */ ]] || new_path="${new_path}.ebox"
-
-  local interactive="-i"
-  [[ ! -t 0 || $force -eq 1 ]] && interactive="-f"
-
-  set_git "$new_path"
-  if [[ $move -eq 1 ]]; then
-    mv $interactive -v "$old_path" "$new_path" || exit 1
-    [[ -e $new_path ]] && reencrypt_path "$new_path"
-
-    set_git "$new_path"
-    if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
-      git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
-      set_git "$new_path"
-      git_add_file "$new_path" "Rename ${1} to ${2}."
-    fi
-    set_git "$old_path"
-    if [[ -n $INNER_GIT_DIR && ! -e $old_path ]]; then
-      git -C "$INNER_GIT_DIR" rm -qr "$old_path" 2>/dev/null
-      set_git "$old_path"
-      [[ -n $(git -C "$INNER_GIT_DIR" status --porcelain "$old_path") ]] && git_commit "Remove ${1}."
-    fi
-    rmdir -p "$old_dir" 2>/dev/null
-  else
-    cp $interactive -r -v "$old_path" "$new_path" || exit 1
-    [[ -e $new_path ]] && reencrypt_path "$new_path"
-    git_add_file "$new_path" "Copy ${1} to ${2}."
-  fi
-}
-
 cmd_pass_recipients() {
   # `list` and `list-available` are handled entirely in the Rust
   # dispatcher and never reach this function. `add`, `remove`, and
@@ -1008,14 +947,6 @@ edit)
 generate)
   shift
   cmd_generate "$@"
-  ;;
-rename | mv)
-  shift
-  cmd_copy_move "move" "$@"
-  ;;
-copy | cp)
-  shift
-  cmd_copy_move "copy" "$@"
   ;;
 recipients)
   shift
