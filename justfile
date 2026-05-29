@@ -66,18 +66,22 @@ test-bats-conformance-interop: build-rust
   trap 'just fib-down' EXIT
   # Rebuild vendored pivy first so any changes to vendor/pivy/openssh.patch
   # (e.g. #81's chacha20-poly1305@piggy.amarbel.net cipher entry) take
-  # effect — the freshly-built nix output lives at vendor/pivy/result.
-  # Use that path explicitly rather than $(command -v pivy-box), which
-  # may resolve to a stale direnv-cached binary.
-  cd vendor/pivy && nix build && cd -
-  real_pivy_box="$PWD/vendor/pivy/result/bin/pivy-box"
+  # effect. The C pivy package is built by the parent flake as a nested
+  # derivation (nix/pivy.nix, src = ./vendor/pivy); resolve its store path
+  # via --print-out-paths rather than $(command -v pivy-box), which may
+  # resolve to a stale direnv-cached binary. Mirrors the
+  # test-bats-conformance-pivy-agent-hardware pattern. See #124 — the
+  # vendor/pivy nested flake was removed, so the parent flake is the single
+  # build entry for the vendored pivy tree.
+  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+  real_pivy_box="$pivy_out/bin/pivy-box"
   if [[ ! -x "$real_pivy_box" ]]; then
-    echo "vendor/pivy/result/bin/pivy-box not executable — nix build failed" >&2
+    echo "$real_pivy_box not executable — nix build .#pivy failed" >&2
     exit 1
   fi
   # Prepend it to PATH so subprocesses also see the fresh binary
   # (pivy-tool, etc.) consistently.
-  export PATH="$PWD/vendor/pivy/result/bin:$PATH"
+  export PATH="$pivy_out/bin:$PATH"
   just fib-up
   eval "$(cat .fib/env)"
   # Generate a key on the fib card's 9D slot (Key Management / ECDH)

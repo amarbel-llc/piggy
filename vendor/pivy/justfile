@@ -1,42 +1,22 @@
-default: build test
+# pivy is vendored inside piggy. Its C package is built by the PARENT
+# piggy flake as a nested derivation (nix/pivy.nix, src = ./vendor/pivy);
+# run `nix build .#pivy` from the piggy repo root. vendor/pivy no longer
+# carries its own flake — see piggy #124 (the duplicate amarbel-llc/nixpkgs
+# input declaration was collapsed into the single parent flake).
+#
+# The recipes below are the standalone Rust dev-loop only — plain cargo,
+# no flake needed. The vendored Rust pivy-agent (rust/) and the Go
+# conformance binary (go/) are not wired into the parent flake (nothing in
+# piggy consumes them); build/test them here via cargo, or the C package
+# via `nix build .#pivy` at the piggy root.
 
-build: build-nix build-nix-rust build-nix-conformance
-
-build-nix:
-  nix build
-
-build-nix-rust:
-  nix build .#pivy-rust -o result-rust
-
-build-nix-conformance:
-  nix build .#pivy-agent-conformance -o result-conformance
+default: build-rust test-rust
 
 build-rust:
   cd rust && cargo build
 
 build-rust-release:
   cd rust && cargo build --release
-
-test: test-bats test-bats-rust test-conformance
-
-test-bats: build-nix
-  PATH="$(readlink -f ./result)/bin:$PATH" just zz-tests_bats/test
-
-test-hardware: build-nix
-  PATH="$(readlink -f ./result)/bin:$PATH" just zz-tests_bats/test-hardware
-
-test-bats-rust: build-nix-rust
-  PIVY_AGENT_RUST="$(readlink -f ./result-rust)/bin/pivy-agent-rust" just zz-tests_bats/test-rust
-
-test-conformance: build-nix build-nix-conformance
-  CONFORMANCE_DIR="$(readlink -f ./result-conformance)" \
-    PATH="$(readlink -f ./result)/bin:$PATH" \
-    just zz-tests_bats/test-conformance
-
-test-conformance-hardware: build-nix build-nix-conformance
-  CONFORMANCE_DIR="$(readlink -f ./result-conformance)" \
-    PATH="$(readlink -f ./result)/bin:$PATH" \
-    just zz-tests_bats/test-conformance-hardware
 
 test-rust:
   cd rust && cargo test
@@ -52,9 +32,6 @@ clippy:
 
 check:
   cd rust && cargo check
-
-compile-commands:
-  nix develop -c make compile-commands
 
 clean:
   cd rust && cargo clean
