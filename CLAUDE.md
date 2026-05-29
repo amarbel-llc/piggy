@@ -108,6 +108,8 @@ Recipes ensure consistent flags, proper dependencies, and keep the justfile as t
 - Functions: `cmd_*` for user-facing commands, lowercase_with_underscores for helpers
 - Shell formatting: `shfmt -s -i=2` (2-space indent, simplified) — driven by treefmt
 - Nix formatting: `nixfmt` (RFC 166) — driven by treefmt
+- Rust formatting: `rustfmt` — driven by treefmt
+- **Always format and check via `just codemod-fmt` (= `nix fmt` = treefmt); never run `cargo fmt` / `rustfmt` / `shfmt` / `nixfmt` bare.** treefmt pins the repo's formatter config, so the bare tools use their stock defaults (notably rustfmt's import grouping/ordering) and report diffs that diverge from what treefmt considers correct. `cargo fmt --check` is especially deceptive: it flags unrelated, already-treefmt-clean files as "unformatted." If you need a non-mutating check, run `just codemod-fmt` on a clean tree and inspect `git status`.
 
 ### Test-fixture ebox part names
 
