@@ -10,9 +10,10 @@
 //!    dispatch to the matching `cmd_*` function. Per-subcommand
 //!    `getopt` parsing stays in bash; clap captures all trailing argv
 //!    verbatim.
-//! 2. Top-level `help` and `version` also `exec_bash` into piggy.sh's
-//!    `cmd_usage`/`cmd_version` — they print piggy-wide usage and
-//!    version banners and so live outside the `pass` namespace.
+//! 2. Top-level `help` `exec_bash`es into piggy.sh's `cmd_usage` (the
+//!    pass-style usage text). `version` is a native Rust handler
+//!    (`version::run`) emitting the eng-versioning(7) format; both live
+//!    outside the `pass` namespace.
 //! 3. C-pivy passthroughs — every other subcommand `exec(2)`s the
 //!    matching `pivy-*` binary from `$PATH` via
 //!    [`fallback::exec_pivy`]:
@@ -50,6 +51,7 @@ mod rm;
 mod show_batch;
 mod store;
 mod verify;
+mod version;
 
 use std::path::PathBuf;
 
@@ -90,7 +92,8 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
-    /// Print piggy.sh's version banner.
+    /// Print piggy's version: a `piggy <version>+<commit>` self-line plus a
+    /// table of pinned downstream components. See eng-versioning(7).
     Version {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
@@ -383,7 +386,7 @@ fn main() {
 
         Command::List { rest } => fallback::exec_piggy_ids("list-all", &rest),
         Command::Help { rest } => fallback::exec_bash("help", &rest),
-        Command::Version { rest } => fallback::exec_bash("version", &rest),
+        Command::Version { .. } => std::process::exit(version::run()),
 
         Command::Agent { rest } => fallback::exec_pivy("agent", &rest),
         Command::Box { rest } => fallback::exec_pivy("box", &rest),

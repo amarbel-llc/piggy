@@ -224,25 +224,14 @@ source "$(dirname "$0")/platform/$(uname | cut -d _ -f 1 | tr '[:upper:]' '[:low
 # BEGIN subcommand functions
 #
 
-# Self-identification line per eng-versioning(7): "<name> <version>+<rev>".
-# PIGGY_VERSION/PIGGY_COMMIT are injected by flake.nix's makeWrapper
-# (PIGGY_VERSION also by the rust dispatcher's set_piggy_version for the dev
-# `cargo build` path); each falls back when bypassed.
+# Self-identification line for the `help` banner (cmd_usage). The `version`
+# subcommand itself is a native Rust handler (crates/piggy/src/version.rs,
+# piggy #96); this helper survives only to head the usage text.
+# PIGGY_VERSION/PIGGY_COMMIT come from flake.nix's makeWrapper (PIGGY_VERSION
+# also via the rust dispatcher's set_piggy_version on the dev `cargo build`
+# path); each falls back when bypassed.
 piggy_version_line() {
   printf 'piggy %s+%s\n' "${PIGGY_VERSION:-dev}" "${PIGGY_COMMIT:-unknown}"
-}
-
-cmd_version() {
-  piggy_version_line
-  echo
-  # Pinned downstream components whose runtime version matters: pivy (the C
-  # stack piggy exec's into for box/tool/agent/...) and pcsclite (pinned in
-  # pkgs-master for IPC back-compat). Values are injected at nix build time
-  # (flake makeWrapper --set); a dev `cargo build` leaves them unset,
-  # rendering "unknown". See eng-versioning(7) "version subcommand output".
-  printf '%-11s %-9s %s\n' COMPONENT VERSION REV
-  printf '%-11s %-9s %s\n' pivy "${PIGGY_PIVY_VERSION:-unknown}" "${PIGGY_PIVY_REV:-unknown}"
-  printf '%-11s %-9s %s\n' pcsclite "${PIGGY_PCSCLITE_VERSION:-unknown}" "${PIGGY_PCSCLITE_REV:-unknown}"
 }
 
 cmd_usage() {
@@ -839,10 +828,6 @@ init)
 help | --help)
   shift
   cmd_usage "$@"
-  ;;
-version | --version)
-  shift
-  cmd_version "$@"
   ;;
 show | ls | list)
   shift

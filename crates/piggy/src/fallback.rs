@@ -77,8 +77,10 @@ fn set_piggy_bin(cmd: &mut Command) {
 /// <piggyVersion>`). The value is injected at compile time by
 /// `build.rs`, which reads `version.env` at the repo root — the single
 /// source of truth shared with the Nix derivation. `piggy.sh`'s
-/// `cmd_version` reads this env var to render the banner; local cargo
-/// builds get the right value without the wrapper layer.
+/// `piggy_version_line` (the `help` banner) reads this env var; local
+/// cargo builds get the right value without the wrapper layer. (The
+/// `version` subcommand itself is the native `version` handler, which
+/// reads `PIGGY_VERSION` directly with the same compile-time fallback.)
 fn set_piggy_version(cmd: &mut Command) {
     if std::env::var_os("PIGGY_VERSION").is_some() {
         return;
