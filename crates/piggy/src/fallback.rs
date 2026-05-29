@@ -38,25 +38,6 @@ pub fn exec_bash(subcmd: &str, rest: &[String]) -> ! {
     std::process::exit(127);
 }
 
-/// Exec `piggy.sh <subcmd> <op> <rest...>`. Used by structured pass
-/// subcommand groups (e.g. `pass recipients add/remove/sync`) that
-/// dispatch through bash via a parent + nested operation pair. The
-/// piggy.sh `cmd_pass_<subcmd>` function dispatches on its first
-/// positional, so we feed it `op` followed by `rest`. Never returns on
-/// success.
-pub fn exec_bash_subcmds(subcmd: &str, op: &str, rest: &[String]) -> ! {
-    let script = find_piggy_sh();
-    let mut cmd = Command::new(&script);
-    cmd.arg(subcmd);
-    cmd.arg(op);
-    cmd.args(rest);
-    set_piggy_bin(&mut cmd);
-    set_piggy_version(&mut cmd);
-    let err = cmd.exec();
-    eprintln!("piggy: failed to launch {}: {}", script.display(), err);
-    std::process::exit(127);
-}
-
 /// Set `$PIGGY_BIN=<current_exe>` on the command unless the caller's
 /// environment already pins it. The bats harness sets `$PIGGY` to the
 /// debug binary; we mirror that with `$PIGGY_BIN` so bash helpers can

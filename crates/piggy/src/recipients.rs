@@ -1,21 +1,24 @@
-//! `piggy pass recipients` — partial Rust port.
+//! `piggy pass recipients` — full Rust port.
 //!
-//! Currently in Rust: `list`, `add` (explicit recipients only),
-//! `remove`, `sync`. `list-available` is dispatched directly through
-//! `fallback::exec_piggy_ids` from main.rs (no module wiring needed).
-//! `add --all-attached` (the `-A` interactive card-detection path) is
-//! still in bash (#96 step 6); the Rust `add` handler defers to the
-//! bash path when it sees `-A`/`--all-attached`.
+//! All recipients subcommands are now in Rust: `list`, `add` (both the
+//! explicit-recipients form and the `-A`/`--all-attached` interactive
+//! card-detection path), `remove`, and `sync`. `list-available` is
+//! dispatched directly through `fallback::exec_piggy_ids` from main.rs
+//! (no module wiring needed). No recipients path reaches `piggy.sh`
+//! anymore (#96 step 6 retired the last bash recipients function).
 //!
-//! `list` mirrors `cmd_pass_recipients_list` in `src/piggy.sh`; `add`,
-//! `remove`, and `sync` mirror `cmd_pass_recipients_{add,remove,sync}`.
-//! The canonicalize/validate/diff steps shell to the `piggy-ids`
-//! binary (located via `PIGGY_IDS_PATH`, same as `reencrypt.rs`) so the
-//! bats mock — which intercepts `encrypt` but delegates those three to
-//! the real binary — exercises the same logic the bash original did.
+//! `list` mirrors the former `cmd_pass_recipients_list` in
+//! `src/piggy.sh`; `add`, `remove`, and `sync` mirror the former
+//! `cmd_pass_recipients_{add,remove,sync}`; `add_all_attached` mirrors
+//! `_cmd_pass_recipients_add_all_attached`. The canonicalize / validate
+//! / diff / detect-all-pubkeys steps shell to the `piggy-ids` binary
+//! (located via `PIGGY_IDS_PATH`, same as `reencrypt.rs`) so the bats
+//! mock — which intercepts `encrypt` / `detect-all-pubkeys` but
+//! delegates the rest to the real binary — exercises the same logic the
+//! bash original did.
 
 use std::ffi::OsString;
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -68,10 +71,8 @@ pub fn list(args: &[String]) -> i32 {
 /// `piggy pass recipients add <markl-id>... [-p subfolder]`.
 ///
 /// Mirrors `cmd_pass_recipients_add` in `src/piggy.sh`. The
-/// `-A`/`--all-attached` interactive card-detection path is NOT ported
-/// here (#96 step 6); when either flag appears we defer to the bash
-/// handler with the original argv via `fallback::exec_bash_subcmds`
-/// (which never returns).
+/// `-A`/`--all-attached` interactive card-detection path is handled by
+/// [`add_all_attached`] (mirrors `_cmd_pass_recipients_add_all_attached`).
 pub fn add(args: &[String]) -> i32 {
     let parsed = match parse_add(args) {
         Ok(p) => p,
@@ -82,9 +83,7 @@ pub fn add(args: &[String]) -> i32 {
     };
 
     if parsed.all_attached {
-        // Card detection stays in bash for now. Re-feed the original
-        // argv so getopt sees exactly what the user typed.
-        crate::fallback::exec_bash_subcmds("recipients", "add", args);
+        return add_all_attached(&parsed.subfolder, parsed.assume_yes);
     }
 
     if parsed.ids.is_empty() {
@@ -135,6 +134,143 @@ pub fn add(args: &[String]) -> i32 {
         id_dir,
         "Add recipient(s) to piggy-ids.",
         "Reencrypt password store after adding recipient(s).",
+    );
+    0
+}
+
+/// `piggy pass recipients add -A | --all-attached [--yes] [-p subfolder]`.
+///
+/// Mirrors `_cmd_pass_recipients_add_all_attached` in `src/piggy.sh`:
+/// enumerate every attached PIV card via `piggy-ids detect-all-pubkeys`,
+/// partition the supported ones into already-present vs to-add, gate on
+/// any unsupported cards, then reuse the add-path tail (atomic tempfile
+/// add + canonicalize + install + commit + reencrypt + commit) for the
+/// survivors.
+fn add_all_attached(subfolder: &str, assume_yes: bool) -> i32 {
+    let root = store_root();
+    let piggy_ids = match find_piggy_ids(&root, subfolder) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return 1;
+        }
+    };
+
+    let helper_out = match piggy_ids_output(&["detect-all-pubkeys"]) {
+        Some(out) => out,
+        None => {
+            eprintln!("Error: detect-all-pubkeys failed; see stderr.");
+            return 1;
+        }
+    };
+
+    let detected = match parse_detect_all_pubkeys(&helper_out) {
+        Ok(d) => d,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return 1;
+        }
+    };
+
+    if detected.supported.is_empty() && detected.unsupported.is_empty() {
+        eprintln!("Error: no PIV cards detected.");
+        return 1;
+    }
+
+    // Canonicalize current piggy-ids so equality below is byte-equality
+    // on the markl-ID column. canonicalize is idempotent.
+    if !piggy_ids_ok(&["canonicalize", &piggy_ids.to_string_lossy()]) {
+        eprintln!("Error: existing piggy-ids invalid.");
+        return 1;
+    }
+
+    let current = match std::fs::read_to_string(&piggy_ids) {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("Error: failed to read {}: {err}", piggy_ids.display());
+            return 1;
+        }
+    };
+    let current_set = current_markl_ids(&current);
+
+    // Partition supported cards into to_add vs already-present.
+    let mut to_add: Vec<String> = Vec::new();
+    for card in &detected.supported {
+        if current_set.contains(card.id.as_str()) {
+            println!("already a recipient: {}  # GUID {}", card.id, card.guid);
+        } else {
+            to_add.push(card.id.clone());
+        }
+    }
+
+    if !detected.unsupported.is_empty() {
+        eprintln!(
+            "Cannot encrypt to {} attached card(s) (slot 9D is not P-256 ECDH):",
+            detected.unsupported.len()
+        );
+        for card in &detected.unsupported {
+            eprintln!("  {}: {}", card.guid, card.reason);
+        }
+
+        if !assume_yes {
+            if std::io::stdin().is_terminal() {
+                eprint!(
+                    "Continue and add the {} supported card(s)? [y/N] ",
+                    to_add.len()
+                );
+                let _ = std::io::stderr().flush();
+                let reply = read_tty_line();
+                match reply.as_str() {
+                    "y" | "Y" | "yes" | "Yes" | "YES" => {}
+                    _ => {
+                        eprintln!("aborted");
+                        return 1;
+                    }
+                }
+            } else {
+                eprintln!(
+                    "aborted: unsupported cards detected and stdin is not a TTY; pass --yes to proceed"
+                );
+                return 1;
+            }
+        }
+    }
+
+    if to_add.is_empty() {
+        eprintln!("nothing to add");
+        return 0;
+    }
+
+    let count = to_add.len();
+    let tmp = tmp_sibling(&piggy_ids);
+    if let Err(err) = std::fs::copy(&piggy_ids, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("Error: failed to stage candidate piggy-ids: {err}");
+        return 1;
+    }
+    if let Err(err) = append_ids(&tmp, &to_add) {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("Error: failed to stage candidate piggy-ids: {err}");
+        return 1;
+    }
+    if !piggy_ids_ok(&["canonicalize", &tmp.to_string_lossy()]) {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("Error: invalid recipient(s); aborting.");
+        return 1;
+    }
+    if let Err(err) = std::fs::rename(&tmp, &piggy_ids) {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("Error: failed to install candidate piggy-ids: {err}");
+        return 1;
+    }
+
+    let id_dir = piggy_ids_dir(&piggy_ids);
+    commit_and_reencrypt(
+        &root,
+        &piggy_ids,
+        id_dir,
+        &format!("Add {count} attached card(s) to piggy-ids."),
+        &format!("Reencrypt password store after adding {count} attached card(s)."),
     );
     0
 }
@@ -273,17 +409,19 @@ pub fn sync(args: &[String]) -> i32 {
 struct AddArgs {
     subfolder: String,
     all_attached: bool,
+    assume_yes: bool,
     ids: Vec<String>,
 }
 
 /// Parse the `add` argv: `-p <subfolder>`, `-A`/`--all-attached`,
-/// `--yes`, and positional markl IDs. `--yes` is consumed but ignored
-/// (it only affects the deferred `-A` path; we re-feed the original
-/// argv to bash there). An unknown `-flag` is a usage error, matching
-/// the bash `-*) die` arm.
+/// `--yes`, and positional markl IDs. `--yes` only affects the `-A`
+/// path (it accepts the "unsupported cards detected" prompt
+/// non-interactively); it is harmless on the explicit-IDs path. An
+/// unknown `-flag` is a usage error, matching the bash `-*) die` arm.
 fn parse_add(args: &[String]) -> Result<AddArgs, String> {
     let mut subfolder = String::new();
     let mut all_attached = false;
+    let mut assume_yes = false;
     let mut ids = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -293,7 +431,7 @@ fn parse_add(args: &[String]) -> Result<AddArgs, String> {
                 None => return Err("Error: -p requires a subfolder argument".into()),
             },
             "-A" | "--all-attached" => all_attached = true,
-            "--yes" => {}
+            "--yes" => assume_yes = true,
             other if other.starts_with('-') => {
                 return Err(format!("Error: unknown flag: {other}"));
             }
@@ -308,6 +446,7 @@ fn parse_add(args: &[String]) -> Result<AddArgs, String> {
     Ok(AddArgs {
         subfolder,
         all_attached,
+        assume_yes,
         ids,
     })
 }
@@ -442,6 +581,104 @@ fn find_comment_start(line: &str) -> Option<usize> {
     None
 }
 
+/// A supported PIV card: its canonical markl ID and GUID hex.
+#[derive(Debug, PartialEq, Eq)]
+struct SupportedCard {
+    id: String,
+    guid: String,
+}
+
+/// An unsupported PIV card: its GUID hex and the reason slot 9D can't
+/// be used as a recipient.
+#[derive(Debug, PartialEq, Eq)]
+struct UnsupportedCard {
+    guid: String,
+    reason: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Default)]
+struct DetectedCards {
+    supported: Vec<SupportedCard>,
+    unsupported: Vec<UnsupportedCard>,
+}
+
+/// Parse the TSV stdout of `piggy-ids detect-all-pubkeys`. Each line is
+/// either `supported\t<markl-id>\t<guid>` or
+/// `unsupported\t<guid>\t<reason>`. Blank lines are skipped; any other
+/// shape is a malformed-line error. Mirrors the bash `while IFS=$'\t'
+/// read -r status f1 f2` loop and its `die` messages.
+fn parse_detect_all_pubkeys(output: &str) -> Result<DetectedCards, String> {
+    let mut detected = DetectedCards::default();
+    for line in output.lines() {
+        let mut fields = line.splitn(3, '\t');
+        let status = fields.next().unwrap_or("");
+        if status.is_empty() {
+            continue;
+        }
+        let f1 = fields.next().unwrap_or("");
+        let f2 = fields.next().unwrap_or("");
+        match status {
+            "supported" => {
+                if f1.is_empty() || f2.is_empty() {
+                    return Err(format!(
+                        "Error: malformed supported line from detect-all-pubkeys: id=[{f1}] guid=[{f2}]"
+                    ));
+                }
+                detected.supported.push(SupportedCard {
+                    id: f1.to_string(),
+                    guid: f2.to_string(),
+                });
+            }
+            "unsupported" => {
+                if f1.is_empty() || f2.is_empty() {
+                    return Err(format!(
+                        "Error: malformed unsupported line from detect-all-pubkeys: guid=[{f1}] reason=[{f2}]"
+                    ));
+                }
+                detected.unsupported.push(UnsupportedCard {
+                    guid: f1.to_string(),
+                    reason: f2.to_string(),
+                });
+            }
+            other => {
+                return Err(format!(
+                    "Error: malformed line from piggy-ids detect-all-pubkeys: status=[{other}]"
+                ));
+            }
+        }
+    }
+    Ok(detected)
+}
+
+/// Build the set of markl IDs currently present in a canonical
+/// piggy-ids file: skip `#`-prefixed and blank lines, strip a `  #`
+/// (TWO ASCII spaces before `#`) inline comment, then trim.
+///
+/// piggy-ids canonical form (RFC 0003) uses exactly two ASCII spaces
+/// between the markl ID and any inline `#` comment. The caller
+/// canonicalizes first, so the two-space strip is correct here. Do NOT
+/// relax to "one or more spaces" — that would also strip a single space
+/// accidentally present in a markl ID's blech32 (impossible by grammar,
+/// but the relaxed pattern still risks future drift). markl IDs contain
+/// no internal whitespace (RFC 0003), so a plain trim cleans the edges.
+fn current_markl_ids(contents: &str) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    for line in contents.lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let id = match line.find("  #") {
+            Some(idx) => &line[..idx],
+            None => line,
+        };
+        let id = id.trim();
+        if !id.is_empty() {
+            set.insert(id.to_string());
+        }
+    }
+    set
+}
+
 /// `${PIGGY_IDS}.tmp.$$` — a sibling temp path. The bash uses the PID;
 /// any unique-enough sibling works since the file is always renamed or
 /// removed before returning.
@@ -471,6 +708,41 @@ fn piggy_ids_ok(args: &[&str]) -> bool {
         Command::new(&binary).args(args).status(),
         Ok(status) if status.success()
     )
+}
+
+/// Like [`piggy_ids_ok`] but captures stdout, mirroring the bash
+/// `helper_out="$(... detect-all-pubkeys)"` command substitution.
+/// Stderr is inherited so the binary's own diagnostics reach the user.
+/// Returns `None` when the binary fails to spawn or exits non-zero
+/// (the bash `|| die` arm).
+fn piggy_ids_output(args: &[&str]) -> Option<String> {
+    let binary: OsString =
+        std::env::var_os("PIGGY_IDS_PATH").unwrap_or_else(|| OsString::from("piggy-ids"));
+    let out = Command::new(&binary)
+        .args(args)
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Read one line from `/dev/tty`, matching the bash `read -r reply
+/// </dev/tty`. The trailing newline is stripped; a read failure yields
+/// an empty reply (the bash `|| reply=""`).
+fn read_tty_line() -> String {
+    use std::io::BufRead as _;
+    let Ok(tty) = std::fs::File::open("/dev/tty") else {
+        return String::new();
+    };
+    let mut reader = std::io::BufReader::new(tty);
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(_) => line.trim_end_matches(['\n', '\r']).to_string(),
+        Err(_) => String::new(),
+    }
 }
 
 /// The shared tail of all three flows: commit the piggy-ids change,
@@ -677,5 +949,99 @@ mod tests {
             piggy_ids_dir(Path::new("/store/work/piggy-ids")),
             Path::new("/store/work")
         );
+    }
+
+    #[test]
+    fn parse_add_yes_sets_assume_yes_on_all_attached() {
+        let parsed = parse_add(&strings(&["-A", "--yes"])).unwrap();
+        assert!(parsed.all_attached);
+        assert!(parsed.assume_yes);
+    }
+
+    #[test]
+    fn parse_detect_supported_and_unsupported() {
+        let out = "supported\tID_A\tGUID1\nunsupported\tGUID2\tslot 9D is Rsa2048\n";
+        let detected = parse_detect_all_pubkeys(out).unwrap();
+        assert_eq!(
+            detected.supported,
+            vec![SupportedCard {
+                id: "ID_A".into(),
+                guid: "GUID1".into()
+            }]
+        );
+        assert_eq!(
+            detected.unsupported,
+            vec![UnsupportedCard {
+                guid: "GUID2".into(),
+                reason: "slot 9D is Rsa2048".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_detect_skips_blank_lines() {
+        let out = "\nsupported\tID_A\tGUID1\n\n";
+        let detected = parse_detect_all_pubkeys(out).unwrap();
+        assert_eq!(detected.supported.len(), 1);
+        assert!(detected.unsupported.is_empty());
+    }
+
+    #[test]
+    fn parse_detect_empty_output_is_empty() {
+        let detected = parse_detect_all_pubkeys("").unwrap();
+        assert_eq!(detected, DetectedCards::default());
+    }
+
+    #[test]
+    fn parse_detect_reason_keeps_embedded_whitespace() {
+        // Only the first two tabs split fields; the reason column keeps
+        // any internal spaces or tabs verbatim (splitn(3)).
+        let out = "unsupported\tGUID2\tslot 9D unreadable: bad\tapdu\n";
+        let detected = parse_detect_all_pubkeys(out).unwrap();
+        assert_eq!(
+            detected.unsupported[0].reason,
+            "slot 9D unreadable: bad\tapdu"
+        );
+    }
+
+    #[test]
+    fn parse_detect_malformed_supported_errors() {
+        let err = parse_detect_all_pubkeys("supported\tID_A\t").unwrap_err();
+        assert!(err.contains("malformed supported line"), "got: {err}");
+        let err = parse_detect_all_pubkeys("supported\t\tGUID1").unwrap_err();
+        assert!(err.contains("malformed supported line"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_detect_malformed_unsupported_errors() {
+        let err = parse_detect_all_pubkeys("unsupported\tGUID2\t").unwrap_err();
+        assert!(err.contains("malformed unsupported line"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_detect_unknown_status_errors() {
+        let err = parse_detect_all_pubkeys("bogus\tx\ty").unwrap_err();
+        assert!(err.contains("status=[bogus]"), "got: {err}");
+    }
+
+    #[test]
+    fn current_markl_ids_collects_bare_and_commented() {
+        let contents = "# header\nID_A\nID_B  # primary card\n\n";
+        let set = current_markl_ids(contents);
+        assert!(set.contains("ID_A"));
+        assert!(set.contains("ID_B"));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn current_markl_ids_two_space_strip_only() {
+        // A single space before `#` is NOT a comment delimiter in the
+        // canonical form; the whole `ID #x` would be the token (and trim
+        // leaves it intact). Two spaces strip the comment.
+        let one_space = current_markl_ids("ID_A #c\n");
+        assert!(one_space.contains("ID_A #c"));
+        let two_space = current_markl_ids("ID_A  #c\n");
+        assert!(two_space.contains("ID_A"));
+        assert!(!two_space.contains("ID_A  #c"));
     }
 }
