@@ -443,25 +443,51 @@ The web/cloud session container has `libpcsclite.so.1` at runtime but
   backend and the end-to-end proxy validation. That leg is operator-
   driven (`cargo run -p fibby --features hardware-proxy`).
 
-### Landed in this pass
+### Landed (steps 1–3 complete)
 
-- `crates/fibby` added to the workspace.
-- `proto.rs`: protocol constants (v4.6), the full `Command` enum with
-  wire values, and codecs for `rxHeader`, `version_struct`,
-  `establish_struct`, `transmit_struct`, plus a little-endian-host
-  assertion. 6 unit tests, all green (`cargo test -p fibby
-  --no-default-features`).
+Full protocol server + both backends + hermetic end-to-end coverage:
+
+- `proto.rs` — protocol 4.6 codec: `Command` enum, `rxHeader` framing,
+  and codecs for version / establish / connect / transmit / disconnect /
+  reader-state structs, plus the 184-byte `READER_STATE` array (ATR
+  padding included) and the protocol constants
+  (scope/share/protocol/disposition/reader-flags).
+- `frame.rs` — message framing with the client↔server asymmetry made
+  explicit (header-in / bare-out / streamed TRANSMIT payload), oversize
+  guard, clean-EOF detection.
+- `error.rs` — `SCARD_*` codes. `trace.rs` — `FIBBY_LOG` leveled logging
+  + hex dumps.
+- `backend.rs` — the `Backend` trait. `virtual_card.rs` — stub PIV card
+  (SELECT→9000, else 6D00). `hardware_proxy.rs` — real-pcscd proxy via
+  the `pcsc` crate (feature `hardware-proxy`).
+- `server.rs` — listen loop, `CMD_VERSION` handshake, handle table,
+  dispatch for the full common command set; unimplemented commands are
+  logged loudly and close the connection (no silent mis-replies).
+- `main.rs` — CLI (`--socket`/`--backend`/`--reader`).
+- Tests: 17 unit + `tests/loopback.rs` (full PC/SC session over a real
+  socket against `VirtualCard`), all green via
+  `cargo test -p fibby --no-default-features`.
+- `crates/fibby/README.md` — module map, `FIBBY_LOG` guide, and the
+  hardware-validation runbook for the wet-env pass.
 
 ### Next steps
 
-1. Flesh out the remaining `*_struct` codecs (connect/reconnect/
-   disconnect/status/get-status-change + the `READER_STATE` array).
-2. Server event loop: Unix-socket listener, `CMD_VERSION` handshake,
-   context/card handle table, command dispatch to a `Backend`.
-3. `Backend` trait + `HardwareProxy` (via `pcsc` crate) + a stub
-   `VirtualCard` (fixed ATR, SELECT echo).
-4. **Capture/validate:** point `pivy-tool list`/`generate 9d` at fibby
-   with the HardwareProxy backend on a machine with a YubiKey; record
-   the wire traffic as conformance fixtures.
-5. Grow `VirtualCard` into the real PIV applet (phases 2–3 above) and
-   replay the captured fixtures against it.
+4. **Capture/validate (wet-env, needs a YubiKey):** run fibby with the
+   `hardware-proxy` backend, point `pivy-tool list`/`generate 9d` at its
+   socket, and record the `FIBBY_LOG=wire` traffic as conformance
+   fixtures. The proxy also reveals any command fibby doesn't yet speak
+   (logged UNIMPLEMENTED with the body hex).
+5. Grow `VirtualCard` into the real PIV applet (GENERATE / GENERAL
+   AUTHENTICATE sign+ECDH / GET·PUT DATA / VERIFY / YubiKey
+   attestation+serial) and replay the captured fixtures + RFC 0002
+   Appendix A + SP 800-73-4 vectors against it.
+6. Swap the bats/conformance test path onto fibby; keep `fib` as a
+   differential oracle for one release.
+
+### Build-environment note
+
+The cloud session container has `libpcsclite.so.1` but no
+`libpcsclite-dev`/pkg-config, so `--features hardware-proxy` cannot be
+*compiled* there (pcsc-sys needs the dev package). The protocol core,
+`VirtualCard`, and loopback test build and pass; the hardware backend is
+exercised on the wet-env machine.

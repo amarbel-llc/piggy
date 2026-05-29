@@ -48,10 +48,6 @@ pub const MAX_BUFFER_SIZE: usize = 264;
 /// Size of `struct rxHeader` on the wire.
 pub const HEADER_LEN: usize = 8;
 
-/// `SCARD_S_SUCCESS`. Full status-word vocabulary lives in `error.rs`
-/// once the dispatcher needs it; the codec only needs success here.
-pub const SCARD_S_SUCCESS: u32 = 0x0000_0000;
-
 /// `enum pcsc_msg_commands` (winscard_msg.h). Numeric values are part of
 /// the wire contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,9 +257,270 @@ impl TransmitStruct {
     }
 }
 
+/// `struct connect_struct`. `szReader` is a fixed 128-byte
+/// NUL-terminated field on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectStruct {
+    pub h_context: u32,
+    pub sz_reader: String,
+    pub dw_share_mode: u32,
+    pub dw_preferred_protocols: u32,
+    pub h_card: i32,
+    pub dw_active_protocol: u32,
+    pub rv: u32,
+}
+
+impl ConnectStruct {
+    pub const WIRE_LEN: usize = 4 + MAX_READERNAME + 4 + 4 + 4 + 4 + 4; // 152
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut b = vec![0u8; Self::WIRE_LEN];
+        b[0..4].copy_from_slice(&self.h_context.to_le_bytes());
+        write_cstr(&mut b[4..4 + MAX_READERNAME], &self.sz_reader);
+        let o = 4 + MAX_READERNAME;
+        b[o..o + 4].copy_from_slice(&self.dw_share_mode.to_le_bytes());
+        b[o + 4..o + 8].copy_from_slice(&self.dw_preferred_protocols.to_le_bytes());
+        b[o + 8..o + 12].copy_from_slice(&self.h_card.to_le_bytes());
+        b[o + 12..o + 16].copy_from_slice(&self.dw_active_protocol.to_le_bytes());
+        b[o + 16..o + 20].copy_from_slice(&self.rv.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() < Self::WIRE_LEN {
+            return None;
+        }
+        let o = 4 + MAX_READERNAME;
+        Some(ConnectStruct {
+            h_context: u32::from_le_bytes(b[0..4].try_into().ok()?),
+            sz_reader: read_cstr(&b[4..4 + MAX_READERNAME]),
+            dw_share_mode: u32::from_le_bytes(b[o..o + 4].try_into().ok()?),
+            dw_preferred_protocols: u32::from_le_bytes(b[o + 4..o + 8].try_into().ok()?),
+            h_card: i32::from_le_bytes(b[o + 8..o + 12].try_into().ok()?),
+            dw_active_protocol: u32::from_le_bytes(b[o + 12..o + 16].try_into().ok()?),
+            rv: u32::from_le_bytes(b[o + 16..o + 20].try_into().ok()?),
+        })
+    }
+}
+
+/// Tiny two-field structs (`disconnect_struct`, `end_struct` share a
+/// shape; `begin_struct`, `status_struct`, `release_struct`,
+/// `cancel_struct` are subsets). One codec covers the
+/// `{ i32 handle; u32 arg; u32 rv }` and `{ i32 handle; u32 rv }`
+/// families; callers pick the field count. Keeping these as explicit
+/// little structs (rather than one mega-enum) keeps the dispatcher
+/// readable and easy to extend per command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandleArgRv {
+    pub handle: i32,
+    pub arg: u32,
+    pub rv: u32,
+}
+
+impl HandleArgRv {
+    pub const WIRE_LEN: usize = 12;
+
+    pub fn to_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut b = [0u8; Self::WIRE_LEN];
+        b[0..4].copy_from_slice(&self.handle.to_le_bytes());
+        b[4..8].copy_from_slice(&self.arg.to_le_bytes());
+        b[8..12].copy_from_slice(&self.rv.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() < Self::WIRE_LEN {
+            return None;
+        }
+        Some(HandleArgRv {
+            handle: i32::from_le_bytes(b[0..4].try_into().ok()?),
+            arg: u32::from_le_bytes(b[4..8].try_into().ok()?),
+            rv: u32::from_le_bytes(b[8..12].try_into().ok()?),
+        })
+    }
+}
+
+/// `{ i32 handle; u32 rv }` — `begin_struct`, `status_struct`,
+/// `release_struct` (with hContext), `cancel_struct`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandleRv {
+    pub handle: i32,
+    pub rv: u32,
+}
+
+impl HandleRv {
+    pub const WIRE_LEN: usize = 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut b = [0u8; Self::WIRE_LEN];
+        b[0..4].copy_from_slice(&self.handle.to_le_bytes());
+        b[4..8].copy_from_slice(&self.rv.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() < Self::WIRE_LEN {
+            return None;
+        }
+        Some(HandleRv {
+            handle: i32::from_le_bytes(b[0..4].try_into().ok()?),
+            rv: u32::from_le_bytes(b[4..8].try_into().ok()?),
+        })
+    }
+}
+
+/// `PCSCLITE_MAX_READERS_CONTEXTS` — the fixed slot count in the
+/// reader-state array returned by `CMD_GET_READERS_STATE`.
+pub const MAX_READERS_CONTEXTS: usize = 16;
+
+/// `READER_STATE` (eventhandler.h). 184 bytes including 3 pad bytes
+/// after the 33-byte ATR (so `cardAtrLength` lands on a 4-aligned
+/// offset). The padding is load-bearing: get it wrong and every field
+/// after the ATR shifts. The hardware-proxy backend is the cheapest
+/// way to confirm this against a real `libpcsclite`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReaderState {
+    pub reader_name: String,
+    pub event_counter: u32,
+    pub reader_state: u32,
+    pub reader_sharing: i32,
+    pub card_atr: Vec<u8>,
+    pub card_protocol: u32,
+}
+
+impl ReaderState {
+    pub const WIRE_LEN: usize = 184;
+    const ATR_OFF: usize = 140;
+    const ATR_LEN_OFF: usize = 176; // 140 + 33 = 173, padded up to 176
+    const PROTO_OFF: usize = 180;
+
+    /// An empty/unused slot — all zero, matching pcscd's freshly-zeroed
+    /// reader-state table.
+    pub fn empty() -> Self {
+        ReaderState {
+            reader_name: String::new(),
+            event_counter: 0,
+            reader_state: 0,
+            reader_sharing: 0,
+            card_atr: Vec::new(),
+            card_protocol: 0,
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut b = [0u8; Self::WIRE_LEN];
+        write_cstr(&mut b[0..MAX_READERNAME], &self.reader_name);
+        b[128..132].copy_from_slice(&self.event_counter.to_le_bytes());
+        b[132..136].copy_from_slice(&self.reader_state.to_le_bytes());
+        b[136..140].copy_from_slice(&self.reader_sharing.to_le_bytes());
+        let atr = &self.card_atr[..self.card_atr.len().min(MAX_ATR_SIZE)];
+        b[Self::ATR_OFF..Self::ATR_OFF + atr.len()].copy_from_slice(atr);
+        b[Self::ATR_LEN_OFF..Self::ATR_LEN_OFF + 4]
+            .copy_from_slice(&(atr.len() as u32).to_le_bytes());
+        b[Self::PROTO_OFF..Self::PROTO_OFF + 4].copy_from_slice(&self.card_protocol.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() < Self::WIRE_LEN {
+            return None;
+        }
+        let atr_len = u32::from_le_bytes(b[Self::ATR_LEN_OFF..Self::ATR_LEN_OFF + 4].try_into().ok()?)
+            as usize;
+        let atr_len = atr_len.min(MAX_ATR_SIZE);
+        Some(ReaderState {
+            reader_name: read_cstr(&b[0..MAX_READERNAME]),
+            event_counter: u32::from_le_bytes(b[128..132].try_into().ok()?),
+            reader_state: u32::from_le_bytes(b[132..136].try_into().ok()?),
+            reader_sharing: i32::from_le_bytes(b[136..140].try_into().ok()?),
+            card_atr: b[Self::ATR_OFF..Self::ATR_OFF + atr_len].to_vec(),
+            card_protocol: u32::from_le_bytes(b[Self::PROTO_OFF..Self::PROTO_OFF + 4].try_into().ok()?),
+        })
+    }
+}
+
+/// Serialize a full `READER_STATE[MAX_READERS_CONTEXTS]` array (the
+/// `CMD_GET_READERS_STATE` reply). Slots past `states` are zeroed.
+pub fn readers_state_array(states: &[ReaderState]) -> Vec<u8> {
+    let mut out = vec![0u8; MAX_READERS_CONTEXTS * ReaderState::WIRE_LEN];
+    for (i, st) in states.iter().take(MAX_READERS_CONTEXTS).enumerate() {
+        let off = i * ReaderState::WIRE_LEN;
+        out[off..off + ReaderState::WIRE_LEN].copy_from_slice(&st.to_bytes());
+    }
+    out
+}
+
+/// Write a NUL-terminated string into a fixed-width field, truncating
+/// if needed and always leaving at least the final byte NUL. Zeroes the
+/// whole field first so the result never depends on prior buffer
+/// contents (no implicit "caller must pre-zero" contract).
+fn write_cstr(dst: &mut [u8], s: &str) {
+    dst.fill(0);
+    let max = dst.len().saturating_sub(1);
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(max);
+    dst[..n].copy_from_slice(&bytes[..n]);
+}
+
+/// Read a NUL-terminated string from a fixed-width field.
+fn read_cstr(src: &[u8]) -> String {
+    let end = src.iter().position(|&c| c == 0).unwrap_or(src.len());
+    String::from_utf8_lossy(&src[..end]).into_owned()
+}
+
+// --- protocol constants (pcsclite.h) -------------------------------------
+
+/// `SCARD_SCOPE_*`.
+pub mod scope {
+    pub const USER: u32 = 0;
+    pub const TERMINAL: u32 = 1;
+    pub const SYSTEM: u32 = 2;
+}
+
+/// `SCARD_SHARE_*`.
+pub mod share {
+    pub const EXCLUSIVE: u32 = 1;
+    pub const SHARED: u32 = 2;
+    pub const DIRECT: u32 = 3;
+}
+
+/// `SCARD_PROTOCOL_*`.
+pub mod protocol {
+    pub const UNDEFINED: u32 = 0;
+    pub const T0: u32 = 1;
+    pub const T1: u32 = 2;
+    pub const RAW: u32 = 4;
+    pub const ANY: u32 = T0 | T1;
+}
+
+/// `SCARD_*_CARD` dispositions (disconnect / end-transaction).
+pub mod disposition {
+    pub const LEAVE: u32 = 0;
+    pub const RESET: u32 = 1;
+    pub const UNPOWER: u32 = 2;
+    pub const EJECT: u32 = 3;
+}
+
+/// Internal `readerState` bit flags (pcsclite.h). These are the
+/// daemon-side state bits stored in `READER_STATE.readerState`, not the
+/// `SCARD_STATE_*` flags the client app sees.
+pub mod reader_flags {
+    pub const UNKNOWN: u32 = 0x0001;
+    pub const ABSENT: u32 = 0x0002;
+    pub const PRESENT: u32 = 0x0004;
+    pub const SWALLOWED: u32 = 0x0008;
+    pub const POWERED: u32 = 0x0010;
+    pub const NEGOTIABLE: u32 = 0x0020;
+    pub const SPECIFIC: u32 = 0x0040;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Codec tests only need the success code; the full SCARD_* vocabulary
+    // lives in error.rs (proto is the lower layer and stays code-free).
+    const SCARD_S_SUCCESS: u32 = 0;
 
     #[test]
     fn header_roundtrips() {
@@ -334,5 +591,75 @@ mod tests {
         assert_eq!(Header::from_bytes(&[0u8; 7]), None);
         assert_eq!(VersionStruct::from_bytes(&[0u8; 11]), None);
         assert_eq!(TransmitStruct::from_bytes(&[0u8; 31]), None);
+    }
+
+    #[test]
+    fn connect_struct_roundtrips_and_is_152_bytes() {
+        let c = ConnectStruct {
+            h_context: 0x0101_0101,
+            sz_reader: "Yubico YubiKey OTP+FIDO+CCID 00 00".to_string(),
+            dw_share_mode: share::SHARED,
+            dw_preferred_protocols: protocol::ANY,
+            h_card: 0,
+            dw_active_protocol: 0,
+            rv: SCARD_S_SUCCESS,
+        };
+        let bytes = c.to_bytes();
+        assert_eq!(bytes.len(), ConnectStruct::WIRE_LEN);
+        assert_eq!(bytes.len(), 152);
+        assert_eq!(ConnectStruct::from_bytes(&bytes), Some(c));
+    }
+
+    #[test]
+    fn reader_state_layout_is_184_bytes_with_atr_padding() {
+        let rs = ReaderState {
+            reader_name: "Virtual PCD piggy fibby 00 00".to_string(),
+            event_counter: 1,
+            reader_state: reader_flags::PRESENT | reader_flags::POWERED | reader_flags::NEGOTIABLE,
+            reader_sharing: 0,
+            card_atr: vec![0x3B, 0xFD, 0x13, 0x00, 0x00, 0x81, 0x31, 0xFE, 0x15, 0x80],
+            card_protocol: protocol::T1,
+        };
+        let bytes = rs.to_bytes();
+        assert_eq!(bytes.len(), 184);
+        // ATR length lands at offset 176 (33-byte ATR field at 140 + 3 pad).
+        assert_eq!(&bytes[176..180], &10u32.to_le_bytes());
+        // cardProtocol at 180.
+        assert_eq!(&bytes[180..184], &protocol::T1.to_le_bytes());
+        assert_eq!(ReaderState::from_bytes(&bytes), Some(rs));
+    }
+
+    #[test]
+    fn readers_state_array_is_fixed_16_slots() {
+        let arr = readers_state_array(&[ReaderState {
+            reader_name: "r".into(),
+            event_counter: 0,
+            reader_state: reader_flags::PRESENT,
+            reader_sharing: 0,
+            card_atr: vec![0x3B],
+            card_protocol: protocol::T1,
+        }]);
+        assert_eq!(arr.len(), MAX_READERS_CONTEXTS * ReaderState::WIRE_LEN);
+        assert_eq!(arr.len(), 16 * 184);
+        // Slot 0 populated, slot 1 zeroed.
+        assert_eq!(ReaderState::from_bytes(&arr[0..184]).unwrap().reader_name, "r");
+        assert_eq!(ReaderState::from_bytes(&arr[184..368]), Some(ReaderState::empty()));
+    }
+
+    #[test]
+    fn handle_codecs_roundtrip() {
+        let a = HandleArgRv { handle: -1, arg: disposition::RESET, rv: 0 };
+        assert_eq!(HandleArgRv::from_bytes(&a.to_bytes()), Some(a));
+        let h = HandleRv { handle: 7, rv: SCARD_S_SUCCESS };
+        assert_eq!(HandleRv::from_bytes(&h.to_bytes()), Some(h));
+    }
+
+    #[test]
+    fn cstr_truncates_and_nul_terminates() {
+        let mut buf = [0xFFu8; 8];
+        write_cstr(&mut buf, "abcdefghijk");
+        assert_eq!(&buf[..7], b"abcdefg"); // 7 chars + reserved NUL slot
+        assert_eq!(buf[7], 0);
+        assert_eq!(read_cstr(&buf), "abcdefg");
     }
 }
