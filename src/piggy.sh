@@ -597,22 +597,16 @@ cmd_generate() {
 }
 
 cmd_pass_recipients() {
-  # `list` and `list-available` are handled entirely in the Rust
-  # dispatcher and never reach this function. `add`, `remove`, and
-  # `sync` still arrive here via `fallback::exec_bash_subcmds`.
+  # `list`, `list-available`, `remove`, and `sync` are handled entirely
+  # in the Rust dispatcher and never reach this function. Explicit-
+  # recipient `add` is also in Rust; only `add --all-attached` (the `-A`
+  # interactive card-detection path, #96 step 6) still defers here via
+  # `fallback::exec_bash_subcmds`.
   local sub="${1:-}"
   case "$sub" in
   add)
     shift
     cmd_pass_recipients_add "$@"
-    ;;
-  remove)
-    shift
-    cmd_pass_recipients_remove "$@"
-    ;;
-  sync)
-    shift
-    cmd_pass_recipients_sync "$@"
     ;;
   *)
     die "Error: unknown subcommand: $PROGRAM_PASS recipients $sub"
@@ -663,9 +657,9 @@ cmd_pass_recipients_add() {
   find_piggy_ids "$subfolder"
   set_git "$PIGGY_IDS"
 
-  # Build candidate in a tempfile, validate, then atomically install.
-  # Same pattern as cmd_pass_recipients_remove — prevents a malformed
-  # input from corrupting the live piggy-ids when canonicalize rejects.
+  # Build candidate in a tempfile, validate, then atomically install —
+  # prevents a malformed input from corrupting the live piggy-ids when
+  # canonicalize rejects.
   local tmp="${PIGGY_IDS}.tmp.$$"
   trap 'rm -f "$tmp"' EXIT
   cp "$PIGGY_IDS" "$tmp" || die "Error: failed to stage candidate piggy-ids."
@@ -820,96 +814,6 @@ _cmd_pass_recipients_add_all_attached() {
   git_add_file "$PIGGY_IDS" "Add ${#to_add[@]} attached card(s) to piggy-ids."
   reencrypt_path "$id_dir"
   git_add_file "$id_dir" "Reencrypt password store after adding ${#to_add[@]} attached card(s)."
-}
-
-cmd_pass_recipients_remove() {
-  local subfolder=""
-  local -a ids=()
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-    -p)
-      subfolder="$2"
-      shift 2
-      ;;
-    *)
-      ids+=("$1")
-      shift
-      ;;
-    esac
-  done
-  [[ ${#ids[@]} -gt 0 ]] || die "Usage: $PROGRAM_PASS recipients remove <markl-id>... [-p subfolder]"
-  find_piggy_ids "$subfolder"
-  set_git "$PIGGY_IDS"
-
-  # Canonicalise so user-supplied IDs (which may be bare-format) match
-  # the on-disk form.
-  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: existing piggy-ids invalid."
-
-  local tmp="${PIGGY_IDS}.tmp.$$"
-  awk -v target_blob="$(printf '%s\n' "${ids[@]}")" '
-    BEGIN {
-      n = split(target_blob, arr, "\n")
-      for (i = 1; i <= n; i++) if (arr[i] != "") targets[arr[i]] = 1
-    }
-    /^[[:space:]]*#/ || /^[[:space:]]*$/ { print; next }
-    {
-      id = $0
-      sub(/[[:space:]]+#.*$/, "", id)
-      sub(/^[[:space:]]+/, "", id)
-      sub(/[[:space:]]+$/, "", id)
-      if (!(id in targets)) print
-    }
-  ' "$PIGGY_IDS" >"$tmp"
-
-  if cmp -s "$PIGGY_IDS" "$tmp"; then
-    rm -f "$tmp"
-    echo "No matching recipients in $PIGGY_IDS."
-    return 0
-  fi
-  mv "$tmp" "$PIGGY_IDS"
-
-  local id_dir="${PIGGY_IDS%/piggy-ids}"
-  git_add_file "$PIGGY_IDS" "Remove recipient(s) from piggy-ids."
-  reencrypt_path "$id_dir"
-  git_add_file "$id_dir" "Reencrypt password store after removing recipient(s)."
-}
-
-cmd_pass_recipients_sync() {
-  local subfolder=""
-  local file=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-    -p)
-      subfolder="$2"
-      shift 2
-      ;;
-    *)
-      [[ -z $file ]] || die "Error: only one <file> argument permitted."
-      file="$1"
-      shift
-      ;;
-    esac
-  done
-  [[ -n $file ]] || die "Usage: $PROGRAM_PASS recipients sync <file> [-p subfolder]"
-  [[ -f $file ]] || die "Error: file not found: $file"
-
-  find_piggy_ids "$subfolder"
-  set_git "$PIGGY_IDS"
-
-  "${PIGGY_IDS_PATH:-piggy-ids}" validate "$file" || die "Error: $file failed validation."
-
-  # Idempotency: if no diff, no commit, no reencryption.
-  if "${PIGGY_IDS_PATH:-piggy-ids}" diff "$PIGGY_IDS" "$file" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  cp "$file" "$PIGGY_IDS" || die "Error: failed to copy $file → $PIGGY_IDS."
-  "${PIGGY_IDS_PATH:-piggy-ids}" canonicalize "$PIGGY_IDS" || die "Error: post-copy canonicalize failed."
-
-  local id_dir="${PIGGY_IDS%/piggy-ids}"
-  git_add_file "$PIGGY_IDS" "Sync recipients in piggy-ids."
-  reencrypt_path "$id_dir"
-  git_add_file "$id_dir" "Reencrypt password store after syncing recipients."
 }
 
 #

@@ -359,15 +359,9 @@ fn main() {
                 RecipientsCommand::ListAvailable { rest } => {
                     fallback::exec_piggy_ids("list-available", &rest)
                 }
-                RecipientsCommand::Add { rest } => {
-                    fallback::exec_bash_subcmds("recipients", "add", &rest)
-                }
-                RecipientsCommand::Remove { rest } => {
-                    fallback::exec_bash_subcmds("recipients", "remove", &rest)
-                }
-                RecipientsCommand::Sync { rest } => {
-                    fallback::exec_bash_subcmds("recipients", "sync", &rest)
-                }
+                RecipientsCommand::Add { rest } => std::process::exit(recipients::add(&rest)),
+                RecipientsCommand::Remove { rest } => std::process::exit(recipients::remove(&rest)),
+                RecipientsCommand::Sync { rest } => std::process::exit(recipients::sync(&rest)),
             },
             PassCommand::Verify { subpath } => std::process::exit(verify::run(subpath.as_deref())),
             PassCommand::ShowBatch(args) => {
