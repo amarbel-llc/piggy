@@ -1,0 +1,21 @@
+[package]
+name = "fibby"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust virtual PIV smart card that speaks the pcsc-lite client protocol directly (no pcscd / vsmartcard)."
+
+[[bin]]
+name = "fibby"
+path = "src/main.rs"
+
+[features]
+# The hardware-proxy backend forwards client calls to a real pcscd via
+# libpcsclite (the `pcsc` crate). Gated so the protocol core + virtual
+# backend build and unit-test on hosts without PCSC headers (e.g. CI
+# containers, darwin). Enable on a machine with a real reader to capture
+# /validate against hardware: `cargo run -p fibby --features hardware-proxy`.
+default = []
+hardware-proxy = ["dep:pcsc"]
+
+[dependencies]
+pcsc = { version = "2.9", optional = true }
