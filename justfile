@@ -65,7 +65,7 @@ test-bats-conformance-protocol: build-rust
   # flake.nix). nix caches aggressively, so repeat invocations are free.
   out=$(nix build .#piggy.tests.conformance --no-link --print-out-paths)
   CONFORMANCE_BIN="$out/bin/piggy-agent-conformance" \
-    BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding \
+    BATS_TEST_TIMEOUT=30 bats --allow-local-binding \
     --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
 
 [group('post-build')]
@@ -114,10 +114,11 @@ test-bats-conformance-interop: build-rust
   # agent again, the recipe shape lives at commit `38df53c` —
   # restore from there rather than re-deriving.
   #
-  # --allow-unix-sockets / --allow-local-binding are batman sandbox
-  # escapes — without them subprocesses cannot connect to pcscd.comm
-  # (a Unix socket) and libpcsclite reports "Smart card resource
-  # manager is not running". See CLAUDE.md "Debugging → bats + PCSC".
+  # --allow-local-binding is a batman sandbox escape needed by the pcscd
+  # path. (batman 0.1.3 removed the older --allow-unix-sockets flag;
+  # passing it now is fatal — batman forwards it to upstream bats-core,
+  # which rejects it. The pcscd.comm Unix socket is reachable via fence's
+  # filesystem allowRead.) See CLAUDE.md "Debugging → bats + PCSC".
   # PIGGY_IDS_REAL is set by zz-tests_bats/common.bash; tests under
   # conformance/ that bypass the mock-piggy-ids symlink (notably
   # piggy_box_decrypt_interop.bats) reference it directly.
@@ -128,7 +129,7 @@ test-bats-conformance-interop: build-rust
     SSH_ASKPASS_REQUIRE=force \
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
-    BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding --tap \
+    BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_interop.bats \
     zz-tests_bats/conformance/piggy_box_decrypt_interop.bats
 
@@ -149,7 +150,7 @@ test-bats-conformance-recipients-add-attached: build-rust
       SSH_ASKPASS_REQUIRE=force \
       DISPLAY="" \
       PIGGY_TEST_FIB_PIN=123456 \
-      BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding --tap \
+      BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
       zz-tests_bats/conformance/piggy_recipients_add_attached.bats
 
 # Hardware lane for `piggy pass show-batch`. Seals real eboxes against
@@ -181,7 +182,7 @@ test-bats-conformance-show-batch: build-rust
       SSH_ASKPASS_REQUIRE=force \
       DISPLAY="" \
       PIGGY_TEST_FIB_PIN=123456 \
-      BATS_TEST_TIMEOUT=60 bats --allow-unix-sockets --allow-local-binding --tap \
+      BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
       zz-tests_bats/conformance/piggy_pass_show_batch_hardware.bats
 
 # Hardware lane for the C pivy-agent built from vendor/pivy/. Runs
@@ -352,10 +353,10 @@ debug-interop-stream-bytes: build-rust
 # infrastructure it needs in setup_file() / teardown_file(). We pass
 # --no-sandbox because explore tests often need to talk to pcscd (Unix
 # sockets), bind local ports, shell out to `just` to bring up fib (which
-# writes .fib/ into CWD and /run/user/$UID), etc. The narrow-escape flags
-# (--allow-unix-sockets, --allow-local-binding) cover sockets and ports
-# but leave CWD read-only, which breaks fib-up. Explores are not part of
-# the CI gate so the broader trust is fine.
+# writes .fib/ into CWD and /run/user/$UID), etc. The narrow-escape flag
+# (--allow-local-binding) covers local binding but leaves CWD read-only,
+# which breaks fib-up. Explores are not part of the CI gate so the
+# broader trust is fine.
 [group('explore')]
 explore-bats *FILES: build-rust
   BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}

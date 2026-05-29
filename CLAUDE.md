@@ -173,15 +173,21 @@ or runs under launchd-style fork+exec, prefer one of:
 ### bats + PCSC
 
 Any bats recipe whose tests exercise pcscd (directly, via pivy-tool, or
-indirectly via piggy's Rust PCSC codepath) MUST invoke bats with
-`--allow-unix-sockets --allow-local-binding`. Without those flags,
-batman's sandbox blocks the Unix-domain socket connection to
-`pcscd.comm` and libpcsclite reports "PC/SC system service/daemon not
-available" — even though `PCSCLITE_CSOCK_NAME` reaches the subprocess.
-The symptom looks identical to a missing pcscd; it isn't. This is a
-batman property (not piggy-specific), but it bites here often enough to
-warrant a local note. See `just explore-bats` for the generic driver
-that always sets the flag correctly.
+indirectly via piggy's Rust PCSC codepath) runs under batman with
+`--allow-local-binding` so the sandbox permits the local binding the
+pcscd handshake needs; the `pcscd.comm` AF_UNIX socket path itself is
+reachable via `fence`'s broad filesystem `allowRead`. If pcscd is
+unreachable, libpcsclite reports "PC/SC system service/daemon not
+available" even though `PCSCLITE_CSOCK_NAME` reached the subprocess —
+the symptom looks identical to a missing pcscd; it isn't.
+
+**batman 0.1.3 removed the older `--allow-unix-sockets` flag.** Passing
+it to current batman is fatal: the wrapper does not recognize it, forwards
+it to upstream bats-core, which exits "Bad command line option" before any
+test runs (`total: 0`, "no plan line found"). The piggy conformance
+recipes were updated to drop it (keeping `--allow-local-binding`); if a
+recipe regresses with that error, the stale flag is the cause. See `just
+explore-bats` for the generic `--no-sandbox` driver.
 
 ### Test harness safety net for PIN prompts
 
