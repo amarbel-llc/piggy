@@ -373,3 +373,95 @@ against each other. Before writing code we should pick: *slim/custom*
 (fast, but inherits the Trussed closure and likely still needs custom
 YubiKey-extension code). The phasing above hedges by spiking on reuse
 first, but the production target should be chosen explicitly.
+
+---
+
+## Addendum (2026-05-29): chosen direction — reimplement pcscd + proxy-validate
+
+Direction set after the examination: **fibby implements the pcsc-lite
+*daemon* protocol itself** so clients connect straight to it with no
+`pcscd` and no `vsmartcard-vpcd`. This is the "fully self-contained"
+tier promoted from stretch goal to the goal, because the brief is to
+*decouple from pcscd and other nix-unfriendly C giants* — keeping
+`pcscd` would defeat that. Validation uses a **proxy pattern**: the
+same fibby server, backed by a hardware passthrough, drives a real
+YubiKey through the real `pcscd`, so we prove fibby's protocol layer
+against hardware before trusting the virtual card.
+
+### The pcsc-lite protocol (now grounded)
+
+Source of truth: LudovicRousseau/PCSC `src/winscard_msg.{h,c}`,
+**protocol 4.6**. Captured verbatim in `crates/fibby/src/proto.rs`:
+
+- **Framing.** `struct rxHeader { uint32_t size; uint32_t command; }`
+  (8 bytes) then a `size`-byte body. Native host byte order, natural
+  alignment, no packing — and every field we touch is 4-byte-aligned,
+  so a packed little-endian codec is bit-identical on x86-64/aarch64
+  (asserted at the codec boundary, not assumed).
+- **Commands** (`enum pcsc_msg_commands`): `SCARD_ESTABLISH_CONTEXT`
+  0x01 … `SCARD_TRANSMIT` 0x09 … `CMD_VERSION` 0x11 …
+  `CMD_GET_READERS_STATE_ARRAY` 0x17.
+- **Handshake.** Client sends `CMD_VERSION` with
+  `version_struct{major,minor,rv}`; fibby must answer with a matching
+  major or the client aborts with `SCARD_E_SERVICE_STOPPED` (the *only*
+  cause of that error per Rousseau's FAQ).
+- **Per-command bodies.** `establish_struct`, `connect_struct`
+  (carries `szReader[128]`), `transmit_struct` (32-byte fixed header
+  then streamed APDU buffers), `disconnect_struct`, `status_struct`,
+  the reader-state array, etc. — all mirrored in `proto.rs`.
+
+### Architecture: one server, swappable backend
+
+```
+client (pivy-tool / piggy / opensc-tool)
+   │  PCSCLITE_CSOCK_NAME → fibby's Unix socket
+   ▼
+crates/fibby  ── pcsc-lite daemon protocol (proto.rs) ──┐
+                                                        │ Backend trait
+            ┌───────────────────────────────────────────┤
+            ▼                                            ▼
+  HardwareProxy (feature "hardware-proxy")        VirtualCard
+  forwards via the `pcsc` crate to the real        the in-Rust PIV
+  pcscd → real YubiKey  [VALIDATION ORACLE]        applet  [THE GOAL]
+```
+
+The proxy and the virtual card share **one** server implementation, so
+proving the protocol layer against hardware (HardwareProxy) directly
+de-risks the virtual path (VirtualCard). The hardware backend is behind
+the `hardware-proxy` Cargo feature so the protocol core + virtual card
+build and unit-test on hosts with no PCSC headers (CI containers,
+darwin).
+
+### Environment constraint
+
+The web/cloud session container has `libpcsclite.so.1` at runtime but
+**no pcscd, no USB, no reader, and no PCSC headers**. Therefore:
+
+- **Buildable + unit-testable here:** `proto.rs` codec, the server
+  state machine, the `VirtualCard` backend, byte-vector conformance.
+- **Runs only on a machine with a YubiKey:** the `HardwareProxy`
+  backend and the end-to-end proxy validation. That leg is operator-
+  driven (`cargo run -p fibby --features hardware-proxy`).
+
+### Landed in this pass
+
+- `crates/fibby` added to the workspace.
+- `proto.rs`: protocol constants (v4.6), the full `Command` enum with
+  wire values, and codecs for `rxHeader`, `version_struct`,
+  `establish_struct`, `transmit_struct`, plus a little-endian-host
+  assertion. 6 unit tests, all green (`cargo test -p fibby
+  --no-default-features`).
+
+### Next steps
+
+1. Flesh out the remaining `*_struct` codecs (connect/reconnect/
+   disconnect/status/get-status-change + the `READER_STATE` array).
+2. Server event loop: Unix-socket listener, `CMD_VERSION` handshake,
+   context/card handle table, command dispatch to a `Backend`.
+3. `Backend` trait + `HardwareProxy` (via `pcsc` crate) + a stub
+   `VirtualCard` (fixed ATR, SELECT echo).
+4. **Capture/validate:** point `pivy-tool list`/`generate 9d` at fibby
+   with the HardwareProxy backend on a machine with a YubiKey; record
+   the wire traffic as conformance fixtures.
+5. Grow `VirtualCard` into the real PIV applet (phases 2–3 above) and
+   replay the captured fixtures against it.
