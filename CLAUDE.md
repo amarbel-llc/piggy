@@ -94,7 +94,7 @@ Rust re-implementations of `agent` and `box` live under `crates/piggy/src/cmd/{a
 Use just recipes for all cargo and bats operations instead of calling cargo/bats directly via `develop-run` or shell:
 
 - `just build-rust -p <crate>` instead of `cargo build --package <crate>`
-- `just check-rust -p <crate>` instead of `cargo check --package <crate>`
+- `just validate-rust -p <crate>` instead of `cargo check --package <crate>`
 - `just test-rust --workspace` instead of `cargo test --workspace`
 - `just test-bats-file <path>` instead of `bats --no-sandbox <path>`
 - `just lint-rust` for clippy

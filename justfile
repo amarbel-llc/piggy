@@ -1,20 +1,23 @@
 
 default: lint build test
 
-# Pre-build gate covering formatting (treefmt) and clippy. Both run on
-# the default `just` chain, which is also the pre-merge hook.
+[group('pre-build')]
 lint: lint-fmt lint-rust
 
 # --- build ---
 
+[group('build')]
 build: build-nix build-rust
 
+[group('build')]
 build-nix:
     nix build --show-trace
 
+[group('build')]
 build-rust *ARGS:
     cargo build {{ARGS}}
 
+[group('build')]
 build-rust-release:
     cargo build --release
 
@@ -22,12 +25,8 @@ run-nix *ARGS:
     nix run . -- {{ARGS}}
 
 # --- test ---
-#
-# Bats tests are routed through the rust `piggy` binary so the full
-# rust → bash dispatch path is exercised on every run. `cargo build`
-# is a hard prerequisite — `zz-tests_bats/common.bash` aborts with a
-# clear error if `target/debug/piggy` is missing.
 
+[group('post-build')]
 test: test-bats-default test-bats-conformance test-rust
 
 # Sandboxed bats lane: runs every top-level t*.bats NOT tagged
@@ -36,18 +35,27 @@ test: test-bats-default test-bats-conformance test-rust
 # tag convention. This replaces the previous `test-bats-piggy` recipe
 # as the authoritative gate for the core suite; the bare-`bats`
 # fallback lives at `test-bats-piggy-local` for fast iteration.
+[group('post-build')]
 test-bats-default:
     nix build .#bats-default --no-link --print-build-logs
 
 # Local-iteration shortcut: re-runs the same t*.bats files outside the
 # nix sandbox against `target/debug/piggy`. Faster than `nix build` on
 # small edits; CI / pre-merge should use `test-bats-default` instead.
+#
+# Bats tests route through the rust `piggy` binary so the full
+# rust → bash dispatch path is exercised; `build-rust` is a hard
+# prerequisite — `zz-tests_bats/common.bash` aborts if
+# `target/debug/piggy` is missing.
+[group('post-build')]
 test-bats-piggy-local: build-rust
   BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/t*.bats
 
+[group('post-build')]
 test-bats-conformance: build-rust
   BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/conformance/*.bats
 
+[group('post-build')]
 test-bats-conformance-protocol: build-rust
   #!/usr/bin/env bash
   set -euo pipefail
@@ -60,6 +68,7 @@ test-bats-conformance-protocol: build-rust
     BATS_TEST_TIMEOUT=30 bats --allow-unix-sockets --allow-local-binding \
     --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
 
+[group('post-build')]
 test-bats-conformance-interop: build-rust
   #!/usr/bin/env bash
   set -euo pipefail
@@ -127,7 +136,7 @@ test-bats-conformance-interop: build-rust
 # piggy_recipients_add_attached.bats conformance lane against the
 # real PCSC stack. Linux-only (fib is Linux-only). Opt-in — not
 # part of the default `just test` lane.
-[group('test')]
+[group('post-build')]
 test-bats-conformance-recipients-add-attached: build-rust
     #!/usr/bin/env bash
     set -euo pipefail
@@ -150,7 +159,7 @@ test-bats-conformance-recipients-add-attached: build-rust
 # shape. Linux-only (fib is Linux-only). Opt-in — not part of the
 # default `just test` lane. Companion to the sandbox surface that
 # runs under `bats-default`; see #122.
-[group('test')]
+[group('post-build')]
 test-bats-conformance-show-batch: build-rust
     #!/usr/bin/env bash
     set -euo pipefail
@@ -181,7 +190,7 @@ test-bats-conformance-show-batch: build-rust
 # piggy#107 (piggy#105 step 3) state-machine plumbing doesn't break
 # the simple identity-listing case. Opt-in — not part of the default
 # `just test` lane. Requires a real card plugged in.
-[group('test')]
+[group('post-build')]
 test-bats-conformance-pivy-agent-hardware: build-rust
     #!/usr/bin/env bash
     set -euo pipefail
@@ -204,9 +213,11 @@ test-bats-conformance-pivy-agent-hardware: build-rust
       BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
       zz-tests_bats/conformance/pivy_agent_hardware.bats
 
+[group('post-build')]
 test-bats-file *FILES: build-rust
     BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
 
+[group('post-build')]
 test-rust *ARGS:
     cargo test {{ARGS}}
 
@@ -214,6 +225,7 @@ test-rust *ARGS:
 # Evaluates the module against synthetic configs and verifies the option
 # schema, both platform code paths, and every assertion. Reports
 # pass/fail per case.
+[group('post-build')]
 test-nix-hm-module:
   #!/usr/bin/env bash
   set -euo pipefail
@@ -237,6 +249,7 @@ test-nix-hm-module:
 # ecdh@joyent.com extension agrees with a locally-computed shared
 # secret. Issue #32 checkpoint 2. Requires fib (just fib-up will be
 # called automatically and torn down on exit).
+[group('post-build')]
 test-rust-agent-ecdh: build-rust
   #!/usr/bin/env bash
   set -euo pipefail
@@ -256,6 +269,7 @@ test-rust-agent-ecdh: build-rust
 # random AEAD key to it, push the ebox through the wire format, and
 # unlock it via a live piggy-agent (through the EcdhOracle trait).
 # Issue #32 checkpoint 3A. Mirrors the shape of test-rust-agent-ecdh.
+[group('post-build')]
 test-rust-agent-unlock: build-rust
   #!/usr/bin/env bash
   set -euo pipefail
@@ -275,6 +289,7 @@ test-rust-agent-unlock: build-rust
 # exports PIGGY_TEST_FIB_PIN so the askpass non-interactively supplies
 # the fib PIN. Any code path that falls through to a real askpass
 # surfaces as a `[piggy-test-askpass]` stderr banner, not a GUI dialog.
+[group('post-build')]
 test-rust-card-unlock: build-rust
   #!/usr/bin/env bash
   set -euo pipefail
@@ -288,13 +303,20 @@ test-rust-card-unlock: build-rust
   export SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=""
   cargo test --test unlock_ebox_card_integration -- --nocapture
 
-check-rust *ARGS:
+# `cargo check` type-evals without codegen — a pre-build validation
+# (hard failure on type errors), distinct from the `lint-rust` clippy
+# opinion pass. `validate-rust` covers the whole workspace; the
+# per-crate variants are faster iteration subsets.
+[group('pre-build')]
+validate-rust *ARGS:
     cargo check {{ARGS}}
 
-check-box:
+[group('pre-build')]
+validate-box:
     cargo check -p piggy-box
 
-check-piggy:
+[group('pre-build')]
+validate-piggy:
     cargo check -p piggy
 
 # --- debug ---
@@ -511,7 +533,7 @@ lint-fmt:
 # Start a private pcscd + PivApplet pair. After this returns, run
 # `eval $(cat .fib/env)` in your shell; then `pivy-tool list` etc. will
 # see "Virtual PCD piggy fib" as the reader.
-[group('test')]
+[group('operational')]
 fib-up:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -581,7 +603,7 @@ fib-up:
     echo "fib: up — eval \$(cat .fib/env) to connect"
 
 # Tear down the private pcscd + fib pair.
-[group('test')]
+[group('operational')]
 fib-down:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -595,7 +617,7 @@ fib-down:
     echo "fib: down"
 
 # Open a subshell with fib up and the env preloaded; tears down on exit.
-[group('test')]
+[group('operational')]
 fib-shell:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -605,7 +627,7 @@ fib-shell:
     PS1="(fib) $PS1" exec "$SHELL"
 
 # Smoke test: bring up fib, verify pivy-tool sees the virtual card, tear down.
-[group('test')]
+[group('post-build')]
 fib-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1004,20 +1026,25 @@ explore-x25519-pivapplet:
 
 # --- update / clean ---
 
+[group('maintenance')]
 update: update-nix
 
+[group('maintenance')]
 update-nix:
     nix flake update
 
+[group('maintenance')]
 clean: clean-build clean-rust
 
+[group('maintenance')]
 clean-build:
     rm -rf result
 
+[group('maintenance')]
 clean-rust:
     cargo clean
 
-# --- maint: version bump + tag + release ---
+# --- maintenance: version bump + tag + release ---
 #
 # Three recipes per eng-versioning(7). `version.env` is the single
 # source of truth: `bump-version` is a pure mutation, `tag` reads the
@@ -1025,16 +1052,21 @@ clean-rust:
 # whole flow (changelog → bump → commit → tag → gh release).
 # `version.env` is also read by `flake.nix` at eval time and by
 # `crates/piggy/build.rs` at compile time.
+#
+# Grouped under the canonical `maintenance` lifecycle group of
+# eng-design_patterns-justfile(7) (alongside update-*/clean-*);
+# eng-versioning(7) still says "maint" — reconciling that wording
+# onto `maintenance` is tracked at amarbel-llc/eng#122.
 
 # Rewrite the PIGGY_VERSION line in version.env. Touches no other
 # file — committing is `release`'s job. Usage: just bump-version 0.1.1
-[group("maint")]
+[group('maintenance')]
 bump-version new_version:
     sed -E -i "s/^(export PIGGY_VERSION)=.*/\1={{new_version}}/" version.env
 
 # Sign + push a tag named after the current version.env. The "v"
 # prefix is added for you. Usage: just tag "release v0.1.1"
-[group("maint")]
+[group('maintenance')]
 tag message:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1051,7 +1083,7 @@ tag message:
 # commit doesn't appear in its own changelog, then bumps version.env,
 # commits, signs+pushes a v<sem> tag, and creates a GitHub release
 # whose body is the changelog. Usage: just release 0.1.1
-[group("maint")]
+[group('maintenance')]
 release new_version:
     #!/usr/bin/env bash
     set -euo pipefail
