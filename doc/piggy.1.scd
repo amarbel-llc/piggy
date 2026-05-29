@@ -362,7 +362,9 @@ passthroughs for the C pivy binaries:
 	Show piggy's pass-style usage message.
 
 *version*
-	Show piggy's version banner.
+	Print piggy's self-identification line (_piggy <version>+<commit>_)
+	followed by a table of the pinned downstream components (pivy,
+	pcsclite) with their versions and revisions. See *eng-versioning*(7).
 
 # SIMPLE EXAMPLES
 

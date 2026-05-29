@@ -70,6 +70,14 @@
           builtins.match ".*PIGGY_VERSION=([^\n]+).*" (builtins.readFile ./version.env)
         );
 
+        # Short commit for the `piggy version` self-line (eng-versioning(7)).
+        # Clean tree → shortRev; dirty worktree → dirtyShortRev; neither
+        # (e.g. a tarball with no git metadata) → "unknown".
+        piggyCommit = self.shortRev or self.dirtyShortRev or "unknown";
+        # pcsclite is pinned *within* the nixpkgs-master input rather than as
+        # its own tool-flake, so the rev that pins it is the input's rev.
+        pcscliteRev = nixpkgs-master.shortRev or "unknown";
+
         # The `amarbel-llc/nixpkgs` overlay supplies the fork's package
         # additions; the bats lane builder itself comes from the
         # `amarbel-llc/bats` flake input (see `batsLib` below). Keeping
@@ -259,10 +267,29 @@
               scdoc < "$f" > "$out/share/man/man''${section}/''${name}.''${section}"
             done
 
+            # The PIGGY_VERSION/COMMIT/<component> --set group below is the
+            # `piggy version` data source: cmd_version (src/piggy.sh) reads
+            # these from the environment makeWrapper bakes in. Component
+            # versions are read live off the derivations (pivyPkg.version,
+            # pkgs-master.pcsclite.version) so a pin bump shows up in the
+            # output with no manual edit — drift stays visible, per
+            # eng-versioning(7).
+            #
+            # IGLOO-PROMOTION CANDIDATE (amarbel-llc/nixpkgs#68): this
+            # version+commit+component injection is the non-Go analog of
+            # buildGoApplication's auto-embedding (amarbel-llc/nixpkgs#31).
+            # A generalized `mkVersionedWrapper` deriving these flags from
+            # {version.env, src.rev, components} is the lift target — this
+            # block is the tracer-bullet reference consumer.
             makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
               --set PIGGY_SH_PATH $out/libexec/piggy/piggy.sh \
               --set PIGGY_IDS_PATH $out/libexec/piggy/piggy-ids \
               --set PIGGY_VERSION ${piggyVersion} \
+              --set PIGGY_COMMIT ${piggyCommit} \
+              --set PIGGY_PIVY_VERSION ${pivyPkg.version} \
+              --set PIGGY_PIVY_REV vendored \
+              --set PIGGY_PCSCLITE_VERSION ${pkgs-master.pcsclite.version} \
+              --set PIGGY_PCSCLITE_REV ${pcscliteRev} \
               --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
           '';
 
