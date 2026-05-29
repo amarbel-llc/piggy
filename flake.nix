@@ -4,7 +4,7 @@
     # The bats lane builder (`batsLane`) is sourced directly from
     # `amarbel-llc/bats` below — not from `pkgs.testers.batsLane`, which
     # the bats flake no longer ships through this overlay.
-    nixpkgs.url = "github:amarbel-llc/nixpkgs";
+    nixpkgs.url = "github:amarbel-llc/igloo";
     nixpkgs-master.url = "github:NixOS/nixpkgs/d233902339c02a9c334e7e593de68855ad26c4cb";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
 
