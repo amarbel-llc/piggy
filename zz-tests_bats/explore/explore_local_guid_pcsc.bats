@@ -24,6 +24,11 @@
 # is required for any bats recipe that exercises pcscd-backed code
 # (piggy_box_interop.bats, piggy_agent_protocol.bats, etc).
 #
+# UPDATE (2026-05-29): batman 0.1.3 removed --allow-unix-sockets; fence
+# now permits AF_UNIX access by default via its broad filesystem
+# allowRead, so recipes pass only --allow-local-binding. See piggy
+# CLAUDE.md "Debugging → bats + PCSC" and amarbel-llc/bats#27.
+#
 # This file keeps its fib setup here so the recipe can stay generic
 # (`explore-bats *FILES`). setup_file brings the virtual card up and
 # tears it down regardless of pass/fail.
@@ -81,8 +86,10 @@ function probe_env_visible { # @test
 
 function probe_pivy_tool_list_via_run { # @test
   # The real pivy-tool (C binary) should enumerate the card if — and only
-  # if — the bats sandbox is letting libpcsclite reach pcscd.comm. This is
-  # the canary that caught the --allow-unix-sockets requirement.
+  # if — the bats sandbox is letting libpcsclite reach pcscd.comm. This
+  # was the canary that caught the original --allow-unix-sockets
+  # requirement (the flag was since removed in batman 0.1.3; see
+  # bats#27 and the FINDING / UPDATE notes above).
   run "$REAL_PIVY_TOOL" list
   echo "status=$status" >&3
   echo "--- output ---" >&3

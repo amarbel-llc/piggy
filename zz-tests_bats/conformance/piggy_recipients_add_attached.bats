@@ -9,8 +9,8 @@
 #
 # Driven by `just test-bats-conformance-recipients-add-attached` which
 # brings up fib, generates a P-256 key in slot 9D, exports
-# PCSCLITE_CSOCK_NAME, and runs bats with --allow-unix-sockets
-# --allow-local-binding plus the askpass safety net.
+# PCSCLITE_CSOCK_NAME, and runs bats with --allow-local-binding plus
+# the askpass safety net.
 #
 # Tests skip gracefully when fib env vars are absent.
 

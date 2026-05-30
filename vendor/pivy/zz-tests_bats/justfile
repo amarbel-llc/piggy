@@ -2,11 +2,11 @@ bats_timeout := "5"
 
 test-targets *targets="*.bats":
   BATS_TEST_TIMEOUT="{{bats_timeout}}" \
-    bats --tap --allow-unix-sockets --filter-tags '!hardware' --jobs {{num_cpus()}} {{targets}}
+    bats --tap--filter-tags '!hardware' --jobs {{num_cpus()}} {{targets}}
 
 test-tags *tags:
   BATS_TEST_TIMEOUT="{{bats_timeout}}" \
-    bats --tap --allow-unix-sockets --jobs {{num_cpus()}} --filter-tags {{tags}} *.bats
+    bats --tap--jobs {{num_cpus()}} --filter-tags {{tags}} *.bats
 
 test: (test-targets "*.bats")
 
