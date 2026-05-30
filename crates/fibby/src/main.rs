@@ -36,8 +36,8 @@ struct Args {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let default_socket = std::env::var("FIBBY_SOCK")
-        .unwrap_or_else(|_| "/tmp/fibby/pcscd.comm".to_string());
+    let default_socket =
+        std::env::var("FIBBY_SOCK").unwrap_or_else(|_| "/tmp/fibby/pcscd.comm".to_string());
     let mut args = Args {
         socket: default_socket,
         backend: "virtual".to_string(),
@@ -110,20 +110,26 @@ fn make_backend(args: &Args) -> Result<SharedBackend, String> {
     match args.backend.as_str() {
         "virtual" => Ok(into_shared(VirtualCard::new())),
         "hardware" => make_hardware_backend(&args.reader),
-        other => Err(format!("unknown backend {other:?} (want 'virtual' or 'hardware')")),
+        other => Err(format!(
+            "unknown backend {other:?} (want 'virtual' or 'hardware')"
+        )),
     }
 }
 
 #[cfg(feature = "hardware-proxy")]
 fn make_hardware_backend(reader: &str) -> Result<SharedBackend, String> {
-    Ok(into_shared(fibby::hardware_proxy::HardwareProxy::new(reader)?))
+    Ok(into_shared(fibby::hardware_proxy::HardwareProxy::new(
+        reader,
+    )?))
 }
 
 #[cfg(not(feature = "hardware-proxy"))]
 fn make_hardware_backend(_reader: &str) -> Result<SharedBackend, String> {
-    Err("the 'hardware' backend needs the `hardware-proxy` build feature: \
+    Err(
+        "the 'hardware' backend needs the `hardware-proxy` build feature: \
          cargo run -p fibby --features hardware-proxy"
-        .to_string())
+            .to_string(),
+    )
 }
 
 fn into_shared<B: Backend + 'static>(b: B) -> SharedBackend {

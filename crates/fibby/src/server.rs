@@ -98,7 +98,11 @@ fn handle_client(mut stream: UnixStream, backend: SharedBackend) -> std::io::Res
     match read_message(&mut stream)? {
         Some((h, body)) if h.command == Command::Version as u32 => {
             let req = VersionStruct::from_bytes(&body);
-            trace::emit(trace::INFO, "conn", &format!("new client; CMD_VERSION {req:?}"));
+            trace::emit(
+                trace::INFO,
+                "conn",
+                &format!("new client; CMD_VERSION {req:?}"),
+            );
             trace::hexdump("rx", &body);
             let client_major = req.map(|v| v.major).unwrap_or(0);
             let rv = if client_major == PROTOCOL_VERSION_MAJOR {
@@ -107,7 +111,9 @@ fn handle_client(mut stream: UnixStream, backend: SharedBackend) -> std::io::Res
                 trace::emit(
                     trace::INFO,
                     "conn",
-                    &format!("version mismatch: client major {client_major} != {PROTOCOL_VERSION_MAJOR}"),
+                    &format!(
+                        "version mismatch: client major {client_major} != {PROTOCOL_VERSION_MAJOR}"
+                    ),
                 );
                 SCARD_E_NO_SERVICE
             };
@@ -146,7 +152,10 @@ fn handle_client(mut stream: UnixStream, backend: SharedBackend) -> std::io::Res
         trace::emit(
             trace::DEBUG,
             "rx",
-            &format!("command={cmd:?} ({:#04x}) size={}", header.command, header.size),
+            &format!(
+                "command={cmd:?} ({:#04x}) size={}",
+                header.command, header.size
+            ),
         );
         trace::hexdump("rx", &body);
 
@@ -172,7 +181,9 @@ fn handle_client(mut stream: UnixStream, backend: SharedBackend) -> std::io::Res
                 trace::emit(
                     trace::INFO,
                     "rx",
-                    &format!("UNIMPLEMENTED command {other:?} — closing. Capture this and extend server::handle_client."),
+                    &format!(
+                        "UNIMPLEMENTED command {other:?} — closing. Capture this and extend server::handle_client."
+                    ),
                 );
                 return Ok(());
             }
@@ -197,7 +208,11 @@ fn establish(stream: &mut UnixStream, body: &[u8], state: &mut ConnState) -> std
         rv: 0,
     });
     let h = state.mint_context();
-    trace::emit(trace::DEBUG, "tx", &format!("ESTABLISH_CONTEXT -> hContext={h}"));
+    trace::emit(
+        trace::DEBUG,
+        "tx",
+        &format!("ESTABLISH_CONTEXT -> hContext={h}"),
+    );
     reply(
         stream,
         &EstablishStruct {
@@ -222,7 +237,11 @@ fn readers_state(stream: &mut UnixStream, backend: &SharedBackend) -> std::io::R
         },
         reader_sharing: 0,
         card_atr: if present { b.atr() } else { Vec::new() },
-        card_protocol: if present { protocol::T1 } else { protocol::UNDEFINED },
+        card_protocol: if present {
+            protocol::T1
+        } else {
+            protocol::UNDEFINED
+        },
     };
     drop(b);
     trace::emit(trace::DEBUG, "tx", &format!("GET_READERS_STATE -> {st:?}"));
@@ -260,7 +279,11 @@ fn connect(
             resp.h_card = -1;
             resp.dw_active_protocol = 0;
             resp.rv = code;
-            trace::emit(trace::DEBUG, "tx", &format!("CONNECT failed rv={code:#010x}"));
+            trace::emit(
+                trace::DEBUG,
+                "tx",
+                &format!("CONNECT failed rv={code:#010x}"),
+            );
         }
     }
     reply(stream, &resp.to_bytes())
@@ -280,14 +303,22 @@ fn reconnect(stream: &mut UnixStream, body: &[u8], backend: &SharedBackend) -> s
         Ok(active) => {
             out[16..20].copy_from_slice(&active.to_le_bytes()); // dwActiveProtocol
             out[20..24].copy_from_slice(&SCARD_S_SUCCESS.to_le_bytes());
-            trace::emit(trace::DEBUG, "tx", &format!("RECONNECT hCard={h_card} proto={active}"));
+            trace::emit(
+                trace::DEBUG,
+                "tx",
+                &format!("RECONNECT hCard={h_card} proto={active}"),
+            );
         }
         Err(code) => out[20..24].copy_from_slice(&code.to_le_bytes()),
     }
     reply(stream, &out)
 }
 
-fn disconnect(stream: &mut UnixStream, body: &[u8], backend: &SharedBackend) -> std::io::Result<()> {
+fn disconnect(
+    stream: &mut UnixStream,
+    body: &[u8],
+    backend: &SharedBackend,
+) -> std::io::Result<()> {
     let req = HandleArgRv::from_bytes(body).unwrap_or(HandleArgRv {
         handle: -1,
         arg: disposition::LEAVE,
@@ -300,7 +331,10 @@ fn disconnect(stream: &mut UnixStream, body: &[u8], backend: &SharedBackend) -> 
     trace::emit(
         trace::DEBUG,
         "tx",
-        &format!("DISCONNECT hCard={} disp={} rv={rv:#010x}", req.handle, req.arg),
+        &format!(
+            "DISCONNECT hCard={} disp={} rv={rv:#010x}",
+            req.handle, req.arg
+        ),
     );
     reply(
         stream,
@@ -358,7 +392,11 @@ fn transmit(
             write_body(stream, &resp)
         }
         Err(code) => {
-            trace::emit(trace::DEBUG, "tx", &format!("TRANSMIT failed rv={code:#010x}"));
+            trace::emit(
+                trace::DEBUG,
+                "tx",
+                &format!("TRANSMIT failed rv={code:#010x}"),
+            );
             let mut reply_struct = req;
             reply_struct.pcb_recv_length = 0;
             reply_struct.rv = code;
