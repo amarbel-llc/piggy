@@ -40,11 +40,17 @@ impl Client {
 }
 
 fn unique_socket_path() -> std::path::PathBuf {
+    // AF_UNIX sun_path is 108 bytes on Linux / 104 on macOS. Some test
+    // environments (spinclass worktree TMPDIR = `<repo>/.worktrees/<name>/.tmp`)
+    // push `std::env::temp_dir()` past ~56 chars on its own, enough that the
+    // PID+nanos suffix overflows sun_path and `bind()` fails silently. /tmp
+    // is short and writable in every environment this test runs in — host
+    // devshell, nix sandbox (private /tmp), GitHub Actions.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("fibby-loopback-{}-{}.sock", std::process::id(), nanos))
+    std::path::PathBuf::from("/tmp").join(format!("fibby-{}-{}.sock", std::process::id(), nanos))
 }
 
 fn start_server(path: &std::path::Path) {
@@ -102,7 +108,11 @@ fn full_piv_select_session_over_socket() {
     let arr = c.recv(MAX_READERS_CONTEXTS * ReaderState::WIRE_LEN);
     let slot0 = ReaderState::from_bytes(&arr[0..ReaderState::WIRE_LEN]).unwrap();
     assert!(slot0.reader_name.contains("fibby"), "reader advertised");
-    assert_ne!(slot0.reader_state & reader_flags::PRESENT, 0, "card present");
+    assert_ne!(
+        slot0.reader_state & reader_flags::PRESENT,
+        0,
+        "card present"
+    );
     assert!(!slot0.card_atr.is_empty(), "ATR reported");
 
     // 4) CONNECT.

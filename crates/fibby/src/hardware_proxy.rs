@@ -62,7 +62,11 @@ impl HardwareProxy {
             format!("no reader matching {reader_substr:?}; is the card plugged in and pcscd up?")
         })?;
         let reader_name = reader.to_string_lossy().into_owned();
-        trace::emit(trace::INFO, "proxy", &format!("selected reader: {reader_name}"));
+        trace::emit(
+            trace::INFO,
+            "proxy",
+            &format!("selected reader: {reader_name}"),
+        );
 
         let mut me = HardwareProxy {
             ctx,
@@ -72,7 +76,10 @@ impl HardwareProxy {
             cached_atr: Vec::new(),
         };
         // Best-effort ATR probe (LEAVE the card as found).
-        if me.connect(crate::proto::share::SHARED, protocol::ANY).is_ok() {
+        if me
+            .connect(crate::proto::share::SHARED, protocol::ANY)
+            .is_ok()
+        {
             me.cached_atr = me.atr();
             let _ = me.disconnect(disposition::LEAVE);
         }
@@ -138,8 +145,9 @@ impl Backend for HardwareProxy {
 
     fn atr(&self) -> Vec<u8> {
         if let Some(card) = &self.card {
-            let mut buf = [0u8; pcsc::MAX_ATR_SIZE];
-            if let Ok(status) = card.status2(&mut buf) {
+            let mut names_buf = [0u8; 256];
+            let mut atr_buf = [0u8; pcsc::MAX_ATR_SIZE];
+            if let Ok(status) = card.status2(&mut names_buf, &mut atr_buf) {
                 return status.atr().to_vec();
             }
         }
@@ -155,13 +163,13 @@ impl Backend for HardwareProxy {
                 Self::map_protocols(preferred_protocols),
             )
             .map_err(Self::map_err)?;
-        let mut buf = [0u8; pcsc::MAX_ATR_SIZE];
-        // `status2().protocol2()` returns a `pcsc::Protocol` directly.
-        let active = match card.status2(&mut buf) {
+        let mut names_buf = [0u8; 256];
+        let mut atr_buf = [0u8; pcsc::MAX_ATR_SIZE];
+        let active = match card.status2(&mut names_buf, &mut atr_buf) {
             Ok(s) => {
                 self.cached_atr = s.atr().to_vec();
                 match s.protocol2() {
-                    pcsc::Protocol::T0 => protocol::T0,
+                    Some(pcsc::Protocol::T0) => protocol::T0,
                     _ => protocol::T1,
                 }
             }
@@ -189,7 +197,9 @@ impl Backend for HardwareProxy {
         // PIV responses fit in the short buffer except chained reads;
         // use the extended buffer to be safe.
         let mut rx = vec![0u8; pcsc::MAX_BUFFER_SIZE_EXTENDED];
-        let resp = card.transmit(command_apdu, &mut rx).map_err(Self::map_err)?;
+        let resp = card
+            .transmit(command_apdu, &mut rx)
+            .map_err(Self::map_err)?;
         Ok(resp.to_vec())
     }
 }

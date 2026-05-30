@@ -140,11 +140,13 @@ impl Header {
 /// on this host. Panics on a big-endian target so a mis-encode is loud,
 /// not silent. Cheap; call once at startup.
 pub fn assert_le_host() {
-    assert!(
-        cfg!(target_endian = "little"),
-        "fibby's pcsc-lite codec assumes a little-endian host; big-endian \
-         needs per-field byteswapping (winscard_msg uses native order)"
-    );
+    const {
+        assert!(
+            cfg!(target_endian = "little"),
+            "fibby's pcsc-lite codec assumes a little-endian host; big-endian \
+             needs per-field byteswapping (winscard_msg uses native order)"
+        );
+    }
 }
 
 /// `struct version_struct { int32_t major; int32_t minor; uint32_t rv; }`.
@@ -425,8 +427,11 @@ impl ReaderState {
         if b.len() < Self::WIRE_LEN {
             return None;
         }
-        let atr_len = u32::from_le_bytes(b[Self::ATR_LEN_OFF..Self::ATR_LEN_OFF + 4].try_into().ok()?)
-            as usize;
+        let atr_len = u32::from_le_bytes(
+            b[Self::ATR_LEN_OFF..Self::ATR_LEN_OFF + 4]
+                .try_into()
+                .ok()?,
+        ) as usize;
         let atr_len = atr_len.min(MAX_ATR_SIZE);
         Some(ReaderState {
             reader_name: read_cstr(&b[0..MAX_READERNAME]),
@@ -434,7 +439,9 @@ impl ReaderState {
             reader_state: u32::from_le_bytes(b[132..136].try_into().ok()?),
             reader_sharing: i32::from_le_bytes(b[136..140].try_into().ok()?),
             card_atr: b[Self::ATR_OFF..Self::ATR_OFF + atr_len].to_vec(),
-            card_protocol: u32::from_le_bytes(b[Self::PROTO_OFF..Self::PROTO_OFF + 4].try_into().ok()?),
+            card_protocol: u32::from_le_bytes(
+                b[Self::PROTO_OFF..Self::PROTO_OFF + 4].try_into().ok()?,
+            ),
         })
     }
 }
@@ -642,15 +649,28 @@ mod tests {
         assert_eq!(arr.len(), MAX_READERS_CONTEXTS * ReaderState::WIRE_LEN);
         assert_eq!(arr.len(), 16 * 184);
         // Slot 0 populated, slot 1 zeroed.
-        assert_eq!(ReaderState::from_bytes(&arr[0..184]).unwrap().reader_name, "r");
-        assert_eq!(ReaderState::from_bytes(&arr[184..368]), Some(ReaderState::empty()));
+        assert_eq!(
+            ReaderState::from_bytes(&arr[0..184]).unwrap().reader_name,
+            "r"
+        );
+        assert_eq!(
+            ReaderState::from_bytes(&arr[184..368]),
+            Some(ReaderState::empty())
+        );
     }
 
     #[test]
     fn handle_codecs_roundtrip() {
-        let a = HandleArgRv { handle: -1, arg: disposition::RESET, rv: 0 };
+        let a = HandleArgRv {
+            handle: -1,
+            arg: disposition::RESET,
+            rv: 0,
+        };
         assert_eq!(HandleArgRv::from_bytes(&a.to_bytes()), Some(a));
-        let h = HandleRv { handle: 7, rv: SCARD_S_SUCCESS };
+        let h = HandleRv {
+            handle: 7,
+            rv: SCARD_S_SUCCESS,
+        };
         assert_eq!(HandleRv::from_bytes(&h.to_bytes()), Some(h));
     }
 
