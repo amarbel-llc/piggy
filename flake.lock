@@ -2,19 +2,19 @@
   "nodes": {
     "bats": {
       "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
+        "igloo": [
+          "igloo"
         ],
         "nixpkgs-master": "nixpkgs-master",
         "treefmt-nix": "treefmt-nix",
         "utils": "utils"
       },
       "locked": {
-        "lastModified": 1780057695,
-        "narHash": "sha256-GPc/9XgEtR2UdIFyajHgfIsyV+mTVdCauFLgo6qzWXY=",
+        "lastModified": 1780142667,
+        "narHash": "sha256-z6TNOtX2lSqUC3R6bBuTQRUIsWCvxpCFiRE13vMaPhg=",
         "owner": "amarbel-llc",
         "repo": "bats",
-        "rev": "1ba0ab1590544685fba211dff9e3e7ccf60c0fc0",
+        "rev": "de6f6720965cf34fc965f18c55f13e8094334ba4",
         "type": "github"
       },
       "original": {
@@ -26,19 +26,19 @@
     "bun2nix": {
       "inputs": {
         "flake-parts": [
-          "nixpkgs",
+          "igloo",
           "flake-parts"
         ],
         "nixpkgs": [
-          "nixpkgs",
+          "igloo",
           "nixpkgs-master"
         ],
         "systems": [
-          "nixpkgs",
+          "igloo",
           "systems"
         ],
         "treefmt-nix": [
-          "nixpkgs",
+          "igloo",
           "treefmt-nix"
         ]
       },
@@ -59,7 +59,7 @@
     "flake-parts": {
       "inputs": {
         "nixpkgs-lib": [
-          "nixpkgs",
+          "igloo",
           "nixpkgs-master"
         ]
       },
@@ -77,23 +77,7 @@
         "type": "github"
       }
     },
-    "jcardsim": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1589327878,
-        "narHash": "sha256-0akp8BAp6QxGuBrDFEg0ED/F98bCkO2WQSocYqWszyI=",
-        "owner": "arekinath",
-        "repo": "jcardsim",
-        "rev": "4c766cfb48c43507f9a30a1443e7214d2073a430",
-        "type": "github"
-      },
-      "original": {
-        "owner": "arekinath",
-        "repo": "jcardsim",
-        "type": "github"
-      }
-    },
-    "nixpkgs": {
+    "igloo": {
       "inputs": {
         "bun2nix": "bun2nix",
         "flake-parts": "flake-parts",
@@ -112,6 +96,22 @@
       "original": {
         "owner": "amarbel-llc",
         "repo": "igloo",
+        "type": "github"
+      }
+    },
+    "jcardsim": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1589327878,
+        "narHash": "sha256-0akp8BAp6QxGuBrDFEg0ED/F98bCkO2WQSocYqWszyI=",
+        "owner": "arekinath",
+        "repo": "jcardsim",
+        "rev": "4c766cfb48c43507f9a30a1443e7214d2073a430",
+        "type": "github"
+      },
+      "original": {
+        "owner": "arekinath",
+        "repo": "jcardsim",
         "type": "github"
       }
     },
@@ -198,8 +198,8 @@
     "root": {
       "inputs": {
         "bats": "bats",
+        "igloo": "igloo",
         "jcardsim": "jcardsim",
-        "nixpkgs": "nixpkgs",
         "nixpkgs-master": "nixpkgs-master_3",
         "oracle-javacard-sdks": "oracle-javacard-sdks",
         "pivapplet": "pivapplet",
@@ -256,7 +256,7 @@
       "inputs": {
         "nixpkgs": [
           "bats",
-          "nixpkgs"
+          "igloo"
         ]
       },
       "locked": {
@@ -276,7 +276,7 @@
     "treefmt-nix_2": {
       "inputs": {
         "nixpkgs": [
-          "nixpkgs",
+          "igloo",
           "nixpkgs-master"
         ]
       },
@@ -297,7 +297,7 @@
     "treefmt-nix_3": {
       "inputs": {
         "nixpkgs": [
-          "nixpkgs"
+          "igloo"
         ]
       },
       "locked": {

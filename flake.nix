@@ -4,18 +4,18 @@
     # The bats lane builder (`batsLane`) is sourced directly from
     # `amarbel-llc/bats` below — not from `pkgs.testers.batsLane`, which
     # the bats flake no longer ships through this overlay.
-    nixpkgs.url = "github:amarbel-llc/igloo";
+    igloo.url = "github:amarbel-llc/igloo";
     nixpkgs-master.url = "github:NixOS/nixpkgs/d233902339c02a9c334e7e593de68855ad26c4cb";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
 
     bats = {
       url = "github:amarbel-llc/bats";
-      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.igloo.follows = "igloo";
     };
 
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.nixpkgs.follows = "igloo";
     };
 
     # Software PIV smart card for tests — see nix/virtual-piv.nix.
@@ -48,7 +48,7 @@
   outputs =
     {
       self,
-      nixpkgs,
+      igloo,
       nixpkgs-master,
       utils,
       bats,
@@ -101,10 +101,10 @@
               '';
             });
           };
-        pkgs = import nixpkgs {
+        pkgs = import igloo {
           inherit system;
           overlays = [
-            nixpkgs.overlays.default
+            igloo.overlays.default
             libfyamlFix
           ];
         };
