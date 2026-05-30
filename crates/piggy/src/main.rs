@@ -40,16 +40,20 @@
 //! - #59 — restore probe-loop PIN-clearing in `piggy agent`.
 
 mod copy_move;
+mod crypt;
 mod fallback;
 mod find;
 mod git;
 mod git_ops;
 mod grep;
 mod init;
+mod insert;
+mod internal_clipboard_restore;
 mod platform;
 mod recipients;
 mod reencrypt;
 mod rm;
+mod show;
 mod show_batch;
 mod store;
 mod verify;
@@ -172,6 +176,15 @@ enum Command {
         /// Directory under the store to walk.
         dir: PathBuf,
     },
+    /// Internal: deferred-restore clipboard worker spawned by
+    /// `show -c`. Reads a serialized ClipPlan from stdin, sleeps
+    /// `clip_time`, restores the prior clipboard contents iff still
+    /// matching, then exits. The parent process exec's this with
+    /// argv0 = `sleep_argv0` so subsequent `clip` calls can `pkill -f
+    /// "^<argv0>"` stale workers. Not a user-facing command. Hidden
+    /// from `--help`.
+    #[command(name = "internal-clipboard-restore", hide = true)]
+    InternalClipboardRestore,
 }
 
 #[derive(Args, Debug)]
@@ -349,10 +362,10 @@ fn main() {
     match cli.cmd {
         Command::Pass(args) => match args.cmd {
             PassCommand::Init { rest } => std::process::exit(init::run(&rest)),
-            PassCommand::Show { rest } => fallback::exec_bash("show", &rest),
+            PassCommand::Show { rest } => std::process::exit(show::run(&rest)),
             PassCommand::Find { rest } => std::process::exit(find::run(&rest)),
             PassCommand::Grep { rest } => std::process::exit(grep::run(&rest)),
-            PassCommand::Insert { rest } => fallback::exec_bash("insert", &rest),
+            PassCommand::Insert { rest } => std::process::exit(insert::run(&rest)),
             PassCommand::Edit { rest } => fallback::exec_bash("edit", &rest),
             PassCommand::Generate { rest } => fallback::exec_bash("generate", &rest),
             PassCommand::Rm { rest } => std::process::exit(rm::run(&rest)),
@@ -408,5 +421,6 @@ fn main() {
         },
 
         Command::InternalReencryptPath { dir } => std::process::exit(reencrypt::run(&dir)),
+        Command::InternalClipboardRestore => std::process::exit(internal_clipboard_restore::run()),
     }
 }

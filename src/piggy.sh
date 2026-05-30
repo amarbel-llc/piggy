@@ -285,123 +285,6 @@ cmd_usage() {
 	_EOF
 }
 
-cmd_show() {
-  local opts selected_line clip=0 qrcode=0
-  opts="$($GETOPT -o q::c:: -l qrcode::,clip:: -n "$PROGRAM" -- "$@")"
-  local err=$?
-  eval set -- "$opts"
-  while true; do case $1 in
-    -q | --qrcode)
-      qrcode=1
-      selected_line="${2:-1}"
-      shift 2
-      ;;
-    -c | --clip)
-      clip=1
-      selected_line="${2:-1}"
-      shift 2
-      ;;
-    --)
-      shift
-      break
-      ;;
-    esac done
-
-  [[ $err -ne 0 || ($qrcode -eq 1 && $clip -eq 1) ]] && die "Usage: $PROGRAM_PASS $COMMAND [--clip[=line-number],-c[line-number]] [--qrcode[=line-number],-q[line-number]] [pass-name]"
-
-  local pass
-  local path="$1"
-  local passfile="$PREFIX/$path.ebox"
-  check_sneaky_paths "$path"
-  if [[ -f $passfile ]]; then
-    if [[ $clip -eq 0 && $qrcode -eq 0 ]]; then
-      pass="$(piggy_decrypt "$passfile" | $BASE64)" || exit $?
-      echo "$pass" | $BASE64 -d
-    else
-      [[ $selected_line =~ ^[0-9]+$ ]] || die "Clip location '$selected_line' is not a number."
-      pass="$(piggy_decrypt "$passfile" | tail -n +${selected_line} | head -n 1)" || exit $?
-      [[ -n $pass ]] || die "There is no password to put on the clipboard at line ${selected_line}."
-      if [[ $clip -eq 1 ]]; then
-        clip "$pass" "$path"
-      elif [[ $qrcode -eq 1 ]]; then
-        qrcode "$pass" "$path"
-      fi
-    fi
-  elif [[ -d $PREFIX/$path ]]; then
-    if [[ -z $path ]]; then
-      echo "Password Store"
-    else
-      echo "${path%\/}"
-    fi
-    tree -N -C -l --noreport "$PREFIX/$path" 3>&- | tail -n +2 | sed -E 's/\.ebox(\x1B\[[0-9]+m)?( ->|$)/\1\2/g'
-  elif [[ -z $path ]]; then
-    die 'Error: password store is empty. Try "piggy pass init".'
-  else
-    die "Error: $path is not in the password store."
-  fi
-}
-
-cmd_insert() {
-  local opts multiline=0 noecho=1 force=0
-  opts="$($GETOPT -o mef -l multiline,echo,force -n "$PROGRAM" -- "$@")"
-  local err=$?
-  eval set -- "$opts"
-  while true; do case $1 in
-    -m | --multiline)
-      multiline=1
-      shift
-      ;;
-    -e | --echo)
-      noecho=0
-      shift
-      ;;
-    -f | --force)
-      force=1
-      shift
-      ;;
-    --)
-      shift
-      break
-      ;;
-    esac done
-
-  [[ $err -ne 0 || ($multiline -eq 1 && $noecho -eq 0) || $# -ne 1 ]] && die "Usage: $PROGRAM_PASS $COMMAND [--echo,-e | --multiline,-m] [--force,-f] pass-name"
-  local path="${1%/}"
-  local passfile="$PREFIX/$path.ebox"
-  check_sneaky_paths "$path"
-  set_git "$passfile"
-
-  [[ $force -eq 0 && -e $passfile ]] && yesno "An entry already exists for $path. Overwrite it?"
-
-  mkdir -p -v "$PREFIX/$(dirname -- "$path")"
-  find_piggy_ids "$(dirname -- "$path")"
-
-  if [[ $multiline -eq 1 ]]; then
-    echo "Enter contents of $path and press Ctrl+D when finished:"
-    echo
-    piggy_encrypt "$passfile" "$PIGGY_IDS"
-  elif [[ $noecho -eq 1 ]]; then
-    local password password_again
-    while true; do
-      read -r -p "Enter password for $path: " -s password || exit 1
-      echo
-      read -r -p "Retype password for $path: " -s password_again || exit 1
-      echo
-      if [[ $password == "$password_again" ]]; then
-        echo "$password" | piggy_encrypt "$passfile" "$PIGGY_IDS"
-        break
-      else
-        die "Error: the entered passwords do not match."
-      fi
-    done
-  else
-    local password
-    read -r -p "Enter password for $path: " -e password
-    echo "$password" | piggy_encrypt "$passfile" "$PIGGY_IDS"
-  fi
-  git_add_file "$passfile" "Add given password for $path to store."
-}
-
 cmd_edit() {
   [[ $# -ne 1 ]] && die "Usage: $PROGRAM_PASS $COMMAND pass-name"
 
@@ -515,14 +398,6 @@ help | --help)
   shift
   cmd_usage "$@"
   ;;
-show | ls | list)
-  shift
-  cmd_show "$@"
-  ;;
-insert | add)
-  shift
-  cmd_insert "$@"
-  ;;
 edit)
   shift
   cmd_edit "$@"
@@ -532,8 +407,11 @@ generate)
   cmd_generate "$@"
   ;;
 *)
-  COMMAND="show"
-  cmd_show "$@"
+  # `show` and `insert` are now Rust-dispatched directly; piggy.sh only
+  # handles the still-bash pass-style subcommands (edit, generate) plus
+  # the legacy help banner. Any other subcommand reaching here is a
+  # bug in the Rust dispatcher — the Rust clap layer is exhaustive.
+  die "piggy.sh: unknown subcommand: ${1:-(empty)}"
   ;;
 esac
 exit 0
