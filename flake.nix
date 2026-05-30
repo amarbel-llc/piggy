@@ -128,15 +128,17 @@
           src = ./vendor/pivy;
         };
 
-        # Runtime deps on PATH for the wrapped piggy binary. `pivy` is kept
-        # as a fallback for subcommands the rust binary hasn't implemented
-        # yet (box/tool/ca/luks/zfs) — see crates/piggy/src/fallback.rs.
+        # Runtime deps on PATH for the wrapped piggy binary. `pivy` is
+        # kept as a fallback for subcommands the rust binary hasn't
+        # implemented yet (box/tool/ca/luks/zfs — see
+        # crates/piggy/src/fallback.rs) and as the decrypt backend for
+        # `pass show` / `pass edit` / `pass generate -i` (the rust
+        # `crypt::decrypt` shells to `pivy-box stream decrypt`).
         runtimeDeps = [
           pivyPkg
           pkgs.git
           pkgs.tree
           pkgs.qrencode
-          pkgs.getopt
           pkgs.gnugrep
           pkgs.coreutils
         ];
@@ -222,20 +224,17 @@
           installPhase = ''
             mkdir -p $out/bin \
                      $out/libexec/piggy \
-                     $out/libexec/piggy/platform \
                      $out/share/man/man1
 
-            # Stash the rust dispatcher, the piggy-ids helper binary,
-            # and the bash script at known paths, then wrap the rust
-            # binary as $out/bin/piggy with PIGGY_SH_PATH +
-            # PIGGY_IDS_PATH set so fallback::find_piggy_sh and
-            # piggy.sh's recipients/encrypt paths locate them.
+            # Stash the rust dispatcher and the piggy-ids helper binary
+            # at known paths, then wrap the rust binary as
+            # $out/bin/piggy with PIGGY_IDS_PATH set so the rust
+            # `piggy-ids` callers (encrypt / list-available / etc.)
+            # locate it.
             install -m 0755 ${piggy-rs}/bin/piggy \
                             $out/libexec/piggy/piggy-rs
             install -m 0755 ${piggy-rs}/bin/piggy-ids \
                             $out/libexec/piggy/piggy-ids
-            install -m 0755 src/piggy.sh \
-                            $out/libexec/piggy/piggy.sh
             # User-facing SSH_ASKPASS helper. Lives under libexec/piggy/
             # so consumers can reference it as
             # `''${piggy}/libexec/piggy/piggy-askpass.sh`, matching the
@@ -251,14 +250,6 @@
             makeWrapper $out/libexec/piggy/piggy-askpass.sh.unwrapped \
                         $out/libexec/piggy/piggy-askpass.sh \
               --prefix PATH : ${pkgs.lib.makeBinPath askpassRuntimeDeps}
-            if [ -f src/platform/darwin.sh ]; then
-              install -m 0644 src/platform/darwin.sh \
-                              $out/libexec/piggy/platform/darwin.sh
-            fi
-            if [ -f src/platform/linux.sh ]; then
-              install -m 0644 src/platform/linux.sh \
-                              $out/libexec/piggy/platform/linux.sh
-            fi
             for f in doc/*.scd; do
               stem="$(basename "$f" .scd)"
               section="''${stem##*.}"
@@ -268,12 +259,12 @@
             done
 
             # The PIGGY_VERSION/COMMIT/<component> --set group below is the
-            # `piggy version` data source: cmd_version (src/piggy.sh) reads
-            # these from the environment makeWrapper bakes in. Component
-            # versions are read live off the derivations (pivyPkg.version,
-            # pkgs-master.pcsclite.version) so a pin bump shows up in the
-            # output with no manual edit — drift stays visible, per
-            # eng-versioning(7).
+            # `piggy version` data source: the native `version` handler
+            # reads these from the environment makeWrapper bakes in.
+            # Component versions are read live off the derivations
+            # (pivyPkg.version, pkgs-master.pcsclite.version) so a pin
+            # bump shows up in the output with no manual edit — drift
+            # stays visible, per eng-versioning(7).
             #
             # IGLOO-PROMOTION CANDIDATE (amarbel-llc/nixpkgs#68): this
             # version+commit+component injection is the non-Go analog of
@@ -282,7 +273,6 @@
             # {version.env, src.rev, components} is the lift target — this
             # block is the tracer-bullet reference consumer.
             makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
-              --set PIGGY_SH_PATH $out/libexec/piggy/piggy.sh \
               --set PIGGY_IDS_PATH $out/libexec/piggy/piggy-ids \
               --set PIGGY_VERSION ${piggyVersion} \
               --set PIGGY_COMMIT ${piggyCommit} \
@@ -356,11 +346,11 @@
         batsLib = import ./bats.nix {
           inherit pkgs;
           # Unwrapped rust dispatcher: lets test-PATH overrides
-          # (mock-pivy-box.sh etc.) win over what piggy.sh invokes.
+          # (mock-pivy-box.sh etc.) win over what the rust handlers
+          # invoke for crypto.
           piggyRs = piggy-rs;
-          # Wrapped piggy: source of `$out/libexec/piggy/piggy.sh`
-          # and `$out/libexec/piggy/piggy-ids` referenced by the
-          # extraEnv (PIGGY_SH_PATH, PIGGY_IDS_REAL).
+          # Wrapped piggy: source of `$out/libexec/piggy/piggy-ids`
+          # referenced by the extraEnv (PIGGY_IDS_REAL).
           piggyWrapped = piggy;
           # Threaded through so the lane can inject CONFORMANCE_BIN
           # for conformance/piggy_agent_protocol.bats. See piggy#115.

@@ -2,18 +2,17 @@
 //!
 //! Dispatch layout (top-level argv is parsed entirely by clap):
 //!
-//! 1. `piggy pass <X>` — every password-store subcommand (`init`, `show`,
-//!    `find`, `grep`, `insert`, `edit`, `generate`, `rm`, `git`) lives
-//!    under the `pass` namespace and `exec(2)`s into
-//!    `piggy.sh <X> <rest...>` via [`fallback::exec_bash`]. The case
-//!    statement at the bottom of `piggy.sh` does the second-level
-//!    dispatch to the matching `cmd_*` function. Per-subcommand
-//!    `getopt` parsing stays in bash; clap captures all trailing argv
-//!    verbatim.
-//! 2. Top-level `help` `exec_bash`es into piggy.sh's `cmd_usage` (the
-//!    pass-style usage text). `version` is a native Rust handler
-//!    (`version::run`) emitting the eng-versioning(7) format; both live
-//!    outside the `pass` namespace.
+//! 1. `piggy pass <X>` — every password-store subcommand is a native
+//!    Rust handler under `crates/piggy/src/`. There is no bash hop.
+//!    Each module mirrors its bash predecessor `cmd_*` in
+//!    `src/piggy.sh` (now retired); see the per-module docstrings for
+//!    the line-by-line provenance. Per-subcommand argv parsing is
+//!    done in the handler; clap captures all trailing argv via
+//!    `trailing_var_arg + allow_hyphen_values`.
+//! 2. Top-level `help` is the native [`usage`] module — the pass-style
+//!    banner ported from `cmd_usage`. `version` is a native Rust
+//!    handler ([`version::run`]) emitting the eng-versioning(7)
+//!    format; both live outside the `pass` namespace.
 //! 3. C-pivy passthroughs — every other subcommand `exec(2)`s the
 //!    matching `pivy-*` binary from `$PATH` via
 //!    [`fallback::exec_pivy`]:
@@ -41,8 +40,10 @@
 
 mod copy_move;
 mod crypt;
+mod edit;
 mod fallback;
 mod find;
+mod generate;
 mod git;
 mod git_ops;
 mod grep;
@@ -56,6 +57,7 @@ mod rm;
 mod show;
 mod show_batch;
 mod store;
+mod usage;
 mod verify;
 mod version;
 
@@ -93,7 +95,7 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
-    /// Print piggy.sh's pass-style usage text.
+    /// Print the pass-style usage text.
     Help {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
@@ -169,8 +171,10 @@ enum Command {
         rest: Vec<String>,
     },
     /// Internal: re-encrypt every entry under DIR to the nearest
-    /// piggy-ids. Invoked by piggy.sh's `reencrypt_path` shim; not a
-    /// user-facing command. Hidden from `--help`.
+    /// piggy-ids. Historically invoked by the bash `reencrypt_path`
+    /// shim; now reached only from in-process callers (`init` etc.)
+    /// but still exposed as a subcommand for backward compat and for
+    /// out-of-tree integrations. Hidden from `--help`.
     #[command(name = "internal-reencrypt-path", hide = true)]
     InternalReencryptPath {
         /// Directory under the store to walk.
@@ -196,7 +200,7 @@ struct PassArgs {
 
 /// Each variant captures `rest` with `trailing_var_arg` +
 /// `allow_hyphen_values` so per-command flags (e.g. `-c`, `--multiline`,
-/// `-r`) reach `piggy.sh`'s `getopt` blocks untouched. Clap is only
+/// `-r`) reach the native handler's argv parser untouched. Clap is only
 /// responsible for matching the subcommand name and any of its visible
 /// aliases.
 #[derive(Subcommand, Debug)]
@@ -267,9 +271,11 @@ enum PassCommand {
     /// Decrypt every entry under the store (or under SUBPATH) and
     /// report each one as ok / not ok in tree form.
     ///
-    /// Unlike the other `pass` subcommands this is handled in Rust and
-    /// does not delegate to piggy.sh, so plain clap flag parsing
-    /// applies (`--help` works, no `--` passthrough).
+    /// Uses clap arg parsing (plain `subpath` positional, no
+    /// `trailing_var_arg` rest) so `--help` works and `--` is not a
+    /// passthrough — historically this differed from the bash-bound
+    /// handlers that captured everything verbatim; that distinction
+    /// no longer matters post-#96 but the explicit clap arg is kept.
     Verify {
         /// Optional sub-directory within the store to limit the walk.
         subpath: Option<String>,
@@ -366,8 +372,8 @@ fn main() {
             PassCommand::Find { rest } => std::process::exit(find::run(&rest)),
             PassCommand::Grep { rest } => std::process::exit(grep::run(&rest)),
             PassCommand::Insert { rest } => std::process::exit(insert::run(&rest)),
-            PassCommand::Edit { rest } => fallback::exec_bash("edit", &rest),
-            PassCommand::Generate { rest } => fallback::exec_bash("generate", &rest),
+            PassCommand::Edit { rest } => std::process::exit(edit::run(&rest)),
+            PassCommand::Generate { rest } => std::process::exit(generate::run(&rest)),
             PassCommand::Rm { rest } => std::process::exit(rm::run(&rest)),
             PassCommand::Mv { rest } => std::process::exit(copy_move::run_move(&rest)),
             PassCommand::Cp { rest } => std::process::exit(copy_move::run_copy(&rest)),
@@ -400,7 +406,7 @@ fn main() {
         },
 
         Command::List { rest } => fallback::exec_piggy_ids("list-all", &rest),
-        Command::Help { rest } => fallback::exec_bash("help", &rest),
+        Command::Help { .. } => std::process::exit(usage::run()),
         Command::Version { .. } => std::process::exit(version::run()),
 
         Command::Agent { rest } => fallback::exec_pivy("agent", &rest),

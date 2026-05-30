@@ -89,11 +89,14 @@ fn is_shm_usable(_shm: &Path) -> bool {
     false
 }
 
-/// `piggy.XXXXXXXXXXXXX` (13 X's) — the bash mktemp template.
+/// `piggy.XXXXXXXXXXXXX` (13 X's) — the bash mktemp template. The
+/// suffix count is a load-bearing pin: the unit tests assert on it
+/// to keep our naming aligned with the original bash convention.
 pub(crate) const TEMPLATE_PREFIX: &str = "piggy.";
 pub(crate) const TEMPLATE_SUFFIX_X_COUNT: usize = 13;
 
-pub(crate) fn template_name() -> String {
+#[cfg(test)]
+fn template_name() -> String {
     let mut s = String::with_capacity(TEMPLATE_PREFIX.len() + TEMPLATE_SUFFIX_X_COUNT);
     s.push_str(TEMPLATE_PREFIX);
     for _ in 0..TEMPLATE_SUFFIX_X_COUNT {

@@ -37,16 +37,15 @@ appears in the worktree.
 
 ## Architecture
 
-**Rust-on-top, bash-on-back CLI** — top-level argv parsing is a Rust `clap` subcommand tree in `crates/piggy/src/main.rs`. Password-management commands live as nested subcommands under a top-level `pass` namespace. Each `pass <X>` is dispatched in one of two ways:
+**Pure-Rust CLI** — top-level argv parsing is a Rust `clap` subcommand tree in `crates/piggy/src/main.rs`. Password-management commands live as nested subcommands under a top-level `pass` namespace. Every `pass <X>` is handled in Rust:
 
-- **Pure Rust handlers** (no bash hop): `find`, `grep`, `git`, `rm`, `verify`, `mv`, `cp`, and the full `recipients` family (`list`, `list-available`, `add` incl. `--all-attached`, `remove`, `sync`). Implemented in `crates/piggy/src/{find,grep,git,rm,verify,copy_move,recipients}.rs`. Shared substrate (store walk, sneaky-path check, git ops) in `store.rs` and `git_ops.rs`. See umbrella #96 for the ongoing port; the `piggy pass *` map there tracks the current state.
-- **Bash dispatch** (`fallback::exec_bash` `exec(2)` into `src/piggy.sh`): `init`, `show`, `insert`, `edit`, `generate`. These keep their `cmd_*` functions in `piggy.sh`. The bash subprocesses receive `$PIGGY_BIN=current_exe()` so any helper that needs to call back into Rust (currently only `reencrypt_path`, called by `cmd_init`, which exec's the hidden `piggy internal-reencrypt-path <dir>` subcommand) has an absolute path to the same binary.
+- **Pass-style handlers**: `init`, `show`, `find`, `grep`, `insert`, `edit`, `generate`, `rm`, `mv`, `cp`, `git`, `verify`, `show-batch`, and the full `recipients` family (`list`, `list-available`, `add` incl. `--all-attached`, `remove`, `sync`). Implemented in `crates/piggy/src/{init,show,find,grep,insert,edit,generate,rm,copy_move,git,verify,show_batch,recipients}.rs`. Shared substrate: store walk + sneaky-path check in `store.rs`, git ops in `git_ops.rs`, crypt shims (`pivy-box stream encrypt/decrypt`) in `crypt.rs`, RAII secure-tmpdir + clipboard/qrcode/shred in `platform/`.
 
-`piggy help` stays top-level and dispatches into `cmd_usage` (bash). `piggy version` is a pure Rust handler (`crates/piggy/src/version.rs`) that emits the eng-versioning(7) self-line (`piggy <version>+<commit>`) plus a pinned-component table, reading the values from the `PIGGY_VERSION`/`PIGGY_COMMIT`/`PIGGY_<component>_*` env vars `flake.nix`'s makeWrapper bakes in (dev `cargo build` renders `unknown`). `piggy.sh` is installed under `$out/libexec/piggy/`, not on `$PATH`; the Rust dispatcher reaches it via `PIGGY_SH_PATH` baked in by `flake.nix`'s makeWrapper. The remaining top-level clap handlers (`agent`, `box`, `tool`, `ca`, `luks`, `zfs`, and the generic `piggy pivy <tool>` passthrough) `exec(2)` into the matching C `pivy-*` binary via `fallback::exec_pivy`. Top-level dispatch is exhaustive in clap; `fallback.rs` has no catch-all bash branch. Bare `piggy` and bare `piggy pass` print clap help (no implicit `cmd_show ""`).
+`piggy help` is a native Rust handler (`crates/piggy/src/usage.rs`) that emits the pass-style usage banner byte-for-byte from the legacy bash `cmd_usage` (interpolating `$PIGGY_CLIP_TIME`, `$PIGGY_GENERATED_LENGTH`, `${EDITOR:-vi}`). `piggy version` is a pure Rust handler (`crates/piggy/src/version.rs`) that emits the eng-versioning(7) self-line (`piggy <version>+<commit>`) plus a pinned-component table, reading the values from the `PIGGY_VERSION`/`PIGGY_COMMIT`/`PIGGY_<component>_*` env vars `flake.nix`'s makeWrapper bakes in (dev `cargo build` renders `unknown`). The remaining top-level clap handlers (`agent`, `box`, `tool`, `ca`, `luks`, `zfs`, and the generic `piggy pivy <tool>` passthrough) `exec(2)` into the matching C `pivy-*` binary via `fallback::exec_pivy`. Top-level dispatch is exhaustive in clap; `fallback.rs` has no catch-all branch. Bare `piggy` and bare `piggy pass` print clap help (no implicit `cmd_show ""`).
 
 Rust re-implementations of `agent` and `box` live under `crates/piggy/src/cmd/{agent,pivy_box}` (reachable via the `piggy::cmd` library surface) but stay off the user-facing dispatch path in v1.0. They will be re-pointed at once they reach feature parity with the C binaries; see #56 (PC/SC transactions in `piggy-piv`), #57 (direct-PCSC ECDH oracle for `piggy box stream decrypt`), #58 (askpass `[piggy-test]` context tagging), and #59 (probe-loop PIN-clearing in `piggy agent`) for the maturation roadmap.
 
-**Known v1 acceptance**: the Rust `pass git` port (commit `03fb0ca`) does not allocate a ramdisk before exec-ing git on the non-init passthrough path. Bash `cmd_git` called `tmpdir nowarn` to set `$TMPDIR=$SECURE_TMPDIR`; the Rust port forwards `$SECURE_TMPDIR` to git as `$TMPDIR` if already set in the environment but does not create one itself. Documented inline in `crates/piggy/src/git.rs`; restored once umbrella #96 step 9 (Rust platform layer) lands.
+**Known v1 acceptance**: the Rust `pass git` port (commit `03fb0ca`) does not allocate a ramdisk before exec-ing git on the non-init passthrough path. Bash `cmd_git` called `tmpdir nowarn` to set `$TMPDIR=$SECURE_TMPDIR`; the Rust port forwards `$SECURE_TMPDIR` to git as `$TMPDIR` if already set in the environment but does not create one itself. Documented inline in `crates/piggy/src/git.rs`. The platform layer (`crates/piggy/src/platform/tmpdir.rs`) now exposes a `SecureTmpdir` RAII guard used by `pass edit`; promoting `pass git` onto the same guard is a straightforward follow-up.
 
 **Crypto layer:**
 - Encrypt: `pivy-box stream encrypt <template> < plaintext > file.ebox`
@@ -54,22 +53,24 @@ Rust re-implementations of `agent` and `box` live under `crates/piggy/src/cmd/{a
 - Templates (`.pivy-id` files) replace `.gpg-id` for recipient management
 - Encrypted files use `.ebox` extension instead of `.gpg`
 
-**Platform abstraction** — `src/platform/darwin.sh` overrides clipboard (pbcopy/pbpaste), tmpdir (ramdisk via hdid), and getopt resolution for macOS. Linux uses defaults from the main script.
+**Platform abstraction** — `crates/piggy/src/platform/{clipboard,qrcode,shred,tmpdir}.rs` ports the clipboard/qrcode/shred/tmpdir helpers. Linux uses `/dev/shm` (preferred) or `${TMPDIR:-/tmp}` for the secure tmpdir; clipboard prefers wl-copy → xclip → error. macOS uses pbcopy/pbpaste, an hdid-backed HFS ramdisk for tmpdir, and `srm -f -z` for shred — selected at compile time via `#[cfg(target_os = "macos")]`.
 
 **Test framework** — BATS (Bash Automated Testing System) in `zz-tests_bats/`. Tests use mock scripts (`helpers/mock-pivy-box.sh`, `helpers/mock-pivy-tool.sh`) that substitute base64 for real encryption, so no physical PIV card is needed.
 
-**Bats lane builder** — `bats.nix` wraps `bats.lib.${system}.batsLane` (the canonical builder exposed by the `amarbel-llc/bats` flake; the nixpkgs-overlay-provided `pkgs.testers.batsLane` is no longer used and was retired with the bats flake split). Two scan roots: top-level `zz-tests_bats/t*.bats` AND `zz-tests_bats/conformance/*.bats`. `# bats file_tags=` directives in either root are auto-discovered, producing one `bats-<tag>` derivation per unique tag plus `bats-default`. The default lane filter is `!hardware`: tests tagged `# bats file_tags=hardware` (currently `t0610-recipients-add-attached.bats`, `conformance/piggy_box_interop.bats`, `conformance/piggy_box_decrypt_interop.bats`, `conformance/piggy_recipients_add_attached.bats`, `conformance/piggy_pass_init.bats`, `conformance/pivy_agent_hardware.bats`, `explore/explore_local_guid_pcsc.bats`) are excluded from `bats-default` because they need a real pcscd talking to fib or hardware, which can't run inside the nix build sandbox. Those tests stay invoked via the existing `just test-bats-conformance-*` recipes. Non-hardware conformance tests (`piggy_askpass.bats`, `piggy_pivy.bats`, `piggy_agent_protocol.bats`) run under both the sandboxed lane AND the `just test-bats-conformance` recipe. The dual-coverage is intentional (piggy#117): `nix build .#bats-default` is the authoritative CI gate (stronger isolation — sandboxed HOME, no pivy-agent leak path), while the just recipe stays as an ergonomic paved path (no nix build overhead, fast iteration, works without per-invocation user permissions for both humans and agents). `zz-tests_bats/explore/` is intentionally not scanned. The wrapped piggy is injected into the lane via the `binaries` map (`PIGGY=${piggy}/bin/piggy`); `CONFORMANCE_BIN` is similarly threaded for `piggy_agent_protocol.bats`; `PIGGY_SH_PATH` / `PIGGY_IDS_REAL` are pinned at the wrapped `$out/libexec/piggy/` via `extraEnv`.
+**Bats lane builder** — `bats.nix` wraps `bats.lib.${system}.batsLane` (the canonical builder exposed by the `amarbel-llc/bats` flake; the nixpkgs-overlay-provided `pkgs.testers.batsLane` is no longer used and was retired with the bats flake split). Two scan roots: top-level `zz-tests_bats/t*.bats` AND `zz-tests_bats/conformance/*.bats`. `# bats file_tags=` directives in either root are auto-discovered, producing one `bats-<tag>` derivation per unique tag plus `bats-default`. The default lane filter is `!hardware`: tests tagged `# bats file_tags=hardware` (currently `t0610-recipients-add-attached.bats`, `conformance/piggy_box_interop.bats`, `conformance/piggy_box_decrypt_interop.bats`, `conformance/piggy_recipients_add_attached.bats`, `conformance/piggy_pass_init.bats`, `conformance/pivy_agent_hardware.bats`, `explore/explore_local_guid_pcsc.bats`) are excluded from `bats-default` because they need a real pcscd talking to fib or hardware, which can't run inside the nix build sandbox. Those tests stay invoked via the existing `just test-bats-conformance-*` recipes. Non-hardware conformance tests (`piggy_askpass.bats`, `piggy_pivy.bats`, `piggy_agent_protocol.bats`) run under both the sandboxed lane AND the `just test-bats-conformance` recipe. The dual-coverage is intentional (piggy#117): `nix build .#bats-default` is the authoritative CI gate (stronger isolation — sandboxed HOME, no pivy-agent leak path), while the just recipe stays as an ergonomic paved path (no nix build overhead, fast iteration, works without per-invocation user permissions for both humans and agents). `zz-tests_bats/explore/` is intentionally not scanned. The wrapped piggy is injected into the lane via the `binaries` map (`PIGGY=${piggy}/bin/piggy`); `CONFORMANCE_BIN` is similarly threaded for `piggy_agent_protocol.bats`; `PIGGY_IDS_REAL` is pinned at the wrapped `$out/libexec/piggy/piggy-ids` via `extraEnv`.
 
 ## Key Files
 
 - `crates/piggy/src/main.rs` — clap subcommand tree; top-level dispatch.
-- `crates/piggy/src/fallback.rs` — `exec_bash(subcmd, rest)` (pass-style handlers still in bash) + `exec_pivy(tool, rest)` (C-pivy handlers + `piggy pivy <tool>` passthrough) + `exec_piggy_ids(subcmd, rest)`. All bash-bound exec paths forward `$PIGGY_BIN=current_exe()` so bash helpers can call back into Rust.
-- `crates/piggy/src/{verify,find,grep,git,rm,copy_move,recipients,reencrypt}.rs` — Rust handlers for the pass-style subcommands that have moved off the bash dispatch path.
+- `crates/piggy/src/fallback.rs` — `exec_pivy(tool, rest)` (C-pivy handlers + `piggy pivy <tool>` passthrough) + `exec_piggy_ids(subcmd, rest)` (top-level `piggy list`). No bash dispatch path survives post-#96.
+- `crates/piggy/src/{init,show,insert,edit,generate,verify,find,grep,git,rm,copy_move,recipients,reencrypt,show_batch}.rs` — Rust handlers for every pass-style subcommand.
+- `crates/piggy/src/crypt.rs` — `encrypt` / `decrypt` shims used by `show`/`insert`/`edit`/`generate` (pipe plaintext through `piggy-ids encrypt` and decrypt through `pivy-box stream decrypt`; honors `PIGGY_AUTH_SOCK`).
+- `crates/piggy/src/usage.rs` — Rust handler for `piggy help` (byte-for-byte port of the legacy bash `cmd_usage`; interpolates `$PIGGY_CLIP_TIME`, `$PIGGY_GENERATED_LENGTH`, `${EDITOR:-vi}`).
 - `crates/piggy/src/version.rs` — Rust handler for the top-level `piggy version` (eng-versioning(7) self-line + pinned-component table).
+- `crates/piggy/src/internal_clipboard_restore.rs` — hidden subcommand that backs the deferred-restore worker for `show -c` / `generate -c` (`pkill`-named via `argv[0]` rename).
+- `crates/piggy/src/platform/{clipboard,qrcode,shred,tmpdir}.rs` — clipboard tool selection (wl-copy/xclip/pbcopy), qrencode viewer plan, `shred -f -z`/`srm -f -z`, and the RAII `SecureTmpdir` guard (`/dev/shm` ramdisk + disk fallback with shred-on-drop; macOS hdid ramdisk under `#[cfg(target_os = "macos")]`).
 - `crates/piggy/src/store.rs` — shared store helpers: `store_root` (`$PIGGY_STORE_DIR > $XDG_DATA_HOME/piggy > $HOME/.local/share/piggy`), `resolve_target` (sneaky-path check), `collect_eboxes` (the canonical `find -L $PREFIX -path '*/.git' -prune -o -iname '*.ebox'` walk), `find_piggy_ids` (walk-up-from-subfolder).
 - `crates/piggy/src/git_ops.rs` — shared git helpers: `find_inner_git_dir` (mirrors `set_git`), `add_and_commit`, `commit`, `rm`, `is_inside_work_tree`, `signing_flag`, `git_at`.
-- `src/piggy.sh` — bash command bodies for the still-bash pass-style subcommands (init, show, insert, edit, generate). Installed under `$out/libexec/piggy/`, not on `$PATH`; reached via `PIGGY_SH_PATH` baked in by `flake.nix`'s makeWrapper.
-- `src/platform/darwin.sh` — macOS platform overrides (sourced by `piggy.sh` at runtime).
 - `zz-tests_bats/common.bash` — bats test harness (mock PATH, temp store, git identity).
 - `zz-tests_bats/helpers/mock-pivy-box.sh` — mock pivy-box using base64 encode/decode.
 - `flake.nix` — nix package definition and dev shell. Roots both `nixpkgs` and the transitive `amarbel-llc/bats` flake at `amarbel-llc/nixpkgs`. The bats lane builder is consumed via `bats.lib.${system}.batsLane` directly from the `amarbel-llc/bats` flake (see `bats.nix`).
@@ -126,7 +127,7 @@ improvements that build on this prefix.
 
 ## Environment Variables
 
-User config is via `PIGGY_*` env vars (store dir, clip time, generated length, character set, etc.) — defaults are set at the top of `src/piggy.sh`. `PIGGY_STORE_DIR` defaults to `~/.local/share/piggy`.
+User config is via `PIGGY_*` env vars (store dir, clip time, generated length, character set, etc.). Defaults live alongside their consumer (`generate.rs` for `PIGGY_GENERATED_LENGTH`/`PIGGY_CHARACTER_SET*`; `show.rs` for `PIGGY_CLIP_TIME`; `clipboard.rs` for `PIGGY_X_SELECTION`; `store.rs` for `PIGGY_STORE_DIR`). `PIGGY_STORE_DIR` defaults to `~/.local/share/piggy`.
 
 `PIGGY_AUTH_SOCK` selects the SSH-agent socket used for PIV decrypt
 (`pivy-box stream decrypt`). When set and non-empty it overrides the
@@ -134,12 +135,14 @@ ambient `SSH_AUTH_SOCK` for piggy's own decrypts only; when unset, piggy
 uses `SSH_AUTH_SOCK` as before. The point is to route decrypts at
 piggy-agent directly (which advertises the `ecdh@joyent.com` extension)
 rather than through an ssh-agent-mux that may not — see #123 (and
-ssh-agent-mux#10 for the mux-side capability drop). Honored at all three
-decrypt sites: bash `piggy_decrypt` (`src/piggy.sh`), Rust `reencrypt_one`
-(`crates/piggy/src/reencrypt.rs`), and the Rust `AgentEcdhOracle` source
-(`crates/piggy/src/cmd/pivy_box.rs`, off the v1.0 dispatch path). The
-canonical resolver is `agent_client::piggy_auth_sock_override` in the
-library crate; the disjoint binary crate mirrors the one-line lookup.
+ssh-agent-mux#10 for the mux-side capability drop). Honored at every
+decrypt site: the Rust `crypt::decrypt` shim
+(`crates/piggy/src/crypt.rs`, used by `show` / `edit` / `generate -i`),
+`reencrypt_one` (`crates/piggy/src/reencrypt.rs`), and the Rust
+`AgentEcdhOracle` source (`crates/piggy/src/cmd/pivy_box.rs`, off the
+v1.0 dispatch path). The canonical resolver is
+`agent_client::piggy_auth_sock_override` in the library crate; the
+disjoint binary crate mirrors the one-line lookup.
 
 ## Debugging
 

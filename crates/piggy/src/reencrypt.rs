@@ -20,11 +20,12 @@
 //!
 //! This module is reachable two ways:
 //!
-//! 1. From Rust callers (`mv`/`cp`, and future `recipients
-//!    add/remove/sync` ports), via `reencrypt::run`.
-//! 2. From the remaining bash callers (today's `init`/recipients
-//!    flows), via the hidden top-level `piggy internal-reencrypt-path
-//!    <dir>` subcommand, which `piggy.sh::reencrypt_path` exec's into.
+//! 1. From Rust callers (`init`, `mv`, `cp`, `recipients
+//!    add/remove/sync`) via `reencrypt::run`.
+//! 2. From the hidden top-level `piggy internal-reencrypt-path
+//!    <dir>` subcommand, kept for backward compat with out-of-tree
+//!    integrations that historically invoked the bash
+//!    `reencrypt_path` shim.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

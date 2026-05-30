@@ -26,7 +26,7 @@ nix develop
 just build
 ```
 
-Dependencies (pinned by the devshell): `bash`, `pivy` (vendored at `vendor/pivy/`), `git`, a clipboard helper (`xclip` / `wl-clipboard` / `pbcopy`), `tree`, GNU `getopt`, `qrencode`.
+Dependencies (pinned by the devshell): `pivy` (vendored at `vendor/pivy/`), `git`, a clipboard helper (`xclip` / `wl-clipboard` / `pbcopy`), `tree`, `qrencode`.
 
 > **Note on the vendored pivy.** The standalone [`amarbel-llc/pivy`](https://github.com/amarbel-llc/pivy) fork (forked from [`arekinath/pivy`](https://github.com/arekinath/pivy)) is **archived**. All ongoing pivy work — bug fixes, new features, vendored patches — happens in this repository under `vendor/pivy/`. Do not open issues or send PRs against the archived fork; file them here against `vendor/pivy/...` instead. The vendored tree is the canonical source.
 
@@ -40,7 +40,7 @@ The user-facing CLI is `piggy <subcommand>`. `piggy --help` prints the full subc
 
 See the manpages in `doc/` for the full command reference and the `PIGGY_*` environment-variable knobs.
 
-`src/piggy.sh` is the bash implementation behind the pass-style handlers. It is an internal detail of the installed binary (lives under `$out/libexec/piggy/`, not on `$PATH`) and is not a separately callable program.
+The pass-style handlers are implemented natively in Rust under `crates/piggy/src/`. The C `pivy-*` family is shelled to for crypto and PIV operations (`pivy-box stream encrypt/decrypt` plus the `tool`/`ca`/`luks`/`zfs` passthroughs).
 
 A more complete walkthrough is tracked at [#25](https://github.com/amarbel-llc/piggy/issues/25).
 

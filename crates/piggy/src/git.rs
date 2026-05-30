@@ -11,15 +11,16 @@
 //!
 //! ## v1 limitation
 //!
-//! The bash `cmd_git` runs `tmpdir nowarn` before non-init passthrough
+//! The bash `cmd_git` ran `tmpdir nowarn` before non-init passthrough
 //! to point `$TMPDIR` at a ramdisk so that any temp files git writes
-//! (e.g. when `diff.ebox.textconv` is invoked) land on volatile
+//! (e.g. when `diff.ebox.textconv` is invoked) landed on volatile
 //! memory. The Rust port currently forwards a pre-existing
 //! `$SECURE_TMPDIR` via `$TMPDIR` but does not allocate a ramdisk
 //! itself. On test runs the harness already sets `SECURE_TMPDIR`. On
-//! real user systems the security posture is slightly weaker than the
-//! bash original until a Rust port of `tmpdir` lands. See the
-//! umbrella tracking issue.
+//! real user systems the security posture is slightly weaker than
+//! the bash original; the platform layer's `SecureTmpdir` guard
+//! (`crates/piggy/src/platform/tmpdir.rs`) is the drop-in target for
+//! a follow-up that wires `pass git` onto it.
 
 use std::os::unix::process::CommandExt;
 use std::path::Path;

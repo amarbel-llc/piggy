@@ -17,18 +17,15 @@ unset PIGGY_CHARACTER_SET
 unset PIGGY_CHARACTER_SET_NO_SYMBOLS
 unset EDITOR
 
-# Use system getopt (nix provides gnu-getopt on PATH)
-export PIGGY_GETOPT=getopt
-
 # Repo root is the working directory where bats is invoked.
 #
 # Two modes share this harness:
 #   - Local `bats --no-sandbox` from the repo root: $PWD = repo root.
 #   - Nix-sandboxed bats lane (`bats.lib.${system}.batsLane`): $PWD = stage/zz-tests_bats/
 #     and the helpers live at $PWD/helpers/ (no extra zz-tests_bats/
-#     prefix). The lane builder injects $PIGGY, $PIGGY_SH_PATH, and
-#     $PIGGY_IDS_REAL via extraEnv so we never need to resolve those
-#     out of $REPO_ROOT in the sandbox path.
+#     prefix). The lane builder injects $PIGGY and $PIGGY_IDS_REAL via
+#     extraEnv so we never need to resolve those out of $REPO_ROOT in
+#     the sandbox path.
 #
 # Resolve the helpers dir from common.bash's own location so both modes
 # pick up the same files without splitting paths on $PWD.
@@ -51,16 +48,15 @@ git config --global user.email "Piggy-Automated-Testing-Suite@test.local"
 git config --global user.name "Piggy Automated Testing Suite"
 
 # Piggy under test:
-#   - $PIGGY is the rust dispatcher binary (NOT src/piggy.sh directly).
-#     Every bash subcommand goes through the full rust → bash dispatch path
-#     so the integration layer is exercised on every test run.
-#   - $PIGGY_SH_PATH points the rust binary at the in-repo bash script.
+#   - $PIGGY is the rust dispatcher binary (pure Rust post-#96; no bash
+#     dispatch survives). Every pass-style subcommand runs through the
+#     same binary so the integration layer is exercised on every test
+#     run.
 #
 # Resolution order: $PIGGY env var → target/debug/piggy → target/release/piggy.
 # The nix lane (`bats.lib.${system}.batsLane`) injects $PIGGY pre-set; the
 # `target/debug` fallback is only reached for local `bats --no-sandbox`
-# runs. We deliberately do NOT fall back to src/piggy.sh — bypassing
-# the rust dispatcher would hide regressions in the wrapper.
+# runs.
 if [[ -z ${PIGGY:-} ]]; then
   if [[ -x $REPO_ROOT/target/debug/piggy ]]; then
     PIGGY="$REPO_ROOT/target/debug/piggy"
@@ -73,12 +69,13 @@ if [[ -z ${PIGGY:-} ]]; then
   fi
 fi
 export PIGGY
-# `:=` so the lane builder's extraEnv (which points at the wrapped
-# $out/libexec/piggy/piggy.sh) wins; local runs fall back to src/.
-: "${PIGGY_SH_PATH:=$REPO_ROOT/src/piggy.sh}"
-export PIGGY_SH_PATH
 
-# Pre-set SECURE_TMPDIR so piggy skips ramdisk creation (sandbox-safe)
+# Pre-set SECURE_TMPDIR so piggy's `pass git` passthrough has a
+# tmpdir to forward as $TMPDIR (sandbox-safe). The Rust `edit`
+# handler's SecureTmpdir guard ignores this and allocates its own
+# directory under $TMPDIR / /dev/shm; SECURE_TMPDIR survives only as
+# the git-textconv carrier and as the legacy escape hatch for any
+# consumer still poking at it.
 export SECURE_TMPDIR="$BATS_TEST_TMPDIR/secure-tmp"
 mkdir -p "$SECURE_TMPDIR"
 

@@ -6,10 +6,9 @@
 # flake is the canonical source). Provides piggy-specific defaults:
 # `bats-libs` from amarbel-llc/bats on `BATS_LIB_PATH`; the wrapped
 # `piggy` derivation injected via the `binaries` map so the rust
-# dispatcher → bash subprocess path is exercised end-to-end; and
-# `PIGGY_SH_PATH` / `PIGGY_IDS_REAL` pointed at the wrapped
-# `$out/libexec/piggy/` so the same harness works inside the nix
-# sandbox and in local `bats --no-sandbox` runs.
+# dispatcher is exercised end-to-end; and `PIGGY_IDS_REAL` pointed at
+# the wrapped `$out/libexec/piggy/piggy-ids` so the same harness works
+# inside the nix sandbox and in local `bats --no-sandbox` runs.
 #
 # Auto-discovers `# bats file_tags=foo,bar` directives at flake-eval
 # time and produces one `bats-${tag}` derivation per unique tag plus
@@ -30,14 +29,13 @@
   # The UNWRAPPED rust dispatcher (piggy-rs from flake.nix). Tests
   # need the unwrapped binary so that PATH overrides from
   # zz-tests_bats/helpers/ (mock-pivy-box.sh etc.) win over what
-  # piggy.sh tries to invoke; the wrapped piggy injects pivyPkg + git
-  # via makeWrapper's `--prefix PATH`, which beats every prefix the
-  # bats setup can add.
+  # the rust handlers try to invoke; the wrapped piggy injects pivyPkg
+  # + git via makeWrapper's `--prefix PATH`, which beats every prefix
+  # the bats setup can add.
   piggyRs,
   # The WRAPPED piggy (piggy from flake.nix). Used only as a source of
-  # `$out/libexec/piggy/{piggy.sh,piggy-ids}` — those are the bash
-  # script and the real piggy-ids binary the dispatcher / mock
-  # delegators need by absolute path.
+  # `$out/libexec/piggy/piggy-ids` — the real piggy-ids binary the mock
+  # delegator needs by absolute path.
   piggyWrapped,
   # The Go-based SSH-agent protocol conformance binary. Plumbed into
   # the lane as `CONFORMANCE_BIN` so
@@ -98,11 +96,8 @@ let
       extraEnv = {
         BATS_TEST_TIMEOUT = batsTestTimeout;
         # Pin against the wrapped piggy's libexec — that's where
-        # `flake.nix` installs the bash script and the piggy-ids
-        # binary. PIGGY_IDS_REAL is consumed by mock-piggy-ids.sh
-        # for delegation; PIGGY_SH_PATH is consumed by the rust
-        # dispatcher's find_piggy_sh().
-        PIGGY_SH_PATH = "${piggyWrapped}/libexec/piggy/piggy.sh";
+        # `flake.nix` installs the piggy-ids binary. PIGGY_IDS_REAL
+        # is consumed by mock-piggy-ids.sh for delegation.
         PIGGY_IDS_REAL = "${piggyWrapped}/libexec/piggy/piggy-ids";
         # The real C pivy-tool, used only by pivy_tool_admin_key.bats.
         # Matches the REAL_PIVY_BOX convention used by the interop
@@ -114,20 +109,18 @@ let
         # (placed at the front of $PATH by common.bash).
       };
       nativeBuildInputs = [
-        # piggy.sh + helpers shell out to these directly; without
-        # them on PATH the sandboxed tests get cryptic
-        # "<tool>: command not found" errors. pivy-* are NOT here
-        # on purpose — the mock symlinks must win.
+        # The bats helpers (mock-pivy-box.sh / mock-pivy-tool.sh /
+        # mock-piggy-ids.sh) and the rust handlers' callouts shell out
+        # to these directly; without them on PATH the sandboxed tests
+        # get cryptic "<tool>: command not found" errors. pivy-* are
+        # NOT here on purpose — the mock symlinks must win.
         #
-        # `openssl` is darwin-only in practice: src/platform/darwin.sh
-        # overrides BASE64 to "openssl base64" because BSD base64 has
-        # line-wrapping quirks. Linux uses coreutils' base64 directly
-        # (src/piggy.sh BASE64="base64"). Keeping openssl in the
-        # closure on both platforms is cheap and avoids a platform
-        # split here.
+        # `openssl` survives as a transitive dep of the mock helpers
+        # (mock-pivy-box.sh uses base64 / openssl for its faux
+        # encryption). Keeping it in the closure on both platforms is
+        # cheap and avoids a platform split here.
         pkgs.bash
         pkgs.coreutils
-        pkgs.getopt
         pkgs.git
         pkgs.gnugrep
         pkgs.gnused

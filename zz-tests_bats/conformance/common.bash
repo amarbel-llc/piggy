@@ -12,5 +12,5 @@
 bats_load_library bats-support
 bats_load_library bats-assert
 
-# Load the parent harness for $PIGGY + $PIGGY_SH_PATH resolution.
+# Load the parent harness for $PIGGY resolution.
 load "$(dirname "$BATS_TEST_FILE")/../common.bash"
