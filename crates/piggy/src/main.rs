@@ -45,6 +45,7 @@ mod find;
 mod git;
 mod git_ops;
 mod grep;
+mod init;
 mod recipients;
 mod reencrypt;
 mod rm;
@@ -346,7 +347,7 @@ fn main() {
 
     match cli.cmd {
         Command::Pass(args) => match args.cmd {
-            PassCommand::Init { rest } => fallback::exec_bash("init", &rest),
+            PassCommand::Init { rest } => std::process::exit(init::run(&rest)),
             PassCommand::Show { rest } => fallback::exec_bash("show", &rest),
             PassCommand::Find { rest } => std::process::exit(find::run(&rest)),
             PassCommand::Grep { rest } => std::process::exit(grep::run(&rest)),

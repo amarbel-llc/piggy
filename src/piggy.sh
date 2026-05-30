@@ -285,95 +285,6 @@ cmd_usage() {
 	_EOF
 }
 
-cmd_init() {
-  # piggy 2.x: writes a piggy-owned `piggy-ids` text file (RFC 0003)
-  # instead of pivy's binary `.pivy-id`. The recipient is identified
-  # by a markl ID of format `pivy_ecdh_p256_pub` carrying the
-  # `piggy-recipient-v1` purpose tag — see madder RFC 0002.
-  #
-  # Modes:
-  #   -k <markl-id>   declarative; user supplies the recipient (any
-  #                   shape that piggy-ids canonicalize accepts).
-  #   no -k           auto-detect; shells to `piggy-ids detect-pubkey`
-  #                   to read slot 9D of the attached PIV card. -g is
-  #                   forwarded as `--guid` for multi-card setups.
-  local opts id_path="" key="" guid=""
-  opts="$($GETOPT -o p:k:g: -l path:,key:,guid: -n "$PROGRAM" -- "$@")"
-  local err=$?
-  eval set -- "$opts"
-  while true; do case $1 in
-    -p | --path)
-      id_path="$2"
-      shift 2
-      ;;
-    -k | --key)
-      key="$2"
-      shift 2
-      ;;
-    -g | --guid)
-      guid="$2"
-      shift 2
-      ;;
-    --)
-      shift
-      break
-      ;;
-    esac done
-
-  [[ $err -ne 0 ]] && die "Usage: $PROGRAM_PASS $COMMAND [-p subfolder] [-k <markl-id> | -g <guid>]"
-  [[ -n $key && -n $guid ]] && die "Error: -k and -g are mutually exclusive (-g only applies to auto-detect)."
-  [[ -n $id_path ]] && check_sneaky_paths "$id_path"
-  [[ -n $id_path && ! -d $PREFIX/$id_path && -e $PREFIX/$id_path ]] && die "Error: $PREFIX/$id_path exists but is not a directory."
-
-  local piggy_ids="$PREFIX/$id_path/piggy-ids"
-  local tpl_dir="$PREFIX/$id_path"
-  set_git "$piggy_ids"
-
-  mkdir -v -p "$tpl_dir"
-
-  if [[ -z $key ]]; then
-    local detect_args=()
-    [[ -n $guid ]] && detect_args+=(--guid "$guid")
-    key="$("${PIGGY_IDS_PATH:-piggy-ids}" detect-pubkey "${detect_args[@]}")" ||
-      die "Error: piggy-ids detect-pubkey failed; pass -k <markl-id> if no PIV card is attached."
-  fi
-
-  # Validate the markl-id has the piggy 2.x recipient shape — bare
-  # `pivy_ecdh_p256_pub-...` or purpose-tagged
-  # `piggy-recipient-v1@pivy_ecdh_p256_pub-...`. RFC 0003 permits
-  # both as input; the next `piggy pass recipients` rewrite will
-  # canonicalise to the purpose-tagged form via the Rust
-  # piggy-markl codec (which re-checksums under the combined HRP).
-  # Canonicalising here in bash would need re-checksumming and
-  # bash can't do blech32, so we write the user's input verbatim.
-  if [[ $key != pivy_ecdh_p256_pub-* &&
-    $key != piggy-recipient-v1@pivy_ecdh_p256_pub-* ]]; then
-    die "Error: -k value must be a markl ID with format=pivy_ecdh_p256_pub (got: ${key%%-*}...)."
-  fi
-
-  # Atomic write: build the file, then mv into place.
-  local tmp="${piggy_ids}.tmp.$$"
-  {
-    echo "# piggy-ids — piggy 2.x recipient template"
-    echo "# format: piggy-recipient-v1@pivy_ecdh_p256_pub-<blech32>  # optional comment"
-    echo "$key"
-  } >"$tmp"
-  mv "$tmp" "$piggy_ids" || {
-    rm -f "$tmp"
-    die "Error: failed to write $piggy_ids."
-  }
-
-  echo "Password store initialized${id_path:+ ($id_path)}"
-  git_add_file "$piggy_ids" "Set piggy recipients${id_path:+ ($id_path)}."
-
-  # Re-encrypt any pre-existing entries against the new recipient
-  # set. Fresh init is a no-op (no `.ebox` files in the tree); for
-  # re-init over an existing store, reencrypt_path now drives the
-  # Rust `piggy-ids encrypt` path (#75 phase 5).
-  reencrypt_path "$PREFIX/$id_path"
-  git_add_file "$PREFIX/$id_path" "Reencrypt password store using new piggy recipients${id_path:+ ($id_path)}."
-}
-
 cmd_show() {
   local opts selected_line clip=0 qrcode=0
   opts="$($GETOPT -o q::c:: -l qrcode::,clip:: -n "$PROGRAM" -- "$@")"
@@ -600,10 +511,6 @@ PROGRAM="${0##*/}"
 COMMAND="$1"
 
 case "$1" in
-init)
-  shift
-  cmd_init "$@"
-  ;;
 help | --help)
   shift
   cmd_usage "$@"

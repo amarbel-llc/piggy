@@ -153,6 +153,28 @@ test-bats-conformance-recipients-add-attached: build-rust
       BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
       zz-tests_bats/conformance/piggy_recipients_add_attached.bats
 
+# Bring up fib, generate a P-256 key in 9D, and run the
+# piggy_pass_init.bats conformance lane against the real PCSC stack.
+# Exercises `piggy pass init`'s auto-detect path (no -k, and -g <guid>)
+# against the live card; the declarative -k path is covered by t0002
+# (mocked). Linux-only (fib is Linux-only). Opt-in — not part of the
+# default `just test` lane.
+[group('post-build')]
+test-bats-conformance-init: build-rust
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'just fib-down' EXIT
+    just fib-up
+    eval "$(cat .fib/env)"
+    pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
+    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    SSH_ASKPASS="$askpass" \
+      SSH_ASKPASS_REQUIRE=force \
+      DISPLAY="" \
+      PIGGY_TEST_FIB_PIN=123456 \
+      BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
+      zz-tests_bats/conformance/piggy_pass_init.bats
+
 # Hardware lane for `piggy pass show-batch`. Seals real eboxes against
 # fib's 9D slot and verifies the end-to-end NDJSON event stream
 # including the single-PIN guarantee, the wrong-card bail-out, the

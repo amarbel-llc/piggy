@@ -715,7 +715,7 @@ fn piggy_ids_ok(args: &[&str]) -> bool {
 /// Stderr is inherited so the binary's own diagnostics reach the user.
 /// Returns `None` when the binary fails to spawn or exits non-zero
 /// (the bash `|| die` arm).
-fn piggy_ids_output(args: &[&str]) -> Option<String> {
+pub(crate) fn piggy_ids_output(args: &[&str]) -> Option<String> {
     let binary: OsString =
         std::env::var_os("PIGGY_IDS_PATH").unwrap_or_else(|| OsString::from("piggy-ids"));
     let out = Command::new(&binary)
