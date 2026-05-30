@@ -46,6 +46,7 @@ mod git;
 mod git_ops;
 mod grep;
 mod init;
+mod platform;
 mod recipients;
 mod reencrypt;
 mod rm;
