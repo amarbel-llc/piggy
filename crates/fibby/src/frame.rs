@@ -15,7 +15,7 @@
 
 use std::io::{self, Read, Write};
 
-use crate::proto::{Header, HEADER_LEN};
+use crate::proto::{HEADER_LEN, Header};
 
 /// Reject absurd body sizes early. A real request body tops out around
 /// `getset_struct` / extended APDU buffers (~64 KiB); 1 MiB is a generous
@@ -34,7 +34,7 @@ pub fn read_message(r: &mut impl Read) -> io::Result<Option<(Header, Vec<u8>)>> 
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "short read on rxHeader",
-            ))
+            ));
         }
         ReadOutcome::Full => {}
     }
