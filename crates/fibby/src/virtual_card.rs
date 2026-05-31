@@ -38,6 +38,32 @@ const YK5_ATR: &[u8] = &[
     0x75, 0x62, 0x69, 0x4B, 0x65, 0x79, 0x40,
 ];
 
+/// Wet-env-captured PIV SELECT FCI from YubiKey 4 firmware 4.3.5
+/// (2026-05-31 capture). Real silicon emits this byte-for-byte on
+/// every successful SELECT of the PIV AID. Structure: outer 0x61
+/// (application-property template, len 0x11=17), then:
+///
+/// - `4F 06 00 00 10 00 01 00` — application identifier
+///   (the post-RID portion of the PIV AID `A0 00 00 03 08 *00 00 10 00
+///   01 00*`).
+/// - `79 07 4F 05 A0 00 00 03 08` — coexistent tag allocation
+///   authority (RID-only portion of the PIV AID).
+///
+/// Trailing SW 9000 is added by the caller.
+const YK4_SELECT_FCI: &[u8] = &[
+    0x61, 0x11, 0x4F, 0x06, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00, 0x79, 0x07, 0x4F, 0x05, 0xA0, 0x00,
+    0x00, 0x03, 0x08,
+];
+
+/// Structurally-valid PIV SELECT FCI stub for Yk5. Mirrors VirtualCard's
+/// pre-Yk4-capture behavior: emits `61 <len> 4F <len> <PIV AID full>`.
+/// **Not** a wet-env-verified capture — real YK5s and fib's PivApplet
+/// emit longer FCIs (the latter includes its applet identity string).
+/// Aligning either needs hardware/wet-env data. Tracked under #133.
+const YK5_SELECT_FCI_STUB: &[u8] = &[
+    0x61, 0x0D, 0x4F, 0x0B, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00,
+];
+
 /// PIV card hardware profile. Selects the ATR VirtualCard advertises
 /// and (eventually, once design-doc step 5 lands the real PIV applet)
 /// the firmware-version-derived behaviors VirtualCard will fork on.
@@ -74,6 +100,29 @@ impl Model {
         match self {
             Model::Yk4 => YK4_ATR,
             Model::Yk5 => YK5_ATR,
+        }
+    }
+
+    /// Bytes returned in the PIV SELECT response (inside the 0x61
+    /// application-property template), without the trailing SW 9000.
+    /// Per SP 800-73-4 §3.1.1 + the YK4 wet-env capture:
+    ///
+    /// - `Yk4` → the wet-env-canonical 19-byte FCI captured 2026-05-31:
+    ///   `61 11 4F 06 <PIV AID app portion> 79 07 4F 05 <PIV AID RID>`.
+    ///   Real silicon emits this byte-for-byte on every PIV SELECT.
+    ///   Embedding the captured constant directly rather than building
+    ///   it from `apdu::PIV_AID` because the YK4 wire splits the AID
+    ///   into RID + app-portion across two TLVs in a way the abstract
+    ///   PIV_AID constant doesn't reflect.
+    /// - `Yk5` → a structurally-valid stub built from `apdu::PIV_AID`,
+    ///   matching VirtualCard's pre-Yk4-capture behavior. Real YK5 +
+    ///   fib's PivApplet emit longer FCIs (fib includes its applet
+    ///   identity string); aligning either requires a wet-env capture
+    ///   (#128, #133).
+    pub fn select_fci_bytes(self) -> &'static [u8] {
+        match self {
+            Model::Yk4 => YK4_SELECT_FCI,
+            Model::Yk5 => YK5_SELECT_FCI_STUB,
         }
     }
 
@@ -192,15 +241,22 @@ impl Backend for VirtualCard {
             command_apdu[3],
         );
 
-        // SELECT (00 A4 04 00 <Lc> <AID>) of the PIV application.
+        // SELECT (00 A4 04 00 <Lc> <AID>) of the PIV application. Use
+        // apdu_body() so both short-form and extended-length Lc work
+        // — YK4's pivy-tool sends extended-length SELECT (we saw the
+        // same issue cause `is_select_piv` to underreport SELECTs in
+        // replay; the same bug class here would silently fail the
+        // PIV AID check on every YK4 SELECT and fall through to 6A82).
         if cla == 0x00 && ins == apdu::ins::SELECT && p1 == 0x04 && p2 == 0x00 {
-            let aid = command_apdu.get(5..).unwrap_or(&[]);
-            let lc = command_apdu.get(4).copied().unwrap_or(0) as usize;
-            let aid = aid.get(..lc.min(aid.len())).unwrap_or(aid);
+            let aid = apdu_body(command_apdu).unwrap_or(&[]);
             if aid.starts_with(apdu::PIV_AID_PREFIX) {
                 self.selected_piv = true;
-                trace::emit(trace::DEBUG, "vcard", "SELECT PIV AID -> 9000 (stub FCI)");
-                let mut resp = piv_select_fci();
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!("SELECT PIV AID -> 9000 ({} FCI)", model_name(self.model)),
+                );
+                let mut resp = self.model.select_fci_bytes().to_vec();
                 resp.extend_from_slice(&sw(0x90, 0x00));
                 return Ok(resp);
             }
@@ -419,18 +475,13 @@ fn hex_tag(tag: &[u8]) -> String {
     s
 }
 
-/// Minimal PIV application property template (tag 0x61) naming the PIV
-/// AID, enough for a client's SELECT to parse. Not a full SP 800-73-4
-/// FCI — the real applet emits the algorithm list etc.
-fn piv_select_fci() -> Vec<u8> {
-    // 61 <len> 4F <len> <AID full> 79 <len> 4F <len> <AID prefix>
-    let mut inner = Vec::new();
-    inner.push(0x4F);
-    inner.push(apdu::PIV_AID.len() as u8);
-    inner.extend_from_slice(apdu::PIV_AID);
-    let mut out = vec![0x61, inner.len() as u8];
-    out.extend_from_slice(&inner);
-    out
+/// Short label for trace messages. Display impl would be neater but
+/// requires a derive; this is one decoration site.
+fn model_name(model: Model) -> &'static str {
+    match model {
+        Model::Yk4 => "Yk4 wet-env",
+        Model::Yk5 => "Yk5 stub",
+    }
 }
 
 #[inline]
@@ -689,6 +740,38 @@ mod tests {
             .transmit(&[0x00, 0xFD, 0x00, 0x00, 0x00, 0x00, 0x00])
             .unwrap();
         assert_eq!(resp, vec![0x04, 0x03, 0x05, 0x90, 0x00]);
+    }
+
+    #[test]
+    fn select_piv_returns_yk4_wet_env_fci_for_default_model() {
+        let mut c = VirtualCard::new();
+        c.connect(2, 3).unwrap();
+        let resp = c.transmit(&select_piv()).unwrap();
+        // Byte-equal to YK4 firmware 4.3.5's wire response on every
+        // SELECT PIV pair in the captures.
+        assert_eq!(
+            resp,
+            vec![
+                0x61, 0x11, 0x4F, 0x06, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00, 0x79, 0x07, 0x4F, 0x05,
+                0xA0, 0x00, 0x00, 0x03, 0x08, 0x90, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn select_piv_returns_yk5_stub_fci_for_yk5_model() {
+        let mut c = VirtualCard::with_model(Model::Yk5);
+        c.connect(2, 3).unwrap();
+        let resp = c.transmit(&select_piv()).unwrap();
+        // Yk5 keeps the original PIV-AID-derived stub until a wet-env
+        // YK5 capture lands (#133). Shape: 0x61 + 0x4F-wrapped AID + 9000.
+        assert_eq!(
+            resp,
+            vec![
+                0x61, 0x0D, 0x4F, 0x0B, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01,
+                0x00, 0x90, 0x00,
+            ]
+        );
     }
 
     #[test]
