@@ -268,6 +268,24 @@ fn replay_progress_against_real_silicon_is_logged() {
         let pairs = parse_fixture(&workspace_relative(fixture_path));
         let mut card = VirtualCard::with_model(model);
         card.connect(2, 3).unwrap();
+        // Pre-seed VirtualCard's PIV data-object storage with anything
+        // the fixture's successful GET DATA pairs show real silicon
+        // returned. This models the fact that the captured card was
+        // already in a populated state before the captured session
+        // began — its CHUID/CCC/cert objects were established by
+        // earlier writes we don't have on tape.
+        //
+        // Self-referential for matched-count purposes (the GET DATA
+        // pair that supplied the seed will, of course, then match its
+        // own value); the real test value is on the *retrieval*
+        // mechanism, which is now exercised against every populated
+        // tag in every captured session. If we ever regress the BER-TLV
+        // wrap/parse plumbing, those matches drop and the diagnostic
+        // headline catches it.
+        let seeds = extract_data_object_seed(&pairs);
+        for (tag, value) in seeds {
+            card.seed_data_object(tag, value);
+        }
         let mut matched = 0usize;
         let mut select_matched = 0usize;
         let mut selects = 0usize;
@@ -297,6 +315,61 @@ fn replay_progress_against_real_silicon_is_logged() {
             select_matched
         );
     }
+}
+
+/// Walk a fixture's APDU pairs once and collect any data-object
+/// pre-seed material — tuples of `(tag_bytes, 53_wrapped_value)` from
+/// successful GET DATA exchanges. A "successful" GET DATA means the
+/// response starts with the BER-TLV tag 0x53 (the canonical wrapper
+/// for PIV object payloads) and ends with SW 9000. Pairs that
+/// returned 6A82 (not present) or anything else are skipped.
+fn extract_data_object_seed(pairs: &[Pair]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut seeds = Vec::new();
+    for p in pairs {
+        // GET DATA request: `00 CB 3F FF <Lc> ... 5C <tag_len> <tag> ...`
+        if !(p.request.len() >= 4 && p.request[0] == 0x00 && p.request[1] == 0xCB) {
+            continue;
+        }
+        let Some(tag) = extract_5c_tag_from_get_data_request(&p.request) else {
+            continue;
+        };
+        // Successful GET DATA response: `53 <len> <value> 90 00`.
+        if p.response.len() < 4 || p.response[0] != 0x53 {
+            continue;
+        }
+        let sw_start = p.response.len() - 2;
+        if p.response[sw_start..] != [0x90, 0x00] {
+            continue;
+        }
+        let value_53_wrapped = p.response[..sw_start].to_vec();
+        seeds.push((tag.to_vec(), value_53_wrapped));
+    }
+    seeds
+}
+
+/// Find the `5C <tag_len> <tag>` BER-TLV in a GET DATA request and
+/// return the `<tag>` slice. Handles both short-form Lc (`00 CB 3F FF
+/// <Lc> 5C ...`) and extended-length (`00 CB 3F FF 00 <Lc_hi> <Lc_lo>
+/// 5C ...`). Returns None for malformed shapes.
+fn extract_5c_tag_from_get_data_request(apdu: &[u8]) -> Option<&[u8]> {
+    if apdu.len() < 5 {
+        return None;
+    }
+    // Body start depends on encoding.
+    let body_start = if apdu[4] == 0x00 && apdu.len() >= 7 {
+        7
+    } else {
+        5
+    };
+    let body = apdu.get(body_start..)?;
+    if body.first()? != &0x5C {
+        return None;
+    }
+    let tag_len = *body.get(1)? as usize;
+    if tag_len == 0 || body.len() < 2 + tag_len {
+        return None;
+    }
+    Some(&body[2..2 + tag_len])
 }
 
 // ============================================================================

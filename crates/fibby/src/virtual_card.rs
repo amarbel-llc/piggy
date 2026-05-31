@@ -217,6 +217,20 @@ impl VirtualCard {
         Self::with_model(Model::default())
     }
 
+    /// Pre-populate a single PIV data object — used by the replay
+    /// test bed to seed VirtualCard with state that real silicon
+    /// had established before the captured session started. `tag` is
+    /// the bare tag bytes (no `5C` wrapper); `value_53_wrapped` is
+    /// the full `53 <len> <value>` BER-TLV form as it appears on
+    /// the wire (and as `handle_get_data` returns it).
+    ///
+    /// In production, callers should use PUT DATA. This method
+    /// bypasses the auth check that PUT DATA would eventually
+    /// enforce, so reserve it for test scaffolding.
+    pub fn seed_data_object(&mut self, tag: Vec<u8>, value_53_wrapped: Vec<u8>) {
+        self.data_objects.insert(tag, value_53_wrapped);
+    }
+
     /// Constructor with an explicit hardware profile. Used by the CLI's
     /// `--model` flag and by tests that need to assert per-model ATR
     /// bytes.
