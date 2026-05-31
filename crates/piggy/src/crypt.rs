@@ -126,6 +126,19 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// Mutex-protected env mutation helper. Same pattern as
+    /// `card_oracle.rs`'s `env_lock` — tests run on multiple threads by
+    /// default, and `PIGGY_IDS_PATH` is process-global. Without this,
+    /// the two tests below that both `set_var("PIGGY_IDS_PATH", ...)`
+    /// race: A sets the fake-script path, B sets the
+    /// definitely-doesn't-exist path, A's `encrypt()` then reads env
+    /// and finds B's value. See #132.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
     /// Tempdir helper modeled after the one in `rm.rs` / `store.rs`.
     fn tempdir() -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -148,6 +161,7 @@ mod tests {
     #[test]
     fn encrypt_writes_stdin_to_outfile_via_fake_binary() {
         use std::os::unix::fs::PermissionsExt as _;
+        let _guard = env_lock();
         let dir = tempdir();
         let piggy_ids = dir.join("piggy-ids");
         std::fs::write(&piggy_ids, b"fixture").unwrap();
@@ -174,6 +188,7 @@ mod tests {
 
     #[test]
     fn encrypt_reports_spawn_failure() {
+        let _guard = env_lock();
         let dir = tempdir();
         let piggy_ids = dir.join("piggy-ids");
         std::fs::write(&piggy_ids, b"x").unwrap();
