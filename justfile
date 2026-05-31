@@ -47,7 +47,7 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: test-bats-default test-bats-conformance test-rust
+test: test-bats-default test-bats-conformance test-rust test-bats-conformance-fibby-pivy-agent-smoke
 
 # Sandboxed bats lane: runs every top-level t*.bats NOT tagged
 # `# bats file_tags=hardware` inside the nix build sandbox. See
@@ -226,6 +226,28 @@ test-bats-conformance-show-batch: build-rust
       PIGGY_TEST_FIB_PIN=123456 \
       BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
       zz-tests_bats/conformance/piggy_pass_show_batch_hardware.bats
+
+# Hardware-free Phase 0 smoke for piggy#135: stand up fibby (virtual
+# backend, empty slots) and pivy-agent against it, run ssh-add -L,
+# assert the substrate works. Lives in the default `just test` lane
+# (no hardware dependency); the bats file gracefully skips if PIVY_
+# AGENT / FIBBY_BIN aren't supplied (e.g. when invoked via the
+# conformance glob without this recipe's env setup).
+#
+# Both binaries come from nix derivations (.#pivy + .#fibby) rather
+# than the workspace's target/debug/. This is the same pattern as the
+# hardware lane recipes and matches what production users would run;
+# the cached store paths are free on repeat invocations.
+[group('post-build')]
+test-bats-conformance-fibby-pivy-agent-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    PIVY_AGENT="$pivy_out/bin/pivy-agent" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_fibby_pivy_agent_smoke.bats
 
 # Hardware lane for the C pivy-agent built from vendor/pivy/. Runs
 # pivy_agent_hardware.bats against the user's plugged-in PIV card.
@@ -1546,3 +1568,100 @@ debug-yk-throwaway-import-rfc6979:
     echo
     echo "=== Post-import status ==="
     yubico-piv-tool --action=status
+
+# Phase 0 smoke probe for piggy#135: stand up fibby with the virtual
+# backend, point pivy-agent at it via PCSCLITE_CSOCK_NAME, and run
+# `ssh-add -L` against the agent. Dumps the wire trace + agent stderr
+# inline so the dev-loop sees what pivy-agent expects from a PIV card
+# that VirtualCard doesn't yet provide (slot cert objects, mgmt-key
+# validation, etc.). Read-only on the host; no hardware involved.
+# Hard-kills both children on exit; safe to re-run repeatedly.
+#
+# Both binaries come from nix derivations (.#pivy + .#fibby); matches
+# the production wire surface and avoids stale target/debug artifacts.
+# The CI gate for this same probe lives at
+# `test-bats-conformance-fibby-pivy-agent-smoke`.
+[group('debug')]
+debug-fibby-pivy-agent-smoke:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    pivy_agent="$pivy_out/bin/pivy-agent"
+    fibby_bin="$fibby_out/bin/fibby"
+    [[ -x $fibby_bin ]] || { echo "missing $fibby_bin"; exit 1; }
+    [[ -x $pivy_agent ]] || { echo "missing $pivy_agent"; exit 1; }
+
+    # Short-path workdir under /tmp so AF_UNIX sun_path doesn't overflow
+    # (108 bytes Linux / 104 darwin). $BATS_TEST_TMPDIR-style nesting
+    # would overflow against $TMPDIR inside the spinclass worktree.
+    workdir=$(mktemp -d /tmp/p0-XXXXXX)
+    fibby_sock="$workdir/pcscd.comm"
+    agent_sock="$workdir/a.sock"
+    fibby_log="$workdir/fibby.log"
+    agent_log="$workdir/agent.log"
+
+    fibby_pid=""
+    agent_pid=""
+    cleanup() {
+      [[ -n $fibby_pid ]] && kill "$fibby_pid" 2>/dev/null || true
+      [[ -n $agent_pid ]] && kill "$agent_pid" 2>/dev/null || true
+      rm -rf "$workdir"
+    }
+    trap cleanup EXIT
+
+    echo "=== Starting fibby (virtual backend, Yk4 model, empty slots) ==="
+    FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+      >"$fibby_log" 2>&1 &
+    fibby_pid=$!
+    for _ in $(seq 1 50); do
+      [[ -S $fibby_sock ]] && break
+      sleep 0.1
+    done
+    if [[ ! -S $fibby_sock ]]; then
+      echo "fibby socket never appeared:" >&2
+      cat "$fibby_log" >&2 || true
+      exit 1
+    fi
+    echo "fibby up (pid=$fibby_pid, socket=$fibby_sock)"
+    echo
+
+    # Refusal askpass: any PIN prompt should be visible as a banner in
+    # stderr, never a GUI dialog. We don't supply PIGGY_TEST_FIB_PIN
+    # because the smoke shouldn't reach a PIN-gated path.
+    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+
+    echo "=== Starting pivy-agent (PCSCLITE_CSOCK_NAME=fibby) ==="
+    PCSCLITE_CSOCK_NAME="$fibby_sock" \
+      SSH_ASKPASS="$askpass" \
+      SSH_ASKPASS_REQUIRE=force \
+      DISPLAY="" \
+      "$pivy_agent" -A -D -a "$agent_sock" >"$agent_log" 2>&1 &
+    agent_pid=$!
+    for _ in $(seq 1 50); do
+      [[ -S $agent_sock ]] && break
+      sleep 0.1
+    done
+    if [[ ! -S $agent_sock ]]; then
+      echo "agent socket never appeared:" >&2
+      echo "--- agent log ---" >&2
+      cat "$agent_log" >&2 || true
+      echo "--- fibby log ---" >&2
+      cat "$fibby_log" >&2 || true
+      exit 1
+    fi
+    echo "pivy-agent up (pid=$agent_pid, socket=$agent_sock)"
+    echo
+
+    echo "=== Probe: ssh-add -L ==="
+    SSH_AUTH_SOCK="$agent_sock" ssh-add -L
+    add_status=$?
+    echo "(exit=$add_status)"
+    echo
+
+    echo "=== pivy-agent stderr ==="
+    cat "$agent_log"
+    echo
+
+    echo "=== fibby wire trace (last 80 lines) ==="
+    tail -80 "$fibby_log"
