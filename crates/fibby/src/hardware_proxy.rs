@@ -36,6 +36,16 @@ pub struct HardwareProxy {
     reader_name: String,
     card: Option<pcsc::Card>,
     cached_atr: Vec<u8>,
+    // Last share/proto args from `connect()` — saved so `transmit()` can
+    // silently re-establish the underlying pcsc Card with the same
+    // parameters when SCardTransmit returns `ResetCard` (the card was
+    // reset between client sessions, typically by a previous client's
+    // DISCONNECT with RESET disposition). Without this, the first
+    // TRANSMIT of every fresh session after a reset bubbles up
+    // SCARD_W_RESET_CARD and chains of `pivy-tool list` → `pivy-box ...`
+    // fail at the second step.
+    last_share: ShareMode,
+    last_protocols: Protocols,
 }
 
 impl HardwareProxy {
@@ -74,6 +84,8 @@ impl HardwareProxy {
             reader_name,
             card: None,
             cached_atr: Vec::new(),
+            last_share: ShareMode::Shared,
+            last_protocols: Protocols::ANY,
         };
         // Best-effort ATR probe (LEAVE the card as found).
         if me
@@ -119,6 +131,7 @@ impl HardwareProxy {
         match e {
             pcsc::Error::NoSmartcard => SCARD_E_NO_SMARTCARD,
             pcsc::Error::RemovedCard => SCARD_W_REMOVED_CARD,
+            pcsc::Error::ResetCard => SCARD_W_RESET_CARD,
             pcsc::Error::UnresponsiveCard => SCARD_W_UNRESPONSIVE_CARD,
             pcsc::Error::UnknownReader => SCARD_E_UNKNOWN_READER,
             pcsc::Error::ReaderUnavailable => SCARD_E_READER_UNAVAILABLE,
@@ -155,14 +168,14 @@ impl Backend for HardwareProxy {
     }
 
     fn connect(&mut self, share_mode: u32, preferred_protocols: u32) -> ScardResult<u32> {
+        let share = Self::map_share(share_mode);
+        let protos = Self::map_protocols(preferred_protocols);
         let card = self
             .ctx
-            .connect(
-                &self.reader,
-                Self::map_share(share_mode),
-                Self::map_protocols(preferred_protocols),
-            )
+            .connect(&self.reader, share, protos)
             .map_err(Self::map_err)?;
+        self.last_share = share;
+        self.last_protocols = protos;
         let mut names_buf = [0u8; 256];
         let mut atr_buf = [0u8; pcsc::MAX_ATR_SIZE];
         let active = match card.status2(&mut names_buf, &mut atr_buf) {
@@ -193,13 +206,46 @@ impl Backend for HardwareProxy {
     }
 
     fn transmit(&mut self, command_apdu: &[u8]) -> ScardResult<Vec<u8>> {
-        let card = self.card.as_ref().ok_or(SCARD_E_INVALID_HANDLE)?;
+        if self.card.is_none() {
+            return Err(SCARD_E_INVALID_HANDLE);
+        }
         // PIV responses fit in the short buffer except chained reads;
         // use the extended buffer to be safe.
         let mut rx = vec![0u8; pcsc::MAX_BUFFER_SIZE_EXTENDED];
-        let resp = card
+        let first = self
+            .card
+            .as_ref()
+            .unwrap()
             .transmit(command_apdu, &mut rx)
-            .map_err(Self::map_err)?;
-        Ok(resp.to_vec())
+            .map(|r| r.to_vec());
+        match first {
+            Ok(resp) => Ok(resp),
+            Err(pcsc::Error::ResetCard) => {
+                // The card was reset between sessions (typically by a
+                // previous client's DISCONNECT/RESET). pcscd surfaces it
+                // exactly once per fresh Card handle; re-establish the
+                // underlying connection with the same share+proto and
+                // retry. This is what a well-behaved PC/SC client does
+                // and HardwareProxy is fibby's "behave like one" oracle.
+                trace::emit(
+                    trace::DEBUG,
+                    "proxy",
+                    "ResetCard on first transmit; reconnecting + retry",
+                );
+                let _ = self.card.take();
+                let new_card = self
+                    .ctx
+                    .connect(&self.reader, self.last_share, self.last_protocols)
+                    .map_err(Self::map_err)?;
+                let mut rx2 = vec![0u8; pcsc::MAX_BUFFER_SIZE_EXTENDED];
+                let resp = new_card
+                    .transmit(command_apdu, &mut rx2)
+                    .map_err(Self::map_err)?
+                    .to_vec();
+                self.card = Some(new_card);
+                Ok(resp)
+            }
+            Err(e) => Err(Self::map_err(e)),
+        }
     }
 }
