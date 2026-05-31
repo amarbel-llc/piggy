@@ -444,6 +444,137 @@ debug-pcsclite-linkage:
       echo
     done
 
+# Survey the wet-env PCSC state: pcscd process, system sockets, readers
+# visible to libpcsclite (opensc-tool + pcsc_scan), ATR of any inserted
+# card, and the USB device side via lsusb. Read-only — does not connect
+# to the card or consume PIN retries. Serves the fibby hardware-proxy
+# validation dev-loop (does the right card show up before we wire fibby
+# to it?) and any other recipe that depends on a real card being present.
+[group('debug')]
+debug-pcsc-env:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo "=== pcscd process ==="
+    pgrep -a pcscd 2>/dev/null || echo "no pcscd process"
+    echo
+    echo "=== system sockets ==="
+    for s in /run/pcscd/pcscd.comm /var/run/pcscd/pcscd.comm; do
+      if [[ -S $s ]]; then ls -la "$s"; else echo "$s: not a socket"; fi
+    done
+    echo
+    echo "=== PCSCLITE_CSOCK_NAME ==="
+    echo "${PCSCLITE_CSOCK_NAME:-(unset)}"
+    echo
+    echo "=== opensc-tool readers ==="
+    timeout 5 opensc-tool -l 2>&1
+    echo
+    echo "=== pcsc_scan one round ==="
+    timeout 3 pcsc_scan -n 2>&1 | tail -8
+    echo
+    echo "=== lsusb (Yubico/CCID/smartcard) ==="
+    lsusb 2>&1 | grep -iE 'yubico|yubikey|ccid|smart' || echo "no Yubico/CCID USB device"
+
+# Bring fibby up with the hardware-proxy backend (proxying to the system
+# pcscd/YubiKey), run an arbitrary client command pointed at fibby's
+# socket via PCSCLITE_CSOCK_NAME, then tear fibby down and dump the
+# FIBBY_LOG=wire trace. Single-shot, transactional — no leftover
+# processes. Serves the fibby wet-env validation dev-loop: pivy-tool /
+# piggy / opensc-tool exercises driven through fibby's protocol layer.
+#
+# Usage:
+#   just debug-fibby-proxy pivy-tool list
+#   just debug-fibby-proxy pivy-tool init
+#   just debug-fibby-proxy pivy-tool -P 123456 generate 9e
+#   just debug-fibby-proxy piggy pass show -v some/entry
+#
+# The recipe rebuilds with --features hardware-proxy on every call so
+# you don't have to remember the feature flag.
+[group('debug')]
+debug-fibby-proxy *CLIENT_CMD:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [[ -z "{{CLIENT_CMD}}" ]]; then
+      echo "usage: just debug-fibby-proxy <client cmd...>" >&2
+      exit 2
+    fi
+    cargo build -p fibby --features hardware-proxy >/dev/null 2>&1 || {
+      echo "fibby --features hardware-proxy build failed; rerun to see why" >&2
+      cargo build -p fibby --features hardware-proxy
+      exit 1
+    }
+    sock_dir="${TMPDIR:-/tmp}/fibby-proxy.$$"
+    mkdir -p "$sock_dir"
+    sock="$sock_dir/pcscd.comm"
+    log="$sock_dir/wire.log"
+    # Last-resort cleanup: kill fibby + remove the tmp socket dir on any
+    # exit path. Fibby itself rm -f's a stale socket on startup, so a
+    # crashed previous run won't block restart. The trailing `:` keeps
+    # cleanup's exit status from polluting the script's final exit code
+    # — without it, `wait $fibby_pid` propagates fibby's SIGTERM (143)
+    # and the recipe spuriously reports failure.
+    cleanup() {
+      [[ -n "${fibby_pid:-}" ]] && kill "$fibby_pid" 2>/dev/null
+      wait "${fibby_pid:-}" 2>/dev/null
+      rm -rf "$sock_dir"
+      :
+    }
+    trap cleanup EXIT
+    FIBBY_LOG=wire ./target/debug/fibby --backend hardware --reader Yubico \
+      --socket "$sock" >"$log" 2>&1 &
+    fibby_pid=$!
+    # Wait up to 5s for the socket to appear; if it doesn't, fibby crashed
+    # at startup (usually pcsc init failure) — dump the log and bail.
+    for _ in $(seq 1 50); do
+      [[ -S "$sock" ]] && break
+      sleep 0.1
+    done
+    if [[ ! -S "$sock" ]]; then
+      echo "!!! fibby socket never appeared; log:" >&2
+      cat "$log" >&2
+      exit 1
+    fi
+    echo "=== fibby up on $sock (pid $fibby_pid); running client ==="
+    PCSCLITE_CSOCK_NAME="$sock" {{CLIENT_CMD}}
+    client_exit=$?
+    echo
+    echo "=== client exit: $client_exit ==="
+    echo
+    echo "=== fibby wire log ==="
+    cat "$log"
+    # Propagate the client's exit, not cleanup's. EXIT trap still runs
+    # after this — but its exit status no longer overrides ours.
+    exit "$client_exit"
+
+# Tier-4 differential gate for fibby's hardware-proxy backend: run a
+# real pivy-box stream encrypt + decrypt round-trip against the inserted
+# PIV card, routed entirely through fibby's pcsc-lite protocol server.
+# Calls debug-fibby-proxy with the in-repo helper script — the helper
+# discovers the card GUID at runtime via `pivy-tool list`, so it works
+# on any throwaway with slot 9D already initialized.
+#
+# Bootstrap a throwaway card before invoking this recipe:
+#   just debug-fibby-proxy pivy-tool -K default init
+#   just debug-fibby-proxy pivy-tool -P 123456 -K default -a eccp256 generate 9d
+# Then:
+#   just debug-fibby-roundtrip
+# Expected tail of output: `=== ROUND-TRIP OK ===` and `client exit: 0`.
+[group('debug')]
+debug-fibby-roundtrip:
+    just debug-fibby-proxy bash zz-tests_bats/helpers/fibby-roundtrip.sh
+
+# Tier-4 differential gate at the **piggy** layer: pass init / insert /
+# show round-trip against the inserted PIV card via fibby. Companion to
+# debug-fibby-roundtrip (which exercises the same crypto at the
+# pivy-box layer). Gitless store: piggy's find_inner_git_dir returns
+# None and the post-write commit is silently skipped — proves the
+# wet-env path without dragging in git config plumbing.
+#
+# Bootstrap as for debug-fibby-roundtrip. Build deps:
+#   just build-rust   # debug piggy + piggy-ids on target/debug/
+[group('debug')]
+debug-fibby-piggy-roundtrip: build-rust
+    just debug-fibby-proxy bash zz-tests_bats/helpers/fibby-piggy-roundtrip.sh
+
 # Reproduce the launchd environment that pivy-agent invokes piggy-askpass.sh
 # under: no controlling TTY, no DISPLAY, scrubbed env. `setsid` detaches the
 # controlling terminal so the script's `/dev/tty` open-test fails the same

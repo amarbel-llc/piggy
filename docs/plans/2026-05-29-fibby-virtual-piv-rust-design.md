@@ -470,19 +470,65 @@ Full protocol server + both backends + hermetic end-to-end coverage:
 - `crates/fibby/README.md` — module map, `FIBBY_LOG` guide, and the
   hardware-validation runbook for the wet-env pass.
 
+### Validated (2026-05-31 wet-env pass, YubiKey 4 firmware 4.3.5)
+
+Step 4 partially completed against a real throwaway YubiKey via the
+`hardware-proxy` backend. Captured + verified:
+
+- **Full pcsc-lite protocol surface fibby implements**: `CMD_VERSION`
+  (client offered 4.4, fibby answered 4.6 — major-matched negotiation
+  succeeded), `ESTABLISH/RELEASE_CONTEXT`, `GET_READERS_STATE` (184-byte
+  `READER_STATE` layout including 3-byte ATR padding round-trip-parsed
+  by libpcsclite), `CONNECT`, `BEGIN/END_TRANSACTION`, `TRANSMIT` (with
+  streamed APDU buffers), `DISCONNECT`. **No UNIMPLEMENTED** seen
+  across `pivy-tool list`, `pivy-tool init`, `pivy-tool generate 9d`,
+  and `pivy-box stream encrypt/decrypt`.
+- **PIV command set exercised on real silicon**: SELECT PIV AID, SELECT
+  YubiKey mgmt AID, GENERATE ASYMMETRIC (P-256, slot 9D), GENERAL
+  AUTHENTICATE (mgmt-key 3DES challenge-response, and ECDH alg=0x11
+  exponent tag 0x82), GET DATA (CHUID, cert slot reads with chained
+  responses), PUT DATA (CHUID/CCC), VERIFY (PIN).
+- **End-to-end tier-4 differential gate**: pivy-box stream encrypt +
+  decrypt of `"hello-from-fibby-validation"` through fibby returned the
+  plaintext byte-for-byte, with PIN supplied non-interactively via
+  `SSH_ASKPASS=zz-tests_bats/helpers/piggy-test-askpass.sh`. The full
+  ECDH AES-256-GCM unwrap exercised every part of fibby's command
+  table.
+- **Captured ATR for `virtual_card.rs` calibration**: YK4 firmware
+  4.3.5 reports `3B F8 13 00 00 81 31 FE 15 59 75 62 69 6B 65 79 34
+  D4` ("Yubikey4"). The current `YUBIKEY5_ATR` placeholder should be
+  replaced with this (or both ATRs gated by `--model`).
+
+Wet-env-discovered fibby bug (fixed in the same pass): `pivy-tool`'s
+`DISCONNECT` with `RESET` disposition triggered `pcsc::Error::ResetCard`
+on the next session's first `SCardTransmit`, which fibby's `map_err`
+fell into the `SCARD_F_INTERNAL_ERROR` catch-all. Added explicit
+mapping → `SCARD_W_RESET_CARD` plus a reconnect-on-reset retry in
+`HardwareProxy::transmit` (saves last share+protocols from `connect`
+to re-establish with identical params). Without this, any
+`<discovery-tool>` → `<work-tool>` chain failed at the second
+operation.
+
+Captured wire trace artifacts live at `.tmp/nix-shell.<run>/fibby-proxy.<pid>/wire.log`
+under each `just debug-fibby-roundtrip` invocation. Promote the most
+representative trace(s) to fixture files as Step 5 work begins.
+
 ### Next steps
 
-4. **Capture/validate (wet-env, needs a YubiKey):** run fibby with the
-   `hardware-proxy` backend, point `pivy-tool list`/`generate 9d` at its
-   socket, and record the `FIBBY_LOG=wire` traffic as conformance
-   fixtures. The proxy also reveals any command fibby doesn't yet speak
-   (logged UNIMPLEMENTED with the body hex).
 5. Grow `VirtualCard` into the real PIV applet (GENERATE / GENERAL
    AUTHENTICATE sign+ECDH / GET·PUT DATA / VERIFY / YubiKey
    attestation+serial) and replay the captured fixtures + RFC 0002
-   Appendix A + SP 800-73-4 vectors against it.
+   Appendix A + SP 800-73-4 vectors against it. Refresh
+   `YUBIKEY5_ATR` (or generalize to a `--model` profile table) using
+   the YK4 ATR captured above as the first profile.
 6. Swap the bats/conformance test path onto fibby; keep `fib` as a
-   differential oracle for one release.
+   differential oracle for one release. Promote `just debug-fibby-roundtrip`
+   to a `hardware`-tagged bats test that does the equivalent assertion.
+7. **Pending wet-env follow-ups**: hot-plug events (`SCardGetStatusChange`
+   in `wait_reader_state`, currently sleeps on a static timeout); YK5+
+   ATR / Ed25519 / X25519 once a 5.7+ card is on hand; multi-client
+   transaction interleaving (current single-client model treats
+   `BEGIN_TRANSACTION` as grant-all).
 
 ### Build-environment note
 
