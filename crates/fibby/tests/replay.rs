@@ -353,15 +353,60 @@ fn replay_progress_against_real_silicon_is_logged() {
             selects,
             select_matched
         );
+        // When the env var REPLAY_LOG_MISMATCHES is set, also print the
+        // INS bytes + truncated request/response of every mismatched
+        // pair. Lets the dev-loop point at the next slice to attack
+        // without re-running a custom diagnostic.
+        if std::env::var("REPLAY_LOG_MISMATCHES").is_ok() {
+            let mut card = VirtualCard::with_model(model);
+            card.connect(2, 3).unwrap();
+            for (tag, value) in extract_data_object_seed(&pairs) {
+                card.seed_data_object(tag, value);
+            }
+            if let Some(scalar) = slot_9d_priv_for(fixture_path) {
+                card.seed_slot_9d_priv(scalar);
+            }
+            for (i, p) in pairs.iter().enumerate() {
+                let got = card.transmit(&p.request).unwrap_or_default();
+                if got != p.response {
+                    let ins = p.request.get(1).copied().unwrap_or(0);
+                    let p1 = p.request.get(2).copied().unwrap_or(0);
+                    let p2 = p.request.get(3).copied().unwrap_or(0);
+                    println!(
+                        "  [{i}] INS={ins:#04x} P1={p1:#04x} P2={p2:#04x}\n    \
+                         exp ({} B): {}\n    \
+                         got ({} B): {}",
+                        p.response.len(),
+                        hex_preview(&p.response),
+                        got.len(),
+                        hex_preview(&got),
+                    );
+                }
+            }
+        }
     }
 }
 
+fn hex_preview(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let cap = bytes.len().min(48);
+    let mut s = String::with_capacity(cap * 2 + 8);
+    for b in &bytes[..cap] {
+        let _ = write!(&mut s, "{b:02x}");
+    }
+    if bytes.len() > cap {
+        let _ = write!(&mut s, "...({} more)", bytes.len() - cap);
+    }
+    s
+}
+
 /// Walk a fixture's APDU pairs once and collect any data-object
-/// pre-seed material — tuples of `(tag_bytes, 53_wrapped_value)` from
-/// successful GET DATA exchanges. A "successful" GET DATA means the
-/// response starts with the BER-TLV tag 0x53 (the canonical wrapper
-/// for PIV object payloads) and ends with SW 9000. Pairs that
-/// returned 6A82 (not present) or anything else are skipped.
+/// pre-seed material — tuples of `(tag_bytes, payload_bytes)` from
+/// successful GET DATA exchanges. A "successful" GET DATA is anything
+/// ending in SW 9000 and not starting with `6A` (the SP 800-73-4 error
+/// class for "not present" / "not found"). Both `53`-wrapped object
+/// payloads (CHUID, CCC, cert objects, etc.) and the SP 800-73-4
+/// §3.3.2 Discovery Object's `7E`-prefixed payload qualify.
 fn extract_data_object_seed(pairs: &[Pair]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut seeds = Vec::new();
     for p in pairs {
@@ -372,16 +417,25 @@ fn extract_data_object_seed(pairs: &[Pair]) -> Vec<(Vec<u8>, Vec<u8>)> {
         let Some(tag) = extract_5c_tag_from_get_data_request(&p.request) else {
             continue;
         };
-        // Successful GET DATA response: `53 <len> <value> 90 00`.
-        if p.response.len() < 4 || p.response[0] != 0x53 {
+        // Need at least SW1 SW2 + 1 payload byte.
+        if p.response.len() < 3 {
             continue;
         }
         let sw_start = p.response.len() - 2;
         if p.response[sw_start..] != [0x90, 0x00] {
             continue;
         }
-        let value_53_wrapped = p.response[..sw_start].to_vec();
-        seeds.push((tag.to_vec(), value_53_wrapped));
+        // 6A-prefixed payloads aren't really payloads — they're SP
+        // 800-73-4 error/diagnostic responses that happened to land
+        // inside a 9000-suffixed sequence (none of our fixtures
+        // actually have this shape, but the guard makes the intent
+        // explicit). Any other leading tag — `53` for object data,
+        // `7E` for the Discovery Object — gets seeded verbatim.
+        if p.response[0] == 0x6A {
+            continue;
+        }
+        let payload = p.response[..sw_start].to_vec();
+        seeds.push((tag.to_vec(), payload));
     }
     seeds
 }
@@ -529,6 +583,70 @@ fn ga_ecdh_byte_replay_test_vector_yubico_piv_tool_bootstrap() {
         &workspace_relative(YK4_TEST_VECTOR_FIXTURE),
         RFC6979_A_2_5_SCALAR,
     );
+}
+
+/// Strict whole-fixture byte-replay against the test-vector capture
+/// (yubico-piv-tool import bootstrap). Every pair — SELECT PIV, GET
+/// DATA for CHUID/CCC/Discovery/cert, VERIFY PIN, YK ATTEST refusal,
+/// GA ECDH — must reproduce byte-for-byte against VirtualCard seeded
+/// with the data-object pre-state and the RFC 6979 §A.2.5 scalar.
+///
+/// This is the closing gate piggy#131 envisioned: not aspirational
+/// (un-ignored), not scoped to one INS (whole flow). The companion
+/// `full_byte_replay_against_yk4_fixture` stays ignored because its
+/// on-card-generated key + factory-signed attestation cert are
+/// non-deterministic; the test-vector capture exists precisely to
+/// remove those non-determinisms.
+#[test]
+fn full_byte_replay_against_yk4_test_vector_fixture() {
+    full_byte_replay_with_seeding(
+        &workspace_relative(YK4_TEST_VECTOR_FIXTURE),
+        Model::Yk4,
+        Some(RFC6979_A_2_5_SCALAR),
+    );
+}
+
+/// Companion to `full_byte_replay_against_yk4_test_vector_fixture`:
+/// strict whole-fixture replay against the pivy-tool-bootstrap
+/// capture (#58). Two distinct bootstrap paths against the same
+/// scalar → two distinct deterministic fixtures, both passing.
+#[test]
+fn full_byte_replay_against_yk4_test_vector_pivy_fixture() {
+    full_byte_replay_with_seeding(
+        &workspace_relative(YK4_TEST_VECTOR_PIVY_FIXTURE),
+        Model::Yk4,
+        Some(RFC6979_A_2_5_SCALAR),
+    );
+}
+
+fn full_byte_replay_with_seeding(fixture: &Path, model: Model, scalar: Option<[u8; 32]>) {
+    let pairs = parse_fixture(fixture);
+    let mut card = VirtualCard::with_model(model);
+    card.connect(2, 3).unwrap();
+    for (tag, value) in extract_data_object_seed(&pairs) {
+        card.seed_data_object(tag, value);
+    }
+    if let Some(s) = scalar {
+        card.seed_slot_9d_priv(s);
+    }
+    for (i, p) in pairs.iter().enumerate() {
+        let got = card.transmit(&p.request).unwrap_or_else(|rv| {
+            panic!(
+                "{}: VirtualCard transmit errored {rv:#010x} on pair {i}: {:?}",
+                fixture.display(),
+                p.request
+            )
+        });
+        assert_eq!(
+            got,
+            p.response,
+            "{}: pair {i}: VirtualCard response mismatch.\n  request: {:?}\n  expected: {:?}\n  got: {:?}",
+            fixture.display(),
+            p.request,
+            p.response,
+            got
+        );
+    }
 }
 
 /// Companion to the yubico-piv-tool-bootstrap byte-replay: the pivy-
