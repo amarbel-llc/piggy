@@ -53,4 +53,16 @@ pub mod ins {
     /// response is `7C 22 82 20 <Xshared>` — the X-coordinate of
     /// `card_priv * eph_pub`, padded to 32 bytes.
     pub const GENERAL_AUTHENTICATE: u8 = 0x87;
+    /// YubiKey vendor "attest slot key". `P1` is the slot (e.g.
+    /// `0x9D`), `P2 = 00`. The response is a YubicoPIV-signed X.509
+    /// attestation certificate over the slot's public key — proof
+    /// that the slot key was generated *on-card* (rather than
+    /// imported). Wet-env wire on YubiKey 4 firmware 4.3.5
+    /// (2026-05-31): generated-key slots return a ~580-byte cert +
+    /// SW 9000 in a single extended-length response; **imported-key
+    /// slots return `6A 80`**, because attestation has nothing to
+    /// sign without the on-card-generation provenance. VirtualCard
+    /// only models the imported-key case (it has no factory
+    /// attestation key) and returns `6A 80` for any F9 probe.
+    pub const YK_ATTEST: u8 = 0xF9;
 }

@@ -444,6 +444,23 @@ impl Backend for VirtualCard {
             return Ok(self.handle_general_authenticate_ecdh_slot_9d(apdu_body(command_apdu)));
         }
 
+        // YK ATTEST (00 F9 <slot> 00 ...). Real silicon returns a
+        // YubicoPIV-signed cert when the slot key was generated on-
+        // card and 6A80 when the key was imported. VirtualCard models
+        // only imported / empty slots (no factory attestation key,
+        // no on-card generate flow yet), so 6A80 is the byte-correct
+        // response in every case VirtualCard actually exercises today
+        // — matches both test-vector fixtures' F9 pair. P1 carries
+        // the slot reference; P2 must be 00.
+        if cla == 0x00 && ins == apdu::ins::YK_ATTEST && p2 == 0x00 {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("YK ATTEST slot={p1:#04x} -> 6A80 (imported-key default)"),
+            );
+            return Ok(sw(0x6A, 0x80));
+        }
+
         trace::emit(
             trace::DEBUG,
             "vcard",
@@ -1469,5 +1486,33 @@ mod tests {
             "7c22822097b863dabf25c290ec35650685e2ae7bed49ae9c097a6feda338ad45c36049fb9000",
         );
         assert_eq!(c.transmit(&req).unwrap(), expected);
+    }
+
+    // -- YK ATTEST (INS 0xF9) tests --------------------------------------
+
+    /// Real YK4 silicon's response to `00 F9 9D 00 00 00 00` when slot
+    /// 9D holds an *imported* key is `6A 80` — attestation refuses
+    /// imported keys (no on-card-generation provenance to sign).
+    /// VirtualCard mirrors this for every F9 9D probe, since it has
+    /// no factory attestation key to sign anything with anyway.
+    /// Captured wire from both `yk4-test-vector-roundtrip*.fixture`
+    /// files.
+    #[test]
+    fn yk_attest_slot_9d_returns_6a80_matching_imported_key_silicon() {
+        let mut c = VirtualCard::new();
+        let req = hex_to_bytes("00f99d00000000");
+        assert_eq!(c.transmit(&req).unwrap(), vec![0x6A, 0x80]);
+    }
+
+    /// Sanity: the same 6A80 response is returned regardless of
+    /// whether VirtualCard's slot 9D has been seeded with a test-
+    /// vector scalar or not. The attestation refusal path is purely
+    /// a function of "we don't have a YubicoPIV factory key".
+    #[test]
+    fn yk_attest_slot_9d_returns_6a80_even_when_slot_seeded() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9d_priv(RFC6979_SCALAR);
+        let req = hex_to_bytes("00f99d00000000");
+        assert_eq!(c.transmit(&req).unwrap(), vec![0x6A, 0x80]);
     }
 }
