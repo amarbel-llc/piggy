@@ -41,6 +41,16 @@ const ALL_FIXTURES: &[(&str, Model)] = &[
     (YK4_FIXTURE, Model::Yk4),
     ("tests/fixtures/apdu/yk4-list.fixture", Model::Yk4),
     ("tests/fixtures/apdu/yk4-init.fixture", Model::Yk4),
+    // yk5-list captured 2026-05-31 from a real YubiKey 5 firmware
+    // 5.2.7 (the primary card alongside the throwaway YK4). Pinned
+    // to `Model::Yk5` with that firmware version and the canonical
+    // real-card SELECT FCI both real YK families share.
+    ("tests/fixtures/apdu/yk5-list.fixture", Model::Yk5),
+    // fib pairs with `Model::Yk5` even though fib's PivApplet
+    // advertises firmware 5.4.0 (not 5.2.7) and a 121-byte FCI
+    // (not the canonical 19-byte). The mismatch costs ~3 matched
+    // pairs per fib fixture; aligning would need a separate
+    // `Model::FibPivApplet` variant, deferred.
     (FIB_YK54_FIXTURE, Model::Yk5),
     ("tests/fixtures/apdu/fib-yk54-list.fixture", Model::Yk5),
     ("tests/fixtures/apdu/fib-yk54-init.fixture", Model::Yk5),

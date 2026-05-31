@@ -38,30 +38,29 @@ const YK5_ATR: &[u8] = &[
     0x75, 0x62, 0x69, 0x4B, 0x65, 0x79, 0x40,
 ];
 
-/// Wet-env-captured PIV SELECT FCI from YubiKey 4 firmware 4.3.5
-/// (2026-05-31 capture). Real silicon emits this byte-for-byte on
-/// every successful SELECT of the PIV AID. Structure: outer 0x61
-/// (application-property template, len 0x11=17), then:
+/// Canonical real-card PIV SELECT FCI. Wet-env-captured byte-equal
+/// from both YubiKey 4 firmware 4.3.5 AND YubiKey 5 firmware 5.2.7
+/// on 2026-05-31 — both real cards emit this exact 19-byte response
+/// on every successful SELECT of the PIV AID, despite their different
+/// firmware lineages.
 ///
-/// - `4F 06 00 00 10 00 01 00` — application identifier
-///   (the post-RID portion of the PIV AID `A0 00 00 03 08 *00 00 10 00
-///   01 00*`).
+/// Structure: outer 0x61 (application-property template, len 0x11=17),
+/// then:
+///
+/// - `4F 06 00 00 10 00 01 00` — application identifier (the
+///   post-RID portion of the PIV AID `A0 00 00 03 08 *00 00 10 00 01
+///   00*`).
 /// - `79 07 4F 05 A0 00 00 03 08` — coexistent tag allocation
 ///   authority (RID-only portion of the PIV AID).
 ///
-/// Trailing SW 9000 is added by the caller.
-const YK4_SELECT_FCI: &[u8] = &[
+/// Trailing SW 9000 is added by the caller. fib's PivApplet does NOT
+/// emit this — it prepends its 30-byte applet identity string into a
+/// 121-byte FCI. A separate `Model::FibPivApplet` variant or an
+/// embedded fib-specific constant would close that gap; out of scope
+/// for the current YK4/YK5 alignment.
+const CANONICAL_REAL_CARD_PIV_FCI: &[u8] = &[
     0x61, 0x11, 0x4F, 0x06, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00, 0x79, 0x07, 0x4F, 0x05, 0xA0, 0x00,
     0x00, 0x03, 0x08,
-];
-
-/// Structurally-valid PIV SELECT FCI stub for Yk5. Mirrors VirtualCard's
-/// pre-Yk4-capture behavior: emits `61 <len> 4F <len> <PIV AID full>`.
-/// **Not** a wet-env-verified capture — real YK5s and fib's PivApplet
-/// emit longer FCIs (the latter includes its applet identity string).
-/// Aligning either needs hardware/wet-env data. Tracked under #133.
-const YK5_SELECT_FCI_STUB: &[u8] = &[
-    0x61, 0x0D, 0x4F, 0x0B, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00,
 ];
 
 /// PIV card hardware profile. Selects the ATR VirtualCard advertises
@@ -105,24 +104,23 @@ impl Model {
 
     /// Bytes returned in the PIV SELECT response (inside the 0x61
     /// application-property template), without the trailing SW 9000.
-    /// Per SP 800-73-4 §3.1.1 + the YK4 wet-env capture:
+    /// Per SP 800-73-4 §3.1.1 + the YK4 + YK5 wet-env captures:
     ///
-    /// - `Yk4` → the wet-env-canonical 19-byte FCI captured 2026-05-31:
+    /// - `Yk4` and `Yk5` both → the wet-env-canonical 19-byte FCI
     ///   `61 11 4F 06 <PIV AID app portion> 79 07 4F 05 <PIV AID RID>`.
-    ///   Real silicon emits this byte-for-byte on every PIV SELECT.
-    ///   Embedding the captured constant directly rather than building
-    ///   it from `apdu::PIV_AID` because the YK4 wire splits the AID
-    ///   into RID + app-portion across two TLVs in a way the abstract
-    ///   PIV_AID constant doesn't reflect.
-    /// - `Yk5` → a structurally-valid stub built from `apdu::PIV_AID`,
-    ///   matching VirtualCard's pre-Yk4-capture behavior. Real YK5 +
-    ///   fib's PivApplet emit longer FCIs (fib includes its applet
-    ///   identity string); aligning either requires a wet-env capture
-    ///   (#128, #133).
+    ///   Wet-env captures confirm real YubiKey 4 firmware 4.3.5 and
+    ///   real YubiKey 5 firmware 5.2.7 emit byte-identical responses
+    ///   on every PIV SELECT — that's the canonical real-card PIV
+    ///   FCI, shared by both profiles. fib's PivApplet, by contrast,
+    ///   prepends its applet identity string and emits a 121-byte
+    ///   FCI; aligning fib requires either a `Model::FibPivApplet`
+    ///   variant or the wet-env-captured PivApplet bytes embedded
+    ///   here — deferred.
     pub fn select_fci_bytes(self) -> &'static [u8] {
         match self {
-            Model::Yk4 => YK4_SELECT_FCI,
-            Model::Yk5 => YK5_SELECT_FCI_STUB,
+            // Both YubiKey models emit the canonical 19-byte real-card
+            // PIV FCI; verified wet-env on YK4 4.3.5 + YK5 5.2.7.
+            Model::Yk4 | Model::Yk5 => CANONICAL_REAL_CARD_PIV_FCI,
         }
     }
 
@@ -132,15 +130,17 @@ impl Model {
     ///
     /// - `Yk4` → `(4, 3, 5)`, the version reported by the real YubiKey
     ///   4 we captured against on 2026-05-31.
-    /// - `Yk5` → `(5, 4, 0)`, which both is a real YK5 firmware
-    ///   version AND is what fib's PivApplet emulates ("yubico:
-    ///   implements YubicoPIV extensions (v5.4.0)"). So this is
-    ///   honest for both the placeholder profile and for replay
-    ///   against fib's fixtures.
+    /// - `Yk5` → `(5, 2, 7)`, captured wet-env on 2026-05-31 against a
+    ///   real YubiKey 5 firmware 5.2.7. This used to be `(5, 4, 0)` as
+    ///   a placeholder that happened to match fib's PivApplet
+    ///   emulation; now that we have real YK5 wire, Yk5 reflects real
+    ///   silicon. fib's `5.4.0` advertisement no longer byte-matches
+    ///   Yk5 — that's a separate concern best handled by a
+    ///   `Model::FibPivApplet` variant or by accepting the gap.
     pub fn firmware_version(self) -> [u8; 3] {
         match self {
             Model::Yk4 => [0x04, 0x03, 0x05],
-            Model::Yk5 => [0x05, 0x04, 0x00],
+            Model::Yk5 => [0x05, 0x02, 0x07],
         }
     }
 
@@ -727,8 +727,11 @@ mod tests {
     fn get_version_returns_yk5_firmware_for_yk5_model() {
         let mut c = VirtualCard::with_model(Model::Yk5);
         let resp = c.transmit(&[0x00, 0xFD, 0x00, 0x00, 0x00]).unwrap();
-        // 5.4.0 + 9000; byte-equal to what fib's PivApplet returns.
-        assert_eq!(resp, vec![0x05, 0x04, 0x00, 0x90, 0x00]);
+        // 5.2.7 + 9000; byte-equal to the YubiKey 5 firmware 5.2.7
+        // wire response captured 2026-05-31. (Previously this asserted
+        // 5.4.0 from a placeholder that happened to match fib's
+        // PivApplet emulation.)
+        assert_eq!(resp, vec![0x05, 0x02, 0x07, 0x90, 0x00]);
     }
 
     #[test]
@@ -759,17 +762,18 @@ mod tests {
     }
 
     #[test]
-    fn select_piv_returns_yk5_stub_fci_for_yk5_model() {
+    fn select_piv_returns_canonical_real_card_fci_for_yk5_model() {
         let mut c = VirtualCard::with_model(Model::Yk5);
         c.connect(2, 3).unwrap();
         let resp = c.transmit(&select_piv()).unwrap();
-        // Yk5 keeps the original PIV-AID-derived stub until a wet-env
-        // YK5 capture lands (#133). Shape: 0x61 + 0x4F-wrapped AID + 9000.
+        // Wet-env captures on 2026-05-31 confirmed real YK4 and real
+        // YK5 emit byte-identical PIV SELECT FCIs. So Yk5's response
+        // is the same canonical bytes Yk4 returns.
         assert_eq!(
             resp,
             vec![
-                0x61, 0x0D, 0x4F, 0x0B, 0xA0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01,
-                0x00, 0x90, 0x00,
+                0x61, 0x11, 0x4F, 0x06, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00, 0x79, 0x07, 0x4F, 0x05,
+                0xA0, 0x00, 0x00, 0x03, 0x08, 0x90, 0x00,
             ]
         );
     }
@@ -781,10 +785,10 @@ mod tests {
     }
 
     #[test]
-    fn model_firmware_version_for_yk5_matches_fib_pivapplet() {
-        // 5.4.0 — both a real YK5 firmware AND what fib's PivApplet
-        // advertises. Byte-equal to fib's GET VERSION wire response.
-        assert_eq!(Model::Yk5.firmware_version(), [0x05, 0x04, 0x00]);
+    fn model_firmware_version_for_yk5_is_5_2_7_wet_env_captured() {
+        // 5.2.7 — captured wet-env from real YubiKey 5 on 2026-05-31.
+        // Byte-equal to the YK5 GET VERSION wire response.
+        assert_eq!(Model::Yk5.firmware_version(), [0x05, 0x02, 0x07]);
     }
 
     #[test]
