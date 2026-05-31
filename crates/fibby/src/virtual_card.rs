@@ -13,6 +13,8 @@
 //! returns `6D00` (INS not supported). Keep the stub honest: it must
 //! never *look* like it did crypto it didn't.
 
+use std::collections::HashMap;
+
 use crate::apdu;
 use crate::backend::{Backend, ScardResult};
 use crate::proto::protocol;
@@ -94,6 +96,19 @@ pub struct VirtualCard {
     model: Model,
     powered: bool,
     selected_piv: bool,
+    /// PIV data-object storage keyed by tag bytes (the inner `<tag>` in
+    /// `5C <len> <tag>`). Values are stored already-wrapped in a 53
+    /// BER-TLV so GET DATA can return them verbatim — that's how real
+    /// silicon's wire looks. Empty by default; clients populate via
+    /// PUT DATA. See SP 800-73-4 §3.1.{2,3} for the request/response
+    /// shape.
+    ///
+    /// NB no mgmt-key auth enforcement yet — any client can PUT
+    /// anything. Auth enforcement is its own slice; the design-doc
+    /// step-5 work tracks it. Until then, VirtualCard is a stub a
+    /// trusted local test can drive end-to-end, not a security
+    /// boundary.
+    data_objects: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 impl Default for VirtualCard {
@@ -118,6 +133,7 @@ impl VirtualCard {
             model,
             powered: false,
             selected_piv: false,
+            data_objects: HashMap::new(),
         }
     }
 }
@@ -174,6 +190,16 @@ impl Backend for VirtualCard {
             return Ok(sw(0x6A, 0x82)); // file/application not found
         }
 
+        // GET DATA (00 CB 3F FF <Lc> 5C <tag_len> <tag> [Le])
+        if cla == 0x00 && ins == apdu::ins::GET_DATA && p1 == 0x3F && p2 == 0xFF {
+            return Ok(self.handle_get_data(command_apdu));
+        }
+
+        // PUT DATA (00 DB 3F FF <Lc> 5C <tag_len> <tag> 53 <data_len> <data>)
+        if cla == 0x00 && ins == apdu::ins::PUT_DATA && p1 == 0x3F && p2 == 0xFF {
+            return Ok(self.handle_put_data(command_apdu));
+        }
+
         trace::emit(
             trace::DEBUG,
             "vcard",
@@ -181,6 +207,181 @@ impl Backend for VirtualCard {
         );
         Ok(sw(0x6D, 0x00)) // instruction not supported (yet)
     }
+}
+
+impl VirtualCard {
+    /// Handle a `GET DATA` APDU. Parses the `5C <tag_len> <tag>` body
+    /// to extract the tag and looks it up in `self.data_objects`.
+    /// Returns the stored `53 <len> <value>` plus SW=9000 if present,
+    /// `6A82` (file not found) if not, `6A80` (incorrect data field
+    /// parameters) on a malformed request.
+    fn handle_get_data(&mut self, apdu: &[u8]) -> Vec<u8> {
+        let body = match apdu_body(apdu) {
+            Some(b) => b,
+            None => return sw(0x6A, 0x80),
+        };
+        let tag = match parse_5c_tag(body) {
+            Some(t) => t.to_vec(),
+            None => {
+                trace::emit(trace::DEBUG, "vcard", "GET DATA: malformed 5C TLV");
+                return sw(0x6A, 0x80);
+            }
+        };
+        match self.data_objects.get(&tag) {
+            Some(value) => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!("GET DATA tag={} -> {} bytes", hex_tag(&tag), value.len()),
+                );
+                let mut out = value.clone();
+                out.extend_from_slice(&sw(0x90, 0x00));
+                out
+            }
+            None => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!("GET DATA tag={} -> 6A82 (not present)", hex_tag(&tag)),
+                );
+                sw(0x6A, 0x82)
+            }
+        }
+    }
+
+    /// Handle a `PUT DATA` APDU. Parses `5C <tag_len> <tag>` followed
+    /// by the `53 <len> <data>` block, stores the 53-wrapped form in
+    /// `self.data_objects`. Returns SW=9000 on success, `6A80` on a
+    /// malformed body. No mgmt-key auth enforced (see struct doc).
+    fn handle_put_data(&mut self, apdu: &[u8]) -> Vec<u8> {
+        let body = match apdu_body(apdu) {
+            Some(b) => b,
+            None => return sw(0x6A, 0x80),
+        };
+        let (tag, rest) = match parse_5c_tag_with_rest(body) {
+            Some(t) => t,
+            None => {
+                trace::emit(trace::DEBUG, "vcard", "PUT DATA: malformed 5C TLV");
+                return sw(0x6A, 0x80);
+            }
+        };
+        // The remainder must be a single 53 BER-TLV. We store the
+        // whole 53-wrapped form verbatim so GET DATA can return it
+        // unchanged.
+        let (value_with_53, _trailing) = match split_53_tlv(rest) {
+            Some(t) => t,
+            None => {
+                trace::emit(trace::DEBUG, "vcard", "PUT DATA: malformed 53 TLV");
+                return sw(0x6A, 0x80);
+            }
+        };
+        trace::emit(
+            trace::DEBUG,
+            "vcard",
+            &format!(
+                "PUT DATA tag={} -> {} bytes stored",
+                hex_tag(tag),
+                value_with_53.len()
+            ),
+        );
+        self.data_objects
+            .insert(tag.to_vec(), value_with_53.to_vec());
+        sw(0x90, 0x00)
+    }
+}
+
+/// Extract the data field from a case-3 or case-4 APDU. Handles both
+/// ISO 7816-4 encodings:
+///
+/// - **Short-form**: `CLA INS P1 P2 Lc <data> [Le]` where `Lc` is one
+///   byte in 1..=255.
+/// - **Extended-length**: `CLA INS P1 P2 00 <Lc_hi> <Lc_lo> <data>
+///   [<Le_hi> <Le_lo>]` — distinguished by `apdu[4] == 0x00` with at
+///   least 7 bytes total.
+///
+/// Real wet-env captures show pivy-tool's PIV path picking encoding
+/// per card: YubiKey 4 negotiates extended-length and uses it for
+/// GET/PUT DATA, while fib's PivApplet falls back to short-form after
+/// rejecting extended (the `6986` error we see in the fib init
+/// fixture). Without both encodings, GET DATA against a YK4 capture
+/// would never match.
+fn apdu_body(apdu: &[u8]) -> Option<&[u8]> {
+    if apdu.len() < 5 {
+        return None;
+    }
+    if apdu[4] == 0x00 && apdu.len() >= 7 {
+        // Extended-length: Lc is 2 bytes BE at [5..7], data at [7..].
+        let lc = u16::from_be_bytes([apdu[5], apdu[6]]) as usize;
+        if lc == 0 || apdu.len() < 7 + lc {
+            return None;
+        }
+        Some(&apdu[7..7 + lc])
+    } else {
+        let lc = apdu[4] as usize;
+        if lc == 0 || apdu.len() < 5 + lc {
+            return None;
+        }
+        Some(&apdu[5..5 + lc])
+    }
+}
+
+/// Parse a single `5C <tag_len> <tag>` BER-TLV at the front of the
+/// data field, returning the tag bytes. Tag length 0 is rejected.
+/// Anything after the 5C TLV is ignored — use [`parse_5c_tag_with_rest`]
+/// when there's more to read (PUT DATA's 53 TLV).
+fn parse_5c_tag(body: &[u8]) -> Option<&[u8]> {
+    parse_5c_tag_with_rest(body).map(|(tag, _rest)| tag)
+}
+
+/// Variant of [`parse_5c_tag`] that also returns the bytes after the
+/// 5C TLV. PUT DATA needs this — the `53 <len> <data>` block follows.
+fn parse_5c_tag_with_rest(body: &[u8]) -> Option<(&[u8], &[u8])> {
+    if body.first()? != &0x5C {
+        return None;
+    }
+    let tag_len = *body.get(1)? as usize;
+    if tag_len == 0 || body.len() < 2 + tag_len {
+        return None;
+    }
+    let tag = &body[2..2 + tag_len];
+    let rest = &body[2 + tag_len..];
+    Some((tag, rest))
+}
+
+/// Parse a single 53 BER-TLV at the front of `body`. Supports the
+/// short form (length 0-127 in one byte) and the 0x81 form (length
+/// 128-255 in one length byte). Returns `(full_tlv_with_53_header,
+/// trailing_bytes)`. Anything beyond the 0x81 form is rejected for now
+/// — real PIV objects fit (CHUID/CCC: ~50-60 bytes; slot certs: handled
+/// by GENERATE flow, not raw PUT DATA in our current captures).
+fn split_53_tlv(body: &[u8]) -> Option<(&[u8], &[u8])> {
+    if body.first()? != &0x53 {
+        return None;
+    }
+    let first_len = *body.get(1)?;
+    let (header_len, payload_len) = if first_len < 0x80 {
+        (2, first_len as usize)
+    } else if first_len == 0x81 {
+        (3, *body.get(2)? as usize)
+    } else {
+        return None;
+    };
+    let total = header_len + payload_len;
+    if body.len() < total {
+        return None;
+    }
+    Some((&body[..total], &body[total..]))
+}
+
+/// Render a tag as a hex string for trace messages. Tags are 1-3 bytes;
+/// this is decoration, not on a hot path.
+fn hex_tag(tag: &[u8]) -> String {
+    let mut s = String::with_capacity(tag.len() * 2);
+    for byte in tag {
+        use std::fmt::Write as _;
+        let _ = write!(&mut s, "{byte:02X}");
+    }
+    s
 }
 
 /// Minimal PIV application property template (tag 0x61) naming the PIV
@@ -285,5 +486,166 @@ mod tests {
     #[test]
     fn model_default_is_yk4_wet_env_profile() {
         assert_eq!(Model::default(), Model::Yk4);
+    }
+
+    // -- GET DATA / PUT DATA tests ---------------------------------------
+
+    /// Build a PIV GET DATA APDU for a 3-byte tag (e.g. CHUID `5FC102`).
+    fn get_data_apdu(tag: &[u8]) -> Vec<u8> {
+        // 00 CB 3F FF Lc 5C <tag_len> <tag> 00
+        let mut a = vec![0x00, 0xCB, 0x3F, 0xFF];
+        let body_len = 2 + tag.len(); // 5C + tag_len + tag
+        a.push(body_len as u8);
+        a.push(0x5C);
+        a.push(tag.len() as u8);
+        a.extend_from_slice(tag);
+        a.push(0x00); // Le = 0 (max)
+        a
+    }
+
+    /// Build a PIV PUT DATA APDU for a tag + value. Wraps the value
+    /// in a 53 BER-TLV (short form, value len ≤ 127) automatically.
+    fn put_data_apdu(tag: &[u8], value: &[u8]) -> Vec<u8> {
+        assert!(value.len() <= 127, "test helper: short-form only");
+        let mut a = vec![0x00, 0xDB, 0x3F, 0xFF];
+        let body_len = 2 + tag.len() + 2 + value.len(); // 5C + tag_len + tag + 53 + val_len + val
+        a.push(body_len as u8);
+        a.push(0x5C);
+        a.push(tag.len() as u8);
+        a.extend_from_slice(tag);
+        a.push(0x53);
+        a.push(value.len() as u8);
+        a.extend_from_slice(value);
+        a
+    }
+
+    const TAG_CHUID: &[u8] = &[0x5F, 0xC1, 0x02];
+    const TAG_CCC: &[u8] = &[0x5F, 0xC1, 0x07];
+
+    #[test]
+    fn get_data_returns_6a82_on_unset_tag() {
+        let mut c = VirtualCard::new();
+        let resp = c.transmit(&get_data_apdu(TAG_CHUID)).unwrap();
+        assert_eq!(resp, vec![0x6A, 0x82]);
+    }
+
+    #[test]
+    fn put_data_then_get_data_round_trips_bytes() {
+        let mut c = VirtualCard::new();
+        // Arbitrary CHUID-shaped payload; we only assert byte equality.
+        let value: &[u8] = &[0x30, 0x19, 0xD0, 0x42, 0x10, 0xAA, 0xBB];
+
+        let put = c.transmit(&put_data_apdu(TAG_CHUID, value)).unwrap();
+        assert_eq!(put, vec![0x90, 0x00], "PUT DATA -> 9000");
+
+        let get = c.transmit(&get_data_apdu(TAG_CHUID)).unwrap();
+        // GET DATA response is the stored 53-wrapped form + SW.
+        let mut expected = vec![0x53, value.len() as u8];
+        expected.extend_from_slice(value);
+        expected.extend_from_slice(&[0x90, 0x00]);
+        assert_eq!(get, expected);
+    }
+
+    #[test]
+    fn put_data_namespaces_by_tag() {
+        let mut c = VirtualCard::new();
+        c.transmit(&put_data_apdu(TAG_CHUID, &[0xAA, 0xAA]))
+            .unwrap();
+        c.transmit(&put_data_apdu(TAG_CCC, &[0xBB, 0xBB])).unwrap();
+
+        let chuid_get = c.transmit(&get_data_apdu(TAG_CHUID)).unwrap();
+        let ccc_get = c.transmit(&get_data_apdu(TAG_CCC)).unwrap();
+
+        // Each tag returns its own stored value (not the other one).
+        assert_eq!(
+            chuid_get,
+            vec![0x53, 0x02, 0xAA, 0xAA, 0x90, 0x00],
+            "CHUID tag returns its own value"
+        );
+        assert_eq!(
+            ccc_get,
+            vec![0x53, 0x02, 0xBB, 0xBB, 0x90, 0x00],
+            "CCC tag returns its own value"
+        );
+    }
+
+    #[test]
+    fn put_data_overwrites_existing_value() {
+        let mut c = VirtualCard::new();
+        c.transmit(&put_data_apdu(TAG_CHUID, &[0x01])).unwrap();
+        c.transmit(&put_data_apdu(TAG_CHUID, &[0x02, 0x03]))
+            .unwrap();
+
+        let resp = c.transmit(&get_data_apdu(TAG_CHUID)).unwrap();
+        assert_eq!(
+            resp,
+            vec![0x53, 0x02, 0x02, 0x03, 0x90, 0x00],
+            "second PUT overwrites the first"
+        );
+    }
+
+    #[test]
+    fn put_data_supports_0x81_length_form_for_values_128_to_255() {
+        let mut c = VirtualCard::new();
+        let value: Vec<u8> = (0..200u8).collect();
+        // Build PUT DATA manually with the 0x81 length form (the helper
+        // above asserts ≤ 127). Body shape:
+        //   5C 03 <tag>  53 81 <len> <value>
+        let body_len = 2 + 3 + 3 + value.len(); // 5C+5C_len+tag(3) + 53+81+len + value
+        let mut apdu = vec![0x00, 0xDB, 0x3F, 0xFF, body_len as u8];
+        apdu.extend_from_slice(&[0x5C, 0x03]);
+        apdu.extend_from_slice(TAG_CHUID);
+        apdu.extend_from_slice(&[0x53, 0x81, value.len() as u8]);
+        apdu.extend_from_slice(&value);
+
+        let put = c.transmit(&apdu).unwrap();
+        assert_eq!(put, vec![0x90, 0x00]);
+
+        let get = c.transmit(&get_data_apdu(TAG_CHUID)).unwrap();
+        // GET returns the stored 53-wrapped form verbatim + SW.
+        let mut expected = vec![0x53, 0x81, value.len() as u8];
+        expected.extend_from_slice(&value);
+        expected.extend_from_slice(&[0x90, 0x00]);
+        assert_eq!(get, expected);
+    }
+
+    #[test]
+    fn get_data_with_truncated_5c_tlv_returns_6a80() {
+        let mut c = VirtualCard::new();
+        // Lc says 2 bytes of body, body is `5C 03` claiming 3 tag bytes
+        // that aren't there. Malformed → 6A80.
+        let apdu = vec![0x00, 0xCB, 0x3F, 0xFF, 0x02, 0x5C, 0x03];
+        let resp = c.transmit(&apdu).unwrap();
+        assert_eq!(resp, vec![0x6A, 0x80]);
+    }
+
+    #[test]
+    fn put_data_without_53_block_returns_6a80() {
+        let mut c = VirtualCard::new();
+        // PUT DATA with a valid 5C TLV but no 53 block after it.
+        let apdu = vec![0x00, 0xDB, 0x3F, 0xFF, 0x05, 0x5C, 0x03, 0x5F, 0xC1, 0x02];
+        let resp = c.transmit(&apdu).unwrap();
+        assert_eq!(resp, vec![0x6A, 0x80]);
+    }
+
+    #[test]
+    fn get_data_handles_extended_length_lc_encoding() {
+        // YubiKey 4's pivy-tool sends GET DATA in extended-length
+        // form: `00 CB 3F FF 00 <Lc_hi> <Lc_lo> <body> <Le_hi> <Le_lo>`.
+        // This is the shape that appears in `yk4-list.fixture`.
+        let mut c = VirtualCard::new();
+        // CHUID payload to plant via short-form PUT (the encoding of
+        // the WRITE doesn't matter here; what we're testing is the
+        // READ accepting extended-length).
+        c.transmit(&put_data_apdu(TAG_CHUID, &[0xAB, 0xCD]))
+            .unwrap();
+
+        let extended_get = vec![
+            0x00, 0xCB, 0x3F, 0xFF, 0x00, 0x00, 0x05, // CLA INS P1 P2 + extended Lc=5
+            0x5C, 0x03, 0x5F, 0xC1, 0x02, // 5C TLV identifying CHUID
+            0x00, 0x00, // extended Le = 0 (max)
+        ];
+        let resp = c.transmit(&extended_get).unwrap();
+        assert_eq!(resp, vec![0x53, 0x02, 0xAB, 0xCD, 0x90, 0x00]);
     }
 }

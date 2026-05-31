@@ -18,4 +18,10 @@ pub const PIV_AID_PREFIX: &[u8] = &[0xA0, 0x00, 0x00, 0x03, 0x08];
 /// ISO 7816-4 instruction bytes fibby's stub recognizes.
 pub mod ins {
     pub const SELECT: u8 = 0xA4;
+    /// PIV GET DATA (SP 800-73-4 §3.1.2). Always with `P1 P2 = 3F FF`,
+    /// data field is a `5C <len> <tag>` TLV identifying the object.
+    pub const GET_DATA: u8 = 0xCB;
+    /// PIV PUT DATA (SP 800-73-4 §3.1.3). Same `P1 P2`; data field is
+    /// `5C <len> <tag>` followed by `53 <len> <value>`.
+    pub const PUT_DATA: u8 = 0xDB;
 }
