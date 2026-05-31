@@ -22,6 +22,23 @@ use fibby::virtual_card::VirtualCard;
 const YK4_FIXTURE: &str = "tests/fixtures/apdu/yk4-roundtrip.fixture";
 const FIB_YK54_FIXTURE: &str = "tests/fixtures/apdu/fib-yk54-roundtrip.fixture";
 
+/// All fixture files the generic tests below iterate over. Three flows
+/// (`roundtrip`, `list`, `init`) × two sources (YubiKey 4 firmware
+/// 4.3.5 real silicon vs fib / PivApplet advertising as YK 5.4.0) =
+/// six fixtures total. Roundtrip is the largest (35-43 APDU pairs);
+/// list/init are smaller (12-13 pairs) because they walk a subset of
+/// the PIV applet's command surface. New captures land here; the
+/// per-test docs explain which assertions hold across all flows vs
+/// roundtrip-specific.
+const ALL_FIXTURES: &[&str] = &[
+    YK4_FIXTURE,
+    "tests/fixtures/apdu/yk4-list.fixture",
+    "tests/fixtures/apdu/yk4-init.fixture",
+    FIB_YK54_FIXTURE,
+    "tests/fixtures/apdu/fib-yk54-list.fixture",
+    "tests/fixtures/apdu/fib-yk54-init.fixture",
+];
+
 /// One APDU exchange parsed from a `.fixture` file: the command APDU
 /// the client sent, and the response APDU the card returned.
 #[derive(Debug, Clone)]
@@ -138,47 +155,40 @@ fn is_select_piv(apdu: &[u8]) -> bool {
 // Tests that pass today.
 // ============================================================================
 
-/// Sanity: both fixtures exist, parse, and contain a useful number of
-/// APDU pairs. A regression in either the extractor or the capture
-/// pipeline shows up here first.
+/// Sanity: every fixture exists, parses, and contains a useful number
+/// of APDU pairs. A regression in either the extractor or any capture
+/// pipeline shows up here first. The pair-count floor (5) is set
+/// permissively so it accepts the smallest flow (list = ~12 pairs)
+/// with margin; the roundtrip fixtures comfortably exceed 30.
 #[test]
 fn fixtures_parse_with_nontrivial_pair_counts() {
-    let yk = parse_fixture(&workspace_relative(YK4_FIXTURE));
-    let fib = parse_fixture(&workspace_relative(FIB_YK54_FIXTURE));
-    assert!(
-        yk.len() >= 20,
-        "YK4 fixture: expected ≥20 APDU pairs, got {}",
-        yk.len()
-    );
-    assert!(
-        fib.len() >= 20,
-        "fib fixture: expected ≥20 APDU pairs, got {}",
-        fib.len()
-    );
-    // Every pair should at minimum carry an SW1 SW2 (2 bytes).
-    for (i, p) in yk.iter().enumerate() {
+    for fixture_path in ALL_FIXTURES {
+        let pairs = parse_fixture(&workspace_relative(fixture_path));
         assert!(
-            p.response.len() >= 2,
-            "YK4 pair {i}: response too short ({} bytes)",
-            p.response.len()
+            pairs.len() >= 5,
+            "{fixture_path}: expected ≥5 APDU pairs, got {}",
+            pairs.len()
         );
-    }
-    for (i, p) in fib.iter().enumerate() {
-        assert!(
-            p.response.len() >= 2,
-            "fib pair {i}: response too short ({} bytes)",
-            p.response.len()
-        );
+        // Every pair should at minimum carry an SW1 SW2 (2 bytes).
+        for (i, p) in pairs.iter().enumerate() {
+            assert!(
+                p.response.len() >= 2,
+                "{fixture_path} pair {i}: response too short ({} bytes)",
+                p.response.len()
+            );
+        }
     }
 }
 
-/// Both fixtures must contain at least one SELECT PIV APDU pair, and
+/// Every fixture must contain at least one SELECT PIV APDU pair, and
 /// the recorded response must be a successful application-property
 /// template (starts with FCI tag 0x61, ends with SW 9000). Documents
 /// the canonical SELECT shape `VirtualCard` is reproducing today.
+/// SELECT is the opening move of every PIV session — list, init,
+/// and roundtrip alike — so this holds across all six fixtures.
 #[test]
 fn fixtures_contain_select_piv_with_fci_response() {
-    for fixture_path in [YK4_FIXTURE, FIB_YK54_FIXTURE] {
+    for fixture_path in ALL_FIXTURES {
         let pairs = parse_fixture(&workspace_relative(fixture_path));
         let selects: Vec<&Pair> = pairs.iter().filter(|p| is_select_piv(&p.request)).collect();
         assert!(
@@ -237,7 +247,7 @@ fn virtual_card_select_piv_returns_fci_shaped_response() {
 /// the `#[ignore]`'d strict tests below become a viable next gate.
 #[test]
 fn replay_progress_against_real_silicon_is_logged() {
-    for fixture_path in [YK4_FIXTURE, FIB_YK54_FIXTURE] {
+    for fixture_path in ALL_FIXTURES {
         let pairs = parse_fixture(&workspace_relative(fixture_path));
         let mut card = VirtualCard::new();
         card.connect(2, 3).unwrap();
