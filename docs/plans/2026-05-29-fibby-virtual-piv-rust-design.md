@@ -509,9 +509,25 @@ to re-establish with identical params). Without this, any
 `<discovery-tool>` → `<work-tool>` chain failed at the second
 operation.
 
-Captured wire trace artifacts live at `.tmp/nix-shell.<run>/fibby-proxy.<pid>/wire.log`
-under each `just debug-fibby-roundtrip` invocation. Promote the most
-representative trace(s) to fixture files as Step 5 work begins.
+Wire trace capture: `debug-fibby-proxy`'s cleanup trap removes the
+session tmp dir (so `.tmp/nix-shell.<run>/fibby-proxy.<pid>/wire.log`
+is ephemeral by default). Set `FIBBY_KEEP_LOGS=<dir>` in the recipe
+env to preserve the trace before teardown; the dedicated capture
+recipes wire this up for the two canonical sources:
+
+- `just debug-fibby-roundtrip-capture` — captures against a real
+  inserted card, lands under `crates/fibby/tests/fixtures/captures/yubikey/`.
+- `just debug-fibby-roundtrip-via-fib` — same flow routed through the
+  Java `fib` card via `FIBBY_BACKEND_PCSCD=/tmp/piggy-fib-ipc/pcscd.comm`
+  + `FIBBY_READER="piggy fib"`, lands under
+  `crates/fibby/tests/fixtures/captures/fib/`.
+
+Both produce the same `[fibby:apdu>]`/`[fibby:apdu<]`-tagged wire
+log; the dual-source pair is the differential fixture set
+`VirtualCard`'s Step 5 tests will diff against (real silicon as
+ground truth, `fib` as the implementation `VirtualCard` is replacing).
+The per-APDU fixture extractor + the canonical capture set are
+follow-ups; the raw captures land first.
 
 ### Next steps
 

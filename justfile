@@ -489,6 +489,21 @@ debug-pcsc-env:
 #
 # The recipe rebuilds with --features hardware-proxy on every call so
 # you don't have to remember the feature flag.
+#
+# Env overrides (all optional):
+#   FIBBY_BACKEND_PCSCD=<socket>  Tell fibby's HardwareProxy to talk to
+#                                 a non-default pcscd (e.g. fib's
+#                                 private pcscd at /tmp/piggy-fib-ipc/pcscd.comm).
+#                                 Default: system pcscd at /run/pcscd/pcscd.comm.
+#   FIBBY_READER=<substr>         Reader-name substring HardwareProxy
+#                                 selects on. Default: "Yubico". Set to
+#                                 e.g. "piggy fib" for the fib virtual
+#                                 reader.
+#   FIBBY_KEEP_LOGS=<dir>         Copy the FIBBY_LOG=wire trace to this
+#                                 directory before the cleanup trap erases
+#                                 the tmp dir. Output file is named
+#                                 wire-<UTC timestamp>-<pid>.log. Default:
+#                                 unset (trace is ephemeral).
 [group('debug')]
 debug-fibby-proxy *CLIENT_CMD:
     #!/usr/bin/env bash
@@ -506,21 +521,42 @@ debug-fibby-proxy *CLIENT_CMD:
     mkdir -p "$sock_dir"
     sock="$sock_dir/pcscd.comm"
     log="$sock_dir/wire.log"
+    reader="${FIBBY_READER:-Yubico}"
     # Last-resort cleanup: kill fibby + remove the tmp socket dir on any
-    # exit path. Fibby itself rm -f's a stale socket on startup, so a
-    # crashed previous run won't block restart. The trailing `:` keeps
-    # cleanup's exit status from polluting the script's final exit code
-    # — without it, `wait $fibby_pid` propagates fibby's SIGTERM (143)
-    # and the recipe spuriously reports failure.
+    # exit path. Before the rm, copy the wire trace under
+    # FIBBY_KEEP_LOGS if requested. Fibby itself rm -f's a stale socket
+    # on startup, so a crashed previous run won't block restart. The
+    # trailing `:` keeps cleanup's exit status from polluting the
+    # script's final exit code — without it, `wait $fibby_pid`
+    # propagates fibby's SIGTERM (143) and the recipe spuriously
+    # reports failure.
     cleanup() {
       [[ -n "${fibby_pid:-}" ]] && kill "$fibby_pid" 2>/dev/null
       wait "${fibby_pid:-}" 2>/dev/null
+      if [[ -n "${FIBBY_KEEP_LOGS:-}" && -f "$log" ]]; then
+        mkdir -p "$FIBBY_KEEP_LOGS"
+        stamp=$(date -u +%Y%m%dT%H%M%SZ)
+        kept="$FIBBY_KEEP_LOGS/wire-$stamp-$$.log"
+        cp "$log" "$kept" 2>/dev/null && \
+          echo "  wire log kept: $kept" >&2
+      fi
       rm -rf "$sock_dir"
       :
     }
     trap cleanup EXIT
-    FIBBY_LOG=wire ./target/debug/fibby --backend hardware --reader Yubico \
-      --socket "$sock" >"$log" 2>&1 &
+    # FIBBY_BACKEND_PCSCD redirects fibby's *upstream* pcsc-lite client
+    # (the one HardwareProxy uses internally). The CLIENT_CMD below uses
+    # a fresh PCSCLITE_CSOCK_NAME=$sock that overrides this for the
+    # client itself.
+    if [[ -n "${FIBBY_BACKEND_PCSCD:-}" ]]; then
+      echo "=== fibby backend pcscd → $FIBBY_BACKEND_PCSCD (reader=\"$reader\") ==="
+      PCSCLITE_CSOCK_NAME="$FIBBY_BACKEND_PCSCD" \
+        FIBBY_LOG=wire ./target/debug/fibby --backend hardware --reader "$reader" \
+        --socket "$sock" >"$log" 2>&1 &
+    else
+      FIBBY_LOG=wire ./target/debug/fibby --backend hardware --reader "$reader" \
+        --socket "$sock" >"$log" 2>&1 &
+    fi
     fibby_pid=$!
     # Wait up to 5s for the socket to appear; if it doesn't, fibby crashed
     # at startup (usually pcsc init failure) — dump the log and bail.
@@ -574,6 +610,50 @@ debug-fibby-roundtrip:
 [group('debug')]
 debug-fibby-piggy-roundtrip: build-rust
     just debug-fibby-proxy bash zz-tests_bats/helpers/fibby-piggy-roundtrip.sh
+
+# Tier-4 round-trip with persistent wire-log capture: same as
+# debug-fibby-roundtrip but the FIBBY_LOG=wire trace is preserved
+# under crates/fibby/tests/fixtures/captures/yubikey/wire-<timestamp>.log
+# instead of being torn down with the recipe's tmp dir. Run this when
+# a real YubiKey is inserted; the captured trace is the canonical
+# input for the future per-APDU fixture set that VirtualCard's step-5
+# tests will replay/diff against.
+[group('debug')]
+debug-fibby-roundtrip-capture:
+    FIBBY_KEEP_LOGS=crates/fibby/tests/fixtures/captures/yubikey \
+      just debug-fibby-roundtrip
+
+# Tier-4 round-trip routed through fib (the Java virtual PIV card)
+# instead of a real YubiKey. fib provides a second oracle — same APDU
+# script, second capture — so we have differential fixtures even when
+# no hardware is around. Brings fib up first (idempotent); does NOT
+# tear it down on exit (run `just fib-down` when you're done).
+#
+# Prereq: fib's slot 9D must already have an ECDH key. Bootstrap once
+# per fib-up session:
+#   just debug-fibby-proxy-via-fib pivy-tool -K default init
+#   just debug-fibby-proxy-via-fib pivy-tool -P 123456 -K default -a eccp256 generate 9d
+#
+# The captured trace lands under crates/fibby/tests/fixtures/captures/fib/.
+[group('debug')]
+debug-fibby-roundtrip-via-fib: build-rust fib-up
+    FIBBY_BACKEND_PCSCD=/tmp/piggy-fib-ipc/pcscd.comm \
+    FIBBY_READER="piggy fib" \
+    FIBBY_KEEP_LOGS=crates/fibby/tests/fixtures/captures/fib \
+      just debug-fibby-roundtrip
+
+# Companion to debug-fibby-roundtrip-via-fib: run an arbitrary client
+# command via fibby-via-fib. Used to bootstrap fib's slot 9D (init +
+# generate) before the round-trip recipe is meaningful.
+#
+# Usage:
+#   just debug-fibby-proxy-via-fib pivy-tool list
+#   just debug-fibby-proxy-via-fib pivy-tool -K default init
+[group('debug')]
+debug-fibby-proxy-via-fib *CLIENT_CMD: build-rust fib-up
+    FIBBY_BACKEND_PCSCD=/tmp/piggy-fib-ipc/pcscd.comm \
+    FIBBY_READER="piggy fib" \
+      just debug-fibby-proxy {{CLIENT_CMD}}
 
 # Reproduce the launchd environment that pivy-agent invokes piggy-askpass.sh
 # under: no controlling TTY, no DISPLAY, scrubbed env. `setsid` detaches the
