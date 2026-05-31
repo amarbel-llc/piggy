@@ -325,6 +325,13 @@ fn replay_progress_against_real_silicon_is_logged() {
         if let Some(scalar) = slot_9d_priv_for(fixture_path) {
             card.seed_slot_9d_priv(scalar);
         }
+        // Seed the mgmt-key witness if the captured fixture ran the
+        // phase-1 of the mgmt-key challenge-response. Real silicon
+        // emits a fresh 8-byte witness per session; replay needs to
+        // know what bytes the capture happened to land on.
+        if let Some(witness) = extract_mgmt_key_witness(&pairs) {
+            card.seed_mgmt_key_witness(witness);
+        }
         let mut matched = 0usize;
         let mut select_matched = 0usize;
         let mut selects = 0usize;
@@ -398,6 +405,47 @@ fn hex_preview(bytes: &[u8]) -> String {
         let _ = write!(&mut s, "...({} more)", bytes.len() - cap);
     }
     s
+}
+
+/// Walk a fixture's APDU pairs and extract the 8-byte mgmt-key
+/// witness real silicon emitted in its GA phase-1 response, if the
+/// fixture exercised mgmt-key auth at all. The witness is in the
+/// last 8 bytes of a `7C 0A 81 08 <witness> 9000` response to a
+/// `7C 02 81 00` GA request. Seeding it into VirtualCard makes the
+/// mgmt-key exchange byte-deterministic across replays (mirrors the
+/// piggy#134 pattern for ECDH).
+fn extract_mgmt_key_witness(pairs: &[Pair]) -> Option<[u8; 8]> {
+    for p in pairs {
+        if !is_ga_mgmt_key(&p.request) {
+            continue;
+        }
+        let body = ga_body(&p.request)?;
+        if body != [0x7C, 0x02, 0x81, 0x00] {
+            continue;
+        }
+        if p.response.len() == 14 && p.response.starts_with(&[0x7C, 0x0A, 0x81, 0x08]) {
+            let bytes: [u8; 8] = p.response[4..12].try_into().ok()?;
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+fn is_ga_mgmt_key(apdu: &[u8]) -> bool {
+    apdu.len() >= 4 && apdu[0] == 0x00 && apdu[1] == 0x87 && apdu[2] == 0x03 && apdu[3] == 0x9B
+}
+
+fn ga_body(apdu: &[u8]) -> Option<&[u8]> {
+    if apdu.len() < 5 {
+        return None;
+    }
+    if apdu[4] == 0x00 && apdu.len() >= 7 {
+        let lc = u16::from_be_bytes([apdu[5], apdu[6]]) as usize;
+        apdu.get(7..7 + lc)
+    } else {
+        let lc = apdu[4] as usize;
+        apdu.get(5..5 + lc)
+    }
 }
 
 /// Walk a fixture's APDU pairs once and collect any data-object
@@ -619,6 +667,26 @@ fn full_byte_replay_against_yk4_test_vector_pivy_fixture() {
     );
 }
 
+/// Strict whole-fixture byte-replay against `yk4-init.fixture`. The
+/// init flow exercises mgmt-key challenge-response (INS 0x87 P1=0x03
+/// P2=0x9B), which is byte-deterministic once we seed VirtualCard with
+/// the captured witness; the rest of init (SELECT, GET DATA, GET
+/// VERSION) was already deterministic. No slot 9D scalar needed
+/// because init doesn't exercise ECDH.
+///
+/// Together with the test-vector strict tests above, this means
+/// every fixture VirtualCard fully implements is gated by an
+/// un-ignored strict-equality assertion — regressions in any branch
+/// surface immediately.
+#[test]
+fn full_byte_replay_against_yk4_init_fixture() {
+    full_byte_replay_with_seeding(
+        &workspace_relative("tests/fixtures/apdu/yk4-init.fixture"),
+        Model::Yk4,
+        None,
+    );
+}
+
 fn full_byte_replay_with_seeding(fixture: &Path, model: Model, scalar: Option<[u8; 32]>) {
     let pairs = parse_fixture(fixture);
     let mut card = VirtualCard::with_model(model);
@@ -628,6 +696,9 @@ fn full_byte_replay_with_seeding(fixture: &Path, model: Model, scalar: Option<[u
     }
     if let Some(s) = scalar {
         card.seed_slot_9d_priv(s);
+    }
+    if let Some(witness) = extract_mgmt_key_witness(&pairs) {
+        card.seed_mgmt_key_witness(witness);
     }
     for (i, p) in pairs.iter().enumerate() {
         let got = card.transmit(&p.request).unwrap_or_else(|rv| {

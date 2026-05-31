@@ -224,6 +224,22 @@ pub struct VirtualCard {
     /// Production VirtualCard runs always have this `None` until a
     /// future generate-asymmetric branch lands.
     slot_9d_priv: Option<[u8; 32]>,
+    /// 24-byte TripleDES management key. Defaults to YubiKey's factory
+    /// constant `01 02 03 04 05 06 07 08 01 02 03 04 05 06 07 08 01
+    /// 02 03 04 05 06 07 08` — the same value our throwaway captures
+    /// pin against. Gated by INS 0x87 P1=0x03 P2=0x9B challenge-
+    /// response (SP 800-73-4 §3.2.4). Override via
+    /// [`Self::seed_mgmt_key`] for tests that capture against a
+    /// rotated mgmt-key.
+    mgmt_key: [u8; 24],
+    /// Witness bytes the mgmt-key auth's phase-1 (`7C 02 81 00`)
+    /// returns to the client. Real silicon picks 8 random bytes per
+    /// session; for byte-deterministic replay (piggy#134's pattern)
+    /// tests seed the value captured on the wire via
+    /// [`Self::seed_mgmt_key_witness`]. Cleared on phase-2 completion
+    /// (success or failure) and on `disconnect()`. `None` means
+    /// "no challenge outstanding" — phase 2 then returns 6982.
+    pending_mgmt_witness: Option<[u8; 8]>,
 }
 
 /// YubiKey factory-default PIN: ASCII "123456" padded with 0xFF bytes
@@ -233,6 +249,14 @@ const DEFAULT_PIN: &[u8] = &[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF];
 
 /// PIV factory-default PIN retry count.
 const DEFAULT_PIN_RETRIES: u8 = 3;
+
+/// YubiKey factory-default TripleDES mgmt-key: three identical 8-byte
+/// halves `01 02 03 04 05 06 07 08`. Every freshly-reset throwaway in
+/// our fixtures uses this exact constant.
+const DEFAULT_MGMT_KEY: [u8; 24] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+];
 
 impl Default for VirtualCard {
     fn default() -> Self {
@@ -279,7 +303,26 @@ impl VirtualCard {
             pin_retries: DEFAULT_PIN_RETRIES,
             pin_verified: false,
             slot_9d_priv: None,
+            mgmt_key: DEFAULT_MGMT_KEY,
+            pending_mgmt_witness: None,
         }
+    }
+
+    /// Seed the next mgmt-key auth phase-1's witness bytes. The
+    /// dispatcher will return these exact 8 bytes inside `7C 0A 81
+    /// 08 <witness>` instead of the default zero-filled witness.
+    /// Reserved for replay tests that pin against a captured wire
+    /// (see the piggy#134 pattern). Cleared after one read; subsequent
+    /// phase-1 requests fall back to the zero default.
+    pub fn seed_mgmt_key_witness(&mut self, witness: [u8; 8]) {
+        self.pending_mgmt_witness = Some(witness);
+    }
+
+    /// Override the 24-byte TripleDES mgmt-key. Reserved for replay
+    /// tests that capture against a rotated mgmt-key; the default is
+    /// the YubiKey factory constant.
+    pub fn seed_mgmt_key(&mut self, key: [u8; 24]) {
+        self.mgmt_key = key;
     }
 
     /// Install a P-256 scalar into slot 9D. The scalar is the 32-byte
@@ -324,6 +367,9 @@ impl Backend for VirtualCard {
         // power. retry counter is persistent — only a successful
         // VERIFY resets it.
         self.pin_verified = false;
+        // Same power-cycle semantics for mgmt-key witnesses: any
+        // outstanding phase-1 challenge is invalidated.
+        self.pending_mgmt_witness = None;
         Ok(())
     }
 
@@ -446,6 +492,17 @@ impl Backend for VirtualCard {
         // fall through to the 6D00 stub.
         if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9D {
             return Ok(self.handle_general_authenticate_ecdh_slot_9d(apdu_body(command_apdu)));
+        }
+
+        // GENERAL AUTHENTICATE mgmt-key challenge-response (00 87 03
+        // 9B). P1=0x03 selects TripleDES-EDE3, P2=0x9B addresses the
+        // mgmt-key. Two-phase: phase-1 request body is `7C 02 81 00`
+        // (the client asking the card for an 8-byte witness); phase-2
+        // request body is `7C 0A 82 08 <client-response>` (the client
+        // returning the TDES-encrypted witness). See SP 800-73-4
+        // §3.2.4 and the yk4-init.fixture wire.
+        if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x03 && p2 == 0x9B {
+            return Ok(self.handle_general_authenticate_mgmt_key(apdu_body(command_apdu)));
         }
 
         // YK ATTEST (00 F9 <slot> 00 ...). Real silicon returns a
@@ -581,6 +638,89 @@ impl VirtualCard {
                 );
                 sw(0x6A, 0x82)
             }
+        }
+    }
+
+    /// Handle a `GENERAL AUTHENTICATE` mgmt-key challenge-response
+    /// exchange (INS 0x87, P1=0x03 TripleDES, P2=0x9B mgmt-key).
+    ///
+    /// Two phases, decoded from the body's inner TLV tag:
+    ///
+    /// - **Phase 1 (witness request)** — body `7C 02 81 00`. Returns
+    ///   `7C 0A 81 08 <witness>` + 9000, where `<witness>` is either
+    ///   the value seeded via [`Self::seed_mgmt_key_witness`] (for
+    ///   replay tests pinning against a captured wire) or 8 zero
+    ///   bytes when nothing was seeded.
+    /// - **Phase 2 (witness response)** — body `7C 0A 82 08 <enc>`.
+    ///   TripleDES-decrypts `<enc>` with `self.mgmt_key`; if the
+    ///   plaintext matches `self.pending_mgmt_witness`, returns
+    ///   9000. Wrong response → 6982; no outstanding witness → 6982.
+    ///
+    /// Any other body shape → 6A80. The pending witness is cleared
+    /// on phase-2 completion (success or failure), mirroring real
+    /// silicon's one-shot semantics.
+    fn handle_general_authenticate_mgmt_key(&mut self, body: Option<&[u8]>) -> Vec<u8> {
+        use cipher::{BlockDecrypt, KeyInit};
+        let body = match body {
+            Some(b) => b,
+            None => return sw(0x6A, 0x80),
+        };
+        // Phase 1: request witness. Body `7C 02 81 00`.
+        if body == [0x7C, 0x02, 0x81, 0x00] {
+            let witness = self.pending_mgmt_witness.unwrap_or([0u8; 8]);
+            self.pending_mgmt_witness = Some(witness);
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("GA mgmt-key phase-1 witness={:02X?} -> 9000", witness),
+            );
+            let mut out = Vec::with_capacity(4 + 8 + 2);
+            out.extend_from_slice(&[0x7C, 0x0A, 0x81, 0x08]);
+            out.extend_from_slice(&witness);
+            out.extend_from_slice(&sw(0x90, 0x00));
+            return out;
+        }
+        // Phase 2: verify response. Body `7C 0A 82 08 <enc>`.
+        if body.len() == 12 && body.starts_with(&[0x7C, 0x0A, 0x82, 0x08]) {
+            let enc: [u8; 8] = body[4..12].try_into().expect("checked len");
+            let witness = match self.pending_mgmt_witness.take() {
+                Some(w) => w,
+                None => {
+                    trace::emit(
+                        trace::DEBUG,
+                        "vcard",
+                        "GA mgmt-key phase-2 -> 6982 (no outstanding witness)",
+                    );
+                    return sw(0x69, 0x82);
+                }
+            };
+            // Real PIV mgmt-key auth: client encrypts the card-supplied
+            // witness with the mgmt-key; card decrypts and compares.
+            let cipher = des::TdesEde3::new(&self.mgmt_key.into());
+            let mut block = enc;
+            cipher.decrypt_block((&mut block).into());
+            if block == witness {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "GA mgmt-key phase-2 -> 9000 (verified)",
+                );
+                sw(0x90, 0x00)
+            } else {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "GA mgmt-key phase-2 -> 6982 (witness mismatch)",
+                );
+                sw(0x69, 0x82)
+            }
+        } else {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                "GA mgmt-key -> 6A80 (unrecognized body)",
+            );
+            sw(0x6A, 0x80)
         }
     }
 
@@ -1518,5 +1658,82 @@ mod tests {
         c.seed_slot_9d_priv(RFC6979_SCALAR);
         let req = hex_to_bytes("00f99d00000000");
         assert_eq!(c.transmit(&req).unwrap(), vec![0x6A, 0x80]);
+    }
+
+    // -- GA mgmt-key challenge-response (slot 9B, 3DES) tests -------------
+
+    #[test]
+    fn ga_mgmt_key_phase1_returns_seeded_witness_matching_yk4_init_capture() {
+        let mut c = VirtualCard::new();
+        // Captured witness from yk4-init.fixture pair [7].
+        c.seed_mgmt_key_witness([0xCA, 0xB1, 0x8C, 0x96, 0xB5, 0x49, 0x7D, 0xAE]);
+        let req = hex_to_bytes("0087039b0000047c0281000000");
+        let expected = hex_to_bytes("7c0a8108cab18c96b5497dae9000");
+        assert_eq!(c.transmit(&req).unwrap(), expected);
+    }
+
+    #[test]
+    fn ga_mgmt_key_phase2_verifies_factory_key_response_matching_yk4_init_capture() {
+        let mut c = VirtualCard::new();
+        c.seed_mgmt_key_witness([0xCA, 0xB1, 0x8C, 0x96, 0xB5, 0x49, 0x7D, 0xAE]);
+        // Drive phase-1 to set the outstanding witness state.
+        let _ = c
+            .transmit(&hex_to_bytes("0087039b0000047c0281000000"))
+            .unwrap();
+        // Phase-2 with the client-computed TDES-EDE3(factory_key,
+        // witness) = 731EFC2B4BD58610 (verified externally via
+        // `openssl enc -des-ede3 -K 0102...070708`).
+        let req = hex_to_bytes("0087039b00000c7c0a8208731efc2b4bd5861000");
+        assert_eq!(c.transmit(&req).unwrap(), vec![0x90, 0x00]);
+    }
+
+    #[test]
+    fn ga_mgmt_key_phase2_rejects_wrong_response_with_6982() {
+        let mut c = VirtualCard::new();
+        c.seed_mgmt_key_witness([0xCA, 0xB1, 0x8C, 0x96, 0xB5, 0x49, 0x7D, 0xAE]);
+        let _ = c
+            .transmit(&hex_to_bytes("0087039b0000047c0281000000"))
+            .unwrap();
+        // Twiddle one byte of the correct response.
+        let req = hex_to_bytes("0087039b00000c7c0a8208731efc2b4bd5861100");
+        assert_eq!(c.transmit(&req).unwrap(), vec![0x69, 0x82]);
+    }
+
+    #[test]
+    fn ga_mgmt_key_phase2_without_prior_phase1_returns_6982() {
+        let mut c = VirtualCard::new();
+        let req = hex_to_bytes("0087039b00000c7c0a8208731efc2b4bd5861000");
+        assert_eq!(c.transmit(&req).unwrap(), vec![0x69, 0x82]);
+    }
+
+    #[test]
+    fn ga_mgmt_key_witness_is_cleared_after_phase2() {
+        let mut c = VirtualCard::new();
+        c.seed_mgmt_key_witness([0xCA, 0xB1, 0x8C, 0x96, 0xB5, 0x49, 0x7D, 0xAE]);
+        let _ = c
+            .transmit(&hex_to_bytes("0087039b0000047c0281000000"))
+            .unwrap();
+        // Successful phase-2.
+        let _ = c
+            .transmit(&hex_to_bytes("0087039b00000c7c0a8208731efc2b4bd5861000"))
+            .unwrap();
+        // Replay phase-2: no outstanding witness now -> 6982.
+        let req = hex_to_bytes("0087039b00000c7c0a8208731efc2b4bd5861000");
+        assert_eq!(c.transmit(&req).unwrap(), vec![0x69, 0x82]);
+    }
+
+    #[test]
+    fn disconnect_clears_pending_mgmt_witness() {
+        let mut c = VirtualCard::new();
+        c.connect(2, 3).unwrap();
+        c.seed_mgmt_key_witness([0xCA, 0xB1, 0x8C, 0x96, 0xB5, 0x49, 0x7D, 0xAE]);
+        let _ = c
+            .transmit(&hex_to_bytes("0087039b0000047c0281000000"))
+            .unwrap();
+        c.disconnect(0).unwrap();
+        c.connect(2, 3).unwrap();
+        // Witness was cleared; phase-2 without re-seeding -> 6982.
+        let req = hex_to_bytes("0087039b00000c7c0a8208731efc2b4bd5861000");
+        assert_eq!(c.transmit(&req).unwrap(), vec![0x69, 0x82]);
     }
 }

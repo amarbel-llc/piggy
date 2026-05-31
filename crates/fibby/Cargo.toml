@@ -27,3 +27,11 @@ pcsc = { version = "2.9", optional = true }
 # real silicon emits inside the `7C 22 82 20 <X>` response. See
 # piggy#134 for the byte-deterministic replay rationale.
 p256 = { version = "0.13", default-features = false, features = ["ecdh"] }
+# 3DES (EDE3-ECB) for PIV mgmt-key challenge-response auth (INS 0x87
+# P1=0x03 P2=0x9B). YubiKey's factory mgmt-key is a 24-byte triple-DES
+# key used to gate admin ops (PUT DATA, GENERATE, import-cert).
+# RustCrypto's `des` crate provides the `TdesEde3` cipher we drive via
+# the `cipher` traits; no I/O. Used only by VirtualCard's mgmt-key
+# dispatch; not part of the production decrypt path.
+des = "0.8"
+cipher = "0.4"
