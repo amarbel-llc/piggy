@@ -27,12 +27,16 @@ use std::sync::{Arc, Mutex};
 
 use fibby::backend::Backend;
 use fibby::server::{self, SharedBackend};
-use fibby::{trace, virtual_card::VirtualCard};
+use fibby::{
+    trace,
+    virtual_card::{Model, VirtualCard},
+};
 
 struct Args {
     socket: String,
     backend: String,
     reader: String,
+    model: String,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -42,6 +46,7 @@ fn parse_args() -> Result<Args, String> {
         socket: default_socket,
         backend: "virtual".to_string(),
         reader: "Yubico".to_string(),
+        model: "yk4".to_string(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -49,6 +54,7 @@ fn parse_args() -> Result<Args, String> {
             "--socket" => args.socket = it.next().ok_or("--socket needs a value")?,
             "--backend" => args.backend = it.next().ok_or("--backend needs a value")?,
             "--reader" => args.reader = it.next().ok_or("--reader needs a value")?,
+            "--model" => args.model = it.next().ok_or("--model needs a value")?,
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -63,7 +69,13 @@ fn print_help() {
     eprintln!(
         "fibby — pure-Rust virtual PIV card over the pcsc-lite protocol\n\
          \n\
-         USAGE: fibby [--socket PATH] [--backend virtual|hardware] [--reader SUBSTR]\n\
+         USAGE: fibby [--socket PATH] [--backend virtual|hardware]\n\
+                      [--reader SUBSTR] [--model yk4|yk5]\n\
+         \n\
+         --model selects the virtual-card hardware profile (ATR + advertised\n\
+         firmware version). Only meaningful when --backend=virtual; the\n\
+         hardware backend reports whatever the real card advertises.\n\
+         Default: yk4 (the wet-env-verified profile).\n\
          \n\
          Point clients at the socket via PCSCLITE_CSOCK_NAME.\n\
          Set FIBBY_LOG=info|debug|wire for logging."
@@ -108,7 +120,10 @@ fn main() {
 
 fn make_backend(args: &Args) -> Result<SharedBackend, String> {
     match args.backend.as_str() {
-        "virtual" => Ok(into_shared(VirtualCard::new())),
+        "virtual" => {
+            let model = Model::parse_arg(&args.model)?;
+            Ok(into_shared(VirtualCard::with_model(model)))
+        }
         "hardware" => make_hardware_backend(&args.reader),
         other => Err(format!(
             "unknown backend {other:?} (want 'virtual' or 'hardware')"
