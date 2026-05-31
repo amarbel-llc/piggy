@@ -15,7 +15,20 @@ build-nix:
 
 [group('build')]
 build-rust *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo build {{ARGS}}
+    # Linux-only second pass: build fibby with --features hardware-proxy
+    # so pcsc-sys's build.rs (which pkg-configs for libpcsclite at
+    # compile time) runs in the merge gate. Clippy doesn't link, so a
+    # missing/wrong libpcsclite-dev would slip past `lint-rust`. Same
+    # Linux gating rationale as `lint-rust`'s second pass (flake.nix:166
+    # adds pcsclite to rustBuildInputs only on isLinux). Skipped when
+    # ARGS is set on the assumption that the caller is specifying a
+    # narrower build scope on purpose.
+    if [ -z "{{ARGS}}" ] && [ "$(uname -s)" = Linux ]; then
+      cargo build -p fibby --features hardware-proxy
+    fi
 
 [group('build')]
 build-rust-release:
@@ -738,7 +751,20 @@ codemod-fmt-treefmt:
 
 [group('pre-build')]
 lint-rust:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo clippy --workspace --all-targets -- -D warnings
+    # Linux-only second pass: clippy fibby with --features hardware-proxy
+    # so wet-env-path regressions (status2 signature drift, protocol2
+    # Option<T> mismatches, missing pcsc::Error variants) are caught at
+    # the merge gate — the same lane the host-devshell-unblock fixes at
+    # c0c59f0 + 653ca77 fell through silently before they were in CI.
+    # Gated on Linux because flake.nix:166 only adds pcsclite to
+    # rustBuildInputs on isLinux (vsmartcard is broken on darwin; the
+    # hardware-proxy build needs libpcsclite-dev via pcsc-sys).
+    if [ "$(uname -s)" = Linux ]; then
+      cargo clippy -p fibby --all-targets --features hardware-proxy -- -D warnings
+    fi
 
 # Read-only formatting gate: builds the `checks.formatting`
 # derivation, which runs treefmt against a /nix/store snapshot of
