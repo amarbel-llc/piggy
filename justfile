@@ -12,6 +12,13 @@ build: build-nix build-rust
 [group('build')]
 build-nix:
     nix build --show-trace
+    # Also build the standalone fibby package — `nix build` (no args)
+    # defaults to `.#default` (= piggy), which doesn't transitively
+    # depend on `.#fibby`. Without an explicit second build, a broken
+    # flake.nix change to the fibby package would only surface the
+    # next time someone ran `nix build .#fibby` directly or
+    # `just fibby-up` (#129).
+    nix build .#fibby --no-link --show-trace
 
 [group('build')]
 build-rust *ARGS:
@@ -875,6 +882,82 @@ fib-down:
     fi
     rm -rf .fib
     echo "fib: down"
+
+# Bring up the standalone `fibby` server in hardware-proxy mode, fronted
+# by the system pcscd. Mirrors fib-up's UX: short-circuits if already
+# running, drops a PID file under .fibby/, and writes an env file
+# (.fibby/env) consumers `eval` to set PCSCLITE_CSOCK_NAME.
+#
+# Unlike fib (which brings up its own pcscd + jcardsim + applet),
+# fibby-up assumes a real PC/SC reader + card are already plugged in
+# and the system pcscd is up — its sole job is to translate pcsc-lite
+# daemon-protocol traffic into PC/SC client traffic against the system
+# pcscd. If no card is present, fibby's startup error surfaces via the
+# log and the recipe bails with a clear hint.
+#
+# The fibby binary comes from `nix build .#fibby` (Linux-only at the
+# moment because hardware-proxy needs libpcsclite — flake.nix gates it
+# on isLinux). Use the dev-loop alternative `debug-fibby-proxy` if you
+# need fast iteration off `./target/debug/fibby` instead.
+[group('operational')]
+fibby-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p .fibby
+    sock="/tmp/piggy-fibby-ipc/pcscd.comm"
+    # Short-circuit if already running.
+    if [[ -f .fibby/fibby.pid ]] && kill -0 "$(cat .fibby/fibby.pid)" 2>/dev/null; then
+      echo "fibby-up: already running (pid $(cat .fibby/fibby.pid)). eval \$(cat .fibby/env)" >&2
+      exit 0
+    fi
+    # System pcscd sanity check: HardwareProxy::new fails noisily if
+    # neither standard socket is present; check first for a better
+    # error than a stack trace.
+    if [[ ! -S /run/pcscd/pcscd.comm && ! -S /var/run/pcscd/pcscd.comm ]]; then
+      echo "fibby-up: no system pcscd socket — start pcscd first" >&2
+      exit 1
+    fi
+    fibby_bin=$(nix build --no-link --print-out-paths .#fibby)/bin/fibby
+    mkdir -p "$(dirname "$sock")"
+    rm -f "$sock"
+    FIBBY_LOG=info "$fibby_bin" \
+      --backend hardware \
+      --socket "$sock" \
+      >.fibby/fibby.log 2>&1 &
+    fibby_pid=$!
+    echo "$fibby_pid" >.fibby/fibby.pid
+    # Wait for the socket; if it doesn't appear, fibby crashed at
+    # startup — most commonly "no reader matching Yubico" when the
+    # card isn't plugged in.
+    for _ in $(seq 1 50); do
+      [[ -S "$sock" ]] && break
+      sleep 0.1
+    done
+    if [[ ! -S "$sock" ]]; then
+      echo "fibby-up: socket never appeared — see .fibby/fibby.log" >&2
+      cat .fibby/fibby.log >&2
+      kill "$fibby_pid" 2>/dev/null || true
+      rm -f .fibby/fibby.pid
+      exit 1
+    fi
+    cat >.fibby/env <<EOF
+    export PCSCLITE_CSOCK_NAME="$sock"
+    # fibby pid: $fibby_pid
+    EOF
+    echo "fibby: up — eval \$(cat .fibby/env) to connect"
+
+# Tear down the standalone fibby server brought up by `fibby-up`.
+[group('operational')]
+fibby-down:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [[ -f .fibby/fibby.pid ]]; then
+      kill "$(cat .fibby/fibby.pid)" 2>/dev/null || true
+    fi
+    rm -rf .fibby
+    rm -f /tmp/piggy-fibby-ipc/pcscd.comm
+    rmdir /tmp/piggy-fibby-ipc 2>/dev/null || true
+    echo "fibby: down"
 
 # Open a subshell with fib up and the env preloaded; tears down on exit.
 [group('operational')]

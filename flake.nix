@@ -206,6 +206,88 @@
           };
         };
 
+        # Standalone `fibby` package — the pcsc-lite-daemon-protocol Rust
+        # server (see docs/plans/2026-05-29-fibby-virtual-piv-rust-design.md
+        # and crates/fibby/README.md). Shares the workspace source filter
+        # with piggy-rs so a single nix-cached build artifact serves both.
+        # On Linux, the `hardware-proxy` Cargo feature is enabled so the
+        # HardwareProxy backend (real-card passthrough used by the wet-env
+        # validation recipes) is available. Darwin builds without the
+        # feature because pcsc-sys's libpcsclite link isn't satisfied
+        # there — flake.nix:166 only adds pcsclite to rustBuildInputs on
+        # `stdenv.isLinux`, matching the upstream vsmartcard-on-darwin
+        # status. The `VirtualCard` backend is always available on both
+        # platforms.
+        #
+        # Used by: `just fibby-up` (downstream of this output), the wet-env
+        # capture recipes (`debug-fibby-roundtrip-capture` /
+        # `debug-fibby-roundtrip-via-fib`), and any consumer of #129's
+        # planned packaging story (e.g. a future home-manager service).
+        fibby = pkgs.rustPlatform.buildRustPackage {
+          pname = "fibby";
+          version = "0.1.0";
+
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              name: type:
+              let
+                rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
+                base = baseNameOf rel;
+              in
+              base == "Cargo.toml"
+              || base == "Cargo.lock"
+              || base == "version.env"
+              || pkgs.lib.hasPrefix "crates" rel;
+          };
+
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
+
+          # Build only the fibby crate (the workspace builds piggy etc. as
+          # a side effect via piggy-rs; this keeps the artifact narrow).
+          cargoBuildFlags = [
+            "-p"
+            "fibby"
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            "--features"
+            "hardware-proxy"
+          ];
+
+          # Match the build feature gate on tests so `cargo test` exercises
+          # the hardware-proxy code path on Linux. The 18 fibby tests
+          # (17 unit + 1 loopback) are pure-data / VirtualCard-driven, so
+          # they pass with or without the feature; the feature gate just
+          # ensures the hardware-proxy code TYPE-CHECKS in the sandbox.
+          cargoTestFlags = [
+            "-p"
+            "fibby"
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            "--features"
+            "hardware-proxy"
+          ];
+
+          buildInputs = rustBuildInputs;
+          nativeBuildInputs = rustNativeBuildInputs;
+
+          # Run the 18 fibby tests inside the sandbox. Loopback uses /tmp
+          # for its AF_UNIX socket (sun_path-short), so it survives the
+          # short nix-sandbox TMPDIR fine. Hardware-proxy unit tests stay
+          # hermetic — they don't try to reach a real pcscd.
+          doCheck = true;
+
+          meta = with pkgs.lib; {
+            description = "Pure-Rust virtual PIV card speaking the pcsc-lite client protocol directly";
+            homepage = "https://github.com/amarbel-llc/piggy";
+            license = licenses.mpl20;
+            mainProgram = "fibby";
+            platforms = platforms.linux ++ platforms.darwin;
+          };
+        };
+
         # Wrapped `piggy` binary: rust dispatch + bash passwordstore + pivy
         # fallback, bundled as a single symlink-joined package.
         piggy = pkgs.stdenv.mkDerivation {
@@ -382,6 +464,12 @@
           # zz-tests_bats/conformance/pivy_agent_hardware.bats and
           # the test-bats-conformance-pivy-agent-hardware just recipe.
           pivy = pivyPkg;
+          # Standalone fibby binary. On Linux this carries the
+          # `hardware-proxy` feature; on darwin it's VirtualCard-only
+          # (vsmartcard upstream is broken on darwin). Consumed by
+          # `just fibby-up` and the wet-env capture recipes; future
+          # consumer is the planned home-manager service (#129 stretch).
+          fibby = fibby;
         }
         // batsLib.batsLaneOutputs
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
