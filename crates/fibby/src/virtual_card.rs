@@ -124,6 +124,27 @@ impl Model {
         }
     }
 
+    /// 4-byte serial number returned by the YubiKey vendor instruction
+    /// `0xF8`, or `None` if the model doesn't implement that vendor
+    /// extension (real silicon then returns `6D00`).
+    ///
+    /// - `Yk4` → `None`. Captured wire on YubiKey 4 firmware 4.3.5
+    ///   (2026-05-31) shows `6D00` for every `00 F8 00 00 ...`
+    ///   request; YubiKey 4 firmware predates this vendor extension.
+    /// - `Yk5` → the 4-byte serial `00 F2 C2 E6` captured from the
+    ///   primary YubiKey 5 firmware 5.2.7 on 2026-05-31. Hardcoding a
+    ///   specific physical card's serial in source is unusual, but
+    ///   the test bed pins to that specific card the same way the
+    ///   throwaway's GUID pins yk4-init. A future `with_serial(...)`
+    ///   constructor — symmetric with `with_pin(...)` (see #134) — is
+    ///   the right escape hatch when more YK5s need to be modeled.
+    pub fn serial(self) -> Option<[u8; 4]> {
+        match self {
+            Model::Yk4 => None,
+            Model::Yk5 => Some([0x00, 0xF2, 0xC2, 0xE6]),
+        }
+    }
+
     /// 3-byte firmware version returned by the YubiKey vendor GET
     /// VERSION instruction (INS 0xFD): `[major, minor, patch]`. The
     /// wire response is these three bytes followed by SW 9000.
@@ -336,6 +357,39 @@ impl Backend for VirtualCard {
             let mut out = fw.to_vec();
             out.extend_from_slice(&sw(0x90, 0x00));
             return Ok(out);
+        }
+
+        // YubiKey vendor GET SERIAL (00 F8 00 00 ...). YK4 firmware
+        // doesn't implement this and returns 6D00; YK5 returns a
+        // 4-byte serial + SW 9000. We delegate to `Model::serial()`
+        // to decide. P1 P2 must be 00 00; otherwise fall through to
+        // the catch-all 6D00 (no wet-env evidence for what real
+        // silicon does on non-standard P1/P2 here, so default-to-
+        // 6D00 keeps the diagnostic honest).
+        if cla == 0x00 && ins == apdu::ins::YK_SERIAL && p1 == 0x00 && p2 == 0x00 {
+            match self.model.serial() {
+                Some(serial) => {
+                    trace::emit(
+                        trace::DEBUG,
+                        "vcard",
+                        &format!(
+                            "YK SERIAL -> {:02X}{:02X}{:02X}{:02X} 9000",
+                            serial[0], serial[1], serial[2], serial[3]
+                        ),
+                    );
+                    let mut out = serial.to_vec();
+                    out.extend_from_slice(&sw(0x90, 0x00));
+                    return Ok(out);
+                }
+                None => {
+                    trace::emit(
+                        trace::DEBUG,
+                        "vcard",
+                        "YK SERIAL -> 6D00 (not supported by model)",
+                    );
+                    return Ok(sw(0x6D, 0x00));
+                }
+            }
         }
 
         // VERIFY (00 20 P1 P2 ...). PIV application PIN at P1=00 P2=80.
@@ -924,6 +978,45 @@ mod tests {
         // 5.2.7 — captured wet-env from real YubiKey 5 on 2026-05-31.
         // Byte-equal to the YK5 GET VERSION wire response.
         assert_eq!(Model::Yk5.firmware_version(), [0x05, 0x02, 0x07]);
+    }
+
+    // -- YubiKey vendor INS 0xF8 (serial) tests ----------------------
+
+    #[test]
+    fn yk_serial_returns_6d00_on_yk4_matching_real_silicon() {
+        let mut c = VirtualCard::with_model(Model::Yk4);
+        // Both short-form `00 F8 00 00 00` (fib-style) and extended-
+        // length `00 F8 00 00 00 00 00` (YK4-style) should return 6D00
+        // on a YK4 model. Captures showed the YK4 firmware doesn't
+        // implement this vendor extension.
+        for apdu in [
+            vec![0x00, 0xF8, 0x00, 0x00, 0x00],
+            vec![0x00, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ] {
+            let resp = c.transmit(&apdu).unwrap();
+            assert_eq!(resp, vec![0x6D, 0x00], "Yk4 INS 0xF8 must return 6D00");
+        }
+    }
+
+    #[test]
+    fn yk_serial_returns_captured_value_on_yk5() {
+        let mut c = VirtualCard::with_model(Model::Yk5);
+        let resp = c
+            .transmit(&[0x00, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00])
+            .unwrap();
+        // 00 F2 C2 E6 + 9000 — byte-equal to the primary YubiKey 5's
+        // captured wire response.
+        assert_eq!(resp, vec![0x00, 0xF2, 0xC2, 0xE6, 0x90, 0x00]);
+    }
+
+    #[test]
+    fn model_serial_for_yk4_is_none() {
+        assert_eq!(Model::Yk4.serial(), None);
+    }
+
+    #[test]
+    fn model_serial_for_yk5_is_primary_capture() {
+        assert_eq!(Model::Yk5.serial(), Some([0x00, 0xF2, 0xC2, 0xE6]));
     }
 
     // -- VERIFY PIN tests ---------------------------------------------

@@ -35,4 +35,10 @@ pub mod ins {
     /// application PIN; other P2 values address PUK / mgmt-key (not
     /// implemented yet).
     pub const VERIFY: u8 = 0x20;
+    /// YubiKey vendor "get serial number". Real YK4 firmware <5.x
+    /// doesn't implement this — the wire shows the card returning
+    /// `6D00`. YK5 firmware emits a 4-byte big-endian serial number +
+    /// SW 9000. `P1 P2 = 00 00`; no body. Not in SP 800-73-4 — it's a
+    /// YubicoPIV extension pivy-tool issues during discovery.
+    pub const YK_SERIAL: u8 = 0xF8;
 }
