@@ -17,26 +17,33 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use fibby::backend::Backend;
-use fibby::virtual_card::VirtualCard;
+use fibby::virtual_card::{Model, VirtualCard};
 
 const YK4_FIXTURE: &str = "tests/fixtures/apdu/yk4-roundtrip.fixture";
 const FIB_YK54_FIXTURE: &str = "tests/fixtures/apdu/fib-yk54-roundtrip.fixture";
 
-/// All fixture files the generic tests below iterate over. Three flows
-/// (`roundtrip`, `list`, `init`) × two sources (YubiKey 4 firmware
-/// 4.3.5 real silicon vs fib / PivApplet advertising as YK 5.4.0) =
-/// six fixtures total. Roundtrip is the largest (35-43 APDU pairs);
-/// list/init are smaller (12-13 pairs) because they walk a subset of
-/// the PIV applet's command surface. New captures land here; the
-/// per-test docs explain which assertions hold across all flows vs
-/// roundtrip-specific.
-const ALL_FIXTURES: &[&str] = &[
-    YK4_FIXTURE,
-    "tests/fixtures/apdu/yk4-list.fixture",
-    "tests/fixtures/apdu/yk4-init.fixture",
-    FIB_YK54_FIXTURE,
-    "tests/fixtures/apdu/fib-yk54-list.fixture",
-    "tests/fixtures/apdu/fib-yk54-init.fixture",
+/// Fixture-to-model mapping. Each fixture is replayed against the
+/// `Model` whose ATR + firmware version matches what the originating
+/// card actually advertised on the wire:
+///
+/// - `yk4-*` fixtures captured against the real YubiKey 4 (fw 4.3.5)
+///   pair with [`Model::Yk4`].
+/// - `fib-yk54-*` fixtures pair with [`Model::Yk5`] because fib's
+///   PivApplet advertises as "YubicoPIV v5.4.0" (same firmware tuple
+///   `Model::Yk5` returns from `firmware_version()`).
+///
+/// Without this per-fixture pairing, fib fixtures would always
+/// replay against the default `Yk4` profile and miss matched-count
+/// improvements on every per-model dispatch (GET VERSION, ATR-derived
+/// behavior, etc.). Three flows (`roundtrip`, `list`, `init`) × two
+/// sources = six fixtures total.
+const ALL_FIXTURES: &[(&str, Model)] = &[
+    (YK4_FIXTURE, Model::Yk4),
+    ("tests/fixtures/apdu/yk4-list.fixture", Model::Yk4),
+    ("tests/fixtures/apdu/yk4-init.fixture", Model::Yk4),
+    (FIB_YK54_FIXTURE, Model::Yk5),
+    ("tests/fixtures/apdu/fib-yk54-list.fixture", Model::Yk5),
+    ("tests/fixtures/apdu/fib-yk54-init.fixture", Model::Yk5),
 ];
 
 /// One APDU exchange parsed from a `.fixture` file: the command APDU
@@ -162,7 +169,7 @@ fn is_select_piv(apdu: &[u8]) -> bool {
 /// with margin; the roundtrip fixtures comfortably exceed 30.
 #[test]
 fn fixtures_parse_with_nontrivial_pair_counts() {
-    for fixture_path in ALL_FIXTURES {
+    for &(fixture_path, _model) in ALL_FIXTURES {
         let pairs = parse_fixture(&workspace_relative(fixture_path));
         assert!(
             pairs.len() >= 5,
@@ -188,7 +195,7 @@ fn fixtures_parse_with_nontrivial_pair_counts() {
 /// and roundtrip alike — so this holds across all six fixtures.
 #[test]
 fn fixtures_contain_select_piv_with_fci_response() {
-    for fixture_path in ALL_FIXTURES {
+    for &(fixture_path, _model) in ALL_FIXTURES {
         let pairs = parse_fixture(&workspace_relative(fixture_path));
         let selects: Vec<&Pair> = pairs.iter().filter(|p| is_select_piv(&p.request)).collect();
         assert!(
@@ -247,9 +254,9 @@ fn virtual_card_select_piv_returns_fci_shaped_response() {
 /// the `#[ignore]`'d strict tests below become a viable next gate.
 #[test]
 fn replay_progress_against_real_silicon_is_logged() {
-    for fixture_path in ALL_FIXTURES {
+    for &(fixture_path, model) in ALL_FIXTURES {
         let pairs = parse_fixture(&workspace_relative(fixture_path));
-        let mut card = VirtualCard::new();
+        let mut card = VirtualCard::with_model(model);
         card.connect(2, 3).unwrap();
         let mut matched = 0usize;
         let mut select_matched = 0usize;
@@ -300,7 +307,7 @@ fn replay_progress_against_real_silicon_is_logged() {
 #[test]
 #[ignore = "VirtualCard PIV applet in progress; see #131 + design-doc step 5"]
 fn full_byte_replay_against_yk4_fixture() {
-    full_byte_replay(&workspace_relative(YK4_FIXTURE));
+    full_byte_replay(&workspace_relative(YK4_FIXTURE), Model::Yk4);
 }
 
 /// Strict byte-equal replay against the fib (PivApplet, advertising as
@@ -312,12 +319,12 @@ fn full_byte_replay_against_yk4_fixture() {
 #[test]
 #[ignore = "VirtualCard PIV applet in progress; see #131 + design-doc step 5"]
 fn full_byte_replay_against_fib_yk54_fixture() {
-    full_byte_replay(&workspace_relative(FIB_YK54_FIXTURE));
+    full_byte_replay(&workspace_relative(FIB_YK54_FIXTURE), Model::Yk5);
 }
 
-fn full_byte_replay(fixture: &Path) {
+fn full_byte_replay(fixture: &Path, model: Model) {
     let pairs = parse_fixture(fixture);
-    let mut card = VirtualCard::new();
+    let mut card = VirtualCard::with_model(model);
     card.connect(2, 3).unwrap();
     for (i, p) in pairs.iter().enumerate() {
         let got = card.transmit(&p.request).unwrap_or_else(|rv| {

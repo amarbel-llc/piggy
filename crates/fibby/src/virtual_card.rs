@@ -77,6 +77,24 @@ impl Model {
         }
     }
 
+    /// 3-byte firmware version returned by the YubiKey vendor GET
+    /// VERSION instruction (INS 0xFD): `[major, minor, patch]`. The
+    /// wire response is these three bytes followed by SW 9000.
+    ///
+    /// - `Yk4` → `(4, 3, 5)`, the version reported by the real YubiKey
+    ///   4 we captured against on 2026-05-31.
+    /// - `Yk5` → `(5, 4, 0)`, which both is a real YK5 firmware
+    ///   version AND is what fib's PivApplet emulates ("yubico:
+    ///   implements YubicoPIV extensions (v5.4.0)"). So this is
+    ///   honest for both the placeholder profile and for replay
+    ///   against fib's fixtures.
+    pub fn firmware_version(self) -> [u8; 3] {
+        match self {
+            Model::Yk4 => [0x04, 0x03, 0x05],
+            Model::Yk5 => [0x05, 0x04, 0x00],
+        }
+    }
+
     /// Parse a CLI `--model VALUE`. Accepts `yk4` and `yk5`; rejects
     /// anything else with a message naming the supported set. Add
     /// new variants here as wet-env captures land.
@@ -198,6 +216,23 @@ impl Backend for VirtualCard {
         // PUT DATA (00 DB 3F FF <Lc> 5C <tag_len> <tag> 53 <data_len> <data>)
         if cla == 0x00 && ins == apdu::ins::PUT_DATA && p1 == 0x3F && p2 == 0xFF {
             return Ok(self.handle_put_data(command_apdu));
+        }
+
+        // GET VERSION (00 FD 00 00 ...). YubiKey vendor extension; no
+        // body. Returns the 3-byte firmware tuple + SW 9000. Both
+        // short-form and extended-length case-2 encodings show up in
+        // the captures; we don't look at the body so both hit this
+        // branch.
+        if cla == 0x00 && ins == apdu::ins::GET_VERSION && p1 == 0x00 && p2 == 0x00 {
+            let fw = self.model.firmware_version();
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("GET VERSION -> {}.{}.{} 9000", fw[0], fw[1], fw[2]),
+            );
+            let mut out = fw.to_vec();
+            out.extend_from_slice(&sw(0x90, 0x00));
+            return Ok(out);
         }
 
         trace::emit(
@@ -626,6 +661,47 @@ mod tests {
         let apdu = vec![0x00, 0xDB, 0x3F, 0xFF, 0x05, 0x5C, 0x03, 0x5F, 0xC1, 0x02];
         let resp = c.transmit(&apdu).unwrap();
         assert_eq!(resp, vec![0x6A, 0x80]);
+    }
+
+    #[test]
+    fn get_version_returns_yk4_firmware_for_default_model() {
+        let mut c = VirtualCard::new();
+        // Short-form Le=0 (case 2).
+        let resp = c.transmit(&[0x00, 0xFD, 0x00, 0x00, 0x00]).unwrap();
+        // 4.3.5 + 9000; byte-equal to what the YK4 capture returned.
+        assert_eq!(resp, vec![0x04, 0x03, 0x05, 0x90, 0x00]);
+    }
+
+    #[test]
+    fn get_version_returns_yk5_firmware_for_yk5_model() {
+        let mut c = VirtualCard::with_model(Model::Yk5);
+        let resp = c.transmit(&[0x00, 0xFD, 0x00, 0x00, 0x00]).unwrap();
+        // 5.4.0 + 9000; byte-equal to what fib's PivApplet returns.
+        assert_eq!(resp, vec![0x05, 0x04, 0x00, 0x90, 0x00]);
+    }
+
+    #[test]
+    fn get_version_accepts_extended_length_le_encoding() {
+        // YK4's pivy-tool sends GET VERSION as
+        // `00 FD 00 00 00 00 00` (case-2 extended-length, Le=0).
+        let mut c = VirtualCard::new();
+        let resp = c
+            .transmit(&[0x00, 0xFD, 0x00, 0x00, 0x00, 0x00, 0x00])
+            .unwrap();
+        assert_eq!(resp, vec![0x04, 0x03, 0x05, 0x90, 0x00]);
+    }
+
+    #[test]
+    fn model_firmware_version_for_yk4_is_4_3_5_wet_env_captured() {
+        // Byte-equality with the YK4 capture's GET VERSION response.
+        assert_eq!(Model::Yk4.firmware_version(), [0x04, 0x03, 0x05]);
+    }
+
+    #[test]
+    fn model_firmware_version_for_yk5_matches_fib_pivapplet() {
+        // 5.4.0 — both a real YK5 firmware AND what fib's PivApplet
+        // advertises. Byte-equal to fib's GET VERSION wire response.
+        assert_eq!(Model::Yk5.firmware_version(), [0x05, 0x04, 0x00]);
     }
 
     #[test]

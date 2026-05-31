@@ -24,4 +24,9 @@ pub mod ins {
     /// PIV PUT DATA (SP 800-73-4 §3.1.3). Same `P1 P2`; data field is
     /// `5C <len> <tag>` followed by `53 <len> <value>`.
     pub const PUT_DATA: u8 = 0xDB;
+    /// YubiKey vendor GET VERSION. Returns 3 bytes encoding the
+    /// firmware version (major, minor, patch) + SW 9000. `P1 P2 = 00 00`;
+    /// no body. Not in SP 800-73-4 — it's a YubicoPIV extension that
+    /// pivy-tool issues during its discovery walk.
+    pub const GET_VERSION: u8 = 0xFD;
 }
