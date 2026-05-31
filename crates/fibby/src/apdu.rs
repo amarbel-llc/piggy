@@ -29,4 +29,10 @@ pub mod ins {
     /// no body. Not in SP 800-73-4 — it's a YubicoPIV extension that
     /// pivy-tool issues during its discovery walk.
     pub const GET_VERSION: u8 = 0xFD;
+    /// PIV VERIFY (SP 800-73-4 §3.2.1). Used both to attempt a PIN
+    /// verification (with an 8-byte PIN body) and to query the current
+    /// verification status (no body). `P2 = 80` selects the PIV
+    /// application PIN; other P2 values address PUK / mgmt-key (not
+    /// implemented yet).
+    pub const VERIFY: u8 = 0x20;
 }

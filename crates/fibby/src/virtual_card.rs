@@ -176,7 +176,33 @@ pub struct VirtualCard {
     /// trusted local test can drive end-to-end, not a security
     /// boundary.
     data_objects: HashMap<Vec<u8>, Vec<u8>>,
+    /// PIV application PIN state (SP 800-73-4 §3.2.1). The PIN is
+    /// stored as 8 bytes; YubiKey factory default is `"123456"` padded
+    /// with 0xFF to the full 8-byte length (`31 32 33 34 35 36 FF FF`).
+    /// pivy-tool's captures use this default, so VirtualCard byte-
+    /// matches successful VERIFYs out of the box.
+    pin: Vec<u8>,
+    /// Number of remaining VERIFY attempts. Reset to 3 on a successful
+    /// verification; decremented on a wrong-PIN attempt; PIN becomes
+    /// permanently blocked at 0 (real silicon needs PUK to unblock,
+    /// not implemented yet). Persists across `disconnect()` like real
+    /// silicon — only successful VERIFY restores it.
+    pin_retries: u8,
+    /// Whether the PIN has been verified in this session. Cleared on
+    /// `disconnect()` to mirror real-card semantics (the verified
+    /// state doesn't survive a power cycle). Subsequent PIN-gated
+    /// operations (GA ECDH, etc.) must check this before honoring the
+    /// request — TODO once GA lands.
+    pin_verified: bool,
 }
+
+/// YubiKey factory-default PIN: ASCII "123456" padded with 0xFF bytes
+/// to 8 bytes total. pivy-tool's captured wires include this exact
+/// byte sequence when verifying a freshly-init'd card.
+const DEFAULT_PIN: &[u8] = &[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF];
+
+/// PIV factory-default PIN retry count.
+const DEFAULT_PIN_RETRIES: u8 = 3;
 
 impl Default for VirtualCard {
     fn default() -> Self {
@@ -201,6 +227,9 @@ impl VirtualCard {
             powered: false,
             selected_piv: false,
             data_objects: HashMap::new(),
+            pin: DEFAULT_PIN.to_vec(),
+            pin_retries: DEFAULT_PIN_RETRIES,
+            pin_verified: false,
         }
     }
 }
@@ -227,6 +256,10 @@ impl Backend for VirtualCard {
     fn disconnect(&mut self, _disposition: u32) -> ScardResult<()> {
         self.powered = false;
         self.selected_piv = false;
+        // Real silicon clears PIN-verified status when the card loses
+        // power. retry counter is persistent — only a successful
+        // VERIFY resets it.
+        self.pin_verified = false;
         Ok(())
     }
 
@@ -291,6 +324,24 @@ impl Backend for VirtualCard {
             return Ok(out);
         }
 
+        // VERIFY (00 20 P1 P2 ...). PIV application PIN at P1=00 P2=80.
+        // Other P1/P2 combinations: the YK4 wet-env capture shows real
+        // silicon returning 6A80 for `00 20 FF 80 00 00 00` (which
+        // SP 800-73-4 nominally documents as "clear verify status"),
+        // so we match that behavior — return 6A80 for any non-(00, 80)
+        // P1/P2 combination instead of inventing an interpretation.
+        if cla == 0x00 && ins == apdu::ins::VERIFY {
+            if p1 != 0x00 || p2 != 0x80 {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!("VERIFY P1={p1:#04x} P2={p2:#04x} -> 6A80 (unsupported)"),
+                );
+                return Ok(sw(0x6A, 0x80));
+            }
+            return Ok(self.handle_verify(apdu_body(command_apdu)));
+        }
+
         trace::emit(
             trace::DEBUG,
             "vcard",
@@ -301,6 +352,76 @@ impl Backend for VirtualCard {
 }
 
 impl VirtualCard {
+    /// Handle a VERIFY (INS 0x20, P1=00, P2=80) APDU.
+    ///
+    /// Two body shapes, both per SP 800-73-4 §3.2.1:
+    ///
+    /// - **No body** (status query): return 9000 if the PIN has been
+    ///   verified in this session, `63 Cx` if not — `x` is
+    ///   `self.pin_retries` packed into the low nibble.
+    /// - **8-byte body** (verify attempt): compare against
+    ///   `self.pin`. On success, reset retries to 3, set
+    ///   `pin_verified`, return 9000. On mismatch, decrement retries
+    ///   and return `63 Cx`. When retries hit 0, the PIN is blocked
+    ///   and subsequent attempts (including with the correct PIN)
+    ///   return `69 83`.
+    ///
+    /// Any other body length returns `6A80` (incorrect data field).
+    fn handle_verify(&mut self, body: Option<&[u8]>) -> Vec<u8> {
+        match body {
+            None => {
+                if self.pin_verified {
+                    trace::emit(trace::DEBUG, "vcard", "VERIFY (status) -> 9000 (verified)");
+                    sw(0x90, 0x00)
+                } else {
+                    let resp = sw(0x63, 0xC0 | self.pin_retries);
+                    trace::emit(
+                        trace::DEBUG,
+                        "vcard",
+                        &format!(
+                            "VERIFY (status) -> 63 C{} ({} retries left)",
+                            self.pin_retries, self.pin_retries
+                        ),
+                    );
+                    resp
+                }
+            }
+            Some(pin) => {
+                if pin.len() != 8 {
+                    trace::emit(
+                        trace::DEBUG,
+                        "vcard",
+                        &format!("VERIFY (body len {}) -> 6A80 (must be 8)", pin.len()),
+                    );
+                    return sw(0x6A, 0x80);
+                }
+                if self.pin_retries == 0 {
+                    trace::emit(trace::DEBUG, "vcard", "VERIFY -> 6983 (blocked)");
+                    return sw(0x69, 0x83);
+                }
+                if pin == self.pin.as_slice() {
+                    self.pin_retries = DEFAULT_PIN_RETRIES;
+                    self.pin_verified = true;
+                    trace::emit(trace::DEBUG, "vcard", "VERIFY -> 9000 (success)");
+                    sw(0x90, 0x00)
+                } else {
+                    self.pin_retries -= 1;
+                    if self.pin_retries == 0 {
+                        trace::emit(trace::DEBUG, "vcard", "VERIFY -> 6983 (just blocked)");
+                        sw(0x69, 0x83)
+                    } else {
+                        trace::emit(
+                            trace::DEBUG,
+                            "vcard",
+                            &format!("VERIFY -> 63 C{} (wrong PIN)", self.pin_retries),
+                        );
+                        sw(0x63, 0xC0 | self.pin_retries)
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle a `GET DATA` APDU. Parses the `5C <tag_len> <tag>` body
     /// to extract the tag and looks it up in `self.data_objects`.
     /// Returns the stored `53 <len> <value>` plus SW=9000 if present,
@@ -789,6 +910,149 @@ mod tests {
         // 5.2.7 — captured wet-env from real YubiKey 5 on 2026-05-31.
         // Byte-equal to the YK5 GET VERSION wire response.
         assert_eq!(Model::Yk5.firmware_version(), [0x05, 0x02, 0x07]);
+    }
+
+    // -- VERIFY PIN tests ---------------------------------------------
+
+    /// Status-query VERIFY: `00 20 00 80 00 00 00` (case 2 extended-
+    /// length, Lc=0). Real YK4 returned `63 C3` here on a freshly-init'd
+    /// card. VirtualCard's defaults reproduce that byte-equal.
+    fn verify_status_apdu_ext() -> Vec<u8> {
+        vec![0x00, 0x20, 0x00, 0x80, 0x00, 0x00, 0x00]
+    }
+
+    /// VERIFY-with-PIN: `00 20 00 80 00 00 08 <8-byte PIN> 00 00`
+    /// (case 4 extended-length with the YubiKey factory default PIN
+    /// "123456" + FF FF padding). Real YK4 returned 9000.
+    fn verify_default_pin_apdu_ext() -> Vec<u8> {
+        vec![
+            0x00, 0x20, 0x00, 0x80, 0x00, 0x00, 0x08, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF,
+            0xFF, 0x00, 0x00,
+        ]
+    }
+
+    /// Short-form variant of the above (for testing without leaning on
+    /// extended-length): `00 20 00 80 08 <PIN>`. Real YK4 wouldn't see
+    /// this shape from pivy-tool (it uses extended-length), but the
+    /// handler should support both.
+    fn verify_default_pin_apdu_short() -> Vec<u8> {
+        vec![
+            0x00, 0x20, 0x00, 0x80, 0x08, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF,
+        ]
+    }
+
+    #[test]
+    fn verify_status_query_on_fresh_card_returns_63_c3() {
+        let mut c = VirtualCard::new();
+        let resp = c.transmit(&verify_status_apdu_ext()).unwrap();
+        assert_eq!(
+            resp,
+            vec![0x63, 0xC3],
+            "fresh card: 3 retries left, not verified"
+        );
+    }
+
+    #[test]
+    fn verify_with_default_pin_returns_9000_and_marks_verified() {
+        let mut c = VirtualCard::new();
+        let resp = c.transmit(&verify_default_pin_apdu_ext()).unwrap();
+        assert_eq!(resp, vec![0x90, 0x00], "default PIN should verify");
+        // Status query now returns 9000.
+        assert_eq!(
+            c.transmit(&verify_status_apdu_ext()).unwrap(),
+            vec![0x90, 0x00]
+        );
+    }
+
+    #[test]
+    fn verify_short_form_works_same_as_extended() {
+        let mut c = VirtualCard::new();
+        let resp = c.transmit(&verify_default_pin_apdu_short()).unwrap();
+        assert_eq!(resp, vec![0x90, 0x00]);
+    }
+
+    #[test]
+    fn verify_with_wrong_pin_decrements_retries_and_returns_63_cx() {
+        let mut c = VirtualCard::new();
+        let mut wrong = verify_default_pin_apdu_short();
+        wrong[5] = 0x39; // change first PIN byte from '1' to '9'
+
+        let resp1 = c.transmit(&wrong).unwrap();
+        assert_eq!(resp1, vec![0x63, 0xC2], "first wrong: 2 left");
+
+        let resp2 = c.transmit(&wrong).unwrap();
+        assert_eq!(resp2, vec![0x63, 0xC1], "second wrong: 1 left");
+
+        let resp3 = c.transmit(&wrong).unwrap();
+        assert_eq!(resp3, vec![0x69, 0x83], "third wrong: PIN blocked");
+    }
+
+    #[test]
+    fn verify_correct_pin_after_one_wrong_resets_retry_counter() {
+        let mut c = VirtualCard::new();
+        let mut wrong = verify_default_pin_apdu_short();
+        wrong[5] = 0x39;
+
+        c.transmit(&wrong).unwrap(); // retries = 2
+        let resp = c.transmit(&verify_default_pin_apdu_short()).unwrap();
+        assert_eq!(resp, vec![0x90, 0x00]);
+
+        // Subsequent wrong attempts should start from 3 again, not 2.
+        let resp = c.transmit(&wrong).unwrap();
+        assert_eq!(resp, vec![0x63, 0xC2], "retries reset after success");
+    }
+
+    #[test]
+    fn verify_with_correct_pin_after_blocked_still_returns_6983() {
+        let mut c = VirtualCard::new();
+        let mut wrong = verify_default_pin_apdu_short();
+        wrong[5] = 0x39;
+        // Burn all 3 retries.
+        for _ in 0..3 {
+            c.transmit(&wrong).unwrap();
+        }
+        // Now even the correct PIN is rejected.
+        let resp = c.transmit(&verify_default_pin_apdu_short()).unwrap();
+        assert_eq!(resp, vec![0x69, 0x83]);
+    }
+
+    #[test]
+    fn verify_with_wrong_body_length_returns_6a80() {
+        let mut c = VirtualCard::new();
+        let apdu = vec![
+            0x00, 0x20, 0x00, 0x80, 0x04, 0x31, 0x32, 0x33, 0x34, // 4-byte body, not 8
+        ];
+        assert_eq!(c.transmit(&apdu).unwrap(), vec![0x6A, 0x80]);
+    }
+
+    #[test]
+    fn verify_with_p1_ff_returns_6a80_matching_yk4_capture() {
+        let mut c = VirtualCard::new();
+        // 00 20 FF 80 00 00 00 — what we saw real YK4 return 6A80 to
+        // in the wet-env yk4-roundtrip capture.
+        let apdu = vec![0x00, 0x20, 0xFF, 0x80, 0x00, 0x00, 0x00];
+        assert_eq!(c.transmit(&apdu).unwrap(), vec![0x6A, 0x80]);
+    }
+
+    #[test]
+    fn disconnect_clears_verified_flag_but_keeps_retries() {
+        let mut c = VirtualCard::new();
+        c.transmit(&verify_default_pin_apdu_short()).unwrap();
+        assert_eq!(
+            c.transmit(&verify_status_apdu_ext()).unwrap(),
+            vec![0x90, 0x00]
+        );
+
+        c.disconnect(0).unwrap();
+        c.connect(2, 3).unwrap();
+
+        // Verified flag cleared, but retry counter persists at 3
+        // (real silicon: a successful verify reset it; disconnect
+        // doesn't touch it).
+        assert_eq!(
+            c.transmit(&verify_status_apdu_ext()).unwrap(),
+            vec![0x63, 0xC3]
+        );
     }
 
     #[test]
