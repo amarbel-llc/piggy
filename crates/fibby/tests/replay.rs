@@ -21,6 +21,30 @@ use fibby::virtual_card::{Model, VirtualCard};
 
 const YK4_FIXTURE: &str = "tests/fixtures/apdu/yk4-roundtrip.fixture";
 const FIB_YK54_FIXTURE: &str = "tests/fixtures/apdu/fib-yk54-roundtrip.fixture";
+const YK4_TEST_VECTOR_FIXTURE: &str = "tests/fixtures/apdu/yk4-test-vector-roundtrip.fixture";
+const YK4_TEST_VECTOR_PIVY_FIXTURE: &str =
+    "tests/fixtures/apdu/yk4-test-vector-roundtrip-pivy.fixture";
+
+/// RFC 6979 §A.2.5 P-256 private scalar (big-endian, 32 bytes).
+/// Imported into the throwaway YubiKey 4 slot 9D for the two test-
+/// vector captures so VirtualCard's ECDH replay is byte-deterministic.
+/// See piggy#134 + `crates/fibby/tests/fixtures/test-vectors/README.md`.
+const RFC6979_A_2_5_SCALAR: [u8; 32] = [
+    0xC9, 0xAF, 0xA9, 0xD8, 0x45, 0xBA, 0x75, 0x16, 0x6B, 0x5C, 0x21, 0x57, 0x67, 0xB1, 0xD6, 0x93,
+    0x4E, 0x50, 0xC3, 0xDB, 0x36, 0xE8, 0x9B, 0x12, 0x7B, 0x8A, 0x62, 0x2B, 0x12, 0x0F, 0x67, 0x21,
+];
+
+/// Returns the slot 9D scalar to pre-seed VirtualCard with before
+/// replaying `fixture_path`, or `None` if the fixture isn't backed by
+/// a known test-vector key. Fixtures derived from captures against
+/// on-card-generated keys can't be byte-replayed (the scalar never
+/// leaves silicon); they remain `None` here.
+fn slot_9d_priv_for(fixture_path: &str) -> Option<[u8; 32]> {
+    match fixture_path {
+        YK4_TEST_VECTOR_FIXTURE | YK4_TEST_VECTOR_PIVY_FIXTURE => Some(RFC6979_A_2_5_SCALAR),
+        _ => None,
+    }
+}
 
 /// Fixture-to-model mapping. Each fixture is replayed against the
 /// `Model` whose ATR + firmware version matches what the originating
@@ -54,6 +78,13 @@ const ALL_FIXTURES: &[(&str, Model)] = &[
     (FIB_YK54_FIXTURE, Model::Yk5),
     ("tests/fixtures/apdu/fib-yk54-list.fixture", Model::Yk5),
     ("tests/fixtures/apdu/fib-yk54-init.fixture", Model::Yk5),
+    // Test-vector captures (piggy#134) — same RFC 6979 §A.2.5 scalar
+    // imported via two independent bootstrap paths so the ECDH
+    // determinism check holds across distinct ephemerals. See
+    // `slot_9d_priv_for` for the seed-material lookup the diagnostic
+    // and strict tests consult.
+    (YK4_TEST_VECTOR_FIXTURE, Model::Yk4),
+    (YK4_TEST_VECTOR_PIVY_FIXTURE, Model::Yk4),
 ];
 
 /// One APDU exchange parsed from a `.fixture` file: the command APDU
@@ -286,6 +317,14 @@ fn replay_progress_against_real_silicon_is_logged() {
         for (tag, value) in seeds {
             card.seed_data_object(tag, value);
         }
+        // For test-vector fixtures (piggy#134), pre-seed the slot 9D
+        // private scalar matching the imported throwaway-card key. The
+        // GA ECDH pair then becomes byte-deterministic and shows up in
+        // matched-count; without this, the GA exchange falls through
+        // VirtualCard's empty-slot branch.
+        if let Some(scalar) = slot_9d_priv_for(fixture_path) {
+            card.seed_slot_9d_priv(scalar);
+        }
         let mut matched = 0usize;
         let mut select_matched = 0usize;
         let mut selects = 0usize;
@@ -427,4 +466,81 @@ fn full_byte_replay(fixture: &Path, model: Model) {
             got
         );
     }
+}
+
+/// Replay the GA ECDH (INS 0x87, P1=0x11, P2=0x9D) pair from a test-
+/// vector fixture against a VirtualCard seeded with the matching slot
+/// 9D scalar, and assert byte-equality of the response. Scopes
+/// strictness to the deterministic surface — does not assert on every
+/// pair in the fixture, just the GA ECDH pair(s). Closes piggy#134's
+/// "byte-deterministic ECDH replay" loop.
+fn assert_ga_ecdh_pairs_replay_byte_equal(fixture: &Path, scalar: [u8; 32]) {
+    let pairs = parse_fixture(fixture);
+    let mut ga_pairs_seen = 0;
+    for (i, p) in pairs.iter().enumerate() {
+        if !is_ga_ecdh_slot_9d(&p.request) {
+            continue;
+        }
+        ga_pairs_seen += 1;
+        let mut card = VirtualCard::new();
+        card.seed_slot_9d_priv(scalar);
+        // PIN-verify out-of-band via the standard PIV VERIFY (00 20 00
+        // 80 + factory PIN 123456+padding) so VirtualCard's PIN-gate
+        // doesn't return 6982. Mirrors what the captured session did
+        // before reaching this pair.
+        let verify_apdu = vec![
+            0x00, 0x20, 0x00, 0x80, 0x08, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF,
+        ];
+        assert_eq!(
+            card.transmit(&verify_apdu).unwrap(),
+            vec![0x90, 0x00],
+            "{}: priming VERIFY failed; PIN gate not satisfied",
+            fixture.display()
+        );
+        let got = card.transmit(&p.request).unwrap();
+        assert_eq!(
+            got,
+            p.response,
+            "{}: GA ECDH pair {i} response mismatch.\n  request: {:?}\n  expected: {:?}\n  got: {:?}",
+            fixture.display(),
+            p.request,
+            p.response,
+            got
+        );
+    }
+    assert!(
+        ga_pairs_seen >= 1,
+        "{}: expected at least one GA ECDH pair (INS 0x87 P1=0x11 P2=0x9D) in fixture",
+        fixture.display()
+    );
+}
+
+fn is_ga_ecdh_slot_9d(apdu: &[u8]) -> bool {
+    apdu.len() >= 4 && apdu[0] == 0x00 && apdu[1] == 0x87 && apdu[2] == 0x11 && apdu[3] == 0x9D
+}
+
+/// GA ECDH byte-replay against `yk4-test-vector-roundtrip.fixture`
+/// (yubico-piv-tool import bootstrap). Pair {request, response} is
+/// deterministic given the slot scalar; VirtualCard's ECDH must
+/// reproduce the captured response exactly.
+#[test]
+fn ga_ecdh_byte_replay_test_vector_yubico_piv_tool_bootstrap() {
+    assert_ga_ecdh_pairs_replay_byte_equal(
+        &workspace_relative(YK4_TEST_VECTOR_FIXTURE),
+        RFC6979_A_2_5_SCALAR,
+    );
+}
+
+/// Companion to the yubico-piv-tool-bootstrap byte-replay: the pivy-
+/// tool bootstrap (#58) used a fresh ephemeral, so the X-coord response
+/// differs — but the scalar is the same, so VirtualCard's math has to
+/// reproduce *this* response byte-equally too. Two distinct fixtures
+/// → strong cross-check that the ECDH implementation isn't accidentally
+/// fitting one frozen pair.
+#[test]
+fn ga_ecdh_byte_replay_test_vector_pivy_tool_bootstrap() {
+    assert_ga_ecdh_pairs_replay_byte_equal(
+        &workspace_relative(YK4_TEST_VECTOR_PIVY_FIXTURE),
+        RFC6979_A_2_5_SCALAR,
+    );
 }

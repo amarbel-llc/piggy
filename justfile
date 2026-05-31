@@ -643,6 +643,16 @@ debug-fibby-roundtrip-capture:
     FIBBY_KEEP_LOGS=crates/fibby/tests/fixtures/captures/yubikey \
       just debug-fibby-roundtrip
 
+# Variant of debug-fibby-roundtrip-capture that routes the wire log into
+# the `test-vector/` subdir, so captures against a throwaway YK with the
+# RFC 6979 §A.2.5 scalar imported at slot 9D (see debug-yk-throwaway-
+# import-rfc6979) stay segregated from the existing generated-key
+# fixtures. Serves the fibby #134 byte-deterministic ECDH replay dev-loop.
+[group('debug')]
+debug-fibby-roundtrip-capture-test-vector:
+    FIBBY_KEEP_LOGS=crates/fibby/tests/fixtures/captures/yubikey/test-vector \
+      just debug-fibby-roundtrip
+
 # Tier-4 round-trip routed through fib (the Java virtual PIV card)
 # instead of a real YubiKey. fib provides a second oracle — same APDU
 # script, second capture — so we have differential fixtures even when
@@ -1457,3 +1467,82 @@ release new_version:
     just tag "$msg"
 
     gh release create "v{{new_version}}" --title "$header" --notes "$msg"
+
+# Factory-reset a YubiKey 4 throwaway so its PIV applet is wiped and the
+# CHUID GUID rolls. DESTRUCTIVE — the recipe refuses to run unless the
+# inserted card reports firmware 4.x (so an accidentally-inserted YK5
+# primary is not blocked/reset). Sequence: 3 wrong PIN attempts to block
+# PIN → 3 wrong PUK attempts to block PUK → --action=reset → re-probe
+# status. Serves the fibby #134 test-vector capture dev-loop.
+[group('debug')]
+debug-yk-throwaway-reset:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    unset PCSCLITE_CSOCK_NAME  # talk to system pcscd, not fibby
+    status=$(yubico-piv-tool --action=status 2>&1) || {
+      echo "ERROR: yubico-piv-tool --action=status failed:" >&2
+      echo "$status" >&2
+      exit 1
+    }
+    version=$(echo "$status" | awk '/^Version:/ {print $2}')
+    serial=$(echo "$status" | awk '/^Serial Number:/ {print $3}')
+    if [[ "$version" != 4.* ]]; then
+      echo "ERROR: refusing to reset — firmware '$version' is not 4.x" >&2
+      echo "this recipe is hard-coded for the throwaway YK4; primary YK5 must be swapped out" >&2
+      exit 1
+    fi
+    echo "Pre-reset: firmware=$version serial=$serial"
+    echo
+    echo "=== Blocking PIN with 3 wrong attempts ==="
+    for _ in 1 2 3; do
+      yubico-piv-tool --action=verify-pin --pin=000000 2>&1 || true
+    done
+    echo
+    echo "=== Blocking PUK with 3 wrong attempts ==="
+    for _ in 1 2 3; do
+      yubico-piv-tool --action=change-puk -P 00000000 -N 11111111 2>&1 || true
+    done
+    echo
+    echo "=== Running reset ==="
+    yubico-piv-tool --action=reset
+    echo
+    echo "=== Post-reset status ==="
+    yubico-piv-tool --action=status
+
+# Import the RFC 6979 §A.2.5 P-256 test-vector key into slot 9D of a
+# freshly-reset throwaway YK4, so subsequent GA ECDH wire captures are
+# byte-deterministic against any VirtualCard implementation that uses
+# the same scalar. DESTRUCTIVE — overwrites slot 9D. Requires the card
+# to be at factory mgmt-key (auto on freshly-reset card). Same 4.x
+# firmware safety as debug-yk-throwaway-reset. Serves the fibby #134
+# test-vector capture dev-loop.
+[group('debug')]
+debug-yk-throwaway-import-rfc6979:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    unset PCSCLITE_CSOCK_NAME
+    status=$(yubico-piv-tool --action=status 2>&1) || {
+      echo "ERROR: yubico-piv-tool --action=status failed:" >&2
+      echo "$status" >&2
+      exit 1
+    }
+    version=$(echo "$status" | awk '/^Version:/ {print $2}')
+    if [[ "$version" != 4.* ]]; then
+      echo "ERROR: refusing to import — firmware '$version' is not 4.x" >&2
+      exit 1
+    fi
+    pem="crates/fibby/tests/fixtures/test-vectors/rfc6979-a-2-5-priv.pem"
+    if [[ ! -f "$pem" ]]; then
+      echo "ERROR: test-vector PEM not found: $pem" >&2
+      exit 1
+    fi
+    echo "Importing $pem to slot 9d (algorithm ECCP256)..."
+    yubico-piv-tool \
+      --action=import-key \
+      --slot=9d \
+      --algorithm=ECCP256 \
+      --key-format=PEM \
+      --input="$pem"
+    echo
+    echo "=== Post-import status ==="
+    yubico-piv-tool --action=status

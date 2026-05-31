@@ -41,4 +41,16 @@ pub mod ins {
     /// SW 9000. `P1 P2 = 00 00`; no body. Not in SP 800-73-4 — it's a
     /// YubicoPIV extension pivy-tool issues during discovery.
     pub const YK_SERIAL: u8 = 0xF8;
+    /// PIV GENERAL AUTHENTICATE (SP 800-73-4 §3.2.4). Used for
+    /// challenge-response (slot ECDSA + mgmt-key auth) and key
+    /// agreement (slot ECDH). `P1` is the algorithm reference (e.g.
+    /// `0x11` = ECCP256), `P2` is the key reference (e.g. `0x9D` =
+    /// key management slot). The data field is a `7C` dynamic-
+    /// authentication-template TLV; for slot 9D ECDH it carries a
+    /// `82 00` (response template, empty in request) followed by a
+    /// `85 41 04 <Xeph> <Yeph>` exponentiation parameter (the
+    /// client's ephemeral uncompressed P-256 point). The card
+    /// response is `7C 22 82 20 <Xshared>` — the X-coordinate of
+    /// `card_priv * eph_pub`, padded to 32 bytes.
+    pub const GENERAL_AUTHENTICATE: u8 = 0x87;
 }

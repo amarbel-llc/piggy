@@ -455,6 +455,7 @@ dependencies = [
 name = "fibby"
 version = "0.1.0"
 dependencies = [
+ "p256",
  "pcsc",
 ]
 

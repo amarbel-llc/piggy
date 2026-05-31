@@ -211,10 +211,19 @@ pub struct VirtualCard {
     pin_retries: u8,
     /// Whether the PIN has been verified in this session. Cleared on
     /// `disconnect()` to mirror real-card semantics (the verified
-    /// state doesn't survive a power cycle). Subsequent PIN-gated
-    /// operations (GA ECDH, etc.) must check this before honoring the
-    /// request — TODO once GA lands.
+    /// state doesn't survive a power cycle). PIN-gated operations
+    /// (e.g. GA ECDH on slot 9D) consult this before honoring the
+    /// request and return `69 82` when unset.
     pin_verified: bool,
+    /// Raw P-256 scalar (big-endian) installed in slot 9D, or `None`
+    /// if no key is present. Mirrors real silicon's PIV state: a slot
+    /// can be either populated (key + optional cert) or empty
+    /// (returns `6A 88` to GA). Set via [`Self::seed_slot_9d_priv`]
+    /// by tests that import a test-vector scalar (see piggy#134) so
+    /// GA ECDH responses are byte-deterministic across captures.
+    /// Production VirtualCard runs always have this `None` until a
+    /// future generate-asymmetric branch lands.
+    slot_9d_priv: Option<[u8; 32]>,
 }
 
 /// YubiKey factory-default PIN: ASCII "123456" padded with 0xFF bytes
@@ -265,7 +274,23 @@ impl VirtualCard {
             pin: DEFAULT_PIN.to_vec(),
             pin_retries: DEFAULT_PIN_RETRIES,
             pin_verified: false,
+            slot_9d_priv: None,
         }
+    }
+
+    /// Install a P-256 scalar into slot 9D. The scalar is the 32-byte
+    /// big-endian raw secret (no PKCS-#8 / SEC1 wrapping). Subsequent
+    /// GA ECDH requests (INS 0x87, P1=0x11, P2=0x9D) compute
+    /// `scalar * client_eph_pub` and return the X-coordinate.
+    ///
+    /// Mirrors `seed_data_object` semantics: bypasses the mgmt-key auth
+    /// that a real GENERATE / import flow would require. Reserved for
+    /// test scaffolding — specifically the piggy#134 byte-deterministic
+    /// replay pattern where the same RFC 6979 §A.2.5 scalar is imported
+    /// into a throwaway YubiKey and into VirtualCard, so the wire
+    /// capture matches VirtualCard's response byte-for-byte.
+    pub fn seed_slot_9d_priv(&mut self, scalar: [u8; 32]) {
+        self.slot_9d_priv = Some(scalar);
     }
 }
 
@@ -410,6 +435,15 @@ impl Backend for VirtualCard {
             return Ok(self.handle_verify(apdu_body(command_apdu)));
         }
 
+        // GENERAL AUTHENTICATE (00 87 <alg> <slot> <Lc> 7C ...). Only
+        // slot 9D ECDH (alg=0x11, slot=0x9D) is implemented; that's the
+        // piggy decrypt path. Other algorithm/slot combinations
+        // (slot 9A auth, slot 9C signing, mgmt-key challenge-response)
+        // fall through to the 6D00 stub.
+        if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9D {
+            return Ok(self.handle_general_authenticate_ecdh_slot_9d(apdu_body(command_apdu)));
+        }
+
         trace::emit(
             trace::DEBUG,
             "vcard",
@@ -529,6 +563,119 @@ impl VirtualCard {
         }
     }
 
+    /// Handle a `GENERAL AUTHENTICATE` (INS 0x87) for the ECDH key
+    /// agreement use case on slot 9D, P-256.
+    ///
+    /// Wire shape per SP 800-73-4 §3.2.4 + the wet-env captures
+    /// (`crates/fibby/tests/fixtures/apdu/yk4-test-vector-roundtrip*
+    /// .fixture`):
+    ///
+    /// - Request body: `7C <len> 82 00 85 <len2> 04 <Xeph 32B>
+    ///   <Yeph 32B>`. The `82 00` is an empty response template (the
+    ///   client asking the card to fill it in); `85` is the
+    ///   exponentiation parameter holding the client's ephemeral
+    ///   uncompressed P-256 point. `<len2>` is `0x41` (65 = 1 prefix
+    ///   + 32 X + 32 Y).
+    /// - Response: `7C 22 82 20 <Xshared 32B>` + SW 9000, where
+    ///   `Xshared = (scalar * eph_pub).x`, zero-padded big-endian to
+    ///   32 bytes.
+    ///
+    /// Status words:
+    ///
+    /// - `69 82` (security status not satisfied): PIN not verified.
+    /// - `6A 88` (referenced data not found): slot 9D is empty (no
+    ///   key installed; see [`Self::seed_slot_9d_priv`]).
+    /// - `6A 80` (incorrect parameters in data field): malformed
+    ///   request body or invalid ephemeral point.
+    /// - `90 00` + `7C 22 82 20 <X>` on success.
+    ///
+    /// Reads the scalar from `self.slot_9d_priv` and uses
+    /// `p256::ecdh::diffie_hellman` for the math, whose output is the
+    /// raw X-coordinate in the exact byte form real silicon emits.
+    fn handle_general_authenticate_ecdh_slot_9d(&mut self, body: Option<&[u8]>) -> Vec<u8> {
+        use p256::elliptic_curve::sec1::FromEncodedPoint;
+        use p256::{EncodedPoint, NonZeroScalar, PublicKey};
+
+        if !self.pin_verified {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                "GA ECDH 9D -> 6982 (PIN not verified)",
+            );
+            return sw(0x69, 0x82);
+        }
+        let scalar_bytes = match self.slot_9d_priv {
+            Some(s) => s,
+            None => {
+                trace::emit(trace::DEBUG, "vcard", "GA ECDH 9D -> 6A88 (slot empty)");
+                return sw(0x6A, 0x88);
+            }
+        };
+        let body = match body {
+            Some(b) => b,
+            None => {
+                trace::emit(trace::DEBUG, "vcard", "GA ECDH 9D -> 6A80 (no body)");
+                return sw(0x6A, 0x80);
+            }
+        };
+        let eph_pub_bytes = match parse_ga_ecdh_request(body) {
+            Some(b) => b,
+            None => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "GA ECDH 9D -> 6A80 (malformed 7C/85 TLV)",
+                );
+                return sw(0x6A, 0x80);
+            }
+        };
+        let eph_point = match EncodedPoint::from_bytes(eph_pub_bytes) {
+            Ok(p) => p,
+            Err(_) => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "GA ECDH 9D -> 6A80 (bad SEC1 encoding)",
+                );
+                return sw(0x6A, 0x80);
+            }
+        };
+        let eph_pub: PublicKey = match Option::from(PublicKey::from_encoded_point(&eph_point)) {
+            Some(pk) => pk,
+            None => {
+                trace::emit(trace::DEBUG, "vcard", "GA ECDH 9D -> 6A80 (not on curve)");
+                return sw(0x6A, 0x80);
+            }
+        };
+        let scalar = match NonZeroScalar::try_from(&scalar_bytes[..]) {
+            Ok(s) => s,
+            Err(_) => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "GA ECDH 9D -> 6A88 (slot scalar invalid)",
+                );
+                return sw(0x6A, 0x88);
+            }
+        };
+        let shared = p256::ecdh::diffie_hellman(scalar, eph_pub.as_affine());
+        let x = shared.raw_secret_bytes();
+        debug_assert_eq!(x.len(), 32);
+        let mut out = Vec::with_capacity(2 + 2 + 32 + 2);
+        out.push(0x7C);
+        out.push(0x22);
+        out.push(0x82);
+        out.push(0x20);
+        out.extend_from_slice(x);
+        out.extend_from_slice(&sw(0x90, 0x00));
+        trace::emit(
+            trace::DEBUG,
+            "vcard",
+            &format!("GA ECDH 9D -> 9000 (X[0]={:02X} X[31]={:02X})", x[0], x[31]),
+        );
+        out
+    }
+
     /// Handle a `PUT DATA` APDU. Parses `5C <tag_len> <tag>` followed
     /// by the `53 <len> <data>` block, stores the 53-wrapped form in
     /// `self.data_objects`. Returns SW=9000 on success, `6A80` on a
@@ -602,6 +749,65 @@ fn apdu_body(apdu: &[u8]) -> Option<&[u8]> {
             return None;
         }
         Some(&apdu[5..5 + lc])
+    }
+}
+
+/// Parse a `GENERAL AUTHENTICATE` ECDH request body and return the
+/// raw ephemeral SEC1-uncompressed P-256 point (65 bytes: `04 ‖ X ‖ Y`).
+///
+/// Expected shape: `7C <len> 82 00 85 <len2> 04 <Xeph 32B> <Yeph 32B>`
+/// where `<len>` is BER short or 0x81 long. The `82 00` is a
+/// zero-length response-template placeholder. The `85` is the
+/// dynamic-authentication "exponentiation parameter" carrying the
+/// client's ephemeral public point.
+///
+/// Returns `None` on any structural error. Does not validate that
+/// the point is on the curve — leave that to `EncodedPoint`.
+fn parse_ga_ecdh_request(body: &[u8]) -> Option<&[u8]> {
+    if body.first()? != &0x7C {
+        return None;
+    }
+    let (inner_offset, inner_len) = ber_len(&body[1..])?;
+    let inner_start = 1 + inner_offset;
+    if body.len() < inner_start + inner_len {
+        return None;
+    }
+    let inner = &body[inner_start..inner_start + inner_len];
+    let mut cur = inner;
+    while !cur.is_empty() {
+        let tag = *cur.first()?;
+        let (len_offset, len) = ber_len(&cur[1..])?;
+        let value_start = 1 + len_offset;
+        if cur.len() < value_start + len {
+            return None;
+        }
+        let value = &cur[value_start..value_start + len];
+        if tag == 0x85 {
+            // SEC1 uncompressed: 65 bytes, leading 0x04.
+            if value.len() == 65 && value[0] == 0x04 {
+                return Some(value);
+            }
+            return None;
+        }
+        cur = &cur[value_start + len..];
+    }
+    None
+}
+
+/// Parse a BER-TLV length octet sequence at the front of `bytes`,
+/// returning `(bytes_consumed_for_length, length_value)`. Supports
+/// short form (length 0-127 in one byte) and 0x81 long form
+/// (128-255 in one length byte). Returns `None` for 0x82+ — real
+/// PIV objects in our wire fit in one length byte. Mirrors
+/// `split_53_tlv`'s discipline.
+fn ber_len(bytes: &[u8]) -> Option<(usize, usize)> {
+    let first = *bytes.first()?;
+    if first < 0x80 {
+        Some((1, first as usize))
+    } else if first == 0x81 {
+        Some((2, *bytes.get(1)? as usize))
+    } else {
+        None
     }
 }
 
@@ -1181,5 +1387,87 @@ mod tests {
         ];
         let resp = c.transmit(&extended_get).unwrap();
         assert_eq!(resp, vec![0x53, 0x02, 0xAB, 0xCD, 0x90, 0x00]);
+    }
+
+    // -- GA ECDH (slot 9D, P-256) tests ----------------------------------
+
+    /// RFC 6979 §A.2.5 P-256 private scalar, big-endian. Same scalar
+    /// imported into the throwaway YubiKey 4 slot 9D for the wet-env
+    /// captures under `tests/fixtures/captures/yubikey/test-vector/`.
+    const RFC6979_SCALAR: [u8; 32] = [
+        0xC9, 0xAF, 0xA9, 0xD8, 0x45, 0xBA, 0x75, 0x16, 0x6B, 0x5C, 0x21, 0x57, 0x67, 0xB1, 0xD6,
+        0x93, 0x4E, 0x50, 0xC3, 0xDB, 0x36, 0xE8, 0x9B, 0x12, 0x7B, 0x8A, 0x62, 0x2B, 0x12, 0x0F,
+        0x67, 0x21,
+    ];
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        let cleaned: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+        (0..cleaned.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&cleaned[i..i + 2], 16).expect("valid hex"))
+            .collect()
+    }
+
+    #[test]
+    fn ga_ecdh_slot_9d_without_pin_verify_returns_6982() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9d_priv(RFC6979_SCALAR);
+        // Capture #1 GA ECDH request bytes (extended-length Lc).
+        let req = hex_to_bytes(
+            "0087119d0000477c458200854104b3ef72daa94a55f409e495f654f234fb8f9730fa66923e7e45a910bb9773535e5d9a77be8d9f0968e7fb008cf9c156d7d468fbecb573e17801e2d441486b9f860000",
+        );
+        let resp = c.transmit(&req).unwrap();
+        assert_eq!(resp, vec![0x69, 0x82], "PIN not verified -> 6982");
+    }
+
+    #[test]
+    fn ga_ecdh_slot_9d_without_key_returns_6a88() {
+        let mut c = VirtualCard::new();
+        c.pin_verified = true;
+        let req = hex_to_bytes(
+            "0087119d0000477c458200854104b3ef72daa94a55f409e495f654f234fb8f9730fa66923e7e45a910bb9773535e5d9a77be8d9f0968e7fb008cf9c156d7d468fbecb573e17801e2d441486b9f860000",
+        );
+        let resp = c.transmit(&req).unwrap();
+        assert_eq!(resp, vec![0x6A, 0x88], "slot 9D empty -> 6A88");
+    }
+
+    /// Byte-deterministic replay of the wet-env GA ECDH pair from
+    /// `yk4-test-vector-roundtrip.fixture` (capture #1, yubico-piv-tool
+    /// import bootstrap). The card's response is purely a function of
+    /// the slot scalar (RFC 6979 §A.2.5) and the client's ephemeral
+    /// public key (carried in the request body), so VirtualCard must
+    /// reproduce it byte-for-byte.
+    #[test]
+    fn ga_ecdh_slot_9d_matches_wet_env_capture_yubico_piv_tool_bootstrap() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9d_priv(RFC6979_SCALAR);
+        c.pin_verified = true;
+        let req = hex_to_bytes(
+            "0087119d0000477c458200854104b3ef72daa94a55f409e495f654f234fb8f9730fa66923e7e45a910bb9773535e5d9a77be8d9f0968e7fb008cf9c156d7d468fbecb573e17801e2d441486b9f860000",
+        );
+        let expected = hex_to_bytes(
+            "7c22822047e03668154b982a23f935f0ac074cb306cb94860073ebc10b92ddcc289e96f29000",
+        );
+        assert_eq!(c.transmit(&req).unwrap(), expected);
+    }
+
+    /// Companion to the yubico-piv-tool capture replay: the
+    /// pivy-tool-bootstrapped capture (#58) uses a different ephemeral
+    /// pub but the same slot scalar, so the deterministic X-coord
+    /// response differs. Both fixtures together verify that
+    /// VirtualCard's ECDH math is correct under independent client
+    /// inputs, not just one frozen pair.
+    #[test]
+    fn ga_ecdh_slot_9d_matches_wet_env_capture_pivy_tool_bootstrap() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9d_priv(RFC6979_SCALAR);
+        c.pin_verified = true;
+        let req = hex_to_bytes(
+            "0087119d0000477c458200854104b47f3c10ff4444e640a4837b83d1b600f1dd60e98df6c778116f219670166705f3dd289073c4090ce100001d2a5eae3faa9104f59e1d372f6b068702f0ec42cb0000",
+        );
+        let expected = hex_to_bytes(
+            "7c22822097b863dabf25c290ec35650685e2ae7bed49ae9c097a6feda338ad45c36049fb9000",
+        );
+        assert_eq!(c.transmit(&req).unwrap(), expected);
     }
 }

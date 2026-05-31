@@ -19,3 +19,11 @@ hardware-proxy = ["dep:pcsc"]
 
 [dependencies]
 pcsc = { version = "2.9", optional = true }
+# VirtualCard's PIV GENERAL AUTHENTICATE (alg=0x11 P-256 ECDH on slot
+# 9D) does `card_priv * client_eph_pub` and returns the X-coord. Pure
+# arithmetic, no I/O. RustCrypto's `p256` is the de-facto P-256 crate
+# for no-OpenSSL Rust; the `ecdh` feature pulls in
+# `p256::ecdh::diffie_hellman` whose output is exactly the byte form
+# real silicon emits inside the `7C 22 82 20 <X>` response. See
+# piggy#134 for the byte-deterministic replay rationale.
+p256 = { version = "0.13", default-features = false, features = ["ecdh"] }
