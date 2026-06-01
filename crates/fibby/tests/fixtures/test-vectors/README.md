@@ -59,3 +59,27 @@ PIV cert-object TLV (`53 70 … 71 01 00 FE 00`), and re-pin.
 
 **Not sensitive.** RFC 5903 publishes this scalar in the public
 literature for ECDH test vectors.
+
+### `fibby-slot-9c-test-priv.pem`
+
+P-256 keypair backing fibby's slot **9C** (Digital Signature) test cert.
+
+Unlike the two files above, this is **not** a published RFC vector — it is
+a key fibby generated itself. The slot-9C sign path uses RFC 6979
+deterministic ECDSA, so (unlike 9D's ECDH byte-replay, piggy#134) there is
+no captured wire to match: all that is required is a key *distinct* from
+slot 9A (§A.2.5) and slot 9D (§8.1) so pivy-agent routes signing
+unambiguously to 9C. Its public point is `04 ‖ BA 37 10 C3 … ‖ … 67 20 E6
+2E 89`.
+
+`virtual_card.rs::FIBBY_SLOT_9C_TEST_PRIV` pins this scalar, and
+`FIBBY_SLOT_9C_CERT_OBJECT` pins a self-signed X.509 over it (CN
+`fibby-test-slot-9c`, serial 1, 100-year validity) at PIV tag `5F C1 0A`.
+A unit test
+(`seed_fibby_slot_9c_cert_enables_signing_and_cert_matches_key`) asserts
+the pinned cert's SubjectPublicKeyInfo point matches this key, so a drift
+in either constant fails CI. To regenerate the key + cert + this PEM in one
+shot, run `just debug-fibby-gen-slot-9c-cert` and re-paste the printed
+arrays (it produces a fresh key each run — only do so deliberately).
+
+**Not sensitive.** A throwaway P-256 test key with no production use.

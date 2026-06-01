@@ -2166,3 +2166,142 @@ debug-ssh-decrypt-via-fibby:
       echo "--- sshd stderr ---"; cat "$sshd_err"
       exit 1
     fi
+
+# piggy#135: regenerate fibby's slot-9C (Digital Signature) test cert. One-shot
+# generator — produces a FRESH P-256 key each run. The slot-9C SIGN path uses
+# RFC 6979 deterministic ECDSA, so (unlike 9D's ECDH, piggy#134) there is no
+# captured wire to byte-replay against: a published vector isn't required, only
+# a key distinct from 9A (§A.2.5) and 9D (§8.1). Saves the key PEM under
+# tests/fixtures/test-vectors/ as the reproducibility anchor and prints Rust
+# byte arrays (scalar + PIV cert-object) to paste into virtual_card.rs as
+# FIBBY_SLOT_9C_TEST_PRIV / FIBBY_SLOT_9C_CERT_OBJECT. The cert's ECDSA sig
+# uses a random k, so re-running re-pins the const — only do so deliberately.
+# Cross-check the printed pubkey is distinct from the 9A/9D points.
+[group('debug')]
+debug-fibby-gen-slot-9c-cert:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="crates/fibby/tests/fixtures/test-vectors"
+    pem="$dir/fibby-slot-9c-test-priv.pem"
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+
+    # Generate until the raw scalar is exactly 32 bytes (64 hex) so the text
+    # extraction below is unambiguous (no leading-zero short form).
+    scalar=""
+    for _ in $(seq 1 16); do
+      openssl ecparam -name prime256v1 -genkey -noout -out "$tmp/key.pem"
+      scalar=$(openssl pkey -in "$tmp/key.pem" -text -noout 2>/dev/null \
+        | sed -n '/priv:/,/pub:/{/priv:/d;/pub:/d;p}' | tr -dc '0-9a-f')
+      [[ ${#scalar} -eq 64 ]] && break
+      scalar=""
+    done
+    [[ ${#scalar} -eq 64 ]] || { echo "could not extract a 32-byte scalar" >&2; exit 1; }
+
+    # Self-sign the cert (fixed subject + serial; 100-year validity).
+    openssl req -x509 -key "$tmp/key.pem" -subj "/CN=fibby-test-slot-9c" \
+      -set_serial 1 -days 36500 -sha256 -outform DER -out "$tmp/cert.der"
+    der=$(od -An -tx1 "$tmp/cert.der" | tr -dc '0-9a-f')
+    der_len=$(( ${#der} / 2 ))
+
+    ber_len() { # echo BER length bytes (hex) for $1
+      local n=$1
+      if [[ $n -lt 128 ]]; then printf '%02x' "$n"
+      elif [[ $n -lt 256 ]]; then printf '81%02x' "$n"
+      else printf '82%02x%02x' $(( (n >> 8) & 255 )) $(( n & 255 )); fi
+    }
+
+    # PIV cert object TLV: 53 L1 [ 70 L2 <DER> 71 01 00  FE 00 ]
+    inner="70$(ber_len "$der_len")${der}710100fe00"
+    inner_len=$(( ${#inner} / 2 ))
+    obj="53$(ber_len "$inner_len")${inner}"
+
+    rust_array() { fold -w2 | awk 'BEGIN{ORS=""}{printf "0x%s, ", toupper($0)}'; echo; }
+
+    cp "$tmp/key.pem" "$pem"
+    echo "=== wrote $pem ==="
+    echo
+    echo "=== pubkey (verify DISTINCT from 9A 60FED4BA… / 9D DAD0B653…) ==="
+    openssl pkey -in "$pem" -text -noout 2>/dev/null | sed -n '/pub:/,/ASN1 OID/p'
+    echo
+    echo "=== FIBBY_SLOT_9C_TEST_PRIV (32 bytes) ==="
+    printf '%s' "$scalar" | rust_array
+    echo
+    echo "=== FIBBY_SLOT_9C_CERT_OBJECT ($(( ${#obj} / 2 )) bytes) ==="
+    printf '%s' "$obj" | rust_array
+
+# piggy#135 slot-9C sign dev-loop: a non-batman mirror of the
+# `pivy_agent_signs_and_verifies_via_seeded_fibby_slot_9c` bats test. Seeds
+# fibby's slot 9C (cert + key), points pivy-agent at it, and drives a real
+# `ssh-keygen -Y sign -U` + verify round-trip — proving the slot-9C ECDSA sign
+# path works end-to-end through pivy-agent. Supplies the VirtualCard PIN
+# non-interactively. Exits non-zero on any failure. No hardware.
+[group('debug')]
+debug-fibby-slot-9c-sign:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    pivy_agent="$pivy_out/bin/pivy-agent"
+    fibby_bin="$fibby_out/bin/fibby"
+    [[ -x $fibby_bin ]] || { echo "missing $fibby_bin"; exit 1; }
+    [[ -x $pivy_agent ]] || { echo "missing $pivy_agent"; exit 1; }
+
+    workdir=$(mktemp -d /tmp/p9csign-XXXXXX)
+    fibby_sock="$workdir/pcscd.comm"
+    agent_sock="$workdir/a.sock"
+    fibby_log="$workdir/fibby.log"
+    agent_log="$workdir/agent.log"
+    fibby_pid=""
+    agent_pid=""
+    cleanup() {
+      [[ -n $fibby_pid ]] && kill "$fibby_pid" 2>/dev/null || true
+      [[ -n $agent_pid ]] && kill "$agent_pid" 2>/dev/null || true
+      rm -rf "$workdir"
+    }
+    trap cleanup EXIT
+
+    echo "=== Starting fibby (virtual, --seed-slot-9c-cert) ==="
+    FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+      --seed-slot-9c-cert >"$fibby_log" 2>&1 &
+    fibby_pid=$!
+    for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+    [[ -S $fibby_sock ]] || { echo "fibby socket never appeared:"; cat "$fibby_log"; exit 1; }
+
+    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    echo "=== Starting pivy-agent (PCSCLITE_CSOCK_NAME=fibby) ==="
+    PCSCLITE_CSOCK_NAME="$fibby_sock" \
+      SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY="" \
+      PIGGY_TEST_FIB_PIN=123456 \
+      "$pivy_agent" -A -D -a "$agent_sock" >"$agent_log" 2>&1 &
+    agent_pid=$!
+    for _ in $(seq 1 50); do [[ -S $agent_sock ]] && break; sleep 0.1; done
+    [[ -S $agent_sock ]] || { echo "agent socket never appeared:"; cat "$agent_log"; cat "$fibby_log"; exit 1; }
+
+    export SSH_AUTH_SOCK="$agent_sock"
+    ssh-add -L >"$workdir/id.pub" 2>/dev/null
+    grep -q '^ecdsa-sha2-nistp256 ' "$workdir/id.pub" || {
+      echo "no ecdsa-sha2-nistp256 identity"; cat "$agent_log"; exit 1; }
+
+    echo "phase-fibby-slot-9c-sign-smoke" >"$workdir/data"
+    read -r ktype kdata _ <"$workdir/id.pub"
+    printf 'smoke@fibby %s %s\n' "$ktype" "$kdata" >"$workdir/allowed_signers"
+
+    echo "=== ssh-keygen -Y sign (agent-sign via slot 9C) ==="
+    if ! ssh-keygen -Y sign -f "$workdir/id.pub" -U -n file "$workdir/data"; then
+      echo "!!! SIGN FAILED"; echo "--- agent log ---"; cat "$agent_log"
+      echo "--- fibby trace tail ---"; tail -80 "$fibby_log"; exit 1
+    fi
+
+    echo "=== ssh-keygen -Y verify ==="
+    if ! ssh-keygen -Y verify -f "$workdir/allowed_signers" -I smoke@fibby \
+        -n file -s "$workdir/data.sig" <"$workdir/data"; then
+      echo "!!! VERIFY FAILED"; echo "--- agent log ---"; cat "$agent_log"
+      echo "--- fibby trace tail ---"; tail -80 "$fibby_log"; exit 1
+    fi
+
+    grep -q "GA ECDSA 9C -> 9000" "$fibby_log" || {
+      echo "!!! no successful slot-9C GA ECDSA sign in fibby trace"
+      tail -80 "$fibby_log"; exit 1; }
+    echo
+    echo "=== SLOT-9C SIGN ROUND-TRIP OK ==="

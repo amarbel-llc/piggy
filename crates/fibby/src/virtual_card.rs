@@ -239,6 +239,16 @@ pub struct VirtualCard {
     /// Production VirtualCard runs always have this `None` until a
     /// future generate-asymmetric branch lands.
     slot_9d_priv: Option<[u8; 32]>,
+    /// Raw P-256 scalar (big-endian) installed in slot 9C (Digital
+    /// Signature), or `None` if no key is present. The signature slot
+    /// with PIV PIN policy **"always"**: GA ECDSA requests (INS 0x87,
+    /// P1=0x11, P2=0x9C) sign the client-supplied prehash under RFC 6979
+    /// deterministic ECDSA, but unlike slot 9A ("once") the PIN
+    /// verification is *consumed* by each sign — see
+    /// [`Self::sign_ecdsa_slot`]. Set via [`Self::seed_slot_9c_priv`], or
+    /// implicitly by [`Self::seed_fibby_slot_9c_cert`]. Empty (`6A 88` to
+    /// GA) until seeded.
+    slot_9c_priv: Option<[u8; 32]>,
     /// 24-byte TripleDES management key. Defaults to YubiKey's factory
     /// constant `01 02 03 04 05 06 07 08 01 02 03 04 05 06 07 08 01
     /// 02 03 04 05 06 07 08` — the same value our throwaway captures
@@ -298,6 +308,21 @@ const RFC6979_A2_5_PRIV: [u8; 32] = [
 const RFC5903_SLOT_9D_PRIV: [u8; 32] = [
     0xC8, 0x8F, 0x01, 0xF5, 0x10, 0xD9, 0xAC, 0x3F, 0x70, 0xA2, 0x92, 0xDA, 0xA2, 0x31, 0x6D, 0xE5,
     0x44, 0xE9, 0xAA, 0xB8, 0xAF, 0xE8, 0x40, 0x49, 0xC6, 0x2A, 0x9C, 0x57, 0x86, 0x2D, 0x14, 0x33,
+];
+
+/// fibby's slot 9C (Digital Signature) test P-256 scalar, big-endian.
+/// Unlike the 9A/9D keys, this is **not** a published RFC vector: the
+/// slot-9C sign path uses RFC 6979 deterministic ECDSA, so (unlike 9D's
+/// ECDH byte-replay, piggy#134) there is no captured wire to match — only
+/// a key distinct from 9A (§A.2.5) and 9D (§8.1) is needed so sign routing
+/// is unambiguous. Generated once by `just debug-fibby-gen-slot-9c-cert`
+/// and pinned alongside [`FIBBY_SLOT_9C_CERT_OBJECT`] (the self-signed
+/// cert over this exact key); the anchor PEM is
+/// tests/fixtures/test-vectors/fibby-slot-9c-test-priv.pem. Its public
+/// point is `04 ‖ BA 37 10 C3 … ‖ … 67 20 E6 2E 89`.
+const FIBBY_SLOT_9C_TEST_PRIV: [u8; 32] = [
+    0x7A, 0x02, 0x52, 0x57, 0xFB, 0xC7, 0x8C, 0x36, 0x9C, 0x6C, 0xFA, 0x4B, 0xEE, 0x3B, 0x1C, 0x04,
+    0x49, 0xD1, 0x93, 0xA5, 0xD4, 0x46, 0x11, 0x88, 0x85, 0x14, 0x1F, 0x0F, 0xBE, 0xBB, 0x47, 0xFC,
 ];
 
 /// PIV tag for the slot 9A (PIV Authentication) X.509 cert object,
@@ -411,6 +436,50 @@ const RFC5903_SLOT_9D_CERT_OBJECT: &[u8] = &[
     0x9E, 0xD9, 0x8D, 0xA5, 0xB8, 0xB7, 0xF2, 0x86, 0x71, 0x01, 0x00, 0xFE, 0x00,
 ];
 
+/// PIV tag for the slot 9C (Digital Signature) X.509 cert object, per
+/// SP 800-73-4 §3.3 Table 6 / pivy `PIV_TAG_CERT_9C`: `5F C1 0A`. (The
+/// fibby↔pivy-agent smoke documents the same slot↔tag map.)
+const TAG_SLOT_9C_CERT: &[u8] = &[0x5F, 0xC1, 0x0A];
+
+/// Canonical fibby slot-9C certificate, wrapped in the PIV cert-object
+/// TLV (`53 <len> 70 <der-len> <der> 71 01 00 FE 00`).
+///
+/// Self-signed X.509 v3 over the [`FIBBY_SLOT_9C_TEST_PRIV`] P-256 key
+/// (CN `fibby-test-slot-9c`, serial 1, 100-year validity), generated once
+/// by `just debug-fibby-gen-slot-9c-cert` and pinned here byte-for-byte.
+/// The embedded SubjectPublicKeyInfo carries that key's public point
+/// (`04 ‖ BA 37 10 C3 … ‖ … 67 20 E6 2E 89`), so pivy-agent exposes a
+/// slot-9C signature identity distinct from the 9A/9D ones. The ECDSA
+/// signature uses a random `k`, so the bytes aren't reproducible from the
+/// PEM by external tools — once pinned they're canonical. 398 bytes.
+const FIBBY_SLOT_9C_CERT_OBJECT: &[u8] = &[
+    0x53, 0x82, 0x01, 0x8A, 0x70, 0x82, 0x01, 0x81, 0x30, 0x82, 0x01, 0x7D, 0x30, 0x82, 0x01, 0x24,
+    0xA0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01, 0x30, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE,
+    0x3D, 0x04, 0x03, 0x02, 0x30, 0x1D, 0x31, 0x1B, 0x30, 0x19, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0C,
+    0x12, 0x66, 0x69, 0x62, 0x62, 0x79, 0x2D, 0x74, 0x65, 0x73, 0x74, 0x2D, 0x73, 0x6C, 0x6F, 0x74,
+    0x2D, 0x39, 0x63, 0x30, 0x20, 0x17, 0x0D, 0x32, 0x36, 0x30, 0x36, 0x30, 0x31, 0x31, 0x39, 0x31,
+    0x34, 0x35, 0x31, 0x5A, 0x18, 0x0F, 0x32, 0x31, 0x32, 0x36, 0x30, 0x35, 0x30, 0x38, 0x31, 0x39,
+    0x31, 0x34, 0x35, 0x31, 0x5A, 0x30, 0x1D, 0x31, 0x1B, 0x30, 0x19, 0x06, 0x03, 0x55, 0x04, 0x03,
+    0x0C, 0x12, 0x66, 0x69, 0x62, 0x62, 0x79, 0x2D, 0x74, 0x65, 0x73, 0x74, 0x2D, 0x73, 0x6C, 0x6F,
+    0x74, 0x2D, 0x39, 0x63, 0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02,
+    0x01, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0xBA,
+    0x37, 0x10, 0xC3, 0xF9, 0xFF, 0x6E, 0x02, 0x84, 0xF5, 0x0B, 0x8A, 0x6A, 0x7F, 0x69, 0x38, 0xF2,
+    0xB9, 0x92, 0x5D, 0x95, 0x02, 0xAF, 0x92, 0xB2, 0xB9, 0x5D, 0xC7, 0x22, 0x3B, 0x46, 0x60, 0x91,
+    0xFD, 0x83, 0xEB, 0xF9, 0xE2, 0x45, 0x6C, 0x67, 0x45, 0x19, 0xFA, 0xFB, 0x20, 0x3C, 0xE5, 0xBE,
+    0x68, 0x53, 0xFE, 0x33, 0x17, 0x33, 0x60, 0xF0, 0x34, 0x8D, 0x67, 0x20, 0xE6, 0x2E, 0x89, 0xA3,
+    0x53, 0x30, 0x51, 0x30, 0x1D, 0x06, 0x03, 0x55, 0x1D, 0x0E, 0x04, 0x16, 0x04, 0x14, 0x7B, 0x6C,
+    0x46, 0xA8, 0x2B, 0x6A, 0xC6, 0x2A, 0x82, 0xCB, 0xA6, 0xB4, 0x89, 0xD3, 0xF5, 0x54, 0x2D, 0x41,
+    0x17, 0x60, 0x30, 0x1F, 0x06, 0x03, 0x55, 0x1D, 0x23, 0x04, 0x18, 0x30, 0x16, 0x80, 0x14, 0x7B,
+    0x6C, 0x46, 0xA8, 0x2B, 0x6A, 0xC6, 0x2A, 0x82, 0xCB, 0xA6, 0xB4, 0x89, 0xD3, 0xF5, 0x54, 0x2D,
+    0x41, 0x17, 0x60, 0x30, 0x0F, 0x06, 0x03, 0x55, 0x1D, 0x13, 0x01, 0x01, 0xFF, 0x04, 0x05, 0x30,
+    0x03, 0x01, 0x01, 0xFF, 0x30, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02,
+    0x03, 0x47, 0x00, 0x30, 0x44, 0x02, 0x20, 0x38, 0xB3, 0xD0, 0xF9, 0x38, 0xC0, 0xB2, 0x04, 0xF0,
+    0x21, 0x17, 0x2D, 0x7D, 0xE5, 0x99, 0x98, 0x72, 0xB8, 0x1F, 0x94, 0xEA, 0xC5, 0xDE, 0x7D, 0xCB,
+    0xC9, 0xBA, 0x97, 0xD5, 0xC0, 0x94, 0x82, 0x02, 0x20, 0x12, 0x7F, 0x90, 0xB3, 0xAD, 0x84, 0x2C,
+    0xA5, 0xC1, 0xE8, 0x05, 0x0E, 0x27, 0x98, 0x39, 0x1D, 0xB1, 0xEF, 0x44, 0xF4, 0x39, 0x84, 0xB4,
+    0x44, 0x0C, 0x91, 0xE8, 0xB5, 0x78, 0xC5, 0x8E, 0x65, 0x71, 0x01, 0x00, 0xFE, 0x00,
+];
+
 /// PIV tag for the Card Holder Unique Identifier (CHUID) data object,
 /// per SP 800-73-4 §3.1.2: `5F C1 02`.
 const TAG_CHUID: &[u8] = &[0x5F, 0xC1, 0x02];
@@ -482,6 +551,7 @@ impl VirtualCard {
             pin_verified: false,
             slot_9a_priv: None,
             slot_9d_priv: None,
+            slot_9c_priv: None,
             mgmt_key: DEFAULT_MGMT_KEY,
             pending_mgmt_witness: None,
         }
@@ -550,6 +620,25 @@ impl VirtualCard {
         self.seed_chuid();
     }
 
+    /// Install fibby's slot 9C (Digital Signature) test cert under PIV tag
+    /// `5F C1 0A` **and** the matching [`FIBBY_SLOT_9C_TEST_PRIV`] scalar
+    /// into slot 9C. After this, GET DATA for the slot 9C cert tag returns
+    /// the pinned cert object, and GA ECDSA (INS 0x87, P1=0x11, P2=0x9C)
+    /// signs with the key the cert is over (under the PIN-always policy —
+    /// each sign consumes the PIN verification). Subscriber: pivy-agent's
+    /// identity-listing flow exposes one SSH identity backed by the
+    /// slot-9C public point, and that identity can sign — cert and key are
+    /// a matched pair. No CHUID is seeded (the agent enumeration/sign path
+    /// doesn't need it, mirroring [`Self::seed_rfc6979_slot_9a_cert`];
+    /// only the piggy `detect-pubkey` ECDH path requires a CHUID).
+    pub fn seed_fibby_slot_9c_cert(&mut self) {
+        self.seed_data_object(
+            TAG_SLOT_9C_CERT.to_vec(),
+            FIBBY_SLOT_9C_CERT_OBJECT.to_vec(),
+        );
+        self.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
+    }
+
     /// Install the canonical CHUID ([`CANONICAL_REAL_CARD_CHUID`]) under
     /// PIV tag `5F C1 02`, making VirtualCard present as an *initialized*
     /// card with a stable GUID. Without it, clients that key off the
@@ -587,6 +676,15 @@ impl VirtualCard {
     /// capture matches VirtualCard's response byte-for-byte.
     pub fn seed_slot_9d_priv(&mut self, scalar: [u8; 32]) {
         self.slot_9d_priv = Some(scalar);
+    }
+
+    /// Install a P-256 scalar into slot 9C (Digital Signature). The scalar
+    /// is the 32-byte big-endian raw secret. Subsequent GA ECDSA requests
+    /// (INS 0x87, P1=0x11, P2=0x9C) sign the client-supplied prehash under
+    /// RFC 6979 deterministic ECDSA, consuming the PIN verification each
+    /// time (PIN-always policy). Mirrors [`Self::seed_slot_9a_priv`].
+    pub fn seed_slot_9c_priv(&mut self, scalar: [u8; 32]) {
+        self.slot_9c_priv = Some(scalar);
     }
 }
 
@@ -735,22 +833,28 @@ impl Backend for VirtualCard {
         }
 
         // GENERAL AUTHENTICATE (00 87 <alg> <slot> <Lc> 7C ...). Slot 9D
-        // ECDH (alg=0x11, slot=0x9D) is the piggy decrypt path; slot 9A
-        // ECDSA (alg=0x11, slot=0x9A) is the SSH-auth signing path. The
-        // mgmt-key challenge-response (alg=0x03, slot=0x9B) is handled
-        // below. Other algorithm/slot combinations (e.g. slot 9C signing)
-        // fall through to the 6D00 stub.
+        // ECDH (alg=0x11, slot=0x9D) is the piggy decrypt path; slots 9A
+        // and 9C ECDSA (alg=0x11, slot=0x9A / 0x9C) are the SSH-auth and
+        // digital-signature signing paths. The mgmt-key challenge-response
+        // (alg=0x03, slot=0x9B) is handled below.
         if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9D {
             return Ok(self.handle_general_authenticate_ecdh_slot_9d(apdu_body(command_apdu)));
         }
 
-        // GENERAL AUTHENTICATE ECDSA sign on slot 9A (alg=0x11 P-256,
-        // slot=0x9A). The request carries the host-computed prehash in
-        // the 81 (CHALLENGE) tag; we return the DER ECDSA signature in
-        // the 82 (RESPONSE) tag. This is pivy/piggy-agent's KEYREQ_SIGN
-        // path for SSH auth. See vendor/pivy/src/piv.c::piv_sign_prehash.
+        // GENERAL AUTHENTICATE ECDSA sign (alg=0x11 P-256). The request
+        // carries the host-computed prehash in the 81 (CHALLENGE) tag; we
+        // return the DER ECDSA signature in the 82 (RESPONSE) tag. This is
+        // pivy/piggy-agent's KEYREQ_SIGN path; see piv.c::piv_sign_prehash.
+        // Slot 9A (SSH auth) is PIN policy "once"; slot 9C (Digital
+        // Signature) is PIN policy "always" — each sign consumes the PIN
+        // verification (consume_pin = true).
         if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9A {
-            return Ok(self.handle_general_authenticate_ecdsa_slot_9a(apdu_body(command_apdu)));
+            let scalar = self.slot_9a_priv;
+            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), scalar, "9A", false));
+        }
+        if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9C {
+            let scalar = self.slot_9c_priv;
+            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), scalar, "9C", true));
         }
 
         // GENERAL AUTHENTICATE mgmt-key challenge-response (00 87 03
@@ -1096,26 +1200,39 @@ impl VirtualCard {
         out
     }
 
-    /// Handle a `GENERAL AUTHENTICATE` ECDSA sign request on slot 9A
-    /// (INS 0x87, P1=0x11 P-256, P2=0x9A) — pivy/piggy-agent's SSH-auth
-    /// signing path (`KEYREQ_SIGN`). The client supplies a host-computed
-    /// prehash in the `81` (CHALLENGE) tag; we return the DER-encoded
-    /// ECDSA signature in the `82` (RESPONSE) tag. Wire shape mirrors
-    /// `vendor/pivy/src/piv.c::piv_sign_prehash`.
+    /// Shared `GENERAL AUTHENTICATE` ECDSA sign handler for the signing
+    /// slots (9A SSH-auth, 9C Digital Signature). INS 0x87, P1=0x11 P-256.
+    /// The client supplies a host-computed prehash in the `81` (CHALLENGE)
+    /// tag; we return the DER-encoded ECDSA signature in the `82`
+    /// (RESPONSE) tag. Wire shape mirrors `piv.c::piv_sign_prehash`.
+    ///
+    /// `scalar` is the slot's key (read by the dispatcher); `slot_label` is
+    /// the trace label ("9A" / "9C"); `consume_pin` selects the PIN policy:
+    /// - `false` (slot 9A, policy "once"): leave `pin_verified` set.
+    /// - `true` (slot 9C, policy "always"): clear `pin_verified` after a
+    ///   successful sign, so the next PIN-gated op needs a fresh VERIFY.
+    ///   This is the conservative model of YubiKey's "always" policy —
+    ///   exact global-vs-per-slot semantics on real silicon are unverified;
+    ///   here the verification is treated as consumed by the sign.
     ///
     /// Returns:
-    /// - `69 82` if the PIN is not verified (slot 9A default policy is
-    ///   "once"; we leave `pin_verified` set afterward, unlike slot 9C's
-    ///   "always" policy — tracked as a separate slice, piggy#135).
-    /// - `6A 88` if slot 9A is empty (no scalar seeded).
+    /// - `69 82` if the PIN is not verified.
+    /// - `6A 88` if the slot is empty (no scalar seeded) or the scalar is
+    ///   invalid.
     /// - `6A 80` on a missing/malformed request body.
     /// - `7C <len> 82 <len> <DER sig>` + `90 00` on success.
     ///
-    /// Signing is **RFC 6979 deterministic** (`p256`'s `sign_prehash`),
-    /// so VirtualCard's output is reproducible. Real silicon randomizes
-    /// `k`, so a slot-9A sign capture is *not* byte-replayable — tests
-    /// verify the signature against the public key instead (piggy#135).
-    fn handle_general_authenticate_ecdsa_slot_9a(&mut self, body: Option<&[u8]>) -> Vec<u8> {
+    /// Signing is **RFC 6979 deterministic** (`p256`'s `sign_prehash`), so
+    /// VirtualCard's output is reproducible. Real silicon randomizes `k`,
+    /// so a sign capture is *not* byte-replayable — tests verify the
+    /// signature against the public key instead (piggy#135).
+    fn sign_ecdsa_slot(
+        &mut self,
+        body: Option<&[u8]>,
+        scalar: Option<[u8; 32]>,
+        slot_label: &str,
+        consume_pin: bool,
+    ) -> Vec<u8> {
         use p256::ecdsa::signature::hazmat::PrehashSigner;
         use p256::ecdsa::{Signature, SigningKey};
 
@@ -1123,21 +1240,29 @@ impl VirtualCard {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
-                "GA ECDSA 9A -> 6982 (PIN not verified)",
+                &format!("GA ECDSA {slot_label} -> 6982 (PIN not verified)"),
             );
             return sw(0x69, 0x82);
         }
-        let scalar_bytes = match self.slot_9a_priv {
+        let scalar_bytes = match scalar {
             Some(s) => s,
             None => {
-                trace::emit(trace::DEBUG, "vcard", "GA ECDSA 9A -> 6A88 (slot empty)");
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!("GA ECDSA {slot_label} -> 6A88 (slot empty)"),
+                );
                 return sw(0x6A, 0x88);
             }
         };
         let body = match body {
             Some(b) => b,
             None => {
-                trace::emit(trace::DEBUG, "vcard", "GA ECDSA 9A -> 6A80 (no body)");
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!("GA ECDSA {slot_label} -> 6A80 (no body)"),
+                );
                 return sw(0x6A, 0x80);
             }
         };
@@ -1147,7 +1272,7 @@ impl VirtualCard {
                 trace::emit(
                     trace::DEBUG,
                     "vcard",
-                    "GA ECDSA 9A -> 6A80 (malformed 7C/81 TLV)",
+                    &format!("GA ECDSA {slot_label} -> 6A80 (malformed 7C/81 TLV)"),
                 );
                 return sw(0x6A, 0x80);
             }
@@ -1158,7 +1283,7 @@ impl VirtualCard {
                 trace::emit(
                     trace::DEBUG,
                     "vcard",
-                    "GA ECDSA 9A -> 6A88 (slot scalar invalid)",
+                    &format!("GA ECDSA {slot_label} -> 6A88 (slot scalar invalid)"),
                 );
                 return sw(0x6A, 0x88);
             }
@@ -1166,7 +1291,11 @@ impl VirtualCard {
         let sig: Signature = match signing_key.sign_prehash(challenge) {
             Ok(s) => s,
             Err(_) => {
-                trace::emit(trace::DEBUG, "vcard", "GA ECDSA 9A -> 6A80 (sign failed)");
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!("GA ECDSA {slot_label} -> 6A80 (sign failed)"),
+                );
                 return sw(0x6A, 0x80);
             }
         };
@@ -1186,10 +1315,16 @@ impl VirtualCard {
         push_ber_len(&mut out, inner.len());
         out.extend_from_slice(&inner);
         out.extend_from_slice(&sw(0x90, 0x00));
+
+        // PIN-always (slot 9C): the sign consumes the PIN verification.
+        if consume_pin {
+            self.pin_verified = false;
+        }
+
         trace::emit(
             trace::DEBUG,
             "vcard",
-            &format!("GA ECDSA 9A -> 9000 ({}-byte DER sig)", der.len()),
+            &format!("GA ECDSA {slot_label} -> 9000 ({}-byte DER sig)", der.len()),
         );
         out
     }
@@ -2090,18 +2225,24 @@ mod tests {
 
     // -- GA ECDSA (slot 9A sign, P-256) tests ----------------------------
 
-    /// Build a GA ECDSA sign APDU for slot 9A: `00 87 11 9A <Lc> 7C <l>
-    /// 82 00 81 <hl> <digest>` (empty RESPONSE placeholder + CHALLENGE
-    /// carrying the prehash). Short-form lengths — the digests we test
-    /// are <128 bytes so the wrappers fit one length byte.
-    fn ga_sign_apdu(digest: &[u8]) -> Vec<u8> {
+    /// Build a GA ECDSA sign APDU for the given signing slot: `00 87 11
+    /// <slot> <Lc> 7C <l> 82 00 81 <hl> <digest>` (empty RESPONSE
+    /// placeholder + CHALLENGE carrying the prehash). Short-form lengths —
+    /// the digests we test are <128 bytes so the wrappers fit one length
+    /// byte.
+    fn ga_sign_apdu_slot(slot: u8, digest: &[u8]) -> Vec<u8> {
         let mut inner = vec![0x82, 0x00, 0x81, digest.len() as u8];
         inner.extend_from_slice(digest);
         let mut body = vec![0x7C, inner.len() as u8];
         body.extend_from_slice(&inner);
-        let mut apdu = vec![0x00, 0x87, 0x11, 0x9A, body.len() as u8];
+        let mut apdu = vec![0x00, 0x87, 0x11, slot, body.len() as u8];
         apdu.extend_from_slice(&body);
         apdu
+    }
+
+    /// GA ECDSA sign APDU for slot 9A (the common case in these tests).
+    fn ga_sign_apdu(digest: &[u8]) -> Vec<u8> {
+        ga_sign_apdu_slot(0x9A, digest)
     }
 
     /// Strip the trailing SW and unwrap `7C <l> 82 <l2> <der>`, returning
@@ -2196,6 +2337,167 @@ mod tests {
             "seeded slot 9A can sign -> 9000"
         );
         assert_eq!(sig[0], 0x7C, "sign response is a GA template");
+    }
+
+    // -- GA ECDSA (slot 9C, Digital Signature, PIN-always) tests ---------
+
+    #[test]
+    fn ga_ecdsa_slot_9c_without_pin_verify_returns_6982() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
+        let resp = c.transmit(&ga_sign_apdu_slot(0x9C, &[0x5A; 32])).unwrap();
+        assert_eq!(resp, vec![0x69, 0x82], "PIN not verified -> 6982");
+    }
+
+    #[test]
+    fn ga_ecdsa_slot_9c_without_key_returns_6a88() {
+        let mut c = VirtualCard::new();
+        c.pin_verified = true;
+        let resp = c.transmit(&ga_sign_apdu_slot(0x9C, &[0x5A; 32])).unwrap();
+        assert_eq!(resp, vec![0x6A, 0x88], "slot 9C empty -> 6A88");
+    }
+
+    /// The slot-9C signature must verify against the slot's public key over
+    /// the supplied prehash. Real silicon randomizes `k`, so we verify
+    /// cryptographically rather than pin a captured wire.
+    #[test]
+    fn ga_ecdsa_slot_9c_signs_and_verifies_against_slot_pubkey() {
+        use p256::ecdsa::signature::hazmat::PrehashVerifier;
+        use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+
+        let mut c = VirtualCard::new();
+        c.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
+        c.pin_verified = true;
+
+        let digest: [u8; 32] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF, 0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78, 0x87, 0x96, 0xA5, 0xB4,
+            0xC3, 0xD2, 0xE1, 0xF0,
+        ];
+        let resp = c.transmit(&ga_sign_apdu_slot(0x9C, &digest)).unwrap();
+        let der = extract_ga_sign_der(&resp);
+
+        let sig = Signature::from_der(&der).expect("card returned valid DER sig");
+        let vk = VerifyingKey::from(&SigningKey::from_slice(&FIBBY_SLOT_9C_TEST_PRIV).unwrap());
+        vk.verify_prehash(&digest, &sig)
+            .expect("signature verifies against the slot-9C public key");
+    }
+
+    /// RFC 6979 signing is deterministic. Slot 9C consumes the PIN
+    /// verification on each sign (policy "always"), so re-verify between the
+    /// two signs; the outputs must still be byte-identical.
+    #[test]
+    fn ga_ecdsa_slot_9c_is_deterministic() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
+        c.pin_verified = true;
+        let apdu = ga_sign_apdu_slot(0x9C, &[0x42; 32]);
+        let first = c.transmit(&apdu).unwrap();
+        c.pin_verified = true; // re-VERIFY: slot 9C is PIN-always
+        let second = c.transmit(&apdu).unwrap();
+        assert_eq!(first, second, "RFC 6979 sign is deterministic");
+        assert_eq!(&first[first.len() - 2..], &[0x90, 0x00]);
+    }
+
+    /// The distinguishing slot-9C behavior: PIN policy "always". A
+    /// successful sign consumes the PIN verification, so a second sign
+    /// without a fresh VERIFY returns 6982; re-verifying re-enables it.
+    #[test]
+    fn ga_ecdsa_slot_9c_consumes_pin_verification() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
+        c.pin_verified = true;
+        let apdu = ga_sign_apdu_slot(0x9C, &[0x33; 32]);
+
+        let first = c.transmit(&apdu).unwrap();
+        assert_eq!(
+            &first[first.len() - 2..],
+            &[0x90, 0x00],
+            "first sign -> 9000"
+        );
+        assert!(!c.pin_verified, "the 9C sign consumed the PIN verification");
+
+        let second = c.transmit(&apdu).unwrap();
+        assert_eq!(
+            second,
+            vec![0x69, 0x82],
+            "second sign without re-VERIFY -> 6982"
+        );
+
+        c.pin_verified = true; // fresh VERIFY
+        let third = c.transmit(&apdu).unwrap();
+        assert_eq!(
+            &third[third.len() - 2..],
+            &[0x90, 0x00],
+            "re-verify then sign -> 9000"
+        );
+    }
+
+    /// Contrast guard for the shared signer: slot 9A is PIN policy "once",
+    /// so a sign leaves `pin_verified` set and back-to-back signs both work
+    /// without re-VERIFY (the inverse of the 9C consume behavior above).
+    #[test]
+    fn ga_ecdsa_slot_9a_sign_does_not_consume_pin_verification() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9a_priv(RFC6979_SCALAR);
+        c.pin_verified = true;
+        let apdu = ga_sign_apdu(&[0x44; 32]);
+
+        let first = c.transmit(&apdu).unwrap();
+        assert_eq!(
+            &first[first.len() - 2..],
+            &[0x90, 0x00],
+            "first 9A sign -> 9000"
+        );
+        assert!(c.pin_verified, "9A sign leaves the PIN verification set");
+
+        let second = c.transmit(&apdu).unwrap();
+        assert_eq!(
+            &second[second.len() - 2..],
+            &[0x90, 0x00],
+            "second 9A sign without re-VERIFY still -> 9000"
+        );
+    }
+
+    /// End-to-end identity wiring: `seed_fibby_slot_9c_cert` makes the
+    /// slot-9C cert readable via GET DATA *and* the slot signable, and the
+    /// cert's embedded SubjectPublicKeyInfo point matches the slot key —
+    /// the last assertion guards the pinned cert↔key pair (a transcription
+    /// slip in either const would break it).
+    #[test]
+    fn seed_fibby_slot_9c_cert_enables_signing_and_cert_matches_key() {
+        use p256::ecdsa::{SigningKey, VerifyingKey};
+
+        let mut c = VirtualCard::new();
+        c.seed_fibby_slot_9c_cert();
+        c.pin_verified = true;
+
+        let cert = c.transmit(&get_data_apdu(TAG_SLOT_9C_CERT)).unwrap();
+        assert_eq!(cert[0], 0x53, "GET DATA returns the 53-wrapped cert object");
+        assert_eq!(&cert[cert.len() - 2..], &[0x90, 0x00], "cert read -> 9000");
+
+        let sig = c.transmit(&ga_sign_apdu_slot(0x9C, &[0x7E; 32])).unwrap();
+        assert_eq!(
+            &sig[sig.len() - 2..],
+            &[0x90, 0x00],
+            "seeded slot 9C can sign -> 9000"
+        );
+
+        // The cert's SubjectPublicKeyInfo point (`03 42 00 04 ‖ x ‖ y`) must
+        // equal the slot key's uncompressed public point.
+        let marker = [0x03u8, 0x42, 0x00, 0x04];
+        let pos = FIBBY_SLOT_9C_CERT_OBJECT
+            .windows(marker.len())
+            .position(|w| w == marker)
+            .expect("cert embeds an uncompressed P-256 point");
+        let point = &FIBBY_SLOT_9C_CERT_OBJECT[pos + 3..pos + 3 + 65]; // 04 ‖ x ‖ y
+        let vk = VerifyingKey::from(&SigningKey::from_slice(&FIBBY_SLOT_9C_TEST_PRIV).unwrap());
+        let expected = vk.to_encoded_point(false);
+        assert_eq!(
+            point,
+            expected.as_bytes(),
+            "cert SPKI point matches the slot-9C key"
+        );
     }
 
     // -- YK ATTEST (INS 0xF9) tests --------------------------------------

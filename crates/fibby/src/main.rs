@@ -39,6 +39,7 @@ struct Args {
     model: String,
     seed_rfc6979_slot_9a_cert: bool,
     seed_rfc5903_slot_9d_cert: bool,
+    seed_slot_9c_cert: bool,
     /// Raw P-256 scalars / keys to install into the virtual card, parsed
     /// from `--seed-*` hex flags. Let bats/shell seed slot material that
     /// was previously Rust-only (piggy#135). Applied after the cert
@@ -46,6 +47,7 @@ struct Args {
     /// `--seed-rfc6979-slot-9a-cert` installs.
     seed_slot_9a_priv: Option<[u8; 32]>,
     seed_slot_9d_priv: Option<[u8; 32]>,
+    seed_slot_9c_priv: Option<[u8; 32]>,
     seed_mgmt_key: Option<[u8; 24]>,
     seed_mgmt_key_witness: Option<[u8; 8]>,
 }
@@ -60,8 +62,10 @@ fn parse_args() -> Result<Args, String> {
         model: "yk4".to_string(),
         seed_rfc6979_slot_9a_cert: false,
         seed_rfc5903_slot_9d_cert: false,
+        seed_slot_9c_cert: false,
         seed_slot_9a_priv: None,
         seed_slot_9d_priv: None,
+        seed_slot_9c_priv: None,
         seed_mgmt_key: None,
         seed_mgmt_key_witness: None,
     };
@@ -86,6 +90,13 @@ fn parse_args() -> Result<Args, String> {
             "--model" => args.model = value("--model")?,
             "--seed-rfc6979-slot-9a-cert" => args.seed_rfc6979_slot_9a_cert = true,
             "--seed-rfc5903-slot-9d-cert" => args.seed_rfc5903_slot_9d_cert = true,
+            "--seed-slot-9c-cert" => args.seed_slot_9c_cert = true,
+            "--seed-slot-9c-priv" => {
+                args.seed_slot_9c_priv = Some(parse_hex_array(
+                    &value("--seed-slot-9c-priv")?,
+                    "--seed-slot-9c-priv",
+                )?)
+            }
             "--seed-slot-9a-priv" => {
                 args.seed_slot_9a_priv = Some(parse_hex_array(
                     &value("--seed-slot-9a-priv")?,
@@ -151,8 +162,9 @@ fn print_help() {
          USAGE: fibby [--socket PATH] [--backend virtual|hardware]\n\
                       [--reader SUBSTR] [--model yk4|yk5]\n\
                       [--seed-rfc6979-slot-9a-cert]\n\
-                      [--seed-rfc5903-slot-9d-cert]\n\
+                      [--seed-rfc5903-slot-9d-cert] [--seed-slot-9c-cert]\n\
                       [--seed-slot-9a-priv HEX] [--seed-slot-9d-priv HEX]\n\
+                      [--seed-slot-9c-priv HEX]\n\
                       [--seed-mgmt-key HEX] [--seed-mgmt-key-witness HEX]\n\
          \n\
          --model selects the virtual-card hardware profile (ATR + advertised\n\
@@ -173,7 +185,15 @@ fn print_help() {
          identity that pivy-box can ECDH against for decrypt. A distinct\n\
          keypair from 9A's so the agent routes ECDH unambiguously to 9D.\n\
          \n\
-         --seed-slot-9a-priv / --seed-slot-9d-priv take a 32-byte (64 hex\n\
+         --seed-slot-9c-cert installs the fibby slot 9C (Digital Signature)\n\
+         test cert at PIV tag 5F C1 0A AND its matching key into slot 9C, so\n\
+         pivy-agent exposes a signature identity. Slot 9C is PIN-policy\n\
+         'always': each sign consumes the PIN verification (vs 9A's 'once').\n\
+         A fibby-generated keypair (the sign path is RFC 6979 deterministic,\n\
+         so no published vector is needed), distinct from 9A/9D.\n\
+         \n\
+         --seed-slot-9a-priv / --seed-slot-9d-priv / --seed-slot-9c-priv take\n\
+         a 32-byte (64 hex\n\
          char) big-endian P-256 scalar; --seed-mgmt-key takes a 24-byte\n\
          3DES key; --seed-mgmt-key-witness takes the 8-byte challenge\n\
          witness. All accept an optional 0x prefix and the `--flag=HEX`\n\
@@ -233,6 +253,9 @@ fn make_backend(args: &Args) -> Result<SharedBackend, String> {
             if args.seed_rfc5903_slot_9d_cert {
                 card.seed_rfc5903_slot_9d_cert();
             }
+            if args.seed_slot_9c_cert {
+                card.seed_fibby_slot_9c_cert();
+            }
             // Explicit per-slot seeds apply after the cert bundle, so an
             // explicit --seed-slot-9a-priv overrides the scalar the cert
             // flag installs.
@@ -241,6 +264,9 @@ fn make_backend(args: &Args) -> Result<SharedBackend, String> {
             }
             if let Some(s) = args.seed_slot_9d_priv {
                 card.seed_slot_9d_priv(s);
+            }
+            if let Some(s) = args.seed_slot_9c_priv {
+                card.seed_slot_9c_priv(s);
             }
             if let Some(k) = args.seed_mgmt_key {
                 card.seed_mgmt_key(k);
