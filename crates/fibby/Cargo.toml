@@ -51,3 +51,12 @@ ecdsa = { version = "0.16", default-features = false, features = ["der"] }
 # dispatch; not part of the production decrypt path.
 des = "0.8"
 cipher = "0.4"
+# CSPRNG for GENERATE ASYMMETRIC (INS 0x47) on-card keygen: random P-256
+# keys when no deterministic override is set. `OsRng` lives behind
+# rand_core's `getrandom` feature; both rand_core 0.6 and getrandom 0.2 are
+# already in the lockfile (p256/elliptic-curve pull rand_core), so enabling
+# the feature adds no new crate fetch. Deterministic generation (tests /
+# `--generate-slot-*-priv`) bypasses the RNG entirely.
+rand_core = { version = "0.6", default-features = false, features = [
+  "getrandom",
+] }

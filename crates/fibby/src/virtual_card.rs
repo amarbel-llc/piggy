@@ -265,6 +265,20 @@ pub struct VirtualCard {
     /// (success or failure) and on `disconnect()`. `None` means
     /// "no challenge outstanding" — phase 2 then returns 6982.
     pending_mgmt_witness: Option<[u8; 8]>,
+    /// Whether the mgmt-key challenge-response (INS 0x87 P1=0x03 P2=0x9B)
+    /// has succeeded in this session. Set on phase-2 success, cleared on
+    /// `disconnect()` (power-cycle resets admin auth, like `pin_verified`).
+    /// Gates admin operations — currently GENERATE ASYMMETRIC (INS 0x47);
+    /// PUT DATA gating is a separate slice.
+    mgmt_authenticated: bool,
+    /// Optional deterministic key material for GENERATE ASYMMETRIC, keyed
+    /// by slot id. When a slot has an override, GENERATE installs that
+    /// exact P-256 scalar instead of a random one — so tests / replay
+    /// flows get reproducible generated keys. Set via
+    /// [`Self::set_generate_override`] (or the CLI `--generate-slot-*-priv`
+    /// flags); empty by default (real random keygen). Config, not session
+    /// state: persists across `disconnect()`.
+    generate_overrides: HashMap<u8, [u8; 32]>,
 }
 
 /// YubiKey factory-default PIN: ASCII "123456" padded with 0xFF bytes
@@ -554,6 +568,8 @@ impl VirtualCard {
             slot_9c_priv: None,
             mgmt_key: DEFAULT_MGMT_KEY,
             pending_mgmt_witness: None,
+            mgmt_authenticated: false,
+            generate_overrides: HashMap::new(),
         }
     }
 
@@ -686,6 +702,15 @@ impl VirtualCard {
     pub fn seed_slot_9c_priv(&mut self, scalar: [u8; 32]) {
         self.slot_9c_priv = Some(scalar);
     }
+
+    /// Pin the P-256 scalar that GENERATE ASYMMETRIC (INS 0x47) will
+    /// install into `slot`, making on-card keygen deterministic for that
+    /// slot. Without an override, GENERATE picks a fresh random key.
+    /// `slot` is the PIV slot id (e.g. `0x9A` / `0x9C` / `0x9D`). Set via
+    /// the CLI `--generate-slot-*-priv` flags or directly by tests.
+    pub fn set_generate_override(&mut self, slot: u8, scalar: [u8; 32]) {
+        self.generate_overrides.insert(slot, scalar);
+    }
 }
 
 impl Backend for VirtualCard {
@@ -717,6 +742,9 @@ impl Backend for VirtualCard {
         // Same power-cycle semantics for mgmt-key witnesses: any
         // outstanding phase-1 challenge is invalidated.
         self.pending_mgmt_witness = None;
+        // ...and mgmt-key authentication (the admin-auth gate for GENERATE)
+        // is dropped on power loss, same as the PIN.
+        self.mgmt_authenticated = false;
         Ok(())
     }
 
@@ -762,6 +790,13 @@ impl Backend for VirtualCard {
         // PUT DATA (00 DB 3F FF <Lc> 5C <tag_len> <tag> 53 <data_len> <data>)
         if cla == 0x00 && ins == apdu::ins::PUT_DATA && p1 == 0x3F && p2 == 0xFF {
             return Ok(self.handle_put_data(command_apdu));
+        }
+
+        // GENERATE ASYMMETRIC KEY PAIR (00 47 00 <slot> <Lc> AC ...). P1=0x00;
+        // P2 is the target slot. mgmt-key gated; generates a P-256 key in the
+        // slot and returns its public point in a 7F49 template.
+        if cla == 0x00 && ins == apdu::ins::GEN_ASYM && p1 == 0x00 {
+            return Ok(self.handle_generate_asymmetric(p2, apdu_body(command_apdu)));
         }
 
         // GET VERSION (00 FD 00 00 ...). YubiKey vendor extension; no
@@ -1063,6 +1098,7 @@ impl VirtualCard {
             let mut block = enc;
             cipher.decrypt_block((&mut block).into());
             if block == witness {
+                self.mgmt_authenticated = true;
                 trace::emit(
                     trace::DEBUG,
                     "vcard",
@@ -1368,6 +1404,124 @@ impl VirtualCard {
             .insert(tag.to_vec(), value_with_53.to_vec());
         sw(0x90, 0x00)
     }
+
+    /// Handle GENERATE ASYMMETRIC KEY PAIR (INS 0x47, P1=0x00, P2=`slot`).
+    /// Generates a P-256 keypair in `slot` and returns its public point in a
+    /// `7F49` template. Admin op — gated on mgmt-key authentication.
+    ///
+    /// Returns:
+    /// - `69 82` if the mgmt-key auth hasn't succeeded this session.
+    /// - `6A 80` on a missing/malformed request or a non-ECCP256 algorithm.
+    /// - `6A 86` if `slot` isn't one VirtualCard models (9A/9C/9D).
+    /// - `7F 49 43 86 41 04 ‖ X ‖ Y` + `90 00` on success.
+    ///
+    /// Keygen is random (`rand_core::OsRng`) unless
+    /// [`Self::set_generate_override`] pinned a scalar for `slot`. The new
+    /// key inherits fibby's hardcoded per-slot PIN policy (9A "once", 9C
+    /// "always") — the request's YubiKey `AA`/`AB` policy tags are ignored.
+    /// Any existing cert object in the slot is left untouched (a real card
+    /// doesn't auto-clear it; the client writes a fresh cert via PUT DATA).
+    fn handle_generate_asymmetric(&mut self, slot: u8, body: Option<&[u8]>) -> Vec<u8> {
+        use p256::ecdsa::SigningKey;
+
+        if !self.mgmt_authenticated {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("GENERATE slot={slot:#04x} -> 6982 (mgmt-key not authenticated)"),
+            );
+            return sw(0x69, 0x82);
+        }
+        let body = match body {
+            Some(b) => b,
+            None => {
+                trace::emit(trace::DEBUG, "vcard", "GENERATE -> 6A80 (no body)");
+                return sw(0x6A, 0x80);
+            }
+        };
+        let alg = match parse_generate_request(body) {
+            Some(a) => a,
+            None => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "GENERATE -> 6A80 (malformed AC/80 TLV)",
+                );
+                return sw(0x6A, 0x80);
+            }
+        };
+        if alg != 0x11 {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("GENERATE -> 6A80 (alg {alg:#04x} unsupported; only ECCP256 0x11)"),
+            );
+            return sw(0x6A, 0x80);
+        }
+        if !matches!(slot, 0x9A | 0x9C | 0x9D) {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("GENERATE slot={slot:#04x} -> 6A86 (slot not modeled; 9A/9C/9D only)"),
+            );
+            return sw(0x6A, 0x86);
+        }
+
+        // Pick the scalar: a pinned override for reproducibility, else a
+        // fresh random P-256 key.
+        let scalar: [u8; 32] = match self.generate_overrides.get(&slot) {
+            Some(s) => *s,
+            None => {
+                let sk = SigningKey::random(&mut rand_core::OsRng);
+                sk.to_bytes()
+                    .as_slice()
+                    .try_into()
+                    .expect("P-256 scalar is 32 bytes")
+            }
+        };
+        // Derive the public point (also validates a pinned override scalar).
+        let signing_key = match SigningKey::from_slice(&scalar) {
+            Ok(k) => k,
+            Err(_) => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!("GENERATE slot={slot:#04x} -> 6A80 (override scalar invalid)"),
+                );
+                return sw(0x6A, 0x80);
+            }
+        };
+        let point = signing_key.verifying_key().to_encoded_point(false);
+        let pt = point.as_bytes(); // 04 ‖ X ‖ Y (65 bytes)
+
+        match slot {
+            0x9A => self.slot_9a_priv = Some(scalar),
+            0x9C => self.slot_9c_priv = Some(scalar),
+            0x9D => self.slot_9d_priv = Some(scalar),
+            _ => unreachable!("slot validated above"),
+        }
+
+        // Response template: 7F49 <len> [ 86 <ptlen> <point> ].
+        let mut inner = Vec::with_capacity(2 + pt.len());
+        inner.push(0x86);
+        push_ber_len(&mut inner, pt.len());
+        inner.extend_from_slice(pt);
+
+        let mut out = Vec::with_capacity(3 + inner.len() + 2);
+        out.extend_from_slice(&[0x7F, 0x49]);
+        push_ber_len(&mut out, inner.len());
+        out.extend_from_slice(&inner);
+        out.extend_from_slice(&sw(0x90, 0x00));
+        trace::emit(
+            trace::DEBUG,
+            "vcard",
+            &format!(
+                "GENERATE slot={slot:#04x} ECCP256 -> 9000 ({}-byte pubkey)",
+                pt.len()
+            ),
+        );
+        out
+    }
 }
 
 /// Extract the data field from a case-3 or case-4 APDU. Handles both
@@ -1486,6 +1640,39 @@ fn parse_ga_sign_request(body: &[u8]) -> Option<&[u8]> {
     None
 }
 
+/// Parse a GENERATE ASYMMETRIC request body: an `AC` control-reference
+/// template (SP 800-73-4 §3.3.2) carrying `80 01 <alg>` plus optional
+/// YubiKey `AA`/`AB` PIN/touch-policy tags (which fibby ignores). Returns
+/// the algorithm byte (e.g. `0x11` = ECCP256), or `None` on structural
+/// error. Same TLV-walk discipline as [`parse_ga_sign_request`].
+fn parse_generate_request(body: &[u8]) -> Option<u8> {
+    if body.first()? != &0xAC {
+        return None;
+    }
+    let (inner_offset, inner_len) = ber_len(&body[1..])?;
+    let inner_start = 1 + inner_offset;
+    if body.len() < inner_start + inner_len {
+        return None;
+    }
+    let mut cur = &body[inner_start..inner_start + inner_len];
+    while !cur.is_empty() {
+        let tag = *cur.first()?;
+        let (len_offset, len) = ber_len(&cur[1..])?;
+        let value_start = 1 + len_offset;
+        if cur.len() < value_start + len {
+            return None;
+        }
+        let value = &cur[value_start..value_start + len];
+        if tag == 0x80 {
+            // Algorithm reference. pivy writes it minimal-width; ECCP256 is
+            // the single byte 0x11. Take the last byte of the value.
+            return value.last().copied();
+        }
+        cur = &cur[value_start + len..];
+    }
+    None
+}
+
 /// Append a BER-TLV definite length to `out`: short form for `len < 128`,
 /// one-byte long form (`81 xx`) for `128..256`, two-byte (`82 xx xx`)
 /// otherwise. Used to wrap the variable-width DER ECDSA signature in the
@@ -1544,12 +1731,12 @@ fn parse_5c_tag_with_rest(body: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((tag, rest))
 }
 
-/// Parse a single 53 BER-TLV at the front of `body`. Supports the
-/// short form (length 0-127 in one byte) and the 0x81 form (length
-/// 128-255 in one length byte). Returns `(full_tlv_with_53_header,
-/// trailing_bytes)`. Anything beyond the 0x81 form is rejected for now
-/// — real PIV objects fit (CHUID/CCC: ~50-60 bytes; slot certs: handled
-/// by GENERATE flow, not raw PUT DATA in our current captures).
+/// Parse a single 53 BER-TLV at the front of `body`. Supports the short
+/// form (length 0-127), the `0x81` form (128-255), and the `0x82` form
+/// (256-65535). Returns `(full_tlv_with_53_header, trailing_bytes)`. The
+/// `0x82` form is needed for PUT DATA of slot **certs** — `pivy-tool
+/// generate` self-signs a cert (~440 B) and writes it back via PUT DATA,
+/// so the object exceeds the one-length-byte forms (CHUID/CCC fit those).
 fn split_53_tlv(body: &[u8]) -> Option<(&[u8], &[u8])> {
     if body.first()? != &0x53 {
         return None;
@@ -1559,6 +1746,11 @@ fn split_53_tlv(body: &[u8]) -> Option<(&[u8], &[u8])> {
         (2, first_len as usize)
     } else if first_len == 0x81 {
         (3, *body.get(2)? as usize)
+    } else if first_len == 0x82 {
+        (
+            4,
+            ((*body.get(2)? as usize) << 8) | (*body.get(3)? as usize),
+        )
     } else {
         return None;
     };
@@ -1616,7 +1808,9 @@ mod tests {
     #[test]
     fn unknown_instruction_is_6d00() {
         let mut c = VirtualCard::new();
-        let resp = c.transmit(&[0x00, 0x47, 0x00, 0x9D]).unwrap();
+        // INS 0xEE is not a PIV/YubiKey instruction VirtualCard models.
+        // (0x47 GENERATE used to be the example here; it's implemented now.)
+        let resp = c.transmit(&[0x00, 0xEE, 0x00, 0x00]).unwrap();
         assert_eq!(resp, vec![0x6D, 0x00]);
     }
 
@@ -1799,6 +1993,44 @@ mod tests {
         expected.extend_from_slice(&value);
         expected.extend_from_slice(&[0x90, 0x00]);
         assert_eq!(get, expected);
+    }
+
+    /// PUT DATA of a cert-sized object (>255 bytes) uses the `53 82 <hi>
+    /// <lo>` length form and an extended-length Lc — the exact shape
+    /// `pivy-tool generate` self-signs and writes back (PUT DATA 5F C1 05).
+    /// Without 0x82 support, split_53_tlv rejected it as "malformed".
+    #[test]
+    fn put_data_supports_0x82_length_form_for_certs() {
+        let mut c = VirtualCard::new();
+        let value: Vec<u8> = (0..300u16).map(|i| i as u8).collect();
+        let mut body = vec![0x5C, 0x03];
+        body.extend_from_slice(TAG_SLOT_9A_CERT);
+        body.extend_from_slice(&[0x53, 0x82, (value.len() >> 8) as u8, value.len() as u8]);
+        body.extend_from_slice(&value);
+        // Extended-length Lc (00 <hi> <lo>) for the >255-byte body.
+        let mut apdu = vec![
+            0x00,
+            0xDB,
+            0x3F,
+            0xFF,
+            0x00,
+            (body.len() >> 8) as u8,
+            body.len() as u8,
+        ];
+        apdu.extend_from_slice(&body);
+
+        let put = c.transmit(&apdu).unwrap();
+        assert_eq!(
+            put,
+            vec![0x90, 0x00],
+            "PUT DATA of a 0x82-length cert -> 9000"
+        );
+
+        let get = c.transmit(&get_data_apdu(TAG_SLOT_9A_CERT)).unwrap();
+        let mut expected = vec![0x53, 0x82, (value.len() >> 8) as u8, value.len() as u8];
+        expected.extend_from_slice(&value);
+        expected.extend_from_slice(&[0x90, 0x00]);
+        assert_eq!(get, expected, "GET DATA returns the stored cert verbatim");
     }
 
     #[test]
@@ -2497,6 +2729,165 @@ mod tests {
             point,
             expected.as_bytes(),
             "cert SPKI point matches the slot-9C key"
+        );
+    }
+
+    // -- GENERATE ASYMMETRIC (INS 0x47) tests ----------------------------
+
+    /// Build a GENERATE ASYMMETRIC request for `slot`, ECCP256:
+    /// `00 47 00 <slot> 05 AC 03 80 01 11 00` (plain `piv_generate` shape,
+    /// no YubiKey AA/AB policy tags).
+    fn generate_apdu(slot: u8) -> Vec<u8> {
+        vec![
+            0x00, 0x47, 0x00, slot, 0x05, 0xAC, 0x03, 0x80, 0x01, 0x11, 0x00,
+        ]
+    }
+
+    /// Drive the mgmt-key challenge-response so `mgmt_authenticated` is set
+    /// the real way (phase-1 with the seeded witness, phase-2 with the
+    /// factory-key TDES response — same vectors as the yk4-init capture
+    /// tests). Asserts the handler set the flag.
+    fn authenticate_mgmt(c: &mut VirtualCard) {
+        c.seed_mgmt_key_witness([0xCA, 0xB1, 0x8C, 0x96, 0xB5, 0x49, 0x7D, 0xAE]);
+        let _ = c
+            .transmit(&hex_to_bytes("0087039b0000047c0281000000"))
+            .unwrap();
+        let r = c
+            .transmit(&hex_to_bytes("0087039b00000c7c0a8208731efc2b4bd5861000"))
+            .unwrap();
+        assert_eq!(r, vec![0x90, 0x00], "mgmt-key auth must succeed");
+        assert!(
+            c.mgmt_authenticated,
+            "phase-2 success sets mgmt_authenticated"
+        );
+    }
+
+    /// Strip the SW and unwrap `7F49 <l> 86 <l2> <point>`, returning the
+    /// uncompressed EC point bytes (04 ‖ x ‖ y). Asserts the wire shape.
+    fn extract_generate_point(resp: &[u8]) -> Vec<u8> {
+        assert_eq!(&resp[resp.len() - 2..], &[0x90, 0x00], "trailing SW 9000");
+        let payload = &resp[..resp.len() - 2];
+        assert_eq!(&payload[0..2], &[0x7F, 0x49], "7F49 template tag");
+        let inner = &payload[3..3 + payload[2] as usize]; // short-form len
+        assert_eq!(inner[0], 0x86, "86 public-point tag");
+        inner[2..2 + inner[1] as usize].to_vec()
+    }
+
+    #[test]
+    fn generate_without_mgmt_auth_returns_6982() {
+        let mut c = VirtualCard::new();
+        let resp = c.transmit(&generate_apdu(0x9A)).unwrap();
+        assert_eq!(resp, vec![0x69, 0x82], "GENERATE without mgmt auth -> 6982");
+    }
+
+    #[test]
+    fn generate_unsupported_alg_returns_6a80() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        // alg 0x07 = RSA2048 — not modeled (fibby is P-256 only).
+        let apdu = vec![
+            0x00, 0x47, 0x00, 0x9A, 0x05, 0xAC, 0x03, 0x80, 0x01, 0x07, 0x00,
+        ];
+        assert_eq!(c.transmit(&apdu).unwrap(), vec![0x6A, 0x80]);
+    }
+
+    #[test]
+    fn generate_unsupported_slot_returns_6a86() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        // Slot 9E (Card Authentication) isn't one VirtualCard models.
+        assert_eq!(c.transmit(&generate_apdu(0x9E)).unwrap(), vec![0x6A, 0x86]);
+    }
+
+    /// With a pinned override, GENERATE installs that exact key: the returned
+    /// public point equals the override key's point (7F49/86 wire shape) and
+    /// the slot becomes signable.
+    #[test]
+    fn generate_slot_9a_override_returns_matching_pubkey_and_is_signable() {
+        use p256::ecdsa::{SigningKey, VerifyingKey};
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        c.set_generate_override(0x9A, RFC6979_SCALAR);
+
+        let resp = c.transmit(&generate_apdu(0x9A)).unwrap();
+        let point = extract_generate_point(&resp);
+        let vk = VerifyingKey::from(&SigningKey::from_slice(&RFC6979_SCALAR).unwrap());
+        assert_eq!(
+            point,
+            vk.to_encoded_point(false).as_bytes(),
+            "returned point matches the override key"
+        );
+
+        // The generated slot now signs (9A "once" — PIN-verify then sign).
+        c.pin_verified = true;
+        let sig = c.transmit(&ga_sign_apdu(&[0x5A; 32])).unwrap();
+        assert_eq!(
+            &sig[sig.len() - 2..],
+            &[0x90, 0x00],
+            "generated slot 9A signs"
+        );
+    }
+
+    /// GENERATE on slot 9D installs the key into the ECDH slot (returned
+    /// point matches the override; `slot_9d_priv` is populated).
+    #[test]
+    fn generate_slot_9d_override_installs_key() {
+        use p256::ecdsa::{SigningKey, VerifyingKey};
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        c.set_generate_override(0x9D, RFC6979_SCALAR);
+
+        let point = extract_generate_point(&c.transmit(&generate_apdu(0x9D)).unwrap());
+        let vk = VerifyingKey::from(&SigningKey::from_slice(&RFC6979_SCALAR).unwrap());
+        assert_eq!(point, vk.to_encoded_point(false).as_bytes());
+        assert_eq!(c.slot_9d_priv, Some(RFC6979_SCALAR), "9D key installed");
+    }
+
+    /// Random keygen (no override): the returned point matches the now-stored
+    /// slot key, and two GENERATEs produce different keys.
+    #[test]
+    fn generate_random_is_valid_distinct_and_signable() {
+        use p256::ecdsa::{SigningKey, VerifyingKey};
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+
+        let p1 = extract_generate_point(&c.transmit(&generate_apdu(0x9A)).unwrap());
+        let stored = c.slot_9a_priv.expect("slot 9A populated by GENERATE");
+        let vk = VerifyingKey::from(&SigningKey::from_slice(&stored).unwrap());
+        assert_eq!(
+            p1,
+            vk.to_encoded_point(false).as_bytes(),
+            "returned point matches the stored key"
+        );
+        assert_eq!(p1.len(), 65, "uncompressed P-256 point");
+        assert_eq!(p1[0], 0x04);
+
+        let p2 = extract_generate_point(&c.transmit(&generate_apdu(0x9A)).unwrap());
+        assert_ne!(p1, p2, "two random GENERATEs produce different keys");
+    }
+
+    /// mgmt-key auth is session state: a power cycle (disconnect) clears it,
+    /// so GENERATE is gated again. Also exercises the real mgmt-auth path
+    /// setting the flag (via `authenticate_mgmt`).
+    #[test]
+    fn disconnect_clears_mgmt_authentication() {
+        let mut c = VirtualCard::new();
+        c.connect(2, 3).unwrap();
+        authenticate_mgmt(&mut c);
+
+        let ok = c.transmit(&generate_apdu(0x9A)).unwrap();
+        assert_eq!(
+            &ok[ok.len() - 2..],
+            &[0x90, 0x00],
+            "GENERATE works while authed"
+        );
+
+        c.disconnect(0).unwrap();
+        assert!(!c.mgmt_authenticated, "disconnect cleared mgmt auth");
+        assert_eq!(
+            c.transmit(&generate_apdu(0x9A)).unwrap(),
+            vec![0x69, 0x82],
+            "GENERATE gated again after power cycle"
         );
     }
 

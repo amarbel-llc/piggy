@@ -430,3 +430,46 @@ function piggy_rebox_decrypts_via_seeded_fibby_slot_9d { # @test
     return 1
   }
 }
+
+# piggy#135 GENERATE ASYMMETRIC: `pivy-tool generate` must provision a fibby
+# slot over the wire — on-card keygen (INS 0x47) + self-sign (GA ECDSA 9A) +
+# cert write-back (PUT DATA 5F C1 05, a 0x82-length object). fibby starts
+# initialized (--seed-chuid) with empty slots. No captured GENERATE fixture
+# exists, so the real pivy-tool client accepting fibby's 7F49/86 response is
+# the authoritative wire-format check. Generate is mgmt-key gated (pivy-tool
+# -K default authenticates first), not the agent path — no pivy-agent here.
+function pivy_tool_generates_key_on_fibby_slot_9a { # @test
+  [[ -n ${PIVY_TOOL:-} && -x ${PIVY_TOOL:-/nonexistent} ]] ||
+    skip "PIVY_TOOL unset; run via just test-bats-conformance-fibby-pivy-agent-smoke"
+  command -v timeout >/dev/null || skip "timeout not on PATH"
+
+  spawn_fibby --seed-chuid
+
+  # -P supplies the PIN, -K default the factory mgmt key, both non-interactive.
+  run timeout 30 env PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    "$PIVY_TOOL" -P 123456 -K default -a eccp256 generate 9a
+  [[ $status -eq 0 ]] || {
+    echo "pivy-tool generate exited $status" >&2
+    printf '%s\n' "$output" >&2
+    tail -60 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+  # pivy-tool prints the generated public key as an SSH ecdsa line.
+  printf '%s\n' "$output" | grep -q '^ecdsa-sha2-nistp256 ' || {
+    echo "no generated pubkey in pivy-tool output" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  # The fibby trace must show the on-card GENERATE and the self-signed cert
+  # write-back (the 0x82-length PUT DATA) both succeeding.
+  grep -q "GENERATE slot=0x9a ECCP256 -> 9000" "$FIBBY_LOG" || {
+    echo "no successful GENERATE in fibby trace" >&2
+    tail -60 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+  grep -q "PUT DATA tag=5FC105" "$FIBBY_LOG" || {
+    echo "no slot-9A cert PUT DATA in fibby trace" >&2
+    tail -60 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+}

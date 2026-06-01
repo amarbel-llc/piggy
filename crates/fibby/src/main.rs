@@ -40,6 +40,10 @@ struct Args {
     seed_rfc6979_slot_9a_cert: bool,
     seed_rfc5903_slot_9d_cert: bool,
     seed_slot_9c_cert: bool,
+    /// Install just the canonical CHUID (no key/cert), so the card presents
+    /// as *initialized* with empty slots — the starting state for an on-card
+    /// GENERATE (`pivy-tool` needs the CHUID to find the card).
+    seed_chuid: bool,
     /// Raw P-256 scalars / keys to install into the virtual card, parsed
     /// from `--seed-*` hex flags. Let bats/shell seed slot material that
     /// was previously Rust-only (piggy#135). Applied after the cert
@@ -50,6 +54,14 @@ struct Args {
     seed_slot_9c_priv: Option<[u8; 32]>,
     seed_mgmt_key: Option<[u8; 24]>,
     seed_mgmt_key_witness: Option<[u8; 8]>,
+    /// Deterministic key material for on-card GENERATE ASYMMETRIC (INS 0x47),
+    /// keyed by slot. When set, a GENERATE for that slot installs this exact
+    /// scalar instead of a random one (reproducible keygen for tests/replay).
+    /// Distinct from `seed_slot_*_priv`, which installs a key directly without
+    /// a GENERATE command.
+    generate_slot_9a_priv: Option<[u8; 32]>,
+    generate_slot_9c_priv: Option<[u8; 32]>,
+    generate_slot_9d_priv: Option<[u8; 32]>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -63,9 +75,13 @@ fn parse_args() -> Result<Args, String> {
         seed_rfc6979_slot_9a_cert: false,
         seed_rfc5903_slot_9d_cert: false,
         seed_slot_9c_cert: false,
+        seed_chuid: false,
         seed_slot_9a_priv: None,
         seed_slot_9d_priv: None,
         seed_slot_9c_priv: None,
+        generate_slot_9a_priv: None,
+        generate_slot_9c_priv: None,
+        generate_slot_9d_priv: None,
         seed_mgmt_key: None,
         seed_mgmt_key_witness: None,
     };
@@ -91,6 +107,7 @@ fn parse_args() -> Result<Args, String> {
             "--seed-rfc6979-slot-9a-cert" => args.seed_rfc6979_slot_9a_cert = true,
             "--seed-rfc5903-slot-9d-cert" => args.seed_rfc5903_slot_9d_cert = true,
             "--seed-slot-9c-cert" => args.seed_slot_9c_cert = true,
+            "--seed-chuid" => args.seed_chuid = true,
             "--seed-slot-9c-priv" => {
                 args.seed_slot_9c_priv = Some(parse_hex_array(
                     &value("--seed-slot-9c-priv")?,
@@ -107,6 +124,24 @@ fn parse_args() -> Result<Args, String> {
                 args.seed_slot_9d_priv = Some(parse_hex_array(
                     &value("--seed-slot-9d-priv")?,
                     "--seed-slot-9d-priv",
+                )?)
+            }
+            "--generate-slot-9a-priv" => {
+                args.generate_slot_9a_priv = Some(parse_hex_array(
+                    &value("--generate-slot-9a-priv")?,
+                    "--generate-slot-9a-priv",
+                )?)
+            }
+            "--generate-slot-9c-priv" => {
+                args.generate_slot_9c_priv = Some(parse_hex_array(
+                    &value("--generate-slot-9c-priv")?,
+                    "--generate-slot-9c-priv",
+                )?)
+            }
+            "--generate-slot-9d-priv" => {
+                args.generate_slot_9d_priv = Some(parse_hex_array(
+                    &value("--generate-slot-9d-priv")?,
+                    "--generate-slot-9d-priv",
                 )?)
             }
             "--seed-mgmt-key" => {
@@ -163,8 +198,11 @@ fn print_help() {
                       [--reader SUBSTR] [--model yk4|yk5]\n\
                       [--seed-rfc6979-slot-9a-cert]\n\
                       [--seed-rfc5903-slot-9d-cert] [--seed-slot-9c-cert]\n\
+                      [--seed-chuid]\n\
                       [--seed-slot-9a-priv HEX] [--seed-slot-9d-priv HEX]\n\
                       [--seed-slot-9c-priv HEX]\n\
+                      [--generate-slot-9a-priv HEX] [--generate-slot-9c-priv HEX]\n\
+                      [--generate-slot-9d-priv HEX]\n\
                       [--seed-mgmt-key HEX] [--seed-mgmt-key-witness HEX]\n\
          \n\
          --model selects the virtual-card hardware profile (ATR + advertised\n\
@@ -200,6 +238,18 @@ fn print_help() {
          form. They let shell/bats seed slot material that was previously\n\
          Rust-only. --seed-slot-9a-priv applied after the cert flag wins.\n\
          Virtual backend only.\n\
+         \n\
+         --seed-chuid installs only the canonical CHUID (no key or cert), so\n\
+         the card presents as initialized with empty slots — the starting\n\
+         point for an on-card GENERATE (pivy-tool needs a CHUID to find the\n\
+         card). Virtual backend only.\n\
+         \n\
+         --generate-slot-9a-priv / --generate-slot-9c-priv / --generate-slot-9d-priv\n\
+         pin the 32-byte P-256 scalar that an on-card GENERATE ASYMMETRIC (INS\n\
+         0x47) will install into that slot, making keygen deterministic for\n\
+         tests/replay. Unlike --seed-slot-*-priv (which installs a key\n\
+         directly), this only takes effect when a client sends a GENERATE.\n\
+         Without it, GENERATE picks a fresh random key. Virtual backend only.\n\
          \n\
          Point clients at the socket via PCSCLITE_CSOCK_NAME.\n\
          Set FIBBY_LOG=info|debug|wire for logging."
@@ -256,6 +306,9 @@ fn make_backend(args: &Args) -> Result<SharedBackend, String> {
             if args.seed_slot_9c_cert {
                 card.seed_fibby_slot_9c_cert();
             }
+            if args.seed_chuid {
+                card.seed_chuid();
+            }
             // Explicit per-slot seeds apply after the cert bundle, so an
             // explicit --seed-slot-9a-priv overrides the scalar the cert
             // flag installs.
@@ -267,6 +320,17 @@ fn make_backend(args: &Args) -> Result<SharedBackend, String> {
             }
             if let Some(s) = args.seed_slot_9c_priv {
                 card.seed_slot_9c_priv(s);
+            }
+            // GENERATE overrides: make a subsequent on-card GENERATE for the
+            // slot install this exact scalar instead of a random key.
+            if let Some(s) = args.generate_slot_9a_priv {
+                card.set_generate_override(0x9A, s);
+            }
+            if let Some(s) = args.generate_slot_9c_priv {
+                card.set_generate_override(0x9C, s);
+            }
+            if let Some(s) = args.generate_slot_9d_priv {
+                card.set_generate_override(0x9D, s);
             }
             if let Some(k) = args.seed_mgmt_key {
                 card.seed_mgmt_key(k);

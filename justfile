@@ -256,6 +256,7 @@ test-bats-conformance-fibby-pivy-agent-smoke:
     # pivy-box/piggy-ids on PATH.
     piggy_out=$(nix build .#default --no-link --print-out-paths)
     PIVY_AGENT="$pivy_out/bin/pivy-agent" \
+      PIVY_TOOL="$pivy_out/bin/pivy-tool" \
       FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
@@ -2305,3 +2306,62 @@ debug-fibby-slot-9c-sign:
       tail -80 "$fibby_log"; exit 1; }
     echo
     echo "=== SLOT-9C SIGN ROUND-TRIP OK ==="
+
+# piggy#135 GENERATE ASYMMETRIC dev-loop: drive the real `pivy-tool generate`
+# client against fibby's virtual card to validate the INS 0x47 request/response
+# wire format (no captured fixture exists, so the real client accepting fibby's
+# 7F49/86 response is the authoritative format check). Stands up fibby virtual
+# with just a CHUID (initialized, empty slots), then runs `pivy-tool -K default
+# -a eccp256 generate 9a` (SELECT + mgmt-key auth + GENERATE) and asserts it
+# prints a public key. Exits non-zero on failure. No hardware.
+[group('debug')]
+debug-fibby-generate:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    pivy_tool="$pivy_out/bin/pivy-tool"
+    fibby_bin="$fibby_out/bin/fibby"
+    [[ -x $fibby_bin ]] || { echo "missing $fibby_bin"; exit 1; }
+    [[ -x $pivy_tool ]] || { echo "missing $pivy_tool"; exit 1; }
+
+    workdir=$(mktemp -d /tmp/pgen-XXXXXX)
+    fibby_sock="$workdir/pcscd.comm"
+    fibby_log="$workdir/fibby.log"
+    fibby_pid=""
+    cleanup() {
+      [[ -n $fibby_pid ]] && kill "$fibby_pid" 2>/dev/null || true
+      rm -rf "$workdir"
+    }
+    trap cleanup EXIT
+
+    echo "=== Starting fibby (virtual, --seed-chuid: initialized, empty slots) ==="
+    FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+      --seed-chuid >"$fibby_log" 2>&1 &
+    fibby_pid=$!
+    for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+    [[ -S $fibby_sock ]] || { echo "fibby socket never appeared:"; cat "$fibby_log"; exit 1; }
+
+    echo "=== pivy-tool -P 123456 -K default -a eccp256 generate 9a (mgmt-auth + GENERATE) ==="
+    # -P supplies the PIN non-interactively; stdin from /dev/null + a timeout
+    # so any unexpected interactive prompt fails fast instead of hanging.
+    out=$(PCSCLITE_CSOCK_NAME="$fibby_sock" timeout 30 "$pivy_tool" \
+      -P 123456 -K default -a eccp256 generate 9a </dev/null 2>&1)
+    rc=$?
+    echo "$out"
+    echo "  pivy-tool exit: $rc"
+    echo
+    echo "=== fibby wire trace (tail 40) ==="
+    tail -40 "$fibby_log"
+    echo
+
+    # pivy-tool prints the generated public key as an `ecdsa-sha2-nistp256 ...`
+    # SSH line on success.
+    if [[ $rc -eq 0 ]] && printf '%s\n' "$out" | grep -q 'ecdsa-sha2-nistp256 ' \
+        && grep -q "GENERATE slot=0x9a ECCP256 -> 9000" "$fibby_log"; then
+      echo "=== GENERATE OK (pivy-tool generated a key on fibby slot 9A) ==="
+      exit 0
+    else
+      echo "=== GENERATE FAILED ==="
+      exit 1
+    fi

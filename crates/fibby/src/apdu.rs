@@ -24,6 +24,13 @@ pub mod ins {
     /// PIV PUT DATA (SP 800-73-4 §3.1.3). Same `P1 P2`; data field is
     /// `5C <len> <tag>` followed by `53 <len> <value>`.
     pub const PUT_DATA: u8 = 0xDB;
+    /// PIV GENERATE ASYMMETRIC KEY PAIR (SP 800-73-4 §3.3.2). `P1 = 00`,
+    /// `P2 = <slot>`; data field is an `AC` control-reference template
+    /// carrying `80 01 <alg>` (e.g. `0x11` = ECCP256) plus optional
+    /// YubiKey `AA`/`AB` PIN/touch-policy tags. The card generates a new
+    /// keypair in the slot and returns the public key in a `7F49`
+    /// template (`86 41 04 <X> <Y>` for ECCP256). mgmt-key gated.
+    pub const GEN_ASYM: u8 = 0x47;
     /// YubiKey vendor GET VERSION. Returns 3 bytes encoding the
     /// firmware version (major, minor, patch) + SW 9000. `P1 P2 = 00 00`;
     /// no body. Not in SP 800-73-4 — it's a YubicoPIV extension that

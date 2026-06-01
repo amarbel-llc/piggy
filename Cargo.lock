@@ -469,6 +469,7 @@ dependencies = [
  "ecdsa",
  "p256",
  "pcsc",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
