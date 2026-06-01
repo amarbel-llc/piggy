@@ -38,6 +38,15 @@ struct Args {
     reader: String,
     model: String,
     seed_rfc6979_slot_9a_cert: bool,
+    /// Raw P-256 scalars / keys to install into the virtual card, parsed
+    /// from `--seed-*` hex flags. Let bats/shell seed slot material that
+    /// was previously Rust-only (piggy#135). Applied after the cert
+    /// bundle, so an explicit `--seed-slot-9a-priv` overrides the scalar
+    /// `--seed-rfc6979-slot-9a-cert` installs.
+    seed_slot_9a_priv: Option<[u8; 32]>,
+    seed_slot_9d_priv: Option<[u8; 32]>,
+    seed_mgmt_key: Option<[u8; 24]>,
+    seed_mgmt_key_witness: Option<[u8; 8]>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -49,15 +58,55 @@ fn parse_args() -> Result<Args, String> {
         reader: "Yubico".to_string(),
         model: "yk4".to_string(),
         seed_rfc6979_slot_9a_cert: false,
+        seed_slot_9a_priv: None,
+        seed_slot_9d_priv: None,
+        seed_mgmt_key: None,
+        seed_mgmt_key_witness: None,
     };
     let mut it = std::env::args().skip(1);
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--socket" => args.socket = it.next().ok_or("--socket needs a value")?,
-            "--backend" => args.backend = it.next().ok_or("--backend needs a value")?,
-            "--reader" => args.reader = it.next().ok_or("--reader needs a value")?,
-            "--model" => args.model = it.next().ok_or("--model needs a value")?,
+    while let Some(raw) = it.next() {
+        // Accept both `--flag value` and `--flag=value` (the latter is
+        // handy for shell/bats orchestration of the `--seed-*` flags).
+        let (key, inline) = match raw.split_once('=') {
+            Some((k, v)) => (k.to_string(), Some(v.to_string())),
+            None => (raw, None),
+        };
+        let mut value = |name: &str| -> Result<String, String> {
+            if let Some(v) = inline.clone() {
+                return Ok(v);
+            }
+            it.next().ok_or_else(|| format!("{name} needs a value"))
+        };
+        match key.as_str() {
+            "--socket" => args.socket = value("--socket")?,
+            "--backend" => args.backend = value("--backend")?,
+            "--reader" => args.reader = value("--reader")?,
+            "--model" => args.model = value("--model")?,
             "--seed-rfc6979-slot-9a-cert" => args.seed_rfc6979_slot_9a_cert = true,
+            "--seed-slot-9a-priv" => {
+                args.seed_slot_9a_priv = Some(parse_hex_array(
+                    &value("--seed-slot-9a-priv")?,
+                    "--seed-slot-9a-priv",
+                )?)
+            }
+            "--seed-slot-9d-priv" => {
+                args.seed_slot_9d_priv = Some(parse_hex_array(
+                    &value("--seed-slot-9d-priv")?,
+                    "--seed-slot-9d-priv",
+                )?)
+            }
+            "--seed-mgmt-key" => {
+                args.seed_mgmt_key = Some(parse_hex_array(
+                    &value("--seed-mgmt-key")?,
+                    "--seed-mgmt-key",
+                )?)
+            }
+            "--seed-mgmt-key-witness" => {
+                args.seed_mgmt_key_witness = Some(parse_hex_array(
+                    &value("--seed-mgmt-key-witness")?,
+                    "--seed-mgmt-key-witness",
+                )?)
+            }
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -68,6 +117,30 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
+/// Parse a hex string into a fixed-size byte array. Accepts an optional
+/// `0x` prefix; rejects non-hex characters and any length other than
+/// exactly `N` bytes (`2*N` hex chars). `what` names the flag for error
+/// messages.
+fn parse_hex_array<const N: usize>(s: &str, what: &str) -> Result<[u8; N], String> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    if !s.is_ascii() {
+        return Err(format!("{what}: non-ASCII hex"));
+    }
+    if s.len() != 2 * N {
+        return Err(format!(
+            "{what}: expected {N} bytes ({} hex chars), got {}",
+            2 * N,
+            s.len()
+        ));
+    }
+    let mut out = [0u8; N];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16)
+            .map_err(|_| format!("{what}: invalid hex byte at position {i}"))?;
+    }
+    Ok(out)
+}
+
 fn print_help() {
     eprintln!(
         "fibby — pure-Rust virtual PIV card over the pcsc-lite protocol\n\
@@ -75,6 +148,8 @@ fn print_help() {
          USAGE: fibby [--socket PATH] [--backend virtual|hardware]\n\
                       [--reader SUBSTR] [--model yk4|yk5]\n\
                       [--seed-rfc6979-slot-9a-cert]\n\
+                      [--seed-slot-9a-priv HEX] [--seed-slot-9d-priv HEX]\n\
+                      [--seed-mgmt-key HEX] [--seed-mgmt-key-witness HEX]\n\
          \n\
          --model selects the virtual-card hardware profile (ATR + advertised\n\
          firmware version). Only meaningful when --backend=virtual; the\n\
@@ -87,6 +162,14 @@ fn print_help() {
          pivy-agent exposes one SSH identity that can both be enumerated and\n\
          used to sign (RFC 6979 deterministic ECDSA). Only meaningful when\n\
          --backend=virtual; ignored by the hardware backend. See piggy#135.\n\
+         \n\
+         --seed-slot-9a-priv / --seed-slot-9d-priv take a 32-byte (64 hex\n\
+         char) big-endian P-256 scalar; --seed-mgmt-key takes a 24-byte\n\
+         3DES key; --seed-mgmt-key-witness takes the 8-byte challenge\n\
+         witness. All accept an optional 0x prefix and the `--flag=HEX`\n\
+         form. They let shell/bats seed slot material that was previously\n\
+         Rust-only. --seed-slot-9a-priv applied after the cert flag wins.\n\
+         Virtual backend only.\n\
          \n\
          Point clients at the socket via PCSCLITE_CSOCK_NAME.\n\
          Set FIBBY_LOG=info|debug|wire for logging."
@@ -137,6 +220,21 @@ fn make_backend(args: &Args) -> Result<SharedBackend, String> {
             if args.seed_rfc6979_slot_9a_cert {
                 card.seed_rfc6979_slot_9a_cert();
             }
+            // Explicit per-slot seeds apply after the cert bundle, so an
+            // explicit --seed-slot-9a-priv overrides the scalar the cert
+            // flag installs.
+            if let Some(s) = args.seed_slot_9a_priv {
+                card.seed_slot_9a_priv(s);
+            }
+            if let Some(s) = args.seed_slot_9d_priv {
+                card.seed_slot_9d_priv(s);
+            }
+            if let Some(k) = args.seed_mgmt_key {
+                card.seed_mgmt_key(k);
+            }
+            if let Some(w) = args.seed_mgmt_key_witness {
+                card.seed_mgmt_key_witness(w);
+            }
             Ok(into_shared(card))
         }
         "hardware" => make_hardware_backend(&args.reader),
@@ -168,4 +266,51 @@ fn into_shared<B: Backend + 'static>(b: B) -> SharedBackend {
 
 fn proto_sanity() {
     fibby::proto::assert_le_host();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hex_array;
+
+    #[test]
+    fn parses_exact_length_lowercase_and_uppercase() {
+        let got: [u8; 4] = parse_hex_array("00ffAB10", "--x").unwrap();
+        assert_eq!(got, [0x00, 0xFF, 0xAB, 0x10]);
+    }
+
+    #[test]
+    fn accepts_optional_0x_prefix() {
+        let got: [u8; 3] = parse_hex_array("0xDEADBE", "--x").unwrap();
+        assert_eq!(got, [0xDE, 0xAD, 0xBE]);
+    }
+
+    #[test]
+    fn parses_a_full_32_byte_scalar() {
+        let hex = "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721";
+        let got: [u8; 32] = parse_hex_array(hex, "--seed-slot-9a-priv").unwrap();
+        assert_eq!(got[0], 0xC9);
+        assert_eq!(got[31], 0x21);
+    }
+
+    #[test]
+    fn rejects_wrong_length() {
+        let err = parse_hex_array::<32>("00ff", "--seed-slot-9a-priv").unwrap_err();
+        assert!(err.contains("expected 32 bytes"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_non_hex_characters() {
+        // Correct length (8 chars = 4 bytes) but 'z'/'g' are not hex.
+        let err = parse_hex_array::<4>("00zg1122", "--x").unwrap_err();
+        assert!(err.contains("invalid hex"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_non_ascii_without_panicking_on_char_boundary() {
+        // A multi-byte char must be rejected before byte-slicing, or the
+        // slice would panic on a non-char-boundary. 'é' is 2 bytes UTF-8,
+        // so this string's byte length could otherwise look plausible.
+        let err = parse_hex_array::<4>("00ffé011", "--x").unwrap_err();
+        assert!(err.contains("non-ASCII"), "got: {err}");
+    }
 }
