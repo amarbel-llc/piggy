@@ -131,12 +131,12 @@ function pivy_agent_against_empty_fibby_lists_no_identities { # @test
 # pcsc-lite path is wired end-to-end and pivy-agent is doing the
 # work we expect — independent of whether the slots are populated.
 #
-# Tags:
+# Tags (slot↔object map per pivy `PIV_TAG_CERT_*` / pivy-piv slot.rs):
 #   5FC10C  Card Capability Container (CCC)
-#   5FC101  Slot 9A (PIV Authentication) cert
-#   5FC105  Slot 9D (Key Management) cert
+#   5FC101  Slot 9E (Card Authentication) cert
+#   5FC105  Slot 9A (PIV Authentication) cert
 #   5FC10A  Slot 9C (Digital Signature) cert
-#   5FC10B  Slot 9E (Card Authentication) cert
+#   5FC10B  Slot 9D (Key Management) cert
 #
 # (CHUID at 5FC102 is NOT probed by pivy-agent's identity flow — that
 # simplifies the seeding story: only cert tags matter for #135's
@@ -193,6 +193,89 @@ function pivy_agent_against_seeded_fibby_lists_one_ecdsa_identity { # @test
     return 1
   }
   refute_output --partial "[piggy-test-askpass]"
+  ! grep -q "REFUSING to prompt" "$AGENT_LOG" || {
+    echo "unexpected askpass refusal in agent log" >&2
+    cat "$AGENT_LOG" >&2
+    return 1
+  }
+}
+
+# With `--seed-rfc6979-slot-9a-cert`, fibby's slot 9A holds both the cert
+# (enumerable identity) AND the matching RFC 6979 §A.2.5 private key
+# (signable). This drives a real signature through the whole stack:
+# ssh-keygen asks pivy-agent to sign, pivy-agent unlocks fibby's PIN and
+# runs GA ECDSA on slot 9A, and we verify the returned SSH signature
+# against the agent's advertised public key. Proves the slot-9A sign path
+# (piggy#135) works end-to-end via pivy-agent, not just at the unit level.
+#
+# Unlike the no-prompt smokes above, this test legitimately reaches a
+# PIN-gated path (slot 9A default PIN policy is "once"), so it supplies
+# the VirtualCard default PIN (123456) non-interactively via the test
+# askpass — the only test in this file that sets PIGGY_TEST_FIB_PIN.
+function pivy_agent_signs_and_verifies_via_seeded_fibby_slot_9a { # @test
+  command -v ssh-keygen >/dev/null || skip "ssh-keygen not on PATH"
+
+  export PIGGY_TEST_FIB_PIN=123456
+  spawn_fibby --seed-rfc6979-slot-9a-cert
+  spawn_agent
+  export SSH_AUTH_SOCK="$AGENT_SOCK"
+
+  # The agent's advertised slot-9A public key.
+  run ssh-add -L
+  [[ $status -eq 0 ]] || {
+    echo "ssh-add -L exited $status; expected 0 (have identities)" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  printf '%s\n' "$output" | grep '^ecdsa-sha2-nistp256 ' >"$WORKDIR/id.pub"
+  [[ -s $WORKDIR/id.pub ]] || {
+    echo "no ecdsa-sha2-nistp256 identity in ssh-add -L output" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+
+  # Message to sign + an allow-list keyed on that public key (type+data
+  # only, so a trailing key comment can't confuse the allowed_signers
+  # parser).
+  echo "phase0-fibby-slot-9a-sign-smoke" >"$WORKDIR/data"
+  local ktype kdata _rest
+  read -r ktype kdata _rest <"$WORKDIR/id.pub"
+  printf 'smoke@fibby %s %s\n' "$ktype" "$kdata" >"$WORKDIR/allowed_signers"
+
+  # Sign via the agent: -U treats -f as a public key and pulls the
+  # matching private key from ssh-agent — i.e. fibby's slot 9A, reached
+  # through pivy-agent. This is the first call to hit the PIN-gated sign
+  # path, so pivy-agent unlocks via the test askpass here.
+  run ssh-keygen -Y sign -f "$WORKDIR/id.pub" -U -n file "$WORKDIR/data"
+  [[ $status -eq 0 && -f $WORKDIR/data.sig ]] || {
+    echo "ssh-keygen -Y sign -U exited $status (data.sig present: $([[ -f $WORKDIR/data.sig ]] && echo yes || echo no))" >&2
+    printf '%s\n' "$output" >&2
+    echo "--- agent log ---" >&2
+    cat "$AGENT_LOG" >&2 || true
+    echo "--- fibby log tail ---" >&2
+    tail -80 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  # Verify the signature cryptographically against the allow-list.
+  run ssh-keygen -Y verify -f "$WORKDIR/allowed_signers" -I "smoke@fibby" \
+    -n file -s "$WORKDIR/data.sig" <"$WORKDIR/data"
+  [[ $status -eq 0 ]] || {
+    echo "ssh-keygen -Y verify exited $status; expected 0 (good signature)" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+
+  # Belt-and-suspenders: the signature must have come from fibby's slot-9A
+  # GA ECDSA handler. The wire trace records the handler firing and
+  # returning 9000 (see virtual_card.rs::handle_general_authenticate_ecdsa_slot_9a).
+  grep -q "GA ECDSA 9A -> 9000" "$FIBBY_LOG" || {
+    echo "no successful slot-9A GA ECDSA sign in fibby trace" >&2
+    tail -80 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  # The askpass supplied the PIN; it must not have refused.
   ! grep -q "REFUSING to prompt" "$AGENT_LOG" || {
     echo "unexpected askpass refusal in agent log" >&2
     cat "$AGENT_LOG" >&2

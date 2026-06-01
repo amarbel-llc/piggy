@@ -1665,3 +1665,85 @@ debug-fibby-pivy-agent-smoke:
 
     echo "=== fibby wire trace (last 80 lines) ==="
     tail -80 "$fibby_log"
+
+# piggy#135 slot-9A sign dev-loop: a non-batman mirror of the
+# `pivy_agent_signs_and_verifies_via_seeded_fibby_slot_9a` bats test. Seeds
+# fibby's slot 9A (cert + RFC 6979 §A.2.5 key), points pivy-agent at it,
+# and drives a real `ssh-keygen -Y sign -U` (agent-sign) + verify
+# round-trip — proving the slot-9A ECDSA sign path works end-to-end through
+# pivy-agent. Runs OUTSIDE batman so it works in dev containers where the
+# batman/sandcastle wrapper can't create namespaces (piggy#136 /
+# amarbel-llc/bats#31). Supplies the VirtualCard default PIN
+# non-interactively. Exits non-zero on any failure. No hardware.
+[group('debug')]
+debug-fibby-slot-9a-sign:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    pivy_agent="$pivy_out/bin/pivy-agent"
+    fibby_bin="$fibby_out/bin/fibby"
+    [[ -x $fibby_bin ]] || { echo "missing $fibby_bin"; exit 1; }
+    [[ -x $pivy_agent ]] || { echo "missing $pivy_agent"; exit 1; }
+
+    workdir=$(mktemp -d /tmp/p0sign-XXXXXX)
+    fibby_sock="$workdir/pcscd.comm"
+    agent_sock="$workdir/a.sock"
+    fibby_log="$workdir/fibby.log"
+    agent_log="$workdir/agent.log"
+    fibby_pid=""
+    agent_pid=""
+    cleanup() {
+      [[ -n $fibby_pid ]] && kill "$fibby_pid" 2>/dev/null || true
+      [[ -n $agent_pid ]] && kill "$agent_pid" 2>/dev/null || true
+      rm -rf "$workdir"
+    }
+    trap cleanup EXIT
+
+    echo "=== Starting fibby (virtual, --seed-rfc6979-slot-9a-cert) ==="
+    FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+      --seed-rfc6979-slot-9a-cert >"$fibby_log" 2>&1 &
+    fibby_pid=$!
+    for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+    [[ -S $fibby_sock ]] || { echo "fibby socket never appeared:"; cat "$fibby_log"; exit 1; }
+
+    # Supply the VirtualCard default PIN non-interactively so pivy-agent
+    # can unlock the slot-9A sign (PIN policy "once").
+    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    echo "=== Starting pivy-agent (PCSCLITE_CSOCK_NAME=fibby) ==="
+    PCSCLITE_CSOCK_NAME="$fibby_sock" \
+      SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY="" \
+      PIGGY_TEST_FIB_PIN=123456 \
+      "$pivy_agent" -A -D -a "$agent_sock" >"$agent_log" 2>&1 &
+    agent_pid=$!
+    for _ in $(seq 1 50); do [[ -S $agent_sock ]] && break; sleep 0.1; done
+    [[ -S $agent_sock ]] || { echo "agent socket never appeared:"; cat "$agent_log"; cat "$fibby_log"; exit 1; }
+
+    export SSH_AUTH_SOCK="$agent_sock"
+    echo "=== ssh-add -L ==="
+    ssh-add -L | tee "$workdir/all.pub"
+    grep '^ecdsa-sha2-nistp256 ' "$workdir/all.pub" >"$workdir/id.pub" || {
+      echo "no ecdsa-sha2-nistp256 identity"; cat "$agent_log"; exit 1; }
+
+    echo "phase0-fibby-slot-9a-sign-smoke" >"$workdir/data"
+    read -r ktype kdata _ <"$workdir/id.pub"
+    printf 'smoke@fibby %s %s\n' "$ktype" "$kdata" >"$workdir/allowed_signers"
+
+    echo "=== ssh-keygen -Y sign (agent-sign via slot 9A) ==="
+    if ! ssh-keygen -Y sign -f "$workdir/id.pub" -U -n file "$workdir/data"; then
+      echo "!!! SIGN FAILED"; echo "--- agent log ---"; cat "$agent_log"
+      echo "--- fibby trace tail ---"; tail -80 "$fibby_log"; exit 1
+    fi
+
+    echo "=== ssh-keygen -Y verify ==="
+    if ! ssh-keygen -Y verify -f "$workdir/allowed_signers" -I smoke@fibby \
+        -n file -s "$workdir/data.sig" <"$workdir/data"; then
+      echo "!!! VERIFY FAILED"; echo "--- agent log ---"; cat "$agent_log"
+      echo "--- fibby trace tail ---"; tail -80 "$fibby_log"; exit 1
+    fi
+
+    grep -q "GA ECDSA 9A -> 9000" "$fibby_log" || {
+      echo "!!! no successful slot-9A GA ECDSA sign in fibby trace"
+      tail -80 "$fibby_log"; exit 1; }
+    echo
+    echo "=== SLOT-9A SIGN ROUND-TRIP OK ==="

@@ -1,17 +1,23 @@
 //! `VirtualCard` — the in-Rust card behind fibby's reader.
 //!
-//! **Status: stub.** This exists to bring the pcsc-lite protocol path
-//! up end-to-end (a client can ESTABLISH → CONNECT → TRANSMIT SELECT →
-//! DISCONNECT against fibby with no pcscd). The real PIV applet —
-//! GENERATE ASYMMETRIC, GENERAL AUTHENTICATE (sign + ECDH), GET/PUT
-//! DATA, VERIFY PIN, YubiKey attestation/serial — is phase-5 work in
-//! docs/plans/2026-05-29-fibby-virtual-piv-rust-design.md, validated
-//! against RFC 0002 Appendix A and SP 800-73-4 vectors.
+//! A software PIV applet that answers the PIV command set over fibby's
+//! pcsc-lite protocol path with no pcscd and no hardware. Implemented
+//! today (validated against RFC 0002 Appendix A, SP 800-73-4 vectors,
+//! and wet-env captures — see
+//! docs/plans/2026-05-29-fibby-virtual-piv-rust-design.md):
 //!
-//! Until then, SELECT of the PIV AID succeeds (so `pivy-tool list` /
-//! readiness probes see a live PIV card) and every other instruction
-//! returns `6D00` (INS not supported). Keep the stub honest: it must
-//! never *look* like it did crypto it didn't.
+//! - SELECT (PIV AID), GET DATA / PUT DATA, GET VERSION, YubiKey SERIAL.
+//! - VERIFY PIN (with retry counter + blocked state).
+//! - GENERAL AUTHENTICATE: ECDH on slot 9D (alg 0x11; the piggy decrypt
+//!   path), ECDSA sign on slot 9A (alg 0x11; the SSH-auth path, RFC 6979
+//!   deterministic), and the 3DES mgmt-key challenge-response (alg 0x03).
+//! - YubiKey ATTEST (INS 0xF9 — `6A80` for imported/empty slots).
+//!
+//! Not yet implemented (returns `6D00`, INS not supported): GENERATE
+//! ASYMMETRIC (on-card keygen), slot 9C signing, and the rest of the
+//! phase-5 surface in the design doc. Keep the card honest: an
+//! unimplemented instruction must return `6D00`, never *look* like it
+//! did crypto it didn't.
 
 use std::collections::HashMap;
 
@@ -215,6 +221,15 @@ pub struct VirtualCard {
     /// (e.g. GA ECDH on slot 9D) consult this before honoring the
     /// request and return `69 82` when unset.
     pin_verified: bool,
+    /// Raw P-256 scalar (big-endian) installed in slot 9A (PIV
+    /// Authentication), or `None` if no key is present. This is the
+    /// SSH-auth signing slot: GA ECDSA requests (INS 0x87, P1=0x11,
+    /// P2=0x9A) sign the client-supplied prehash under RFC 6979
+    /// deterministic ECDSA. Set via [`Self::seed_slot_9a_priv`], or
+    /// implicitly by [`Self::seed_rfc6979_slot_9a_cert`] which seeds the
+    /// scalar matching the canonical slot-9A cert. Empty (`6A 88` to GA)
+    /// until a future generate-asymmetric branch lands for production runs.
+    slot_9a_priv: Option<[u8; 32]>,
     /// Raw P-256 scalar (big-endian) installed in slot 9D, or `None`
     /// if no key is present. Mirrors real silicon's PIV state: a slot
     /// can be either populated (key + optional cert) or empty
@@ -258,9 +273,29 @@ const DEFAULT_MGMT_KEY: [u8; 24] = [
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 ];
 
+/// RFC 6979 §A.2.5 P-256 private scalar, big-endian. This is the
+/// keypair the canonical slot-9A cert ([`RFC6979_SLOT_9A_CERT_OBJECT`])
+/// is self-signed over — its embedded public point
+/// `04 60 FE D4 BA … 46 22 99` is exactly this scalar's public key — and
+/// the same scalar imported into the throwaway YubiKey slot 9D for the
+/// wet-env ECDH captures. [`VirtualCard::seed_rfc6979_slot_9a_cert`]
+/// installs both the cert and this scalar so the seeded SSH identity can
+/// actually sign. The unit tests reference it as `RFC6979_SCALAR`.
+const RFC6979_A2_5_PRIV: [u8; 32] = [
+    0xC9, 0xAF, 0xA9, 0xD8, 0x45, 0xBA, 0x75, 0x16, 0x6B, 0x5C, 0x21, 0x57, 0x67, 0xB1, 0xD6, 0x93,
+    0x4E, 0x50, 0xC3, 0xDB, 0x36, 0xE8, 0x9B, 0x12, 0x7B, 0x8A, 0x62, 0x2B, 0x12, 0x0F, 0x67, 0x21,
+];
+
 /// PIV tag for the slot 9A (PIV Authentication) X.509 cert object,
-/// per SP 800-73-4 §3.3 Table 6: `5F C1 01`.
-const TAG_SLOT_9A_CERT: &[u8] = &[0x5F, 0xC1, 0x01];
+/// per SP 800-73-4 §3.3 Table 6 / pivy `PIV_TAG_CERT_9A`: `5F C1 05`.
+///
+/// NB: `5F C1 01` is the slot **9E** (Card Authentication) cert object,
+/// not slot 9A — a tempting off-by-one. Seeding the 9A cert under
+/// `5F C1 01` makes pivy-agent expose the identity as slot 9E and sign
+/// via GA `P2=0x9E` (which fibby's sign handler, keyed on slot 9A,
+/// rejects with `6D00`). The fibby↔pivy-agent Phase 0 smoke caught
+/// exactly this. See `pivy-piv/src/slot.rs` for the full slot→tag map.
+const TAG_SLOT_9A_CERT: &[u8] = &[0x5F, 0xC1, 0x05];
 
 /// Canonical fibby test-vector slot 9A certificate, wrapped in the PIV
 /// cert-object TLV (`53 <len> 70 <der-len> <der> 71 01 00 FE 00`).
@@ -357,6 +392,7 @@ impl VirtualCard {
             pin: DEFAULT_PIN.to_vec(),
             pin_retries: DEFAULT_PIN_RETRIES,
             pin_verified: false,
+            slot_9a_priv: None,
             slot_9d_priv: None,
             mgmt_key: DEFAULT_MGMT_KEY,
             pending_mgmt_witness: None,
@@ -381,19 +417,37 @@ impl VirtualCard {
     }
 
     /// Install the canonical fibby slot 9A test cert under PIV tag
-    /// `5F C1 01`. After this, GET DATA for the slot 9A cert tag
+    /// `5F C1 05` **and** the matching RFC 6979 §A.2.5 private scalar
+    /// into slot 9A. After this, GET DATA for the slot 9A cert tag
     /// returns the pinned cert object (`53 …`) instead of the
-    /// empty-slot 6A82. Subscriber: pivy-agent's identity-listing
-    /// flow then exposes one SSH identity backed by the RFC 6979
-    /// §A.2.5 public point.
+    /// empty-slot 6A82, and GA ECDSA (INS 0x87, P1=0x11, P2=0x9A) signs
+    /// with the key the cert is over. Subscriber: pivy-agent's
+    /// identity-listing flow exposes one SSH identity backed by the
+    /// RFC 6979 §A.2.5 public point, and that identity can sign — the
+    /// cert and key are a matched pair, so seeding one without the
+    /// other would yield a non-functional identity.
     ///
-    /// See [`RFC6979_SLOT_9A_CERT_OBJECT`] for the full byte layout
-    /// and the regeneration recipe.
+    /// See [`RFC6979_SLOT_9A_CERT_OBJECT`] for the cert byte layout and
+    /// regeneration recipe, and [`RFC6979_A2_5_PRIV`] for the scalar.
     pub fn seed_rfc6979_slot_9a_cert(&mut self) {
         self.seed_data_object(
             TAG_SLOT_9A_CERT.to_vec(),
             RFC6979_SLOT_9A_CERT_OBJECT.to_vec(),
         );
+        self.seed_slot_9a_priv(RFC6979_A2_5_PRIV);
+    }
+
+    /// Install a P-256 scalar into slot 9A (PIV Authentication, the
+    /// SSH-auth signing slot). The scalar is the 32-byte big-endian raw
+    /// secret (no PKCS-#8 / SEC1 wrapping). Subsequent GA ECDSA requests
+    /// (INS 0x87, P1=0x11, P2=0x9A) sign the client-supplied prehash
+    /// under RFC 6979 deterministic ECDSA.
+    ///
+    /// Mirrors [`Self::seed_slot_9d_priv`]: bypasses the mgmt-key auth a
+    /// real GENERATE / import flow would require, so reserve it for test
+    /// scaffolding (or the CLI seed flag, piggy#135).
+    pub fn seed_slot_9a_priv(&mut self, scalar: [u8; 32]) {
+        self.slot_9a_priv = Some(scalar);
     }
 
     /// Install a P-256 scalar into slot 9D. The scalar is the 32-byte
@@ -556,13 +610,23 @@ impl Backend for VirtualCard {
             return Ok(self.handle_verify(apdu_body(command_apdu)));
         }
 
-        // GENERAL AUTHENTICATE (00 87 <alg> <slot> <Lc> 7C ...). Only
-        // slot 9D ECDH (alg=0x11, slot=0x9D) is implemented; that's the
-        // piggy decrypt path. Other algorithm/slot combinations
-        // (slot 9A auth, slot 9C signing, mgmt-key challenge-response)
+        // GENERAL AUTHENTICATE (00 87 <alg> <slot> <Lc> 7C ...). Slot 9D
+        // ECDH (alg=0x11, slot=0x9D) is the piggy decrypt path; slot 9A
+        // ECDSA (alg=0x11, slot=0x9A) is the SSH-auth signing path. The
+        // mgmt-key challenge-response (alg=0x03, slot=0x9B) is handled
+        // below. Other algorithm/slot combinations (e.g. slot 9C signing)
         // fall through to the 6D00 stub.
         if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9D {
             return Ok(self.handle_general_authenticate_ecdh_slot_9d(apdu_body(command_apdu)));
+        }
+
+        // GENERAL AUTHENTICATE ECDSA sign on slot 9A (alg=0x11 P-256,
+        // slot=0x9A). The request carries the host-computed prehash in
+        // the 81 (CHALLENGE) tag; we return the DER ECDSA signature in
+        // the 82 (RESPONSE) tag. This is pivy/piggy-agent's KEYREQ_SIGN
+        // path for SSH auth. See vendor/pivy/src/piv.c::piv_sign_prehash.
+        if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9A {
+            return Ok(self.handle_general_authenticate_ecdsa_slot_9a(apdu_body(command_apdu)));
         }
 
         // GENERAL AUTHENTICATE mgmt-key challenge-response (00 87 03
@@ -908,6 +972,104 @@ impl VirtualCard {
         out
     }
 
+    /// Handle a `GENERAL AUTHENTICATE` ECDSA sign request on slot 9A
+    /// (INS 0x87, P1=0x11 P-256, P2=0x9A) — pivy/piggy-agent's SSH-auth
+    /// signing path (`KEYREQ_SIGN`). The client supplies a host-computed
+    /// prehash in the `81` (CHALLENGE) tag; we return the DER-encoded
+    /// ECDSA signature in the `82` (RESPONSE) tag. Wire shape mirrors
+    /// `vendor/pivy/src/piv.c::piv_sign_prehash`.
+    ///
+    /// Returns:
+    /// - `69 82` if the PIN is not verified (slot 9A default policy is
+    ///   "once"; we leave `pin_verified` set afterward, unlike slot 9C's
+    ///   "always" policy — tracked as a separate slice, piggy#135).
+    /// - `6A 88` if slot 9A is empty (no scalar seeded).
+    /// - `6A 80` on a missing/malformed request body.
+    /// - `7C <len> 82 <len> <DER sig>` + `90 00` on success.
+    ///
+    /// Signing is **RFC 6979 deterministic** (`p256`'s `sign_prehash`),
+    /// so VirtualCard's output is reproducible. Real silicon randomizes
+    /// `k`, so a slot-9A sign capture is *not* byte-replayable — tests
+    /// verify the signature against the public key instead (piggy#135).
+    fn handle_general_authenticate_ecdsa_slot_9a(&mut self, body: Option<&[u8]>) -> Vec<u8> {
+        use p256::ecdsa::signature::hazmat::PrehashSigner;
+        use p256::ecdsa::{Signature, SigningKey};
+
+        if !self.pin_verified {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                "GA ECDSA 9A -> 6982 (PIN not verified)",
+            );
+            return sw(0x69, 0x82);
+        }
+        let scalar_bytes = match self.slot_9a_priv {
+            Some(s) => s,
+            None => {
+                trace::emit(trace::DEBUG, "vcard", "GA ECDSA 9A -> 6A88 (slot empty)");
+                return sw(0x6A, 0x88);
+            }
+        };
+        let body = match body {
+            Some(b) => b,
+            None => {
+                trace::emit(trace::DEBUG, "vcard", "GA ECDSA 9A -> 6A80 (no body)");
+                return sw(0x6A, 0x80);
+            }
+        };
+        let challenge = match parse_ga_sign_request(body) {
+            Some(c) => c,
+            None => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "GA ECDSA 9A -> 6A80 (malformed 7C/81 TLV)",
+                );
+                return sw(0x6A, 0x80);
+            }
+        };
+        let signing_key = match SigningKey::from_slice(&scalar_bytes) {
+            Ok(k) => k,
+            Err(_) => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "GA ECDSA 9A -> 6A88 (slot scalar invalid)",
+                );
+                return sw(0x6A, 0x88);
+            }
+        };
+        let sig: Signature = match signing_key.sign_prehash(challenge) {
+            Ok(s) => s,
+            Err(_) => {
+                trace::emit(trace::DEBUG, "vcard", "GA ECDSA 9A -> 6A80 (sign failed)");
+                return sw(0x6A, 0x80);
+            }
+        };
+        // The card returns the ASN.1 `ECDSA-Sig-Value` (SEQUENCE { r, s })
+        // under the GA `82` (RESPONSE) tag — the same DER pivy parses out
+        // in piv_sign_prehash.
+        let der = sig.to_der();
+        let der = der.as_bytes();
+
+        let mut inner = Vec::with_capacity(2 + der.len());
+        inner.push(0x82); // GA RESPONSE tag (SP 800-73-4 dynamic auth)
+        push_ber_len(&mut inner, der.len());
+        inner.extend_from_slice(der);
+
+        let mut out = Vec::with_capacity(3 + inner.len() + 2);
+        out.push(0x7C);
+        push_ber_len(&mut out, inner.len());
+        out.extend_from_slice(&inner);
+        out.extend_from_slice(&sw(0x90, 0x00));
+        trace::emit(
+            trace::DEBUG,
+            "vcard",
+            &format!("GA ECDSA 9A -> 9000 ({}-byte DER sig)", der.len()),
+        );
+        out
+    }
+
     /// Handle a `PUT DATA` APDU. Parses `5C <tag_len> <tag>` followed
     /// by the `53 <len> <data>` block, stores the 53-wrapped form in
     /// `self.data_objects`. Returns SW=9000 on success, `6A80` on a
@@ -1024,6 +1186,63 @@ fn parse_ga_ecdh_request(body: &[u8]) -> Option<&[u8]> {
         cur = &cur[value_start + len..];
     }
     None
+}
+
+/// Parse a `GENERAL AUTHENTICATE` ECDSA sign request body and return the
+/// challenge bytes (the host-computed prehash to sign).
+///
+/// Expected shape: `7C <len> 82 00 81 <len2> <prehash>` — the `82 00` is
+/// the empty response-template placeholder asking the card for a
+/// signature, and the `81` (CHALLENGE) tag carries the digest. Mirrors
+/// `parse_ga_ecdh_request` but matches tag `0x81` and accepts a value of
+/// any length (the digest width is the caller's choice, typically 32 B
+/// SHA-256; we do not constrain it). Returns `None` on structural error.
+fn parse_ga_sign_request(body: &[u8]) -> Option<&[u8]> {
+    if body.first()? != &0x7C {
+        return None;
+    }
+    let (inner_offset, inner_len) = ber_len(&body[1..])?;
+    let inner_start = 1 + inner_offset;
+    if body.len() < inner_start + inner_len {
+        return None;
+    }
+    let inner = &body[inner_start..inner_start + inner_len];
+    let mut cur = inner;
+    while !cur.is_empty() {
+        let tag = *cur.first()?;
+        let (len_offset, len) = ber_len(&cur[1..])?;
+        let value_start = 1 + len_offset;
+        if cur.len() < value_start + len {
+            return None;
+        }
+        let value = &cur[value_start..value_start + len];
+        if tag == 0x81 {
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value);
+        }
+        cur = &cur[value_start + len..];
+    }
+    None
+}
+
+/// Append a BER-TLV definite length to `out`: short form for `len < 128`,
+/// one-byte long form (`81 xx`) for `128..256`, two-byte (`82 xx xx`)
+/// otherwise. Used to wrap the variable-width DER ECDSA signature in the
+/// `7C`/`82` response template (the ECDH handler hard-codes its lengths
+/// because the X-coordinate output is fixed-width; sign output is not).
+fn push_ber_len(out: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        out.push(len as u8);
+    } else if len < 0x100 {
+        out.push(0x81);
+        out.push(len as u8);
+    } else {
+        out.push(0x82);
+        out.push((len >> 8) as u8);
+        out.push((len & 0xFF) as u8);
+    }
 }
 
 /// Parse a BER-TLV length octet sequence at the front of `bytes`,
@@ -1625,12 +1844,10 @@ mod tests {
 
     /// RFC 6979 §A.2.5 P-256 private scalar, big-endian. Same scalar
     /// imported into the throwaway YubiKey 4 slot 9D for the wet-env
-    /// captures under `tests/fixtures/captures/yubikey/test-vector/`.
-    const RFC6979_SCALAR: [u8; 32] = [
-        0xC9, 0xAF, 0xA9, 0xD8, 0x45, 0xBA, 0x75, 0x16, 0x6B, 0x5C, 0x21, 0x57, 0x67, 0xB1, 0xD6,
-        0x93, 0x4E, 0x50, 0xC3, 0xDB, 0x36, 0xE8, 0x9B, 0x12, 0x7B, 0x8A, 0x62, 0x2B, 0x12, 0x0F,
-        0x67, 0x21,
-    ];
+    /// captures under `tests/fixtures/captures/yubikey/test-vector/`,
+    /// and the keypair the canonical slot-9A cert is over. Aliases the
+    /// module const so there is one source of truth for these bytes.
+    const RFC6979_SCALAR: [u8; 32] = RFC6979_A2_5_PRIV;
 
     fn hex_to_bytes(hex: &str) -> Vec<u8> {
         let cleaned: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1701,6 +1918,116 @@ mod tests {
             "7c22822097b863dabf25c290ec35650685e2ae7bed49ae9c097a6feda338ad45c36049fb9000",
         );
         assert_eq!(c.transmit(&req).unwrap(), expected);
+    }
+
+    // -- GA ECDSA (slot 9A sign, P-256) tests ----------------------------
+
+    /// Build a GA ECDSA sign APDU for slot 9A: `00 87 11 9A <Lc> 7C <l>
+    /// 82 00 81 <hl> <digest>` (empty RESPONSE placeholder + CHALLENGE
+    /// carrying the prehash). Short-form lengths — the digests we test
+    /// are <128 bytes so the wrappers fit one length byte.
+    fn ga_sign_apdu(digest: &[u8]) -> Vec<u8> {
+        let mut inner = vec![0x82, 0x00, 0x81, digest.len() as u8];
+        inner.extend_from_slice(digest);
+        let mut body = vec![0x7C, inner.len() as u8];
+        body.extend_from_slice(&inner);
+        let mut apdu = vec![0x00, 0x87, 0x11, 0x9A, body.len() as u8];
+        apdu.extend_from_slice(&body);
+        apdu
+    }
+
+    /// Strip the trailing SW and unwrap `7C <l> 82 <l2> <der>`, returning
+    /// the DER signature bytes. Asserts the wrapper shape and a 9000 SW.
+    fn extract_ga_sign_der(resp: &[u8]) -> Vec<u8> {
+        assert_eq!(&resp[resp.len() - 2..], &[0x90, 0x00], "trailing SW 9000");
+        let payload = &resp[..resp.len() - 2];
+        assert_eq!(payload[0], 0x7C, "outer GA template tag");
+        let l7c = payload[1] as usize; // short form for our sizes
+        let inner = &payload[2..2 + l7c];
+        assert_eq!(inner[0], 0x82, "GA RESPONSE tag");
+        let l82 = inner[1] as usize;
+        inner[2..2 + l82].to_vec()
+    }
+
+    #[test]
+    fn ga_ecdsa_slot_9a_without_pin_verify_returns_6982() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9a_priv(RFC6979_SCALAR);
+        let resp = c.transmit(&ga_sign_apdu(&[0x5A; 32])).unwrap();
+        assert_eq!(resp, vec![0x69, 0x82], "PIN not verified -> 6982");
+    }
+
+    #[test]
+    fn ga_ecdsa_slot_9a_without_key_returns_6a88() {
+        let mut c = VirtualCard::new();
+        c.pin_verified = true;
+        let resp = c.transmit(&ga_sign_apdu(&[0x5A; 32])).unwrap();
+        assert_eq!(resp, vec![0x6A, 0x88], "slot 9A empty -> 6A88");
+    }
+
+    /// The signature the card returns must verify against the RFC 6979
+    /// §A.2.5 public key over the supplied prehash. Real silicon
+    /// randomizes `k`, so we verify cryptographically rather than pin a
+    /// captured wire (piggy#135).
+    #[test]
+    fn ga_ecdsa_slot_9a_signs_and_verifies_against_a2_5_pubkey() {
+        use p256::ecdsa::signature::hazmat::PrehashVerifier;
+        use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+
+        let mut c = VirtualCard::new();
+        c.seed_slot_9a_priv(RFC6979_SCALAR);
+        c.pin_verified = true;
+
+        let digest: [u8; 32] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF, 0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78, 0x87, 0x96, 0xA5, 0xB4,
+            0xC3, 0xD2, 0xE1, 0xF0,
+        ];
+        let resp = c.transmit(&ga_sign_apdu(&digest)).unwrap();
+        let der = extract_ga_sign_der(&resp);
+
+        let sig = Signature::from_der(&der).expect("card returned valid DER sig");
+        let vk = VerifyingKey::from(&SigningKey::from_slice(&RFC6979_SCALAR).unwrap());
+        vk.verify_prehash(&digest, &sig)
+            .expect("signature verifies against the §A.2.5 public key");
+    }
+
+    /// RFC 6979 signing is deterministic: signing the same prehash twice
+    /// yields byte-identical output. Guards against an accidental switch
+    /// to randomized `k` (which would silently break replayability).
+    #[test]
+    fn ga_ecdsa_slot_9a_is_deterministic() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9a_priv(RFC6979_SCALAR);
+        c.pin_verified = true;
+        let apdu = ga_sign_apdu(&[0x42; 32]);
+        let first = c.transmit(&apdu).unwrap();
+        let second = c.transmit(&apdu).unwrap();
+        assert_eq!(first, second, "RFC 6979 sign is deterministic");
+        assert_eq!(&first[first.len() - 2..], &[0x90, 0x00]);
+    }
+
+    /// End-to-end identity wiring: `seed_rfc6979_slot_9a_cert` must make
+    /// the slot-9A cert readable via GET DATA *and* the slot signable —
+    /// the cert and key are a matched pair, so the seeded SSH identity is
+    /// fully usable (enumerate + sign).
+    #[test]
+    fn seed_rfc6979_slot_9a_cert_enables_signing() {
+        let mut c = VirtualCard::new();
+        c.seed_rfc6979_slot_9a_cert();
+        c.pin_verified = true;
+
+        let cert = c.transmit(&get_data_apdu(TAG_SLOT_9A_CERT)).unwrap();
+        assert_eq!(cert[0], 0x53, "GET DATA returns the 53-wrapped cert object");
+        assert_eq!(&cert[cert.len() - 2..], &[0x90, 0x00], "cert read -> 9000");
+
+        let sig = c.transmit(&ga_sign_apdu(&[0x7E; 32])).unwrap();
+        assert_eq!(
+            &sig[sig.len() - 2..],
+            &[0x90, 0x00],
+            "seeded slot 9A can sign -> 9000"
+        );
+        assert_eq!(sig[0], 0x7C, "sign response is a GA template");
     }
 
     // -- YK ATTEST (INS 0xF9) tests --------------------------------------

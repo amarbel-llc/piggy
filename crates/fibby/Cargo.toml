@@ -19,14 +19,30 @@ hardware-proxy = ["dep:pcsc"]
 
 [dependencies]
 pcsc = { version = "2.9", optional = true }
-# VirtualCard's PIV GENERAL AUTHENTICATE (alg=0x11 P-256 ECDH on slot
-# 9D) does `card_priv * client_eph_pub` and returns the X-coord. Pure
-# arithmetic, no I/O. RustCrypto's `p256` is the de-facto P-256 crate
-# for no-OpenSSL Rust; the `ecdh` feature pulls in
-# `p256::ecdh::diffie_hellman` whose output is exactly the byte form
-# real silicon emits inside the `7C 22 82 20 <X>` response. See
-# piggy#134 for the byte-deterministic replay rationale.
-p256 = { version = "0.13", default-features = false, features = ["ecdh"] }
+# VirtualCard's PIV GENERAL AUTHENTICATE uses `p256` two ways:
+#   - ECDH on slot 9D (alg=0x11, P2=0x9D): `card_priv * client_eph_pub`
+#     returning the X-coord (feature `ecdh`). Output is exactly the byte
+#     form real silicon emits inside the `7C 22 82 20 <X>` response; see
+#     piggy#134 for the byte-deterministic replay rationale.
+#   - ECDSA sign on slot 9A (alg=0x11, P2=0x9A): RFC 6979 deterministic
+#     signing of the client-supplied prehash (feature `ecdsa`, which pulls
+#     in `signature::hazmat::PrehashSigner` + DER sig encoding). Real
+#     YubiKeys sign with a random `k` and so aren't byte-replayable;
+#     RFC 6979 makes VirtualCard's output reproducible (piggy#135).
+# Pure arithmetic, no I/O. The lockfile already pins ecdsa/rfc6979/der
+# transitively (via piggy-box, p384, ssh-key), so `ecdsa` adds no new
+# external crates.
+p256 = { version = "0.13", default-features = false, features = [
+  "ecdh",
+  "ecdsa",
+] }
+# `ecdsa`'s `der` feature gates `Signature::{to_der,from_der}`, which
+# p256's `ecdsa` feature alone does not turn on. We need `to_der` to emit
+# the ASN.1 `ECDSA-Sig-Value` real PIV cards return under the GA `82`
+# tag (and `from_der` to verify it in tests). The crate is already in the
+# dependency graph (transitive via piggy-box/p384/ssh-key); this just
+# unifies the `der` feature onto `p256::ecdsa::Signature`.
+ecdsa = { version = "0.16", default-features = false, features = ["der"] }
 # 3DES (EDE3-ECB) for PIV mgmt-key challenge-response auth (INS 0x87
 # P1=0x03 P2=0x9B). YubiKey's factory mgmt-key is a 24-byte triple-DES
 # key used to gate admin ops (PUT DATA, GENERATE, import-cert).

@@ -83,8 +83,9 @@ fn print_help() {
          \n\
          --seed-rfc6979-slot-9a-cert installs the canonical fibby slot 9A\n\
          test cert (X.509 self-signed over the RFC 6979 §A.2.5 P-256 keypair)\n\
-         at PIV tag 5F C1 01. pivy-agent then exposes one SSH identity\n\
-         backed by the test-vector pubkey. Only meaningful when\n\
+         at PIV tag 5F C1 05 AND the matching private key into slot 9A, so\n\
+         pivy-agent exposes one SSH identity that can both be enumerated and\n\
+         used to sign (RFC 6979 deterministic ECDSA). Only meaningful when\n\
          --backend=virtual; ignored by the hardware backend. See piggy#135.\n\
          \n\
          Point clients at the socket via PCSCLITE_CSOCK_NAME.\n\
