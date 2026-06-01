@@ -306,3 +306,95 @@ function pivy_agent_against_empty_fibby_serves_repeated_probes { # @test
     return 1
   }
 }
+
+# piggy#138 regression: the agent ecdh-rebox decrypt path must NOT crash
+# pivy-agent against fibby's virtual slot 9D. With --seed-rfc5903-slot-9d-cert
+# fibby holds a slot-9D ECDH cert + key but answers INS_ATTEST with 6a80 —
+# exactly like a real YubiKey holding an *imported* 9D key (see
+# virtual_card.rs::yk_attest_slot_9d_returns_6a80_matching_imported_key_silicon).
+# pivy-agent's resume_rebox_after_confirm used to call piv_slot_get_auth (an
+# on-card attest/metadata probe, NOT a pure accessor) before opening the card
+# txn, so ykpiv_attest's VERIFY(pt_intxn) aborted the whole agent and the C
+# pivy-box rebox client saw libssh -26. Fixed in vendor/pivy by opening the
+# txn first (commit 0687d73); this test is the gate against that regression.
+#
+# Drives the FULL piggy decrypt path: `pass init` (auto-detect the slot-9D
+# recipient) + `pass insert` (encrypt) against fibby directly, then
+# `pass show` routed at the agent via PIGGY_AUTH_SOCK. The wrapped piggy
+# (.#default, PIGGY_BIN) carries the real pivy-box + piggy-ids, so the mock
+# crypto common.bash puts on PATH is bypassed. Legitimately PIN-gated (slot-9D
+# unlock during the rebox), so it supplies the VirtualCard PIN via the test
+# askpass — like the slot-9A sign test, the only other PIN-reaching test here.
+function piggy_rebox_decrypts_via_seeded_fibby_slot_9d { # @test
+  [[ -n ${PIGGY_BIN:-} && -x ${PIGGY_BIN:-/nonexistent} ]] ||
+    skip "PIGGY_BIN unset or not executable; run via just test-bats-conformance-fibby-pivy-agent-smoke"
+
+  export PIGGY_TEST_FIB_PIN=123456
+  spawn_fibby --seed-rfc5903-slot-9d-cert
+  spawn_agent
+
+  local store="$WORKDIR/store"
+  local secret="rebox-decrypt-138"
+
+  # init + insert talk to fibby directly: pubkey read + offline encrypt, no
+  # agent and no PIN. Bare `init` auto-detects the single card's 9D recipient
+  # (shells to `piggy-ids detect-pubkey`). Gitless store -> piggy's
+  # find_inner_git_dir returns None and the post-write commit is skipped.
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_STORE_DIR="$store" \
+    run "$PIGGY_BIN" pass init
+  [[ $status -eq 0 ]] || {
+    echo "piggy pass init exited $status" >&2
+    printf '%s\n' "$output" >&2
+    tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  printf '%s\n' "$secret" | PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    PIGGY_STORE_DIR="$store" "$PIGGY_BIN" pass insert -e foo/bar
+  local ins=$?
+  [[ $ins -eq 0 && -f "$store/foo/bar.ebox" ]] || {
+    echo "piggy pass insert exited $ins (ebox present: $([[ -f $store/foo/bar.ebox ]] && echo yes || echo no))" >&2
+    tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  # The decrypt routes through pivy-box stream decrypt -> piv_box_open_agent
+  # rebox against the agent. Pre-fix this SIGABRTed the agent (-> -26 here).
+  PIGGY_AUTH_SOCK="$AGENT_SOCK" PIGGY_STORE_DIR="$store" \
+    run "$PIGGY_BIN" pass show foo/bar
+  [[ $status -eq 0 ]] || {
+    echo "piggy pass show exited $status (regression: agent rebox decrypt)" >&2
+    printf '%s\n' "$output" >&2
+    echo "--- agent log tail ---" >&2
+    tail -60 "$AGENT_LOG" >&2 || true
+    echo "--- fibby log tail ---" >&2
+    tail -60 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+  # `run` merges pivy-box's stderr ("Using key ... in ssh-agent...") into
+  # $output, so assert the decrypted secret appears as its own line rather
+  # than equalling the whole capture.
+  printf '%s\n' "$output" | grep -Fxq "$secret" || {
+    echo "decrypt output missing the secret line '$secret'" >&2
+    printf 'got:\n%s\n' "$output" >&2
+    return 1
+  }
+
+  # The agent must still be alive (a SIGABRT would have reaped it), and the
+  # GA ECDH must have actually reached fibby's slot 9D and returned 9000.
+  kill -0 "$AGENT_PID" 2>/dev/null || {
+    echo "pivy-agent died during the rebox decrypt (#138 regression)" >&2
+    tail -60 "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  grep -q "GA ECDH 9D -> 9000" "$FIBBY_LOG" || {
+    echo "no successful slot-9D GA ECDH in fibby trace" >&2
+    tail -80 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+  ! grep -q "REFUSING to prompt" "$AGENT_LOG" || {
+    echo "unexpected askpass refusal in agent log" >&2
+    cat "$AGENT_LOG" >&2
+    return 1
+  }
+}

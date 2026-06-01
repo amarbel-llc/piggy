@@ -249,9 +249,16 @@ test-bats-conformance-fibby-pivy-agent-smoke:
     set -euo pipefail
     pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    # The wrapped piggy (.#default) bakes the real pivy-box on its PATH and
+    # the real piggy-ids via PIGGY_IDS_PATH, so the agent-rebox decrypt test
+    # (piggy_rebox_decrypts_via_seeded_fibby_slot_9d, the piggy#138 gate)
+    # exercises the real crypto path even though common.bash puts mock
+    # pivy-box/piggy-ids on PATH.
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
     PIVY_AGENT="$pivy_out/bin/pivy-agent" \
       FIBBY_BIN="$fibby_out/bin/fibby" \
-      BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_fibby_pivy_agent_smoke.bats
 
 # Hardware lane for the C pivy-agent built from vendor/pivy/. Runs
