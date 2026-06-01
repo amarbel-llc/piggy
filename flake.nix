@@ -412,6 +412,40 @@
           };
         };
 
+        # Go test-only SSH server for the hardware-free SSH-over-fibby
+        # bats lane (piggy#135 Phase A). Mirrors madder's RFC-0001
+        # test-subprocess handshake and embeds golang.org/x/crypto/ssh —
+        # already vendored for piggy-agent-conformance, so the vendorHash
+        # is shared (go.mod/go.sum are unchanged; only a new subPackage
+        # is built). Named after its cmd/ dir, so no postInstall rename.
+        piggy-test-sshd = pkgs.buildGoModule {
+          pname = "piggy-test-sshd";
+          version = piggyVersion;
+
+          src = pkgs.lib.fileset.toSource {
+            root = ./go;
+            fileset = pkgs.lib.fileset.unions [
+              ./go/go.mod
+              ./go/go.sum
+              ./go/cmd/piggy-test-sshd/main.go
+            ];
+          };
+
+          # Distinct from piggy-agent-conformance's vendorHash: this
+          # subPackage's import set differs, so buildGoModule's vendor
+          # dir (and its hash) differs even though go.mod/go.sum match.
+          vendorHash = "sha256-+TACCNntEPB3do5qjBqWHNiCf4DF0mPNb5dekR9cut4=";
+
+          subPackages = [ "cmd/piggy-test-sshd" ];
+
+          meta = with pkgs.lib; {
+            description = "Go-based test-only SSH server for piggy's SSH-over-fibby bats lane";
+            homepage = "https://github.com/amarbel-llc/piggy";
+            license = licenses.mpl20;
+            platforms = platforms.linux ++ platforms.darwin;
+          };
+        };
+
         # Sandboxed bats lane. See ./bats.nix for the lane builder and
         # the `# bats file_tags=hardware` convention that filters
         # pcscd/hardware-requiring tests out of the default lane.
@@ -470,6 +504,10 @@
           # `just fibby-up` and the wet-env capture recipes; future
           # consumer is the planned home-manager service (#129 stretch).
           fibby = fibby;
+          # Go test-only SSH server for the SSH-over-fibby bats lane
+          # (piggy#135). Consumed by the forthcoming Phase D recipe via
+          # `nix build .#piggy-test-sshd`.
+          piggy-test-sshd = piggy-test-sshd;
         }
         // batsLib.batsLaneOutputs
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {

@@ -1747,3 +1747,86 @@ debug-fibby-slot-9a-sign:
       tail -80 "$fibby_log"; exit 1; }
     echo
     echo "=== SLOT-9A SIGN ROUND-TRIP OK ==="
+
+# piggy#135 Phase A smoke: build piggy-test-sshd, start it (RFC-0001
+# handshake over stdout, shutdown on stdin EOF), connect with an
+# ephemeral key (the server accepts any auth), run a remote `exec`, and
+# assert both stdout and the exit-status propagate. No fibby/agent yet —
+# that's Phase B/D. Exits non-zero on any failure. No hardware.
+[group('debug')]
+debug-piggy-test-sshd:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    sshd_out=$(nix build .#piggy-test-sshd --no-link --print-out-paths)
+    sshd_bin="$sshd_out/bin/piggy-test-sshd"
+    [[ -x $sshd_bin ]] || { echo "missing $sshd_bin"; exit 1; }
+
+    workdir=$(mktemp -d /tmp/p135a-XXXXXX)
+    hs="$workdir/handshake"
+    err="$workdir/stderr"
+    fifo="$workdir/stdin.fifo"
+    mkfifo "$fifo"
+    cookie=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+
+    sshd_pid=""
+    cleanup() {
+      [[ -n $sshd_pid ]] && kill "$sshd_pid" 2>/dev/null || true
+      exec 9>&- 2>/dev/null || true
+      rm -rf "$workdir"
+    }
+    trap cleanup EXIT
+
+    # Start the server with stdin from a fifo so we control EOF (= the
+    # RFC-0001 shutdown signal). The child blocks opening the fifo for
+    # read until we open it for write on fd 9.
+    PIGGY_PLUGIN_COOKIE="$cookie" "$sshd_bin" <"$fifo" >"$hs" 2>"$err" &
+    sshd_pid=$!
+    exec 9>"$fifo"
+
+    for _ in $(seq 1 50); do [[ -s $hs ]] && break; sleep 0.1; done
+    [[ -s $hs ]] || { echo "no handshake line; stderr:"; cat "$err"; exit 1; }
+    line=$(head -1 "$hs")
+    echo "handshake: $line"
+
+    IFS='|' read -r got_cookie version _transport addr kh_field subproto <<<"$line"
+    [[ $got_cookie == "$cookie" ]] || { echo "cookie mismatch"; exit 1; }
+    [[ $version == 1 ]] || { echo "version: $version"; exit 1; }
+    [[ $subproto == ssh ]] || { echo "subproto: $subproto"; exit 1; }
+    port="${addr##*:}"
+    kh="${kh_field#known_hosts=}"
+    [[ -s $kh ]] || { echo "known_hosts missing: $kh"; exit 1; }
+
+    key="$workdir/id"
+    ssh-keygen -t ed25519 -N '' -f "$key" -q
+
+    # Env isolation: run the ssh client with a pristine HOME under
+    # `env -i` so the test neither inherits nor fights the operator's ssh
+    # config or the home-manager ssh wrapper (which injects
+    # `-o UserKnownHostsFile=$SSH_HOME/known_hosts -F $SSH_HOME/config`,
+    # winning over our flags via ssh's first-wins -o rule). Both stock
+    # ssh ($HOME/.ssh/known_hosts) and the wrapper ($SSH_HOME) then read
+    # our ephemeral known_hosts. PATH is preserved so `ssh` resolves.
+    client_home="$workdir/clienthome"
+    mkdir -p "$client_home/.ssh"
+    chmod 700 "$client_home/.ssh"
+    cp "$kh" "$client_home/.ssh/known_hosts"
+    : >"$client_home/.ssh/config"
+
+    echo "=== remote exec (echo + exit 7) ==="
+    out=$(env -i \
+      HOME="$client_home" \
+      SSH_HOME="$client_home/.ssh" \
+      PATH="$PATH" \
+      ssh -i "$key" \
+        -o IdentitiesOnly=yes \
+        -o StrictHostKeyChecking=yes \
+        -o BatchMode=yes \
+        -p "$port" testuser@127.0.0.1 \
+        'echo hello-from-piggy-sshd; exit 7')
+    rc=$?
+    echo "stdout: $out"
+    echo "exit:   $rc"
+    [[ $out == hello-from-piggy-sshd ]] || { echo "!!! unexpected stdout"; cat "$err"; exit 1; }
+    [[ $rc -eq 7 ]] || { echo "!!! exit-status not propagated (want 7, got $rc)"; cat "$err"; exit 1; }
+    echo
+    echo "=== PHASE A SMOKE OK ==="
