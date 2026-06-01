@@ -38,6 +38,7 @@ struct Args {
     reader: String,
     model: String,
     seed_rfc6979_slot_9a_cert: bool,
+    seed_rfc5903_slot_9d_cert: bool,
     /// Raw P-256 scalars / keys to install into the virtual card, parsed
     /// from `--seed-*` hex flags. Let bats/shell seed slot material that
     /// was previously Rust-only (piggy#135). Applied after the cert
@@ -58,6 +59,7 @@ fn parse_args() -> Result<Args, String> {
         reader: "Yubico".to_string(),
         model: "yk4".to_string(),
         seed_rfc6979_slot_9a_cert: false,
+        seed_rfc5903_slot_9d_cert: false,
         seed_slot_9a_priv: None,
         seed_slot_9d_priv: None,
         seed_mgmt_key: None,
@@ -83,6 +85,7 @@ fn parse_args() -> Result<Args, String> {
             "--reader" => args.reader = value("--reader")?,
             "--model" => args.model = value("--model")?,
             "--seed-rfc6979-slot-9a-cert" => args.seed_rfc6979_slot_9a_cert = true,
+            "--seed-rfc5903-slot-9d-cert" => args.seed_rfc5903_slot_9d_cert = true,
             "--seed-slot-9a-priv" => {
                 args.seed_slot_9a_priv = Some(parse_hex_array(
                     &value("--seed-slot-9a-priv")?,
@@ -148,6 +151,7 @@ fn print_help() {
          USAGE: fibby [--socket PATH] [--backend virtual|hardware]\n\
                       [--reader SUBSTR] [--model yk4|yk5]\n\
                       [--seed-rfc6979-slot-9a-cert]\n\
+                      [--seed-rfc5903-slot-9d-cert]\n\
                       [--seed-slot-9a-priv HEX] [--seed-slot-9d-priv HEX]\n\
                       [--seed-mgmt-key HEX] [--seed-mgmt-key-witness HEX]\n\
          \n\
@@ -162,6 +166,12 @@ fn print_help() {
          pivy-agent exposes one SSH identity that can both be enumerated and\n\
          used to sign (RFC 6979 deterministic ECDSA). Only meaningful when\n\
          --backend=virtual; ignored by the hardware backend. See piggy#135.\n\
+         \n\
+         --seed-rfc5903-slot-9d-cert is the slot-9D analogue: it installs a\n\
+         cert (over the RFC 5903 §8.1 P-256 keypair) at PIV tag 5F C1 0B AND\n\
+         the matching key into slot 9D, so pivy-agent exposes a key-management\n\
+         identity that pivy-box can ECDH against for decrypt. A distinct\n\
+         keypair from 9A's so the agent routes ECDH unambiguously to 9D.\n\
          \n\
          --seed-slot-9a-priv / --seed-slot-9d-priv take a 32-byte (64 hex\n\
          char) big-endian P-256 scalar; --seed-mgmt-key takes a 24-byte\n\
@@ -219,6 +229,9 @@ fn make_backend(args: &Args) -> Result<SharedBackend, String> {
             let mut card = VirtualCard::with_model(model);
             if args.seed_rfc6979_slot_9a_cert {
                 card.seed_rfc6979_slot_9a_cert();
+            }
+            if args.seed_rfc5903_slot_9d_cert {
+                card.seed_rfc5903_slot_9d_cert();
             }
             // Explicit per-slot seeds apply after the cert bundle, so an
             // explicit --seed-slot-9a-priv overrides the scalar the cert
