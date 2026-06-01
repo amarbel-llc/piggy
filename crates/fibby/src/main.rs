@@ -37,6 +37,7 @@ struct Args {
     backend: String,
     reader: String,
     model: String,
+    seed_rfc6979_slot_9a_cert: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -47,6 +48,7 @@ fn parse_args() -> Result<Args, String> {
         backend: "virtual".to_string(),
         reader: "Yubico".to_string(),
         model: "yk4".to_string(),
+        seed_rfc6979_slot_9a_cert: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -55,6 +57,7 @@ fn parse_args() -> Result<Args, String> {
             "--backend" => args.backend = it.next().ok_or("--backend needs a value")?,
             "--reader" => args.reader = it.next().ok_or("--reader needs a value")?,
             "--model" => args.model = it.next().ok_or("--model needs a value")?,
+            "--seed-rfc6979-slot-9a-cert" => args.seed_rfc6979_slot_9a_cert = true,
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -71,11 +74,18 @@ fn print_help() {
          \n\
          USAGE: fibby [--socket PATH] [--backend virtual|hardware]\n\
                       [--reader SUBSTR] [--model yk4|yk5]\n\
+                      [--seed-rfc6979-slot-9a-cert]\n\
          \n\
          --model selects the virtual-card hardware profile (ATR + advertised\n\
          firmware version). Only meaningful when --backend=virtual; the\n\
          hardware backend reports whatever the real card advertises.\n\
          Default: yk4 (the wet-env-verified profile).\n\
+         \n\
+         --seed-rfc6979-slot-9a-cert installs the canonical fibby slot 9A\n\
+         test cert (X.509 self-signed over the RFC 6979 §A.2.5 P-256 keypair)\n\
+         at PIV tag 5F C1 01. pivy-agent then exposes one SSH identity\n\
+         backed by the test-vector pubkey. Only meaningful when\n\
+         --backend=virtual; ignored by the hardware backend. See piggy#135.\n\
          \n\
          Point clients at the socket via PCSCLITE_CSOCK_NAME.\n\
          Set FIBBY_LOG=info|debug|wire for logging."
@@ -122,7 +132,11 @@ fn make_backend(args: &Args) -> Result<SharedBackend, String> {
     match args.backend.as_str() {
         "virtual" => {
             let model = Model::parse_arg(&args.model)?;
-            Ok(into_shared(VirtualCard::with_model(model)))
+            let mut card = VirtualCard::with_model(model);
+            if args.seed_rfc6979_slot_9a_cert {
+                card.seed_rfc6979_slot_9a_cert();
+            }
+            Ok(into_shared(card))
         }
         "hardware" => make_hardware_backend(&args.reader),
         other => Err(format!(

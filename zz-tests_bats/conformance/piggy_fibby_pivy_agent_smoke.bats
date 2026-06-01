@@ -65,8 +65,10 @@ teardown() {
 
 # Spawn fibby in the virtual backend on the per-test socket. Tracing
 # is set to `wire` so other tests in this file can grep the trace.
+# Extra args (e.g. `--seed-rfc6979-slot-9a-cert`) pass through verbatim
+# after the standard `--socket` / `--backend` flags.
 spawn_fibby() {
-  FIBBY_LOG=wire "$FIBBY_BIN" --socket "$FIBBY_SOCK" --backend virtual \
+  FIBBY_LOG=wire "$FIBBY_BIN" --socket "$FIBBY_SOCK" --backend virtual "$@" \
     >"$FIBBY_LOG" 2>&1 &
   FIBBY_PID=$!
   local _
@@ -153,6 +155,49 @@ function pivy_agent_probes_standard_piv_cert_tags { # @test
       return 1
     }
   done
+}
+
+# With fibby's `--seed-rfc6979-slot-9a-cert` flag, VirtualCard exposes
+# the canonical slot 9A cert built over the RFC 6979 §A.2.5 P-256
+# keypair. pivy-agent's identity-listing flow then surfaces one SSH
+# identity (`ecdsa-sha2-nistp256 …`) whose public key is the RFC test
+# vector. This closes the loop on the empty-card smoke above —
+# substrate works AND the seeded-cert path produces a usable SSH
+# identity end-to-end.
+#
+# Asserts:
+#   - ssh-add -L exits 0 (has identities)
+#   - exactly one identity line in stdout
+#   - the key type prefix is `ecdsa-sha2-nistp256` (matches the P-256
+#     curve the cert advertises)
+function pivy_agent_against_seeded_fibby_lists_one_ecdsa_identity { # @test
+  spawn_fibby --seed-rfc6979-slot-9a-cert
+  spawn_agent
+  SSH_AUTH_SOCK="$AGENT_SOCK" run ssh-add -L
+  [[ $status -eq 0 ]] || {
+    echo "ssh-add -L exited $status; expected 0 (have identities)" >&2
+    echo "--- agent log ---" >&2
+    cat "$AGENT_LOG" >&2 || true
+    echo "--- fibby log tail ---" >&2
+    tail -80 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+  local count
+  count=$(printf '%s\n' "$output" | grep -c '^ecdsa-sha2-nistp256 ' || true)
+  [[ $count -eq 1 ]] || {
+    echo "expected 1 ecdsa-sha2-nistp256 identity, got $count" >&2
+    echo "ssh-add -L output:" >&2
+    printf '%s\n' "$output" >&2
+    echo "--- agent log ---" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  refute_output --partial "[piggy-test-askpass]"
+  ! grep -q "REFUSING to prompt" "$AGENT_LOG" || {
+    echo "unexpected askpass refusal in agent log" >&2
+    cat "$AGENT_LOG" >&2
+    return 1
+  }
 }
 
 # pivy-agent on top of fibby must survive multiple identity probes
