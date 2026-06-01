@@ -19,6 +19,11 @@ build-nix:
     # next time someone ran `nix build .#fibby` directly or
     # `just fibby-up` (#129).
     nix build .#fibby --no-link --show-trace
+    # Same rationale for the Go piggy-test-sshd binary (piggy#135): it's
+    # not a transitive dep of `.#default`, so build it explicitly here to
+    # catch flake.nix / vendorHash regressions at the merge gate rather
+    # than only when `just debug-piggy-test-sshd` or the Phase D bats run.
+    nix build .#piggy-test-sshd --no-link --show-trace
 
 [group('build')]
 build-rust *ARGS:
