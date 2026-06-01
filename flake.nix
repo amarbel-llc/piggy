@@ -544,6 +544,13 @@
               pkgs-master.rust-analyzer
               treefmtEval.config.build.wrapper
               pkgs.scdoc
+              # Go toolchain for the go/ module (piggy-agent-conformance
+              # + piggy-test-sshd): `go build`/`vet`/`gofmt` for fast
+              # dev-loop iteration outside nix, and to back the hamster.*
+              # MCP tools. The packaged binaries still build via
+              # buildGoModule (which uses its own pkgs.go); this is the
+              # same toolchain, exposed on the devShell PATH.
+              pkgs.go
               # gum drives terminal UI logging in the maint group recipes
               # (`bump-version`, `tag`, `release`). See eng-versioning(7)
               # "JUSTFILE RELEASE RECIPES".

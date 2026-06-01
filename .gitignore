@@ -5,3 +5,8 @@
 
 # fib (virtual PIV) runtime state
 /.fib/
+
+# go build artifacts (binaries land in the module dir when `go build`
+# is run without -o, e.g. `cd go && go build ./cmd/piggy-test-sshd`)
+/go/conformance
+/go/piggy-test-sshd
