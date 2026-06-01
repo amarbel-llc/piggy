@@ -411,6 +411,31 @@ const RFC5903_SLOT_9D_CERT_OBJECT: &[u8] = &[
     0x9E, 0xD9, 0x8D, 0xA5, 0xB8, 0xB7, 0xF2, 0x86, 0x71, 0x01, 0x00, 0xFE, 0x00,
 ];
 
+/// PIV tag for the Card Holder Unique Identifier (CHUID) data object,
+/// per SP 800-73-4 §3.1.2: `5F C1 02`.
+const TAG_CHUID: &[u8] = &[0x5F, 0xC1, 0x02];
+
+/// Canonical CHUID object, captured from the YubiKey 4 throwaway during
+/// the 2026-05-31 wet-env init (`tests/fixtures/apdu/yk4-init.fixture`,
+/// the GET DATA 5F C1 02 response). A real CHUID is needed because
+/// clients treat a card with no CHUID as *uninitialized*: `pivy-tool
+/// list` reports `guid: 0000…` / "needs initialization", and piggy's
+/// `PivToken::connect` → `read_chuid` (pivy-piv) errors outright, so
+/// `piggy-ids detect-pubkey` / `piggy pass init` see "no PIV cards".
+/// Seeding this makes VirtualCard a detectable, initialized card with a
+/// stable GUID (`19 17 55 CF … BE B1`, tag 0x34) — required for the
+/// SSH-over-fibby decrypt store setup (piggy#135 Phase D).
+///
+/// Wraps `53 39 30 19 <FASC-N> 34 10 <GUID> 35 08 <expiry> 3E 00`. The
+/// FASC-N / GUID / expiry are the throwaway card's real (public, not
+/// sensitive) values — a CHUID carries no key material.
+const CANONICAL_REAL_CARD_CHUID: &[u8] = &[
+    0x53, 0x39, 0x30, 0x19, 0xD0, 0x42, 0x10, 0xD8, 0x21, 0x08, 0x6C, 0x10, 0x84, 0x21, 0x0D, 0x83,
+    0x68, 0x58, 0x21, 0x08, 0x42, 0x10, 0x84, 0x21, 0xC8, 0x42, 0x10, 0xC3, 0xEB, 0x34, 0x10, 0x19,
+    0x17, 0x55, 0xCF, 0xF3, 0x9E, 0xFE, 0x52, 0x2C, 0x07, 0xA3, 0x83, 0x27, 0x5B, 0xBE, 0xB1, 0x35,
+    0x08, 0x32, 0x30, 0x33, 0x36, 0x30, 0x35, 0x32, 0x38, 0x3E, 0x00,
+];
+
 impl Default for VirtualCard {
     fn default() -> Self {
         Self::new()
@@ -519,6 +544,21 @@ impl VirtualCard {
             RFC5903_SLOT_9D_CERT_OBJECT.to_vec(),
         );
         self.seed_slot_9d_priv(RFC5903_SLOT_9D_PRIV);
+        // A 9D recipient is only reachable if clients see an *initialized*
+        // card; without a CHUID, pivy-piv's read_chuid errors and
+        // `piggy-ids detect-pubkey` / `piggy pass init` report no card.
+        self.seed_chuid();
+    }
+
+    /// Install the canonical CHUID ([`CANONICAL_REAL_CARD_CHUID`]) under
+    /// PIV tag `5F C1 02`, making VirtualCard present as an *initialized*
+    /// card with a stable GUID. Without it, clients that key off the
+    /// CHUID (pivy-tool, pivy-piv's `read_chuid`) treat the card as
+    /// uninitialized and won't enumerate its slots. Idempotent; reserved
+    /// for test scaffolding (bypasses the mgmt-key auth a real
+    /// `pivy-tool init` PUT DATA would require).
+    pub fn seed_chuid(&mut self) {
+        self.seed_data_object(TAG_CHUID.to_vec(), CANONICAL_REAL_CARD_CHUID.to_vec());
     }
 
     /// Install a P-256 scalar into slot 9A (PIV Authentication, the
@@ -1535,7 +1575,8 @@ mod tests {
         a
     }
 
-    const TAG_CHUID: &[u8] = &[0x5F, 0xC1, 0x02];
+    // TAG_CHUID is now a module-level const (see CANONICAL_REAL_CARD_CHUID);
+    // imported via `use super::*`.
     const TAG_CCC: &[u8] = &[0x5F, 0xC1, 0x07];
 
     #[test]
@@ -2020,6 +2061,16 @@ mod tests {
         let cert = c.transmit(&get_data_apdu(TAG_SLOT_9D_CERT)).unwrap();
         assert_eq!(cert[0], 0x53, "GET DATA returns the 53-wrapped cert object");
         assert_eq!(&cert[cert.len() - 2..], &[0x90, 0x00], "cert read -> 9000");
+
+        // It also installs a CHUID so clients see an initialized card with
+        // a GUID (else pivy-piv's read_chuid errors and detect-pubkey /
+        // init report no card).
+        let chuid = c.transmit(&get_data_apdu(TAG_CHUID)).unwrap();
+        assert_eq!(chuid[0], 0x53, "GET DATA returns the 53-wrapped CHUID");
+        assert!(
+            chuid.windows(2).any(|w| w == [0x34, 0x10]),
+            "CHUID carries a 16-byte GUID (tag 0x34) for pivy-piv to read"
+        );
 
         // Reuse an ephemeral point from the 9D ECDH captures; the X-coord
         // differs (different key) but the response must be a well-formed
