@@ -3008,12 +3008,19 @@ static errf_t *resume_rebox_after_confirm(socket_entry_t *e) {
                  "by a disabled key slot"));
   }
 
-  rauth = piv_slot_get_auth(c->tk, c->slot);
-  if (rauth & PIV_SLOT_AUTH_PIN)
-    c->canskip = B_FALSE;
-  if (rauth & PIV_SLOT_AUTH_TOUCH)
-    send_touch_notify(e, piv_slot_id(c->slot));
-
+  /*
+   * Open the card txn BEFORE piv_slot_get_auth (amarbel-llc/piggy#138).
+   * piv_slot_get_auth is NOT a pure accessor: on a ykpiv card whose slot
+   * metadata wasn't cached during enumeration, it performs an on-card
+   * metadata fetch (ykpiv_attest / ykpiv_get_metadata) whose
+   * VERIFY(pt->pt_intxn == B_TRUE) aborts the whole agent if no txn is
+   * open. Enumeration leaves metadata uncached whenever the card answers
+   * INS_ATTEST / GET-METADATA with an error (e.g. fibby's VirtualCard,
+   * which presents as ykpiv but implements neither), so the rebox path
+   * must claim the txn first. The sign/ECDH/prehash handlers open their
+   * txn in the pre-yield body, so they were already safe; rebox confirms
+   * before opening, so the open has to move here.
+   */
   if (allcard_mode) {
     if ((err = agent_piv_open_token(c->tk)))
       return (err);
@@ -3024,6 +3031,12 @@ static errf_t *resume_rebox_after_confirm(socket_entry_t *e) {
   /* Now claim txn ownership; everything below this point could
    * touch the card. */
   txn_owner = e;
+
+  rauth = piv_slot_get_auth(c->tk, c->slot);
+  if (rauth & PIV_SLOT_AUTH_PIN)
+    c->canskip = B_FALSE;
+  if (rauth & PIV_SLOT_AUTH_TOUCH)
+    send_touch_notify(e, piv_slot_id(c->slot));
 
   if (pin_len == 0 && !c->canskip) {
     start_prompt(e, PROMPT_ASKPASS, CONT_REBOX_AFTER_PIN);

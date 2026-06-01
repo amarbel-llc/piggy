@@ -1869,3 +1869,143 @@ debug-piggy-test-sshd:
     echo "=== PHASE B (agent forwarding) OK ==="
     echo
     echo "=== PHASE A+B SMOKE OK ==="
+
+# piggy#138 repro: the SSH-forwarded-style agent decrypt against fibby's
+# virtual slot-9D. Stands up fibby (virtual, --seed-rfc5903-slot-9d-cert
+# + CHUID), points pivy-agent at it (PCSCLITE_CSOCK_NAME), builds a piggy
+# store (init + insert — both client-side / direct to fibby), then runs
+# `piggy pass show` with PIGGY_AUTH_SOCK=<agent> so the decrypt routes
+# through the C `pivy-box stream decrypt` → `piv_box_open_agent`
+# ecdh-rebox path (NOT the direct-PCSC path). Dumps the TRACE-level agent
+# log + fibby wire trace. No hardware, no SSH transport — this is the
+# minimal (transport-free) reproduction of the failing combination from
+# #138's 3-axis bisection: C rebox client + on-demand agent unlock +
+# fibby. Exits 0 if the decrypt round-trips, non-zero (reproducing #138)
+# otherwise.
+[group('debug')]
+debug-ssh-via-fibby GDB="":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    pivy_agent="$pivy_out/bin/pivy-agent"
+    pivy_tool="$pivy_out/bin/pivy-tool"
+    fibby_bin="$fibby_out/bin/fibby"
+    piggy_bin="$piggy_out/bin/piggy"
+    for b in "$pivy_agent" "$pivy_tool" "$fibby_bin" "$piggy_bin"; do
+      [[ -x $b ]] || { echo "missing $b"; exit 1; }
+    done
+
+    workdir=$(mktemp -d /tmp/p138-XXXXXX)
+    keepdir=/tmp/p138-last
+    rm -rf "$keepdir"; mkdir -p "$keepdir"
+    fibby_sock="$workdir/pcscd.comm"
+    agent_sock="$workdir/a.sock"
+    fibby_log="$workdir/fibby.log"
+    agent_log="$workdir/agent.log"
+    export PIGGY_STORE_DIR="$workdir/store"
+    fibby_pid=""
+    agent_pid=""
+    cleanup() {
+      [[ -n $fibby_pid ]] && kill "$fibby_pid" 2>/dev/null || true
+      [[ -n $agent_pid ]] && kill "$agent_pid" 2>/dev/null || true
+      # Preserve logs under a stable path for post-mortem (the agent
+      # SIGABRTs on the #138 bug; its stderr holds the fatal line).
+      cp "$agent_log" "$fibby_log" "$workdir/show.err" "$keepdir/" 2>/dev/null || true
+      rm -rf "$workdir"
+    }
+    trap cleanup EXIT
+
+    echo "=== Starting fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
+    FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+      --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+    fibby_pid=$!
+    for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+    [[ -S $fibby_sock ]] || { echo "fibby socket never appeared:"; cat "$fibby_log"; exit 1; }
+
+    # Test askpass: hands the agent the VirtualCard default PIN (123456)
+    # non-interactively so slot 9D can unlock on-demand during the rebox.
+    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+
+    echo "=== Starting pivy-agent (-A -d TRACE, PCSCLITE_CSOCK_NAME=fibby) ==="
+    # Passing GDB=1 (`just debug-ssh-via-fibby 1`) wraps the agent in
+    # gdb --batch so the SIGABRT (the #138 bug) is caught and a backtrace
+    # lands in the agent log. Requires gdb on PATH; symbols depend on the
+    # pivy build (see nix/pivy.nix).
+    agent_argv=("$pivy_agent" -A -d -a "$agent_sock")
+    if [[ -n "{{ GDB }}" ]]; then
+      # gdb can't exec pivy's makeWrapper shell shim — target the real
+      # ELF (.pivy-agent-unwrapped, not stripped) and replicate the
+      # wrapper's libpcsclite LD_PRELOAD ourselves.
+      agent_unwrapped="${pivy_agent%/pivy-agent}/.pivy-agent-unwrapped"
+      [[ -x $agent_unwrapped ]] || { echo "missing $agent_unwrapped"; exit 1; }
+      for lib in /usr/lib/x86_64-linux-gnu/libpcsclite.so.1 \
+                 /usr/lib/libpcsclite.so.1 /lib/x86_64-linux-gnu/libpcsclite.so.1; do
+        [[ -e $lib ]] && { export LD_PRELOAD="$lib${LD_PRELOAD:+:$LD_PRELOAD}"; break; }
+      done
+      agent_argv=(gdb -q -batch \
+        -ex 'set pagination off' \
+        -ex 'set print frame-arguments all' \
+        -ex run \
+        -ex 'printf "\n=== BACKTRACE ===\n"' \
+        -ex 'bt' \
+        -ex 'printf "\n=== BACKTRACE FULL ===\n"' \
+        -ex 'bt full' \
+        --args "$agent_unwrapped" -A -d -a "$agent_sock")
+    fi
+    PCSCLITE_CSOCK_NAME="$fibby_sock" \
+      SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY="" \
+      PIGGY_TEST_FIB_PIN=123456 \
+      "${agent_argv[@]}" >"$agent_log" 2>&1 &
+    agent_pid=$!
+    for _ in $(seq 1 50); do [[ -S $agent_sock ]] && break; sleep 0.1; done
+    [[ -S $agent_sock ]] || { echo "agent socket never appeared:"; cat "$agent_log"; cat "$fibby_log"; exit 1; }
+
+    echo "=== discover GUID via pivy-tool list (through fibby) ==="
+    guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+    [[ -n $guid ]] || { echo "no GUID found"; cat "$fibby_log"; exit 1; }
+    echo "  guid: $guid"
+
+    echo "=== piggy pass init -g $guid (direct to fibby) ==="
+    PCSCLITE_CSOCK_NAME="$fibby_sock" "$piggy_bin" pass init -g "$guid" \
+      || { echo "init failed"; tail -40 "$fibby_log"; exit 1; }
+
+    plaintext="secret-via-fibby-138"
+    echo "=== piggy pass insert -e foo/bar (direct to fibby) ==="
+    printf '%s\n' "$plaintext" | PCSCLITE_CSOCK_NAME="$fibby_sock" \
+      "$piggy_bin" pass insert -e foo/bar \
+      || { echo "insert failed"; tail -40 "$fibby_log"; exit 1; }
+
+    # Decrypt via the agent. PIGGY_AUTH_SOCK overrides SSH_AUTH_SOCK for
+    # piggy's own pivy-box child only, so the decrypt hits piv_box_open_agent
+    # (rebox) against the agent, NOT fibby's direct-PCSC path. PCSCLITE_CSOCK_NAME
+    # is intentionally NOT set here, mirroring the SSH-remote side that has
+    # no fibby socket of its own.
+    echo "=== piggy pass show foo/bar (PIGGY_AUTH_SOCK=agent → rebox path) ==="
+    got=$(PIGGY_AUTH_SOCK="$agent_sock" "$piggy_bin" pass show foo/bar 2>"$workdir/show.err")
+    show_rc=$?
+    echo "  show exit: $show_rc"
+    echo "  show stderr:"; sed 's/^/    /' "$workdir/show.err"
+    echo "  got: '$got'"
+    echo
+    if grep -q '=== BACKTRACE ===' "$agent_log"; then
+      echo "=== pivy-agent gdb backtrace ==="
+      sed -n '/=== BACKTRACE ===/,$p' "$agent_log"
+      echo
+    fi
+    echo "=== agent crash / extension lines (grep) ==="
+    grep -nE 'FATAL|fatal|assert|VERIFY|abort|panic|rebox|ecdh|EXTENSION|extension|failed to process' "$agent_log" || true
+    echo
+    echo "=== pivy-agent log (last 30 lines) ==="
+    tail -30 "$agent_log"
+    echo
+    echo "=== logs preserved under $keepdir ==="
+
+    if [[ $show_rc -eq 0 && $got == "$plaintext" ]]; then
+      echo "=== DECRYPT OK (rebox path works) ==="
+      exit 0
+    else
+      echo "=== DECRYPT FAILED — reproduces #138 ==="
+      exit 1
+    fi
