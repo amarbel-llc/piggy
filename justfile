@@ -52,7 +52,7 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: test-bats-default test-bats-conformance test-rust test-bats-conformance-fibby-pivy-agent-smoke
+test: test-bats-default test-bats-conformance test-rust test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby
 
 # Sandboxed bats lane: runs every top-level t*.bats NOT tagged
 # `# bats file_tags=hardware` inside the nix build sandbox. See
@@ -260,6 +260,28 @@ test-bats-conformance-fibby-pivy-agent-smoke:
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_fibby_pivy_agent_smoke.bats
+
+# piggy#135 Phase D: end-to-end SSH-forwarded decrypt lane. Stands up
+# fibby + pivy-agent + piggy-test-sshd and drives a "remote" `piggy pass
+# show` over `ssh -A` so the decrypt routes through the forwarded agent
+# socket back to pivy-agent <-> fibby. No hardware. The wrapped piggy
+# (.#default) bypasses common.bash's mock crypto (see the smoke recipe);
+# .#piggy-test-sshd is the Go fixture server (#135 Phase A/B). The
+# `just debug-ssh-decrypt-via-fibby` recipe is the non-bats scaffold.
+[group('post-build')]
+test-bats-conformance-piggy-ssh-via-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    sshd_out=$(nix build .#piggy-test-sshd --no-link --print-out-paths)
+    PIVY_AGENT="$pivy_out/bin/pivy-agent" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      SSHD_BIN="$sshd_out/bin/piggy-test-sshd" \
+      BATS_TEST_TIMEOUT=90 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_ssh_via_fibby.bats
 
 # Hardware lane for the C pivy-agent built from vendor/pivy/. Runs
 # pivy_agent_hardware.bats against the user's plugged-in PIV card.
@@ -2014,5 +2036,133 @@ debug-ssh-via-fibby GDB="":
       exit 0
     else
       echo "=== DECRYPT FAILED — reproduces #138 ==="
+      exit 1
+    fi
+
+# piggy#135 Phase D: end-to-end SSH-forwarded decrypt — the realistic
+# deployment shape this whole arc is about. Stands up the full stack:
+# fibby (virtual, seeded slot-9D ECDH cert) + pivy-agent over fibby + a
+# piggy store (init + insert, direct to fibby) + the piggy-test-sshd
+# fixture server. Then runs a *remote* `piggy pass show` over `ssh -A`,
+# so the decrypt routes through the FORWARDED agent socket back to
+# pivy-agent ↔ fibby (not a direct path). No hardware. Exits 0 iff the
+# remote decrypt round-trips. This is the debug-recipe scaffold for the
+# Phase D bats lane (conformance/piggy_ssh_via_fibby.bats).
+[group('debug')]
+debug-ssh-decrypt-via-fibby:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    unset PIGGY_AUTH_SOCK  # the remote must use the FORWARDED SSH_AUTH_SOCK
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    sshd_out=$(nix build .#piggy-test-sshd --no-link --print-out-paths)
+    pivy_agent="$pivy_out/bin/pivy-agent"
+    fibby_bin="$fibby_out/bin/fibby"
+    piggy_bin="$piggy_out/bin/piggy"
+    sshd_bin="$sshd_out/bin/piggy-test-sshd"
+    for b in "$pivy_agent" "$fibby_bin" "$piggy_bin" "$sshd_bin"; do
+      [[ -x $b ]] || { echo "missing $b"; exit 1; }
+    done
+
+    workdir=$(mktemp -d /tmp/p135d-XXXXXX)
+    fibby_sock="$workdir/pcscd.comm"
+    agent_sock="$workdir/a.sock"
+    fibby_log="$workdir/fibby.log"
+    agent_log="$workdir/agent.log"
+    sshd_hs="$workdir/handshake"
+    sshd_err="$workdir/sshd.err"
+    sshd_fifo="$workdir/sshd.fifo"
+    store="$workdir/store"
+    fibby_pid=""; agent_pid=""; sshd_pid=""
+    cleanup() {
+      [[ -n $sshd_pid ]] && kill "$sshd_pid" 2>/dev/null || true
+      [[ -n $agent_pid ]] && kill "$agent_pid" 2>/dev/null || true
+      [[ -n $fibby_pid ]] && kill "$fibby_pid" 2>/dev/null || true
+      exec 9>&- 2>/dev/null || true
+      rm -rf "$workdir"
+    }
+    trap cleanup EXIT
+
+    echo "=== Starting fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
+    FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+      --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+    fibby_pid=$!
+    for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+    [[ -S $fibby_sock ]] || { echo "fibby socket never appeared:"; cat "$fibby_log"; exit 1; }
+
+    # pivy-agent unlocks slot 9D on-demand during the (forwarded) rebox via
+    # the test askpass; the unlock happens at this local agent process, the
+    # SSH channel only proxies the agent protocol.
+    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    echo "=== Starting pivy-agent (PCSCLITE_CSOCK_NAME=fibby) ==="
+    PCSCLITE_CSOCK_NAME="$fibby_sock" \
+      SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY="" \
+      PIGGY_TEST_FIB_PIN=123456 \
+      "$pivy_agent" -A -D -a "$agent_sock" >"$agent_log" 2>&1 &
+    agent_pid=$!
+    for _ in $(seq 1 50); do [[ -S $agent_sock ]] && break; sleep 0.1; done
+    [[ -S $agent_sock ]] || { echo "agent socket never appeared:"; cat "$agent_log"; cat "$fibby_log"; exit 1; }
+
+    echo "=== piggy pass init + insert (direct to fibby) ==="
+    PCSCLITE_CSOCK_NAME="$fibby_sock" PIGGY_STORE_DIR="$store" \
+      "$piggy_bin" pass init || { echo "init failed"; tail -40 "$fibby_log"; exit 1; }
+    plaintext="ssh-forwarded-decrypt-135d"
+    printf '%s\n' "$plaintext" | PCSCLITE_CSOCK_NAME="$fibby_sock" \
+      PIGGY_STORE_DIR="$store" "$piggy_bin" pass insert -e foo/bar \
+      || { echo "insert failed"; tail -40 "$fibby_log"; exit 1; }
+
+    # piggy-test-sshd: RFC-0001 handshake on stdout, shutdown on stdin EOF.
+    mkfifo "$sshd_fifo"
+    cookie=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    echo "=== Starting piggy-test-sshd ==="
+    PIGGY_PLUGIN_COOKIE="$cookie" "$sshd_bin" <"$sshd_fifo" >"$sshd_hs" 2>"$sshd_err" &
+    sshd_pid=$!
+    exec 9>"$sshd_fifo"
+    for _ in $(seq 1 50); do [[ -s $sshd_hs ]] && break; sleep 0.1; done
+    [[ -s $sshd_hs ]] || { echo "no sshd handshake; stderr:"; cat "$sshd_err"; exit 1; }
+    line=$(head -1 "$sshd_hs")
+    IFS='|' read -r got_cookie _version _transport addr kh_field _subproto <<<"$line"
+    [[ $got_cookie == "$cookie" ]] || { echo "cookie mismatch"; exit 1; }
+    port="${addr##*:}"
+    kh="${kh_field#known_hosts=}"
+    [[ -s $kh ]] || { echo "known_hosts missing: $kh"; exit 1; }
+
+    key="$workdir/id"
+    ssh-keygen -t ed25519 -N '' -f "$key" -q
+    client_home="$workdir/clienthome"
+    mkdir -p "$client_home/.ssh"; chmod 700 "$client_home/.ssh"
+    cp "$kh" "$client_home/.ssh/known_hosts"
+    : >"$client_home/.ssh/config"
+
+    # `ssh -A` forwards THIS shell's SSH_AUTH_SOCK (= pivy-agent). The
+    # server injects a forwarded SSH_AUTH_SOCK into the remote command's
+    # env; PIGGY_AUTH_SOCK is unset, so the remote piggy decrypts through
+    # the forwarded socket → SSH channel → pivy-agent ↔ fibby.
+    echo "=== ssh -A remote 'piggy pass show foo/bar' (forwarded decrypt) ==="
+    remote_out=$(env -i \
+      HOME="$client_home" \
+      SSH_HOME="$client_home/.ssh" \
+      SSH_AUTH_SOCK="$agent_sock" \
+      PATH="$PATH" \
+      ssh -A -i "$key" \
+        -o IdentitiesOnly=yes \
+        -o StrictHostKeyChecking=yes \
+        -o BatchMode=yes \
+        -p "$port" testuser@127.0.0.1 \
+        "PIGGY_STORE_DIR=$store $piggy_bin pass show foo/bar")
+    rc=$?
+    echo "  ssh exit: $rc"
+    echo "  remote stdout: $remote_out"
+    echo
+
+    if [[ $rc -eq 0 ]] && printf '%s\n' "$remote_out" | grep -Fxq "$plaintext"; then
+      echo "=== PHASE D SSH-FORWARDED DECRYPT OK ==="
+      exit 0
+    else
+      echo "=== PHASE D FAILED ==="
+      echo "--- agent log tail ---"; tail -60 "$agent_log"
+      echo "--- fibby log tail ---"; tail -60 "$fibby_log"
+      echo "--- sshd stderr ---"; cat "$sshd_err"
       exit 1
     fi

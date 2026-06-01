@@ -21,6 +21,9 @@
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
+  # spawn_fibby / spawn_agent live in the shared lib (also used by
+  # piggy_ssh_via_fibby.bats).
+  load "$(dirname "$BATS_TEST_FILE")/../lib/fibby.bash"
   export output
 
   if [[ -z ${PIVY_AGENT:-} ]] || [[ ! -x ${PIVY_AGENT:-/nonexistent} ]]; then
@@ -61,45 +64,6 @@ teardown() {
   if [[ -n ${FIBBY_PID:-} ]]; then wait "$FIBBY_PID" 2>/dev/null || true; fi
   [[ -n ${WORKDIR:-} ]] && rm -rf "$WORKDIR" 2>/dev/null || true
   teardown_test_home 2>/dev/null || true
-}
-
-# Spawn fibby in the virtual backend on the per-test socket. Tracing
-# is set to `wire` so other tests in this file can grep the trace.
-# Extra args (e.g. `--seed-rfc6979-slot-9a-cert`) pass through verbatim
-# after the standard `--socket` / `--backend` flags.
-spawn_fibby() {
-  FIBBY_LOG=wire "$FIBBY_BIN" --socket "$FIBBY_SOCK" --backend virtual "$@" \
-    >"$FIBBY_LOG" 2>&1 &
-  FIBBY_PID=$!
-  local _
-  for _ in $(seq 1 50); do
-    [[ -S $FIBBY_SOCK ]] && return 0
-    sleep 0.1
-  done
-  echo "fibby socket never appeared at $FIBBY_SOCK" >&2
-  echo "--- fibby log ---" >&2
-  cat "$FIBBY_LOG" >&2 || true
-  return 1
-}
-
-# Spawn pivy-agent pointing at fibby's pcscd.comm socket. -A (all
-# cards) so we don't have to predict a GUID; -D for foreground; -a
-# for the private socket.
-spawn_agent() {
-  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
-    "$PIVY_AGENT" -A -D -a "$AGENT_SOCK" >"$AGENT_LOG" 2>&1 &
-  AGENT_PID=$!
-  local _
-  for _ in $(seq 1 50); do
-    [[ -S $AGENT_SOCK ]] && return 0
-    sleep 0.1
-  done
-  echo "agent socket never appeared at $AGENT_SOCK" >&2
-  echo "--- agent log ---" >&2
-  cat "$AGENT_LOG" >&2 || true
-  echo "--- fibby log ---" >&2
-  cat "$FIBBY_LOG" >&2 || true
-  return 1
 }
 
 # Empty VirtualCard exposes no identities — pivy-agent returns
