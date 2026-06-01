@@ -1753,11 +1753,12 @@ debug-fibby-slot-9a-sign:
     echo
     echo "=== SLOT-9A SIGN ROUND-TRIP OK ==="
 
-# piggy#135 Phase A smoke: build piggy-test-sshd, start it (RFC-0001
-# handshake over stdout, shutdown on stdin EOF), connect with an
-# ephemeral key (the server accepts any auth), run a remote `exec`, and
-# assert both stdout and the exit-status propagate. No fibby/agent yet —
-# that's Phase B/D. Exits non-zero on any failure. No hardware.
+# piggy#135 Phase A+B smoke: build piggy-test-sshd, start it (RFC-0001
+# handshake over stdout, shutdown on stdin EOF), then (A) connect with an
+# ephemeral key and assert a remote `exec`'s stdout + exit-status
+# propagate, and (B) connect with agent forwarding (`ssh -A`) and assert
+# the remote side sees the forwarded key via `ssh-add -l`. No fibby yet —
+# that's Phase D. Exits non-zero on any failure. No hardware.
 [group('debug')]
 debug-piggy-test-sshd:
     #!/usr/bin/env bash
@@ -1774,8 +1775,10 @@ debug-piggy-test-sshd:
     cookie=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
 
     sshd_pid=""
+    agent_pid=""
     cleanup() {
       [[ -n $sshd_pid ]] && kill "$sshd_pid" 2>/dev/null || true
+      [[ -n $agent_pid ]] && kill "$agent_pid" 2>/dev/null || true
       exec 9>&- 2>/dev/null || true
       rm -rf "$workdir"
     }
@@ -1833,5 +1836,36 @@ debug-piggy-test-sshd:
     echo "exit:   $rc"
     [[ $out == hello-from-piggy-sshd ]] || { echo "!!! unexpected stdout"; cat "$err"; exit 1; }
     [[ $rc -eq 7 ]] || { echo "!!! exit-status not propagated (want 7, got $rc)"; cat "$err"; exit 1; }
+    echo "=== PHASE A (exec) OK ==="
     echo
-    echo "=== PHASE A SMOKE OK ==="
+
+    # --- Phase B: agent forwarding ---
+    # Stand up a throwaway local ssh-agent holding the same ephemeral key,
+    # connect with `ssh -A`, and confirm the remote `ssh-add -l` (talking
+    # to the SSH_AUTH_SOCK piggy-test-sshd injected) sees the key — i.e.
+    # the agent channel is forwarded all the way back to our agent.
+    agentsock="$workdir/agent.sock"
+    eval "$(ssh-agent -a "$agentsock")" >/dev/null
+    agent_pid="${SSH_AGENT_PID:-}"
+    SSH_AUTH_SOCK="$agentsock" ssh-add "$key" 2>/dev/null
+    fp=$(ssh-keygen -lf "$key.pub" | awk '{print $2}')
+    echo "local key fingerprint: $fp"
+
+    echo "=== remote ssh-add -l over forwarded agent ==="
+    remote_keys=$(env -i \
+      HOME="$client_home" \
+      SSH_HOME="$client_home/.ssh" \
+      SSH_AUTH_SOCK="$agentsock" \
+      PATH="$PATH" \
+      ssh -A -i "$key" \
+        -o IdentitiesOnly=yes \
+        -o StrictHostKeyChecking=yes \
+        -o BatchMode=yes \
+        -p "$port" testuser@127.0.0.1 \
+        'ssh-add -l')
+    echo "remote: $remote_keys"
+    grep -qF "$fp" <<<"$remote_keys" || {
+      echo "!!! forwarded agent did not expose the key"; cat "$err"; exit 1; }
+    echo "=== PHASE B (agent forwarding) OK ==="
+    echo
+    echo "=== PHASE A+B SMOKE OK ==="

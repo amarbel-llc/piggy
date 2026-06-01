@@ -7,7 +7,11 @@
 // It accepts any password/public key (it's a fixture, not a real
 // server) and handles `session` channels' `exec` requests by running
 // the command through `sh -c` and wiring stdio + the exit status back
-// to the client. Agent forwarding and TCP forwarding land in Phase B.
+// to the client. Phase B adds SSH agent forwarding (the agent-forward
+// request arms a remote unix socket whose connections are proxied back
+// to the client's agent, with SSH_AUTH_SOCK injected into the exec env)
+// and `direct-tcpip` TCP forwarding. See agentForwardRequest /
+// agentForwardChannel for the OpenSSH extension names.
 //
 // Refuses to start without PIGGY_PLUGIN_COOKIE so an accidental direct
 // invocation on a shared machine fails loudly rather than binding a
@@ -27,6 +31,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -35,6 +42,19 @@ const (
 	programName     = "piggy-test-sshd"
 	protocolVersion = "1"
 	subprotocol     = "ssh"
+)
+
+// OpenSSH agent-forwarding extension names. Assembled by concatenation
+// so the "openssh.com" suffix survives email-address obfuscation in
+// editing tooling — a bare "name<at>openssh.com" string literal gets
+// rewritten, which would silently break the protocol string match.
+//
+//	agentForwardRequest = the session request that arms forwarding
+//	agentForwardChannel = the reverse channel opened toward the client
+const (
+	openSSHExt          = "@" + "openssh.com"
+	agentForwardRequest = "auth-agent-req" + openSSHExt
+	agentForwardChannel = "auth-agent" + openSSHExt
 )
 
 func main() {
@@ -174,28 +194,55 @@ func handleConnection(conn net.Conn, config *ssh.ServerConfig) {
 	go ssh.DiscardRequests(reqs)
 
 	for newChannel := range chans {
-		if newChannel.ChannelType() != "session" {
+		switch newChannel.ChannelType() {
+		case "session":
+			channel, requests, err := newChannel.Accept()
+			if err != nil {
+				continue
+			}
+			go serveSession(sshConn, channel, requests)
+		case "direct-tcpip":
+			go handleDirectTCPIP(newChannel)
+		default:
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
-			continue
 		}
-		channel, requests, err := newChannel.Accept()
-		if err != nil {
-			continue
-		}
-		go serveSession(channel, requests)
 	}
 }
 
-// serveSession handles one session channel. Phase A supports `exec`
-// (run a command, return its output + exit status). Other request types
-// are declined so a client doesn't hang waiting for a reply.
-func serveSession(channel ssh.Channel, requests <-chan *ssh.Request) {
+// serveSession handles one session channel: the agent-forward request
+// (arm agent forwarding) followed by `exec` (run a command, return its
+// output + exit status). The agent-forward request always precedes exec
+// on the wire, so by the time exec runs we know the forwarded
+// SSH_AUTH_SOCK path. Other request types are declined so the client
+// doesn't hang waiting for a reply.
+func serveSession(sshConn ssh.Conn, channel ssh.Channel, requests <-chan *ssh.Request) {
+	var agentSock string
+	var cleanup func()
+	defer func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
+
 	for req := range requests {
 		switch req.Type {
+		case agentForwardRequest:
+			sock, cl, err := setupAgentForward(sshConn)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] agent-forward setup: %v\n", programName, err)
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			agentSock, cleanup = sock, cl
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
 		case "exec":
 			command := parseStringPayload(req.Payload)
 			_ = req.Reply(true, nil)
-			runExec(channel, command)
+			runExec(channel, command, agentSock)
 			return
 		default:
 			if req.WantReply {
@@ -206,30 +253,45 @@ func serveSession(channel ssh.Channel, requests <-chan *ssh.Request) {
 	_ = channel.Close()
 }
 
-// parseStringPayload decodes an SSH "string" wire field (a uint32
-// big-endian length prefix followed by that many bytes) — the shape of
-// the `exec` request's command argument (RFC 4254 §6.5).
+// parseStringPayload decodes the leading SSH "string" wire field of a
+// request payload — the shape of the `exec` request's command argument
+// (RFC 4254 §6.5).
 func parseStringPayload(payload []byte) string {
-	if len(payload) < 4 {
+	s, _, ok := parseSSHString(payload)
+	if !ok {
 		return ""
 	}
-	n := binary.BigEndian.Uint32(payload[:4])
-	end := 4 + int(n)
-	if n > uint32(len(payload)-4) {
-		end = len(payload)
+	return s
+}
+
+// parseSSHString decodes one SSH "string" field (a uint32 big-endian
+// length prefix followed by that many bytes) and returns it plus the
+// remaining bytes. ok is false on a truncated buffer.
+func parseSSHString(data []byte) (value string, rest []byte, ok bool) {
+	if len(data) < 4 {
+		return "", nil, false
 	}
-	return string(payload[4:end])
+	n := binary.BigEndian.Uint32(data[:4])
+	if uint32(len(data)-4) < n {
+		return "", nil, false
+	}
+	return string(data[4 : 4+n]), data[4+n:], true
 }
 
 // runExec runs the command through `sh -c`, wiring the channel as the
 // process's stdio, then sends the exit status back per RFC 4254 §6.10.
-func runExec(channel ssh.Channel, command string) {
+// When agentSock is non-empty (agent forwarding was armed) it is exported
+// as SSH_AUTH_SOCK so the command can reach the forwarded agent.
+func runExec(channel ssh.Channel, command, agentSock string) {
 	defer channel.Close() //nolint:errcheck
 
 	cmd := exec.Command("sh", "-c", command)
 	cmd.Stdin = channel
 	cmd.Stdout = channel
 	cmd.Stderr = channel.Stderr()
+	if agentSock != "" {
+		cmd.Env = envWithAuthSock(agentSock)
+	}
 
 	exitCode := 0
 	if err := cmd.Run(); err != nil {
@@ -248,4 +310,116 @@ func sendExitStatus(channel ssh.Channel, code int) {
 	var payload [4]byte
 	binary.BigEndian.PutUint32(payload[:], uint32(code))
 	_, _ = channel.SendRequest("exit-status", false, payload[:])
+}
+
+// envWithAuthSock returns the process environment with SSH_AUTH_SOCK set
+// to sock, REPLACING any inherited value rather than appending — glibc
+// getenv returns the first match, so a stale inherited SSH_AUTH_SOCK
+// (e.g. the operator's agent) would otherwise shadow the forwarded one
+// and the remote command would talk to the wrong agent.
+func envWithAuthSock(sock string) []string {
+	base := os.Environ()
+	out := make([]string, 0, len(base)+1)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "SSH_AUTH_SOCK=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "SSH_AUTH_SOCK="+sock)
+}
+
+// setupAgentForward arms SSH agent forwarding: it binds a unix socket on
+// the remote (server) side and, for each connection to it, opens an
+// reverse agent-forward channel back to the client — whose ssh -A agent
+// serves it. The returned path is exported to the exec'd command as
+// SSH_AUTH_SOCK; cleanup stops the listener and removes the socket dir.
+func setupAgentForward(sshConn ssh.Conn) (sockPath string, cleanup func(), err error) {
+	// Short /tmp path: the socket's absolute path must fit AF_UNIX
+	// sun_path (108 bytes on Linux, 104 on darwin). The devshell $TMPDIR
+	// can nest deeply under the worktree and overrun it, so bind under
+	// /tmp with short names — the same dodge the bats helpers use.
+	dir, err := os.MkdirTemp("/tmp", "pts-agent-")
+	if err != nil {
+		return "", nil, err
+	}
+	sockPath = filepath.Join(dir, "a.sock")
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", nil, err
+	}
+	go func() {
+		for {
+			local, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return // listener closed by cleanup
+			}
+			go proxyAgentConn(sshConn, local)
+		}
+	}()
+	cleanup = func() {
+		_ = listener.Close()
+		_ = os.RemoveAll(dir)
+	}
+	return sockPath, cleanup, nil
+}
+
+// proxyAgentConn bridges one connection to the forwarded-agent socket to
+// a reverse agent-forward channel toward the client's agent.
+func proxyAgentConn(sshConn ssh.Conn, local net.Conn) {
+	defer local.Close() //nolint:errcheck
+	channel, reqs, err := sshConn.OpenChannel(agentForwardChannel, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] open agent channel: %v\n", programName, err)
+		return
+	}
+	defer channel.Close() //nolint:errcheck
+	go ssh.DiscardRequests(reqs)
+	proxy(channel, local)
+}
+
+// handleDirectTCPIP serves a `direct-tcpip` channel: dial the requested
+// host:port and splice it to the channel. Used for client-driven TCP
+// port forwarding (RFC 4254 §7.2).
+func handleDirectTCPIP(newChannel ssh.NewChannel) {
+	host, port, ok := parseDirectTCPIP(newChannel.ExtraData())
+	if !ok {
+		_ = newChannel.Reject(ssh.ConnectionFailed, "malformed direct-tcpip payload")
+		return
+	}
+	dest := net.JoinHostPort(host, strconv.Itoa(int(port)))
+	remote, err := net.Dial("tcp", dest)
+	if err != nil {
+		_ = newChannel.Reject(ssh.ConnectionFailed, fmt.Sprintf("dial %s: %v", dest, err))
+		return
+	}
+	defer remote.Close() //nolint:errcheck
+	channel, reqs, err := newChannel.Accept()
+	if err != nil {
+		return
+	}
+	defer channel.Close() //nolint:errcheck
+	go ssh.DiscardRequests(reqs)
+	proxy(channel, remote)
+}
+
+// parseDirectTCPIP extracts the destination host+port from a
+// direct-tcpip channel's extra data (string host, uint32 port, string
+// origHost, uint32 origPort). Only the destination is needed.
+func parseDirectTCPIP(data []byte) (host string, port uint32, ok bool) {
+	host, rest, ok := parseSSHString(data)
+	if !ok || len(rest) < 4 {
+		return "", 0, false
+	}
+	return host, binary.BigEndian.Uint32(rest[:4]), true
+}
+
+// proxy splices an SSH channel and a net.Conn bidirectionally, returning
+// once either direction closes.
+func proxy(channel ssh.Channel, conn net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(channel, conn); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(conn, channel); done <- struct{}{} }()
+	<-done
 }
