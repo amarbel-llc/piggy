@@ -394,6 +394,217 @@ fn replay_progress_against_real_silicon_is_logged() {
     }
 }
 
+/// The three fib (Java PivApplet) fixtures, a subset of [`ALL_FIXTURES`].
+/// All pair with `Model::Yk5` today (fib advertises fw 5.4.0).
+const FIB_FIXTURES: &[&str] = &[
+    FIB_YK54_FIXTURE,
+    "tests/fixtures/apdu/fib-yk54-list.fixture",
+    "tests/fixtures/apdu/fib-yk54-init.fixture",
+];
+
+/// The trailing status word (SW1 SW2) of an APDU response, or the whole
+/// slice if it's shorter than two bytes.
+fn status_word(resp: &[u8]) -> &[u8] {
+    if resp.len() >= 2 {
+        &resp[resp.len() - 2..]
+    } else {
+        resp
+    }
+}
+
+/// Documented status-word divergences between fibby and the captured fib
+/// wire, keyed by `(fixture_path, pair_index)`. Each entry says why fibby
+/// differs and which slice (if any) resolves it. The differential gate
+/// below asserts these are the ONLY SW divergences AND that each still
+/// diverges — a now-agreeing entry is flagged stale so the gate
+/// auto-tightens as the resolving slices land. Indices are stable: the fib
+/// fixtures are static committed captures.
+///
+/// An entry here records a *known* fibby↔fib difference; it does NOT mean
+/// fib is right. Several entries exist precisely because fibby is correct
+/// (matches a real YubiKey) and fib is not. See the ORACLE HIERARCHY note
+/// on [`fib_fixtures_agree_on_status_word_except_documented_divergences`]
+/// before adding entries or "fixing" fibby to match fib.
+const FIB_SW_DIVERGENCES: &[(&str, usize, &str)] = &[
+    // fib emits a spurious first-SELECT per vsmartcard reconnect (6986/6D00
+    // before the real FCI); fibby SELECTs cleanly every time. A capture
+    // artifact of fib's reconnect behavior — permanent.
+    (FIB_YK54_FIXTURE, 0, "reconnect first-SELECT artifact"),
+    (FIB_YK54_FIXTURE, 15, "reconnect first-SELECT artifact"),
+    (FIB_YK54_FIXTURE, 27, "reconnect first-SELECT artifact"),
+    (
+        "tests/fixtures/apdu/fib-yk54-list.fixture",
+        0,
+        "reconnect first-SELECT artifact",
+    ),
+    (
+        "tests/fixtures/apdu/fib-yk54-init.fixture",
+        0,
+        "reconnect first-SELECT artifact",
+    ),
+    // fib chains the slot-9A cert read (GET DATA -> 61xx, then GET RESPONSE);
+    // fibby returns 6A82 (cert absent) until 0xC0 chaining + cert seeding
+    // land. Resolved by Phase 2.
+    (
+        FIB_YK54_FIXTURE,
+        12,
+        "Phase 2: chained cert read (GET DATA 61xx)",
+    ),
+    (
+        FIB_YK54_FIXTURE,
+        24,
+        "Phase 2: chained cert read (GET DATA 61xx)",
+    ),
+    (
+        FIB_YK54_FIXTURE,
+        35,
+        "Phase 2: chained cert read (GET DATA 61xx)",
+    ),
+    // GET RESPONSE (0xC0) unimplemented — fibby returns 6D00. Phase 2.
+    (
+        FIB_YK54_FIXTURE,
+        13,
+        "Phase 2: GET RESPONSE (0xC0) unimplemented",
+    ),
+    (
+        FIB_YK54_FIXTURE,
+        25,
+        "Phase 2: GET RESPONSE (0xC0) unimplemented",
+    ),
+    (
+        FIB_YK54_FIXTURE,
+        36,
+        "Phase 2: GET RESPONSE (0xC0) unimplemented",
+    ),
+    // GET METADATA (0xF7) unimplemented — fibby returns 6D00. Phase 2.
+    (
+        FIB_YK54_FIXTURE,
+        14,
+        "Phase 2: GET METADATA (0xF7) unimplemented",
+    ),
+    (
+        FIB_YK54_FIXTURE,
+        26,
+        "Phase 2: GET METADATA (0xF7) unimplemented",
+    ),
+    (
+        FIB_YK54_FIXTURE,
+        37,
+        "Phase 2: GET METADATA (0xF7) unimplemented",
+    ),
+    // fib's PivApplet defaults to 5 PIN retries (63 C5) vs YubiKey's 3
+    // (63 C3). Resolved by Phase 1 (Model::FibPivApplet per-model retry).
+    (
+        FIB_YK54_FIXTURE,
+        39,
+        "Phase 1: fib PIN-retry default 5 vs YubiKey 3",
+    ),
+    // fib's slot-9D key was generated on-card; its scalar can't be seeded,
+    // so fibby's empty-slot 6A88 vs fib's 9000 ECDH is unreplayable. Permanent.
+    (
+        FIB_YK54_FIXTURE,
+        41,
+        "permanent: on-card-generated 9D key (no scalar to seed)",
+    ),
+    // fib returns 9000 to VERIFY P1=0xFF (clear verify status); fibby returns
+    // 6A80, matching the real YubiKey 4 wet-env capture. fibby is correct for
+    // YubiKey — permanent fib-vs-YubiKey divergence.
+    (
+        FIB_YK54_FIXTURE,
+        42,
+        "permanent: VERIFY P1=0xFF; fibby matches YubiKey (6A80) not fib (9000)",
+    ),
+];
+
+/// Differential gate (piggy#135): fibby and fib must return the same status
+/// word for every captured fib APDU, except the documented divergences in
+/// [`FIB_SW_DIVERGENCES`]. This is intentionally looser than byte-replay —
+/// it tolerates fib's card-identity byte differences (126-byte PivApplet
+/// FCI, fw 5.4.0, serial) since those don't change the SW — but unlike
+/// `replay_progress_against_real_silicon_is_logged` it *asserts*, so any new
+/// fibby<->fib protocol-behavior divergence is caught. Static fixtures, so
+/// it runs in CI with no live fib / Java / pcscd.
+///
+/// ORACLE HIERARCHY — read before "fixing" a failure here. fibby's
+/// correctness oracle is the **real YubiKey** (the `yk4-*` / `yk5-*`
+/// captures and the `full_byte_replay_*` byte-replay tests) and the PIV
+/// spec. `fib` (the Java PivApplet) is a *differential second opinion*, NOT
+/// an oracle — it has its own quirks that real silicon does not (e.g. it
+/// answers VERIFY `P1=0xFF` with `9000` where a YubiKey returns `6A80`, and
+/// defaults to 5 PIN retries vs 3).
+///
+/// So when this gate reports a NEW divergence, do NOT reflexively change
+/// fibby to match fib. Instead: (1) determine which side matches a real
+/// YubiKey / the PIV spec; (2) if fibby is the correct one, add a
+/// `FIB_SW_DIVERGENCES` entry whose reason records that fibby matches
+/// YubiKey, not fib (see the `P1=0xFF` and PIN-retry entries for the
+/// pattern); (3) only change fibby if it is genuinely wrong vs YubiKey /
+/// the spec, and validate that change against the YubiKey captures, not fib.
+///
+/// fib-specific behavior that real silicon lacks belongs in a separate
+/// `Model::FibPivApplet` profile (Phase 1), never in the YubiKey models.
+#[test]
+fn fib_fixtures_agree_on_status_word_except_documented_divergences() {
+    let mut unexpected: Vec<String> = Vec::new();
+    let mut fired: std::collections::HashSet<(&str, usize)> = std::collections::HashSet::new();
+
+    for &fixture in FIB_FIXTURES {
+        let pairs = parse_fixture(&workspace_relative(fixture));
+        let mut card = VirtualCard::with_model(Model::Yk5);
+        card.connect(2, 3).unwrap();
+        // Same pre-seeding as the progress diagnostic: data objects the
+        // capture shows were already present, and the per-session mgmt-key
+        // witness. (fib's 9D key is on-card-generated, so no scalar to seed.)
+        for (tag, value) in extract_data_object_seed(&pairs) {
+            card.seed_data_object(tag, value);
+        }
+        if let Some(witness) = extract_mgmt_key_witness(&pairs) {
+            card.seed_mgmt_key_witness(witness);
+        }
+        for (i, p) in pairs.iter().enumerate() {
+            let got = card
+                .transmit(&p.request)
+                .unwrap_or_else(|rv| panic!("transmit errored {rv:#010x} on {:?}", p.request));
+            if status_word(&got) == status_word(&p.response) {
+                continue;
+            }
+            if FIB_SW_DIVERGENCES
+                .iter()
+                .any(|&(f, idx, _)| f == fixture && idx == i)
+            {
+                fired.insert((fixture, i));
+            } else {
+                let ins = p.request.get(1).copied().unwrap_or(0);
+                let p1 = p.request.get(2).copied().unwrap_or(0);
+                let p2 = p.request.get(3).copied().unwrap_or(0);
+                unexpected.push(format!(
+                    "{fixture} [{i}] INS={ins:#04x} P1={p1:#04x} P2={p2:#04x}: \
+                     fibby SW={} fib SW={}",
+                    hex_preview(status_word(&got)),
+                    hex_preview(status_word(&p.response)),
+                ));
+            }
+        }
+    }
+
+    let stale: Vec<String> = FIB_SW_DIVERGENCES
+        .iter()
+        .filter(|&&(f, idx, _)| !fired.contains(&(f, idx)))
+        .map(|&(f, idx, reason)| format!("{f} [{idx}] ({reason})"))
+        .collect();
+
+    assert!(
+        unexpected.is_empty(),
+        "fibby<->fib status-word divergence not in FIB_SW_DIVERGENCES:\n  {}",
+        unexpected.join("\n  ")
+    );
+    assert!(
+        stale.is_empty(),
+        "stale FIB_SW_DIVERGENCES entries (fibby now agrees with fib — remove them):\n  {}",
+        stale.join("\n  ")
+    );
+}
+
 fn hex_preview(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let cap = bytes.len().min(48);
