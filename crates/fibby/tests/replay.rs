@@ -476,21 +476,27 @@ const FIB_SW_DIVERGENCES: &[(&str, usize, &str)] = &[
         36,
         "Phase 2: GET RESPONSE (0xC0) unimplemented",
     ),
-    // GET METADATA (0xF7) unimplemented — fibby returns 6D00. Phase 2.
+    // GET METADATA (0xF7) for slot 9D — fib serves the on-card-generated key's
+    // metadata (algorithm/policy/origin + that key's pubkey); fibby's 9D is
+    // empty in replay because the generating session's scalar/pubkey aren't on
+    // tape (same unreplayable root cause as the 9D ECDH entry below). Permanent
+    // for THIS capture, NOT a 0xF7 implementation gap — implementing GET
+    // METADATA would still return a no-key SW here. A future fixture that seeds
+    // a 9D key would let an implemented 0xF7 agree.
     (
         FIB_YK54_FIXTURE,
         14,
-        "Phase 2: GET METADATA (0xF7) unimplemented",
+        "permanent: on-card-generated 9D key (no key to serve metadata)",
     ),
     (
         FIB_YK54_FIXTURE,
         26,
-        "Phase 2: GET METADATA (0xF7) unimplemented",
+        "permanent: on-card-generated 9D key (no key to serve metadata)",
     ),
     (
         FIB_YK54_FIXTURE,
         37,
-        "Phase 2: GET METADATA (0xF7) unimplemented",
+        "permanent: on-card-generated 9D key (no key to serve metadata)",
     ),
     // fib's PivApplet defaults to 5 PIN retries (63 C5) vs YubiKey's 3
     // (63 C3). Resolved by Phase 1 (Model::FibPivApplet per-model retry).
