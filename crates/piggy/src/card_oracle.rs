@@ -5,7 +5,8 @@
 //! to this oracle: it talks straight to a PIV card over PCSC, prompts for
 //! the PIN, and runs ECDH on the card. Closes the agentless gap that
 //! issue #31 tracks; the on-card primitives all live in `piggy_piv`
-//! (`PivToken::verify_pin`, `PivToken::ecdh_derive`).
+//! (`PinSession::verify_pin`, `PinSession::ecdh_derive`, bracketed in a
+//! PC/SC transaction — piggy#56).
 //!
 //! ## PIN supply
 //!
@@ -13,9 +14,11 @@
 //! calls the first time it needs to authenticate to a given token. The
 //! closure receives a prompt string and returns a `Zeroizing<String>` so
 //! the PIN is wiped from memory once it falls out of scope on the card
-//! side. Subsequent ECDH calls against the same token in the same oracle
-//! instance reuse the verified session — verify-pin state is held by the
-//! card for the lifetime of the `pcsc::Card` connection.
+//! side. Each `ecdh` call opens its own PC/SC transaction (a
+//! [`piggy_piv::PinSession`]) and re-verifies the PIN inside it, so a
+//! co-resident PIV agent's `SCARD_RESET_CARD` can't clear PIN state
+//! mid-operation (piggy#56). The PIN is cached per token GUID, so a
+//! multi-part decrypt still prompts the user only once.
 //!
 //! [`askpass_pin_supplier`] returns the default supplier: spawn the
 //! program named in `SSH_ASKPASS` with the prompt as argv[1]. That
@@ -32,7 +35,7 @@
 //! private key, so the match is unambiguous. Templates with slots other
 //! than 0x9D are out of scope for v1 (matches `template::DEFAULT_SLOT`).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
 
@@ -58,7 +61,11 @@ pub type PinSupplier = Box<dyn FnMut(&str) -> Result<Zeroizing<String>, OracleEr
 pub struct CardEcdhOracle {
     ctx: PivContext,
     pin_supplier: PinSupplier,
-    verified: HashSet<Guid>,
+    /// PIN cache keyed by token GUID. Populated on first authentication to a
+    /// token; lets a multi-part decrypt reuse the PIN (one prompt) even
+    /// though each `ecdh` call now runs in its own PC/SC transaction
+    /// (piggy#56). `Zeroizing` wipes each cached PIN when the oracle drops.
+    pin_cache: HashMap<Guid, Zeroizing<String>>,
 }
 
 impl CardEcdhOracle {
@@ -71,7 +78,7 @@ impl CardEcdhOracle {
         Ok(Self {
             ctx,
             pin_supplier,
-            verified: HashSet::new(),
+            pin_cache: HashMap::new(),
         })
     }
 
@@ -112,23 +119,37 @@ impl EcdhOracle for CardEcdhOracle {
         let self_point_raw = extract_point_from_sshkey_blob(self_pubkey_ssh_blob)?;
         let self_uncompressed = canonicalize_uncompressed(&self_point_raw)?;
 
-        let token = match self.find_token_by_pubkey(&self_uncompressed)? {
+        let mut token = match self.find_token_by_pubkey(&self_uncompressed)? {
             Some(t) => t,
             None => return Err(OracleError::NoKey),
         };
 
         let token_guid = token.guid().clone();
-        if !self.verified.contains(&token_guid) {
-            let prompt = format!("PIV PIN for token {}", token_guid.to_hex());
-            let pin = (self.pin_supplier)(&prompt)?;
-            token.verify_pin(&pin).map_err(piv_to_oracle_pin_error)?;
-            self.verified.insert(token_guid);
-        }
+
+        // Prompt for the PIN only the first time we authenticate to a given
+        // token; reuse the cached PIN on later parts so the user is prompted
+        // once even though each part now runs in its own transaction (piggy#56).
+        let pin = match self.pin_cache.get(&token_guid) {
+            Some(p) => p.clone(),
+            None => {
+                let prompt = format!("PIV PIN for token {}", token_guid.to_hex());
+                let p = (self.pin_supplier)(&prompt)?;
+                self.pin_cache.insert(token_guid, p.clone());
+                p
+            }
+        };
 
         let partner_point_raw = extract_point_from_sshkey_blob(partner_pubkey_ssh_blob)?;
         let partner_uncompressed = canonicalize_uncompressed(&partner_point_raw)?;
 
-        let secret = token
+        // Bracket verify-PIN + ECDH in one PC/SC transaction so a co-resident
+        // PIV agent's SCARD_RESET_CARD cannot clear PIN state between them
+        // (piggy#56). The session ends (ResetCard) when it drops at scope exit.
+        let mut session = token
+            .begin_pin_session()
+            .map_err(|e| OracleError::Transport(format!("begin_pin_session: {e}")))?;
+        session.verify_pin(&pin).map_err(piv_to_oracle_pin_error)?;
+        let secret = session
             .ecdh_derive(DEFAULT_SLOT, &partner_uncompressed)
             .map_err(|e| OracleError::Transport(format!("ecdh_derive: {e}")))?;
         Ok(secret)
@@ -156,7 +177,7 @@ pub fn piv_to_oracle_pin_error(e: PivError) -> OracleError {
 
 /// Ensure an EC point is in SEC1-uncompressed form (`0x04 || X || Y`).
 ///
-/// `piggy-piv::PivToken::ecdh_derive` rejects compressed inputs explicitly
+/// `piggy-piv::PinSession::ecdh_derive` rejects compressed inputs explicitly
 /// (see `crates/piggy-piv/src/token.rs::validate_ec_point`). The pubkey
 /// blobs `unlock_ebox` hands us are already uncompressed in practice
 /// (`agent_ext::ec_point_to_ssh_pubkey_blob` is fed uncompressed bytes

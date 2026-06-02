@@ -70,7 +70,14 @@ impl Session for PiggyAgent {
     async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
         let key = self.find_cached_key(&request.pubkey).await?;
 
-        let token = reconnect_to_token(&key.guid)?;
+        let mut token = reconnect_to_token(&key.guid)?;
+        // Bracket verify-PIN + sign in one PC/SC transaction so a
+        // co-resident agent's SCARD_RESET_CARD cannot clear the PIN
+        // between them (piggy#56). The session drops at end of scope:
+        // ResetCard if a PIN was verified, LeaveCard for the 9E no-PIN path.
+        let mut session = token
+            .begin_pin_session()
+            .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
         // Verify PIN if needed (slot 9E doesn't require PIN)
         if key.slot_id != 0x9E {
@@ -78,7 +85,7 @@ impl Session for PiggyAgent {
             let pin = pin_guard
                 .as_ref()
                 .ok_or_else(|| AgentError::Other("PIN required (use ssh-add -X)".into()))?;
-            token
+            session
                 .verify_pin(pin)
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
         }
@@ -86,8 +93,8 @@ impl Session for PiggyAgent {
         // Prepare data for signing based on algorithm
         let sign_data = prepare_sign_data(key.algorithm, &request.data, request.flags)?;
 
-        // Sign via card
-        let sig_bytes = token
+        // Sign via card, inside the PIN-bracketed transaction
+        let sig_bytes = session
             .sign_prehash(key.slot_id, &sign_data)
             .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
@@ -197,19 +204,23 @@ impl PiggyAgent {
             }
         }
 
-        let token = reconnect_to_token(&key.guid)?;
+        let mut token = reconnect_to_token(&key.guid)?;
+        // verify-PIN + ECDH bracketed in one transaction (piggy#56).
+        let mut session = token
+            .begin_pin_session()
+            .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
         if key.slot_id != 0x9E {
             let pin_guard = self.pin.lock().await;
             let pin = pin_guard
                 .as_ref()
                 .ok_or_else(|| AgentError::Other("PIN required (use ssh-add -X)".into()))?;
-            token
+            session
                 .verify_pin(pin)
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
         }
 
-        let mut secret = token
+        let mut secret = session
             .ecdh_derive(key.slot_id, &ec_point)
             .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
@@ -302,23 +313,33 @@ impl PiggyAgent {
             .await
             .ok_or_else(|| AgentError::Other("ecdh-rebox: no matching key".into()))?;
 
-        let token = reconnect_to_token(&key.guid)?;
+        let mut token = reconnect_to_token(&key.guid)?;
+        // verify-PIN + ECDH bracketed in one transaction (piggy#56).
+        let mut session = token
+            .begin_pin_session()
+            .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
         if box_slot != 0x9E {
             let pin_guard = self.pin.lock().await;
             let pin = pin_guard
                 .as_ref()
                 .ok_or_else(|| AgentError::Other("PIN required (use ssh-add -X)".into()))?;
-            token
+            session
                 .verify_pin(pin)
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
         }
 
         let ec_point = decompress_ec_point(&piv_box.ephemeral_pubkey, piv_box.curve)?;
 
-        let shared_secret = token
+        let shared_secret = session
             .ecdh_derive(box_slot, &ec_point)
             .map_err(|e| AgentError::Other(e.to_string().into()))?;
+
+        // Last card op done; release the transaction (ResetCard if a PIN was
+        // verified) before the offline reseal below, which is pure CPU and
+        // needs no card. Drop runs SCardEndTransaction; failures are logged,
+        // not propagated, so a txn-end hiccup never fails an otherwise-good rebox.
+        drop(session);
 
         piv_box
             .open_with_secret(&shared_secret)

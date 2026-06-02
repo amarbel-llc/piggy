@@ -228,56 +228,6 @@ impl PivToken {
         Ok(slots)
     }
 
-    /// Sign pre-hashed data with the key in the given slot.
-    /// For ECDSA, `data` is the hash digest (32 bytes for P256, 48 for P384).
-    /// For RSA, `data` is the PKCS#1 v1.5 padded DigestInfo (128 or 256 bytes).
-    pub fn sign_prehash(&self, slot_id: u8, data: &[u8]) -> Result<Vec<u8>, PivError> {
-        let slot = self.read_slot(slot_id)?;
-        self.general_authenticate(slot.algorithm().to_byte(), slot_id, ga_tag::CHALLENGE, data)
-    }
-
-    /// Perform ECDH key agreement with the key in the given slot.
-    /// `peer_ec_point` is the uncompressed EC point of the peer's ephemeral key
-    /// (04 || x || y). Returns the raw shared secret (the x-coordinate of the
-    /// derived point on the curve).
-    pub fn ecdh_derive(&self, slot_id: u8, peer_ec_point: &[u8]) -> Result<Vec<u8>, PivError> {
-        let slot = self.read_slot(slot_id)?;
-        validate_ec_point(slot.algorithm(), peer_ec_point)?;
-        self.general_authenticate(
-            slot.algorithm().to_byte(),
-            slot_id,
-            ga_tag::EXPONENT,
-            peer_ec_point,
-        )
-    }
-
-    /// Build and transmit a GENERAL AUTHENTICATE APDU, parse the response.
-    fn general_authenticate(
-        &self,
-        alg: u8,
-        slot_id: u8,
-        data_tag: u8,
-        data: &[u8],
-    ) -> Result<Vec<u8>, PivError> {
-        let mut inner = TlvWriter::new();
-        inner.write_tag_value(ga_tag::RESPONSE as u32, &[]);
-        inner.write_tag_value(data_tag as u32, data);
-        let mut outer = TlvWriter::new();
-        outer.write_tag_value(0x7C, inner.as_bytes());
-
-        let apdu = Apdu::general_authenticate(alg, slot_id, outer.as_bytes());
-        let (resp, sw) = self.transmit(&apdu)?;
-
-        if sw.as_u16() == 0x6982 {
-            return Err(PivError::PinRequired);
-        }
-        if !sw.is_success() {
-            return Err(PivError::Apdu { sw: sw.as_u16() });
-        }
-
-        parse_ga_response(&resp)
-    }
-
     /// Read the configured PIN policy and touch policy for the given
     /// slot. Backed by an INS_ATTEST round-trip plus a walk of the
     /// returned attestation cert's `1.3.6.1.4.1.41482.3.8` extension.
@@ -310,39 +260,6 @@ impl PivToken {
             }
         }
         Ok(data)
-    }
-
-    /// Verify the PIV PIN. The PIN is padded to 8 bytes with 0xFF per the spec.
-    ///
-    /// **Note:** this method on `PivToken` does NOT wrap its APDUs in a
-    /// PC/SC transaction, so the PIN-verified state it leaves on the
-    /// card can race with another PC/SC client's `SCardEndTransaction
-    /// (SCARD_RESET_CARD)`. New callers SHOULD prefer
-    /// [`PivToken::begin_pin_session`] and `PinSession::verify_pin`,
-    /// which are atomic with respect to other clients sharing the
-    /// card. This method stays in place for the existing off-the-user-
-    /// path callers (`crates/piggy/src/cmd/agent/session.rs`,
-    /// `card_oracle.rs`) until piggy#56 closes them out.
-    pub fn verify_pin(&self, pin: &str) -> Result<(), PivError> {
-        if pin.len() > 8 {
-            return Err(PivError::Other(format!(
-                "PIV PIN must be at most 8 bytes, got {}",
-                pin.len()
-            )));
-        }
-        let apdu = Apdu::verify_pin(pin.as_bytes());
-        let (_, sw) = self.transmit(&apdu)?;
-        if sw.is_success() {
-            Ok(())
-        } else if sw.is_pin_incorrect() {
-            Err(PivError::PinIncorrect {
-                retries: sw.pin_retries_remaining().unwrap_or(0) as u32,
-            })
-        } else if sw.as_u16() == 0x6983 {
-            Err(PivError::PinBlocked)
-        } else {
-            Err(PivError::Apdu { sw: sw.as_u16() })
-        }
     }
 
     /// Begin a PIN-bracketed session over this token. Card operations
@@ -442,9 +359,8 @@ impl<'tok> PinSession<'tok> {
         }
     }
 
-    /// Sign pre-hashed data with the key in the given slot. Mirrors
-    /// [`PivToken::sign_prehash`] but runs inside this session's
-    /// transaction so a concurrent PC/SC client cannot clear the
+    /// Sign pre-hashed data with the key in the given slot, inside this
+    /// session's transaction so a concurrent PC/SC client cannot clear the
     /// PIN-verified state between `verify_pin` and this call.
     ///
     /// Requires a prior `verify_pin` for slots whose PIN policy
@@ -456,9 +372,8 @@ impl<'tok> PinSession<'tok> {
         self.general_authenticate(slot.algorithm().to_byte(), slot_id, ga_tag::CHALLENGE, data)
     }
 
-    /// Perform ECDH key agreement with the slot's private key.
-    /// Mirrors [`PivToken::ecdh_derive`] but inside this session's
-    /// transaction. Same PIN-policy semantics as `sign_prehash`.
+    /// Perform ECDH key agreement with the slot's private key, inside this
+    /// session's transaction. Same PIN-policy semantics as `sign_prehash`.
     pub fn ecdh_derive(&mut self, slot_id: u8, peer_ec_point: &[u8]) -> Result<Vec<u8>, PivError> {
         let slot = self.read_slot(slot_id)?;
         validate_ec_point(slot.algorithm(), peer_ec_point)?;

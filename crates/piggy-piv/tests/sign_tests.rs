@@ -11,7 +11,7 @@ fn sign_with_9e_no_pin() {
         }
     };
     let tokens = ctx.enumerate_tokens().unwrap_or_default();
-    let token = match tokens.into_iter().next() {
+    let mut token = match tokens.into_iter().next() {
         Some(t) => t,
         None => {
             eprintln!("No PIV tokens found, skipping");
@@ -21,9 +21,21 @@ fn sign_with_9e_no_pin() {
     // Try slot 9E which typically doesn't need PIN
     match token.read_slot(0x9E) {
         Ok(_) => {
-            // Slot exists, try to sign (may still fail without card)
+            // Slot exists, try to sign (may still fail without card). 9E needs
+            // no PIN, but signing is reachable only via a PinSession
+            // transaction now (piggy#56), so open one first.
             let data = b"test data to sign";
-            match token.sign_prehash(0x9E, data) {
+            let mut session = match token.begin_pin_session() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "begin_pin_session failed (expected without real card): {}",
+                        e
+                    );
+                    return;
+                }
+            };
+            match session.sign_prehash(0x9E, data) {
                 Ok(sig) => assert!(!sig.is_empty()),
                 Err(e) => eprintln!("Sign failed (expected without real card): {}", e),
             }

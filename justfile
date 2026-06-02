@@ -1397,6 +1397,131 @@ explore-verify-auth-sock-cache piggy_auth_sock=env_var_or_default("PIGGY_AUTH_SO
       echo "RESULT: FAIL — at least one show hit the agent-unlock error path. See stderr above."
     fi
 
+# HARDWARE + out-of-band — piggy#56 criterion 3 (PinSession transaction race).
+#
+# Proves piggy-agent's transaction-wrapped verify-PIN+sign (the PinSession
+# from piggy#56) does NOT surface SW=6982 when another PC/SC client resets
+# the card mid-operation. Runs a worktree `piggy agent` against a REAL card
+# while a `pivy-tool sign` loop hammers the SAME card — each pivy-tool sign
+# verifies the PIN, signs, and ends its transaction with SCARD_RESET_CARD,
+# the exact contention that cleared piggy's PIN state between VERIFY and
+# GENERAL AUTHENTICATE pre-fix. Post-fix the two clients serialize on the
+# transaction, so every piggy-agent sign succeeds.
+#
+# A race-induced 6982 surfaces as a piggy-agent *sign failure*
+# (PivError::PinRequired), so the primary signal is the ssh-add -T exit
+# status; the agent trace log is grepped as backup.
+#
+# SAFETY (see piggy#56 plan + the recipe's pre-flight):
+#  - Pins to the THROWAWAY via `-g {{guid}}` (default = the YK4 throwaway
+#    GUID recorded in crates/fibby/src/virtual_card.rs:509). Prod is NEVER a
+#    candidate even if plugged in; the recipe REFUSES if the GUID is absent.
+#  - Sends only SELECT / VERIFY / GENERAL AUTHENTICATE / SCARD_RESET_CARD —
+#    no PUT DATA / GENERATE / CHANGE-PIN / reset. The one persistent-state
+#    hazard is a PIN-retry decrement on a WRONG pin, so a single fail-fast
+#    PIN check runs BEFORE the loop and aborts if it's wrong (bounds a bad
+#    PIN to one decrement, never {{iters}}). The same `pin` feeds both the
+#    pivy-tool calls and the piggy-agent unlock (via an echo-PIN askpass
+#    shim), so there is exactly one PIN source — no mismatch path.
+#  - `pin` defaults to the factory 123456 of a freshly-reset throwaway.
+#    NEVER pass your prod PIN.
+#
+# NOT part of `just` / the pre-merge lane — needs real hardware + an
+# inserted throwaway, so it is an explore-group manual verification.
+[group('explore')]
+[linux]
+explore-verify-pin-session-race guid="191755cff39efe522c07a383275bbeb1" pin="123456" slot="9a" iters="100": build-rust
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    guid="{{guid}}"; pin="{{pin}}"; slot="{{slot}}"; iters="{{iters}}"
+    slot_upper="$(printf '%s' "$slot" | tr '[:lower:]' '[:upper:]')"
+
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    pivy_tool="$pivy_out/bin/pivy-tool"
+    piggy="./target/debug/piggy"
+
+    # --- Pre-flight: throwaway present + PIN correct, BEFORE any loop. ---
+    echo "=== pre-flight: confirm throwaway $guid is present ==="
+    if ! "$pivy_tool" -g "$guid" list >/dev/null 2>&1; then
+      echo "REFUSING: no PIV card with GUID $guid present. Insert the throwaway" >&2
+      echo "(or pass guid=...). Prod is never targeted by -g pinning." >&2
+      exit 1
+    fi
+
+    echo "=== pre-flight: single PIN check on slot $slot (fail-fast, one attempt) ==="
+    if ! printf 'preflight' | "$pivy_tool" -g "$guid" -P "$pin" sign "$slot" >/dev/null 2>&1; then
+      echo "REFUSING: PIN/sign check failed on $guid slot $slot. Is the PIN correct" >&2
+      echo "and the slot populated? NOT looping (PIN-retry-counter safety)." >&2
+      exit 1
+    fi
+    echo "PIN OK on slot $slot."
+
+    tmpdir=$(mktemp -d /tmp/piggy-pinsession-race.XXXXXX)
+    sock="$tmpdir/piggy-agent.sock"; log="$tmpdir/piggy-agent.log"
+    pubf="$tmpdir/key.pub"; shim="$tmpdir/echo-pin.sh"
+    agent_pid=""; contend_pid=""
+    cleanup() {
+      [[ -n "$contend_pid" ]] && kill "$contend_pid" 2>/dev/null || true
+      [[ -n "$agent_pid" ]] && kill "$agent_pid" 2>/dev/null || true
+      rm -rf "$tmpdir"
+    }
+    trap cleanup EXIT
+
+    # echo-PIN askpass shim: ssh-add -X feeds this same verified PIN to
+    # piggy-agent's unlock, so the agent and the pivy-tool contention share
+    # one PIN source (no wrong-PIN-during-loop path).
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$PIGGY_RACE_PIN"\n' >"$shim"
+    chmod +x "$shim"
+
+    echo "=== starting worktree piggy-agent (-g $guid, trace) ==="
+    "$piggy" agent -g "$guid" -d -d -a "$sock" >"$log" 2>&1 &
+    agent_pid=$!
+    for _ in $(seq 1 30); do [[ -S "$sock" ]] && break; sleep 0.1; done
+    [[ -S "$sock" ]] || { echo "agent socket never appeared; log:"; cat "$log"; exit 1; }
+
+    echo "=== unlocking piggy-agent (non-interactive, verified PIN) ==="
+    PIGGY_RACE_PIN="$pin" SSH_ASKPASS="$shim" SSH_ASKPASS_REQUIRE=force DISPLAY="" \
+      SSH_AUTH_SOCK="$sock" ssh-add -X
+
+    # Pick the PIN-requiring signing key (the slot under test) to drive signs.
+    SSH_AUTH_SOCK="$sock" ssh-add -L | grep "PIV_slot_${slot_upper}" | head -1 >"$pubf" || true
+    [[ -s "$pubf" ]] || { echo "no slot-$slot key loaded in piggy-agent; ssh-add -L:"; \
+      SSH_AUTH_SOCK="$sock" ssh-add -L; echo "--- agent log ---"; cat "$log"; exit 1; }
+
+    echo "=== contention: pivy-tool sign loop (each ends txn w/ SCARD_RESET_CARD) ==="
+    ( while true; do
+        printf 'contend' | "$pivy_tool" -g "$guid" -P "$pin" sign "$slot" >/dev/null 2>&1 || true
+      done ) &
+    contend_pid=$!
+
+    echo "=== $iters piggy-agent signs under contention ==="
+    fails=0
+    for i in $(seq 1 "$iters"); do
+      if ! SSH_AUTH_SOCK="$sock" ssh-add -T "$pubf" >/dev/null 2>&1; then
+        fails=$((fails + 1)); echo "  sign $i FAILED"
+      fi
+    done
+
+    kill "$contend_pid" 2>/dev/null || true; contend_pid=""
+
+    # Backup signal: a 6982 (PinRequired) reaching the card surface in the
+    # agent trace log. Primary signal is the sign-failure count above.
+    log_hits=$(grep -ciE '6982|pinrequired|pin required' "$log" || true)
+
+    echo
+    echo "=== summary ==="
+    echo "piggy-agent sign failures:        $fails / $iters"
+    echo "PIN-required hits in agent log:   $log_hits"
+    if [[ "$fails" -eq 0 && "$log_hits" -eq 0 ]]; then
+      echo "RESULT: PASS — no SW=6982 across $iters signs under card-reset contention."
+      echo "piggy#56 PinSession transaction wrapping holds."
+    else
+      echo "RESULT: FAIL — the verify-PIN/sign race reappeared. Agent log: $log"
+      cat "$log"
+      exit 1
+    fi
+
 # Probe PivApplet (running under fib) for X25519 / Ed25519 algorithm
 # support. Sends GENERATE ASYMMETRIC KEY PAIR for several alg bytes and
 # captures each SW. Hardware-free: only touches the virtual card behind
