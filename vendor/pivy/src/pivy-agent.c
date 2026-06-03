@@ -73,6 +73,10 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 
+/* stats-me telemetry: UDP statsd datagrams (see agent_stats_op_done). */
+#include <netdb.h>
+#include <netinet/in.h>
+
 #include "debug.h"
 
 #include <openssl/err.h>
@@ -395,6 +399,16 @@ typedef struct socket_entry {
   struct prompt_state se_prompt;
   struct request_continuation se_cont;
   struct bunyan_frame *se_log_frame;
+  /*
+   * stats-me telemetry: the operation label (a static string — the
+   * msg_type_to_name() result or, for extensions, the extension name),
+   * the monotime() at which the request started, and a once-only guard
+   * so a request that completes inside after_prompt_reap and then
+   * unwinds back through process_message is counted exactly once.
+   */
+  const char *se_stats_op;
+  uint64_t se_stats_start;
+  boolean_t se_stats_done;
 } socket_entry_t;
 
 u_int sockets_alloc = 0;
@@ -503,6 +517,122 @@ static uint64_t monotime(void) {
   msec = tv.tv_sec * 1000;
   msec += tv.tv_usec / 1000;
   return (msec);
+}
+
+/*
+ * stats-me telemetry (best-effort, fire-and-forget).
+ *
+ * stats-me is upstream statsd packaged under Bun; clients publish by
+ * sending UDP datagrams in the statsd wire format to the daemon (see
+ * stats-me-clients(7) in the amarbel-llc/stats-me repo). There is no
+ * library API and no auth — anything that can write UDP can publish.
+ *
+ * Emission is gated on the *presence* of the STATSD_HOST / STATSD_PORT
+ * environment variables the stats-me home-manager module exports via
+ * home.sessionVariables. If neither is set we emit nothing, so the
+ * agent never sprays UDP at a host that has not opted in. When at
+ * least one is present we follow the documented resolution order:
+ * STATSD_HOST (present-but-empty treated as unset, defaulting to the
+ * loopback 127.0.0.1) and STATSD_PORT (default 8125).
+ *
+ * UDP is fire-and-forget: every failure to resolve, open a socket, or
+ * send is swallowed. Telemetry must never perturb the agent.
+ */
+#define STATS_DEFAULT_HOST "127.0.0.1"
+#define STATS_DEFAULT_PORT "8125"
+
+static void stats_send(const char *payload) {
+  const char *host = getenv("STATSD_HOST");
+  const char *port = getenv("STATSD_PORT");
+  struct addrinfo hints, *res, *ai;
+  int fd, gai;
+
+  /* opt-in gate: nothing exported by the stats-me module -> no-op */
+  if (host == NULL && port == NULL)
+    return;
+  if (host == NULL || host[0] == '\0')
+    host = STATS_DEFAULT_HOST;
+  if (port == NULL || port[0] == '\0')
+    port = STATS_DEFAULT_PORT;
+
+  bzero(&hints, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = IPPROTO_UDP;
+  /*
+   * AI_NUMERICSERV: the port is always numeric. The host is a literal
+   * IP in every stats-me deployment (the module exports 127.0.0.1), so
+   * getaddrinfo resolves without touching DNS — no blocking in the
+   * agent's request hot path.
+   */
+  hints.ai_flags = AI_NUMERICSERV;
+  gai = getaddrinfo(host, port, &hints, &res);
+  if (gai != 0)
+    return;
+  for (ai = res; ai != NULL; ai = ai->ai_next) {
+    fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd == -1)
+      continue;
+    (void)sendto(fd, payload, strlen(payload), 0, ai->ai_addr, ai->ai_addrlen);
+    close(fd);
+    break;
+  }
+  freeaddrinfo(res);
+}
+
+/*
+ * Sanitise an operation label into a single statsd metric-path
+ * segment. statsd treats '.' as the hierarchy separator and the
+ * joyent extension names carry '@' and '.', so map anything outside
+ * [A-Za-z0-9_] to '_' and lowercase the alphabetics.
+ */
+static void stats_sanitise(const char *in, char *out, size_t outlen) {
+  size_t i;
+  if (outlen == 0)
+    return;
+  for (i = 0; in[i] != '\0' && i + 1 < outlen; ++i) {
+    char c = in[i];
+    if (c >= 'A' && c <= 'Z')
+      out[i] = c - 'A' + 'a';
+    else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+      out[i] = c;
+    else
+      out[i] = '_';
+  }
+  out[i] = '\0';
+}
+
+/*
+ * Record the completion of one ssh-agent request: a counter keyed by
+ * operation type and outcome, plus a timer carrying the elapsed
+ * milliseconds. Both lines also carry DogStatsD-style op/result tags
+ * for tag-aware backends (the console backend ignores them).
+ *
+ * Called from every request-terminal site (process_message's tail,
+ * after_prompt_reap's tail, and process_extension after the handler
+ * returns); se_stats_done makes it idempotent so a request that
+ * finishes inside after_prompt_reap and then unwinds back through its
+ * caller is counted exactly once.
+ */
+static void agent_stats_op_done(socket_entry_t *e, boolean_t success) {
+  char op[64];
+  /* op (<=63) appears four times plus the literals; 512 leaves slack so
+   * the compiler can prove no truncation under -Werror=format-truncation. */
+  char payload[512];
+  const char *result = success ? "success" : "failure";
+  uint64_t ms;
+
+  if (e->se_stats_done || e->se_stats_op == NULL)
+    return;
+  e->se_stats_done = B_TRUE;
+
+  stats_sanitise(e->se_stats_op, op, sizeof(op));
+  ms = monotime() - e->se_stats_start;
+  snprintf(payload, sizeof(payload),
+           "piggy.agent.%s.%s:1|c|#op:%s,result:%s\n"
+           "piggy.agent.%s.duration:%llu|ms|#op:%s,result:%s",
+           op, result, op, result, op, (unsigned long long)ms, op, result);
+  stats_send(payload);
 }
 
 static inline boolean_t is_slot_enabled(struct piv_slot *slot) {
@@ -1891,8 +2021,10 @@ static void after_prompt_reap(socket_entry_t *e) {
     sshbuf_reset(e->se_request);
     send_status(e, 0);
     errf_free(err);
+    agent_stats_op_done(e, B_FALSE);
   } else {
     bunyan_log(BNY_INFO, "processed ssh-agent message", NULL);
+    agent_stats_op_done(e, B_TRUE);
   }
 }
 
@@ -3544,6 +3676,10 @@ static errf_t *process_extension(socket_entry_t *e) {
 
   bunyan_add_vars(msg_log_frame, "extension", BNY_STRING, h->eh_name, NULL);
 
+  /* Refine the stats-me op label from "EXTENSION" to the extension
+   * name (a static string), so e.g. ecdh@joyent.com is its own metric. */
+  e->se_stats_op = h->eh_name;
+
   if (h->eh_string) {
     if ((r = sshbuf_froms(e->se_request, &inner))) {
       err = parserrf("sshbuf_froms", r);
@@ -3555,6 +3691,15 @@ static errf_t *process_extension(socket_entry_t *e) {
   VERIFY(inner != NULL);
 
   err = hdlr->eh_handler(e, inner);
+
+  /*
+   * Record the extension's outcome here, where the handler's real
+   * error is visible — process_message can't see it because we swallow
+   * the error below (send_extfail + return ERRF_OK). If the handler
+   * yielded to a prompt, after_prompt_reap already recorded the
+   * outcome and this is a no-op (se_stats_done guard).
+   */
+  agent_stats_op_done(e, err == ERRF_OK);
 
   if (err) {
     send_extfail(e);
@@ -3738,6 +3883,17 @@ static int process_message(u_int socknum) {
       NULL);
   bunyan_log(BNY_DEBUG, "received ssh-agent message", NULL);
 
+  /*
+   * stats-me telemetry: start the per-request clock and label it with
+   * the message type. process_extension refines the label to the
+   * extension name once it knows it; agent_stats_op_done emits at the
+   * terminal site. se_stats_done is reset here so the once-only guard
+   * is per-request.
+   */
+  e->se_stats_op = msg_type_to_name(type);
+  e->se_stats_start = monotime();
+  e->se_stats_done = B_FALSE;
+
   switch (type) {
   case SSH_AGENTC_LOCK:
   case SSH_AGENTC_UNLOCK:
@@ -3772,8 +3928,15 @@ static int process_message(u_int socknum) {
     sshbuf_reset(e->se_request);
     send_status(e, 0);
     errf_free(err);
+    agent_stats_op_done(e, B_FALSE);
   } else {
     bunyan_log(BNY_INFO, "processed ssh-agent message", NULL);
+    /*
+     * No-op if a yield (process_sign_request2 / an extension handler)
+     * already recorded the real outcome via after_prompt_reap or
+     * process_extension — see agent_stats_op_done's once-only guard.
+     */
+    agent_stats_op_done(e, B_TRUE);
   }
 
   bunyan_pop(msg_log_frame);

@@ -56,6 +56,50 @@ impl PiggyAgent {
 #[ssh_agent_lib::async_trait]
 impl Session for PiggyAgent {
     async fn request_identities(&mut self) -> Result<Vec<Identity>, AgentError> {
+        let start = std::time::Instant::now();
+        let res = self.request_identities_inner().await;
+        crate::stats::agent_op(
+            "request_identities",
+            crate::stats::outcome_of(&res),
+            start.elapsed(),
+        );
+        res
+    }
+
+    async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
+        let start = std::time::Instant::now();
+        let res = self.sign_inner(request).await;
+        crate::stats::agent_op("sign", crate::stats::outcome_of(&res), start.elapsed());
+        res
+    }
+
+    async fn lock(&mut self, key: String) -> Result<(), AgentError> {
+        let start = std::time::Instant::now();
+        let res = self.lock_inner(key).await;
+        crate::stats::agent_op("lock", crate::stats::outcome_of(&res), start.elapsed());
+        res
+    }
+
+    async fn unlock(&mut self, key: String) -> Result<(), AgentError> {
+        let start = std::time::Instant::now();
+        let res = self.unlock_inner(key).await;
+        crate::stats::agent_op("unlock", crate::stats::outcome_of(&res), start.elapsed());
+        res
+    }
+
+    async fn extension(&mut self, extension: Extension) -> Result<Option<Extension>, AgentError> {
+        let start = std::time::Instant::now();
+        // Label the metric with the extension name (bare, so it matches
+        // the C agent: e.g. ecdh@joyent.com -> piggy.agent.ecdh_joyent_com).
+        let op = extension.name.as_str().to_owned();
+        let res = self.extension_inner(extension).await;
+        crate::stats::agent_op(&op, crate::stats::outcome_of(&res), start.elapsed());
+        res
+    }
+}
+
+impl PiggyAgent {
+    async fn request_identities_inner(&mut self) -> Result<Vec<Identity>, AgentError> {
         let keys = self.keys.lock().await;
         let identities = keys
             .iter()
@@ -67,7 +111,7 @@ impl Session for PiggyAgent {
         Ok(identities)
     }
 
-    async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
+    async fn sign_inner(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
         let key = self.find_cached_key(&request.pubkey).await?;
 
         let mut token = reconnect_to_token(&key.guid)?;
@@ -102,19 +146,22 @@ impl Session for PiggyAgent {
         to_ssh_signature(key.algorithm, &sig_bytes, request.flags)
     }
 
-    async fn lock(&mut self, _key: String) -> Result<(), AgentError> {
+    async fn lock_inner(&mut self, _key: String) -> Result<(), AgentError> {
         let mut pin = self.pin.lock().await;
         *pin = None;
         Ok(())
     }
 
-    async fn unlock(&mut self, key: String) -> Result<(), AgentError> {
+    async fn unlock_inner(&mut self, key: String) -> Result<(), AgentError> {
         let mut pin = self.pin.lock().await;
         *pin = Some(key);
         Ok(())
     }
 
-    async fn extension(&mut self, extension: Extension) -> Result<Option<Extension>, AgentError> {
+    async fn extension_inner(
+        &mut self,
+        extension: Extension,
+    ) -> Result<Option<Extension>, AgentError> {
         match extension.name.as_str() {
             "query" => {
                 let supported: &[&str] = &[
