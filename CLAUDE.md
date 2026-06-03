@@ -144,6 +144,30 @@ v1.0 dispatch path). The canonical resolver is
 `agent_client::piggy_auth_sock_override` in the library crate; the
 disjoint binary crate mirrors the one-line lookup.
 
+`STATSD_HOST` / `STATSD_PORT` opt piggy's SSH agents into
+[stats-me](https://github.com/amarbel-llc/stats-me) telemetry. stats-me
+is upstream statsd packaged under Bun; its home-manager module exports
+these two vars via `home.sessionVariables` (the eng env piggy runs in),
+so their *presence* is the opt-in gate — when neither is set the agents
+emit nothing and never spray UDP at a host that hasn't enabled it. When
+present, both SSH agent implementations (the C `pivy-agent` in
+`vendor/pivy/src/pivy-agent.c` and the Rust `cmd::agent` re-impl in
+`crates/piggy/src/cmd/agent/session.rs`) emit one fire-and-forget
+statsd datagram per request at the request-terminal site: a counter
+`piggy.agent.<op>.<result>:1|c` and a timer
+`piggy.agent.<op>.duration:<ms>|ms`, both carrying DogStatsD-style
+`#op:<op>,result:<result>` tags. `<op>` is the agent message type
+(`sign`, `request_identities`, `lock`, `unlock`) or, for extensions, the
+sanitized extension name (`ecdh@joyent.com` → `ecdh_joyent_com`);
+`<result>` is `success`/`failure`. Host resolution follows
+stats-me-clients(7): `STATSD_HOST` (empty → `127.0.0.1`) and
+`STATSD_PORT` (default `8125`). The shared Rust emitter is
+`crate::stats` (`crates/piggy/src/stats.rs`); the C side mirrors it in
+`stats_send` / `agent_stats_op_done`. In the C agent the prompt-driven
+ops (sign/ecdh/rebox/prehash) complete inside `after_prompt_reap`, so
+emission is guarded by a per-request `se_stats_done` flag to count each
+request exactly once as control unwinds back through `process_message`.
+
 ## Debugging
 
 ### darwin CI: silent exit 126 under `env -i` with `set -euo pipefail`

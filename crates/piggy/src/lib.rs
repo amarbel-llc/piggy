@@ -18,3 +18,4 @@
 pub mod agent_client;
 pub mod card_oracle;
 pub mod cmd;
+pub mod stats;
