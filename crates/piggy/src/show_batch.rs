@@ -596,6 +596,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         target_curve,
         pin_verified: false,
         pin_supplier: askpass_pin_supplier(),
+        pin_prompt: batch_pin_prompt(&names),
         last_failure: None,
     };
 
@@ -753,6 +754,37 @@ fn canonicalize_pass_name(raw: &str) -> String {
         .strip_suffix(".ebox")
         .unwrap_or(stripped)
         .to_string()
+}
+
+/// Build the `SSH_ASKPASS` prompt for a show-batch run (piggy#140).
+///
+/// The single PIN entry authorizes decryption of the whole batch, so
+/// the prompt names *what* is being decrypted — the count of secrets
+/// plus a capped sample of their canonical pass-names — rather than a
+/// generic "PIV PIN". `contrib/piggy-askpass.sh` renders this on top of
+/// its context banner; `libexec/pivy-askpass` passes it straight to
+/// `zenity --title`, so the user sees the batch they are authorizing.
+///
+/// The name list is capped at [`PROMPT_MAX_NAMES`] so a large batch
+/// can't blow out a dialog title; the remainder is summarized as
+/// "+N more".
+fn batch_pin_prompt(names: &[String]) -> String {
+    /// Cap on how many pass-names to spell out before eliding.
+    const PROMPT_MAX_NAMES: usize = 3;
+
+    let count = names.len();
+    let noun = if count == 1 { "secret" } else { "secrets" };
+    let mut list = names
+        .iter()
+        .take(PROMPT_MAX_NAMES)
+        .map(|n| canonicalize_pass_name(n))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if count > PROMPT_MAX_NAMES {
+        use std::fmt::Write as _;
+        let _ = write!(list, ", +{} more", count - PROMPT_MAX_NAMES);
+    }
+    format!("piggy PIV PIN — decrypt {count} {noun}: {list}")
 }
 
 /// Resolve a pass-name to its on-disk ebox path. Mirrors the bash
@@ -1143,6 +1175,11 @@ struct BatchOracle<'sess, 'tok> {
     target_curve: piggy_box::piv_box::EcCurve,
     pin_verified: bool,
     pin_supplier: PinSupplier,
+    /// Prompt handed to `pin_supplier`. Carries the batch's request
+    /// context (count + pass-names) so the askpass dialog tells the
+    /// user what they are authorizing — see [`batch_pin_prompt`]
+    /// (piggy#140).
+    pin_prompt: String,
     last_failure: Option<BatchFailure>,
 }
 
@@ -1174,7 +1211,7 @@ impl<'sess, 'tok> EcdhOracle for BatchOracle<'sess, 'tok> {
         }
 
         if !self.pin_verified {
-            let pin = match (self.pin_supplier)("PIV PIN") {
+            let pin = match (self.pin_supplier)(&self.pin_prompt) {
                 Ok(p) => p,
                 Err(e) => {
                     self.last_failure = Some(classify_pin_supplier_error(e));
@@ -1390,6 +1427,61 @@ mod tests {
         assert_eq!(
             super::canonicalize_pass_name("config/.ebox/foo"),
             "config/.ebox/foo"
+        );
+    }
+
+    /// piggy#140: the show-batch askpass prompt must carry request
+    /// context (how many secrets, which ones) so the SSH_ASKPASS dialog
+    /// tells the user what they are authorizing instead of a bare
+    /// "PIV PIN". Names are shown canonically (no leading `/`, no
+    /// trailing `.ebox`).
+    #[test]
+    fn batch_pin_prompt_includes_count_and_canonical_names() {
+        let names = vec!["deploy/db".to_string(), "/deploy/api.ebox".to_string()];
+        let prompt = super::batch_pin_prompt(&names);
+        assert!(
+            prompt.contains('2'),
+            "prompt should state the count: {prompt}"
+        );
+        assert!(
+            prompt.contains("deploy/db"),
+            "prompt should list the requested names: {prompt}"
+        );
+        assert!(
+            prompt.contains("deploy/api"),
+            "prompt should canonicalize names: {prompt}"
+        );
+        assert!(
+            !prompt.contains(".ebox"),
+            "names should be canonical (no .ebox suffix): {prompt}"
+        );
+    }
+
+    /// A single secret uses the singular noun.
+    #[test]
+    fn batch_pin_prompt_singular_for_one_secret() {
+        let prompt = super::batch_pin_prompt(&["solo".to_string()]);
+        assert!(prompt.contains("1 secret"), "expected singular: {prompt}");
+        assert!(
+            !prompt.contains("secrets"),
+            "one secret must not pluralize: {prompt}"
+        );
+    }
+
+    /// Long batches cap the listed names so the dialog title stays
+    /// bounded; the elided remainder is summarized as "+N more".
+    #[test]
+    fn batch_pin_prompt_caps_long_name_list() {
+        let names: Vec<String> = (0..10).map(|i| format!("secret-{i}")).collect();
+        let prompt = super::batch_pin_prompt(&names);
+        assert!(prompt.contains("10 secrets"), "expected count: {prompt}");
+        assert!(
+            prompt.contains("+7 more"),
+            "expected elision summary: {prompt}"
+        );
+        assert!(
+            !prompt.contains("secret-9"),
+            "must not list every name: {prompt}"
         );
     }
 
