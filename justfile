@@ -52,7 +52,7 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: test-bats-default test-bats-conformance test-rust test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby
+test: test-bats-default test-bats-conformance test-rust test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand
 
 # Sandboxed bats lane: runs every top-level t*.bats NOT tagged
 # `# bats file_tags=hardware` inside the nix build sandbox. See
@@ -341,6 +341,26 @@ test-bats-conformance-piggy-ssh-via-fibby:
       BATS_TEST_TIMEOUT=90 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_ssh_via_fibby.bats
 
+# piggy#58: prompt-on-demand PIN entry parity. Drives a slot-9D decrypt
+# at the agent (via PIGGY_AUTH_SOCK) WITHOUT pushing a PIN first, so the
+# agent must fork SSH_ASKPASS on demand. Baselines the C pivy-agent; the
+# Rust `piggy agent` is held to the same scenario once re-pointed. Uses
+# the wrapped piggy (.#default, real pivy-box) over fibby — no hardware,
+# no SSH forwarding (unlike piggy-ssh-via-fibby). Agent dev-loop: this is
+# the CI gate for the #58 prompt-on-demand work.
+[group('post-build')]
+test-bats-conformance-agent-pin-on-demand:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIVY_AGENT="$pivy_out/bin/pivy-agent" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_agent_pin_on_demand.bats
+
 # Hardware lane for the C pivy-agent built from vendor/pivy/. Runs
 # pivy_agent_hardware.bats against the user's plugged-in PIV card.
 # Read-only PIN-free operations (REQUEST_IDENTITIES). Verifies the
@@ -388,7 +408,7 @@ test-nix-hm-module:
   set -euo pipefail
   expr='let
     flake = builtins.getFlake (toString ./.);
-    pkgs = flake.inputs.nixpkgs.legacyPackages.${builtins.currentSystem};
+    pkgs = flake.inputs.igloo.legacyPackages.${builtins.currentSystem};
     test = import ./nix/hm/eval-test.nix {
       inherit pkgs;
       module = flake.homeManagerModules.piggy-agent;

@@ -194,18 +194,28 @@ explore-bats` for the generic `--no-sandbox` driver.
 
 ### PIV CLI dispatch (exec-to-C) + pcscd reset semantics
 
-`piggy agent` and `piggy box` `exec(2)` into the **C** `pivy-agent`/`pivy-box`
-(`main.rs`: `Command::Agent => fallback::exec_pivy("agent", ...)`); the Rust
-re-impls under `crates/piggy/src/cmd/{agent,pivy_box}` are OFF the v1.0 dispatch
-path (a `piggy agent` process shows as `.pivy-agent-unwrapped` in `ps`). So you
-**cannot hardware-test piggy's Rust card-crypto via the CLI** — and neither can
-`agent_ecdh_integration` (it spawns `piggy agent` → C). The Rust `PinSession` is
-reachable only via `pass show-batch` (on-path) and the in-process
+`piggy agent` and `piggy box` now run the **Rust** re-impls under
+`crates/piggy/src/cmd/{agent,pivy_box}` (post-#57/#58: `main.rs` calls
+`piggy::cmd::agent::run(...)` / `piggy::cmd::pivy_box::run(...)`). The Rust
+`piggy agent` prompts for the PIN on demand via `SSH_ASKPASS` (reusing
+`card_oracle::run_askpass`, which propagates `PIGGY_ASKPASS_CONTEXT`), matches
+guidless piggy 2.x boxes by recipient pubkey in `handle_ecdh_rebox`, and spawns
+the #59 card-presence probe loop. The re-point is a **clean cutover to the Rust
+flag surface** — notably `piggy agent -i` means print-keys-and-exit, NOT C's
+foreground mode; the home-manager module (`nix/hm/piggy-agent.nix`) emits Rust
+flags (no `-i`, `-S` only for hex whitelists, no `-K`). C-only features (`-C`
+confirm, `-K` CAK, `install-service`) stay reachable via the `piggy pivy agent`
+passthrough or `package = pkgs.pivy`.
+
+Hardware/fibby test path: the Rust agent's card-crypto is now exercisable
+straight through the CLI (`piggy agent` → Rust). The fibby-backed
+`zz-tests_bats/conformance/piggy_agent_pin_on_demand.bats`
+(`just test-bats-conformance-agent-pin-on-demand`) drives a guidless slot-9D
+decrypt through the agent with the PIN supplied on demand, baselined against the
+C `pivy-agent` and held to parity by the Rust agent. The in-process
 `CardEcdhOracle` test (`crates/piggy/tests/unlock_ebox_card_integration.rs`,
-hardware mode `PIGGY_TEST_CARD_GUID=<guid>`; `just explore-rust-card-unlock-hw`).
-This cost a long piggy#56 detour — a hardware recipe built on `piggy agent`
-tested the C agent the whole time. The Rust `handle_ecdh` has no hardware path
-until #57/#59.
+hardware mode `PIGGY_TEST_CARD_GUID=<guid>`; `just explore-rust-card-unlock-hw`)
+remains for direct PinSession hardware validation.
 
 pcsc-lite **refcount-shields** a co-resident
 `SCardEndTransaction(SCARD_RESET_CARD)` while the victim holds its connection

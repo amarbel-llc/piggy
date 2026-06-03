@@ -262,9 +262,14 @@ async fn run_async(
     let listener = UnixListener::bind(&socket_path)?;
     let agent = PiggyAgent::new(cached_keys);
 
-    // Spawn card probe loop if we have a primary card
+    // Spawn the card-presence probe loop (piggy#59): polls the primary card
+    // every PROBE_INTERVAL (60s) and clears the cached PIN after
+    // PROBE_FAIL_LIMIT (3) consecutive failures, so an unattended agent drops
+    // its PIN shortly after the card is removed. This is piggy-specific — the
+    // C pivy-agent has its own card-presence handling with different timing.
     if let Some(guid) = primary_guid {
         let pin_handle = agent.pin_handle();
+        tracing::info!(guid = %guid.short_id(), "spawning card-presence probe loop");
         tokio::spawn(card::probe_loop(guid, pin_handle));
     }
 

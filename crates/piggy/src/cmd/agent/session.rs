@@ -16,7 +16,7 @@ use ssh_key::{Algorithm, PublicKey, Signature, public::KeyData};
 
 use piggy_box::piv_box::{EcCurve, PivBox};
 use piggy_piv::{Guid, PivAlgorithm, PivContext};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Cached key info from a PIV token (populated at startup)
 #[derive(Clone)]
@@ -34,6 +34,16 @@ pub struct CachedKey {
 pub struct PiggyAgent {
     keys: Arc<Mutex<Vec<CachedKey>>>,
     pin: Arc<Mutex<Option<String>>>,
+    /// Serializes on-demand askpass prompts so a burst of concurrent ops
+    /// that all need the PIN forks at most one dialog (piggy#58).
+    prompt_lock: Arc<Mutex<()>>,
+}
+
+/// A PIN acquired for a card op, plus whether it came from an on-demand
+/// prompt (and so should be cached only after a successful on-card verify).
+struct AcquiredPin {
+    pin: Zeroizing<String>,
+    fresh: bool,
 }
 
 impl PiggyAgent {
@@ -41,6 +51,7 @@ impl PiggyAgent {
         Self {
             keys: Arc::new(Mutex::new(keys)),
             pin: Arc::new(Mutex::new(None)),
+            prompt_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -50,6 +61,51 @@ impl PiggyAgent {
 
     fn find_key(keys: &[CachedKey], pubkey: &KeyData) -> Option<CachedKey> {
         keys.iter().find(|k| k.public_key == *pubkey).cloned()
+    }
+
+    /// Acquire the PIV PIN for an op on `guid`: the cached PIN if one is
+    /// present, otherwise prompt the user on demand via SSH_ASKPASS (#58),
+    /// mirroring the C pivy-agent's "get PIN at first use".
+    ///
+    /// The prompt is taken OUTSIDE any PC/SC transaction: it can block on a
+    /// human for many seconds, and holding the card txn across it would
+    /// wedge the card (the pivy#105 concern). Concurrent requests serialize
+    /// on `prompt_lock` so a burst forks at most one dialog; the returned
+    /// `fresh` flag tells the caller to cache the PIN only after an on-card
+    /// verify succeeds (so a wrong prompted PIN is never cached). `op` is a
+    /// short request label propagated as `PIGGY_ASKPASS_CONTEXT`.
+    async fn ensure_pin(&self, op: &str, guid: &Guid) -> Result<AcquiredPin, AgentError> {
+        if let Some(p) = self.pin.lock().await.as_ref() {
+            return Ok(AcquiredPin {
+                pin: Zeroizing::new(p.clone()),
+                fresh: false,
+            });
+        }
+        // No cached PIN; serialize prompts and re-check (another request may
+        // have just prompted and cached one while we waited).
+        let _prompt_guard = self.prompt_lock.lock().await;
+        if let Some(p) = self.pin.lock().await.as_ref() {
+            return Ok(AcquiredPin {
+                pin: Zeroizing::new(p.clone()),
+                fresh: false,
+            });
+        }
+        let prompt = format!("Enter PIN for token {}", guid.short_id());
+        let context = format!("piggy-agent:{op}:{}", guid.short_id());
+        let pin = tokio::task::spawn_blocking(move || {
+            crate::card_oracle::run_askpass(&prompt, Some(&context))
+        })
+        .await
+        .map_err(|e| AgentError::Other(format!("askpass task: {e}").into()))?
+        .map_err(|e| AgentError::Other(e.to_string().into()))?;
+        Ok(AcquiredPin { pin, fresh: true })
+    }
+
+    /// Cache a freshly-prompted PIN after its on-card verify succeeded.
+    async fn cache_pin(&self, acquired: &AcquiredPin) {
+        if acquired.fresh {
+            *self.pin.lock().await = Some(acquired.pin.as_str().to_string());
+        }
     }
 }
 
@@ -70,6 +126,15 @@ impl Session for PiggyAgent {
     async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
         let key = self.find_cached_key(&request.pubkey).await?;
 
+        // Acquire the PIN (cached, or prompted on demand via SSH_ASKPASS)
+        // BEFORE opening the transaction — the prompt must not be held
+        // across the card txn (piggy#105). Slot 9E needs no PIN.
+        let acquired = if key.slot_id != 0x9E {
+            Some(self.ensure_pin("sign", &key.guid).await?)
+        } else {
+            None
+        };
+
         let mut token = reconnect_to_token(&key.guid)?;
         // Bracket verify-PIN + sign in one PC/SC transaction so a
         // co-resident agent's SCARD_RESET_CARD cannot clear the PIN
@@ -79,15 +144,12 @@ impl Session for PiggyAgent {
             .begin_pin_session()
             .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
-        // Verify PIN if needed (slot 9E doesn't require PIN)
-        if key.slot_id != 0x9E {
-            let pin_guard = self.pin.lock().await;
-            let pin = pin_guard
-                .as_ref()
-                .ok_or_else(|| AgentError::Other("PIN required (use ssh-add -X)".into()))?;
+        if let Some(acq) = &acquired {
             session
-                .verify_pin(pin)
+                .verify_pin(&acq.pin)
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
+            // Verified PIN is good; cache it (no-op if it came from cache).
+            self.cache_pin(acq).await;
         }
 
         // Prepare data for signing based on algorithm
@@ -204,20 +266,25 @@ impl PiggyAgent {
             }
         }
 
+        // Acquire the PIN before opening the transaction (prompt must not be
+        // held across the card txn — piggy#105). Slot 9E needs no PIN.
+        let acquired = if key.slot_id != 0x9E {
+            Some(self.ensure_pin("ecdh", &key.guid).await?)
+        } else {
+            None
+        };
+
         let mut token = reconnect_to_token(&key.guid)?;
         // verify-PIN + ECDH bracketed in one transaction (piggy#56).
         let mut session = token
             .begin_pin_session()
             .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
-        if key.slot_id != 0x9E {
-            let pin_guard = self.pin.lock().await;
-            let pin = pin_guard
-                .as_ref()
-                .ok_or_else(|| AgentError::Other("PIN required (use ssh-add -X)".into()))?;
+        if let Some(acq) = &acquired {
             session
-                .verify_pin(pin)
+                .verify_pin(&acq.pin)
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
+            self.cache_pin(acq).await;
         }
 
         let mut secret = session
@@ -302,16 +369,34 @@ impl PiggyAgent {
         let mut piv_box = PivBox::from_bytes(boxbuf)
             .map_err(|e| AgentError::Other(format!("ecdh-rebox: bad box: {e}").into()))?;
 
-        let (box_guid, box_slot) = piv_box
-            .guid_slot
-            .as_ref()
-            .ok_or_else(|| AgentError::Other("ecdh-rebox: box has no GUID/slot".into()))?;
-        let box_slot = *box_slot;
+        // Resolve the agent key + slot for this box. A GUID/slot hint (legacy
+        // boxes) matches directly; piggy 2.x boxes are guidless, so match the
+        // cached key by the box's recipient pubkey (SEC1-uncompressed
+        // equality) — the same pubkey-matching the agentless card_oracle and
+        // `handle_ecdh` use. Without this the agent can't decrypt guidless
+        // piggy boxes (piggy#58).
+        let (key, box_slot) = match piv_box.guid_slot.as_ref() {
+            Some((box_guid, slot)) => {
+                let key = self.find_key_by_guid(box_guid).await.ok_or_else(|| {
+                    AgentError::Other("ecdh-rebox: no matching key for GUID".into())
+                })?;
+                (key, *slot)
+            }
+            None => self
+                .find_key_by_recipient_pubkey(&piv_box.recipient_pubkey)
+                .await
+                .ok_or_else(|| {
+                    AgentError::Other("ecdh-rebox: no agent key matches the box recipient".into())
+                })?,
+        };
 
-        let key = self
-            .find_key_by_guid(box_guid)
-            .await
-            .ok_or_else(|| AgentError::Other("ecdh-rebox: no matching key".into()))?;
+        // Acquire the PIN before opening the transaction (prompt must not be
+        // held across the card txn — piggy#105). Slot 9E needs no PIN.
+        let acquired = if box_slot != 0x9E {
+            Some(self.ensure_pin("ecdh-rebox", &key.guid).await?)
+        } else {
+            None
+        };
 
         let mut token = reconnect_to_token(&key.guid)?;
         // verify-PIN + ECDH bracketed in one transaction (piggy#56).
@@ -319,14 +404,11 @@ impl PiggyAgent {
             .begin_pin_session()
             .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
-        if box_slot != 0x9E {
-            let pin_guard = self.pin.lock().await;
-            let pin = pin_guard
-                .as_ref()
-                .ok_or_else(|| AgentError::Other("PIN required (use ssh-add -X)".into()))?;
+        if let Some(acq) = &acquired {
             session
-                .verify_pin(pin)
+                .verify_pin(&acq.pin)
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
+            self.cache_pin(acq).await;
         }
 
         let ec_point = decompress_ec_point(&piv_box.ephemeral_pubkey, piv_box.curve)?;
@@ -384,6 +466,22 @@ impl PiggyAgent {
     async fn find_key_by_guid(&self, guid: &Guid) -> Option<CachedKey> {
         let keys = self.keys.lock().await;
         keys.iter().find(|k| &k.guid == guid).cloned()
+    }
+
+    /// Match a cached EC key by a box recipient pubkey (raw SEC1 bytes from a
+    /// guidless box), returning the key and the slot it lives in. The
+    /// recipient bytes (compressed on the wire) and each cached key's pubkey
+    /// are both reduced to SEC1-uncompressed form before comparison, so the
+    /// encodings agree (mirrors `card_oracle`'s pubkey matching).
+    async fn find_key_by_recipient_pubkey(&self, recipient: &[u8]) -> Option<(CachedKey, u8)> {
+        let want = crate::card_oracle::canonicalize_uncompressed(recipient).ok()?;
+        let keys = self.keys.lock().await;
+        keys.iter().find_map(|k| match &k.public_key {
+            KeyData::Ecdsa(ec) if ec.as_sec1_bytes() == want.as_slice() => {
+                Some((k.clone(), k.slot_id))
+            }
+            _ => None,
+        })
     }
 }
 

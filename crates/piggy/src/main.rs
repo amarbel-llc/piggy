@@ -30,11 +30,13 @@
 //! `cmd_show ""`); `arg_required_else_help` handles that on the top-level
 //! `Cli` and the nested `PassArgs`.
 //!
-//! The Rust `agent` re-implementation (`cmd::agent`) is still OFF the
-//! dispatch path — `piggy agent` execs C `pivy-agent`. Roadmap: #56 (PC/SC
-//! transactions — **done**) and #57 (this `box` re-point — **done**); the
-//! agent returns once #58 (`[piggy-test]` askpass-context tagging) and #59
-//! (probe-loop PIN-clearing in `piggy agent`) land.
+//! The Rust `agent` re-implementation (`cmd::agent`) is ON the dispatch
+//! path: `piggy agent` runs it (piggy#58), prompting for the PIN on demand
+//! via SSH_ASKPASS and clearing it on a card-presence probe loop (piggy#59),
+//! atop the PC/SC transactions from #56. This is a clean cutover to the Rust
+//! flag surface (e.g. `-i` prints keys and exits here, unlike C's foreground
+//! mode); the C `pivy-agent` and its C-only features (`-C`, `-K`,
+//! `install-service`, …) stay reachable via `piggy pivy agent`.
 
 mod copy_move;
 mod crypt;
@@ -407,7 +409,18 @@ fn main() {
         Command::Help { .. } => std::process::exit(usage::run()),
         Command::Version { .. } => std::process::exit(version::run()),
 
-        Command::Agent { rest } => fallback::exec_pivy("agent", &rest),
+        // `agent` runs the Rust impl (piggy#58): a PIV-backed SSH agent that
+        // prompts for the PIN on demand via SSH_ASKPASS and clears it on a
+        // card-presence probe loop (piggy#59). Unlike `box`, this is a clean
+        // cutover — `piggy agent` uses the Rust flag surface, not the C one
+        // (notably `-i` = print-keys-and-exit here, NOT C's foreground mode).
+        // C-only features (confirm `-C`, `-K` CAK, `install-service`, …) stay
+        // reachable via the `piggy pivy agent` passthrough.
+        Command::Agent { rest } => {
+            let mut argv = vec!["piggy".to_string(), "agent".to_string()];
+            argv.extend(rest);
+            std::process::exit(piggy::cmd::agent::run(argv));
+        }
         // `box` runs the Rust impl (restores agentless direct-PCSC decrypt,
         // piggy#57); subcommands it doesn't handle return None and fall back
         // to C `pivy-box`, so `piggy box` stays a superset.

@@ -77,10 +77,20 @@ let
   # doesn't fire when the launcher derivation gets forced.
   #
   # Passed as a separate module (not merged via `//`) so evalModules
-  # does the proper deep-merge with the case's own config.
+  # does the proper deep-merge with the case's own config. `mkDefault` so
+  # a case can pin `package` to the rust-agent stub below to exercise the
+  # `isRustAgent` flag-construction branch (piggy#58).
   pinPackage = {
-    services.piggy-agent.package = pkgs.hello;
+    services.piggy-agent.package = lib.mkDefault pkgs.hello;
   };
+
+  # A package whose `pname == "piggy"` so the module's `isRustAgent`
+  # branch fires. `pkgs.hello` stands in for the real derivation — the
+  # launcher is only forced through eval, never realized, so the store
+  # path's contents don't matter; only `pname` and the path string do.
+  rustPackageStub = pkgs.hello.overrideAttrs (_: {
+    pname = "piggy";
+  });
 
   runEval =
     cfg:
@@ -655,6 +665,123 @@ let
               stderrPath == null;
           got = {
             inherit stderrPath isAbsolute noLiteralHome;
+          };
+        };
+    }
+    {
+      # piggy#58: with the Rust agent (pname == "piggy") the launcher must
+      # invoke the `agent` subcommand and must NOT pass the C-only `-i`
+      # (which means print-keys-and-exit on the Rust parser) nor `-S all`
+      # (the Rust `-S` takes only a hex slot whitelist; "all" is the
+      # default, expressed by omitting `-S`).
+      name = "rust-agent-launcher-uses-rust-flags";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          # escapeShellArgs leaves shell-safe args unquoted, so match the
+          # bare flags as they appear on the exec line.
+          hasAgentSubcmd = lib.hasInfix " agent " text;
+          hasAllCards = lib.hasInfix " -A" text;
+          noForegroundI = !(lib.hasInfix " -i " text);
+          noSlotFilter = !(lib.hasInfix " -S " text);
+        in
+        {
+          ok = tripped == [ ] && hasAgentSubcmd && hasAllCards && noForegroundI && noSlotFilter;
+          got = {
+            inherit
+              tripped
+              text
+              hasAgentSubcmd
+              hasAllCards
+              noForegroundI
+              noSlotFilter
+              ;
+          };
+        };
+    }
+    {
+      # A hex slot list IS passed to the Rust agent as `-S 9a,9e` (only
+      # "all" is omitted).
+      name = "rust-agent-passes-hex-slots-as-S";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.slots = "9a,9e";
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          hasSlotFilter = lib.hasInfix "-S 9a,9e" text;
+        in
+        {
+          ok = tripped == [ ] && hasSlotFilter;
+          got = {
+            inherit tripped text hasSlotFilter;
+          };
+        };
+    }
+    {
+      # CAK (`-K`) is C-only; setting it with the Rust agent must trip the
+      # guard assertion rather than silently dropping the anti-swap check.
+      name = "rust-agent-with-cak-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.cak = "ecdsa-sha2-nistp256 AAAATESTKEY";
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          hasExpected = lib.any (m: lib.hasInfix "`cak` is not supported" m) tripped;
+        in
+        {
+          ok = hasExpected;
+          got = tripped;
+        };
+    }
+    {
+      # The C escape-hatch package (pname == "pivy") keeps the C flag
+      # surface: `-i` foreground, `-S all`, and `-K` when a CAK is set.
+      name = "c-agent-package-keeps-c-flags";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = pkgs.hello.overrideAttrs (_: {
+          pname = "pivy";
+        });
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.cak = "ecdsa-sha2-nistp256 AAAATESTKEY";
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          hasForegroundI = lib.hasInfix " -i " text;
+          hasSlotAll = lib.hasInfix "-S all" text;
+          hasCak = lib.hasInfix "-K '" text;
+        in
+        {
+          ok = tripped == [ ] && hasForegroundI && hasSlotAll && hasCak;
+          got = {
+            inherit
+              tripped
+              text
+              hasForegroundI
+              hasSlotAll
+              hasCak
+              ;
           };
         };
     }

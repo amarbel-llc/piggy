@@ -212,6 +212,57 @@ pub fn canonicalize_uncompressed(point: &[u8]) -> Result<Vec<u8>, OracleError> {
     Ok(bytes)
 }
 
+/// Run `$SSH_ASKPASS` with `prompt` as `argv[1]` and return the PIN it
+/// prints on stdout (trailing CR/LF trimmed, must be non-empty).
+///
+/// When `context` is `Some`, it is exported to the askpass child as
+/// `PIGGY_ASKPASS_CONTEXT`, which `contrib/piggy-askpass.sh` renders as
+/// origin info on the prompt (#33) and the test askpass surfaces in its
+/// banner (#35). The Rust `piggy agent`'s prompt-on-demand path sets this
+/// to identify the request (piggy#58); the agentless oracle passes `None`.
+///
+/// Synchronous (forks + waits). Async callers (the agent) wrap this in
+/// `tokio::task::spawn_blocking`. Reference impl: pivy's
+/// `vendor/pivy/src/ebox-cmd.c::run_askpass`.
+pub fn run_askpass(prompt: &str, context: Option<&str>) -> Result<Zeroizing<String>, OracleError> {
+    let askpass = match std::env::var_os("SSH_ASKPASS") {
+        Some(v) if !v.is_empty() => v,
+        _ => {
+            return Err(OracleError::Other(
+                "no PIN source: SSH_ASKPASS not set".into(),
+            ));
+        }
+    };
+    let mut cmd = Command::new(&askpass);
+    cmd.arg(prompt)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    if let Some(ctx) = context {
+        cmd.env("PIGGY_ASKPASS_CONTEXT", ctx);
+    }
+    let mut child = cmd.spawn().map_err(|e| {
+        OracleError::Other(format!("spawn askpass {}: {e}", askpass.to_string_lossy()))
+    })?;
+
+    let mut buf = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_string(&mut buf)
+            .map_err(|e| OracleError::Other(format!("read askpass stdout: {e}")))?;
+    }
+    let status = child
+        .wait()
+        .map_err(|e| OracleError::Other(format!("await askpass: {e}")))?;
+    if !status.success() {
+        return Err(OracleError::Other(format!("askpass exited with {status}")));
+    }
+    let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
+    if trimmed.is_empty() {
+        return Err(OracleError::Other("askpass returned empty PIN".into()));
+    }
+    Ok(Zeroizing::new(trimmed))
+}
+
 /// Default PIN supplier: spawn `$SSH_ASKPASS` with the prompt as `argv[1]`,
 /// read one line of stdout, return as `Zeroizing<String>`.
 ///
@@ -221,45 +272,11 @@ pub fn canonicalize_uncompressed(point: &[u8]) -> Result<Vec<u8>, OracleError> {
 /// `cmd_stream_decrypt` where the card oracle may never be exercised.
 ///
 /// Composes with `contrib/piggy-askpass.sh` (#33) and
-/// `zz-tests_bats/helpers/piggy-test-askpass.sh` (#35). Reference impl:
-/// pivy's `vendor/pivy/src/ebox-cmd.c::run_askpass`.
+/// `zz-tests_bats/helpers/piggy-test-askpass.sh` (#35). Thin wrapper over
+/// [`run_askpass`] with no `PIGGY_ASKPASS_CONTEXT` (the agentless path has
+/// no agent-side request context to propagate).
 pub fn askpass_pin_supplier() -> PinSupplier {
-    Box::new(|prompt: &str| -> Result<Zeroizing<String>, OracleError> {
-        let askpass = match std::env::var_os("SSH_ASKPASS") {
-            Some(v) if !v.is_empty() => v,
-            _ => {
-                return Err(OracleError::Other(
-                    "no PIN source: SSH_ASKPASS not set".into(),
-                ));
-            }
-        };
-        let mut child = Command::new(&askpass)
-            .arg(prompt)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| {
-                OracleError::Other(format!("spawn askpass {}: {e}", askpass.to_string_lossy()))
-            })?;
-
-        let mut buf = String::new();
-        if let Some(mut out) = child.stdout.take() {
-            out.read_to_string(&mut buf)
-                .map_err(|e| OracleError::Other(format!("read askpass stdout: {e}")))?;
-        }
-        let status = child
-            .wait()
-            .map_err(|e| OracleError::Other(format!("await askpass: {e}")))?;
-        if !status.success() {
-            return Err(OracleError::Other(format!("askpass exited with {status}")));
-        }
-        let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
-        if trimmed.is_empty() {
-            return Err(OracleError::Other("askpass returned empty PIN".into()));
-        }
-        Ok(Zeroizing::new(trimmed))
-    })
+    Box::new(|prompt: &str| run_askpass(prompt, None))
 }
 
 #[cfg(test)]

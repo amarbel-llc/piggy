@@ -55,7 +55,11 @@ banner() {
 }
 
 if [[ -n ${PIGGY_TEST_FIB_PIN:-} ]]; then
-  banner "supplying PIGGY_TEST_FIB_PIN for prompt: $prompt"
+  # Surface PIGGY_ASKPASS_CONTEXT in the banner so tests can assert that a
+  # caller (e.g. the Rust `piggy agent`, piggy#58) propagated request
+  # context to the askpass child. Unset for callers that don't (the C
+  # pivy-agent), making the differential visible in agent logs.
+  banner "supplying PIGGY_TEST_FIB_PIN for prompt: $prompt (context: ${PIGGY_ASKPASS_CONTEXT:-<unset>})"
   # No trailing newline manipulation: ssh-add and pivy-box both trim the
   # first line via strcspn / similar. A plain echo is the simplest.
   printf '%s\n' "$PIGGY_TEST_FIB_PIN"

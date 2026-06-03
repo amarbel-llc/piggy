@@ -7,14 +7,13 @@
 //!   and direct-PCSC oracle used by integration tests in `tests/`
 //!   to validate the `ecdh@joyent.com` round-trip.
 //! - `cmd` — the Rust re-implementations of `piggy agent` and
-//!   `piggy box`. `cmd::pivy_box` IS on the dispatch path now
-//!   (`piggy box` runs it, falling back to C `pivy-box` for
-//!   subcommands it doesn't handle — piggy#57), restoring the
-//!   agentless direct-PCSC decrypt. `cmd::agent` is still OFF the
-//!   path (`piggy agent` execs C `pivy-agent`) until #58/#59. See
-//!   the head of `main.rs` for the full rationale and the #56–#59
-//!   maturation roadmap (#56 + #57 done; #58 askpass `[piggy-test]`
-//!   context tagging + #59 probe-loop PIN-clearing remain).
+//!   `piggy box`, both now ON the dispatch path. `cmd::pivy_box`
+//!   backs `piggy box` (falling back to C `pivy-box` for subcommands
+//!   it doesn't handle — piggy#57), restoring agentless direct-PCSC
+//!   decrypt. `cmd::agent` backs `piggy agent` (piggy#58/#59): a
+//!   PIV-backed SSH agent with on-demand SSH_ASKPASS PIN entry and a
+//!   card-presence probe loop, atop the #56 PC/SC transactions. See
+//!   the head of `main.rs` for the dispatch rationale.
 
 pub mod agent_client;
 pub mod card_oracle;

@@ -23,6 +23,13 @@ let
   binPath = "${cfg.package}/bin/${if isRustAgent then "piggy" else "pivy-agent"}";
   preArgs = lib.optional isRustAgent "agent";
 
+  # The C pivy-agent needs `-i` to run in the foreground (systemd/launchd
+  # require a non-forking process) and log commands. The Rust `piggy agent`
+  # always runs in the foreground, and its `-i` means print-keys-and-exit
+  # (piggy#58) — so it must NOT receive `-i`, or the service would print a
+  # key list and exit instead of serving.
+  foregroundArgs = lib.optional (!isRustAgent) "-i";
+
   # Build the per-instance unit definitions. Single-instance mode
   # synthesizes one instance named `piggy-agent` from the top-level
   # options; multi-instance mode (planned) maps `cfg.instances` through
@@ -49,14 +56,29 @@ let
           instanceCfg.guid
         ])
         ++ lib.optional instanceCfg.allCards "-A"
-        ++ (lib.optionals (instanceCfg.cak != null) [
+        # CAK (-K) is only understood by the C pivy-agent; the Rust `piggy
+        # agent` has no -K flag. A per-instance assertion forbids `cak` in
+        # rust-agent mode, so this branch only fires for the `pkgs.pivy`
+        # escape-hatch package.
+        ++ (lib.optionals (!isRustAgent && instanceCfg.cak != null) [
           "-K"
           instanceCfg.cak
         ])
-        ++ [
-          "-S"
-          instanceCfg.slots
-        ]
+        # Slot filter. The C agent takes `-S all` / `-S !9e`; the Rust agent
+        # exposes every slot by default (so "all" => omit -S) and otherwise
+        # takes a comma-separated hex whitelist (`-S 9a,9e`).
+        ++ (
+          if isRustAgent then
+            lib.optionals (instanceCfg.slots != "all") [
+              "-S"
+              instanceCfg.slots
+            ]
+          else
+            [
+              "-S"
+              instanceCfg.slots
+            ]
+        )
         ++ instanceCfg.extraArgs;
 
       # Single shared launcher script for both Linux and Darwin. Handles
@@ -85,7 +107,9 @@ let
         mkdir -p -m 0700 "$(dirname "$SOCK")"
         rm -f "$SOCK"
         export SSH_AUTH_SOCK="$SOCK"
-        exec ${binPath} ${lib.escapeShellArgs preArgs} -i -a "$SOCK" ${lib.escapeShellArgs nonSocketArgs}
+        exec ${binPath} ${
+          lib.escapeShellArgs (preArgs ++ foregroundArgs)
+        } -a "$SOCK" ${lib.escapeShellArgs nonSocketArgs}
       '';
 
       launcher = pkgs.writeShellScript "${name}-launch" launcherText;
@@ -224,6 +248,14 @@ let
         assertion = builtins.match "^(all|[0-9a-fA-F]{2}(,[0-9a-fA-F]{2})*)$" ic.slots != null;
         message = "services.piggy-agent: `slots` must be \"all\" or a comma-separated list of two-hex-char slot IDs, e.g. \"9a\", \"9a,9e\" (instance ${unitName}).";
       }
+      {
+        # CAK (`-K`) authentication is implemented only by the C pivy-agent.
+        # The Rust `piggy agent` (the default `pkgs.piggy` package) has no
+        # -K flag, so silently dropping it would lose the anti-card-swap
+        # check. Force the user to either unset `cak` or select the C agent.
+        assertion = !(isRustAgent && ic.cak != null);
+        message = "services.piggy-agent: `cak` is not supported by the Rust `piggy agent`; unset it, or set `package = pkgs.pivy` to use the C agent that implements -K CAK auth (instance ${unitName}).";
+      }
     ]) effectiveInstances
   );
 in
@@ -236,15 +268,13 @@ in
     # case) MUST set `package = piggy.packages.${system}.piggy` from
     # this flake — there's no silent fallback.
     #
-    # Note: post-`79658e1` (v1.0), `piggy agent` itself exec's into C
-    # `pivy-agent` — there is no Rust-vs-C implementation choice to
-    # make at this layer. The `package = pkgs.pivy` escape hatch
-    # (selected by `pname == "pivy"` above) bypasses one layer of
-    # wrapping by talking to `pivy-agent` directly instead of via
-    # `piggy agent`'s clap dispatch; same underlying agent either way.
-    # The Rust agent under `crates/piggy/src/cmd/agent/` is held off
-    # the dispatch path until the maturation issues (#56, #58, #59)
-    # close.
+    # Note: as of piggy#58, `piggy agent` runs the Rust agent under
+    # `crates/piggy/src/cmd/agent/` (on-demand SSH_ASKPASS PIN entry +
+    # probe-loop PIN-clearing). The module emits the Rust flag surface for
+    # the default `pkgs.piggy` package — `isRustAgent` above drops the C-only
+    # `-i`/`-S all`/`-K` shapes. The `package = pkgs.pivy` escape hatch
+    # (`pname == "pivy"`) selects the C `pivy-agent` instead, which keeps the
+    # C flag surface and C-only features (CAK `-K`, confirm, install-service).
     package = lib.mkPackageOption pkgs "piggy" { };
 
     guid = mkOption {
