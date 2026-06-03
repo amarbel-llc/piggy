@@ -52,7 +52,18 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: test-bats-default test-bats-conformance test-rust test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand
+test: test-bats-default test-bats-conformance test-rust test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-agent-pin-on-demand _test-conformance-linux-only
+
+# `test-bats-conformance-box-agentless-fibby` is a [linux]-only recipe, so
+# the umbrella `test` target can't depend on it unconditionally — `just`
+# rejects an unknown recipe at parse time on macOS, breaking `just test`
+# there entirely. Gate it behind a per-platform shim: the real dependency on
+# Linux, a no-op on macOS. Keeps the `test` dep list single-source.
+[linux]
+_test-conformance-linux-only: test-bats-conformance-box-agentless-fibby
+
+[macos]
+_test-conformance-linux-only:
 
 # Sandboxed bats lane: runs every top-level t*.bats NOT tagged
 # `# bats file_tags=hardware` inside the nix build sandbox. See
