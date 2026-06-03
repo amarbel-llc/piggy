@@ -52,15 +52,17 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: test-bats-default test-bats-conformance test-rust test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby _test-conformance-linux-only
+test: test-bats-default test-bats-conformance test-rust _test-conformance-linux-only
 
-# `test-bats-conformance-box-agentless-fibby` is a [linux]-only recipe, so
-# the umbrella `test` target can't depend on it unconditionally — `just`
-# rejects an unknown recipe at parse time on macOS, breaking `just test`
-# there entirely. Gate it behind a per-platform shim: the real dependency on
-# Linux, a no-op on macOS. Keeps the `test` dep list single-source.
+# The fibby-backed conformance lanes are Linux-only: fibby is a virtual PCSC
+# card reached via libpcsclite's PCSCLITE_CSOCK_NAME socket redirect, which
+# macOS's PCSC.framework ignores — so the virtual card is invisible there and
+# every pivy/piggy card op reports "no PIV cards". (`just` also won't even
+# parse a `[linux]`-only recipe named as an unconditional dependency on
+# macOS.) Gate all three behind a per-platform shim: the real dependencies on
+# Linux, a no-op on macOS, keeping the `test` dep list single-source.
 [linux]
-_test-conformance-linux-only: test-bats-conformance-box-agentless-fibby
+_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -312,6 +314,7 @@ test-bats-conformance-show-batch: build-rust
 # hardware lane recipes and matches what production users would run;
 # the cached store paths are free on repeat invocations.
 [group('post-build')]
+[linux]
 test-bats-conformance-fibby-pivy-agent-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -338,6 +341,7 @@ test-bats-conformance-fibby-pivy-agent-smoke:
 # .#piggy-test-sshd is the Go fixture server (#135 Phase A/B). The
 # `just debug-ssh-decrypt-via-fibby` recipe is the non-bats scaffold.
 [group('post-build')]
+[linux]
 test-bats-conformance-piggy-ssh-via-fibby:
     #!/usr/bin/env bash
     set -euo pipefail
