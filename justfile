@@ -52,7 +52,7 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: test-bats-default test-bats-conformance test-rust test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby
+test: test-bats-default test-bats-conformance test-rust test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby
 
 # Sandboxed bats lane: runs every top-level t*.bats NOT tagged
 # `# bats file_tags=hardware` inside the nix build sandbox. See
@@ -164,6 +164,55 @@ test-bats-conformance-interop: build-rust
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_interop.bats \
     zz-tests_bats/conformance/piggy_box_decrypt_interop.bats \
+    zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
+
+# Agentless box decrypt against FIBBY (the Rust VirtualCard) — the fibby
+# companion to the piggy_box_decrypt_agentless test above (which runs against
+# fib/jcardsim). Brings up fibby with a seeded slot-9D ECDH key, then runs the
+# SAME card-agnostic bats test against it: Rust `piggy-ids encrypt` ->
+# `piggy box stream decrypt` with no agent -> Rust CardEcdhOracle -> fibby's
+# 9D ECDH (piggy#57). Pure-Rust card-under-test, no Java/jcardsim/hardware, so
+# it runs in the default `just test` lane unlike the fib interop recipe.
+[group('post-build')]
+[linux]
+test-bats-conformance-box-agentless-fibby: build-rust
+  #!/usr/bin/env bash
+  set -uo pipefail
+  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+  export PATH="$pivy_out/bin:$PATH"
+  pivy_tool="$pivy_out/bin/pivy-tool"
+  fibby_bin="$PWD/target/debug/fibby"
+  piggy_bin="$PWD/target/debug/piggy"
+  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
+
+  workdir=$(mktemp -d /tmp/pbox-agentless-fibby-XXXXXX)
+  fibby_sock="$workdir/pcscd.comm"
+  fibby_log="$workdir/fibby.log"
+  fibby_pid=""
+  cleanup() { [[ -n "$fibby_pid" ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
+  trap cleanup EXIT
+
+  echo "=== Starting fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
+  FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+    --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+  fibby_pid=$!
+  for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+  [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
+
+  echo "=== discover fibby GUID via pivy-tool list ==="
+  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+  [[ -n $guid ]] || { echo "no GUID from fibby"; cat "$fibby_log"; exit 1; }
+  echo "  guid: $guid"
+
+  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+  INTEROP_GUID="$guid" \
+    PIGGY="$piggy_bin" \
+    PCSCLITE_CSOCK_NAME="$fibby_sock" \
+    SSH_ASKPASS="$askpass" \
+    SSH_ASKPASS_REQUIRE=force \
+    DISPLAY="" \
+    PIGGY_TEST_FIB_PIN=123456 \
+    BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
 
 # Bring up fib, generate a P-256 key in 9D, and run the

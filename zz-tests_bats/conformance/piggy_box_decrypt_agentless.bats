@@ -16,10 +16,13 @@
 # Flow: Rust `piggy-ids encrypt` -> `$PIGGY box stream decrypt` with
 # SSH_AUTH_SOCK / PIGGY_AUTH_SOCK UNSET (so unlock must use the direct-PCSC
 # card path), PIN supplied non-interactively by the test askpass
-# (PIGGY_TEST_FIB_PIN), against the fib virtual card.
+# (PIGGY_TEST_FIB_PIN), against a virtual PIV card.
 #
-# Requires the fib stack (`just test-bats-conformance-interop`). Tests skip
-# when the env vars are absent.
+# Card-agnostic (keyed on PCSCLITE_CSOCK_NAME + INTEROP_GUID) — driven by two
+# recipes: `test-bats-conformance-interop` (against fib / jcardsim, opt-in)
+# and `test-bats-conformance-box-agentless-fibby` (against fibby, the
+# pure-Rust VirtualCard — in the default `just test` lane). Tests skip when
+# the env vars are absent.
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
@@ -39,8 +42,8 @@ setup() {
   fi
 }
 
-function rust_encrypt_through_piggy_box_stream_decrypt_agentless_via_fib { # @test
-  # 1. Read fib's 9D pubkey through piggy-ids detect-pubkey -> markl ID.
+function rust_encrypt_through_piggy_box_stream_decrypt_agentless { # @test
+  # 1. Read the card's 9D pubkey through piggy-ids detect-pubkey -> markl ID.
   local recipient
   recipient="$("$PIGGY_IDS_REAL" detect-pubkey --guid "$INTEROP_GUID")"
   [[ -n $recipient ]] || fail "detect-pubkey returned empty markl ID"
