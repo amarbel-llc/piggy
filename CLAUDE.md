@@ -192,6 +192,28 @@ recipes were updated to drop it (keeping `--allow-local-binding`); if a
 recipe regresses with that error, the stale flag is the cause. See `just
 explore-bats` for the generic `--no-sandbox` driver.
 
+### PIV CLI dispatch (exec-to-C) + pcscd reset semantics
+
+`piggy agent` and `piggy box` `exec(2)` into the **C** `pivy-agent`/`pivy-box`
+(`main.rs`: `Command::Agent => fallback::exec_pivy("agent", ...)`); the Rust
+re-impls under `crates/piggy/src/cmd/{agent,pivy_box}` are OFF the v1.0 dispatch
+path (a `piggy agent` process shows as `.pivy-agent-unwrapped` in `ps`). So you
+**cannot hardware-test piggy's Rust card-crypto via the CLI** — and neither can
+`agent_ecdh_integration` (it spawns `piggy agent` → C). The Rust `PinSession` is
+reachable only via `pass show-batch` (on-path) and the in-process
+`CardEcdhOracle` test (`crates/piggy/tests/unlock_ebox_card_integration.rs`,
+hardware mode `PIGGY_TEST_CARD_GUID=<guid>`; `just explore-rust-card-unlock-hw`).
+This cost a long piggy#56 detour — a hardware recipe built on `piggy agent`
+tested the C agent the whole time. The Rust `handle_ecdh` has no hardware path
+until #57/#59.
+
+pcsc-lite **refcount-shields** a co-resident
+`SCardEndTransaction(SCARD_RESET_CARD)` while the victim holds its connection
+open — the reset is deferred and does NOT clear another open client's PIN.
+Consequence (piggy#56): the verify→op PIN-clearing race does not reproduce on
+this stack regardless of binary. Probe with `just debug-lock-contention-probe`
+/ `debug-reset-loop`.
+
 ### Test harness safety net for PIN prompts
 
 Any recipe that could invoke `pivy-box`, `pivy-agent`, or any path that
