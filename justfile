@@ -1397,129 +1397,143 @@ explore-verify-auth-sock-cache piggy_auth_sock=env_var_or_default("PIGGY_AUTH_SO
       echo "RESULT: FAIL — at least one show hit the agent-unlock error path. See stderr above."
     fi
 
-# HARDWARE + out-of-band — piggy#56 criterion 3 (PinSession transaction race).
-#
-# Proves piggy-agent's transaction-wrapped verify-PIN+sign (the PinSession
-# from piggy#56) does NOT surface SW=6982 when another PC/SC client resets
-# the card mid-operation. Runs a worktree `piggy agent` against a REAL card
-# while a `pivy-tool sign` loop hammers the SAME card — each pivy-tool sign
-# verifies the PIN, signs, and ends its transaction with SCARD_RESET_CARD,
-# the exact contention that cleared piggy's PIN state between VERIFY and
-# GENERAL AUTHENTICATE pre-fix. Post-fix the two clients serialize on the
-# transaction, so every piggy-agent sign succeeds.
-#
-# A race-induced 6982 surfaces as a piggy-agent *sign failure*
-# (PivError::PinRequired), so the primary signal is the ssh-add -T exit
-# status; the agent trace log is grepped as backup.
-#
-# SAFETY (see piggy#56 plan + the recipe's pre-flight):
-#  - Pins to the THROWAWAY via `-g {{guid}}` (default = the YK4 throwaway
-#    GUID recorded in crates/fibby/src/virtual_card.rs:509). Prod is NEVER a
-#    candidate even if plugged in; the recipe REFUSES if the GUID is absent.
-#  - Sends only SELECT / VERIFY / GENERAL AUTHENTICATE / SCARD_RESET_CARD —
-#    no PUT DATA / GENERATE / CHANGE-PIN / reset. The one persistent-state
-#    hazard is a PIN-retry decrement on a WRONG pin, so a single fail-fast
-#    PIN check runs BEFORE the loop and aborts if it's wrong (bounds a bad
-#    PIN to one decrement, never {{iters}}). The same `pin` feeds both the
-#    pivy-tool calls and the piggy-agent unlock (via an echo-PIN askpass
-#    shim), so there is exactly one PIN source — no mismatch path.
-#  - `pin` defaults to the factory 123456 of a freshly-reset throwaway.
-#    NEVER pass your prod PIN.
-#
-# NOT part of `just` / the pre-merge lane — needs real hardware + an
-# inserted throwaway, so it is an explore-group manual verification.
+# HARDWARE + out-of-band — piggy#56: exercise the REAL Rust PinSession on a
+# real card. Unlike a `piggy agent` invocation (which execs the C pivy-agent),
+# this runs the in-process `unlock_ebox_card_integration`
+# test, which drives piggy's Rust `CardEcdhOracle` → `begin_pin_session` →
+# `PinSession::{verify_pin,ecdh_derive}` DIRECTLY against the card. First time
+# the Rust #56 PinSession code runs on real hardware (it has only seen fib).
+# Pins to the throwaway via PIGGY_TEST_CARD_GUID so a co-resident prod card is
+# never selected; one fail-fast PIN check first. NEVER pass your prod PIN.
 [group('explore')]
 [linux]
-explore-verify-pin-session-race guid="191755cff39efe522c07a383275bbeb1" pin="123456" slot="9a" iters="100": build-rust
+explore-rust-card-unlock-hw guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456": build-rust
     #!/usr/bin/env bash
     set -euo pipefail
-
-    guid="{{guid}}"; pin="{{pin}}"; slot="{{slot}}"; iters="{{iters}}"
-    slot_upper="$(printf '%s' "$slot" | tr '[:lower:]' '[:upper:]')"
-
+    guid="{{guid}}"; pin="{{pin}}"
     pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     pivy_tool="$pivy_out/bin/pivy-tool"
-    piggy="./target/debug/piggy"
+    tmpdir=$(mktemp -d /tmp/piggy-rust-card-hw.XXXXXX); trap 'rm -rf "$tmpdir"' EXIT
+    pub="$tmpdir/9d.pub"
 
-    # --- Pre-flight: throwaway present + PIN correct, BEFORE any loop. ---
-    echo "=== pre-flight: confirm throwaway $guid is present ==="
-    if ! "$pivy_tool" -g "$guid" list >/dev/null 2>&1; then
-      echo "REFUSING: no PIV card with GUID $guid present. Insert the throwaway" >&2
-      echo "(or pass guid=...). Prod is never targeted by -g pinning." >&2
-      exit 1
+    echo "=== pre-flight: throwaway $guid present + single PIN check ==="
+    "$pivy_tool" -g "$guid" pubkey 9d >"$pub" 2>/dev/null || { echo "no 9d key on $guid"; exit 1; }
+    if ! "$pivy_tool" -g "$guid" -P "$pin" ecdh 9d <"$pub" >/dev/null 2>&1; then
+      echo "REFUSING: PIN/ECDH check failed on $guid slot 9d. NOT running."; exit 1
     fi
+    echo "PIN OK."
 
-    echo "=== pre-flight: single PIN check on slot $slot (fail-fast, one attempt) ==="
-    if ! printf 'preflight' | "$pivy_tool" -g "$guid" -P "$pin" sign "$slot" >/dev/null 2>&1; then
-      echo "REFUSING: PIN/sign check failed on $guid slot $slot. Is the PIN correct" >&2
-      echo "and the slot populated? NOT looping (PIN-retry-counter safety)." >&2
-      exit 1
-    fi
-    echo "PIN OK on slot $slot."
+    echo "=== unlock_ebox_card_integration vs the real throwaway (Rust PinSession) ==="
+    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    PIGGY_TEST_CARD_GUID="$guid" \
+      PIGGY_TEST_FIB_PIN="$pin" \
+      SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY="" \
+      cargo test --test unlock_ebox_card_integration -- --nocapture
 
-    tmpdir=$(mktemp -d /tmp/piggy-pinsession-race.XXXXXX)
-    sock="$tmpdir/piggy-agent.sock"; log="$tmpdir/piggy-agent.log"
-    pubf="$tmpdir/key.pub"; shim="$tmpdir/echo-pin.sh"
-    agent_pid=""; contend_pid=""
-    cleanup() {
-      [[ -n "$contend_pid" ]] && kill "$contend_pid" 2>/dev/null || true
-      [[ -n "$agent_pid" ]] && kill "$agent_pid" 2>/dev/null || true
-      rm -rf "$tmpdir"
-    }
-    trap cleanup EXIT
-
-    # echo-PIN askpass shim: ssh-add -X feeds this same verified PIN to
-    # piggy-agent's unlock, so the agent and the pivy-tool contention share
-    # one PIN source (no wrong-PIN-during-loop path).
-    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$PIGGY_RACE_PIN"\n' >"$shim"
-    chmod +x "$shim"
-
-    echo "=== starting worktree piggy-agent (-g $guid, trace) ==="
-    "$piggy" agent -g "$guid" -d -d -a "$sock" >"$log" 2>&1 &
-    agent_pid=$!
-    for _ in $(seq 1 30); do [[ -S "$sock" ]] && break; sleep 0.1; done
-    [[ -S "$sock" ]] || { echo "agent socket never appeared; log:"; cat "$log"; exit 1; }
-
-    echo "=== unlocking piggy-agent (non-interactive, verified PIN) ==="
-    PIGGY_RACE_PIN="$pin" SSH_ASKPASS="$shim" SSH_ASKPASS_REQUIRE=force DISPLAY="" \
-      SSH_AUTH_SOCK="$sock" ssh-add -X
-
-    # Pick the PIN-requiring signing key (the slot under test) to drive signs.
-    SSH_AUTH_SOCK="$sock" ssh-add -L | grep "PIV_slot_${slot_upper}" | head -1 >"$pubf" || true
-    [[ -s "$pubf" ]] || { echo "no slot-$slot key loaded in piggy-agent; ssh-add -L:"; \
-      SSH_AUTH_SOCK="$sock" ssh-add -L; echo "--- agent log ---"; cat "$log"; exit 1; }
-
-    echo "=== contention: pivy-tool sign loop (each ends txn w/ SCARD_RESET_CARD) ==="
-    ( while true; do
-        printf 'contend' | "$pivy_tool" -g "$guid" -P "$pin" sign "$slot" >/dev/null 2>&1 || true
-      done ) &
-    contend_pid=$!
-
-    echo "=== $iters piggy-agent signs under contention ==="
-    fails=0
-    for i in $(seq 1 "$iters"); do
-      if ! SSH_AUTH_SOCK="$sock" ssh-add -T "$pubf" >/dev/null 2>&1; then
-        fails=$((fails + 1)); echo "  sign $i FAILED"
-      fi
+# HARDWARE, read-only — enumerate every PIV card currently visible to
+# pcscd. Prints each card's reader, GUID, CHUID, and slots via
+# `pivy-tool list`, then a YubiKey factory serial per card via the
+# 0xF8 vendor INS. No PIN, no sign, no retry consumption. Use this to
+# confirm which physical card is the throwaway vs prod (by GUID/serial)
+# before running hardware recipes like explore-rust-card-unlock-hw.
+[group('debug')]
+[linux]
+debug-list-piv-cards:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    pivy_tool="$pivy_out/bin/pivy-tool"
+    echo "=== pivy-tool list (all visible PIV cards) ==="
+    "$pivy_tool" list
+    echo
+    echo "=== per-card YubiKey serial (0xF8), keyed by GUID ==="
+    # Pull each GUID from the list output and query its serial individually.
+    "$pivy_tool" list 2>/dev/null | awk '/guid:/ {print $2}' | while read -r g; do
+      serial="$("$pivy_tool" -g "$g" list 2>/dev/null | awk '/serial:/ {print $2; exit}')"
+      printf '  guid %s  serial %s\n' "$g" "${serial:-<not reported>}"
     done
 
-    kill "$contend_pid" 2>/dev/null || true; contend_pid=""
+# DIAGNOSTIC (piggy#56) — hold an SCardBeginTransaction lock on the card at
+# <guid> for <secs>s via the piggy-piv hold_lock example, so a co-resident
+# client must block on the lock. Read-only (no PIN). Kill/Ctrl-C to release.
+[group('debug')]
+[linux]
+debug-hold-card-lock guid="5DA19C98257243EFCD29BE3AE91EA7F8" secs="3600":
+    cargo run -q -p piggy-piv --example hold_lock -- "{{guid}}" "{{secs}}"
 
-    # Backup signal: a 6982 (PinRequired) reaching the card surface in the
-    # agent trace log. Primary signal is the sign-failure count above.
-    log_hits=$(grep -ciE '6982|pinrequired|pin required' "$log" || true)
+# DIAGNOSTIC (piggy#56) — run the faithful reset-loop contender standalone
+# for <secs>s and report how many begin+verify+end(ResetCard) cycles it
+# completes. Confirms the contender actually exercises the card (a low/zero
+# count would mean the "race" tests had no real reset contention). HARDWARE;
+# verifies the PIN repeatedly (correct PIN does not decrement the counter).
+[group('debug')]
+[linux]
+debug-reset-loop guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456" secs="5":
+    cargo run -q -p piggy-piv --example reset_loop -- "{{guid}}" "{{pin}}" "{{secs}}"
+
+# DIAGNOSTIC (piggy#56) — is a second client's card lock actually visible to
+# other clients on the throwaway, or do they run in isolation? Holds an
+# SCardBeginTransaction (the hold_lock example) on <guid>, then checks
+# whether `pivy-tool ecdh 9d` BLOCKS on that lock (times out) and runs once
+# the holder is killed. A clean block→unblock proves lock-level contention
+# is REAL on this card (=> a non-reproducing reset race is a reset-semantics
+# issue, e.g. deferred disconnect-reset — switch the contender to a real
+# pivy-agent). Instant success despite the held lock means the clients are
+# NOT sharing the card (deeper isolation; the race test was hollow).
+# HARDWARE; the lock-hold is read-only, the ecdh probe verifies the PIN once.
+[group('debug')]
+[linux]
+debug-lock-contention-probe guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456": build-rust
+    #!/usr/bin/env bash
+    set -uo pipefail
+    guid="{{guid}}"; pin="{{pin}}"
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    pivy_tool="$pivy_out/bin/pivy-tool"
+
+    tmpdir=$(mktemp -d /tmp/piggy-lockprobe.XXXXXX)
+    pub="$tmpdir/9d.pub"; hold_log="$tmpdir/hold.log"; hold_pid=""
+    cleanup() { [[ -n "$hold_pid" ]] && kill "$hold_pid" 2>/dev/null || true; rm -rf "$tmpdir"; }
+    trap cleanup EXIT
+
+    "$pivy_tool" -g "$guid" pubkey 9d >"$pub" 2>/dev/null || { echo "no 9d key on $guid"; exit 1; }
+
+    echo "=== starting lock holder (SCardBeginTransaction, never releases) ==="
+    cargo run -q -p piggy-piv --example hold_lock -- "$guid" 120 >"$hold_log" 2>&1 &
+    hold_pid=$!
+    for _ in $(seq 1 120); do grep -q HOLDING "$hold_log" 2>/dev/null && break; sleep 0.5; done
+    if ! grep -q HOLDING "$hold_log" 2>/dev/null; then
+      echo "holder never acquired the lock:"; cat "$hold_log"; exit 1
+    fi
+    echo "  holder holds the lock (pid $hold_pid)"
+
+    echo "=== Test 1: pivy-tool ecdh WHILE lock held (expect BLOCK -> timeout) ==="
+    if timeout 8 "$pivy_tool" -g "$guid" -P "$pin" ecdh 9d <"$pub" >/dev/null 2>&1; then
+      echo "  pivy-tool ecdh SUCCEEDED despite the held lock"; locked_blocks=no
+    else
+      echo "  pivy-tool ecdh did NOT complete (rc=$?; 124=timeout) while the lock was held"; locked_blocks=yes
+    fi
+
+    echo "=== releasing the lock (kill holder) ==="
+    kill "$hold_pid" 2>/dev/null || true; wait "$hold_pid" 2>/dev/null || true; hold_pid=""
+    sleep 1
+
+    echo "=== Test 2: pivy-tool ecdh with lock RELEASED (expect SUCCESS) ==="
+    if timeout 8 "$pivy_tool" -g "$guid" -P "$pin" ecdh 9d <"$pub" >/dev/null 2>&1; then
+      echo "  pivy-tool ecdh SUCCEEDED after release"; freed_ok=yes
+    else
+      echo "  pivy-tool ecdh still failing after release (rc=$?) — unexpected"; freed_ok=no
+    fi
 
     echo
-    echo "=== summary ==="
-    echo "piggy-agent sign failures:        $fails / $iters"
-    echo "PIN-required hits in agent log:   $log_hits"
-    if [[ "$fails" -eq 0 && "$log_hits" -eq 0 ]]; then
-      echo "RESULT: PASS — no SW=6982 across $iters signs under card-reset contention."
-      echo "piggy#56 PinSession transaction wrapping holds."
+    echo "=== conclusion ==="
+    if [[ "${locked_blocks:-}" == yes && "${freed_ok:-}" == yes ]]; then
+      echo "Lock-level contention is REAL (blocked while held, ran when freed)."
+      echo "=> the race not reproducing is a RESET-semantics issue; switch the"
+      echo "   contender to a real pivy-agent (persistent conn + end-txn reset)."
+    elif [[ "${locked_blocks:-}" == no ]]; then
+      echo "Clients are NOT sharing the card lock — deeper isolation; the race test was hollow."
     else
-      echo "RESULT: FAIL — the verify-PIN/sign race reappeared. Agent log: $log"
-      cat "$log"
-      exit 1
+      echo "Inconclusive — see output above."
     fi
 
 # Probe PivApplet (running under fib) for X25519 / Ed25519 algorithm

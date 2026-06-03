@@ -11,8 +11,6 @@
 //! refusing test askpass, and exports `PIGGY_TEST_FIB_PIN=123456` so the
 //! askpass returns the fib PIN non-interactively.
 
-use std::path::PathBuf;
-
 use openssl::bn::BigNumContext;
 use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
 use piggy::card_oracle::{CardEcdhOracle, askpass_pin_supplier};
@@ -26,29 +24,28 @@ use ssh_key::public::{EcdsaPublicKey, KeyData};
 #[test]
 fn unlock_ebox_against_real_card() {
     // ---- Gating ----
-    let pcscd_sock = match std::env::var("PCSCLITE_CSOCK_NAME") {
-        Ok(v) if !v.is_empty() => v,
-        _ => {
-            eprintln!(
-                "PCSCLITE_CSOCK_NAME not set — skipping (run via `just test-rust-card-unlock`)"
-            );
-            return;
-        }
-    };
-    let piggy_bin = match std::env::var("PIGGY_BIN") {
-        Ok(v) if !v.is_empty() => PathBuf::from(v),
-        _ => {
-            eprintln!("PIGGY_BIN not set — skipping");
-            return;
-        }
-    };
-    assert!(
-        piggy_bin.is_file(),
-        "PIGGY_BIN={} does not point to a file",
-        piggy_bin.display()
-    );
-    eprintln!("using pcscd socket: {pcscd_sock}");
-    eprintln!("using piggy bin:    {}", piggy_bin.display());
+    // Two modes enable this test; otherwise it no-ops:
+    //  - fib mode: `PCSCLITE_CSOCK_NAME` points at the fib socket.
+    //  - hardware mode: `PIGGY_TEST_CARD_GUID` pins the test to ONE specific
+    //    real card, so it never touches a co-resident prod card.
+    // `PIGGY_TEST_FIB_PIN` supplies the card PIN (via the test askpass) in
+    // both modes. This is the only Rust `PinSession` user reachable as an
+    // in-process test (the agent/box CLIs exec into C pivy-*; piggy#56).
+    let pcscd_sock = std::env::var("PCSCLITE_CSOCK_NAME").unwrap_or_default();
+    let want_guid = std::env::var("PIGGY_TEST_CARD_GUID").unwrap_or_default();
+    if pcscd_sock.is_empty() && want_guid.is_empty() {
+        eprintln!(
+            "neither PCSCLITE_CSOCK_NAME nor PIGGY_TEST_CARD_GUID set — skipping \
+             (fib: `just test-rust-card-unlock`; hardware: the card-unlock-hw recipe)"
+        );
+        return;
+    }
+    if !pcscd_sock.is_empty() {
+        eprintln!("using pcscd socket: {pcscd_sock}");
+    }
+    if !want_guid.is_empty() {
+        eprintln!("pinned to card GUID: {want_guid}");
+    }
 
     // ---- Read card's 9D pubkey via piggy-piv ----
     //
@@ -61,9 +58,18 @@ fn unlock_ebox_against_real_card() {
     let (card_guid, card_sec1_uncompressed) = {
         let ctx = PivContext::new().expect("PivContext");
         let tokens = ctx.enumerate_tokens().expect("enumerate_tokens");
-        let token = tokens
-            .first()
-            .expect("at least one PIV token available via PCSCLITE_CSOCK_NAME");
+        // In hardware mode pin to the requested GUID so a co-resident prod
+        // card is never selected; in fib mode take the only token present.
+        let token = if want_guid.is_empty() {
+            tokens
+                .first()
+                .expect("at least one PIV token available via PCSCLITE_CSOCK_NAME")
+        } else {
+            tokens
+                .iter()
+                .find(|t| t.guid().to_hex().eq_ignore_ascii_case(&want_guid))
+                .unwrap_or_else(|| panic!("no PIV token with GUID {want_guid} present"))
+        };
         let slot_9d = token.read_slot(0x9D).expect("read 9D slot");
         assert_eq!(
             slot_9d.algorithm(),
