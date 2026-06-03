@@ -70,6 +70,14 @@ start_test_sshd() {
 ssh_agent_exec() {
   local auth_sock="$1"
   shift
+  # Point ssh explicitly at the copied known_hosts rather than relying on
+  # HOME-based `~/.ssh/known_hosts` resolution (which proved fragile in CI:
+  # the client reported "No ECDSA host key is known" despite the file being
+  # in place). GlobalKnownHostsFile is silenced so a runner's /etc/ssh can't
+  # interfere. StrictHostKeyChecking=accept-new still verifies against the
+  # seeded entry on the happy path but won't abort the run if the ephemeral
+  # localhost fixture's key isn't pre-trusted — host-key trust of a throwaway
+  # test sshd is not what this lane exercises; the forwarded rebox decrypt is.
   env -i \
     HOME="$SSHD_CLIENT_HOME" \
     SSH_HOME="$SSHD_CLIENT_HOME/.ssh" \
@@ -77,7 +85,9 @@ ssh_agent_exec() {
     PATH="$PATH" \
     ssh -A -i "$SSHD_CLIENT_KEY" \
     -o IdentitiesOnly=yes \
-    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile="$SSHD_CLIENT_HOME/.ssh/known_hosts" \
+    -o GlobalKnownHostsFile=/dev/null \
+    -o StrictHostKeyChecking=accept-new \
     -o BatchMode=yes \
     -p "$SSHD_PORT" testuser@127.0.0.1 \
     "$@"
