@@ -116,6 +116,12 @@ test-bats-conformance-interop: build-rust
   # Prepend it to PATH so subprocesses also see the fresh binary
   # (pivy-tool, etc.) consistently.
   export PATH="$pivy_out/bin:$PATH"
+  # The dev piggy binary (built by the build-rust dep) for
+  # piggy_box_decrypt_agentless.bats (#57): `piggy box stream decrypt` now
+  # runs the Rust impl, whose CardEcdhOracle decrypts directly against the
+  # card with no agent. The dev binary suffices — the agentless decrypt path
+  # needs no makeWrapper env, and the C fallback finds pivy-box on $PATH.
+  piggy_bin="$PWD/target/debug/piggy"
   just fib-up
   eval "$(cat .fib/env)"
   # Generate a key on the fib card's 9D slot (Key Management / ECDH)
@@ -149,6 +155,7 @@ test-bats-conformance-interop: build-rust
   # piggy_box_decrypt_interop.bats) reference it directly.
   INTEROP_GUID="$guid" \
     REAL_PIVY_BOX="$real_pivy_box" \
+    PIGGY="$piggy_bin" \
     PCSCLITE_CSOCK_NAME="$PCSCLITE_CSOCK_NAME" \
     SSH_ASKPASS="$askpass" \
     SSH_ASKPASS_REQUIRE=force \
@@ -156,7 +163,8 @@ test-bats-conformance-interop: build-rust
     PIGGY_TEST_FIB_PIN=123456 \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_interop.bats \
-    zz-tests_bats/conformance/piggy_box_decrypt_interop.bats
+    zz-tests_bats/conformance/piggy_box_decrypt_interop.bats \
+    zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
 
 # Bring up fib, generate a P-256 key in 9D, and run the
 # piggy_recipients_add_attached.bats conformance lane against the

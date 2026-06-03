@@ -13,30 +13,28 @@
 //!    banner ported from `cmd_usage`. `version` is a native Rust
 //!    handler ([`version::run`]) emitting the eng-versioning(7)
 //!    format; both live outside the `pass` namespace.
-//! 3. C-pivy passthroughs — every other subcommand `exec(2)`s the
-//!    matching `pivy-*` binary from `$PATH` via
-//!    [`fallback::exec_pivy`]:
-//!    - `agent` → `pivy-agent`
-//!    - `box` → `pivy-box`
-//!    - `tool` → `pivy-tool`, `ca` → `pivy-ca`, `luks` → `pivy-luks`,
-//!      `zfs` → `pivy-zfs`
-//!    - `pivy <X>` is the explicit-escape-hatch form — `piggy pivy
-//!      <tool> [args]` always reaches `pivy-<tool>`.
+//! 3. `box` runs piggy's **Rust** re-implementation (`piggy::cmd::pivy_box::run`)
+//!    for the subcommands it handles (`stream encrypt`/`decrypt`,
+//!    `tpl create`/`show`) — restoring the agentless direct-PCSC decrypt
+//!    that C `pivy-box` lacks (piggy#57). Subcommands it doesn't handle
+//!    (`tpl edit` + the rest of the pivy-box surface) fall back to C
+//!    `pivy-box` via [`fallback::exec_pivy`], so `piggy box` is a superset.
+//! 4. C-pivy passthroughs — `agent`/`tool`/`ca`/`luks`/`zfs` `exec(2)` the
+//!    matching `pivy-*` binary from `$PATH` via [`fallback::exec_pivy`]
+//!    (`agent` → `pivy-agent`, `tool` → `pivy-tool`, `ca` → `pivy-ca`,
+//!    `luks` → `pivy-luks`, `zfs` → `pivy-zfs`). `piggy pivy <X>` is the
+//!    explicit escape hatch — `piggy pivy box` always reaches C `pivy-box`
+//!    even though `piggy box` runs the Rust impl.
 //!
 //! Bare `piggy` and bare `piggy pass` both print clap help (no implicit
 //! `cmd_show ""`); `arg_required_else_help` handles that on the top-level
 //! `Cli` and the nested `PassArgs`.
 //!
-//! Rust-native re-implementations of `agent` and `box` exist under
-//! `cmd::agent` / `cmd::pivy_box` but are NOT on the binary's
-//! dispatch path. They will return once they reach feature parity
-//! with the C implementations. The maturation roadmap:
-//! - #56 — PC/SC transaction handling in `piggy-piv`.
-//! - #57 — direct-PCSC ECDH oracle for `piggy box stream decrypt`,
-//!   currently lost because C `pivy-box` requires an agent for ECDH.
-//! - #58 — restore `[piggy-test]` askpass-context tagging when
-//!   `piggy agent` returns to the user path.
-//! - #59 — restore probe-loop PIN-clearing in `piggy agent`.
+//! The Rust `agent` re-implementation (`cmd::agent`) is still OFF the
+//! dispatch path — `piggy agent` execs C `pivy-agent`. Roadmap: #56 (PC/SC
+//! transactions — **done**) and #57 (this `box` re-point — **done**); the
+//! agent returns once #58 (`[piggy-test]` askpass-context tagging) and #59
+//! (probe-loop PIN-clearing in `piggy agent`) land.
 
 mod copy_move;
 mod crypt;
@@ -410,7 +408,13 @@ fn main() {
         Command::Version { .. } => std::process::exit(version::run()),
 
         Command::Agent { rest } => fallback::exec_pivy("agent", &rest),
-        Command::Box { rest } => fallback::exec_pivy("box", &rest),
+        // `box` runs the Rust impl (restores agentless direct-PCSC decrypt,
+        // piggy#57); subcommands it doesn't handle return None and fall back
+        // to C `pivy-box`, so `piggy box` stays a superset.
+        Command::Box { rest } => match piggy::cmd::pivy_box::run(&rest) {
+            Some(code) => std::process::exit(code),
+            None => fallback::exec_pivy("box", &rest),
+        },
         Command::Tool { rest } => fallback::exec_pivy("tool", &rest),
         Command::Ca { rest } => fallback::exec_pivy("ca", &rest),
         Command::Luks { rest } => fallback::exec_pivy("luks", &rest),

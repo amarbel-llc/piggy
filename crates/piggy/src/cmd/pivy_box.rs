@@ -14,76 +14,44 @@ use std::path::PathBuf;
 use piggy_box::stream::EboxStream;
 use piggy_box::unlock::unlock_ebox;
 
-/// Entry point for `piggy box ...`.
+/// Entry point for `piggy box ...`. `args` is the argv *after* `box`
+/// (i.e. `Command::Box { rest }`), dispatched as `<type> <operation>` to
+/// match pivy-box's two-level subcommand structure.
 ///
-/// `full_argv` is the full argv including `args[0]` (program name) and
-/// `args[1]` (`"box"`). We dispatch on `args[2]` (type) and `args[3]`
-/// (operation) to match pivy-box's two-level subcommand structure.
-pub fn run(full_argv: Vec<String>) -> i32 {
-    let rest: Vec<&str> = full_argv.iter().skip(2).map(String::as_str).collect();
-
-    let (type_name, op_rest) = match rest.split_first() {
-        Some((t, r)) => (*t, r),
-        None => {
-            eprintln!("piggy box: type and operation required");
-            eprintln!("Usage: piggy box <type> <operation> [args...]");
-            eprintln!("Types: stream, tpl");
-            return 1;
-        }
-    };
-
-    match type_name {
+/// Returns `Some(exit_code)` for subcommands the Rust impl handles
+/// (`stream encrypt`/`decrypt`, `tpl create`/`show`); returns `None` for
+/// anything else (empty, unknown type/op, `tpl edit`, the rest of the
+/// pivy-box surface) so the caller falls back to the C `pivy-box` — keeping
+/// `piggy box` a superset of C while restoring the agentless direct-PCSC
+/// decrypt the Rust impl carries (piggy#57).
+pub fn run(args: &[String]) -> Option<i32> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (type_name, op_rest) = args.split_first()?;
+    match *type_name {
         "stream" => dispatch_stream(op_rest),
         "tpl" => dispatch_tpl(op_rest),
-        _ => {
-            eprintln!("piggy box: unknown type: {type_name}");
-            eprintln!("Types: stream, tpl");
-            1
-        }
+        _ => None,
     }
 }
 
-fn dispatch_stream(args: &[&str]) -> i32 {
-    let (op, rest) = match args.split_first() {
-        Some((o, r)) => (*o, r),
-        None => {
-            eprintln!("piggy box stream: operation required");
-            eprintln!("Operations: encrypt, decrypt");
-            return 1;
-        }
-    };
-
-    match op {
-        "encrypt" => cmd_stream_encrypt(rest),
-        "decrypt" => cmd_stream_decrypt(rest),
-        _ => {
-            eprintln!("piggy box stream: unknown operation: {op}");
-            1
-        }
+fn dispatch_stream(args: &[&str]) -> Option<i32> {
+    let (op, rest) = args.split_first()?;
+    match *op {
+        "encrypt" => Some(cmd_stream_encrypt(rest)),
+        "decrypt" => Some(cmd_stream_decrypt(rest)),
+        // Unknown stream op (or empty) — fall back to C `pivy-box`.
+        _ => None,
     }
 }
 
-fn dispatch_tpl(args: &[&str]) -> i32 {
-    let (op, rest) = match args.split_first() {
-        Some((o, r)) => (*o, r),
-        None => {
-            eprintln!("piggy box tpl: operation required");
-            eprintln!("Operations: create, show");
-            return 1;
-        }
-    };
-
-    match op {
-        "create" => cmd_tpl_create(rest),
-        "show" => cmd_tpl_show(rest),
-        "edit" => {
-            eprintln!("piggy box tpl edit: not yet implemented");
-            1
-        }
-        _ => {
-            eprintln!("piggy box tpl: unknown operation: {op}");
-            1
-        }
+fn dispatch_tpl(args: &[&str]) -> Option<i32> {
+    let (op, rest) = args.split_first()?;
+    match *op {
+        "create" => Some(cmd_tpl_create(rest)),
+        "show" => Some(cmd_tpl_show(rest)),
+        // `edit` (and any unknown tpl op, or empty) — the Rust impl never
+        // implemented `tpl edit`; fall back to C `pivy-box`, which does.
+        _ => None,
     }
 }
 

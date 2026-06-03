@@ -7,17 +7,14 @@
 //!   and direct-PCSC oracle used by integration tests in `tests/`
 //!   to validate the `ecdh@joyent.com` round-trip.
 //! - `cmd` — the Rust re-implementations of `piggy agent` and
-//!   `piggy box`. These are NOT on the binary's dispatch path
-//!   today (the binary wraps C `pivy-agent` and `pivy-box` via
-//!   `fallback::exec_pivy`); the modules stay here so the unit
-//!   tests under each one keep running and so the code is in
-//!   place to swap back in once it reaches feature parity with
-//!   the C implementations. See the head of `main.rs` for the
-//!   full rationale, and #56 (PC/SC transactions in `piggy-piv`),
-//!   #57 (direct-PCSC ECDH oracle for `piggy box stream decrypt`),
-//!   #58 (askpass `[piggy-test]` context tagging), and #59
-//!   (probe-loop PIN-clearing in `piggy agent`) for the maturation
-//!   roadmap.
+//!   `piggy box`. `cmd::pivy_box` IS on the dispatch path now
+//!   (`piggy box` runs it, falling back to C `pivy-box` for
+//!   subcommands it doesn't handle — piggy#57), restoring the
+//!   agentless direct-PCSC decrypt. `cmd::agent` is still OFF the
+//!   path (`piggy agent` execs C `pivy-agent`) until #58/#59. See
+//!   the head of `main.rs` for the full rationale and the #56–#59
+//!   maturation roadmap (#56 + #57 done; #58 askpass `[piggy-test]`
+//!   context tagging + #59 probe-loop PIN-clearing remain).
 
 pub mod agent_client;
 pub mod card_oracle;
