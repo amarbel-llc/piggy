@@ -646,6 +646,49 @@ debug-pcsc-env:
     echo "=== lsusb (Yubico/CCID/smartcard) ==="
     lsusb 2>&1 | grep -iE 'yubico|yubikey|ccid|smart' || echo "no Yubico/CCID USB device"
 
+# Verify stats-me telemetry end-to-end (#141 + the piggy.pass/box/agent
+# coverage expansion): report whether anything is collecting on the
+# configured 127.0.0.1:8125, then prove piggy emits by running an
+# instrumented `pass` command against a throwaway local UDP listener and
+# printing the captured statsd datagram. No card needed. Serves the
+# stats-me wiring dev-loop.
+[group('debug')]
+debug-stats-me-roundtrip: build-rust
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo "=== configured endpoint: ${STATSD_HOST:-(unset)}:${STATSD_PORT:-(unset)} ==="
+    echo "=== UDP listeners on :8125 (the real stats-me daemon, if any) ==="
+    ss -ulnp 2>/dev/null | grep 8125 || echo "(nothing listening on UDP 8125 — no stats-me daemon)"
+    echo
+    port=18125
+    cap="$(mktemp)"
+    # Capture datagrams on a throwaway port for ~3s, then exit.
+    timeout 3 socat -u UDP-RECV:"$port" - >"$cap" 2>/dev/null &
+    sock_pid=$!
+    sleep 0.4
+    store="$(mktemp -d)"
+    echo "=== emit: piggy pass find (STATSD_PORT=$port) ==="
+    STATSD_HOST=127.0.0.1 STATSD_PORT="$port" PIGGY_STORE_DIR="$store" \
+      target/debug/piggy pass find nonexistent-term || true
+    wait "$sock_pid" 2>/dev/null || true
+    rm -rf "$store"
+    echo
+    echo "=== captured datagram(s) ==="
+    if [[ -s "$cap" ]]; then cat "$cap"; echo; else echo "(none captured)"; fi
+    rm -f "$cap"
+    echo
+    echo "=== stats-me collected piggy.* counters (statsd admin :8126) ==="
+    if ss -tlnp 2>/dev/null | grep -q 8126; then
+      # Emit one to the REAL endpoint, then query the live accumulators.
+      STATSD_HOST=127.0.0.1 STATSD_PORT=8125 PIGGY_STORE_DIR="$(mktemp -d)" \
+        target/debug/piggy pass find "roundtrip-marker-$$" >/dev/null 2>&1 || true
+      sleep 0.3
+      printf 'counters\nquit\n' | timeout 3 nc 127.0.0.1 8126 2>/dev/null \
+        | tr ',' '\n' | grep -i piggy || echo "(no piggy.* counters returned)"
+    else
+      echo "(no statsd admin interface on :8126)"
+    fi
+
 # Bring fibby up with the hardware-proxy backend (proxying to the system
 # pcscd/YubiKey), run an arbitrary client command pointed at fibby's
 # socket via PCSCLITE_CSOCK_NAME, then tear fibby down and dump the
