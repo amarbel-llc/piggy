@@ -67,7 +67,11 @@ pub(crate) fn viewer_argv(viewer: &str, name: &str) -> Vec<OsString> {
 /// Environment snapshot consumed by render planning.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Env {
+    // Read only by the non-macOS `pick_viewer` branch; on macOS the
+    // imgcat path returns before consulting either field.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub(crate) display: Option<OsString>,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub(crate) wayland_display: Option<OsString>,
     /// Map of viewer name → on-PATH presence.
     pub(crate) viewers_present: std::collections::BTreeMap<String, bool>,
@@ -112,7 +116,7 @@ pub(crate) fn pick_viewer(env: &Env) -> Option<&'static str> {
         if env.viewers_present.get("imgcat").copied().unwrap_or(false) {
             return Some("imgcat");
         }
-        return None;
+        None
     }
     #[cfg(not(target_os = "macos"))]
     {

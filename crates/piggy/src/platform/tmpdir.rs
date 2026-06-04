@@ -237,11 +237,15 @@ mod darwin {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use super::{SecureTmpdir, TEMPLATE_PREFIX, TEMPLATE_SUFFIX_X_COUNT, create_with_700};
+    use super::{SecureTmpdir, create_with_700};
 
     /// Allocate `$TMPDIR/piggy.XXX...` as a plain directory, then
     /// `hdid` a 16 MB ram device, format HFS, mount it over the
     /// directory.
+    // TODO(#145): orphaned — SecureTmpdir::new always sets
+    // darwin_ramdisk_dev: None, so this ramdisk path is never taken even
+    // on macOS. Allowed dead until the wiring lands.
+    #[allow(dead_code)]
     pub(crate) fn new_with_env(env_tmpdir: Option<OsString>) -> io::Result<SecureTmpdir> {
         let base: PathBuf = env_tmpdir
             .map(PathBuf::from)
@@ -259,6 +263,8 @@ mod darwin {
         })
     }
 
+    // TODO(#145): orphaned helper for the unwired ramdisk path.
+    #[allow(dead_code)]
     fn hdid_ramdisk() -> io::Result<OsString> {
         let out = Command::new("hdid")
             .args(["-drivekey", "system-image=yes", "-nomount", "ram://32768"])
@@ -278,6 +284,8 @@ mod darwin {
         Ok(OsString::from(dev))
     }
 
+    // TODO(#145): orphaned helper for the unwired ramdisk path.
+    #[allow(dead_code)]
     fn newfs_hfs(dev: &OsString) -> io::Result<()> {
         let status = Command::new("newfs_hfs")
             .arg("-M")
@@ -290,6 +298,8 @@ mod darwin {
         Ok(())
     }
 
+    // TODO(#145): orphaned helper for the unwired ramdisk path.
+    #[allow(dead_code)]
     fn mount_hfs(dev: &OsString, mount_point: &Path) -> io::Result<()> {
         let status = Command::new("mount")
             .args(["-t", "hfs", "-o", "noatime", "-o", "nobrowse"])

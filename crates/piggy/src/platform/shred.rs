@@ -64,9 +64,14 @@ pub(crate) fn shred_paths(paths: &[&Path]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Used only by the non-macOS shred-on-disk test and its helpers.
+    #[cfg(not(target_os = "macos"))]
     use std::fs;
+    #[cfg(not(target_os = "macos"))]
     use std::path::PathBuf;
 
+    // Only consumed by the non-macOS shred test below.
+    #[cfg(not(target_os = "macos"))]
     fn scratch_root() -> PathBuf {
         let base = std::env::var_os("CARGO_TARGET_TMPDIR")
             .map(PathBuf::from)
@@ -123,6 +128,8 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // Only consumed by the non-macOS shred test above.
+    #[cfg(not(target_os = "macos"))]
     fn which(name: &str) -> Option<PathBuf> {
         let path = std::env::var_os("PATH")?;
         for dir in std::env::split_paths(&path) {
