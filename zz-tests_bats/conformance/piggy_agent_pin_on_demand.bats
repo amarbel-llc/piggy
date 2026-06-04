@@ -205,3 +205,70 @@ function rust_piggy_agent_prompts_on_demand_and_propagates_context { # @test
     return 1
   }
 }
+
+# piggy#142: a wrong PIN entered at the on-demand prompt must re-prompt within
+# the same operation (C-parity bounded retry), not fail the decrypt outright.
+# The wrong-first askpass hands out a bad PIN on the first call and the correct
+# one on the second; the decrypt should still succeed.
+function rust_piggy_agent_retries_on_wrong_pin { # @test
+  export PIGGY_TEST_FIB_PIN=123456
+  export PIGGY_TEST_ASKPASS_MARKER="$WORKDIR/askpass-marker"
+  export SSH_ASKPASS="$PIGGY_BATS_HELPERS_DIR/piggy-test-askpass-wrong-first.sh"
+  [[ -x $SSH_ASKPASS ]] || skip "piggy-test-askpass-wrong-first.sh not found at $SSH_ASKPASS"
+
+  spawn_fibby --seed-rfc5903-slot-9d-cert
+  _spawn_agent_cmd "$PIGGY_BIN" agent -A
+
+  local store="$WORKDIR/store"
+  local secret="retry-on-wrong-pin"
+
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_STORE_DIR="$store" \
+    run "$PIGGY_BIN" pass init
+  [[ $status -eq 0 ]] || {
+    echo "piggy pass init exited $status" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  printf '%s\n' "$secret" | PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    PIGGY_STORE_DIR="$store" "$PIGGY_BIN" pass insert -e foo/bar
+  local ins=$?
+  [[ $ins -eq 0 && -f "$store/foo/bar.ebox" ]] || {
+    echo "piggy pass insert exited $ins" >&2
+    return 1
+  }
+
+  # First prompt supplies a WRONG PIN; the agent must re-prompt and the second
+  # (correct) PIN must complete the decrypt.
+  PIGGY_AUTH_SOCK="$AGENT_SOCK" PIGGY_STORE_DIR="$store" \
+    run "$PIGGY_BIN" pass show foo/bar
+  [[ $status -eq 0 ]] || {
+    echo "piggy pass show exited $status (no retry after wrong PIN?)" >&2
+    printf '%s\n' "$output" >&2
+    echo "--- agent log tail ---" >&2
+    tail -60 "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  printf '%s\n' "$output" | grep -Fxq "$secret" || {
+    echo "decrypt output missing the secret line '$secret'" >&2
+    printf 'got:\n%s\n' "$output" >&2
+    return 1
+  }
+
+  # Both prompts must have fired: the wrong one first, then the correct retry.
+  # (Guards against a trivially-green test that never supplied the wrong PIN.)
+  grep -q "supplying WRONG PIN" "$AGENT_LOG" || {
+    echo "the wrong PIN was never supplied — test did not exercise the retry path" >&2
+    tail -60 "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  grep -q "supplying correct PIN" "$AGENT_LOG" || {
+    echo "the agent did not re-prompt with the correct PIN after the wrong one" >&2
+    tail -60 "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  grep -q "GA ECDH 9D -> 9000" "$FIBBY_LOG" || {
+    echo "no successful slot-9D GA ECDH after the retry" >&2
+    tail -80 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+}

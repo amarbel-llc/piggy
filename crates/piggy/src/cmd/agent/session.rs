@@ -15,8 +15,14 @@ use ssh_agent_lib::{
 use ssh_key::{Algorithm, PublicKey, Signature, public::KeyData};
 
 use piggy_box::piv_box::{EcCurve, PivBox};
-use piggy_piv::{Guid, PivAlgorithm, PivContext};
+use piggy_piv::{Guid, PivAlgorithm, PivContext, PivError};
 use zeroize::{Zeroize, Zeroizing};
+
+/// Extra PIN prompts after the first one, on `PinIncorrect`, within a single
+/// agent request — matching the C pivy-agent's one-retry behaviour (initial
+/// attempt + one retry = 2 card PIN attempts max). Kept low because every
+/// wrong attempt decrements the card's PIN retry counter (piggy#142).
+const PIN_RETRY_LIMIT: u32 = 1;
 
 /// Cached key info from a PIV token (populated at startup)
 #[derive(Clone)]
@@ -107,6 +113,14 @@ impl PiggyAgent {
             *self.pin.lock().await = Some(acquired.pin.as_str().to_string());
         }
     }
+
+    /// Drop any cached PIN so the next `ensure_pin` re-prompts. Called on a
+    /// `PinIncorrect` retry: a freshly-prompted wrong PIN was never cached,
+    /// but a stale cached PIN that the card now rejects must be cleared
+    /// before the re-prompt (piggy#142).
+    async fn forget_pin(&self) {
+        *self.pin.lock().await = None;
+    }
 }
 
 #[ssh_agent_lib::async_trait]
@@ -170,42 +184,47 @@ impl PiggyAgent {
     async fn sign_inner(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
         let key = self.find_cached_key(&request.pubkey).await?;
 
-        // Acquire the PIN (cached, or prompted on demand via SSH_ASKPASS)
-        // BEFORE opening the transaction — the prompt must not be held
-        // across the card txn (piggy#105). Slot 9E needs no PIN.
-        let acquired = if key.slot_id != 0x9E {
-            Some(self.ensure_pin("sign", &key.guid).await?)
-        } else {
-            None
-        };
-
-        let mut token = reconnect_to_token(&key.guid)?;
-        // Bracket verify-PIN + sign in one PC/SC transaction so a
-        // co-resident agent's SCARD_RESET_CARD cannot clear the PIN
-        // between them (piggy#56). The session drops at end of scope:
-        // ResetCard if a PIN was verified, LeaveCard for the 9E no-PIN path.
-        let mut session = token
-            .begin_pin_session()
-            .map_err(|e| AgentError::Other(e.to_string().into()))?;
-
-        if let Some(acq) = &acquired {
-            session
-                .verify_pin(&acq.pin)
-                .map_err(|e| AgentError::Other(e.to_string().into()))?;
-            // Verified PIN is good; cache it (no-op if it came from cache).
-            self.cache_pin(acq).await;
-        }
-
-        // Prepare data for signing based on algorithm
+        // Prepare data for signing (independent of the card session).
         let sign_data = prepare_sign_data(key.algorithm, &request.data, request.flags)?;
 
-        // Sign via card, inside the PIN-bracketed transaction
-        let sig_bytes = session
-            .sign_prehash(key.slot_id, &sign_data)
-            .map_err(|e| AgentError::Other(e.to_string().into()))?;
+        // Acquire-verify-sign with a bounded re-prompt on a wrong PIN (#142).
+        // The PIN is acquired (cached or prompted) OUTSIDE the transaction —
+        // the prompt must not be held across the card txn (piggy#105) — then
+        // verify+sign are bracketed in one PC/SC transaction (piggy#56). On
+        // PinIncorrect we forget the PIN and re-loop, re-prompting outside a
+        // fresh transaction.
+        let mut attempt = 0u32;
+        loop {
+            let acquired = if key.slot_id != 0x9E {
+                Some(self.ensure_pin("sign", &key.guid).await?)
+            } else {
+                None
+            };
 
-        // Convert raw signature bytes to ssh_key::Signature
-        to_ssh_signature(key.algorithm, &sig_bytes, request.flags)
+            let mut token = reconnect_to_token(&key.guid)?;
+            // The session drops at end of scope: ResetCard if a PIN was
+            // verified, LeaveCard for the 9E no-PIN path.
+            let mut session = token
+                .begin_pin_session()
+                .map_err(|e| AgentError::Other(e.to_string().into()))?;
+
+            if let Some(acq) = &acquired {
+                match session.verify_pin(&acq.pin) {
+                    Ok(()) => self.cache_pin(acq).await,
+                    Err(PivError::PinIncorrect { .. }) if attempt < PIN_RETRY_LIMIT => {
+                        attempt += 1;
+                        self.forget_pin().await;
+                        continue;
+                    }
+                    Err(e) => return Err(AgentError::Other(e.to_string().into())),
+                }
+            }
+
+            let sig_bytes = session
+                .sign_prehash(key.slot_id, &sign_data)
+                .map_err(|e| AgentError::Other(e.to_string().into()))?;
+            return to_ssh_signature(key.algorithm, &sig_bytes, request.flags);
+        }
     }
 
     async fn lock_inner(&mut self, _key: String) -> Result<(), AgentError> {
@@ -313,30 +332,40 @@ impl PiggyAgent {
             }
         }
 
-        // Acquire the PIN before opening the transaction (prompt must not be
-        // held across the card txn — piggy#105). Slot 9E needs no PIN.
-        let acquired = if key.slot_id != 0x9E {
-            Some(self.ensure_pin("ecdh", &key.guid).await?)
-        } else {
-            None
+        // Acquire-verify-ECDH with a bounded re-prompt on a wrong PIN (#142).
+        // PIN acquired OUTSIDE the txn (piggy#105); verify+ECDH bracketed in
+        // one transaction (piggy#56). Slot 9E needs no PIN.
+        let mut secret = {
+            let mut attempt = 0u32;
+            loop {
+                let acquired = if key.slot_id != 0x9E {
+                    Some(self.ensure_pin("ecdh", &key.guid).await?)
+                } else {
+                    None
+                };
+
+                let mut token = reconnect_to_token(&key.guid)?;
+                let mut session = token
+                    .begin_pin_session()
+                    .map_err(|e| AgentError::Other(e.to_string().into()))?;
+
+                if let Some(acq) = &acquired {
+                    match session.verify_pin(&acq.pin) {
+                        Ok(()) => self.cache_pin(acq).await,
+                        Err(PivError::PinIncorrect { .. }) if attempt < PIN_RETRY_LIMIT => {
+                            attempt += 1;
+                            self.forget_pin().await;
+                            continue;
+                        }
+                        Err(e) => return Err(AgentError::Other(e.to_string().into())),
+                    }
+                }
+
+                break session
+                    .ecdh_derive(key.slot_id, &ec_point)
+                    .map_err(|e| AgentError::Other(e.to_string().into()))?;
+            }
         };
-
-        let mut token = reconnect_to_token(&key.guid)?;
-        // verify-PIN + ECDH bracketed in one transaction (piggy#56).
-        let mut session = token
-            .begin_pin_session()
-            .map_err(|e| AgentError::Other(e.to_string().into()))?;
-
-        if let Some(acq) = &acquired {
-            session
-                .verify_pin(&acq.pin)
-                .map_err(|e| AgentError::Other(e.to_string().into()))?;
-            self.cache_pin(acq).await;
-        }
-
-        let mut secret = session
-            .ecdh_derive(key.slot_id, &ec_point)
-            .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
         let mut resp = Vec::new();
         resp.extend_from_slice(&(secret.len() as u32).to_be_bytes());
@@ -437,38 +466,44 @@ impl PiggyAgent {
                 })?,
         };
 
-        // Acquire the PIN before opening the transaction (prompt must not be
-        // held across the card txn — piggy#105). Slot 9E needs no PIN.
-        let acquired = if box_slot != 0x9E {
-            Some(self.ensure_pin("ecdh-rebox", &key.guid).await?)
-        } else {
-            None
-        };
-
-        let mut token = reconnect_to_token(&key.guid)?;
-        // verify-PIN + ECDH bracketed in one transaction (piggy#56).
-        let mut session = token
-            .begin_pin_session()
-            .map_err(|e| AgentError::Other(e.to_string().into()))?;
-
-        if let Some(acq) = &acquired {
-            session
-                .verify_pin(&acq.pin)
-                .map_err(|e| AgentError::Other(e.to_string().into()))?;
-            self.cache_pin(acq).await;
-        }
-
         let ec_point = decompress_ec_point(&piv_box.ephemeral_pubkey, piv_box.curve)?;
 
-        let shared_secret = session
-            .ecdh_derive(box_slot, &ec_point)
-            .map_err(|e| AgentError::Other(e.to_string().into()))?;
+        // Acquire-verify-ECDH with a bounded re-prompt on a wrong PIN (#142).
+        // PIN acquired OUTSIDE the txn (piggy#105); verify+ECDH bracketed in
+        // one transaction (piggy#56). The transaction is released when the loop
+        // block ends (ResetCard if a PIN was verified) before the offline
+        // reseal below, which is pure CPU and needs no card. Slot 9E needs no PIN.
+        let shared_secret = {
+            let mut attempt = 0u32;
+            loop {
+                let acquired = if box_slot != 0x9E {
+                    Some(self.ensure_pin("ecdh-rebox", &key.guid).await?)
+                } else {
+                    None
+                };
 
-        // Last card op done; release the transaction (ResetCard if a PIN was
-        // verified) before the offline reseal below, which is pure CPU and
-        // needs no card. Drop runs SCardEndTransaction; failures are logged,
-        // not propagated, so a txn-end hiccup never fails an otherwise-good rebox.
-        drop(session);
+                let mut token = reconnect_to_token(&key.guid)?;
+                let mut session = token
+                    .begin_pin_session()
+                    .map_err(|e| AgentError::Other(e.to_string().into()))?;
+
+                if let Some(acq) = &acquired {
+                    match session.verify_pin(&acq.pin) {
+                        Ok(()) => self.cache_pin(acq).await,
+                        Err(PivError::PinIncorrect { .. }) if attempt < PIN_RETRY_LIMIT => {
+                            attempt += 1;
+                            self.forget_pin().await;
+                            continue;
+                        }
+                        Err(e) => return Err(AgentError::Other(e.to_string().into())),
+                    }
+                }
+
+                break session
+                    .ecdh_derive(box_slot, &ec_point)
+                    .map_err(|e| AgentError::Other(e.to_string().into()))?;
+            }
+        };
 
         piv_box
             .open_with_secret(&shared_secret)
