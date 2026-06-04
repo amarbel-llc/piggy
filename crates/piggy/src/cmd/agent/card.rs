@@ -93,6 +93,13 @@ pub async fn probe_loop_with<F>(
                 if pin_guard.is_some() {
                     tracing::warn!("card unavailable after {} probes, forgetting PIN", failures);
                     *pin_guard = None;
+                    // stats-me: `piggy.agent.pin_cleared` counter (no duration
+                    // dimension) — the probe loop dropped a cached PIN.
+                    crate::stats::agent_op(
+                        "pin_cleared",
+                        crate::stats::Outcome::Success,
+                        std::time::Duration::ZERO,
+                    );
                 }
                 failures = 0;
             }

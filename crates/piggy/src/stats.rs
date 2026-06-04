@@ -18,7 +18,7 @@
 //! swallowed. Telemetry must never perturb the agent's behaviour.
 
 use std::net::UdpSocket;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8125;
@@ -44,6 +44,16 @@ pub fn outcome_of<T, E>(r: &Result<T, E>) -> Outcome {
     match r {
         Ok(_) => Outcome::Success,
         Err(_) => Outcome::Failure,
+    }
+}
+
+/// Map a process exit code to an [`Outcome`] (0 = success). Used by the
+/// CLI emitters, whose handlers return their exit code.
+pub fn outcome_of_code(code: i32) -> Outcome {
+    if code == 0 {
+        Outcome::Success
+    } else {
+        Outcome::Failure
     }
 }
 
@@ -98,24 +108,103 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-/// Record the completion of one SSH-agent operation: a counter keyed by
-/// operation type and outcome, plus a timer carrying the elapsed
-/// milliseconds. Both lines also carry DogStatsD-style `op`/`result`
-/// tags for tag-aware backends (the console backend ignores them).
-pub fn agent_op(op: &str, outcome: Outcome, elapsed: Duration) {
-    let op = sanitize(op);
+/// Build the two-line statsd payload (counter + duration timer) for a
+/// completed operation under `piggy.<category>.<op>`. Pure — the wire shape
+/// is asserted in tests; `op` is assumed already sanitized.
+fn payload(category: &str, op: &str, outcome: Outcome, ms: u128) -> String {
     let result = outcome.as_str();
-    let ms = elapsed.as_millis();
-    let payload = format!(
-        "piggy.agent.{op}.{result}:1|c|#op:{op},result:{result}\n\
-         piggy.agent.{op}.duration:{ms}|ms|#op:{op},result:{result}"
-    );
-    send(&payload);
+    format!(
+        "piggy.{category}.{op}.{result}:1|c|#op:{op},result:{result}\n\
+         piggy.{category}.{op}.duration:{ms}|ms|#op:{op},result:{result}"
+    )
+}
+
+/// Record the completion of one operation: a counter keyed by op + outcome
+/// plus a duration timer, under the `piggy.<category>` namespace. Both
+/// lines carry DogStatsD-style `op`/`result` tags for tag-aware backends.
+fn record(category: &str, op: &str, outcome: Outcome, elapsed: Duration) {
+    let op = sanitize(op);
+    send(&payload(category, &op, outcome, elapsed.as_millis()));
+}
+
+/// SSH-agent request telemetry: `piggy.agent.<op>`. The C `pivy-agent`
+/// mirrors this exact wire shape (`stats_send` / `agent_stats_op_done`), so
+/// the `agent` category must stay byte-compatible.
+pub fn agent_op(op: &str, outcome: Outcome, elapsed: Duration) {
+    record("agent", op, outcome, elapsed);
+}
+
+/// User-facing `pass` subcommand telemetry: `piggy.pass.<cmd>`.
+pub fn pass_op(cmd: &str, outcome: Outcome, elapsed: Duration) {
+    record("pass", cmd, outcome, elapsed);
+}
+
+/// `piggy box` telemetry: `piggy.box.<op>` (e.g. `stream_decrypt`).
+pub fn box_op(op: &str, outcome: Outcome, elapsed: Duration) {
+    record("box", op, outcome, elapsed);
+}
+
+/// Time `f` — a `pass` subcommand handler returning its process exit code —
+/// emit a `piggy.pass.<cmd>` counter + timer, and return the code so the
+/// caller can `std::process::exit` it. The closure runs even when telemetry
+/// is disabled (the emit is the only conditional part).
+pub fn timed_pass<F: FnOnce() -> i32>(cmd: &str, f: F) -> i32 {
+    let start = Instant::now();
+    let code = f();
+    pass_op(cmd, outcome_of_code(code), start.elapsed());
+    code
+}
+
+/// Time `f` — a `piggy box` operation handler returning its exit code — and
+/// emit a `piggy.box.<op>` counter + timer. Returns the code.
+pub fn timed_box<F: FnOnce() -> i32>(op: &str, f: F) -> i32 {
+    let start = Instant::now();
+    let code = f();
+    box_op(op, outcome_of_code(code), start.elapsed());
+    code
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_agent_category_is_byte_identical_to_the_c_mirror() {
+        // The `agent` category must reproduce the pre-refactor wire shape
+        // exactly, since the C pivy-agent emits the same metric.
+        assert_eq!(
+            payload("agent", "sign", Outcome::Success, 7),
+            "piggy.agent.sign.success:1|c|#op:sign,result:success\n\
+             piggy.agent.sign.duration:7|ms|#op:sign,result:success"
+        );
+    }
+
+    #[test]
+    fn payload_categories_and_failure_outcome() {
+        assert!(
+            payload("pass", "show", Outcome::Failure, 3)
+                .starts_with("piggy.pass.show.failure:1|c|#op:show,result:failure")
+        );
+        assert!(
+            payload("box", "stream_decrypt", Outcome::Success, 0)
+                .starts_with("piggy.box.stream_decrypt.success:1|c|")
+        );
+    }
+
+    #[test]
+    fn outcome_of_code_maps_zero_to_success() {
+        assert!(matches!(outcome_of_code(0), Outcome::Success));
+        assert!(matches!(outcome_of_code(1), Outcome::Failure));
+        assert!(matches!(outcome_of_code(-1), Outcome::Failure));
+    }
+
+    #[test]
+    fn timed_pass_returns_the_handler_code() {
+        // Telemetry is gated off here (no STATSD_* env), so this just
+        // exercises the closure + passthrough.
+        assert_eq!(timed_pass("noop", || 0), 0);
+        assert_eq!(timed_pass("noop", || 42), 42);
+    }
 
     #[test]
     fn sanitize_maps_reserved_chars() {

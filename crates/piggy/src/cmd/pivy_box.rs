@@ -36,9 +36,15 @@ pub fn run(args: &[String]) -> Option<i32> {
 
 fn dispatch_stream(args: &[&str]) -> Option<i32> {
     let (op, rest) = args.split_first()?;
+    // Handled ops emit `piggy.box.<op>` telemetry (stats-me); the fall-back
+    // (`None`) paths reach C `pivy-box`, which isn't instrumented here.
     match *op {
-        "encrypt" => Some(cmd_stream_encrypt(rest)),
-        "decrypt" => Some(cmd_stream_decrypt(rest)),
+        "encrypt" => Some(crate::stats::timed_box("stream_encrypt", || {
+            cmd_stream_encrypt(rest)
+        })),
+        "decrypt" => Some(crate::stats::timed_box("stream_decrypt", || {
+            cmd_stream_decrypt(rest)
+        })),
         // Unknown stream op (or empty) — fall back to C `pivy-box`.
         _ => None,
     }
@@ -47,8 +53,10 @@ fn dispatch_stream(args: &[&str]) -> Option<i32> {
 fn dispatch_tpl(args: &[&str]) -> Option<i32> {
     let (op, rest) = args.split_first()?;
     match *op {
-        "create" => Some(cmd_tpl_create(rest)),
-        "show" => Some(cmd_tpl_show(rest)),
+        "create" => Some(crate::stats::timed_box("tpl_create", || {
+            cmd_tpl_create(rest)
+        })),
+        "show" => Some(crate::stats::timed_box("tpl_show", || cmd_tpl_show(rest))),
         // `edit` (and any unknown tpl op, or empty) — the Rust impl never
         // implemented `tpl edit`; fall back to C `pivy-box`, which does.
         _ => None,

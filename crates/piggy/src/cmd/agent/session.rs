@@ -98,13 +98,24 @@ impl PiggyAgent {
         }
         let prompt = format!("Enter PIN for token {}", guid.short_id());
         let context = format!("piggy-agent:{op}:{}", guid.short_id());
-        let pin = tokio::task::spawn_blocking(move || {
+        let prompt_start = std::time::Instant::now();
+        let result = tokio::task::spawn_blocking(move || {
             crate::card_oracle::run_askpass(&prompt, Some(&context))
         })
         .await
-        .map_err(|e| AgentError::Other(format!("askpass task: {e}").into()))?
-        .map_err(|e| AgentError::Other(e.to_string().into()))?;
-        Ok(AcquiredPin { pin, fresh: true })
+        .map_err(|e| AgentError::Other(format!("askpass task: {e}").into()))
+        .and_then(|r| r.map_err(|e| AgentError::Other(e.to_string().into())));
+        // stats-me: `piggy.agent.pin_prompt.<result>` + duration. Fires once
+        // per on-demand prompt (so a wrong-PIN retry, piggy#142, emits twice).
+        crate::stats::agent_op(
+            "pin_prompt",
+            crate::stats::outcome_of(&result),
+            prompt_start.elapsed(),
+        );
+        Ok(AcquiredPin {
+            pin: result?,
+            fresh: true,
+        })
     }
 
     /// Cache a freshly-prompted PIN after its on-card verify succeeded.

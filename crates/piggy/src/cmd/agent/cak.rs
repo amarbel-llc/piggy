@@ -17,13 +17,22 @@ use super::session::reconnect_to_token;
 /// any PCSC / card / crypto error (missing 9E key, malformed signature, a
 /// non-EC CAK, …) counts as a failed authentication, never a panic.
 pub(super) fn authenticate(guid: &Guid, cak: &KeyData) -> bool {
-    match authenticate_inner(guid, cak) {
+    let start = std::time::Instant::now();
+    let ok = match authenticate_inner(guid, cak) {
         Ok(ok) => ok,
         Err(e) => {
             tracing::debug!("CAK authentication error: {e}");
             false
         }
-    }
+    };
+    // stats-me: `piggy.agent.cak.<result>` + duration (best-effort/opt-in).
+    let outcome = if ok {
+        crate::stats::Outcome::Success
+    } else {
+        crate::stats::Outcome::Failure
+    };
+    crate::stats::agent_op("cak", outcome, start.elapsed());
+    ok
 }
 
 fn authenticate_inner(guid: &Guid, cak: &KeyData) -> Result<bool, String> {

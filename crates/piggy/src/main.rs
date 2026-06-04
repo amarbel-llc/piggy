@@ -366,28 +366,76 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.cmd {
+        // Each `pass` subcommand is wrapped in `stats::timed_pass` so it
+        // emits `piggy.pass.<cmd>.<result>` + duration telemetry (stats-me,
+        // best-effort/opt-in). `recipients list-available` is an exec-to-C
+        // passthrough that never returns, so it can't be timed.
         Command::Pass(args) => match args.cmd {
-            PassCommand::Init { rest } => std::process::exit(init::run(&rest)),
-            PassCommand::Show { rest } => std::process::exit(show::run(&rest)),
-            PassCommand::Find { rest } => std::process::exit(find::run(&rest)),
-            PassCommand::Grep { rest } => std::process::exit(grep::run(&rest)),
-            PassCommand::Insert { rest } => std::process::exit(insert::run(&rest)),
-            PassCommand::Edit { rest } => std::process::exit(edit::run(&rest)),
-            PassCommand::Generate { rest } => std::process::exit(generate::run(&rest)),
-            PassCommand::Rm { rest } => std::process::exit(rm::run(&rest)),
-            PassCommand::Mv { rest } => std::process::exit(copy_move::run_move(&rest)),
-            PassCommand::Cp { rest } => std::process::exit(copy_move::run_copy(&rest)),
-            PassCommand::Git { rest } => std::process::exit(git::run(&rest)),
+            PassCommand::Init { rest } => {
+                std::process::exit(piggy::stats::timed_pass("init", || init::run(&rest)))
+            }
+            PassCommand::Show { rest } => {
+                std::process::exit(piggy::stats::timed_pass("show", || show::run(&rest)))
+            }
+            PassCommand::Find { rest } => {
+                std::process::exit(piggy::stats::timed_pass("find", || find::run(&rest)))
+            }
+            PassCommand::Grep { rest } => {
+                std::process::exit(piggy::stats::timed_pass("grep", || grep::run(&rest)))
+            }
+            PassCommand::Insert { rest } => {
+                std::process::exit(piggy::stats::timed_pass("insert", || insert::run(&rest)))
+            }
+            PassCommand::Edit { rest } => {
+                std::process::exit(piggy::stats::timed_pass("edit", || edit::run(&rest)))
+            }
+            PassCommand::Generate { rest } => {
+                std::process::exit(piggy::stats::timed_pass("generate", || {
+                    generate::run(&rest)
+                }))
+            }
+            PassCommand::Rm { rest } => {
+                std::process::exit(piggy::stats::timed_pass("rm", || rm::run(&rest)))
+            }
+            PassCommand::Mv { rest } => std::process::exit(piggy::stats::timed_pass("mv", || {
+                copy_move::run_move(&rest)
+            })),
+            PassCommand::Cp { rest } => std::process::exit(piggy::stats::timed_pass("cp", || {
+                copy_move::run_copy(&rest)
+            })),
+            PassCommand::Git { rest } => {
+                std::process::exit(piggy::stats::timed_pass("git", || git::run(&rest)))
+            }
             PassCommand::Recipients(args) => match args.cmd {
-                RecipientsCommand::List { rest } => std::process::exit(recipients::list(&rest)),
+                RecipientsCommand::List { rest } => {
+                    std::process::exit(piggy::stats::timed_pass("recipients_list", || {
+                        recipients::list(&rest)
+                    }))
+                }
                 RecipientsCommand::ListAvailable { rest } => {
                     fallback::exec_piggy_ids("list-available", &rest)
                 }
-                RecipientsCommand::Add { rest } => std::process::exit(recipients::add(&rest)),
-                RecipientsCommand::Remove { rest } => std::process::exit(recipients::remove(&rest)),
-                RecipientsCommand::Sync { rest } => std::process::exit(recipients::sync(&rest)),
+                RecipientsCommand::Add { rest } => {
+                    std::process::exit(piggy::stats::timed_pass("recipients_add", || {
+                        recipients::add(&rest)
+                    }))
+                }
+                RecipientsCommand::Remove { rest } => {
+                    std::process::exit(piggy::stats::timed_pass("recipients_remove", || {
+                        recipients::remove(&rest)
+                    }))
+                }
+                RecipientsCommand::Sync { rest } => {
+                    std::process::exit(piggy::stats::timed_pass("recipients_sync", || {
+                        recipients::sync(&rest)
+                    }))
+                }
             },
-            PassCommand::Verify { subpath } => std::process::exit(verify::run(subpath.as_deref())),
+            PassCommand::Verify { subpath } => {
+                std::process::exit(piggy::stats::timed_pass("verify", || {
+                    verify::run(subpath.as_deref())
+                }))
+            }
             PassCommand::ShowBatch(args) => {
                 let mapped = show_batch::ShowBatchArgs {
                     names: args.names,
@@ -401,7 +449,9 @@ fn main() {
                     },
                     all_or_nothing: args.all_or_nothing,
                 };
-                std::process::exit(show_batch::run(mapped))
+                std::process::exit(piggy::stats::timed_pass("show_batch", move || {
+                    show_batch::run(mapped)
+                }))
             }
         },
 

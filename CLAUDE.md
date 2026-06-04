@@ -168,6 +168,23 @@ ops (sign/ecdh/rebox/prehash) complete inside `after_prompt_reap`, so
 emission is guarded by a per-request `se_stats_done` flag to count each
 request exactly once as control unwinds back through `process_message`.
 
+Beyond the per-request `piggy.agent.<op>` surface, the Rust side also
+emits (all via the same `crate::stats` module, same wire shape):
+`piggy.pass.<cmd>` for every user-facing `pass` subcommand
+(`show`/`insert`/`edit`/`generate`/`rm`/`mv`/`cp`/`git`/`verify`/`init`/
+`recipients_*`/`show_batch`, wrapped once at the `main.rs` dispatch via
+`stats::timed_pass`); `piggy.box.<op>` for the Rust `piggy box`
+operations (`stream_encrypt`/`stream_decrypt`/`tpl_create`/`tpl_show`,
+via `stats::timed_box` in `cmd::pivy_box`); finer agent-internal events
+`piggy.agent.cak` (CAK auth, #143), `piggy.agent.pin_prompt` (each
+on-demand askpass prompt — a wrong-PIN retry from #142 emits twice), and
+`piggy.agent.pin_cleared` (a probe-loop PIN drop, #59); and
+`piggy.pass.show_batch_item` per ebox inside a `show-batch` run. The
+`agent` category stays byte-identical to the C mirror (pinned by the
+`payload_agent_category_is_byte_identical_to_the_c_mirror` test); the new
+categories are Rust-only — the C `pivy-agent` doesn't run the CLI/box
+paths.
+
 ## Debugging
 
 ### darwin CI: silent exit 126 under `env -i` with `set -euo pipefail`

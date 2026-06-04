@@ -622,7 +622,11 @@ pub fn run(args: ShowBatchArgs) -> i32 {
             ));
             break;
         }
-        match outcome {
+        // Per-ebox stats-me: `piggy.pass.show_batch_item.<result>` + duration,
+        // one datagram per ebox (in addition to the whole-`show_batch` metric
+        // the dispatcher emits). The match yields whether this item decrypted.
+        let item_start = std::time::Instant::now();
+        let item_ok = match outcome {
             PreflightOutcome::Failed {
                 canonical_name,
                 diagnostic,
@@ -632,6 +636,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
                     return 1;
                 }
                 failed_count += 1;
+                false
             }
             PreflightOutcome::Ready {
                 canonical_name,
@@ -646,6 +651,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
                             return 1;
                         }
                         ok_count += 1;
+                        true
                     }
                     Err(e) => {
                         let diag = Diagnostic {
@@ -658,6 +664,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
                             return 1;
                         }
                         failed_count += 1;
+                        false
                     }
                 },
                 Err(DecryptError {
@@ -675,14 +682,31 @@ pub fn run(args: ShowBatchArgs) -> i32 {
                     }
                     failed_count += 1;
                     if fatal_for_batch {
+                        // Emit before the `break` (the post-match emit below
+                        // won't run for the bailing item).
+                        piggy::stats::pass_op(
+                            "show_batch_item",
+                            piggy::stats::Outcome::Failure,
+                            item_start.elapsed(),
+                        );
                         bail_reason = Some(format!(
                             "{kind_label} after decrypt n={n} of {total}: {summary}"
                         ));
                         break;
                     }
+                    false
                 }
             },
-        }
+        };
+        piggy::stats::pass_op(
+            "show_batch_item",
+            if item_ok {
+                piggy::stats::Outcome::Success
+            } else {
+                piggy::stats::Outcome::Failure
+            },
+            item_start.elapsed(),
+        );
     }
 
     // Explicit session end so we can propagate
