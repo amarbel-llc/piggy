@@ -42,6 +42,53 @@ fn main() {
     };
 
     println!("cargo:rustc-env=PIGGY_VERSION={}", version);
+
+    emit_git_commit(&manifest_dir);
+}
+
+/// Resolve `git rev-parse --short HEAD` and emit it as `PIGGY_COMMIT` so a
+/// dev `cargo build` embeds the real short-rev instead of `unknown` (#126).
+///
+/// The nix build sandbox strips `.git`, so git resolution fails there — that
+/// is fine: we simply don't set the compile-time var, and `version::run`
+/// keeps getting the commit from the wrapper's `self.shortRev` at runtime
+/// (it prefers the runtime value). This is the same version-from-`version.env`
+/// / commit-from-`src.rev` split the Go path uses. Uses `git rev-parse
+/// --git-path` for the rerun triggers so it works inside git worktrees (where
+/// `.git` is a file, not a directory).
+fn emit_git_commit(manifest_dir: &std::path::Path) {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(manifest_dir)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    };
+
+    let Some(rev) = git(&["rev-parse", "--short", "HEAD"]) else {
+        // No git (nix sandbox, or git not on PATH) — leave PIGGY_COMMIT unset
+        // so `option_env!("PIGGY_COMMIT")` is None and the runtime/`unknown`
+        // fallback applies.
+        return;
+    };
+    println!("cargo:rustc-env=PIGGY_COMMIT={rev}");
+
+    // Rebuild when HEAD moves (commit or branch switch) and when the current
+    // branch's tip advances. `--git-path` resolves to the real files even in
+    // a worktree; the ref lookup is skipped on a detached HEAD.
+    if let Some(head) = git(&["rev-parse", "--git-path", "HEAD"]) {
+        println!("cargo:rerun-if-changed={head}");
+    }
+    if let Some(ref_name) = git(&["symbolic-ref", "--quiet", "HEAD"]) {
+        if let Some(ref_path) = git(&["rev-parse", "--git-path", &ref_name]) {
+            println!("cargo:rerun-if-changed={ref_path}");
+        }
+    }
 }
 
 // Hand-rolled parse: avoids a regex crate dependency on the build script.

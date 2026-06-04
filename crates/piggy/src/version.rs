@@ -55,7 +55,13 @@ pub fn run() -> i32 {
     // Prefer the wrapper-injected runtime value (authoritative for nix
     // builds); fall back to the compile-time value for dev cargo builds.
     let version = env_or("PIGGY_VERSION", env!("PIGGY_VERSION"));
-    let commit = env_or("PIGGY_COMMIT", "unknown");
+    // Prefer the wrapper-injected runtime value (nix builds); fall back to the
+    // compile-time `build.rs` short-rev for dev `cargo build` (#126); finally
+    // `unknown` if neither resolved (e.g. a git-less build with no wrapper).
+    let commit = env_or(
+        "PIGGY_COMMIT",
+        option_env!("PIGGY_COMMIT").unwrap_or("unknown"),
+    );
     let components = [
         Component {
             name: "pivy",
