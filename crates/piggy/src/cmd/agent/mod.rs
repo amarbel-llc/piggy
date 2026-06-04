@@ -171,10 +171,35 @@ pub fn run(full_argv: Vec<String>) -> i32 {
             }
         }
 
+        // Read this token's keys BEFORE the CAK check. CAK auth opens its own
+        // card connection and signs; a co-resident reset on disconnect can
+        // disturb the live enumerated connection this read uses (observed on
+        // fibby). Read first, then discard the keys if the card fails CAK.
+        let slots = token.read_all_slots().unwrap_or_default();
+        let mut token_keys = Vec::new();
+        for slot in &slots {
+            if let Some(ref allowed) = allowed_slots {
+                if !allowed.contains(&slot.id()) {
+                    continue;
+                }
+            }
+
+            token_keys.push(CachedKey {
+                guid: guid.clone(),
+                reader_name: token.reader_name().to_string(),
+                slot_id: slot.id(),
+                algorithm: slot.algorithm(),
+                public_key: slot.public_key().key_data().clone(),
+                comment: format!("PIV_slot_{:02X} {}", slot.id(), guid.short_id()),
+            });
+        }
+
         // CAK anti-swap (piggy#143): if a CAK is configured, only expose a
         // card whose slot 9E authenticates against it.
         if let Some(ref cak) = cak {
-            if !cak::authenticate(&guid, cak) {
+            if cak::authenticate(&guid, cak) {
+                tracing::info!(guid = %guid.short_id(), "CAK authentication succeeded");
+            } else {
                 tracing::warn!(
                     guid = %guid.short_id(),
                     "CAK authentication failed; not exposing this card's keys"
@@ -186,24 +211,7 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         if primary_guid.is_none() {
             primary_guid = Some(guid.clone());
         }
-
-        let slots = token.read_all_slots().unwrap_or_default();
-        for slot in &slots {
-            if let Some(ref allowed) = allowed_slots {
-                if !allowed.contains(&slot.id()) {
-                    continue;
-                }
-            }
-
-            cached_keys.push(CachedKey {
-                guid: guid.clone(),
-                reader_name: token.reader_name().to_string(),
-                slot_id: slot.id(),
-                algorithm: slot.algorithm(),
-                public_key: slot.public_key().key_data().clone(),
-                comment: format!("PIV_slot_{:02X} {}", slot.id(), guid.short_id()),
-            });
-        }
+        cached_keys.extend(token_keys);
 
         if !cli.all_cards {
             break;

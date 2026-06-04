@@ -56,11 +56,10 @@ let
           instanceCfg.guid
         ])
         ++ lib.optional instanceCfg.allCards "-A"
-        # CAK (-K) is only understood by the C pivy-agent; the Rust `piggy
-        # agent` has no -K flag. A per-instance assertion forbids `cak` in
-        # rust-agent mode, so this branch only fires for the `pkgs.pivy`
-        # escape-hatch package.
-        ++ (lib.optionals (!isRustAgent && instanceCfg.cak != null) [
+        # CAK (-K): both the C pivy-agent and the Rust `piggy agent` implement
+        # slot-9E card authentication (piggy#143), so emit -K whenever a `cak`
+        # is configured, regardless of package.
+        ++ (lib.optionals (instanceCfg.cak != null) [
           "-K"
           instanceCfg.cak
         ])
@@ -248,14 +247,6 @@ let
         assertion = builtins.match "^(all|[0-9a-fA-F]{2}(,[0-9a-fA-F]{2})*)$" ic.slots != null;
         message = "services.piggy-agent: `slots` must be \"all\" or a comma-separated list of two-hex-char slot IDs, e.g. \"9a\", \"9a,9e\" (instance ${unitName}).";
       }
-      {
-        # CAK (`-K`) authentication is implemented only by the C pivy-agent.
-        # The Rust `piggy agent` (the default `pkgs.piggy` package) has no
-        # -K flag, so silently dropping it would lose the anti-card-swap
-        # check. Force the user to either unset `cak` or select the C agent.
-        assertion = !(isRustAgent && ic.cak != null);
-        message = "services.piggy-agent: `cak` is not supported by the Rust `piggy agent`; unset it, or set `package = pkgs.pivy` to use the C agent that implements -K CAK auth (instance ${unitName}).";
-      }
     ]) effectiveInstances
   );
 in
@@ -270,11 +261,13 @@ in
     #
     # Note: as of piggy#58, `piggy agent` runs the Rust agent under
     # `crates/piggy/src/cmd/agent/` (on-demand SSH_ASKPASS PIN entry +
-    # probe-loop PIN-clearing). The module emits the Rust flag surface for
-    # the default `pkgs.piggy` package — `isRustAgent` above drops the C-only
-    # `-i`/`-S all`/`-K` shapes. The `package = pkgs.pivy` escape hatch
-    # (`pname == "pivy"`) selects the C `pivy-agent` instead, which keeps the
-    # C flag surface and C-only features (CAK `-K`, confirm, install-service).
+    # probe-loop PIN-clearing), and as of piggy#143 it also implements CAK
+    # (`-K`) slot-9E card authentication. The module emits the Rust flag
+    # surface for the default `pkgs.piggy` package — `isRustAgent` above drops
+    # the C-only `-i`/`-S all` shapes (but `-K` is emitted for both). The
+    # `package = pkgs.pivy` escape hatch (`pname == "pivy"`) selects the C
+    # `pivy-agent` instead, which keeps the C flag surface and the remaining
+    # C-only features (confirm, install-service).
     package = lib.mkPackageOption pkgs "piggy" { };
 
     guid = mkOption {

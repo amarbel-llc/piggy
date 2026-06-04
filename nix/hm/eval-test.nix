@@ -731,9 +731,9 @@ let
         };
     }
     {
-      # CAK (`-K`) is C-only; setting it with the Rust agent must trip the
-      # guard assertion rather than silently dropping the anti-swap check.
-      name = "rust-agent-with-cak-trips-assertion";
+      # piggy#143: the Rust agent implements CAK (`-K`), so setting `cak`
+      # emits `-K <pubkey>` and trips no assertion (the C-only guard is gone).
+      name = "rust-agent-with-cak-emits-K";
       cfg = {
         services.piggy-agent.enable = true;
         services.piggy-agent.package = rustPackageStub;
@@ -744,11 +744,15 @@ let
         result:
         let
           tripped = trippedMessages result;
-          hasExpected = lib.any (m: lib.hasInfix "`cak` is not supported" m) tripped;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          # escapeShellArgs single-quotes the cak value (it contains a space).
+          hasCak = lib.hasInfix "-K 'ecdsa-sha2-nistp256 AAAATESTKEY'" text;
         in
         {
-          ok = hasExpected;
-          got = tripped;
+          ok = tripped == [ ] && hasCak;
+          got = {
+            inherit tripped text hasCak;
+          };
         };
     }
     {

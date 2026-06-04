@@ -272,3 +272,94 @@ function rust_piggy_agent_retries_on_wrong_pin { # @test
     return 1
   }
 }
+
+# Stop the running agent and reset its socket + log so a second agent can
+# bind the same socket within one test (used by the CAK accept test).
+_restart_agent_reset() {
+  [[ -n ${AGENT_PID:-} ]] && kill "$AGENT_PID" 2>/dev/null || true
+  [[ -n ${AGENT_PID:-} ]] && wait "$AGENT_PID" 2>/dev/null || true
+  AGENT_PID=
+  rm -f "$AGENT_SOCK"
+  : >"$AGENT_LOG"
+}
+
+# piggy#143: CAK (-K) anti-card-swap. The agent authenticates the card's
+# slot-9E key (PIN-never) against the configured CAK public key at startup;
+# a matching card has its identities exposed, a non-matching one is withheld.
+
+# Accept: with -K set to the card's real slot-9E public key, the card
+# authenticates and its identity is exposed.
+function rust_piggy_agent_cak_accepts_matching_card { # @test
+  spawn_fibby --seed-rfc6979-slot-9e-cert
+
+  # Phase 1: no -K — read the card's slot-9E public key off the agent.
+  _spawn_agent_cmd "$PIGGY_BIN" agent -A
+  SSH_AUTH_SOCK="$AGENT_SOCK" run ssh-add -L
+  [[ $status -eq 0 ]] || {
+    echo "ssh-add -L (no -K) exited $status; expected the 9E identity" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  local cak
+  cak=$(printf '%s\n' "$output" | grep '^ecdsa-sha2-nistp256 ' | head -1 | awk '{print $1, $2}')
+  [[ -n $cak ]] || {
+    echo "no slot-9E ecdsa identity to use as the CAK" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  _restart_agent_reset
+
+  # Phase 2: -K = the real 9E pubkey -> CAK passes, identity still exposed.
+  _spawn_agent_cmd "$PIGGY_BIN" agent -A -K "$cak"
+  SSH_AUTH_SOCK="$AGENT_SOCK" run ssh-add -L
+  [[ $status -eq 0 ]] || {
+    echo "CAK-authenticated agent exposed no keys (status $status)" >&2
+    printf '%s\n' "$output" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  printf '%s\n' "$output" | grep -q '^ecdsa-sha2-nistp256 ' || {
+    echo "the 9E identity is not exposed after a matching CAK" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  # The agent must have actually run CAK auth and passed (not merely exposed
+  # keys because no -K was given).
+  grep -q "CAK authentication succeeded" "$AGENT_LOG" || {
+    echo "no CAK-success log; auth may not have run" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  ! grep -q "CAK authentication failed" "$AGENT_LOG" || {
+    echo "CAK auth unexpectedly failed for the matching card" >&2
+    cat "$AGENT_LOG" >&2
+    return 1
+  }
+}
+
+# Reject: with -K set to some OTHER public key, the card fails authentication
+# and NONE of its identities are exposed.
+function rust_piggy_agent_cak_rejects_mismatched_card { # @test
+  command -v ssh-keygen >/dev/null || skip "ssh-keygen not on PATH"
+  spawn_fibby --seed-rfc6979-slot-9e-cert
+
+  # A valid but unrelated P-256 SSH public key.
+  ssh-keygen -t ecdsa -b 256 -N '' -C '' -f "$WORKDIR/wrong" -q </dev/null
+  local wrong
+  wrong=$(awk '{print $1, $2}' "$WORKDIR/wrong.pub")
+
+  _spawn_agent_cmd "$PIGGY_BIN" agent -A -K "$wrong"
+  SSH_AUTH_SOCK="$AGENT_SOCK" run ssh-add -L
+  # No identities should be exposed (ssh-add -L exits 1 "no identities").
+  if printf '%s\n' "$output" | grep -q '^ecdsa-sha2-nistp256 '; then
+    echo "keys were exposed despite a CAK mismatch (anti-swap failure)" >&2
+    printf '%s\n' "$output" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  fi
+  grep -q "CAK authentication failed" "$AGENT_LOG" || {
+    echo "expected a 'CAK authentication failed' warning in the agent log" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+}

@@ -684,6 +684,10 @@ impl VirtualCard {
             RFC6979_SLOT_9A_CERT_OBJECT.to_vec(),
         );
         self.seed_slot_9e_priv(RFC6979_A2_5_PRIV);
+        // The Rust agent enumerates tokens via the CHUID (read_chuid derives
+        // the GUID); without it the card looks uninitialized and exposes no
+        // identities. Mirror `seed_rfc5903_slot_9d_cert`.
+        self.seed_chuid();
     }
 
     /// Install the canonical CHUID ([`CANONICAL_REAL_CARD_CHUID`]) under
