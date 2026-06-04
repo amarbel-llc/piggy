@@ -9,6 +9,7 @@ use clap::Parser;
 use ssh_agent_lib::agent::listen;
 use tokio::net::UnixListener;
 
+mod cak;
 mod card;
 mod session;
 
@@ -25,6 +26,13 @@ pub struct AgentArgs {
     /// All-card mode: expose keys from all PIV cards
     #[arg(short = 'A', conflicts_with = "guid")]
     pub all_cards: bool,
+
+    /// Card Authentication Key: an SSH public key (e.g.
+    /// "ecdsa-sha2-nistp256 AAAA…"). When set, only cards whose slot 9E
+    /// answers a challenge with this key are exposed — an anti-card-swap
+    /// check matching the C pivy-agent's -K (piggy#143).
+    #[arg(short = 'K')]
+    pub cak: Option<String>,
 
     /// Socket path for the agent
     #[arg(short = 'a')]
@@ -139,6 +147,19 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         }
     };
 
+    // Parse the optional CAK (Card Authentication Key, piggy#143). Invalid
+    // input is a hard startup error — better than silently exposing keys.
+    let cak: Option<ssh_key::public::KeyData> = match cli.cak.as_deref() {
+        Some(s) => match ssh_key::PublicKey::from_openssh(s) {
+            Ok(pk) => Some(pk.key_data().clone()),
+            Err(e) => {
+                eprintln!("piggy agent: invalid -K Card Authentication Key: {e}");
+                return 1;
+            }
+        },
+        None => None,
+    };
+
     let mut cached_keys = Vec::new();
     let mut primary_guid = None;
     for token in &tokens {
@@ -146,6 +167,18 @@ pub fn run(full_argv: Vec<String>) -> i32 {
 
         if let Some(ref filter_guid) = cli.guid {
             if guid.to_hex() != *filter_guid && guid.short_id() != *filter_guid {
+                continue;
+            }
+        }
+
+        // CAK anti-swap (piggy#143): if a CAK is configured, only expose a
+        // card whose slot 9E authenticates against it.
+        if let Some(ref cak) = cak {
+            if !cak::authenticate(&guid, cak) {
+                tracing::warn!(
+                    guid = %guid.short_id(),
+                    "CAK authentication failed; not exposing this card's keys"
+                );
                 continue;
             }
         }
@@ -207,7 +240,7 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         }
     };
 
-    match rt.block_on(run_async(cli, cached_keys, primary_guid)) {
+    match rt.block_on(run_async(cli, cached_keys, primary_guid, cak)) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("piggy agent: {}", e);
@@ -220,6 +253,7 @@ async fn run_async(
     cli: AgentArgs,
     cached_keys: Vec<CachedKey>,
     primary_guid: Option<piggy_piv::Guid>,
+    cak: Option<ssh_key::public::KeyData>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Determine socket path
     let socket_path = match cli.socket {
@@ -269,8 +303,18 @@ async fn run_async(
     // C pivy-agent has its own card-presence handling with different timing.
     if let Some(guid) = primary_guid {
         let pin_handle = agent.pin_handle();
-        tracing::info!(guid = %guid.short_id(), "spawning card-presence probe loop");
-        tokio::spawn(card::probe_loop(guid, pin_handle));
+        match cak {
+            Some(cak) => {
+                // CAK mode (piggy#143): the probe also re-runs the slot-9E
+                // challenge each tick, so a mid-session card swap clears the PIN.
+                tracing::info!(guid = %guid.short_id(), "spawning CAK-reauthenticating card probe loop");
+                tokio::spawn(card::probe_loop_cak(guid, pin_handle, cak));
+            }
+            None => {
+                tracing::info!(guid = %guid.short_id(), "spawning card-presence probe loop");
+                tokio::spawn(card::probe_loop(guid, pin_handle));
+            }
+        }
     }
 
     // If a command was given, run it with the agent env, then exit

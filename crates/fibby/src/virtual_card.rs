@@ -249,6 +249,15 @@ pub struct VirtualCard {
     /// implicitly by [`Self::seed_fibby_slot_9c_cert`]. Empty (`6A 88` to
     /// GA) until seeded.
     slot_9c_priv: Option<[u8; 32]>,
+    /// Raw P-256 scalar (big-endian) installed in slot 9E (Card
+    /// Authentication), or `None` if no key is present. This is the
+    /// **PIN-never** slot: GA ECDSA requests (INS 0x87, P1=0x11, P2=0x9E)
+    /// sign the client-supplied prehash WITHOUT a prior VERIFY — used by
+    /// the CAK (Card Authentication Key) challenge/response a `piggy
+    /// agent -K` authenticates the card with (piggy#143). Set via
+    /// [`Self::seed_slot_9e_priv`], or implicitly by
+    /// [`Self::seed_rfc6979_slot_9e_cert`]. Empty (`6A 88` to GA) until seeded.
+    slot_9e_priv: Option<[u8; 32]>,
     /// 24-byte TripleDES management key. Defaults to YubiKey's factory
     /// constant `01 02 03 04 05 06 07 08 01 02 03 04 05 06 07 08 01
     /// 02 03 04 05 06 07 08` — the same value our throwaway captures
@@ -349,6 +358,12 @@ const FIBBY_SLOT_9C_TEST_PRIV: [u8; 32] = [
 /// rejects with `6D00`). The fibby↔pivy-agent Phase 0 smoke caught
 /// exactly this. See `pivy-piv/src/slot.rs` for the full slot→tag map.
 const TAG_SLOT_9A_CERT: &[u8] = &[0x5F, 0xC1, 0x05];
+
+/// PIV tag for the slot 9E (Card Authentication) X.509 cert object, per
+/// SP 800-73-4 §3.3 Table 6 / pivy `PIV_TAG_CERT_9E`: `5F C1 01`. Seeding
+/// a cert here makes pivy-agent expose the identity as slot 9E and route
+/// GA `P2=0x9E` signing to it — the CAK challenge path (piggy#143).
+const TAG_SLOT_9E_CERT: &[u8] = &[0x5F, 0xC1, 0x01];
 
 /// Canonical fibby test-vector slot 9A certificate, wrapped in the PIV
 /// cert-object TLV (`53 <len> 70 <der-len> <der> 71 01 00 FE 00`).
@@ -566,6 +581,7 @@ impl VirtualCard {
             slot_9a_priv: None,
             slot_9d_priv: None,
             slot_9c_priv: None,
+            slot_9e_priv: None,
             mgmt_key: DEFAULT_MGMT_KEY,
             pending_mgmt_witness: None,
             mgmt_authenticated: false,
@@ -655,6 +671,21 @@ impl VirtualCard {
         self.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
     }
 
+    /// Install a self-signed cert over the RFC 6979 §A.2.5 P-256 keypair at
+    /// the slot 9E cert tag (`5F C1 01`) **and** the matching key into slot
+    /// 9E, so `pivy-agent` exposes a Card-Authentication identity whose 9E
+    /// key can answer a CAK challenge (`piggy agent -K`, piggy#143). Reuses
+    /// the A.2.5 cert bytes — the cert subject CN is cosmetic; only the
+    /// embedded public key matters for CAK verification. Slot 9E is
+    /// PIN-never, so the resulting identity signs without a prior VERIFY.
+    pub fn seed_rfc6979_slot_9e_cert(&mut self) {
+        self.seed_data_object(
+            TAG_SLOT_9E_CERT.to_vec(),
+            RFC6979_SLOT_9A_CERT_OBJECT.to_vec(),
+        );
+        self.seed_slot_9e_priv(RFC6979_A2_5_PRIV);
+    }
+
     /// Install the canonical CHUID ([`CANONICAL_REAL_CARD_CHUID`]) under
     /// PIV tag `5F C1 02`, making VirtualCard present as an *initialized*
     /// card with a stable GUID. Without it, clients that key off the
@@ -701,6 +732,16 @@ impl VirtualCard {
     /// time (PIN-always policy). Mirrors [`Self::seed_slot_9a_priv`].
     pub fn seed_slot_9c_priv(&mut self, scalar: [u8; 32]) {
         self.slot_9c_priv = Some(scalar);
+    }
+
+    /// Install a P-256 private key into slot 9E (Card Authentication). The
+    /// scalar is the 32-byte big-endian raw secret. Subsequent GA ECDSA
+    /// requests (INS 0x87, P1=0x11, P2=0x9E) sign the client-supplied
+    /// prehash under RFC 6979 deterministic ECDSA — WITHOUT a prior VERIFY,
+    /// since 9E is the PIN-never Card Authentication slot (piggy#143).
+    /// Mirrors [`Self::seed_slot_9a_priv`].
+    pub fn seed_slot_9e_priv(&mut self, scalar: [u8; 32]) {
+        self.slot_9e_priv = Some(scalar);
     }
 
     /// Pin the P-256 scalar that GENERATE ASYMMETRIC (INS 0x47) will
@@ -885,11 +926,17 @@ impl Backend for VirtualCard {
         // verification (consume_pin = true).
         if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9A {
             let scalar = self.slot_9a_priv;
-            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), scalar, "9A", false));
+            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), scalar, "9A", true, false));
         }
         if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9C {
             let scalar = self.slot_9c_priv;
-            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), scalar, "9C", true));
+            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), scalar, "9C", true, true));
+        }
+        // Slot 9E (Card Authentication) is PIN-never: it answers the CAK
+        // challenge/response (`piggy agent -K`, piggy#143) without a VERIFY.
+        if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9E {
+            let scalar = self.slot_9e_priv;
+            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), scalar, "9E", false, false));
         }
 
         // GENERAL AUTHENTICATE mgmt-key challenge-response (00 87 03
@@ -1267,12 +1314,16 @@ impl VirtualCard {
         body: Option<&[u8]>,
         scalar: Option<[u8; 32]>,
         slot_label: &str,
+        pin_required: bool,
         consume_pin: bool,
     ) -> Vec<u8> {
         use p256::ecdsa::signature::hazmat::PrehashSigner;
         use p256::ecdsa::{Signature, SigningKey};
 
-        if !self.pin_verified {
+        // `pin_required` is false only for slot 9E (Card Authentication),
+        // which is PIN-never — it answers a CAK challenge without a prior
+        // VERIFY (piggy#143). 9A/9C require a verified PIN.
+        if pin_required && !self.pin_verified {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
@@ -2569,6 +2620,73 @@ mod tests {
             "seeded slot 9A can sign -> 9000"
         );
         assert_eq!(sig[0], 0x7C, "sign response is a GA template");
+    }
+
+    // -- GA ECDSA (slot 9E, Card Authentication, PIN-never) tests --------
+
+    /// Slot 9E is PIN-never: it signs a CAK challenge WITHOUT a prior
+    /// VERIFY, and the signature verifies against the slot's public key —
+    /// the property `piggy agent -K` relies on (piggy#143).
+    #[test]
+    fn ga_ecdsa_slot_9e_signs_without_pin_verify() {
+        use p256::ecdsa::signature::hazmat::PrehashVerifier;
+        use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+
+        let mut c = VirtualCard::new();
+        c.seed_slot_9e_priv(RFC6979_SCALAR);
+        assert!(!c.pin_verified, "precondition: PIN not verified");
+
+        let digest: [u8; 32] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF, 0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78, 0x87, 0x96, 0xA5, 0xB4,
+            0xC3, 0xD2, 0xE1, 0xF0,
+        ];
+        let resp = c.transmit(&ga_sign_apdu_slot(0x9E, &digest)).unwrap();
+        let der = extract_ga_sign_der(&resp);
+
+        let sig = Signature::from_der(&der).expect("card returned valid DER sig");
+        let vk = VerifyingKey::from(&SigningKey::from_slice(&RFC6979_SCALAR).unwrap());
+        vk.verify_prehash(&digest, &sig)
+            .expect("9E signature verifies against the slot public key");
+    }
+
+    #[test]
+    fn ga_ecdsa_slot_9e_without_key_returns_6a88() {
+        let mut c = VirtualCard::new();
+        // PIN-never: an empty 9E slot is 6A88 (not 6982) even without VERIFY.
+        let resp = c.transmit(&ga_sign_apdu_slot(0x9E, &[0x5A; 32])).unwrap();
+        assert_eq!(resp, vec![0x6A, 0x88], "slot 9E empty -> 6A88");
+    }
+
+    /// `seed_rfc6979_slot_9e_cert` installs the cert at `5F C1 01` AND the
+    /// matching key, so the 9E slot can be enumerated (cert) and answer a
+    /// CAK challenge (key) — PIN-never, verifying against the A.2.5 pubkey.
+    #[test]
+    fn seed_rfc6979_slot_9e_cert_enables_signing() {
+        use p256::ecdsa::signature::hazmat::PrehashVerifier;
+        use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+
+        let mut c = VirtualCard::new();
+        c.seed_rfc6979_slot_9e_cert();
+
+        let cert = c.transmit(&get_data_apdu(TAG_SLOT_9E_CERT)).unwrap();
+        assert_eq!(
+            cert[0], 0x53,
+            "GET DATA returns the 53-wrapped 9E cert object"
+        );
+        assert_eq!(
+            &cert[cert.len() - 2..],
+            &[0x90, 0x00],
+            "9E cert read -> 9000"
+        );
+
+        let digest = [0x42u8; 32];
+        let resp = c.transmit(&ga_sign_apdu_slot(0x9E, &digest)).unwrap();
+        let der = extract_ga_sign_der(&resp);
+        let sig = Signature::from_der(&der).unwrap();
+        let vk = VerifyingKey::from(&SigningKey::from_slice(&RFC6979_A2_5_PRIV).unwrap());
+        vk.verify_prehash(&digest, &sig)
+            .expect("cert-seeded 9E signature verifies against the A.2.5 pubkey");
     }
 
     // -- GA ECDSA (slot 9C, Digital Signature, PIN-always) tests ---------

@@ -31,6 +31,26 @@ pub async fn probe_loop(guid: Guid, pin: Arc<Mutex<Option<String>>>) {
     .await
 }
 
+/// CAK-reauthenticating probe loop (piggy#143): like [`probe_loop`], but the
+/// per-tick probe additionally re-runs the slot-9E CAK challenge/response. A
+/// card SWAP (or a card whose 9E stops matching the configured CAK) is then
+/// treated as card-absent and clears the cached PIN after `PROBE_FAIL_LIMIT`
+/// consecutive failures, matching the C pivy-agent's per-probe `auth_cak`.
+pub async fn probe_loop_cak(
+    guid: Guid,
+    pin: Arc<Mutex<Option<String>>>,
+    cak: ssh_key::public::KeyData,
+) {
+    probe_loop_with(
+        guid,
+        pin,
+        move |g| default_card_probe(g) && super::cak::authenticate(g, &cak),
+        PROBE_INTERVAL,
+        PROBE_FAIL_LIMIT,
+    )
+    .await
+}
+
 /// Default card-presence probe: establishes a new PCSC context and
 /// enumerates tokens. Returns `true` iff a token with the given GUID is
 /// available.

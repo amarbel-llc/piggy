@@ -40,6 +40,7 @@ struct Args {
     seed_rfc6979_slot_9a_cert: bool,
     seed_rfc5903_slot_9d_cert: bool,
     seed_slot_9c_cert: bool,
+    seed_rfc6979_slot_9e_cert: bool,
     /// Install just the canonical CHUID (no key/cert), so the card presents
     /// as *initialized* with empty slots — the starting state for an on-card
     /// GENERATE (`pivy-tool` needs the CHUID to find the card).
@@ -52,6 +53,7 @@ struct Args {
     seed_slot_9a_priv: Option<[u8; 32]>,
     seed_slot_9d_priv: Option<[u8; 32]>,
     seed_slot_9c_priv: Option<[u8; 32]>,
+    seed_slot_9e_priv: Option<[u8; 32]>,
     seed_mgmt_key: Option<[u8; 24]>,
     seed_mgmt_key_witness: Option<[u8; 8]>,
     /// Deterministic key material for on-card GENERATE ASYMMETRIC (INS 0x47),
@@ -75,10 +77,12 @@ fn parse_args() -> Result<Args, String> {
         seed_rfc6979_slot_9a_cert: false,
         seed_rfc5903_slot_9d_cert: false,
         seed_slot_9c_cert: false,
+        seed_rfc6979_slot_9e_cert: false,
         seed_chuid: false,
         seed_slot_9a_priv: None,
         seed_slot_9d_priv: None,
         seed_slot_9c_priv: None,
+        seed_slot_9e_priv: None,
         generate_slot_9a_priv: None,
         generate_slot_9c_priv: None,
         generate_slot_9d_priv: None,
@@ -107,6 +111,7 @@ fn parse_args() -> Result<Args, String> {
             "--seed-rfc6979-slot-9a-cert" => args.seed_rfc6979_slot_9a_cert = true,
             "--seed-rfc5903-slot-9d-cert" => args.seed_rfc5903_slot_9d_cert = true,
             "--seed-slot-9c-cert" => args.seed_slot_9c_cert = true,
+            "--seed-rfc6979-slot-9e-cert" => args.seed_rfc6979_slot_9e_cert = true,
             "--seed-chuid" => args.seed_chuid = true,
             "--seed-slot-9c-priv" => {
                 args.seed_slot_9c_priv = Some(parse_hex_array(
@@ -124,6 +129,12 @@ fn parse_args() -> Result<Args, String> {
                 args.seed_slot_9d_priv = Some(parse_hex_array(
                     &value("--seed-slot-9d-priv")?,
                     "--seed-slot-9d-priv",
+                )?)
+            }
+            "--seed-slot-9e-priv" => {
+                args.seed_slot_9e_priv = Some(parse_hex_array(
+                    &value("--seed-slot-9e-priv")?,
+                    "--seed-slot-9e-priv",
                 )?)
             }
             "--generate-slot-9a-priv" => {
@@ -198,9 +209,9 @@ fn print_help() {
                       [--reader SUBSTR] [--model yk4|yk5]\n\
                       [--seed-rfc6979-slot-9a-cert]\n\
                       [--seed-rfc5903-slot-9d-cert] [--seed-slot-9c-cert]\n\
-                      [--seed-chuid]\n\
+                      [--seed-rfc6979-slot-9e-cert] [--seed-chuid]\n\
                       [--seed-slot-9a-priv HEX] [--seed-slot-9d-priv HEX]\n\
-                      [--seed-slot-9c-priv HEX]\n\
+                      [--seed-slot-9c-priv HEX] [--seed-slot-9e-priv HEX]\n\
                       [--generate-slot-9a-priv HEX] [--generate-slot-9c-priv HEX]\n\
                       [--generate-slot-9d-priv HEX]\n\
                       [--seed-mgmt-key HEX] [--seed-mgmt-key-witness HEX]\n\
@@ -306,6 +317,9 @@ fn make_backend(args: &Args) -> Result<SharedBackend, String> {
             if args.seed_slot_9c_cert {
                 card.seed_fibby_slot_9c_cert();
             }
+            if args.seed_rfc6979_slot_9e_cert {
+                card.seed_rfc6979_slot_9e_cert();
+            }
             if args.seed_chuid {
                 card.seed_chuid();
             }
@@ -320,6 +334,9 @@ fn make_backend(args: &Args) -> Result<SharedBackend, String> {
             }
             if let Some(s) = args.seed_slot_9c_priv {
                 card.seed_slot_9c_priv(s);
+            }
+            if let Some(s) = args.seed_slot_9e_priv {
+                card.seed_slot_9e_priv(s);
             }
             // GENERATE overrides: make a subsequent on-card GENERATE for the
             // slot install this exact scalar instead of a random key.

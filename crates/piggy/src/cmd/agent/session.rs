@@ -844,7 +844,7 @@ fn read_u32_be(data: &[u8], offset: usize, label: &str) -> Result<u32, AgentErro
 }
 
 /// Establish a fresh PCSC context and find the token matching `guid`.
-fn reconnect_to_token(guid: &Guid) -> Result<piggy_piv::PivToken, AgentError> {
+pub(super) fn reconnect_to_token(guid: &Guid) -> Result<piggy_piv::PivToken, AgentError> {
     let ctx = PivContext::new().map_err(|e| AgentError::Other(e.to_string().into()))?;
     let tokens = ctx
         .enumerate_tokens()
