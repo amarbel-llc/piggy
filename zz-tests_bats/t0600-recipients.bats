@@ -81,6 +81,39 @@ function recipients_sync_rejects_wrong_format { # @test
   assert_output --partial "validation"
 }
 
+function recipients_sync_no_file_reencrypts_whole_store { # @test
+  # No <file>: re-encrypt every ebox to the recipients already in piggy-ids.
+  # The base64 mock round-trips bit-identically, so this asserts the dispatch
+  # path succeeds and the plaintext survives. The real-crypto proof (ciphertext
+  # actually re-encrypted, decryptable via the card, commit landed) lives in
+  # zz-tests_bats/conformance/piggy_recipients_sync_fibby.bats.
+  echo "secret-one" | "$PIGGY" pass insert -e foo/bar
+  echo "secret-two" | "$PIGGY" pass insert -e baz
+  run "$PIGGY" pass recipients sync
+  assert_success
+  run "$PIGGY" pass show foo/bar
+  assert_success
+  assert_output --partial "secret-one"
+  run "$PIGGY" pass show baz
+  assert_success
+  assert_output --partial "secret-two"
+}
+
+function recipients_sync_no_file_with_p_scopes { # @test
+  # `sync -p <subfolder>` (no file) re-encrypts only that subtree; the other
+  # subtree is left alone. Both must still decrypt afterward.
+  echo "scoped-secret" | "$PIGGY" pass insert -e work/cred
+  echo "other-secret" | "$PIGGY" pass insert -e personal/cred
+  run "$PIGGY" pass recipients sync -p work
+  assert_success
+  run "$PIGGY" pass show work/cred
+  assert_success
+  assert_output --partial "scoped-secret"
+  run "$PIGGY" pass show personal/cred
+  assert_success
+  assert_output --partial "other-secret"
+}
+
 function recipients_add_commits_piggy_ids_change { # @test
   # `add` lands a commit for the piggy-ids change. Under real
   # crypto a second commit lands for the reencryption pass too, but

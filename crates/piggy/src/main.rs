@@ -355,7 +355,8 @@ enum RecipientsCommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
-    /// Replace piggy-ids with another file's contents (idempotent).
+    /// Replace piggy-ids with a file's contents (idempotent), or with no
+    /// file re-encrypt the store to the current piggy-ids recipients.
     Sync {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,

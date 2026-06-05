@@ -379,6 +379,27 @@ test-bats-conformance-agent-pin-on-demand:
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_agent_pin_on_demand.bats
 
+# Fibby-backed gate for `recipients sync` with NO file: re-encrypt the store
+# (whole or `-p` subtree) to the current piggy-ids recipients, then prove the
+# result still decrypts through the agent <-> fibby slot-9D rebox path. The
+# wrapped piggy (.#default, real pivy-box + piggy-ids) bypasses common.bash's
+# mock crypto so the re-encrypt produces real fresh ciphertext. No hardware.
+# [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect is a
+# no-op on macOS's PCSC.framework).
+[group('post-build')]
+[linux]
+test-bats-conformance-recipients-sync-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIVY_AGENT="$pivy_out/bin/pivy-agent" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_recipients_sync_fibby.bats
+
 # Hardware lane for the C pivy-agent built from vendor/pivy/. Runs
 # pivy_agent_hardware.bats against the user's plugged-in PIV card.
 # Read-only PIN-free operations (REQUEST_IDENTITIES). Verifies the

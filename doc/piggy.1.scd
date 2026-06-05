@@ -146,11 +146,18 @@ passthroughs for the C pivy binaries:
 	canonicalized form) and re-encrypt. Idempotent: if no recipients
 	match, no commit is made.
 
-*pass recipients sync* _file_ [*--path*=_sub-folder_, *-p* _sub-folder_]
-	Replace the recipient set with the contents of _file_, which must be
-	a valid _piggy-ids_ text file. Idempotent: if the on-disk and
-	declared sets match, no commit is made and no re-encryption happens.
-	Validation rejects markl IDs whose format is not *pivy_ecdh_p256_pub*.
+*pass recipients sync* [_file_] [*--path*=_sub-folder_, *-p* _sub-folder_]
+	With _file_: replace the recipient set with the contents of _file_,
+	which must be a valid _piggy-ids_ text file. Idempotent: if the
+	on-disk and declared sets match, no commit is made and no
+	re-encryption happens. Validation rejects markl IDs whose format is
+	not *pivy_ecdh_p256_pub*.
+
+	With no _file_: re-encrypt every entry to the recipients already in
+	the _piggy-ids_ file(s), then commit. Bare *sync* walks the whole
+	store; with *-p* _sub-folder_ it re-encrypts only that subtree. Each
+	entry is re-encrypted to its nearest _piggy-ids_. Use this to refresh
+	ciphertext after editing a _piggy-ids_ file by hand.
 
 *pass ls* _subfolder_
 	List names of passwords inside the tree at _subfolder_ by using the

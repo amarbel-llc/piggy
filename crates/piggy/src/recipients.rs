@@ -24,7 +24,7 @@ use std::process::Command;
 
 use crate::git_ops;
 use crate::reencrypt;
-use crate::store::{find_piggy_ids, store_root};
+use crate::store::{find_piggy_ids, resolve_target, store_root};
 
 /// Exit code conventions:
 /// - 0: piggy-ids found and printed
@@ -340,12 +340,19 @@ pub fn remove(args: &[String]) -> i32 {
     0
 }
 
-/// `piggy pass recipients sync <file> [-p subfolder]`.
+/// `piggy pass recipients sync [<file>] [-p subfolder]`.
 ///
-/// Mirrors `cmd_pass_recipients_sync` in `src/piggy.sh`: validate the
-/// declared file, no-op when it already matches the live recipients
-/// (the `diff` idempotency check), otherwise copy it over the live file,
-/// canonicalise in place, and commit + reencrypt.
+/// Two forms:
+///
+/// - With `<file>`: mirrors `cmd_pass_recipients_sync` in `src/piggy.sh` —
+///   validate the declared file, no-op when it already matches the live
+///   recipients (the `diff` idempotency check), otherwise copy it over the
+///   live file, canonicalise in place, and commit + reencrypt.
+/// - Without `<file>`: re-encrypt every ebox to the recipients already
+///   declared in the `piggy-ids` file(s), then commit. Bare `sync` walks the
+///   whole store; `sync -p <subfolder>` scopes the walk to that subtree. Each
+///   ebox still picks up its *nearest* `piggy-ids`. This is the ergonomic
+///   front-end to the otherwise-hidden `internal-reencrypt-path` command.
 pub fn sync(args: &[String]) -> i32 {
     let parsed = match parse_sync(args) {
         Ok(p) => p,
@@ -354,16 +361,30 @@ pub fn sync(args: &[String]) -> i32 {
             return 1;
         }
     };
+
+    let root = store_root();
+
+    // No <file>: re-encrypt the existing store (whole store, or the
+    // `-p <subfolder>` subtree) to the recipients already declared in the
+    // piggy-ids file(s), then commit. No piggy-ids edit happens here, so
+    // unlike the <file> path there is nothing to validate/canonicalize.
     let Some(file) = parsed.file else {
-        eprintln!("Usage: piggy pass recipients sync <file> [-p subfolder]");
-        return 1;
+        let scope = (!parsed.subfolder.is_empty()).then_some(parsed.subfolder.as_str());
+        let target = match resolve_target(&root, scope) {
+            Ok(t) => t,
+            Err(msg) => {
+                eprintln!("Error: {msg}");
+                return 1;
+            }
+        };
+        return reencrypt_and_commit(&target);
     };
+
     if !Path::new(&file).is_file() {
         eprintln!("Error: file not found: {file}");
         return 1;
     }
 
-    let root = store_root();
     let piggy_ids = match find_piggy_ids(&root, &parsed.subfolder) {
         Ok(p) => p,
         Err(msg) => {
@@ -769,6 +790,27 @@ fn commit_and_reencrypt(
     }
 }
 
+/// Re-encrypt every ebox under `target` to its nearest `piggy-ids`, then
+/// commit the resulting ciphertext changes. This is the no-file `recipients
+/// sync` path: unlike [`commit_and_reencrypt`] there is no `piggy-ids` edit to
+/// commit first — it just refreshes ciphertext against the recipients already
+/// on disk.
+///
+/// The work-tree is resolved as `target` itself rather than via
+/// [`git_ops::find_inner_git_dir`] (which walks up from the *parent* and would
+/// miss the store-root case): any directory inside the work tree answers
+/// `--is-inside-work-tree` true, and `git -C <target> add <target>` stages
+/// exactly the walked subtree. The commit-only-if-changed guard in
+/// `git_ops::add_and_commit` means a bit-identical re-encrypt (e.g. the base64
+/// bats mock) produces no commit.
+fn reencrypt_and_commit(target: &Path) -> i32 {
+    let code = reencrypt::run(target);
+    if git_ops::is_inside_work_tree(target) {
+        let _ = git_ops::add_and_commit(target, target, "Reencrypt password store.");
+    }
+    code
+}
+
 /// Parse `-p <subfolder>`. Everything else is a usage error — mirrors
 /// the bash `case ... *) die "unexpected argument" ;;` arm.
 fn parse_subfolder(args: &[String]) -> Result<String, String> {
@@ -885,6 +927,19 @@ mod tests {
 
         let err = parse_sync(&strings(&["a.txt", "b.txt"])).unwrap_err();
         assert!(err.contains("only one"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_sync_accepts_no_file() {
+        // No positional → the no-file re-encrypt form: file is None, and any
+        // `-p` is still captured to scope the walk.
+        let bare = parse_sync(&[]).unwrap();
+        assert!(bare.file.is_none());
+        assert_eq!(bare.subfolder, "");
+
+        let scoped = parse_sync(&strings(&["-p", "work"])).unwrap();
+        assert!(scoped.file.is_none());
+        assert_eq!(scoped.subfolder, "work");
     }
 
     #[test]
