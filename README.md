@@ -44,6 +44,34 @@ The pass-style handlers and `piggy box` (`stream encrypt`/`decrypt`, `tpl create
 
 A more complete walkthrough is tracked at [#25](https://github.com/amarbel-llc/piggy/issues/25).
 
+## Nix modules
+
+The flake exports home-manager modules (and thin NixOS re-exports that
+wire them into `home-manager.sharedModules`):
+
+- **`homeManagerModules.piggy-agent`** — `services.piggy-agent`, a
+  PIV-backed SSH agent unit (systemd user service / launchd agent).
+- **`homeManagerModules.piggy-secrets`** — `piggy.secrets`, a
+  [sops-nix](https://github.com/Mic92/sops-nix)-shaped secret manager
+  whose ciphertext is piggy `.ebox` files. Each secret is decrypted at
+  `home-manager switch` into a tmpfs generation dir behind an atomically
+  swapped symlink, so consumers can hard-code the path and never see a
+  half-written secret:
+
+  ```nix
+  {
+    piggy.secrets.db-password.eboxFile = ./secrets/db-password.ebox;
+    # decrypted to $XDG_RUNTIME_DIR/piggy-secrets/db-password (mode 0400)
+
+    # route decrypts at the piggy-agent that advertises ecdh@joyent.com:
+    piggy.agentSocket = "$XDG_STATE_HOME/piggy/piggy-agent.sock";
+  }
+  ```
+
+  Because decryption is PIV-interactive (needs the card + agent), it runs
+  in the user's session — not a boot-time root activation. See
+  `docs/plans/2026-06-05-piggy-secrets-nix-module.md`.
+
 ## History
 
 piggy started as a fork of [passwordstore.org](https://www.passwordstore.org/) and replaced the GPG encryption path with `pivy-box`. See `COPYING` for the original GPL-2.0+ license retained from pass.

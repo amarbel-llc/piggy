@@ -477,6 +477,30 @@ test-nix-hm-module:
     exit 1
   fi
 
+# Smoke-test for the `piggy.secrets` home-manager module (sops-nix-shaped
+# secret manager backed by piggy eboxes). Evaluates the module against
+# synthetic configs and verifies the option schema + the rendered
+# activation script (decrypt-command shape, atomic symlink flip,
+# PIGGY_AUTH_SOCK / SSH_ASKPASS threading). Reports pass/fail per case.
+[group('post-build')]
+test-nix-hm-secrets-module:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  expr='let
+    flake = builtins.getFlake (toString ./.);
+    pkgs = flake.inputs.igloo.legacyPackages.${builtins.currentSystem};
+    test = import ./nix/hm/secrets-eval-test.nix {
+      inherit pkgs;
+      module = flake.homeManagerModules.piggy-secrets;
+    };
+  in test'
+  json="$(nix eval --impure --json --expr "$expr")"
+  printf '%s\n' "$json" | jq -r '"\(.summary)"'
+  if [[ "$(printf '%s\n' "$json" | jq -r '.pass')" != "true" ]]; then
+    printf '%s\n' "$json" | jq -r '.failures[] | "FAIL: \(.name)\n  got: \(.result.got)"'
+    exit 1
+  fi
+
 # End-to-end ECDH round-trip: boot fib, generate a 9D key, spawn
 # piggy-agent as a child of the test binary, and verify the agent's
 # ecdh@joyent.com extension agrees with a locally-computed shared

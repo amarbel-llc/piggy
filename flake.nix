@@ -586,5 +586,13 @@
       # under `home-manager.users.<u>.services.piggy-agent`.
       homeManagerModules.piggy-agent = import ./nix/hm/piggy-agent.nix;
       nixosModules.piggy-agent = import ./nix/nixos/piggy-agent.nix;
+
+      # `piggy.secrets` — a sops-nix-shaped secret manager whose
+      # ciphertext is piggy `.ebox` files. Decrypts at `home-manager
+      # switch` into a tmpfs generation dir with an atomic symlink flip.
+      # See docs/plans/2026-06-05-piggy-secrets-nix-module.md. The NixOS
+      # module is the same thin home-manager re-export as piggy-agent.
+      homeManagerModules.piggy-secrets = import ./nix/hm/piggy-secrets.nix;
+      nixosModules.piggy-secrets = import ./nix/nixos/piggy-secrets.nix;
     };
 }
