@@ -21,6 +21,11 @@ piggy-box = { path = "../piggy-box" }
 # ID (the `pass ls --recipients` annotation). Transitive via piggy-box
 # already, but not re-exported, so the explicit entry makes the use legal.
 piggy-markl = { path = "../piggy-markl" }
+# Direct dep so `reencrypt::reencrypt_unnecessary` can parse a `piggy-ids`
+# file (`RecipientFile`) and compare its recipient set against an ebox's
+# parts for the TAP `# SKIP` decision. Transitive via piggy-box already;
+# the explicit entry makes the `piggy_ids::RecipientFile` use-site legal.
+piggy-ids = { path = "../piggy-ids" }
 # Direct dep so `show_batch::classify_piv_error` can match against
 # `pcsc::Error::NoSmartcard | ReaderUnavailable | RemovedCard` for the
 # RFC 0005 `card-absent` mapping. Transitive via `piggy-piv` already;
@@ -58,3 +63,7 @@ tokio = { version = "1", features = ["test-util"] }
 # file can `use p256::...`.
 p256 = { version = "0.13", default-features = false, features = ["ecdh"] }
 rand = "0.8"
+# Used by reencrypt.rs SKIP-helper unit tests to construct markl IDs
+# (`piggy_markl::Id::new`) for the ebox + piggy-ids recipient fixtures.
+# Transitive via piggy-box already; explicit for the test use-site.
+piggy-markl = { path = "../piggy-markl" }

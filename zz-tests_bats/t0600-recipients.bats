@@ -91,6 +91,11 @@ function recipients_sync_no_file_reencrypts_whole_store { # @test
   echo "secret-two" | "$PIGGY" pass insert -e baz
   run "$PIGGY" pass recipients sync
   assert_success
+  # The walk emits a TAP-14 stream: version + a 1..2 plan (one point per ebox).
+  # The base64 mock isn't real ebox wire format, so the recipients-match SKIP
+  # never fires here (it parses real eboxes only); every point is a plain `ok`.
+  assert_output --partial "TAP version 14"
+  assert_output --partial "1..2"
   run "$PIGGY" pass show foo/bar
   assert_success
   assert_output --partial "secret-one"

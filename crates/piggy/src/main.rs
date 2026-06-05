@@ -180,6 +180,10 @@ enum Command {
     InternalReencryptPath {
         /// Directory under the store to walk.
         dir: PathBuf,
+        /// Emit a TAP YAML diagnostic block on every point, not just
+        /// failures.
+        #[arg(short = 'v', long = "verbose")]
+        verbose: bool,
     },
     /// Internal: deferred-restore clipboard worker spawned by
     /// `show -c`. Reads a serialized ClipPlan from stdin, sleeps
@@ -495,7 +499,9 @@ fn main() {
             }
         },
 
-        Command::InternalReencryptPath { dir } => std::process::exit(reencrypt::run(&dir)),
+        Command::InternalReencryptPath { dir, verbose } => {
+            std::process::exit(reencrypt::run(&dir, verbose))
+        }
         Command::InternalClipboardRestore => std::process::exit(internal_clipboard_restore::run()),
     }
 }

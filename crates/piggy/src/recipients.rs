@@ -134,8 +134,8 @@ pub fn add(args: &[String]) -> i32 {
         id_dir,
         "Add recipient(s) to piggy-ids.",
         "Reencrypt password store after adding recipient(s).",
-    );
-    0
+        false,
+    )
 }
 
 /// `piggy pass recipients add -A | --all-attached [--yes] [-p subfolder]`.
@@ -271,8 +271,8 @@ fn add_all_attached(subfolder: &str, assume_yes: bool) -> i32 {
         id_dir,
         &format!("Add {count} attached card(s) to piggy-ids."),
         &format!("Reencrypt password store after adding {count} attached card(s)."),
-    );
-    0
+        false,
+    )
 }
 
 /// `piggy pass recipients remove <markl-id>... [-p subfolder]`.
@@ -336,8 +336,8 @@ pub fn remove(args: &[String]) -> i32 {
         id_dir,
         "Remove recipient(s) from piggy-ids.",
         "Reencrypt password store after removing recipient(s).",
-    );
-    0
+        false,
+    )
 }
 
 /// `piggy pass recipients sync [<file>] [-p subfolder]`.
@@ -377,7 +377,7 @@ pub fn sync(args: &[String]) -> i32 {
                 return 1;
             }
         };
-        return reencrypt_and_commit(&target);
+        return reencrypt_and_commit(&target, parsed.verbose);
     };
 
     if !Path::new(&file).is_file() {
@@ -422,8 +422,8 @@ pub fn sync(args: &[String]) -> i32 {
         id_dir,
         "Sync recipients in piggy-ids.",
         "Reencrypt password store after syncing recipients.",
-    );
-    0
+        parsed.verbose,
+    )
 }
 
 #[derive(Debug)]
@@ -500,27 +500,37 @@ fn parse_subfolder_and_ids(args: &[String]) -> SubfolderAndIds {
 struct SyncArgs {
     subfolder: String,
     file: Option<String>,
+    verbose: bool,
 }
 
-/// Parse the `sync` argv: `-p <subfolder>` plus exactly one positional
-/// `<file>`. A second positional is a usage error, matching the bash
-/// `[[ -z $file ]] || die` guard.
+/// Parse the `sync` argv: `-p <subfolder>`, `-v`/`--verbose` (TAP YAML
+/// diagnostics on every point, not just failures), plus exactly one
+/// positional `<file>`. A second positional is a usage error, matching
+/// the bash `[[ -z $file ]] || die` guard.
 fn parse_sync(args: &[String]) -> Result<SyncArgs, String> {
     let mut subfolder = String::new();
     let mut file: Option<String> = None;
+    let mut verbose = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        if arg == "-p" {
-            if let Some(v) = iter.next() {
-                subfolder = v.clone();
+        match arg.as_str() {
+            "-p" => {
+                if let Some(v) = iter.next() {
+                    subfolder = v.clone();
+                }
             }
-        } else if file.is_some() {
-            return Err("Error: only one <file> argument permitted.".into());
-        } else {
-            file = Some(arg.clone());
+            "-v" | "--verbose" => verbose = true,
+            _ if file.is_some() => {
+                return Err("Error: only one <file> argument permitted.".into());
+            }
+            _ => file = Some(arg.clone()),
         }
     }
-    Ok(SyncArgs { subfolder, file })
+    Ok(SyncArgs {
+        subfolder,
+        file,
+        verbose,
+    })
 }
 
 /// Append each markl ID as its own line to `path`, mirroring the bash
@@ -779,15 +789,17 @@ fn commit_and_reencrypt(
     id_dir: &Path,
     ids_message: &str,
     reencrypt_message: &str,
-) {
+    verbose: bool,
+) -> i32 {
     let work_tree = git_ops::find_inner_git_dir(piggy_ids, root);
     if let Some(work_tree) = &work_tree {
         let _ = git_ops::add_and_commit(work_tree, piggy_ids, ids_message);
     }
-    reencrypt::run(id_dir);
+    let code = reencrypt::run(id_dir, verbose);
     if let Some(work_tree) = &work_tree {
         let _ = git_ops::add_and_commit(work_tree, id_dir, reencrypt_message);
     }
+    code
 }
 
 /// Re-encrypt every ebox under `target` to its nearest `piggy-ids`, then
@@ -803,8 +815,8 @@ fn commit_and_reencrypt(
 /// exactly the walked subtree. The commit-only-if-changed guard in
 /// `git_ops::add_and_commit` means a bit-identical re-encrypt (e.g. the base64
 /// bats mock) produces no commit.
-fn reencrypt_and_commit(target: &Path) -> i32 {
-    let code = reencrypt::run(target);
+fn reencrypt_and_commit(target: &Path, verbose: bool) -> i32 {
+    let code = reencrypt::run(target, verbose);
     if git_ops::is_inside_work_tree(target) {
         let _ = git_ops::add_and_commit(target, target, "Reencrypt password store.");
     }

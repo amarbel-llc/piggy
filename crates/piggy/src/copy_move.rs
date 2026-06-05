@@ -123,8 +123,12 @@ fn run(op: Op, args: &[String]) -> i32 {
         return 1;
     }
 
+    // Re-encrypt the moved/copied subtree to its new nearest piggy-ids,
+    // emitting a TAP-14 stream. Surface a non-zero walk result as the
+    // command exit code while still committing whatever succeeded.
+    let mut reencrypt_code = 0;
     if new_path.exists() {
-        reencrypt::run(&new_path);
+        reencrypt_code = reencrypt::run(&new_path, false);
     }
 
     match op {
@@ -140,7 +144,7 @@ fn run(op: Op, args: &[String]) -> i32 {
         }
     }
 
-    0
+    reencrypt_code
 }
 
 /// Mirrors the move branch's git bookkeeping in cmd_copy_move: stage the

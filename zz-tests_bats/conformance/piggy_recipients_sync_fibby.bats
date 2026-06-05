@@ -1,25 +1,31 @@
 #! /usr/bin/env bats
 #
 # Fibby-backed proof that `piggy pass recipients sync` with NO file argument
-# re-encrypts the existing store to the recipients already declared in the
-# piggy-ids file(s), and that the result still decrypts through the card.
+# emits a TAP-14 stream and, on an already-current store, `# SKIP`s every ebox
+# (the recipients-match optimization in
+# crates/piggy/src/reencrypt.rs::reencrypt_unnecessary) without touching the
+# card or landing a commit — while every secret still decrypts.
 #
 # This is the real-crypto counterpart to the mock-based guards in
-# t0600-recipients.bats. The base64 mock round-trips bit-identically, so it
-# can only prove the dispatch path; here, with fibby's virtual slot 9D, a
-# re-encrypt produces fresh ciphertext that we then decrypt back through the
-# agent <-> fibby ECDH path.
+# t0600-recipients.bats. The base64 mock can't carry recipient metadata, so the
+# SKIP decision is invisible there; here, with fibby's virtual slot 9D, the
+# eboxes are genuine ebox wire format, so `reencrypt_unnecessary` parses their
+# recipient pubkeys and proves the SKIP path end-to-end.
 #
 # Two scenarios:
-#   - whole-store: bare `recipients sync` re-encrypts every ebox; a new
-#     "Reencrypt password store." commit lands and both secrets still decrypt.
-#   - `-p <subfolder>`: scopes the walk to that subtree; the sibling subtree's
-#     ebox is left byte-identical.
+#   - whole-store: bare `recipients sync` on a just-initialised store emits a
+#     `1..2` plan with both points `# SKIP`'d, lands NO new commit, never issues
+#     a card GA ECDH, and both secrets still decrypt.
+#   - `-p <subfolder>`: scopes the walk to that subtree (a `1..1` plan), SKIPs
+#     the in-scope ebox, and leaves the sibling subtree's ebox byte-identical.
 #
-# Single-card limitation: with one fibby card we verify the re-encrypt loop and
-# that the card's recipient still decrypts. Independently verifying a *second,
-# keyless* recipient (i.e. that the re-encrypted ebox is openable by another
-# card too) would need a second card and is out of scope here.
+# Single-card limitation: with one fibby card every ebox is encrypted to exactly
+# the one recipient piggy-ids declares, so `recipients sync` always SKIPs.
+# Exercising the re-encrypt branch (recipients genuinely changed -> `ok` points
+# + a fresh-ciphertext commit) needs a second, distinct recipient; the
+# `reencrypt_unnecessary` false-cases are covered by Rust unit tests in
+# reencrypt.rs instead. A multi-card/multi-instance fibby harness that would
+# restore the real-crypto re-encrypt proof is tracked in amarbel-llc/piggy#147.
 #
 # Required env (supplied by the
 # `test-bats-conformance-recipients-sync-fibby` recipe):
@@ -159,10 +165,11 @@ _assert_decrypts() {
   }
 }
 
-# Bare `recipients sync` (no file) re-encrypts the WHOLE store to the current
-# piggy-ids recipients: a new commit lands (real crypto -> fresh ciphertext)
-# and every secret still decrypts via fibby's slot 9D.
-function recipients_sync_no_file_reencrypts_whole_store_via_fibby { # @test
+# Bare `recipients sync` (no file) on a just-initialised store: every ebox
+# already encrypts to the one recipient in piggy-ids, so the TAP stream is a
+# `1..2` plan with both points `# SKIP`'d, NO commit lands, the card is never
+# touched, and both secrets still decrypt via fibby's slot 9D.
+function recipients_sync_no_file_skips_already_current_via_fibby { # @test
   export PIGGY_TEST_FIB_PIN=123456
   spawn_fibby --seed-rfc5903-slot-9d-cert
   spawn_agent
@@ -170,12 +177,10 @@ function recipients_sync_no_file_reencrypts_whole_store_via_fibby { # @test
   local store="$WORKDIR/store"
   _init_store_with_secrets "$store" "foo/bar=secret-one" "baz=secret-two"
 
-  local before
+  local before fibby_lines_before
   before="$(git -C "$store" rev-parse HEAD)"
+  fibby_lines_before="$(wc -l <"$FIBBY_LOG")"
 
-  # No file: re-encrypt the whole store to the current recipients. The decrypt
-  # half routes through pivy-box stream decrypt -> agent rebox (slot 9D), so it
-  # needs PIGGY_AUTH_SOCK + the PIN (supplied via the test askpass).
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_AUTH_SOCK="$AGENT_SOCK" \
     PIGGY_STORE_DIR="$store" run "$PIGGY_BIN" pass recipients sync
   [[ $status -eq 0 ]] || {
@@ -188,30 +193,48 @@ function recipients_sync_no_file_reencrypts_whole_store_via_fibby { # @test
     return 1
   }
 
-  # Real crypto re-encrypts to fresh ciphertext, so a commit must land.
+  # TAP-14: a 1..2 plan with both points SKIP'd as recipients-already-current.
+  printf '%s\n' "$output" | grep -qx "TAP version 14" || {
+    echo "missing 'TAP version 14' header" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  printf '%s\n' "$output" | grep -qx "1..2" || {
+    echo "expected a 1..2 plan" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  local skips
+  skips="$(printf '%s\n' "$output" | grep -c '# SKIP recipients already current' || true)"
+  [[ "$skips" -eq 2 ]] || {
+    echo "expected 2 SKIP points, got $skips" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+
+  # SKIP short-circuits before any decrypt: no new commit, and the card is
+  # never touched (no new slot-9D GA ECDH during the sync window).
   local after
   after="$(git -C "$store" rev-parse HEAD)"
-  [[ "$before" != "$after" ]] || {
-    echo "expected a new commit after whole-store re-encrypt" >&2
+  [[ "$before" == "$after" ]] || {
+    echo "expected NO new commit (every ebox SKIP'd), but HEAD moved" >&2
     git -C "$store" log --oneline -3 >&2 || true
     return 1
   }
-  run git -C "$store" log -1 --pretty=%s
-  assert_output --partial "Reencrypt password store."
+  local new_ga
+  new_ga="$(tail -n "+$((fibby_lines_before + 1))" "$FIBBY_LOG" | grep -c 'GA ECDH 9D' || true)"
+  [[ "$new_ga" -eq 0 ]] || {
+    echo "SKIP path unexpectedly hit the card ($new_ga GA ECDH ops during sync)" >&2
+    tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
 
-  # Both secrets must still decrypt through the card.
+  # The eboxes are untouched and still decrypt through the card.
   _assert_decrypts "$store" "foo/bar" "secret-one"
   _assert_decrypts "$store" "baz" "secret-two"
 
-  # The re-encrypt's decrypt actually reached fibby's slot 9D, and the agent
-  # neither died nor refused the askpass.
-  grep -q "GA ECDH 9D -> 9000" "$FIBBY_LOG" || {
-    echo "no successful slot-9D GA ECDH in fibby trace" >&2
-    tail -80 "$FIBBY_LOG" >&2 || true
-    return 1
-  }
   kill -0 "$AGENT_PID" 2>/dev/null || {
-    echo "pivy-agent died during the re-encrypt" >&2
+    echo "pivy-agent died during the sync" >&2
     tail -60 "$AGENT_LOG" >&2 || true
     return 1
   }
@@ -222,9 +245,10 @@ function recipients_sync_no_file_reencrypts_whole_store_via_fibby { # @test
   }
 }
 
-# `recipients sync -p <subfolder>` (no file) re-encrypts ONLY that subtree: the
-# scoped ebox changes and still decrypts, while the sibling subtree's ebox is
-# left byte-identical.
+# `recipients sync -p <subfolder>` (no file) walks ONLY that subtree: a `1..1`
+# plan (vs `1..2` for the whole store) proves the scoping, the in-scope ebox is
+# SKIP'd (already current), and the sibling subtree's ebox is left untouched.
+# Both still decrypt.
 function recipients_sync_no_file_p_scopes_subtree_via_fibby { # @test
   export PIGGY_TEST_FIB_PIN=123456
   spawn_fibby --seed-rfc5903-slot-9d-cert
@@ -247,12 +271,26 @@ function recipients_sync_no_file_p_scopes_subtree_via_fibby { # @test
     return 1
   }
 
+  # -p alpha walks ONLY the alpha subtree: a 1..1 plan, that one point SKIP'd.
+  printf '%s\n' "$output" | grep -qx "1..1" || {
+    echo "expected a 1..1 plan scoped to alpha" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  printf '%s\n' "$output" | grep -q '# SKIP' || {
+    echo "expected the alpha ebox to be SKIP'd" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+
+  # Already-current store: alpha is SKIP'd (byte-identical) and beta is out of
+  # scope (never walked), so both eboxes are unchanged.
   local a_after b_after
   a_after="$(_ebox_sha "$store/alpha/cred.ebox")"
   b_after="$(_ebox_sha "$store/beta/cred.ebox")"
 
-  [[ "$a_before" != "$a_after" ]] || {
-    echo "expected alpha/cred.ebox to be re-encrypted (sha unchanged: $a_after)" >&2
+  [[ "$a_before" == "$a_after" ]] || {
+    echo "expected alpha/cred.ebox to be SKIP'd byte-identical (sha changed: $a_after)" >&2
     return 1
   }
   [[ "$b_before" == "$b_after" ]] || {

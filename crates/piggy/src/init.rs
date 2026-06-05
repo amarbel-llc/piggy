@@ -152,7 +152,10 @@ pub fn run(args: &[String]) -> i32 {
         );
     }
 
-    reencrypt::run(&tpl_dir);
+    // Re-encrypt emits a TAP-14 stream; a fresh store has no eboxes so
+    // this is normally a `1..0` no-op. Surface a non-zero walk result as
+    // the init exit code while still committing whatever succeeded.
+    let reencrypt_code = reencrypt::run(&tpl_dir, false);
 
     if let Some(work_tree) = &work_tree {
         let _ = git_ops::add_and_commit(
@@ -162,7 +165,7 @@ pub fn run(args: &[String]) -> i32 {
         );
     }
 
-    0
+    reencrypt_code
 }
 
 #[derive(Debug)]
