@@ -6,8 +6,16 @@
 # garbage in the uninitialized len variable.
 #
 # These tests exercise the real (nix-built) pivy-tool binary, not the
-# mock. No card or fib stack is needed — the parse check fires before
-# any PC/SC connection.
+# mock. The assertions only care about `-K default` argument parsing, but
+# the current pivy-tool establishes a PC/SC context before printing the
+# version. On Linux that context-establish hits the host's system pcscd,
+# which in headless/polkit sessions answers SCardEstablishContext with
+# SCARD_W_SECURITY_VIOLATION ("Access denied") and aborts the tool before
+# any output. So on Linux setup() routes pivy-tool at a permissive fibby
+# virtual card (when FIBBY_BIN is supplied) to keep the parse check
+# hermetic; macOS ignores PCSCLITE_CSOCK_NAME and the sandboxed lane has no
+# pcscd at all (NO_SERVICE, which pivy-tool tolerates), so both run the
+# tool unredirected.
 
 setup() {
   bats_load_library bats-support
@@ -41,6 +49,33 @@ setup() {
     PIVY_TOOL="$(command -v pivy-tool)" || true
   fi
   [[ -x ${PIVY_TOOL:-} ]] || skip "pivy-tool not found via REAL_PIVY_TOOL, ./result, or PATH"
+
+  # Linux only, and only when a fibby binary is supplied (the
+  # test-bats-conformance recipe threads FIBBY_BIN): stand up a permissive
+  # fibby virtual card and redirect libpcsclite at it, so the
+  # context-establish never reaches — and is never denied by — the host's
+  # system pcscd. See the header comment for the macOS / sandbox paths.
+  FIBBY_PID=
+  if [[ -n ${FIBBY_BIN:-} && -x ${FIBBY_BIN:-} && "$(uname -s)" == Linux ]]; then
+    load "$(dirname "$BATS_TEST_FILE")/../lib/fibby.bash"
+    WORKDIR="$(mktemp -d -t pvtak.XXXXXX)"
+    FIBBY_SOCK="$WORKDIR/pcscd.comm"
+    FIBBY_LOG="$WORKDIR/fibby.log"
+    # Best-effort: if fibby comes up we talk to it. If it can't bind (e.g. a
+    # restrictive sandbox), the redirect below still points away from the
+    # host's denying system pcscd, so libpcsclite reports NO_SERVICE and
+    # pivy-tool prints the version anyway (same as the no-daemon bats-default
+    # lane). Either path keeps the #23 parse check hermetic and never hits
+    # SCARD_W_SECURITY_VIOLATION.
+    spawn_fibby || true
+    export PCSCLITE_CSOCK_NAME="$FIBBY_SOCK"
+  fi
+}
+
+teardown() {
+  [[ -n ${FIBBY_PID:-} ]] && kill "$FIBBY_PID" 2>/dev/null || true
+  [[ -n ${FIBBY_PID:-} ]] && wait "$FIBBY_PID" 2>/dev/null || true
+  [[ -n ${WORKDIR:-} ]] && rm -rf "$WORKDIR" 2>/dev/null || true
 }
 
 function k_default_version_prints_version { # @test

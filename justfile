@@ -91,7 +91,24 @@ test-bats-piggy-local: build-rust
 
 [group('post-build')]
 test-bats-conformance: build-rust
-  BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/conformance/*.bats
+  #!/usr/bin/env bash
+  set -euo pipefail
+  # On Linux, hand pivy_tool_admin_key.bats a real pivy-tool (PIVY_TOOL) and a
+  # fibby binary (FIBBY_BIN) so it routes its PC/SC context at a virtual card
+  # instead of the host's system pcscd, which denies SCardEstablishContext
+  # (SCARD_W_SECURITY_VIOLATION) in headless/polkit sessions. macOS ignores
+  # PCSCLITE_CSOCK_NAME, so there's nothing to redirect — run the glob
+  # unchanged and skip the (pointless) fibby build. The agent-backed fibby
+  # tests still skip here: they gate on PIVY_AGENT/PIGGY_BIN, left unset so
+  # they run only via their dedicated [linux] recipes.
+  fibby_env=()
+  if [[ "$(uname -s)" == Linux ]]; then
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    fibby_env=(PIVY_TOOL="$pivy_out/bin/pivy-tool" FIBBY_BIN="$fibby_out/bin/fibby")
+  fi
+  env "${fibby_env[@]}" BATS_TEST_TIMEOUT=30 \
+    bats --jobs {{ num_cpus() }} --tap zz-tests_bats/conformance/*.bats
 
 [group('post-build')]
 test-bats-conformance-protocol: build-rust
