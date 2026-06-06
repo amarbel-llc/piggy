@@ -1,0 +1,44 @@
+# Spike: wasm-capable, OpenSSL-free decrypt half of a piggy-box.
+#
+# This crate is DELIBERATELY detached from the piggy workspace (note the
+# empty `[workspace]` table below) so it pulls in zero native deps —
+# no `openssl`, no `pcsc`. Everything here compiles to `wasm32` as-is.
+#
+# Purpose (piggy-wasm-webauthn-access spike, half 1 of 2): prove that a
+# pure-Rust decrypt path reproduces the RFC 0002 §A wire vectors given
+# only the ECDH shared secret Z — and that RustCrypto's ECDH derives the
+# *same* Z that OpenSSL used to seal those vectors (the Poly1305 tag is
+# the cross-check). See spikes/wasm-piv-decrypt/README.md.
+[package]
+name = "wasm-piv-decrypt-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+# cdylib emits a real .wasm under wasm32; rlib keeps the native test
+# harness working.
+crate-type = ["cdylib", "rlib"]
+
+# Detach from the parent piggy workspace so `cargo` here never evaluates
+# crates/piggy-box (which depends on the native `openssl` crate).
+[workspace]
+
+[dependencies]
+# Versions pinned to match piggy's Cargo.lock so the spike exercises the
+# exact primitives the eventual piggy-box rustcrypto backend would use.
+sha2 = "0.10"
+chacha20poly1305 = "0.10"
+p256 = { version = "0.13", features = ["ecdh"] }
+p384 = { version = "0.13", features = ["ecdh"] }
+
+# Browser target only: give the transitive `getrandom` (pulled in by the
+# EC crates) its JS backend so the module links under
+# `wasm32-unknown-unknown`. The decrypt path itself uses no randomness;
+# this only satisfies the dependency graph. A real `piggy-wasm` built with
+# wasm-bindgen does the same.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+hex = "0.4"

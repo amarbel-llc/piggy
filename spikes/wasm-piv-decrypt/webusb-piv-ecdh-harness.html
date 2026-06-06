@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>piggy spike — WebUSB → PIV slot-9D ECDH harness</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; }
+  label { display: block; margin: .75rem 0 .2rem; font-weight: 600; }
+  input[type=text], textarea { width: 100%; font-family: ui-monospace, monospace; box-sizing: border-box; }
+  textarea { height: 4.5rem; }
+  button { margin-top: 1rem; padding: .5rem 1rem; font-size: 1rem; cursor: pointer; }
+  #log { white-space: pre-wrap; background: #0b0b0b; color: #d6f5d6; padding: 1rem; border-radius: 6px;
+         font-family: ui-monospace, monospace; font-size: 12px; margin-top: 1rem; min-height: 6rem; }
+  .out { color:#7fd; font-weight:600; }
+  .err { color:#f88; }
+  .warn { background:#332; color:#fe9; padding:.6rem .8rem; border-radius:6px; }
+  fieldset { border:1px solid #ccc; border-radius:6px; }
+</style>
+</head>
+<body>
+<h1>piggy spike — WebUSB → PIV slot-9D ECDH</h1>
+
+<p class="warn">
+<b>What this proves (hardware half of the spike):</b> that the browser can talk
+CCID over WebUSB to a YubiKey, run <code>GENERAL AUTHENTICATE</code> (ECDH) on
+PIV slot 9D, and recover a shared secret <code>Z</code> that matches the
+OpenSSL-derived / RustCrypto-derived value the decrypt half already verified.
+<br><br>
+<b>Caveats:</b> WebUSB is Chromium-only. The OS smartcard service (pcscd /
+Windows Smart Card service) may already hold the CCID interface — if
+<code>claimInterface</code> fails with "device busy", stop pcscd (Linux:
+<code>sudo systemctl stop pcscd pcscd.socket</code>) or unbind the reader first.
+This harness is <b>untested on hardware from this environment</b>; treat APDU
+quirks (PIN/touch policy on 9D, extended-length) as expected spike friction.
+</p>
+
+<fieldset>
+<legend>Step 1 — get the ephemeral point from a box addressed to your card</legend>
+<p>Encrypt anything to your card, then run:<br>
+<code>cargo run --example open -- --box &lt;ebox-hex&gt;</code><br>
+Paste its <code>ephemeral_pubkey</code> (uncompressed, starts with <code>04</code>) below and pick the curve.</p>
+</fieldset>
+
+<label>Curve</label>
+<select id="curve">
+  <option value="p256" selected>NIST P-256 (alg 0x11)</option>
+  <option value="p384">NIST P-384 (alg 0x14)</option>
+</select>
+
+<label>Ephemeral public key — uncompressed hex (<code>04 ‖ X ‖ Y</code>)</label>
+<textarea id="point" placeholder="048ed57ec2b8...75"></textarea>
+
+<label>PIV PIN</label>
+<input type="text" id="pin" value="" placeholder="usually 6 digits" autocomplete="off" />
+
+<button id="go">Connect YubiKey &amp; run ECDH</button>
+
+<div id="log"></div>
+
+<script>
+const PIV_AID = [0xA0,0x00,0x00,0x03,0x08,0x00,0x00,0x10,0x00];
+const SLOT_9D = 0x9D;
+const logEl = document.getElementById('log');
+const log = (m, cls) => { const s=document.createElement('span'); if(cls)s.className=cls; s.textContent=m+"\n"; logEl.appendChild(s); };
+const hex = b => [...b].map(x=>x.toString(16).padStart(2,'0')).join('');
+const unhex = s => { s=s.replace(/\s+/g,''); const a=new Uint8Array(s.length/2); for(let i=0;i<a.length;i++)a[i]=parseInt(s.substr(i*2,2),16); return a; };
+
+// ---- CCID bulk wrapper (PC/SC-free, raw to the reader) ----
+let device, ifaceNum, epIn, epOut, seq = 0;
+
+async function connect() {
+  device = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x1050 }] }); // Yubico
+  await device.open();
+  if (device.configuration === null) await device.selectConfiguration(1);
+  // Find the CCID interface (class 0x0B) and its bulk endpoints.
+  let chosen = null;
+  for (const cfg of device.configurations) {
+    for (const intf of cfg.interfaces) {
+      for (const alt of intf.alternates) {
+        if (alt.interfaceClass === 0x0B) { chosen = { intf, alt }; break; }
+      }
+    }
+  }
+  if (!chosen) throw new Error('no CCID (class 0x0B) interface — is this a smartcard-capable YubiKey?');
+  ifaceNum = chosen.intf.interfaceNumber;
+  await device.claimInterface(ifaceNum);
+  for (const ep of chosen.alt.endpoints) {
+    if (ep.type === 'bulk' && ep.direction === 'in') epIn = ep.endpointNumber;
+    if (ep.type === 'bulk' && ep.direction === 'out') epOut = ep.endpointNumber;
+  }
+  log(`connected: ${device.productName||'YubiKey'} (CCID iface ${ifaceNum}, ep in=${epIn} out=${epOut})`);
+}
+
+function ccidHeader(type, dataLen, param=0) {
+  const h = new Uint8Array(10);
+  h[0] = type;
+  h[1] = dataLen & 0xff; h[2] = (dataLen>>8)&0xff; h[3] = (dataLen>>16)&0xff; h[4] = (dataLen>>24)&0xff;
+  h[5] = 0;            // bSlot
+  h[6] = seq++ & 0xff; // bSeq
+  h[7] = param;        // bBWI (XfrBlock) / power-select (PowerOn)
+  // bytes 8,9 = wLevelParameter = 0
+  return h;
+}
+
+async function ccidSend(type, body=new Uint8Array(0), param=0) {
+  const msg = new Uint8Array(10 + body.length);
+  msg.set(ccidHeader(type, body.length, param)); msg.set(body, 10);
+  await device.transferOut(epOut, msg);
+  // Read response (may need a couple of reads; reader returns one DataBlock).
+  const r = await device.transferIn(epIn, 512);
+  const buf = new Uint8Array(r.data.buffer);
+  if (buf.length < 10) throw new Error('short CCID response');
+  const dlen = buf[1] | (buf[2]<<8) | (buf[3]<<16) | (buf[4]<<24);
+  const status = buf[7];
+  if ((status & 0xC0) !== 0) throw new Error(`CCID error: bStatus=0x${status.toString(16)} bError=0x${buf[8].toString(16)}`);
+  return buf.slice(10, 10 + dlen);
+}
+
+const powerOn  = () => ccidSend(0x62, new Uint8Array(0), 0x00); // PC_to_RDR_IccPowerOn → ATR
+async function xfr(apdu) { return ccidSend(0x6F, apdu, 0x00); } // PC_to_RDR_XfrBlock
+
+// Send one APDU; transparently follow 61xx (GET RESPONSE). Returns {data, sw}.
+async function apdu(bytes) {
+  let resp = await xfr(Uint8Array.from(bytes));
+  let data = resp.slice(0, -2);
+  let sw1 = resp[resp.length-2], sw2 = resp[resp.length-1];
+  while (sw1 === 0x61) { // more data available
+    const more = await xfr(Uint8Array.from([0x00,0xC0,0x00,0x00,sw2]));
+    data = new Uint8Array([...data, ...more.slice(0,-2)]);
+    sw1 = more[more.length-2]; sw2 = more[more.length-1];
+  }
+  return { data, sw: (sw1<<8)|sw2 };
+}
+
+function expectOk(r, what) {
+  if (r.sw !== 0x9000) throw new Error(`${what} failed: SW=0x${r.sw.toString(16).padStart(4,'0')}`);
+  return r;
+}
+
+async function selectPiv() {
+  const a = [0x00,0xA4,0x04,0x00, PIV_AID.length, ...PIV_AID, 0x00];
+  expectOk(await apdu(a), 'SELECT PIV');
+  log('PIV applet selected');
+}
+
+async function verifyPin(pin) {
+  const padded = new Uint8Array(8).fill(0xFF);
+  for (let i=0;i<pin.length && i<8;i++) padded[i] = pin.charCodeAt(i);
+  const r = await apdu([0x00,0x20,0x00,0x80,0x08, ...padded]);
+  if (r.sw === 0x9000) { log('PIN verified'); return; }
+  if ((r.sw & 0xFFF0) === 0x63C0) throw new Error(`wrong PIN, ${r.sw & 0x0F} tries left`);
+  throw new Error(`VERIFY PIN failed: SW=0x${r.sw.toString(16)}`);
+}
+
+// GENERAL AUTHENTICATE (ECDH): 00 87 <alg> 9D  7C L { 82 00  85 Lp <point> }
+async function ecdh(point, curve) {
+  const alg = curve === 'p384' ? 0x14 : 0x11;
+  const inner = [0x82,0x00, 0x85, point.length, ...point];
+  const data  = [0x7C, inner.length, ...inner];
+  const r = expectOk(await apdu([0x00,0x87,alg,SLOT_9D, data.length, ...data, 0x00]), 'GENERAL AUTHENTICATE');
+  // Response: 7C L { 82 Lz <Z> }. Walk to the 0x82 value.
+  let p = 0;
+  if (r.data[p++] !== 0x7C) throw new Error('GA response: missing 0x7C template');
+  let outerLen = r.data[p++]; if (outerLen & 0x80) { const n=outerLen&0x7f; outerLen=0; for(let i=0;i<n;i++) outerLen=(outerLen<<8)|r.data[p++]; }
+  if (r.data[p++] !== 0x82) throw new Error('GA response: missing 0x82 (shared secret) tag');
+  let zlen = r.data[p++]; if (zlen & 0x80) { const n=zlen&0x7f; zlen=0; for(let i=0;i<n;i++) zlen=(zlen<<8)|r.data[p++]; }
+  return r.data.slice(p, p+zlen);
+}
+
+document.getElementById('go').addEventListener('click', async () => {
+  logEl.innerHTML = '';
+  try {
+    if (!navigator.usb) throw new Error('WebUSB unavailable — use Chrome/Edge over https or localhost.');
+    const point = unhex(document.getElementById('point').value);
+    const curve = document.getElementById('curve').value;
+    const pin   = document.getElementById('pin').value.trim();
+    if (point[0] !== 0x04) throw new Error('point must be uncompressed (start with 04)');
+    if (!pin) throw new Error('enter the PIV PIN');
+
+    seq = 0;
+    await connect();
+    log('ATR: ' + hex(await powerOn()));
+    await selectPiv();
+    await verifyPin(pin);
+    const z = await ecdh(point, curve);
+    log('');
+    log('Z (shared secret) = ' + hex(z), 'out');
+    log('');
+    log('Now finish the decrypt with the same wasm-capable code:');
+    log(`  cargo run --example open -- --box <ebox-hex> --z ${hex(z)}`);
+  } catch (e) {
+    log('ERROR: ' + (e && e.message ? e.message : e), 'err');
+  } finally {
+    try { if (device) await device.releaseInterface(ifaceNum); } catch {}
+  }
+});
+</script>
+</body>
+</html>
