@@ -7,6 +7,7 @@ authorized YubiKey holders can read it. The app stays plaintext; only the
 applet** (the transport chosen for this spike).
 
 This directory de-risks the two unknowns before any real implementation.
+Design + the gated hardware-test procedure: `docs/fdr/FDR-piv-gated-wasm-decrypt.md`.
 
 ## Architecture (the `EcdhOracle` seam, moved to the JS↔WASM boundary)
 
