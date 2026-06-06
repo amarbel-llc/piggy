@@ -99,6 +99,62 @@ function recipients_sync_no_file_reencrypts_whole_store { # @test
   assert_output --partial "secret-two"
 }
 
+function recipients_sync_no_file_follows_symlink_into_external_dir { # @test
+  # Mirrors the real-world rcm symlink-farm store: the store entry is a
+  # symlink pointing at an ebox that lives OUTSIDE the store (an rcm
+  # checkout). reencrypt must follow the link, rewrite the real target,
+  # and leave the link in place — not skip it (the old behavior, which
+  # made `recipients sync` a no-op on such stores). The base64 mock
+  # round-trips bit-identically, so this proves the link survives and
+  # the target still decrypts; the real-crypto re-encrypt proof lives in
+  # the fibby conformance lane.
+  local ext="$BATS_TEST_TMPDIR/external-store"
+  mkdir -p "$ext"
+  # Create the real ebox inside the store, then relocate it outside and
+  # symlink it back in — the same shape as a store entry pointing into
+  # rcm.
+  echo "linked-secret" | "$PIGGY" pass insert -e linked
+  mv "$PIGGY_STORE_DIR/linked.ebox" "$ext/linked.ebox"
+  ln -s "$ext/linked.ebox" "$PIGGY_STORE_DIR/linked.ebox"
+  assert [ -L "$PIGGY_STORE_DIR/linked.ebox" ]
+
+  run "$PIGGY" pass recipients sync
+  assert_success
+
+  # The store entry is STILL a symlink (not clobbered into a regular
+  # file) and still points at the external target.
+  assert [ -L "$PIGGY_STORE_DIR/linked.ebox" ]
+  run readlink "$PIGGY_STORE_DIR/linked.ebox"
+  assert_output "$ext/linked.ebox"
+  # The external target still decrypts to the original plaintext.
+  run "$PIGGY" pass show linked
+  assert_success
+  assert_output --partial "linked-secret"
+}
+
+function recipients_sync_no_file_dedups_symlink_beside_target { # @test
+  # A symlink sitting beside its own target (both inside the store, both
+  # resolving to the same file) must be re-encrypted exactly once and
+  # both names must still resolve afterward.
+  echo "dup-secret" | "$PIGGY" pass insert -e original
+  ln -s "$PIGGY_STORE_DIR/original.ebox" "$PIGGY_STORE_DIR/alias.ebox"
+  assert [ -L "$PIGGY_STORE_DIR/alias.ebox" ]
+
+  run "$PIGGY" pass recipients sync
+  assert_success
+
+  # Real file stays a real file; alias stays a link to it.
+  assert [ -f "$PIGGY_STORE_DIR/original.ebox" ]
+  assert [ ! -L "$PIGGY_STORE_DIR/original.ebox" ]
+  assert [ -L "$PIGGY_STORE_DIR/alias.ebox" ]
+  run "$PIGGY" pass show original
+  assert_success
+  assert_output --partial "dup-secret"
+  run "$PIGGY" pass show alias
+  assert_success
+  assert_output --partial "dup-secret"
+}
+
 function recipients_sync_no_file_with_p_scopes { # @test
   # `sync -p <subfolder>` (no file) re-encrypts only that subtree; the other
   # subtree is left alone. Both must still decrypt afterward.

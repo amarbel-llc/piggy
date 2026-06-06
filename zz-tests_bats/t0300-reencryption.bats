@@ -45,15 +45,32 @@ function reencryption_subfolder_move { # @test
   assert [ -f "$PIGGY_STORE_DIR/anotherfolder2/anotherfolder/cred1.ebox" ]
 }
 
-function reencryption_skips_links { # @test
+function reencryption_preserves_links_and_rewrites_target { # @test
+  # reencrypt no longer SKIPS symlinks — it follows them, rewrites the
+  # real target, and leaves the link in place. (Was
+  # `reencryption_skips_links`; the old skip made `recipients sync` a
+  # no-op on symlink-farm stores. See crates/piggy/src/reencrypt.rs.)
   echo "$INITIAL_PASSWORD" | "$PIGGY" pass insert -e folder/cred1
   ln -s "$PIGGY_STORE_DIR/folder/cred1.ebox" "$PIGGY_STORE_DIR/folder/symlink.ebox"
   assert [ -L "$PIGGY_STORE_DIR/folder/symlink.ebox" ]
-  create_test_template "$PIGGY_STORE_DIR/folder"
-  git -C "$PIGGY_STORE_DIR" add folder/piggy-ids
-  git -C "$PIGGY_STORE_DIR" commit -m "Add folder template."
-  # Symlink should still be a symlink after reencryption
+
+  # Actually drive a reencryption pass over the subtree containing both
+  # the real file and its alias.
+  run "$PIGGY" pass recipients sync
+  assert_success
+
+  # The link is still a link (not clobbered into a regular file).
   assert [ -L "$PIGGY_STORE_DIR/folder/symlink.ebox" ]
+  # The real file is still a real file.
+  assert [ -f "$PIGGY_STORE_DIR/folder/cred1.ebox" ]
+  assert [ ! -L "$PIGGY_STORE_DIR/folder/cred1.ebox" ]
+  # Both names still decrypt to the original content.
+  run "$PIGGY" pass show folder/cred1
+  assert_success
+  assert_output --partial "$INITIAL_PASSWORD"
+  run "$PIGGY" pass show folder/symlink
+  assert_success
+  assert_output --partial "$INITIAL_PASSWORD"
 }
 
 function password_survives_all_transformations { # @test

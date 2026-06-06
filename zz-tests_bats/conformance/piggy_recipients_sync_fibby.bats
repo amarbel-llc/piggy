@@ -264,3 +264,67 @@ function recipients_sync_no_file_p_scopes_subtree_via_fibby { # @test
   _assert_decrypts "$store" "alpha/cred" "in-scope"
   _assert_decrypts "$store" "beta/cred" "untouched"
 }
+
+# Real-crypto proof for the symlink-farm store (the rcm shape that broke
+# `recipients sync` in practice): the store entry is a symlink pointing at an
+# ebox that lives OUTSIDE the store. Bare `recipients sync` must follow the
+# link, re-encrypt the EXTERNAL target to fresh ciphertext (sha changes),
+# leave the link a link pointing at that same target, and the secret must
+# still decrypt through the card via the link. The base64 mock in
+# t0600-recipients.bats proves the plumbing but cannot prove the ciphertext is
+# genuinely re-wrapped — that is this test's job.
+function recipients_sync_follows_symlink_into_external_dir_via_fibby { # @test
+  export PIGGY_TEST_FIB_PIN=123456
+  spawn_fibby --seed-rfc5903-slot-9d-cert
+  spawn_agent
+
+  local store="$WORKDIR/store"
+  _init_store_with_secrets "$store" "linked=linked-secret"
+
+  # Relocate the real ebox outside the store and symlink it back in — the
+  # exact shape of a store entry pointing into an rcm checkout.
+  local ext="$WORKDIR/external"
+  mkdir -p "$ext"
+  mv "$store/linked.ebox" "$ext/linked.ebox"
+  ln -s "$ext/linked.ebox" "$store/linked.ebox"
+  [[ -L "$store/linked.ebox" ]] || {
+    echo "setup: store entry is not a symlink" >&2
+    return 1
+  }
+
+  local before
+  before="$(_ebox_sha "$ext/linked.ebox")"
+
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_AUTH_SOCK="$AGENT_SOCK" \
+    PIGGY_STORE_DIR="$store" run "$PIGGY_BIN" pass recipients sync
+  [[ $status -eq 0 ]] || {
+    echo "piggy pass recipients sync (symlink-farm) exited $status" >&2
+    printf '%s\n' "$output" >&2
+    echo "--- agent log tail ---" >&2
+    tail -60 "$AGENT_LOG" >&2 || true
+    echo "--- fibby log tail ---" >&2
+    tail -60 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  # The EXTERNAL target was re-encrypted (fresh ciphertext under real crypto).
+  local after
+  after="$(_ebox_sha "$ext/linked.ebox")"
+  [[ "$before" != "$after" ]] || {
+    echo "expected external target to be re-encrypted (sha unchanged: $after)" >&2
+    return 1
+  }
+
+  # The store entry is STILL a symlink to the same external target — not
+  # clobbered into a regular file.
+  [[ -L "$store/linked.ebox" ]] || {
+    echo "store entry stopped being a symlink after sync" >&2
+    ls -la "$store" >&2 || true
+    return 1
+  }
+  run readlink "$store/linked.ebox"
+  assert_output "$ext/linked.ebox"
+
+  # And the secret still decrypts through the card, reached via the link.
+  _assert_decrypts "$store" "linked" "linked-secret"
+}

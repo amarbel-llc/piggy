@@ -8,7 +8,21 @@
 //! toward the store root), matching the bash `find_piggy_ids
 //! "$passfile_dir"` call inside the loop.
 //!
-//! Symlinks are skipped (bash uses `[[ -L $passfile ]] && continue`).
+//! Symlinked eboxes are **resolved and their real target rewritten**,
+//! leaving the link in place. The bash original (and earlier Rust)
+//! skipped symlinks outright (`[[ -L $passfile ]] && continue`), which
+//! makes `recipients sync` a permanent no-op on a symlink-farm store
+//! (e.g. a store whose entries all symlink into an rcm checkout). We
+//! follow the link, decrypt+re-encrypt the canonical target file, and
+//! atomic-rename over *that* path so the store's symlink keeps pointing
+//! at a freshly-rewritten file. Targets are deduplicated by canonical
+//! path so two links to the same file (or a link beside its own target)
+//! are processed exactly once. A rewritten target may live outside the
+//! store (in rcm); the caller's git-commit step is store-scoped and
+//! simply finds nothing to stage for those — re-encryption still
+//! happens, the rcm working tree is left dirty for the user's own rcm
+//! workflow to commit.
+//!
 //! Per-file failures are non-fatal: the temp file is removed and the
 //! walk continues. This matches the bash, which uses
 //! `(pipeline && mv) || rm` so a failed pipeline doesn't abort the
@@ -55,7 +69,7 @@ pub fn run(target: &Path) -> i32 {
         return 1;
     }
 
-    let entries = match collect_eboxes_no_symlinks(&target) {
+    let entries = match collect_eboxes_dedup_targets(&target) {
         Ok(v) => v,
         Err(err) => {
             eprintln!("piggy reencrypt: walk {}: {}", target.display(), err);
@@ -63,12 +77,16 @@ pub fn run(target: &Path) -> i32 {
         }
     };
 
-    for path in entries {
+    for (path, real) in entries {
         // Compute the relative display name (drop store root prefix
-        // and `.ebox` suffix). Matches bash $passfile_display.
+        // and `.ebox` suffix). Matches bash $passfile_display. Uses the
+        // store-side `path`, not the resolved target.
         let display = display_name(&path, &store);
 
-        // Find the nearest piggy-ids for this file's directory.
+        // Find the nearest piggy-ids for this file's directory. This
+        // walks up from the STORE-SIDE path, so a symlink picks up the
+        // piggy-ids governing its store location (the rcm-farm case has
+        // a single store-side piggy-ids governing everything).
         let passfile_dir = match path.parent() {
             Some(p) => p,
             None => continue,
@@ -88,7 +106,10 @@ pub fn run(target: &Path) -> i32 {
 
         eprintln_safe(&format!("{display}: reencrypting"));
 
-        if let Err(err) = reencrypt_one(&path, &piggy_ids) {
+        // `real` is the canonical (symlink-resolved) target, already
+        // computed during the dedup walk — pass it straight through so
+        // reencrypt_one doesn't re-`canonicalize`.
+        if let Err(err) = reencrypt_one(&real, &piggy_ids) {
             eprintln!("piggy reencrypt: {display}: {err}");
             // Bash silently continues on failure. We mirror that and
             // do not change the exit code.
@@ -110,15 +131,32 @@ fn eprintln_safe(message: &str) {
     let _ = std::io::Write::write_all(&mut std::io::stdout().lock(), b"\n");
 }
 
-/// Walk like `collect_eboxes`, but skip symlinks at the file level so
-/// we never try to re-encrypt through a link.
-fn collect_eboxes_no_symlinks(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut entries = collect_eboxes(root)?;
-    entries.retain(|p| match std::fs::symlink_metadata(p) {
-        Ok(m) => !m.file_type().is_symlink(),
-        Err(_) => false,
-    });
-    Ok(entries)
+/// Walk like `collect_eboxes`, following symlinks, but deduplicate
+/// entries by their canonical (symlink-resolved) target so a file
+/// reachable by more than one path — a symlink beside its own target,
+/// or two symlinks into the same rcm file — is re-encrypted exactly
+/// once.
+///
+/// Returns `(store_side, canonical_real)` pairs, one per distinct
+/// target, keyed on the first store-side path seen (sorted order). The
+/// caller uses `store_side` for `display_name` and the nearest-
+/// `piggy-ids` walk (both want the store's view), and `canonical_real`
+/// as the file to rewrite — resolving the symlink exactly once here so
+/// `reencrypt_one` doesn't `canonicalize` a second time.
+fn collect_eboxes_dedup_targets(root: &Path) -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+    let entries = collect_eboxes(root)?;
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(entries.len());
+    for path in entries {
+        // Canonicalize to collapse symlinks; on failure (dangling link,
+        // race) fall back to the path itself so we still attempt it
+        // once and surface the real error at reencrypt time.
+        let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if seen.insert(real.clone()) {
+            out.push((path, real));
+        }
+    }
+    Ok(out)
 }
 
 fn display_name(path: &Path, store: &Path) -> String {
@@ -130,13 +168,23 @@ fn display_name(path: &Path, store: &Path) -> String {
         .to_string()
 }
 
-/// Run `pivy-box stream decrypt < passfile | piggy-ids encrypt $piggy_ids > tmp`
-/// connected by an OS pipe, then atomic-rename tmp over passfile.
-fn reencrypt_one(passfile: &Path, piggy_ids: &Path) -> Result<(), String> {
-    let tmp = make_tmp_path(passfile);
+/// Run `pivy-box stream decrypt < real | piggy-ids encrypt $piggy_ids > tmp`
+/// connected by an OS pipe, then atomic-rename tmp over `real`.
+///
+/// `real` is the canonical (symlink-resolved) target, resolved once by
+/// [`collect_eboxes_dedup_targets`]. When the store-side entry was a
+/// symlink (e.g. into an rcm checkout), `real` is the file the link
+/// points at: the tmp is created as a sibling of `real` and
+/// atomic-renamed over it, so the store's symlink is left untouched and
+/// keeps pointing at a freshly-rewritten file. Renaming over the link
+/// directly would replace the link with a regular file and orphan the
+/// real target — the hazard the old skip-symlinks behavior avoided by
+/// refusing to act at all.
+fn reencrypt_one(real: &Path, piggy_ids: &Path) -> Result<(), String> {
+    let tmp = make_tmp_path(real);
 
     let pipeline_result = (|| -> Result<(), String> {
-        let input = std::fs::File::open(passfile).map_err(|e| format!("open passfile: {e}"))?;
+        let input = std::fs::File::open(real).map_err(|e| format!("open passfile: {e}"))?;
 
         let mut decrypt_cmd = Command::new("pivy-box");
         decrypt_cmd
@@ -190,9 +238,12 @@ fn reencrypt_one(passfile: &Path, piggy_ids: &Path) -> Result<(), String> {
     })();
 
     match pipeline_result {
-        Ok(()) => std::fs::rename(&tmp, passfile).map_err(|e| {
+        // Rename over the resolved real target, not the store-side
+        // symlink, so the link stays a link pointing at the rewritten
+        // file.
+        Ok(()) => std::fs::rename(&tmp, real).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            format!("rename {} -> {}: {}", tmp.display(), passfile.display(), e)
+            format!("rename {} -> {}: {}", tmp.display(), real.display(), e)
         }),
         Err(err) => {
             let _ = std::fs::remove_file(&tmp);
@@ -263,5 +314,91 @@ mod tests {
             "unexpected tmp name: {:?}",
             tmp.file_name()
         );
+    }
+
+    fn tempdir() -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "piggy-reencrypt-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// A symlinked ebox is now collected (not skipped). The walk follows
+    /// the link, so the entry shows up exactly once.
+    #[test]
+    fn collect_follows_symlinked_ebox() {
+        let dir = tempdir();
+        let real = dir.join("real.ebox");
+        std::fs::write(&real, b"ciphertext").unwrap();
+        let link = dir.join("link.ebox");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // Drop the real file from the walk root so only the link is
+        // present under `root`, proving the link itself is collected.
+        let root = tempdir();
+        let root_link = root.join("link.ebox");
+        std::os::unix::fs::symlink(&real, &root_link).unwrap();
+
+        let got = collect_eboxes_dedup_targets(&root).unwrap();
+        assert_eq!(got.len(), 1, "expected the single link, got: {got:?}");
+        let (store_side, resolved) = &got[0];
+        assert_eq!(store_side, &root_link, "store-side path must be the link");
+        assert_eq!(
+            resolved,
+            &std::fs::canonicalize(&real).unwrap(),
+            "resolved target must be the real file"
+        );
+    }
+
+    /// A symlink sitting beside its own target (both under the walk
+    /// root, both resolving to the same file) is collected exactly once
+    /// — we must not decrypt+re-encrypt the same file twice in one pass.
+    #[test]
+    fn collect_dedups_link_beside_its_target() {
+        let root = tempdir();
+        let real = root.join("real.ebox");
+        std::fs::write(&real, b"ciphertext").unwrap();
+        let link = root.join("link.ebox");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let got = collect_eboxes_dedup_targets(&root).unwrap();
+        assert_eq!(
+            got.len(),
+            1,
+            "link + its target must collapse to one entry, got: {got:?}"
+        );
+        // The surviving entry's resolved target is the real file
+        // (whichever store-side path sorted first is kept).
+        let (_, resolved) = &got[0];
+        assert_eq!(resolved, &std::fs::canonicalize(&real).unwrap());
+    }
+
+    /// Two distinct symlinks pointing at the same out-of-root target
+    /// collapse to a single entry.
+    #[test]
+    fn collect_dedups_two_links_to_same_target() {
+        let target_dir = tempdir();
+        let real = target_dir.join("shared.ebox");
+        std::fs::write(&real, b"ciphertext").unwrap();
+
+        let root = tempdir();
+        let a = root.join("a.ebox");
+        let b = root.join("b.ebox");
+        std::os::unix::fs::symlink(&real, &a).unwrap();
+        std::os::unix::fs::symlink(&real, &b).unwrap();
+
+        let got = collect_eboxes_dedup_targets(&root).unwrap();
+        assert_eq!(
+            got.len(),
+            1,
+            "two links to one target must collapse to one entry, got: {got:?}"
+        );
+        let (_, resolved) = &got[0];
+        assert_eq!(resolved, &std::fs::canonicalize(&real).unwrap());
     }
 }

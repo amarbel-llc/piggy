@@ -581,6 +581,17 @@ debug-interop-stream-bytes: build-rust
   head -c 80 /tmp/stream-c.ebox | xxd
   echo "total: $(wc -c < /tmp/stream-c.ebox) bytes"
 
+# Dump the recipient pubkey(s) baked into one or more .ebox files, rendered
+# as piggy-recipient-v1@pivy_ecdh_p256_pub-… markl IDs so they compare
+# byte-for-byte against piggy-ids and `piggy pass recipients list-available`.
+# Non-destructive: parses the ebox off-disk, touches no card, prompts for no
+# PIN. Diagnoses "card present but cannot decrypt" — if no recipient matches
+# an attached card's pubkey, the box was encrypted to a different recipient
+# set. Usage: just debug-ebox-recipients ~/.local/share/piggy/foo.ebox …
+[group('debug')]
+debug-ebox-recipients *EBOXES:
+    cargo run -q -p piggy-box --example dump-recipients -- {{EBOXES}}
+
 # Generic driver for exploratory bats files. Each file brings up whatever
 # infrastructure it needs in setup_file() / teardown_file(). We pass
 # --no-sandbox because explore tests often need to talk to pcscd (Unix
