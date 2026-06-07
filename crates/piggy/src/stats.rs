@@ -164,6 +164,15 @@ pub fn timed_box<F: FnOnce() -> i32>(op: &str, f: F) -> i32 {
     code
 }
 
+/// Time `f` — the `piggy health` handler returning its exit code — and
+/// emit a `piggy.health.run` counter + timer. Returns the code.
+pub fn timed_health<F: FnOnce() -> i32>(f: F) -> i32 {
+    let start = Instant::now();
+    let code = f();
+    record("health", "run", outcome_of_code(code), start.elapsed());
+    code
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +197,14 @@ mod tests {
         assert!(
             payload("box", "stream_decrypt", Outcome::Success, 0)
                 .starts_with("piggy.box.stream_decrypt.success:1|c|")
+        );
+    }
+
+    #[test]
+    fn payload_health_category() {
+        assert!(
+            payload("health", "run", Outcome::Success, 5)
+                .starts_with("piggy.health.run.success:1|c|")
         );
     }
 

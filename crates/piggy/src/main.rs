@@ -108,6 +108,13 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
+    /// Run piggy-layer health checks (piggy-agent socket/identities/ecdh
+    /// extension, pcscd + attached cards + 9D slots, piggy-agent.service)
+    /// and report TAP-14 on a tty or tap-ndjson(7) records otherwise.
+    ///
+    /// All probes are read-only — nothing here prompts for a PIN or
+    /// decrypts. Exits 0 iff no check fails (SKIPs count as ok).
+    Health(HealthCmdArgs),
     /// PIV-backed SSH signing agent.
     ///
     /// `piggy agent` has its own clap parser; `--help`, `-h`, and any
@@ -331,6 +338,16 @@ enum ShowBatchFormat {
 }
 
 #[derive(Args, Debug)]
+struct HealthCmdArgs {
+    /// Output format; `auto` switches on whether stdout is a tty.
+    #[arg(long, value_enum, default_value_t = health::Format::Auto)]
+    format: health::Format,
+    /// Attach the diagnostic block to every point, not just failures.
+    #[arg(short = 'v', long = "verbose")]
+    verbose: bool,
+}
+
+#[derive(Args, Debug)]
 struct RecipientsArgs {
     #[command(subcommand)]
     cmd: RecipientsCommand,
@@ -465,6 +482,9 @@ fn main() {
         Command::List { rest } => fallback::exec_piggy_ids("list-all", &rest),
         Command::Help { .. } => std::process::exit(usage::run()),
         Command::Version { .. } => std::process::exit(version::run()),
+        Command::Health(args) => std::process::exit(piggy::stats::timed_health(|| {
+            health::run(args.format, args.verbose)
+        })),
 
         // `agent` runs the Rust impl (piggy#58): a PIV-backed SSH agent that
         // prompts for the PIN on demand via SSH_ASKPASS and clears it on a

@@ -5,10 +5,6 @@
 //! `HealthSink`. All card operations are read-only (enumerate + cert
 //! read); nothing here prompts for a PIN or decrypts.
 
-// Not yet reachable from main.rs dispatch — the clap wiring lands in a
-// later task. Drop this allow when `piggy health` is dispatched.
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 /// Per-probe timeout. Tuning lever (design doc): change signal is false
@@ -18,6 +14,17 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// The extension piggy decrypts require. Built by concatenation so
 /// editing tools cannot mangle the literal (see CLAUDE.md memory).
 pub const ECDH_EXT: &str = concat!("ecdh@", "joyent.com");
+
+/// Output format for `piggy health`, parsed straight from `--format`
+/// (this is the clap `ValueEnum`; main.rs uses it directly rather than
+/// mapping through a duplicate enum). `Auto` switches on whether stdout
+/// is a tty: TAP-14 for humans, tap-ndjson(7) for pipes.
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum Format {
+    Auto,
+    Tap,
+    Ndjson,
+}
 
 pub enum Status {
     Pass,
@@ -319,6 +326,33 @@ pub fn exit_code(results: &[CheckResult]) -> i32 {
     }
 }
 
+/// `piggy health` entry point: [`gather`] → [`evaluate`] → render to
+/// stdout via the format-selected [`HealthSink`] → [`exit_code`].
+///
+/// Exit code conventions (the render-error 2 mirrors `pass verify`):
+/// - 0: no point failed (SKIPs count as ok)
+/// - 1: at least one point is `not ok`
+/// - 2: the report itself could not be rendered (stdout IO error)
+pub fn run(format: Format, verbose: bool) -> i32 {
+    use std::io::IsTerminal;
+
+    let results = evaluate(&gather());
+    let stdout = std::io::stdout();
+    let rendered = match format {
+        Format::Tap => TapSink::new(stdout.lock(), verbose).render(&results),
+        Format::Ndjson => NdjsonSink::new(stdout.lock(), verbose).render(&results),
+        Format::Auto if stdout.is_terminal() => {
+            TapSink::auto(stdout.lock(), verbose).render(&results)
+        }
+        Format::Auto => NdjsonSink::new(stdout.lock(), verbose).render(&results),
+    };
+    if let Err(e) = rendered {
+        eprintln!("piggy health: failed to render report: {e}");
+        return 2;
+    }
+    exit_code(&results)
+}
+
 /// Render a full health run (the 9 [`CheckResult`]s from [`evaluate`])
 /// to an output stream. Two implementations: [`TapSink`] (TAP-14 text,
 /// tty) and [`NdjsonSink`] (tap-ndjson(7) records, non-tty / `--format
@@ -327,26 +361,49 @@ pub trait HealthSink {
     fn render(&mut self, results: &[CheckResult]) -> std::io::Result<()>;
 }
 
-/// TAP-14 text sink. Builds a plain (colorless, locale-free)
-/// `tap_dancer::TapWriter` so the output is deterministic; tty
-/// color/locale auto-detection is the dispatch layer's concern (Task 8
-/// can switch to `Reporter::auto` / `TapWriterBuilder::auto` for the
-/// interactive path).
+/// TAP-14 text sink. [`TapSink::new`] builds a plain (colorless,
+/// locale-free) `tap_dancer::TapWriter` so the output is deterministic
+/// — explicit `--format tap` stays byte-stable for scripts and tests.
+/// [`TapSink::auto`] opts into `TapWriterBuilder::auto` (NO_COLOR-gated
+/// color + env-derived locale pragma) for the interactive
+/// `--format auto`-on-a-tty path, where presentation beats
+/// determinism.
 pub struct TapSink<W: std::io::Write> {
     w: W,
     verbose: bool,
+    auto_style: bool,
 }
 
 impl<W: std::io::Write> TapSink<W> {
     pub fn new(w: W, verbose: bool) -> Self {
-        Self { w, verbose }
+        Self {
+            w,
+            verbose,
+            auto_style: false,
+        }
+    }
+
+    /// Like [`TapSink::new`] but with `TapWriterBuilder::auto` styling
+    /// (color unless NO_COLOR, locale pragma from LC_ALL/LC_NUMERIC/
+    /// LANG). The builder never sniffs file descriptors itself — only
+    /// call this when the caller has established the writer is a tty.
+    pub fn auto(w: W, verbose: bool) -> Self {
+        Self {
+            w,
+            verbose,
+            auto_style: true,
+        }
     }
 }
 
 impl<W: std::io::Write> HealthSink for TapSink<W> {
     fn render(&mut self, results: &[CheckResult]) -> std::io::Result<()> {
-        let mut rep =
-            tap_dancer::Reporter::Tap(tap_dancer::TapWriterBuilder::new(&mut self.w).build()?);
+        let builder = if self.auto_style {
+            tap_dancer::TapWriterBuilder::auto(&mut self.w)
+        } else {
+            tap_dancer::TapWriterBuilder::new(&mut self.w)
+        };
+        let mut rep = tap_dancer::Reporter::Tap(builder.build()?);
         render_into(&mut rep, results, self.verbose)
     }
 }
