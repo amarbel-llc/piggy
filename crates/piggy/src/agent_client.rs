@@ -182,7 +182,7 @@ pub fn probe_extensions(socket_path: &Path, timeout: Duration) -> Result<Vec<Str
             let response = client
                 .extension(Extension {
                     name: "query".into(),
-                    details: Vec::<u8>::new().into(),
+                    details: Vec::new().into(),
                 })
                 .await
                 .map_err(|e| format!("query extension: {e}"))?;
@@ -215,6 +215,12 @@ pub fn probe_extensions(socket_path: &Path, timeout: Duration) -> Result<Vec<Str
 /// A single-entry flat body aliases the wrapped shape and fails to
 /// parse — the same accepted limitation as the C parser (real agents
 /// advertise several extensions, "query" itself included).
+///
+/// piv.c additionally tolerates a legacy pivy response shape delivered
+/// as plain SSH_AGENT_SUCCESS (a u32 count followed by that many
+/// cstrings); no current agent emits it and `probe_extensions` treats a
+/// plain-SUCCESS reply as an error, so this decoder deliberately
+/// handles only the EXT_RESPONSE body.
 ///
 /// The IETF-draft echoed extension name ("query") is NOT part of
 /// `details` and is never expected here: ssh-agent-lib 0.5's response
