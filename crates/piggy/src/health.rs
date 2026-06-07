@@ -264,7 +264,7 @@ fn probe_cards() -> (PcscProbe, Option<Vec<CardInfo>>) {
         Err(e) => return (PcscProbe::Error(e.to_string()), None),
     };
     let cards = tokens
-        .iter()
+        .into_iter()
         .map(|t| CardInfo {
             reader: t.reader_name().to_string(),
             // Full uppercase hex, matching how the rest of the
