@@ -41,6 +41,7 @@ function health_dead_piggy_auth_sock_path_fails_point_3 { # @test
   assert_output --partial "ok 2 - agent: socket resolved"
   assert_output --partial "not ok 3 - agent: socket exists"
   assert_output --partial "ok 4 - agent: answers request_identities # SKIP path is not a socket"
+  assert_output --partial "ok 5 - agent: advertises ecdh extension # SKIP path is not a socket"
 }
 
 function health_ndjson_emits_parseable_records_with_summary { # @test
@@ -48,7 +49,6 @@ function health_ndjson_emits_parseable_records_with_summary { # @test
   run "$PIGGY" health --format ndjson
   assert_failure
   report="$output"
-  summary_line="${lines[-1]}"
   # Every line parses as JSON: slurping the stream errors on any
   # malformed line. plan + 9 test records + summary = 11.
   run jq -es 'length' <<<"$report"
@@ -56,7 +56,10 @@ function health_ndjson_emits_parseable_records_with_summary { # @test
   assert_output "11"
   # The trailing record is the tap-ndjson(7) mandatory summary; the
   # unresolved socket guarantees at least one failure on every host.
-  run jq -e '.type == "summary" and .failed >= 1' <<<"$summary_line"
+  # Re-derive the last line from the verified report rather than the
+  # first run's $lines, so the dependency on the count check is
+  # explicit in the ordering.
+  run jq -e '.type == "summary" and .failed >= 1' <<<"$(printf '%s' "$report" | tail -n1)"
   assert_success
 }
 
