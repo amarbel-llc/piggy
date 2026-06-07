@@ -86,6 +86,91 @@ pub struct Probes {
     pub cards: Option<Vec<CardInfo>>,
 }
 
+/// Parse `systemctl show` key=value output into a [`ServiceProbe`].
+/// Pure: no IO.
+///
+/// systemctl emits one `Key=Value` per line in no guaranteed order
+/// (observed live: ExecMainStatus first). Missing Active/Sub/ExecMain
+/// keys default to empty strings, but output carrying no `LoadState`
+/// at all is not `systemctl show` output we understand — that maps to
+/// `NotAvailable` rather than a bogus `Unit`, keeping SKIP as the
+/// graceful-degradation path.
+fn parse_systemctl_show(stdout: &str) -> ServiceProbe {
+    let mut load_state: Option<&str> = None;
+    let mut active_state = String::new();
+    let mut sub_state = String::new();
+    let mut exec_main_status = String::new();
+    for line in stdout.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "LoadState" => load_state = Some(value),
+            "ActiveState" => active_state = value.to_string(),
+            "SubState" => sub_state = value.to_string(),
+            "ExecMainStatus" => exec_main_status = value.to_string(),
+            _ => {}
+        }
+    }
+    match load_state {
+        None => ServiceProbe::NotAvailable("unparseable systemctl output".into()),
+        Some("not-found") => ServiceProbe::UnitNotFound,
+        Some(_) => ServiceProbe::Unit {
+            active_state,
+            sub_state,
+            exec_main_status,
+        },
+    }
+}
+
+/// Run `systemctl --user show piggy-agent.service
+/// --property=LoadState,ActiveState,SubState,ExecMainStatus`.
+///
+/// Thin IO shim over [`parse_systemctl_show`]: a spawn error IS the
+/// which-style "no systemctl" failure (no PATH pre-check), and the
+/// exit status is deliberately not gated on — `systemctl show` exits 0
+/// even for inactive units and reports not-found via `LoadState`, so
+/// any usable stdout is handed to the parser regardless. The exit
+/// status only flavors the `NotAvailable` reason when stdout was
+/// unusable (e.g. "Failed to connect to bus" on a session without a
+/// user manager, which lands on stderr with a non-zero exit).
+#[cfg(target_os = "linux")]
+fn probe_service() -> ServiceProbe {
+    let output = match std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            "piggy-agent.service",
+            "--property=LoadState,ActiveState,SubState,ExecMainStatus",
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ServiceProbe::NotAvailable("systemctl not found".into());
+        }
+        Err(e) => return ServiceProbe::NotAvailable(format!("systemctl spawn failed: {e}")),
+    };
+    // Lossy UTF-8 is safe: invalid bytes in unit state names are
+    // implausible, and the conservative parser maps any resulting
+    // garbage to NotAvailable anyway.
+    match parse_systemctl_show(&String::from_utf8_lossy(&output.stdout)) {
+        ServiceProbe::NotAvailable(_) if !output.status.success() => {
+            ServiceProbe::NotAvailable(format!(
+                "systemctl failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+        probe => probe,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn probe_service() -> ServiceProbe {
+    ServiceProbe::NotAvailable("service check is Linux-only".into())
+}
+
 pub fn exit_code(results: &[CheckResult]) -> i32 {
     if results.iter().any(|r| matches!(r.status, Status::Fail)) {
         1
@@ -576,6 +661,36 @@ mod tests {
         assert!(matches!(results[3].status, Status::Skip(_)));
         assert!(matches!(results[4].status, Status::Skip(_)));
         assert!(matches!(results[8].status, Status::Skip(_)));
+    }
+
+    /// systemctl show parser: a loaded, active unit maps to Unit with
+    /// the three states carried through verbatim.
+    #[test]
+    fn parse_systemctl_show_active_unit() {
+        let out = "LoadState=loaded\nActiveState=active\nSubState=running\nExecMainStatus=0\n";
+        match parse_systemctl_show(out) {
+            ServiceProbe::Unit {
+                active_state,
+                sub_state,
+                exec_main_status,
+            } => {
+                assert_eq!(active_state, "active");
+                assert_eq!(sub_state, "running");
+                assert_eq!(exec_main_status, "0");
+            }
+            _ => panic!("expected Unit"),
+        }
+    }
+
+    /// systemctl show parser: LoadState=not-found (no unit installed)
+    /// maps to UnitNotFound regardless of the other keys.
+    #[test]
+    fn parse_systemctl_show_not_found_unit() {
+        let out = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nExecMainStatus=0\n";
+        assert!(matches!(
+            parse_systemctl_show(out),
+            ServiceProbe::UnitNotFound
+        ));
     }
 
     /// exit code: 0 iff no Fail. Skip counts as ok.
