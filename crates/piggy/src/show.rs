@@ -63,7 +63,7 @@ pub fn run(args: &[String]) -> i32 {
     };
 
     if dir_target.is_dir() {
-        return handle_dir(&opts.path, &dir_target);
+        return handle_dir(&opts, &dir_target);
     }
 
     if opts.path.is_empty() {
@@ -79,6 +79,10 @@ struct Opts {
     mode: Mode,
     selected_line: usize,
     path: String,
+    /// `-r` / `--recipients`: when listing a directory, annotate each
+    /// ebox leaf with its recipients (handled by `tree_recipients`).
+    /// Ignored on the file path (`-c`/`-q` own that).
+    recipients: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -95,9 +99,10 @@ enum Mode {
 fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut mode = Mode::Print;
     let mut selected_line: usize = 1;
+    let mut recipients = false;
     let mut positional: Vec<String> = Vec::new();
     let mut iter = args.iter();
-    let usage = "Usage: piggy pass show [--clip[=line-number],-c[line-number]] [--qrcode[=line-number],-q[line-number]] [pass-name]";
+    let usage = "Usage: piggy pass show [--clip[=line-number],-c[line-number]] [--qrcode[=line-number],-q[line-number]] [--recipients,-r] [pass-name]";
 
     while let Some(arg) = iter.next() {
         let s = arg.as_str();
@@ -110,6 +115,8 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             set_mode(&mut mode, Mode::Clip, usage)?;
         } else if s == "-q" || s == "--qrcode" {
             set_mode(&mut mode, Mode::Qrcode, usage)?;
+        } else if s == "-r" || s == "--recipients" {
+            recipients = true;
         } else if let Some(value) = s.strip_prefix("--clip=") {
             set_mode(&mut mode, Mode::Clip, usage)?;
             selected_line = parse_line(value)?;
@@ -142,6 +149,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         mode,
         selected_line,
         path,
+        recipients,
     })
 }
 
@@ -382,13 +390,21 @@ fn clip_time_seconds() -> u64 {
         .unwrap_or(DEFAULT_CLIP_TIME_SECS)
 }
 
-fn handle_dir(path: &str, dir_target: &Path) -> i32 {
-    if path.is_empty() {
-        println!("Password Store");
+fn handle_dir(opts: &Opts, dir_target: &Path) -> i32 {
+    let banner = if opts.path.is_empty() {
+        "Password Store"
     } else {
-        println!("{}", path.trim_end_matches('/'));
+        opts.path.trim_end_matches('/')
+    };
+    if opts.recipients {
+        // `-r`: native renderer that annotates each ebox with its
+        // recipients (owns its own banner line). The default
+        // `tree(1)` path below is left untouched.
+        crate::tree_recipients::print_tree_with_recipients(banner, dir_target)
+    } else {
+        println!("{banner}");
+        print_tree(dir_target)
     }
-    print_tree(dir_target)
 }
 
 /// Shell to `tree -N -C -l --noreport <dir> | tail -n +1 (drop first
@@ -574,6 +590,27 @@ mod tests {
     fn parse_rejects_clip_and_qrcode_combined() {
         let err = parse_args(&s(&["-c", "-q", "cred1"])).unwrap_err();
         assert!(err.contains("Usage"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_recipients_long_flag() {
+        let opts = parse_args(&s(&["--recipients", "folder"])).unwrap();
+        assert!(opts.recipients);
+        assert_eq!(opts.path, "folder");
+        assert_eq!(opts.mode, Mode::Print);
+    }
+
+    #[test]
+    fn parse_recipients_short_flag() {
+        let opts = parse_args(&s(&["-r"])).unwrap();
+        assert!(opts.recipients);
+        assert_eq!(opts.path, "");
+    }
+
+    #[test]
+    fn parse_recipients_defaults_false() {
+        let opts = parse_args(&s(&["folder"])).unwrap();
+        assert!(!opts.recipients);
     }
 
     #[test]

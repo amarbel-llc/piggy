@@ -16,6 +16,11 @@ path = "src/main.rs"
 [dependencies]
 piggy-piv = { path = "../piggy-piv" }
 piggy-box = { path = "../piggy-box" }
+# Direct dep so `tree_recipients` can name `Id` / `FormatId` / `PurposeId`
+# to render each ebox's recipient_pubkey as a `piggy-recipient-v1@…` markl
+# ID (the `pass ls --recipients` annotation). Transitive via piggy-box
+# already, but not re-exported, so the explicit entry makes the use legal.
+piggy-markl = { path = "../piggy-markl" }
 # Direct dep so `show_batch::classify_piv_error` can match against
 # `pcsc::Error::NoSmartcard | ReaderUnavailable | RemovedCard` for the
 # RFC 0005 `card-absent` mapping. Transitive via `piggy-piv` already;

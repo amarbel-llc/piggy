@@ -417,6 +417,27 @@ test-bats-conformance-recipients-sync-fibby:
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_recipients_sync_fibby.bats
 
+# Fibby-backed proof that `piggy pass show -r` annotates each ebox with its
+# REAL recipient, read offline from the ebox wire header (no card/PIN). The
+# wrapped piggy (.#default, real pivy-box + piggy-ids) writes genuine eboxes via
+# init/insert so the rendered markl prefix can be cross-checked against the
+# card's recipient in piggy-ids. Mock-mode coverage (the [?] degrade path) lives
+# in t0020-show.bats. [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME
+# redirect is a no-op on macOS's PCSC.framework).
+[group('post-build')]
+[linux]
+test-bats-conformance-pass-ls-recipients-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIVY_AGENT="$pivy_out/bin/pivy-agent" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_pass_ls_recipients_fibby.bats
+
 # Hardware lane for the C pivy-agent built from vendor/pivy/. Runs
 # pivy_agent_hardware.bats against the user's plugged-in PIV card.
 # Read-only PIN-free operations (REQUEST_IDENTITIES). Verifies the

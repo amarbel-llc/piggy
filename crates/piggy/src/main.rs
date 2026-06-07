@@ -57,6 +57,7 @@ mod rm;
 mod show;
 mod show_batch;
 mod store;
+mod tree_recipients;
 mod usage;
 mod verify;
 mod version;
