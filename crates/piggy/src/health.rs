@@ -186,6 +186,131 @@ fn probe_service() -> ServiceProbe {
     ServiceProbe::NotAvailable("service check is Linux-only".into())
 }
 
+/// Resolve the agent socket for the health probe: `PIGGY_AUTH_SOCK`
+/// (set non-empty, via the canonical
+/// [`piggy::agent_client::piggy_auth_sock_override`] resolver) wins
+/// over the ambient `SSH_AUTH_SOCK` (also only when set non-empty);
+/// neither → [`SocketProbe::Unresolved`]. The resolved path is stat'd
+/// immediately so points 2 and 3 come from one probe.
+fn resolve_socket() -> SocketProbe {
+    let (source, raw): (&'static str, std::ffi::OsString) =
+        match piggy::agent_client::piggy_auth_sock_override() {
+            Some(p) => ("PIGGY_AUTH_SOCK", p),
+            None => match std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty()) {
+                Some(p) => ("SSH_AUTH_SOCK", p),
+                None => return SocketProbe::Unresolved,
+            },
+        };
+    let path = std::path::PathBuf::from(raw);
+    let (is_socket, stat_detail) = stat_socket_path(&path);
+    SocketProbe::Resolved {
+        source,
+        path,
+        is_socket,
+        stat_detail,
+    }
+}
+
+/// Stat `path` and decide whether it is a unix socket, with an
+/// explanatory detail string for every outcome (missing path, wrong
+/// file type, metadata error). Follows symlinks (`fs::metadata`): an
+/// agent socket reached through a symlink still counts as a socket.
+fn stat_socket_path(path: &std::path::Path) -> (bool, String) {
+    use std::os::unix::fs::FileTypeExt;
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.file_type().is_socket() => (true, "unix socket".into()),
+        Ok(meta) => (
+            false,
+            format!(
+                "exists but is not a socket ({})",
+                file_type_name(meta.file_type())
+            ),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (false, "path does not exist".into()),
+        Err(e) => (false, format!("stat failed: {e}")),
+    }
+}
+
+/// Human name for a non-socket file type, for `stat_detail`.
+fn file_type_name(ft: std::fs::FileType) -> &'static str {
+    if ft.is_file() {
+        "regular file"
+    } else if ft.is_dir() {
+        "directory"
+    } else {
+        "non-socket special file"
+    }
+}
+
+/// Enumerate PIV cards read-only: pcsc context + token enumeration +
+/// a 9D cert read per token. NO PIN, NO decrypt — `read_slot` is a
+/// bare GET DATA on the slot's cert object
+/// (`crates/piggy-piv/src/token.rs::PivToken::read_slot`, no
+/// `verify_pin` on its path; cert objects are free-read per NIST SP
+/// 800-73). An empty or unreadable 9D returns
+/// `Err(PivError::SlotEmpty(0x9d))`, which maps to
+/// `slot_9d_populated: false`.
+///
+/// Context establishment and enumeration failures both collapse to
+/// `PcscProbe::Error` with `cards: None` — evaluate renders point 6
+/// as the failure and SKIPs the card points.
+fn probe_cards() -> (PcscProbe, Option<Vec<CardInfo>>) {
+    let ctx = match piggy_piv::PivContext::new() {
+        Ok(ctx) => ctx,
+        Err(e) => return (PcscProbe::Error(e.to_string()), None),
+    };
+    let tokens = match ctx.enumerate_tokens() {
+        Ok(tokens) => tokens,
+        Err(e) => return (PcscProbe::Error(e.to_string()), None),
+    };
+    let cards = tokens
+        .iter()
+        .map(|t| CardInfo {
+            reader: t.reader_name().to_string(),
+            // Full uppercase hex, matching how the rest of the
+            // codebase renders guids user-facing (Guid::to_hex).
+            guid: t.guid().to_hex(),
+            slot_9d_populated: t.read_slot(0x9d).is_ok(),
+        })
+        .collect();
+    (PcscProbe::Ok, Some(cards))
+}
+
+/// Probe phase: run every probe defensively and short-circuit
+/// dependents — the agent is contacted only when the socket resolved
+/// AND stat'd as a real unix socket, and the `query` extension is sent
+/// only when `request_identities` got an answer. Card probing is
+/// independent of the agent-side chain.
+pub fn gather() -> Probes {
+    let service = probe_service();
+    let socket = resolve_socket();
+    let (agent, extensions) = match &socket {
+        SocketProbe::Resolved {
+            path,
+            is_socket: true,
+            ..
+        } => {
+            let ids = piggy::agent_client::probe_identities(path, PROBE_TIMEOUT);
+            let exts = if ids.is_ok() {
+                Some(piggy::agent_client::probe_extensions(path, PROBE_TIMEOUT))
+            } else {
+                None
+            };
+            (Some(ids), exts)
+        }
+        _ => (None, None),
+    };
+    let (pcsc, cards) = probe_cards();
+    Probes {
+        service,
+        socket,
+        agent,
+        extensions,
+        pcsc,
+        cards,
+    }
+}
+
 pub fn exit_code(results: &[CheckResult]) -> i32 {
     if results.iter().any(|r| matches!(r.status, Status::Fail)) {
         1
@@ -781,6 +906,94 @@ mod tests {
             ServiceProbe::Unit { active_state, .. } => assert_eq!(active_state, "active"),
             _ => panic!("expected Unit to pass through"),
         }
+    }
+
+    /// resolve_socket honors PIGGY_AUTH_SOCK over SSH_AUTH_SOCK and
+    /// treats empty as unset on both vars. Mutating env: this is the
+    /// only test in this test binary touching these vars (the
+    /// agent_client override test lives in the library crate's separate
+    /// test binary), so the process-wide mutation is race-free.
+    /// Snapshot + restore mirrors stats.rs's
+    /// `endpoint_gated_on_env_presence`.
+    #[test]
+    fn resolve_socket_precedence() {
+        let saved_piggy = std::env::var_os("PIGGY_AUTH_SOCK");
+        let saved_ssh = std::env::var_os("SSH_AUTH_SOCK");
+
+        std::env::set_var("PIGGY_AUTH_SOCK", "/run/piggy-health-test.sock");
+        std::env::set_var("SSH_AUTH_SOCK", "/run/ambient-health-test.sock");
+        match resolve_socket() {
+            SocketProbe::Resolved { source, path, .. } => {
+                assert_eq!(source, "PIGGY_AUTH_SOCK");
+                assert_eq!(
+                    path,
+                    std::path::PathBuf::from("/run/piggy-health-test.sock")
+                );
+            }
+            _ => panic!("expected Resolved via PIGGY_AUTH_SOCK"),
+        }
+
+        std::env::set_var("PIGGY_AUTH_SOCK", "");
+        match resolve_socket() {
+            SocketProbe::Resolved { source, path, .. } => {
+                assert_eq!(
+                    source, "SSH_AUTH_SOCK",
+                    "empty PIGGY_AUTH_SOCK must be treated as unset"
+                );
+                assert_eq!(
+                    path,
+                    std::path::PathBuf::from("/run/ambient-health-test.sock")
+                );
+            }
+            _ => panic!("expected Resolved via SSH_AUTH_SOCK"),
+        }
+
+        std::env::remove_var("PIGGY_AUTH_SOCK");
+        std::env::set_var("SSH_AUTH_SOCK", "");
+        assert!(
+            matches!(resolve_socket(), SocketProbe::Unresolved),
+            "both empty must be Unresolved"
+        );
+
+        std::env::remove_var("SSH_AUTH_SOCK");
+        assert!(
+            matches!(resolve_socket(), SocketProbe::Unresolved),
+            "both unset must be Unresolved"
+        );
+
+        // Restore.
+        match saved_piggy {
+            Some(v) => std::env::set_var("PIGGY_AUTH_SOCK", v),
+            None => std::env::remove_var("PIGGY_AUTH_SOCK"),
+        }
+        match saved_ssh {
+            Some(v) => std::env::set_var("SSH_AUTH_SOCK", v),
+            None => std::env::remove_var("SSH_AUTH_SOCK"),
+        }
+    }
+
+    /// stat on a plain file yields is_socket=false with an explanatory
+    /// stat_detail; a missing path likewise explains rather than
+    /// erroring. No tempfile dev-dependency exists in this crate, so a
+    /// uniquely-named file under env::temp_dir() with explicit cleanup
+    /// stands in.
+    #[test]
+    fn stat_plain_file_is_not_a_socket() {
+        let path =
+            std::env::temp_dir().join(format!("piggy-health-stat-test-{}", std::process::id()));
+        std::fs::File::create(&path).expect("create plain file");
+        let (is_socket, detail) = stat_socket_path(&path);
+        std::fs::remove_file(&path).ok();
+        assert!(!is_socket, "plain file must not be a socket");
+        assert!(detail.contains("regular file"), "detail: {detail}");
+
+        // The same path, now removed: missing files explain themselves.
+        let (missing_is_socket, missing_detail) = stat_socket_path(&path);
+        assert!(!missing_is_socket);
+        assert!(
+            missing_detail.contains("does not exist"),
+            "detail: {missing_detail}"
+        );
     }
 
     /// exit code: 0 iff no Fail. Skip counts as ok.
