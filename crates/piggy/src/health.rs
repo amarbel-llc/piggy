@@ -356,6 +356,39 @@ mod tests {
         }
     }
 
+    /// Fully-healthy probe set: every point evaluates Pass. Matrix
+    /// tests mutate one field at a time from here.
+    fn healthy_probes() -> Probes {
+        Probes {
+            service: ServiceProbe::Unit {
+                active_state: "active".into(),
+                sub_state: "running".into(),
+                exec_main_status: "0".into(),
+            },
+            socket: SocketProbe::Resolved {
+                source: "PIGGY_AUTH_SOCK",
+                path: "/run/user/1000/piggy-agent.sock".into(),
+                is_socket: true,
+                stat_detail: "unix socket".into(),
+            },
+            agent: Some(Ok(vec!["card-a".into(), "card-b".into(), "card-c".into()])),
+            extensions: Some(Ok(vec![ECDH_EXT.into(), "other-ext".into()])),
+            pcsc: PcscProbe::Ok,
+            cards: Some(vec![CardInfo {
+                reader: "Yubico YubiKey CCID 00 00".into(),
+                guid: "DEADBEEFDEADBEEF".into(),
+                slot_9d_populated: true,
+            }]),
+        }
+    }
+
+    fn diag<'a>(r: &'a CheckResult, key: &str) -> Option<&'a str> {
+        r.diags
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
     /// The plan is always 9 points, in the fixed documented order,
     /// regardless of probe outcomes.
     #[test]
@@ -389,6 +422,144 @@ mod tests {
         assert!(matches!(results[3].status, Status::Skip(_)));
         assert!(matches!(results[4].status, Status::Skip(_)));
         assert!(matches!(results[8].status, Status::Skip(_)));
+    }
+
+    /// Matrix row 1: fully-populated healthy probes → all 9 Pass.
+    #[test]
+    fn healthy_probes_all_pass() {
+        let results = evaluate(&healthy_probes());
+        assert_eq!(results.len(), 9);
+        for r in &results {
+            assert!(
+                matches!(r.status, Status::Pass),
+                "expected Pass for {:?}",
+                r.name
+            );
+        }
+        assert_eq!(exit_code(&results), 0);
+    }
+
+    /// Matrix row 2: agent answers with zero identities while a
+    /// provisioned card is attached — point 4 still passes (it owns
+    /// only "did the agent answer"), point 9 owns the cross-checked
+    /// verdict and fails with the restart hint.
+    #[test]
+    fn zero_identities_with_provisioned_card_fails_point_9() {
+        let mut probes = healthy_probes();
+        probes.agent = Some(Ok(vec![]));
+        let results = evaluate(&probes);
+        assert!(matches!(results[3].status, Status::Pass));
+        assert_eq!(diag(&results[3], "identities"), Some("0"));
+        assert!(matches!(results[8].status, Status::Fail));
+        assert_eq!(
+            diag(&results[8], "hint"),
+            Some("pcscd race or locked agent — restart piggy-agent")
+        );
+    }
+
+    /// Matrix row 3: zero identities but no card attached — point 7
+    /// fails (no card), points 8 and 9 SKIP (nothing to cross-check).
+    #[test]
+    fn zero_identities_without_card_skips_point_9() {
+        let mut probes = healthy_probes();
+        probes.agent = Some(Ok(vec![]));
+        probes.cards = Some(vec![]);
+        let results = evaluate(&probes);
+        assert!(matches!(results[6].status, Status::Fail));
+        assert!(matches!(results[7].status, Status::Skip(_)));
+        assert!(matches!(results[8].status, Status::Skip(_)));
+    }
+
+    /// Matrix row 4: the query extension answered but the ecdh
+    /// extension is absent — point 5 fails carrying the advertised set.
+    #[test]
+    fn ecdh_missing_from_query_fails_point_5() {
+        let mut probes = healthy_probes();
+        probes.extensions = Some(Ok(vec!["other-ext".into()]));
+        let results = evaluate(&probes);
+        assert!(matches!(results[4].status, Status::Fail));
+        assert_eq!(diag(&results[4], "advertised"), Some("other-ext"));
+    }
+
+    /// Matrix row 5: the query extension itself is unsupported or
+    /// errored — point 5 fails (piggy decrypts will fail either way).
+    #[test]
+    fn query_unsupported_fails_point_5() {
+        let mut probes = healthy_probes();
+        probes.extensions = Some(Err("agent: unsupported extension".into()));
+        let results = evaluate(&probes);
+        assert!(matches!(results[4].status, Status::Fail));
+    }
+
+    /// Matrix row 6: agent connect/protocol error — point 4 fails,
+    /// point 5 SKIPs with "agent did not answer" (gather's contract:
+    /// extensions only probed when identities succeeded, so it is
+    /// None here), point 9 SKIPs.
+    #[test]
+    fn agent_connect_error_fails_4_skips_5_and_9() {
+        let mut probes = healthy_probes();
+        probes.agent = Some(Err("connection refused".into()));
+        probes.extensions = None;
+        let results = evaluate(&probes);
+        assert!(matches!(results[3].status, Status::Fail));
+        match &results[4].status {
+            Status::Skip(reason) => assert_eq!(reason, "agent did not answer"),
+            _ => panic!("expected Skip for point 5"),
+        }
+        assert!(matches!(results[8].status, Status::Skip(_)));
+    }
+
+    /// Matrix row 7: pcscd unreachable — point 6 fails; 7, 8, and 9
+    /// SKIP (card data unavailable).
+    #[test]
+    fn pcsc_error_fails_6_skips_7_8_9() {
+        let mut probes = healthy_probes();
+        probes.pcsc = PcscProbe::Error("PC/SC daemon not available".into());
+        probes.cards = None;
+        let results = evaluate(&probes);
+        assert!(matches!(results[5].status, Status::Fail));
+        assert!(matches!(results[6].status, Status::Skip(_)));
+        assert!(matches!(results[7].status, Status::Skip(_)));
+        assert!(matches!(results[8].status, Status::Skip(_)));
+    }
+
+    /// Matrix row 8: unit installed but not active — point 1 fails.
+    #[test]
+    fn unit_inactive_fails_point_1() {
+        let mut probes = healthy_probes();
+        probes.service = ServiceProbe::Unit {
+            active_state: "failed".into(),
+            sub_state: "failed".into(),
+            exec_main_status: "1".into(),
+        };
+        let results = evaluate(&probes);
+        assert!(matches!(results[0].status, Status::Fail));
+    }
+
+    /// Matrix row 9: no unit installed (manual agent setups) — point 1
+    /// SKIPs rather than fails.
+    #[test]
+    fn unit_not_found_skips_point_1() {
+        let mut probes = healthy_probes();
+        probes.service = ServiceProbe::UnitNotFound;
+        let results = evaluate(&probes);
+        assert!(matches!(results[0].status, Status::Skip(_)));
+    }
+
+    /// Matrix row 10: socket env var resolved to a path that exists
+    /// but is not a unix socket — point 2 passes, point 3 fails.
+    #[test]
+    fn socket_path_not_a_socket_fails_point_3() {
+        let mut probes = healthy_probes();
+        probes.socket = SocketProbe::Resolved {
+            source: "SSH_AUTH_SOCK",
+            path: "/tmp/not-a-socket".into(),
+            is_socket: false,
+            stat_detail: "regular file".into(),
+        };
+        let results = evaluate(&probes);
+        assert!(matches!(results[1].status, Status::Pass));
+        assert!(matches!(results[2].status, Status::Fail));
     }
 
     /// exit code: 0 iff no Fail. Skip counts as ok.
