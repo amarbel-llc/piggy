@@ -613,6 +613,77 @@ debug-interop-stream-bytes: build-rust
 debug-ebox-recipients *EBOXES:
     cargo run -q -p piggy-box --example dump-recipients -- {{EBOXES}}
 
+# EXPLORE (#task darwin-fibby) — prove/refute whether macOS's PCSC.framework
+# honors PCSCLITE_CSOCK_NAME. Starts fibby (virtual, seeded slot 9D) on a temp
+# socket, points PCSCLITE_CSOCK_NAME at it, and runs the framework-linked
+# `pivy-tool list`. If the card appears, the framework DOES honor the var
+# (darwin-fibby is trivial); if it reports no readers / no card, the var is
+# ignored (fibby needs a different interpose on darwin). Pure probe, no PIN.
+[group('explore')]
+explore-darwin-fibby-csock: build-rust
+    #!/usr/bin/env bash
+    set -uo pipefail
+    # Short path: AF_UNIX sun_path is 104 bytes on macOS; the worktree
+    # .tmp/ prefix overruns it. Use a short /tmp dir (TMPDIR points into
+    # the worktree, so override it explicitly).
+    workdir="$(TMPDIR=/tmp mktemp -d /tmp/fibcsock.XXXXXX)"
+    sock="$workdir/pcscd.comm"
+    log="$workdir/fibby.log"
+    fibby="$PWD/target/debug/fibby"
+    trap 'kill "$fibby_pid" 2>/dev/null; rm -rf "$workdir"' EXIT
+    FIBBY_LOG=wire "$fibby" --socket "$sock" --backend virtual \
+      --seed-rfc5903-slot-9d-cert >"$log" 2>&1 &
+    fibby_pid=$!
+    for _ in $(seq 1 50); do [[ -S $sock ]] && break; sleep 0.1; done
+    [[ -S $sock ]] || { echo "fibby socket never appeared"; cat "$log"; exit 1; }
+    echo "=== fibby up at $sock (pid $fibby_pid) ==="
+    echo "=== pivy-tool list WITH PCSCLITE_CSOCK_NAME pointed at fibby ==="
+    PCSCLITE_CSOCK_NAME="$sock" pivy-tool list; echo "pivy-tool exit=$?"
+    echo "=== fibby wire log (did the framework client ever connect?) ==="
+    cat "$log"
+
+# EXPLORE (#task darwin-fibby) — does nixpkgs vsmartcard-vpcd actually BUILD on
+# this darwin, or is its `broken = isDarwin` flag a stale blanket? The package
+# already scaffolds the darwin path (`--enable-infoplist` → ifd-vpcd.bundle).
+# If it builds, the bundle is one nix build away; if it fails, we learn the
+# real blocker cheaply. Uses NIXPKGS_ALLOW_BROKEN + --impure to bypass the
+# broken assertion.
+[group('explore')]
+explore-darwin-vpcd-build:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo "=== attempting nixpkgs#vsmartcard-vpcd build on $(uname -sm) with broken override ==="
+    NIXPKGS_ALLOW_BROKEN=1 nix build --impure --no-link --print-out-paths \
+      'nixpkgs#vsmartcard-vpcd' 2>&1 | tail -40
+    echo "=== nix build exit=$? ==="
+
+# EXPLORE (#task darwin-fibby) — vpcd's darwin build fails at link: the IFD
+# handler (libifdvpcd) references `_log_msg`, which the loader daemon provides
+# at runtime, but darwin ld rejects the undefined symbol. Override the nixpkgs
+# derivation to add `-undefined dynamic_lookup` (the standard darwin
+# loadable-bundle flag) and drop the broken gate, then rebuild. If it links and
+# emits ifd-vpcd.bundle, this is both a buildable path AND a nixpkgs-unbreak PR.
+[group('explore')]
+explore-darwin-vpcd-build-patched:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo "=== building patched vsmartcard-vpcd (darwin dynamic_lookup) ==="
+    NIXPKGS_ALLOW_BROKEN=1 nix build --impure --no-link --print-out-paths --expr '
+      let
+        flake = builtins.getFlake "nixpkgs";
+        pkgs = import flake.outPath { system = "aarch64-darwin"; config.allowBroken = true; };
+      in
+      pkgs.vsmartcard-vpcd.overrideAttrs (old: {
+        # The IFD handler is a loadable bundle; _log_msg is resolved at
+        # runtime by com.apple.ifdreader. Tell darwin ld to allow it.
+        env = (old.env or {}) // {
+          NIX_LDFLAGS = (old.env.NIX_LDFLAGS or "") + " -undefined dynamic_lookup";
+        };
+        meta = old.meta // { broken = false; };
+      })
+    ' 2>&1 | tail -45
+    echo "=== nix build exit=$? ==="
+
 # Generic driver for exploratory bats files. Each file brings up whatever
 # infrastructure it needs in setup_file() / teardown_file(). We pass
 # --no-sandbox because explore tests often need to talk to pcscd (Unix
