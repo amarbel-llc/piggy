@@ -54,8 +54,8 @@ pub enum SocketProbe {
     Resolved {
         source: &'static str, // "PIGGY_AUTH_SOCK" | "SSH_AUTH_SOCK"
         path: std::path::PathBuf,
-        /// `true` = exists and is a unix socket; `false` =
-        /// exists/missing but not a socket; carried diag explains.
+        /// `true` = exists and is a unix socket; `false` = exists/missing
+        /// but not a socket; carried diag explains.
         is_socket: bool,
         stat_detail: String,
     },
@@ -197,9 +197,20 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
 
     // 5 — ecdh extension
     out.push(match &probes.extensions {
+        // gather's contract: extensions is only probed when
+        // request_identities succeeded — so `extensions: None` means
+        // either the socket was never reachable (agent: None) or the
+        // agent failed to answer (agent: Some(Err)). Distinguish the
+        // SKIP reason via probes.agent; the Some(Ok) arm shouldn't
+        // occur under that contract, but evaluate is pure and must not
+        // panic on any input, so it falls back to "agent did not
+        // answer".
         None => CheckResult {
             name: "agent: advertises ecdh extension",
-            status: Status::Skip("agent did not answer".into()),
+            status: Status::Skip(match &probes.agent {
+                None => "socket missing".into(),
+                Some(_) => "agent did not answer".into(),
+            }),
             diags: vec![],
         },
         // The query extension being unsupported is itself a failure:
@@ -216,7 +227,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
             } else {
                 Status::Fail
             },
-            diags: vec![("advertised".into(), names.join(","))],
+            diags: vec![("advertised".into(), names.join(", "))],
         },
     });
 
