@@ -20,6 +20,7 @@
 //! with "PIN required".
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use piggy_box::agent_ext::{decode_ecdh_response, encode_ecdh_request};
 use piggy_box::oracle::{EcdhOracle, OracleError};
@@ -126,6 +127,141 @@ pub fn unlock_agent_pin(socket_path: &Path, pin: &str) -> Result<(), OracleError
     })
 }
 
+/// List the agent's identities; returns the key comments (count = len).
+///
+/// Health-check probe for `piggy health` — same fresh-connection shape
+/// as [`unlock_agent_pin`] (own current-thread runtime, one UnixStream
+/// per call), but additionally bounded by `timeout` and surfacing every
+/// failure as `Err(String)` so the caller can render it as a TAP
+/// diagnostic. Never prompts, never panics on IO.
+pub fn probe_identities(socket_path: &Path, timeout: Duration) -> Result<Vec<String>, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+
+    let socket_path = socket_path.to_path_buf();
+
+    runtime.block_on(async move {
+        tokio::time::timeout(timeout, async {
+            let stream = UnixStream::connect(&socket_path)
+                .await
+                .map_err(|e| format!("connect {}: {e}", socket_path.display()))?;
+            let mut client = Client::new(stream);
+            let ids = client
+                .request_identities()
+                .await
+                .map_err(|e| format!("request_identities: {e}"))?;
+            Ok(ids.into_iter().map(|i| i.comment).collect())
+        })
+        .await
+        .map_err(|_| format!("timeout after {timeout:?}"))?
+    })
+}
+
+/// Send the `query` extension and decode the supported-extension list.
+///
+/// Same fresh-connection/timeout shell as [`probe_identities`]. A plain
+/// SUCCESS (no extension payload) is an error too: a conforming agent
+/// answers `query` with an extension response carrying the name list
+/// (draft-miller-ssh-agent-14 §3.8.1).
+pub fn probe_extensions(socket_path: &Path, timeout: Duration) -> Result<Vec<String>, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+
+    let socket_path = socket_path.to_path_buf();
+
+    runtime.block_on(async move {
+        tokio::time::timeout(timeout, async {
+            let stream = UnixStream::connect(&socket_path)
+                .await
+                .map_err(|e| format!("connect {}: {e}", socket_path.display()))?;
+            let mut client = Client::new(stream);
+            let response = client
+                .extension(Extension {
+                    name: "query".into(),
+                    details: Vec::<u8>::new().into(),
+                })
+                .await
+                .map_err(|e| format!("query extension: {e}"))?;
+            let ext = response.ok_or_else(|| {
+                "agent answered query with plain SUCCESS (no extension list)".to_string()
+            })?;
+            decode_query_response(ext.details.as_ref())
+        })
+        .await
+        .map_err(|_| format!("timeout after {timeout:?}"))?
+    })
+}
+
+/// Decode the body of a `query` extension response into the advertised
+/// extension names.
+///
+/// Two encodings exist in the wild (documented in the query-response
+/// comment in vendor/pivy/src/piv.c, which this mirrors):
+///
+///   1. Flat cstrings — one u32-length-prefixed name after another.
+///      Emitted by pivy-agent's process_ext_query and the Rust agent's
+///      "query" arm (cmd/agent/session.rs).
+///   2. A single SSH-string blob wrapping the flat cstrings. Emitted by
+///      ssh-agent-lib's QueryResponse (`Vec<String>` serialization),
+///      which ssh-agent-mux uses to aggregate upstream responses
+///      (piggy#119).
+///
+/// As in piv.c, encoding 2 is detected by peeking the first u32: if it
+/// equals the remaining buffer length, the rest is the wrapped blob.
+/// A single-entry flat body aliases the wrapped shape and fails to
+/// parse — the same accepted limitation as the C parser (real agents
+/// advertise several extensions, "query" itself included).
+///
+/// The IETF-draft echoed extension name ("query") is NOT part of
+/// `details` and is never expected here: ssh-agent-lib 0.5's response
+/// plumbing consumes it as `Extension::name` when decoding
+/// SSH_AGENT_EXTENSION_RESPONSE (proto::message::Extension::decode
+/// reads the name cstring first and hands back only the remainder), so
+/// this decoder sees only the name list regardless of which agent
+/// answered. The C parser consumes the same echo itself before its
+/// dual-encoding switch.
+fn decode_query_response(details: &[u8]) -> Result<Vec<String>, String> {
+    if details.len() >= 4 {
+        let blob_len =
+            u32::from_be_bytes([details[0], details[1], details[2], details[3]]) as usize;
+        if blob_len + 4 == details.len() {
+            return parse_flat_cstrings(&details[4..]);
+        }
+    }
+    parse_flat_cstrings(details)
+}
+
+/// Parse consecutive u32-length-prefixed UTF-8 strings until the buffer
+/// is exhausted. Any truncation or invalid UTF-8 is an `Err`.
+fn parse_flat_cstrings(mut buf: &[u8]) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    while !buf.is_empty() {
+        if buf.len() < 4 {
+            return Err(format!(
+                "query response: truncated length prefix ({} trailing bytes)",
+                buf.len()
+            ));
+        }
+        let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        buf = &buf[4..];
+        if buf.len() < len {
+            return Err(format!(
+                "query response: truncated name (want {len} bytes, have {})",
+                buf.len()
+            ));
+        }
+        let name = std::str::from_utf8(&buf[..len])
+            .map_err(|e| format!("query response: non-UTF-8 extension name: {e}"))?;
+        names.push(name.to_string());
+        buf = &buf[len..];
+    }
+    Ok(names)
+}
+
 /// The SSH-agent socket override piggy should prefer for PIV decrypt.
 ///
 /// Returns `PIGGY_AUTH_SOCK` when it is set and non-empty, else `None`.
@@ -195,5 +331,91 @@ mod tests {
             Some(v) => std::env::set_var("PIGGY_AUTH_SOCK", v),
             None => std::env::remove_var("PIGGY_AUTH_SOCK"),
         }
+    }
+
+    // -------- health probes: probe_identities / probe_extensions --------
+
+    use std::time::Duration;
+
+    /// Test-local copy of the ecdh extension name, assembled by
+    /// concatenation so editing tools cannot mangle the email-like
+    /// literal (see CLAUDE.md). The canonical `health::ECDH_EXT` lives
+    /// in the binary crate, out of reach of this library module.
+    const ECDH_EXT: &str = concat!("ecdh@", "joyent.com");
+
+    /// Missing socket surfaces a connect error string, not a panic/hang.
+    #[test]
+    fn identity_probe_on_missing_socket_errors_fast() {
+        let err = probe_identities(
+            Path::new("/nonexistent/health.sock"),
+            Duration::from_secs(2),
+        )
+        .expect_err("missing socket must fail");
+        assert!(err.contains("connect"), "got: {err}");
+    }
+
+    #[test]
+    fn query_probe_on_missing_socket_errors_fast() {
+        let err = probe_extensions(
+            Path::new("/nonexistent/health.sock"),
+            Duration::from_secs(2),
+        )
+        .expect_err("missing socket must fail");
+        assert!(err.contains("connect"), "got: {err}");
+    }
+
+    /// Build the flat encoding: repeated u32-length-prefixed names.
+    fn flat_cstrings(names: &[&str]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for name in names {
+            buf.extend_from_slice(&(name.len() as u32).to_be_bytes());
+            buf.extend_from_slice(name.as_bytes());
+        }
+        buf
+    }
+
+    /// Wild encoding 1 — flat cstrings, as emitted by pivy-agent's
+    /// process_ext_query and the Rust agent's "query" arm (server-side
+    /// bytes pinned by cmd/agent/session.rs's
+    /// `extension_query_lists_supported_names`).
+    #[test]
+    fn decode_query_response_flat_cstrings() {
+        let buf = flat_cstrings(&["query", ECDH_EXT]);
+        let names = decode_query_response(&buf).expect("flat encoding");
+        assert_eq!(names, vec!["query".to_string(), ECDH_EXT.to_string()]);
+    }
+
+    /// Wild encoding 2 — a single SSH-string blob wrapping the flat
+    /// cstrings, as emitted by ssh-agent-lib's QueryResponse
+    /// (`Vec<String>` serialization) and forwarded by ssh-agent-mux.
+    /// See the query-response comment in vendor/pivy/src/piv.c and
+    /// piggy#119.
+    #[test]
+    fn decode_query_response_wrapped_blob() {
+        let inner = flat_cstrings(&["query", ECDH_EXT]);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&inner);
+        let names = decode_query_response(&buf).expect("wrapped encoding");
+        assert_eq!(names, vec!["query".to_string(), ECDH_EXT.to_string()]);
+    }
+
+    /// Truncation (length prefix running past the buffer) is an Err,
+    /// never a panic.
+    #[test]
+    fn decode_query_response_truncated_is_error() {
+        let full = flat_cstrings(&["query", ECDH_EXT]);
+        let err = decode_query_response(&full[..full.len() - 3]).expect_err("truncated must fail");
+        assert!(err.contains("truncated"), "got: {err}");
+    }
+
+    /// A single-entry flat body aliases the wrapped shape; mirroring
+    /// pivy's C parser we prefer the wrapped interpretation, which then
+    /// fails to parse. Accepted limitation (same as piv.c): real agents
+    /// advertise several extensions, "query" itself included.
+    #[test]
+    fn decode_query_response_single_flat_entry_errors_like_pivy() {
+        let buf = flat_cstrings(&[ECDH_EXT]);
+        decode_query_response(&buf).expect_err("single flat entry aliases the wrapped shape");
     }
 }
