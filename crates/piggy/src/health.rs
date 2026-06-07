@@ -534,6 +534,15 @@ mod tests {
         };
         let results = evaluate(&probes);
         assert!(matches!(results[0].status, Status::Fail));
+        // the service failure must not cascade to any other point
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r.status, Status::Fail))
+                .count(),
+            1
+        );
+        assert_eq!(exit_code(&results), 1);
     }
 
     /// Matrix row 9: no unit installed (manual agent setups) — point 1
@@ -557,9 +566,16 @@ mod tests {
             is_socket: false,
             stat_detail: "regular file".into(),
         };
+        // gather's contract: the agent is only probed when the socket
+        // resolved AND is_socket, so these are always None here.
+        probes.agent = None;
+        probes.extensions = None;
         let results = evaluate(&probes);
         assert!(matches!(results[1].status, Status::Pass));
         assert!(matches!(results[2].status, Status::Fail));
+        assert!(matches!(results[3].status, Status::Skip(_)));
+        assert!(matches!(results[4].status, Status::Skip(_)));
+        assert!(matches!(results[8].status, Status::Skip(_)));
     }
 
     /// exit code: 0 iff no Fail. Skip counts as ok.
