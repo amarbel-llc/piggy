@@ -1140,7 +1140,11 @@ mod tests {
     /// TAP sink: version line, 1..3 plan, points with SKIP directives,
     /// YAML diags on failures (always) and not on passes (non-verbose).
     /// TapSink builds a plain (colorless, locale-free) writer, so the
-    /// full output is deterministic and pinned byte-for-byte.
+    /// full output is deterministic and pinned byte-for-byte. NOTE: the
+    /// YAML interior quoting (`key: "value"`) is tap-dancer's
+    /// write_yaml_value_field implementation detail, not a spec
+    /// guarantee — if a tap-dancer bump changes quote style, update the
+    /// YAML lines here (the structure lines are TAP-14-stable).
     #[test]
     fn tap_sink_renders_mixed_results() {
         let out = render_tap(false, &sink_fixture());
