@@ -124,6 +124,9 @@ let
         pkgs.git
         pkgs.gnugrep
         pkgs.gnused
+        # jq: needed by t0800-health.bats to validate the tap-ndjson(7)
+        # output of `piggy health --format ndjson`.
+        pkgs.jq
         pkgs.openssl
         # python3: needed by conformance/piggy_askpass.bats — the test
         # uses `python3 -c 'import os; os.setsid(); os.execvp(...)'` to
