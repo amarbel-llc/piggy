@@ -48,6 +48,7 @@ pub enum ServiceProbe {
     /// `LoadState=not-found`: no unit installed (manual agent setups).
     UnitNotFound,
     Unit {
+        load_state: String,
         active_state: String,
         sub_state: String,
         exec_main_status: String,
@@ -122,7 +123,8 @@ fn parse_systemctl_show(stdout: &str) -> ServiceProbe {
     match load_state {
         None => ServiceProbe::NotAvailable("unparseable systemctl output".into()),
         Some("not-found") => ServiceProbe::UnitNotFound,
-        Some(_) => ServiceProbe::Unit {
+        Some(load_state) => ServiceProbe::Unit {
+            load_state: load_state.to_string(),
             active_state,
             sub_state,
             exec_main_status,
@@ -507,6 +509,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
             diags: vec![],
         },
         ServiceProbe::Unit {
+            load_state,
             active_state,
             sub_state,
             exec_main_status,
@@ -518,6 +521,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
                 Status::Fail
             },
             diags: vec![
+                ("load_state".into(), load_state.clone()),
                 ("active_state".into(), active_state.clone()),
                 ("sub_state".into(), sub_state.clone()),
                 ("exec_main_status".into(), exec_main_status.clone()),
@@ -607,12 +611,14 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
             }),
             diags: vec![],
         },
-        // The query extension being unsupported is itself a failure:
-        // piggy decrypts will fail either way (piggy#123 catch).
+        // The query extension being unsupported or failing is itself a
+        // failure: piggy decrypts will fail either way (piggy#123
+        // catch). The error text carries the unsupported-vs-failed
+        // detail under the file-consistent "error" key.
         Some(Err(e)) => CheckResult {
             name: "agent: advertises ecdh extension",
             status: Status::Fail,
-            diags: vec![("query extension unsupported or failed".into(), e.clone())],
+            diags: vec![("error".into(), e.clone())],
         },
         Some(Ok(names)) => CheckResult {
             name: "agent: advertises ecdh extension",
@@ -755,6 +761,7 @@ mod tests {
     fn healthy_probes() -> Probes {
         Probes {
             service: ServiceProbe::Unit {
+                load_state: "loaded".into(),
                 active_state: "active".into(),
                 sub_state: "running".into(),
                 exec_main_status: "0".into(),
@@ -929,6 +936,7 @@ mod tests {
     fn unit_inactive_fails_point_1() {
         let mut probes = healthy_probes();
         probes.service = ServiceProbe::Unit {
+            load_state: "loaded".into(),
             active_state: "failed".into(),
             sub_state: "failed".into(),
             exec_main_status: "1".into(),
@@ -986,16 +994,18 @@ mod tests {
     }
 
     /// systemctl show parser: a loaded, active unit maps to Unit with
-    /// the three states carried through verbatim.
+    /// the four properties carried through verbatim.
     #[test]
     fn parse_systemctl_show_active_unit() {
         let out = "LoadState=loaded\nActiveState=active\nSubState=running\nExecMainStatus=0\n";
         match parse_systemctl_show(out) {
             ServiceProbe::Unit {
+                load_state,
                 active_state,
                 sub_state,
                 exec_main_status,
             } => {
+                assert_eq!(load_state, "loaded");
                 assert_eq!(active_state, "active");
                 assert_eq!(sub_state, "running");
                 assert_eq!(exec_main_status, "0");
@@ -1052,6 +1062,7 @@ mod tests {
     #[test]
     fn enrich_unparseable_with_exit_passes_unit_through() {
         let probe = ServiceProbe::Unit {
+            load_state: "loaded".into(),
             active_state: "active".into(),
             sub_state: "running".into(),
             exec_main_status: "0".into(),
