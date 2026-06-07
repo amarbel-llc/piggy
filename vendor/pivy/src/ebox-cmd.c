@@ -1756,13 +1756,19 @@ errf_t *interactive_unlock_ebox(struct ebox *ebox, const char *fn) {
   if (ebox_is_unlocked(ebox))
     return (ERRF_OK);
 
-  /* Try to use the pivy-agent to unlock first if we have one. */
+  /* Try to use the pivy-agent to unlock first if we have one. A PRIMARY
+   * config's parts are independent full-key boxes (1-of-N: any single part's
+   * recipient recovers the whole key), so iterate ALL parts and try each
+   * against the agent — not just part 0. Advancing to the next config only
+   * after every part misses fixes multi-recipient boxes whose first part is a
+   * recipient the agent doesn't hold (piggy #152). */
   config = NULL;
   while ((config = ebox_next_config(ebox, config)) != NULL) {
     tconfig = ebox_config_tpl(config);
-    if (ebox_tpl_config_type(tconfig) == EBOX_PRIMARY) {
-      part = ebox_config_next_part(config, NULL);
-      tpart = ebox_part_tpl(part);
+    if (ebox_tpl_config_type(tconfig) != EBOX_PRIMARY)
+      continue;
+    part = NULL;
+    while ((part = ebox_config_next_part(config, part)) != NULL) {
       errf_free(agerror);
       agerror = local_unlock_agent(ebox_part_box(part));
       if (agerror && !errf_caused_by(agerror, "KeyNotFoundError") &&
@@ -1783,8 +1789,10 @@ errf_t *interactive_unlock_ebox(struct ebox *ebox, const char *fn) {
   config = NULL;
   while ((config = ebox_next_config(ebox, config)) != NULL) {
     tconfig = ebox_config_tpl(config);
-    if (ebox_tpl_config_type(tconfig) == EBOX_PRIMARY) {
-      part = ebox_config_next_part(config, NULL);
+    if (ebox_tpl_config_type(tconfig) != EBOX_PRIMARY)
+      continue;
+    part = NULL;
+    while ((part = ebox_config_next_part(config, part)) != NULL) {
       tpart = ebox_part_tpl(part);
       error = local_unlock(ebox_part_box(part), ebox_tpl_part_cak(tpart),
                            ebox_tpl_part_name(tpart));
@@ -1844,11 +1852,24 @@ again:
   }
   tconfig = ebox_config_tpl(config);
   if (ebox_tpl_config_type(tconfig) == EBOX_PRIMARY) {
-    part = ebox_config_next_part(config, NULL);
-    tpart = ebox_part_tpl(part);
-    release_context();
-    error = local_unlock(ebox_part_box(part), ebox_tpl_part_cak(tpart),
-                         ebox_tpl_part_name(tpart));
+    /* Try every part (1-of-N independent full-key boxes; piggy #152), not
+     * just part 0. Only warn / retry / propagate after all parts of the
+     * chosen config fail. `release_context()` per attempt mirrors the
+     * `partagain:` loop above so each local_unlock re-enumerates fresh. */
+    error = errf("NotFoundError", NULL,
+                 "config %c has no parts", a->a_key);
+    part = NULL;
+    while ((part = ebox_config_next_part(config, part)) != NULL) {
+      tpart = ebox_part_tpl(part);
+      release_context();
+      errf_free(error);
+      error = local_unlock(ebox_part_box(part), ebox_tpl_part_cak(tpart),
+                           ebox_tpl_part_name(tpart));
+      if (error == ERRF_OK)
+        break;
+      if (!errf_caused_by(error, "NotFoundError"))
+        break;
+    }
     if (error) {
       warnfx(error, "failed to activate config %c", a->a_key);
       if (nconfigs == 1) {
