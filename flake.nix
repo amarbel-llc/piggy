@@ -166,6 +166,20 @@
         ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs-master.pcsclite ];
         rustNativeBuildInputs = [ pkgs.pkg-config ];
 
+        # Shared cargoLock attrs for every buildRustPackage derivation in
+        # this flake. They all vendor from the same Cargo.lock, so git-dep
+        # outputHashes must stay identical — buildRustPackage fetches every
+        # git dep in the lock file regardless of which workspace package is
+        # built (fibby doesn't depend on tap-dancer but still needs the
+        # hash). Factored here so a tap-dancer bump (or any future git dep)
+        # only needs one edit.
+        sharedCargoLock = {
+          lockFile = ./Cargo.lock;
+          outputHashes = {
+            "tap-dancer-0.1.12" = "sha256-tZ30ATmSKh10fY8hRwH+ZY+Hz0Pvpg7/yA9chYSdlvI=";
+          };
+        };
+
         piggy-rs = pkgs.rustPlatform.buildRustPackage {
           pname = "piggy-rs";
           version = "0.1.0";
@@ -186,12 +200,7 @@
               || pkgs.lib.hasPrefix "crates" rel;
           };
 
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            outputHashes = {
-              "tap-dancer-0.1.12" = "sha256-tZ30ATmSKh10fY8hRwH+ZY+Hz0Pvpg7/yA9chYSdlvI=";
-            };
-          };
+          cargoLock = sharedCargoLock;
 
           buildInputs = rustBuildInputs;
           nativeBuildInputs = rustNativeBuildInputs;
@@ -244,12 +253,7 @@
               || pkgs.lib.hasPrefix "crates" rel;
           };
 
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            outputHashes = {
-              "tap-dancer-0.1.12" = "sha256-tZ30ATmSKh10fY8hRwH+ZY+Hz0Pvpg7/yA9chYSdlvI=";
-            };
-          };
+          cargoLock = sharedCargoLock;
 
           # Build only the fibby crate (the workspace builds piggy etc. as
           # a side effect via piggy-rs; this keeps the artifact narrow).
