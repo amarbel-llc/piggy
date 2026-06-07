@@ -319,6 +319,103 @@ pub fn exit_code(results: &[CheckResult]) -> i32 {
     }
 }
 
+/// Render a full health run (the 9 [`CheckResult`]s from [`evaluate`])
+/// to an output stream. Two implementations: [`TapSink`] (TAP-14 text,
+/// tty) and [`NdjsonSink`] (tap-ndjson(7) records, non-tty / `--format
+/// ndjson`).
+pub trait HealthSink {
+    fn render(&mut self, results: &[CheckResult]) -> std::io::Result<()>;
+}
+
+/// TAP-14 text sink. Builds a plain (colorless, locale-free)
+/// `tap_dancer::TapWriter` so the output is deterministic; tty
+/// color/locale auto-detection is the dispatch layer's concern (Task 8
+/// can switch to `Reporter::auto` / `TapWriterBuilder::auto` for the
+/// interactive path).
+pub struct TapSink<W: std::io::Write> {
+    w: W,
+    verbose: bool,
+}
+
+impl<W: std::io::Write> TapSink<W> {
+    pub fn new(w: W, verbose: bool) -> Self {
+        Self { w, verbose }
+    }
+}
+
+impl<W: std::io::Write> HealthSink for TapSink<W> {
+    fn render(&mut self, results: &[CheckResult]) -> std::io::Result<()> {
+        let mut rep =
+            tap_dancer::Reporter::Tap(tap_dancer::TapWriterBuilder::new(&mut self.w).build()?);
+        render_into(&mut rep, results, self.verbose)
+    }
+}
+
+/// tap-ndjson(7) sink: plan record, one test record per point (skip
+/// reason as the directive, diags as the diagnostics map), and the
+/// spec-mandatory trailing summary record.
+pub struct NdjsonSink<W: std::io::Write> {
+    w: W,
+    verbose: bool,
+}
+
+impl<W: std::io::Write> NdjsonSink<W> {
+    pub fn new(w: W, verbose: bool) -> Self {
+        Self { w, verbose }
+    }
+}
+
+impl<W: std::io::Write> HealthSink for NdjsonSink<W> {
+    fn render(&mut self, results: &[CheckResult]) -> std::io::Result<()> {
+        let mut rep = tap_dancer::Reporter::Ndjson(tap_dancer::NdjsonWriter::new(&mut self.w));
+        render_into(&mut rep, results, self.verbose)
+    }
+}
+
+/// Shared point-emission loop over tap-dancer's format-dispatching
+/// `Reporter`. Failures always carry their diag block; passes only
+/// under verbose (the [`CheckResult::diags`] contract). Diag values
+/// pass through as JSON strings deliberately — `CheckResult` diags are
+/// `(String, String)` by contract and sniffing `"0"` into the integer
+/// `0` would silently change the ndjson type surface; out of scope.
+///
+/// Skips: tap-dancer's `skip(desc, reason)` carries no diagnostics, so
+/// a Skip's diags are not expressible even under verbose. `evaluate`
+/// never attaches diags to a Skip, so nothing is lost in practice.
+///
+/// `finish()` is required on the ndjson side (summary record); on the
+/// TAP side it is the idempotent trailing plan, a no-op after
+/// `plan_ahead`.
+fn render_into(
+    rep: &mut tap_dancer::Reporter,
+    results: &[CheckResult],
+    verbose: bool,
+) -> std::io::Result<()> {
+    rep.plan_ahead(results.len())?;
+    for r in results {
+        let diags: Vec<(&str, serde_json::Value)> = r
+            .diags
+            .iter()
+            .map(|(k, v)| (k.as_str(), serde_json::Value::String(v.clone())))
+            .collect();
+        match &r.status {
+            Status::Pass if verbose && !diags.is_empty() => {
+                rep.ok_diag(r.name, &diags)?;
+            }
+            Status::Pass => {
+                rep.ok(r.name)?;
+            }
+            Status::Fail => {
+                rep.not_ok_diag(r.name, &diags)?;
+            }
+            Status::Skip(reason) => {
+                rep.skip(r.name, reason)?;
+            }
+        }
+    }
+    rep.finish()
+}
+
 /// Skip reason for agent-side points when the agent was never probed,
 /// derived from how far the socket probe got. The `is_socket: true`
 /// arm shouldn't occur under gather's contract (a good socket means
@@ -994,6 +1091,152 @@ mod tests {
             missing_detail.contains("does not exist"),
             "detail: {missing_detail}"
         );
+    }
+
+    // ---- HealthSink rendering ----
+
+    /// Small mixed fixture for sink tests: Pass-with-diags,
+    /// Fail-with-diags, Skip-with-reason. Mirrors what evaluate
+    /// produces (failures always carry diags; skips never do).
+    fn sink_fixture() -> Vec<CheckResult> {
+        vec![
+            CheckResult {
+                name: "agent: socket resolved",
+                status: Status::Pass,
+                diags: vec![
+                    ("source".into(), "PIGGY_AUTH_SOCK".into()),
+                    ("path".into(), "/run/user/1000/piggy-agent.sock".into()),
+                ],
+            },
+            CheckResult {
+                name: "agent: answers request_identities",
+                status: Status::Fail,
+                diags: vec![("error".into(), "connection refused".into())],
+            },
+            CheckResult {
+                name: "card: key-management slot 9D populated",
+                status: Status::Skip("no card attached".into()),
+                diags: vec![],
+            },
+        ]
+    }
+
+    fn render_tap(verbose: bool, results: &[CheckResult]) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        TapSink::new(&mut buf, verbose).render(results).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn render_ndjson(verbose: bool, results: &[CheckResult]) -> Vec<serde_json::Value> {
+        let mut buf: Vec<u8> = Vec::new();
+        NdjsonSink::new(&mut buf, verbose).render(results).unwrap();
+        String::from_utf8(buf)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("each line parses as JSON"))
+            .collect()
+    }
+
+    /// TAP sink: version line, 1..3 plan, points with SKIP directives,
+    /// YAML diags on failures (always) and not on passes (non-verbose).
+    /// TapSink builds a plain (colorless, locale-free) writer, so the
+    /// full output is deterministic and pinned byte-for-byte.
+    #[test]
+    fn tap_sink_renders_mixed_results() {
+        let out = render_tap(false, &sink_fixture());
+        assert_eq!(
+            out,
+            "TAP version 14\n\
+1..3\n\
+ok 1 - agent: socket resolved\n\
+not ok 2 - agent: answers request_identities\n\
+\x20 ---\n\
+\x20 error: \"connection refused\"\n\
+\x20 ...\n\
+ok 3 - card: key-management slot 9D populated # SKIP no card attached\n"
+        );
+    }
+
+    /// TAP sink, verbose: passes carry their YAML diag block too.
+    #[test]
+    fn tap_sink_verbose_adds_diags_on_passes() {
+        let out = render_tap(true, &sink_fixture());
+        assert_eq!(
+            out,
+            "TAP version 14\n\
+1..3\n\
+ok 1 - agent: socket resolved\n\
+\x20 ---\n\
+\x20 source: \"PIGGY_AUTH_SOCK\"\n\
+\x20 path: \"/run/user/1000/piggy-agent.sock\"\n\
+\x20 ...\n\
+not ok 2 - agent: answers request_identities\n\
+\x20 ---\n\
+\x20 error: \"connection refused\"\n\
+\x20 ...\n\
+ok 3 - card: key-management slot 9D populated # SKIP no card attached\n"
+        );
+    }
+
+    /// ndjson sink: one JSON object per line; first = plan record, then
+    /// one test record per point (skip reason + diagnostics map), last =
+    /// summary record per tap-ndjson(7). Field assertions rather than
+    /// byte-equality: tap-dancer owns field ordering.
+    #[test]
+    fn ndjson_sink_renders_records_per_tap_ndjson_7() {
+        let lines = render_ndjson(false, &sink_fixture());
+        assert_eq!(lines.len(), 5, "plan + 3 tests + summary");
+
+        assert_eq!(lines[0]["type"], "plan");
+        assert_eq!(lines[0]["count"], 3);
+
+        assert_eq!(lines[1]["type"], "test");
+        assert_eq!(lines[1]["n"], 1);
+        assert_eq!(lines[1]["description"], "agent: socket resolved");
+        assert_eq!(lines[1]["ok"], true);
+        assert_eq!(
+            lines[1]["diagnostic"],
+            serde_json::Value::Null,
+            "pass diags only render under verbose"
+        );
+        // Direct producer: no source line (tap-ndjson(7) line-0 rule).
+        assert_eq!(lines[1]["line"], 0);
+
+        assert_eq!(lines[2]["ok"], false);
+        assert_eq!(lines[2]["diagnostic"]["error"], "connection refused");
+
+        assert_eq!(lines[3]["ok"], true);
+        assert_eq!(lines[3]["directive"]["kind"], "skip");
+        assert_eq!(lines[3]["directive"]["reason"], "no card attached");
+
+        let summary = &lines[4];
+        assert_eq!(summary["type"], "summary");
+        assert_eq!(summary["passed"], 1);
+        assert_eq!(summary["failed"], 1);
+        assert_eq!(summary["skipped"], 1);
+        assert_eq!(summary["total"], 3);
+        assert_eq!(summary["plan_count"], 3);
+        assert_eq!(summary["bailed"], false);
+    }
+
+    /// ndjson sink, verbose: pass points carry their diagnostics map,
+    /// with values passed through as JSON strings (no int sniffing —
+    /// CheckResult diags are (String, String) by contract).
+    #[test]
+    fn ndjson_sink_verbose_adds_diags_on_passes() {
+        let lines = render_ndjson(true, &sink_fixture());
+        assert_eq!(lines[1]["diagnostic"]["source"], "PIGGY_AUTH_SOCK");
+        assert_eq!(
+            lines[1]["diagnostic"]["path"],
+            "/run/user/1000/piggy-agent.sock"
+        );
+        // String pass-through: a numeric-looking diag value stays a
+        // JSON string.
+        let mut results = sink_fixture();
+        results[0].diags = vec![("identities".into(), "0".into())];
+        let lines = render_ndjson(true, &results);
+        assert_eq!(lines[1]["diagnostic"]["identities"], "0");
+        assert!(lines[1]["diagnostic"]["identities"].is_string());
     }
 
     /// exit code: 0 iff no Fail. Skip counts as ok.
