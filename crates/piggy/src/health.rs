@@ -154,14 +154,29 @@ fn probe_service() -> ServiceProbe {
     // Lossy UTF-8 is safe: invalid bytes in unit state names are
     // implausible, and the conservative parser maps any resulting
     // garbage to NotAvailable anyway.
-    match parse_systemctl_show(&String::from_utf8_lossy(&output.stdout)) {
-        ServiceProbe::NotAvailable(_) if !output.status.success() => {
-            ServiceProbe::NotAvailable(format!(
-                "systemctl failed ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
-        }
+    enrich_unparseable_with_exit(
+        parse_systemctl_show(&String::from_utf8_lossy(&output.stdout)),
+        output.status.success(),
+        &output.status.to_string(),
+        &output.stderr,
+    )
+}
+
+/// When the parse degraded to NotAvailable and systemctl itself exited
+/// non-zero, fold the exit status + stderr into the reason (covers the
+/// "Failed to connect to bus" no-user-manager case). Pure: any other
+/// probe — or a zero exit — passes through untouched.
+fn enrich_unparseable_with_exit(
+    probe: ServiceProbe,
+    success: bool,
+    exit_desc: &str,
+    stderr: &[u8],
+) -> ServiceProbe {
+    match probe {
+        ServiceProbe::NotAvailable(_) if !success => ServiceProbe::NotAvailable(format!(
+            "systemctl failed ({exit_desc}): {}",
+            String::from_utf8_lossy(stderr).trim()
+        )),
         probe => probe,
     }
 }
@@ -176,6 +191,21 @@ pub fn exit_code(results: &[CheckResult]) -> i32 {
         1
     } else {
         0
+    }
+}
+
+/// Skip reason for agent-side points when the agent was never probed,
+/// derived from how far the socket probe got. The `is_socket: true`
+/// arm shouldn't occur under gather's contract (a good socket means
+/// the agent IS probed), but evaluate is pure and must not panic on
+/// any input — "socket missing" is the sensible fallback.
+fn socket_skip_reason(socket: &SocketProbe) -> String {
+    match socket {
+        SocketProbe::Unresolved => "socket unresolved".into(),
+        SocketProbe::Resolved {
+            is_socket: false, ..
+        } => "path is not a socket".into(),
+        SocketProbe::Resolved { .. } => "socket missing".into(),
     }
 }
 
@@ -263,7 +293,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     out.push(match &probes.agent {
         None => CheckResult {
             name: "agent: answers request_identities",
-            status: Status::Skip("socket missing".into()),
+            status: Status::Skip(socket_skip_reason(&probes.socket)),
             diags: vec![],
         },
         Some(Err(e)) => CheckResult {
@@ -293,7 +323,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
         None => CheckResult {
             name: "agent: advertises ecdh extension",
             status: Status::Skip(match &probes.agent {
-                None => "socket missing".into(),
+                None => socket_skip_reason(&probes.socket),
                 Some(_) => "agent did not answer".into(),
             }),
             diags: vec![],
@@ -498,14 +528,21 @@ mod tests {
     }
 
     /// Unresolved socket fails point 2 and SKIPs every dependent
-    /// agent-side point (3, 4, 5, 9).
+    /// agent-side point (3, 4, 5, 9) — with the skip reason naming the
+    /// unresolved socket, not a missing one.
     #[test]
     fn unresolved_socket_skips_dependents() {
         let results = evaluate(&empty_probes());
         assert!(matches!(results[1].status, Status::Fail));
         assert!(matches!(results[2].status, Status::Skip(_)));
-        assert!(matches!(results[3].status, Status::Skip(_)));
-        assert!(matches!(results[4].status, Status::Skip(_)));
+        match &results[3].status {
+            Status::Skip(reason) => assert_eq!(reason, "socket unresolved"),
+            _ => panic!("expected Skip for point 4"),
+        }
+        match &results[4].status {
+            Status::Skip(reason) => assert_eq!(reason, "socket unresolved"),
+            _ => panic!("expected Skip for point 5"),
+        }
         assert!(matches!(results[8].status, Status::Skip(_)));
     }
 
@@ -658,8 +695,14 @@ mod tests {
         let results = evaluate(&probes);
         assert!(matches!(results[1].status, Status::Pass));
         assert!(matches!(results[2].status, Status::Fail));
-        assert!(matches!(results[3].status, Status::Skip(_)));
-        assert!(matches!(results[4].status, Status::Skip(_)));
+        match &results[3].status {
+            Status::Skip(reason) => assert_eq!(reason, "path is not a socket"),
+            _ => panic!("expected Skip for point 4"),
+        }
+        match &results[4].status {
+            Status::Skip(reason) => assert_eq!(reason, "path is not a socket"),
+            _ => panic!("expected Skip for point 5"),
+        }
         assert!(matches!(results[8].status, Status::Skip(_)));
     }
 
@@ -691,6 +734,53 @@ mod tests {
             parse_systemctl_show(out),
             ServiceProbe::UnitNotFound
         ));
+    }
+
+    /// systemctl show parser: empty output carries no LoadState, so the
+    /// conservative path is NotAvailable (SKIP), never a bogus Unit.
+    #[test]
+    fn parse_systemctl_show_empty_input_is_not_available() {
+        assert!(matches!(
+            parse_systemctl_show(""),
+            ServiceProbe::NotAvailable(_)
+        ));
+    }
+
+    /// Exit-status enrichment: an unparseable probe + non-zero exit
+    /// folds the exit description and stderr text into the reason.
+    #[test]
+    fn enrich_unparseable_with_exit_folds_status_and_stderr() {
+        let probe = ServiceProbe::NotAvailable("unparseable systemctl output".into());
+        match enrich_unparseable_with_exit(
+            probe,
+            false,
+            "exit status: 1",
+            b"Failed to connect to bus: No medium found\n",
+        ) {
+            ServiceProbe::NotAvailable(reason) => {
+                assert!(reason.contains("exit status: 1"), "reason: {reason}");
+                assert!(
+                    reason.contains("Failed to connect to bus: No medium found"),
+                    "reason: {reason}"
+                );
+            }
+            _ => panic!("expected NotAvailable"),
+        }
+    }
+
+    /// Exit-status enrichment: a parseable Unit result passes through
+    /// untouched regardless of exit status.
+    #[test]
+    fn enrich_unparseable_with_exit_passes_unit_through() {
+        let probe = ServiceProbe::Unit {
+            active_state: "active".into(),
+            sub_state: "running".into(),
+            exec_main_status: "0".into(),
+        };
+        match enrich_unparseable_with_exit(probe, false, "exit status: 1", b"noise") {
+            ServiceProbe::Unit { active_state, .. } => assert_eq!(active_state, "active"),
+            _ => panic!("expected Unit to pass through"),
+        }
     }
 
     /// exit code: 0 iff no Fail. Skip counts as ok.
