@@ -526,11 +526,10 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         return 1;
     };
 
-    // The first ready ebox's PRIMARY config[0].part[0] tells us
-    // which recipient pubkey to find on a card. Match by SEC1-
-    // uncompressed pubkey bytes (the form `unlock_ebox` will hand
-    // BatchOracle later, post-decompress).
-    let (target_uncompressed, target_curve) = match select_target_pubkey(&preflight[first_idx]) {
+    // The first ready ebox's PRIMARY config lists one or more recipient
+    // pubkeys (1-of-N). Collect them ALL; we'll open the batch session
+    // against whichever attached card matches ANY of them (piggy #153).
+    let targets = match primary_part_targets(&preflight[first_idx]) {
         Ok(v) => v,
         Err(diag) => {
             let _ = out.bail_out(&format!(
@@ -541,8 +540,10 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         }
     };
 
-    // Step 5: enumerate connected PIV tokens; pick the first one
-    // whose 9D slot pubkey matches.
+    // Step 5: enumerate connected PIV tokens; pick the first whose 9D
+    // slot pubkey matches any of the ebox's recipients. The chosen
+    // card's own (pubkey, curve) configures BatchOracle — it equals the
+    // recipient pubkey of whichever part the card satisfies.
     let ctx = match PivContext::new() {
         Ok(c) => c,
         Err(e) => {
@@ -557,26 +558,12 @@ pub fn run(args: ShowBatchArgs) -> i32 {
             return 1;
         }
     };
-    let mut chosen: Option<PivToken> = None;
     let target_slot = piggy_box::template::DEFAULT_SLOT;
-    for token in tokens {
-        let slot = match token.read_slot(target_slot) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let candidate = match slot.public_key().key_data() {
-            KeyData::Ecdsa(EcdsaPublicKey::NistP256(p)) => p.as_bytes().to_vec(),
-            KeyData::Ecdsa(EcdsaPublicKey::NistP384(p)) => p.as_bytes().to_vec(),
-            _ => continue,
-        };
-        if candidate == target_uncompressed {
-            chosen = Some(token);
-            break;
-        }
-    }
-    let Some(mut token) = chosen else {
-        let _ =
-            out.bail_out("no attached PIV card has a 9D slot matching the first ebox's recipient");
+    let Some((mut token, (target_uncompressed, target_curve))) =
+        select_card_for_targets(tokens, &targets, target_slot)
+    else {
+        let _ = out
+            .bail_out("no attached PIV card has a 9D slot matching any of the ebox's recipients");
         return 1;
     };
 
@@ -823,18 +810,21 @@ fn pass_name_to_ebox_path(store_root: &Path, raw: &str) -> PathBuf {
     }
 }
 
-/// Pull the target recipient SEC1-uncompressed pubkey + curve from the
-/// first PRIMARY config's first part. show-batch picks one (card,
-/// slot) pair for the whole batch by matching this pubkey against
-/// connected cards' 9D slots; the heterogeneous-batch case (different
-/// recipients per ebox) is out of scope by RFC 0005 §Single-card
-/// Operation and falls into the bail-out path naturally.
-fn select_target_pubkey(
-    outcome: &PreflightOutcome,
-) -> Result<(Vec<u8>, piggy_box::piv_box::EcCurve), Diagnostic> {
+/// One PRIMARY-config recipient: its SEC1-uncompressed pubkey + curve.
+type RecipientTarget = (Vec<u8>, piggy_box::piv_box::EcCurve);
+
+/// Collect EVERY PRIMARY-config recipient (uncompressed pubkey + curve)
+/// from the first ready ebox. show-batch picks one (card, slot) pair for
+/// the whole batch by matching an attached card's 9D pubkey against
+/// **any** of these — not just part[0] — so a multi-recipient (1-of-N)
+/// box decrypts whenever any one of its recipients' cards is present
+/// (piggy #153). A part whose recipient pubkey won't decompress is
+/// skipped rather than failing the whole batch; only an ebox with no
+/// usable PRIMARY recipient at all is a hard error.
+fn primary_part_targets(outcome: &PreflightOutcome) -> Result<Vec<RecipientTarget>, Diagnostic> {
     let stream = match outcome {
         PreflightOutcome::Ready { stream, .. } => stream,
-        _ => unreachable!("select_target_pubkey called on a Failed outcome"),
+        _ => unreachable!("primary_part_targets called on a Failed outcome"),
     };
     let primary = stream
         .ebox
@@ -846,19 +836,66 @@ fn select_target_pubkey(
             message: "ebox has no PRIMARY config".into(),
             retryable: None,
         })?;
-    let part = primary.parts.first().ok_or_else(|| Diagnostic {
-        kind: DiagnosticKind::DecryptFailed,
-        message: "PRIMARY config has no parts".into(),
-        retryable: None,
-    })?;
-    let curve = part.piv_box.curve;
-    let recipient = &part.piv_box.recipient_pubkey;
-    let uncompressed = canonicalize_uncompressed(recipient).map_err(|e| Diagnostic {
-        kind: DiagnosticKind::DecryptFailed,
-        message: format!("decompress recipient pubkey: {e}"),
-        retryable: None,
-    })?;
-    Ok((uncompressed, curve))
+    let targets: Vec<RecipientTarget> = primary
+        .parts
+        .iter()
+        .filter_map(|part| {
+            canonicalize_uncompressed(&part.piv_box.recipient_pubkey)
+                .ok()
+                .map(|uncompressed| (uncompressed, part.piv_box.curve))
+        })
+        .collect();
+    if targets.is_empty() {
+        return Err(Diagnostic {
+            kind: DiagnosticKind::DecryptFailed,
+            message: "PRIMARY config has no usable recipient parts".into(),
+            retryable: None,
+        });
+    }
+    Ok(targets)
+}
+
+/// Pick the attached card to open the batch session against: the first
+/// enumerated card whose 9D-slot pubkey matches **any** of the ebox's
+/// PRIMARY recipients. Returns the chosen token plus the card's own
+/// (uncompressed pubkey, curve) — which is what `BatchOracle` is
+/// configured with, and equals the recipient pubkey of whichever part
+/// that card satisfies. `None` when no attached card matches any part.
+fn select_card_for_targets(
+    tokens: Vec<PivToken>,
+    targets: &[RecipientTarget],
+    target_slot: u8,
+) -> Option<(PivToken, RecipientTarget)> {
+    for token in tokens {
+        let Ok(slot) = token.read_slot(target_slot) else {
+            continue;
+        };
+        let (candidate, curve) = match slot.public_key().key_data() {
+            KeyData::Ecdsa(EcdsaPublicKey::NistP256(p)) => {
+                (p.as_bytes().to_vec(), piggy_box::piv_box::EcCurve::NistP256)
+            }
+            KeyData::Ecdsa(EcdsaPublicKey::NistP384(p)) => {
+                (p.as_bytes().to_vec(), piggy_box::piv_box::EcCurve::NistP384)
+            }
+            _ => continue,
+        };
+        if candidate_matches_any(&candidate, targets) {
+            return Some((token, (candidate, curve)));
+        }
+    }
+    None
+}
+
+/// True when `candidate` (a card's SEC1-uncompressed 9D pubkey) equals
+/// the recipient pubkey of any target part. The pure matching core of
+/// [`select_card_for_targets`], split out so it's unit-testable without
+/// a live PIV token. Curve is not compared here: pubkey-bytes equality
+/// is decisive (two curves can't share an uncompressed encoding), and
+/// the matched part's curve travels with its target tuple.
+fn candidate_matches_any(candidate: &[u8], targets: &[RecipientTarget]) -> bool {
+    targets
+        .iter()
+        .any(|(pubkey, _)| pubkey.as_slice() == candidate)
 }
 
 /// Per-ebox failure carrying both the diagnostic to emit and a
@@ -870,12 +907,13 @@ struct DecryptError {
     fatal_for_batch: bool,
 }
 
-/// Pre-flight: if the ebox's first PRIMARY recipient uses a curve
-/// different from the chosen card's slot, return a single-line
-/// description so [`decrypt_one`] can surface it as `decrypt-failed`
-/// without calling `unlock_ebox`. Returns `None` when the curves
-/// match or when the ebox has no PRIMARY config (the latter would
-/// surface its own error from `unlock_ebox` shortly after).
+/// Pre-flight: if NO PRIMARY recipient uses the chosen card's slot
+/// curve, return a single-line description so [`decrypt_one`] can
+/// surface it as `decrypt-failed` without calling `unlock_ebox`.
+/// Returns `None` when any part's curve matches (the card can decrypt
+/// that part) or when the ebox has no PRIMARY config (the latter would
+/// surface its own error from `unlock_ebox` shortly after). Considers
+/// every part, not just part[0] (piggy #153).
 ///
 /// Heterogeneous-curve batches are rare — within a single piggy
 /// store they only occur mid-migration when one folder's
@@ -892,15 +930,23 @@ fn check_curve_mismatch(
         .configs
         .iter()
         .find(|c| c.config_type == EboxConfigType::Primary)?;
-    let part = primary.parts.first()?;
-    if part.piv_box.curve == target_curve {
+    // No part is part[0]-privileged (piggy #153): the decrypt can use
+    // any part whose recipient is on the chosen card, so this is only a
+    // real mismatch when NO part matches the card's curve. Report the
+    // first part's curve as a representative in the message.
+    if primary
+        .parts
+        .iter()
+        .any(|part| part.piv_box.curve == target_curve)
+    {
         return None;
     }
+    let representative = primary.parts.first()?;
     Some(format!(
         "ebox recipient curve {} does not match the chosen card's slot curve {} \
          (heterogeneous batch — re-encrypt this ebox or run show-batch with a \
          matching card)",
-        part.piv_box.curve.wire_name(),
+        representative.piv_box.curve.wire_name(),
         target_curve.wire_name(),
     ))
 }
@@ -1670,5 +1716,101 @@ mod tests {
 
         let stream = make_stream_for_curve(EcCurve::NistP384);
         assert!(super::check_curve_mismatch(&stream, EcCurve::NistP384).is_none());
+    }
+
+    /// Build a PRIMARY config with two parts on the two given curves
+    /// (one recipient each). Used to test that card-selection /
+    /// curve-checks consider EVERY part, not just part[0] (piggy #153).
+    fn make_two_part_stream(
+        c0: piggy_box::piv_box::EcCurve,
+        c1: piggy_box::piv_box::EcCurve,
+    ) -> piggy_box::stream::EboxStream {
+        use openssl::bn::BigNumContext;
+        use openssl::ec::{EcGroup, EcKey, PointConversionForm};
+        use piggy_box::stream::EboxStream;
+        use piggy_box::template::{DEFAULT_SLOT, EboxTplConfig, EboxTplPart};
+        use piggy_box::{EboxConfigType, EboxTemplate};
+
+        let mk_part = |curve: piggy_box::piv_box::EcCurve, name: &str| {
+            let group = EcGroup::from_curve_name(curve.nid()).unwrap();
+            let priv_key = EcKey::generate(&group).unwrap();
+            let mut ctx = BigNumContext::new().unwrap();
+            let pubkey = priv_key
+                .public_key()
+                .to_bytes(&group, PointConversionForm::COMPRESSED, &mut ctx)
+                .unwrap();
+            EboxTplPart {
+                guid: None,
+                slot: DEFAULT_SLOT,
+                name: Some(name.into()),
+                pubkey,
+                pubkey_curve: curve,
+                cak: None,
+            }
+        };
+
+        let tpl = EboxTemplate {
+            version: 1,
+            configs: vec![EboxTplConfig {
+                config_type: EboxConfigType::Primary,
+                n: 1,
+                parts: vec![
+                    mk_part(c0, "piggy-test:two-part-0"),
+                    mk_part(c1, "piggy-test:two-part-1"),
+                ],
+            }],
+        };
+        EboxStream::new(&tpl).expect("stream creation should succeed")
+    }
+
+    /// #153: a multi-recipient box is NOT a curve mismatch when the
+    /// chosen card's curve matches ANY part — even if part[0]'s curve
+    /// differs. Pre-fix this returned Some(...) because it only looked
+    /// at part[0].
+    #[test]
+    fn curve_mismatch_considers_all_parts_not_just_part0() {
+        use piggy_box::piv_box::EcCurve;
+
+        // part0 = P-256, part1 = P-384.
+        let stream = make_two_part_stream(EcCurve::NistP256, EcCurve::NistP384);
+        // A P-384 card matches part1 → no mismatch (the bug would flag
+        // it because part0 is P-256).
+        assert!(
+            super::check_curve_mismatch(&stream, EcCurve::NistP384).is_none(),
+            "P-384 card should match part1, not be reported as a mismatch"
+        );
+        // A P-256 card matches part0 → no mismatch.
+        assert!(super::check_curve_mismatch(&stream, EcCurve::NistP256).is_none());
+    }
+
+    /// A real mismatch (no part matches the card's curve) still reports.
+    #[test]
+    fn curve_mismatch_reports_when_no_part_matches() {
+        use piggy_box::piv_box::EcCurve;
+
+        // Both parts P-256; a P-384 card matches neither.
+        let stream = make_two_part_stream(EcCurve::NistP256, EcCurve::NistP256);
+        let msg = super::check_curve_mismatch(&stream, EcCurve::NistP384)
+            .expect("no part matches the P-384 card — should report mismatch");
+        assert!(msg.contains("nistp384"), "got: {msg}");
+    }
+
+    /// #153: the pure card-matching predicate matches a candidate
+    /// against ANY target part's recipient pubkey, by bytes.
+    #[test]
+    fn candidate_matches_any_finds_a_later_part() {
+        use piggy_box::piv_box::EcCurve;
+        let part0 = (vec![0x02u8; 33], EcCurve::NistP256);
+        let part1 = (vec![0x03u8; 33], EcCurve::NistP256);
+        let targets = vec![part0, part1];
+
+        // A card whose pubkey equals part1 (not part0) still matches.
+        assert!(super::candidate_matches_any(&[0x03u8; 33], &targets));
+        // part0 matches too.
+        assert!(super::candidate_matches_any(&[0x02u8; 33], &targets));
+        // A pubkey present in neither part does not match.
+        assert!(!super::candidate_matches_any(&[0x04u8; 33], &targets));
+        // Empty target set never matches.
+        assert!(!super::candidate_matches_any(&[0x02u8; 33], &[]));
     }
 }
