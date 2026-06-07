@@ -47,6 +47,7 @@ mod generate;
 mod git;
 mod git_ops;
 mod grep;
+mod health;
 mod init;
 mod insert;
 mod internal_clipboard_restore;
