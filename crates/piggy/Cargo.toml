@@ -50,6 +50,9 @@ libc = "0.2"
 # of use.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# TAP-14 text + tap-ndjson(7) writers for `piggy health`. Git dep on the
+# spec repo's Rust crate; see docs/plans/2026-06-07-piggy-health-design.md.
+tap-dancer = { git = "https://github.com/amarbel-llc/tap", tag = "v0.1.12" }
 
 [dev-dependencies]
 # tokio's test-util feature enables `tokio::time::pause` / `advance` and

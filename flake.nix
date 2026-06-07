@@ -188,6 +188,9 @@
 
           cargoLock = {
             lockFile = ./Cargo.lock;
+            outputHashes = {
+              "tap-dancer-0.1.12" = "sha256-tZ30ATmSKh10fY8hRwH+ZY+Hz0Pvpg7/yA9chYSdlvI=";
+            };
           };
 
           buildInputs = rustBuildInputs;
@@ -243,6 +246,9 @@
 
           cargoLock = {
             lockFile = ./Cargo.lock;
+            outputHashes = {
+              "tap-dancer-0.1.12" = "sha256-tZ30ATmSKh10fY8hRwH+ZY+Hz0Pvpg7/yA9chYSdlvI=";
+            };
           };
 
           # Build only the fibby crate (the workspace builds piggy etc. as
