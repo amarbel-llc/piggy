@@ -2783,3 +2783,31 @@ debug-fibby-generate:
       echo "=== GENERATE FAILED ==="
       exit 1
     fi
+
+# Dump the real launchd state of the piggy-agent agent so the `piggy
+# health` macOS service probe (point 1) can be grounded in actual
+# `launchctl print` output rather than guessed. Read-only: print +
+# list only, no load/unload. Serves the piggy-health darwin-service
+# design loop.
+[macos]
+[group('explore')]
+explore-launchd-piggy-agent label="piggy-agent":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    uid=$(id -u)
+    echo "=== launchctl print gui/$uid/{{label}} ==="
+    launchctl print "gui/$uid/{{label}}" 2>&1 || echo "  (exit $?)"
+    echo
+    echo "=== launchctl list {{label}} (legacy) ==="
+    launchctl list "{{label}}" 2>&1 || echo "  (exit $?)"
+    echo
+    echo "=== launchctl print gui/$uid | grep piggy-agent ==="
+    launchctl print "gui/$uid" 2>&1 | grep -i piggy-agent || echo "  (no match)"
+
+# Run the dev `piggy health -v` against the live local agent/cards so the
+# macOS launchd service probe (point 1) can be eyeballed end-to-end.
+# `-v` forces diags onto passing points; `--format tap` keeps output
+# deterministic regardless of tty. Serves the piggy-health verify loop.
+[group('explore')]
+explore-piggy-health *ARGS:
+    cargo run -q -p piggy -- health -v --format tap {{ARGS}}

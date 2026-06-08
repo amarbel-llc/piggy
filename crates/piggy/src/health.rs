@@ -4,6 +4,11 @@
 //! Split: probe phase (IO, `gather`) → pure `evaluate` → render via
 //! `HealthSink`. All card operations are read-only (enumerate + cert
 //! read); nothing here prompts for a PIN or decrypts.
+//!
+//! Point 1 (the agent service check) probes the OS service manager:
+//! `systemctl --user` on Linux, `launchctl print` on macOS. Both map
+//! onto the shared [`ServiceProbe`] enum; the point name varies by
+//! platform ([`SERVICE_POINT_NAME`]). Other unixes SKIP it.
 
 use std::time::Duration;
 
@@ -14,6 +19,15 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// The extension piggy decrypts require. Built by concatenation so
 /// editing tools cannot mangle the literal (see CLAUDE.md memory).
 pub const ECDH_EXT: &str = concat!("ecdh@", "joyent.com");
+
+/// Point-1 name. Platform-specific because the agent runs under a
+/// different service manager per OS: a systemd `.service` unit on Linux,
+/// a launchd agent on macOS. ndjson consumers keying on the point name
+/// must handle both spellings.
+#[cfg(target_os = "macos")]
+pub const SERVICE_POINT_NAME: &str = "service: piggy-agent launchd agent active";
+#[cfg(not(target_os = "macos"))]
+pub const SERVICE_POINT_NAME: &str = "service: piggy-agent.service active";
 
 /// Output format for `piggy health`, parsed straight from `--format`
 /// (this is the clap `ValueEnum`; main.rs uses it directly rather than
@@ -103,6 +117,7 @@ pub struct Probes {
 /// at all is not `systemctl show` output we understand — that maps to
 /// `NotAvailable` rather than a bogus `Unit`, keeping SKIP as the
 /// graceful-degradation path.
+#[cfg(target_os = "linux")]
 fn parse_systemctl_show(stdout: &str) -> ServiceProbe {
     let mut load_state: Option<&str> = None;
     let mut active_state = String::new();
@@ -175,6 +190,7 @@ fn probe_service() -> ServiceProbe {
 /// non-zero, fold the exit status + stderr into the reason (covers the
 /// "Failed to connect to bus" no-user-manager case). Pure: any other
 /// probe — or a zero exit — passes through untouched.
+#[cfg(target_os = "linux")]
 fn enrich_unparseable_with_exit(
     probe: ServiceProbe,
     success: bool,
@@ -190,9 +206,119 @@ fn enrich_unparseable_with_exit(
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// The launchd label home-manager assigns piggy-agent on macOS. The
+/// `org.nix-community.home.` prefix is added by home-manager's launchd
+/// module to every agent label (the systemd side keeps the bare
+/// `piggy-agent` name); see nix/hm/piggy-agent.nix. A non-home-manager
+/// launchd setup using a different label is reported as UnitNotFound →
+/// SKIP, which is the correct graceful-degradation for a manual setup.
+#[cfg(target_os = "macos")]
+const LAUNCHD_LABEL: &str = "org.nix-community.home.piggy-agent";
+
+/// Probe the piggy-agent launchd job via `launchctl print
+/// gui/<uid>/<label>` (the per-GUI-session domain home-manager loads
+/// user agents into). Thin IO shim over [`parse_launchctl_print`]: a
+/// missing `launchctl` is the which-style NotAvailable failure; the
+/// exit status, stdout, and stderr are all handed to the pure parser,
+/// which decides UnitNotFound (label absent) vs Unit (present) vs
+/// NotAvailable (launchctl errored some other way).
+#[cfg(target_os = "macos")]
 fn probe_service() -> ServiceProbe {
-    ServiceProbe::NotAvailable("service check is Linux-only".into())
+    let uid = unsafe { libc::getuid() };
+    let target = format!("gui/{uid}/{LAUNCHD_LABEL}");
+    let output = match std::process::Command::new("launchctl")
+        .args(["print", &target])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ServiceProbe::NotAvailable("launchctl not found".into());
+        }
+        Err(e) => return ServiceProbe::NotAvailable(format!("launchctl spawn failed: {e}")),
+    };
+    parse_launchctl_print(
+        output.status.success(),
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+/// Parse a `launchctl print gui/<uid>/<label>` result into a
+/// [`ServiceProbe`]. Pure: no IO.
+///
+/// `launchctl print` emits an indented `key = value` block on success.
+/// We map it onto the shared (systemd-shaped) enum so [`evaluate`] needs
+/// no launchd-specific arm:
+///
+/// - **Label absent** — non-zero exit whose stderr says `Could not find
+///   service`, or exit code 113 (launchctl's "service not found"). Maps
+///   to [`ServiceProbe::UnitNotFound`] → SKIP (manual / non-home-manager
+///   agent setups stay green).
+/// - **Other launchctl error** — any other non-zero exit. Maps to
+///   [`ServiceProbe::NotAvailable`] with the exit code + stderr folded
+///   into the reason → SKIP.
+/// - **Label present** (zero exit, recognizable keys) — maps to
+///   [`ServiceProbe::Unit`] with `active_state` pinned to `"active"`.
+///   This encodes the "loaded == healthy" rule: an `OnDemand` launchd
+///   agent is legitimately *loaded but idle* (no live PID) between SSH
+///   requests, so liveness must not key on a running PID — presence in
+///   the domain is the signal. The real launchd `state` (`running` /
+///   `waiting` / …) and `last exit code` ride in `sub_state` /
+///   `exec_main_status` as faithful diags; a truly dead agent is caught
+///   by the socket/identity points (2–5), not here.
+/// - **Zero exit but no recognizable keys** — conservative
+///   [`ServiceProbe::NotAvailable`], mirroring the systemctl
+///   empty-input path: never fabricate a bogus Unit.
+#[cfg(target_os = "macos")]
+fn parse_launchctl_print(
+    success: bool,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> ServiceProbe {
+    if !success {
+        if exit_code == Some(113) || stderr.contains("Could not find service") {
+            return ServiceProbe::UnitNotFound;
+        }
+        let code = exit_code.map_or_else(|| "signal".to_string(), |c| c.to_string());
+        return ServiceProbe::NotAvailable(format!(
+            "launchctl failed (exit {code}): {}",
+            stderr.trim()
+        ));
+    }
+
+    // Indented `key = value` lines (e.g. `\tstate = running`). Trim each
+    // side so leading tabs and the surrounding spaces drop out.
+    let mut state: Option<&str> = None;
+    let mut last_exit: Option<&str> = None;
+    let mut saw_any_key = false;
+    for line in stdout.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        saw_any_key = true;
+        match key {
+            "state" => state = Some(value),
+            "last exit code" => last_exit = Some(value),
+            _ => {}
+        }
+    }
+    if !saw_any_key {
+        return ServiceProbe::NotAvailable("unparseable launchctl output".into());
+    }
+    ServiceProbe::Unit {
+        load_state: "loaded".into(),
+        active_state: "active".into(),
+        sub_state: state.unwrap_or("unknown").to_string(),
+        exec_main_status: last_exit.unwrap_or("unknown").to_string(),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn probe_service() -> ServiceProbe {
+    ServiceProbe::NotAvailable("service check is unsupported on this OS".into())
 }
 
 /// Resolve the agent socket for the health probe: `PIGGY_AUTH_SOCK`
@@ -499,13 +625,13 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     // 1 — service
     out.push(match &probes.service {
         ServiceProbe::NotAvailable(why) => CheckResult {
-            name: "service: piggy-agent.service active",
+            name: SERVICE_POINT_NAME,
             status: Status::Skip(why.clone()),
             diags: vec![],
         },
         ServiceProbe::UnitNotFound => CheckResult {
-            name: "service: piggy-agent.service active",
-            status: Status::Skip("no piggy-agent.service unit installed".into()),
+            name: SERVICE_POINT_NAME,
+            status: Status::Skip("no piggy-agent service unit installed".into()),
             diags: vec![],
         },
         ServiceProbe::Unit {
@@ -514,7 +640,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
             sub_state,
             exec_main_status,
         } => CheckResult {
-            name: "service: piggy-agent.service active",
+            name: SERVICE_POINT_NAME,
             status: if active_state == "active" {
                 Status::Pass
             } else {
@@ -800,7 +926,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "service: piggy-agent.service active",
+                SERVICE_POINT_NAME,
                 "agent: socket resolved",
                 "agent: socket exists",
                 "agent: answers request_identities",
@@ -995,6 +1121,7 @@ mod tests {
 
     /// systemctl show parser: a loaded, active unit maps to Unit with
     /// the four properties carried through verbatim.
+    #[cfg(target_os = "linux")]
     #[test]
     fn parse_systemctl_show_active_unit() {
         let out = "LoadState=loaded\nActiveState=active\nSubState=running\nExecMainStatus=0\n";
@@ -1016,6 +1143,7 @@ mod tests {
 
     /// systemctl show parser: LoadState=not-found (no unit installed)
     /// maps to UnitNotFound regardless of the other keys.
+    #[cfg(target_os = "linux")]
     #[test]
     fn parse_systemctl_show_not_found_unit() {
         let out = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nExecMainStatus=0\n";
@@ -1027,6 +1155,7 @@ mod tests {
 
     /// systemctl show parser: empty output carries no LoadState, so the
     /// conservative path is NotAvailable (SKIP), never a bogus Unit.
+    #[cfg(target_os = "linux")]
     #[test]
     fn parse_systemctl_show_empty_input_is_not_available() {
         assert!(matches!(
@@ -1037,6 +1166,7 @@ mod tests {
 
     /// Exit-status enrichment: an unparseable probe + non-zero exit
     /// folds the exit description and stderr text into the reason.
+    #[cfg(target_os = "linux")]
     #[test]
     fn enrich_unparseable_with_exit_folds_status_and_stderr() {
         let probe = ServiceProbe::NotAvailable("unparseable systemctl output".into());
@@ -1059,6 +1189,7 @@ mod tests {
 
     /// Exit-status enrichment: a parseable Unit result passes through
     /// untouched regardless of exit status.
+    #[cfg(target_os = "linux")]
     #[test]
     fn enrich_unparseable_with_exit_passes_unit_through() {
         let probe = ServiceProbe::Unit {
@@ -1071,6 +1202,94 @@ mod tests {
             ServiceProbe::Unit { active_state, .. } => assert_eq!(active_state, "active"),
             _ => panic!("expected Unit to pass through"),
         }
+    }
+
+    /// launchctl parser: a running agent (verbatim shape from real
+    /// `launchctl print` output) maps to Unit. active_state is pinned to
+    /// "active" (loaded == healthy); the real launchd `state` and `last
+    /// exit code` ride in sub_state / exec_main_status as diags.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_launchctl_print_running_agent() {
+        let out = "\tactive count = 1\n\tstate = running\n\tpid = 970\n\tlast exit code = (never exited)\n";
+        match parse_launchctl_print(true, Some(0), out, "") {
+            ServiceProbe::Unit {
+                load_state,
+                active_state,
+                sub_state,
+                exec_main_status,
+            } => {
+                assert_eq!(load_state, "loaded");
+                assert_eq!(active_state, "active");
+                assert_eq!(sub_state, "running");
+                assert_eq!(exec_main_status, "(never exited)");
+            }
+            _ => panic!("expected Unit"),
+        }
+    }
+
+    /// launchctl parser: an OnDemand agent that is loaded but idle (no
+    /// `pid` line, state=waiting) is still Unit/active — pins the
+    /// "loaded == Pass" contract so a healthy idle agent never FAILs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_launchctl_print_idle_on_demand_is_active() {
+        let out = "\tstate = waiting\n\tlast exit code = 0\n";
+        match parse_launchctl_print(true, Some(0), out, "") {
+            ServiceProbe::Unit {
+                active_state,
+                sub_state,
+                ..
+            } => {
+                assert_eq!(active_state, "active");
+                assert_eq!(sub_state, "waiting");
+            }
+            _ => panic!("expected Unit"),
+        }
+    }
+
+    /// launchctl parser: an absent label (exit 113 + "Could not find
+    /// service" on stderr) maps to UnitNotFound → SKIP. Both signals are
+    /// checked independently; either alone suffices.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_launchctl_print_absent_label_is_not_found() {
+        let stderr = "Could not find service \"org.nix-community.home.piggy-agent\" in domain for user gui: 501\n";
+        assert!(matches!(
+            parse_launchctl_print(false, Some(113), "", stderr),
+            ServiceProbe::UnitNotFound
+        ));
+        // exit 113 alone (stderr stripped) is also sufficient.
+        assert!(matches!(
+            parse_launchctl_print(false, Some(113), "", ""),
+            ServiceProbe::UnitNotFound
+        ));
+    }
+
+    /// launchctl parser: a non-113 launchctl error folds the exit code
+    /// and stderr into a NotAvailable reason → SKIP.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_launchctl_print_other_error_is_not_available() {
+        match parse_launchctl_print(false, Some(1), "", "Bad request.\n") {
+            ServiceProbe::NotAvailable(reason) => {
+                assert!(reason.contains("exit 1"), "reason: {reason}");
+                assert!(reason.contains("Bad request."), "reason: {reason}");
+            }
+            _ => panic!("expected NotAvailable"),
+        }
+    }
+
+    /// launchctl parser: a zero exit with no recognizable `key = value`
+    /// lines is conservatively NotAvailable, never a fabricated Unit
+    /// (mirrors the systemctl empty-input path).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_launchctl_print_unparseable_is_not_available() {
+        assert!(matches!(
+            parse_launchctl_print(true, Some(0), "garbage with no equals signs\n", ""),
+            ServiceProbe::NotAvailable(_)
+        ));
     }
 
     /// resolve_socket honors PIGGY_AUTH_SOCK over SSH_AUTH_SOCK and
