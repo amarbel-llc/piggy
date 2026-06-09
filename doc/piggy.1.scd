@@ -10,6 +10,8 @@ piggy - stores, retrieves, generates, and synchronizes passwords using PIV smart
 
 *piggy list* [*--format* _human_|_ndjson_|_ssh_]
 
+*piggy ssh-copy-id* [*--ids* _PATH_] [_SSH-COPY-ID-OPTIONS_]... [_user_@]_host_
+
 *piggy help*
 
 *piggy version*
@@ -365,6 +367,36 @@ passthroughs for the C pivy binaries:
 	because every recipient slot is ECDH-only and has no
 	_authorized_keys_-style representation.
 
+*ssh-copy-id* [*--ids* _PATH_] [_SSH-COPY-ID-OPTIONS_]... [_user_@]_host_
+	Authorize a whole recipient set for SSH login on a remote host.
+	Reads the PIV slot-9A SSH-auth keys (*piggy-piv_auth-v1* /
+	*ssh_ecdsa_nistp256_pub*) declared in a *piggy-ids*(5) file, renders
+	each as an *ecdsa-sha2-nistp256* _authorized_keys_ line, and hands
+	the whole set to the system *ssh-copy-id*(1) — installing them all on
+	the remote in one invocation.
+
+	The 9D encryption recipients in the same file are ignored; only 9A
+	SSH-auth entries are installed. Rendering is offline (the keys come
+	straight from the file's markl IDs), so no card or PIN is needed.
+
+	*--ids* _PATH_ reads recipients from _PATH_ instead of the store's
+	*piggy-ids* (resolved via *PIGGY_STORE_DIR*). Every other argument —
+	including the _[user@]host_ and any *ssh-copy-id*(1) options (*-p*,
+	*-o*, …) — is forwarded verbatim to *ssh-copy-id*, which is invoked
+	with *-f -i* _<rendered-file>_. *-f* skips ssh-copy-id's
+	already-installed probe (the keys are recipients', not the local
+	agent's).
+
+	If the file declares no 9A keys, the command refuses with guidance
+	rather than invoking *ssh-copy-id*. Discover a card's 9A markl ID
+	with *piggy list --format=human* and add it with *piggy pass
+	recipients add*.
+
+	```
+	piggy ssh-copy-id alice@server.example
+	piggy ssh-copy-id --ids ./team-ids -p 2222 deploy@host
+	```
+
 *help*
 	Show piggy's pass-style usage message.
 
@@ -582,7 +614,7 @@ _EDITOR_
 
 *piggy-agent*(1), *pivy-box*(1), *pivy-tool*(1), *pivy-agent*(1), *git*(1),
 *tree*(1), *tr*(1), *xclip*(1), *wl-clipboard*(1), *qrencode*(1),
-*piggy-piv-slots*(7)
+*ssh-copy-id*(1), *piggy-ids*(5), *piggy-piv-slots*(7)
 
 # AUTHOR
 

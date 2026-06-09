@@ -353,3 +353,37 @@ fn compress_p256_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::
     }
     Ok(compressed)
 }
+
+/// Decompress a 33-byte SEC1-compressed P-256 point and render the
+/// `ecdsa-sha2-nistp256 <base64-blob>` prefix of an OpenSSH
+/// `authorized_keys` line. The caller appends any trailing comment.
+///
+/// Uses openssl (already a direct dep) to decompress and
+/// `piggy_box::agent_ext::ec_point_to_ssh_pubkey_blob` to frame the SSH
+/// wire blob, so byte-for-byte output matches what `ssh-key`'s
+/// `PublicKey::to_bytes` would produce for the same point — verified by
+/// the parity test in `agent_ext::tests`. Returns `Err` (rather than
+/// panicking) when `compressed` is not a valid on-curve P-256 point, so
+/// callers can suppress malformed entries.
+///
+/// This is the shared renderer behind both `piggy list --format=ssh`
+/// (live-card enumeration) and `piggy ssh-copy-id` (offline, from the
+/// markl IDs in a `piggy-ids` file). A `ssh_ecdsa_nistp256_pub` markl
+/// ID's `data()` is exactly the 33-byte compressed point this expects.
+pub fn openssh_authorized_key(compressed: &[u8]) -> Result<String, String> {
+    use openssl::bn::BigNumContext;
+    use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
+    use openssl::nid::Nid;
+    use piggy_box::agent_ext::ec_point_to_ssh_pubkey_blob;
+    use piggy_box::piv_box::EcCurve;
+
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).map_err(|e| e.to_string())?;
+    let mut ctx = BigNumContext::new().map_err(|e| e.to_string())?;
+    let point = EcPoint::from_bytes(&group, compressed, &mut ctx).map_err(|e| e.to_string())?;
+    let uncompressed = point
+        .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+        .map_err(|e| e.to_string())?;
+    let blob = ec_point_to_ssh_pubkey_blob(EcCurve::NistP256, &uncompressed);
+    let b64 = openssl::base64::encode_block(&blob);
+    Ok(format!("ecdsa-sha2-nistp256 {b64}"))
+}

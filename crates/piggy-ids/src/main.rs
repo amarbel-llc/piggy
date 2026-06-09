@@ -229,7 +229,13 @@ fn cmd_diff(current: &Path, desired: &Path) -> Result<ExitCode, DynErr> {
 
 fn cmd_encrypt(path: &Path) -> Result<ExitCode, DynErr> {
     let file = read_recipient_file(path)?;
-    let ids: Vec<MarklId> = file.recipients().iter().map(|r| r.id().clone()).collect();
+    // Only encryption recipients (9D ECDH / age) seed the ebox template.
+    // SSH-auth (9A) entries may share the file but are not keys we can
+    // wrap a secret to; `template_from_recipients` would reject them.
+    let ids: Vec<MarklId> = file
+        .encryption_recipients()
+        .map(|r| r.id().clone())
+        .collect();
 
     let tpl = template_from_recipients(&ids)?;
     let stream = EboxStream::new(&tpl)?;
@@ -822,7 +828,7 @@ fn format_ssh(c: &piggy_ids::Classification) -> Option<String> {
     if !is_ssh_slot(*slot_id) {
         return None;
     }
-    let prefix = openssh_line_from_compressed_p256(id.data()).ok()?;
+    let prefix = piggy_ids::openssh_authorized_key(id.data()).ok()?;
     let cn_field = cn
         .as_deref()
         .map(|n| format!(" cn={n}"))
@@ -836,31 +842,6 @@ fn format_ssh(c: &piggy_ids::Classification) -> Option<String> {
 
 fn is_ssh_slot(slot_id: u8) -> bool {
     matches!(slot_id, 0x9A | 0x9C | 0x9E)
-}
-
-/// Decompress a 33-byte SEC1-compressed P-256 point and render the
-/// `ecdsa-sha2-nistp256 <base64-blob>` half of an OpenSSH
-/// `authorized_keys` line. The caller appends the trailing comment.
-///
-/// Uses openssl (already a direct dep) to decompress and
-/// `piggy_box::agent_ext::ec_point_to_ssh_pubkey_blob` to frame the
-/// SSH wire blob, so byte-for-byte output matches what `ssh-key`'s
-/// `PublicKey::to_bytes` would produce for the same point —
-/// verified by the parity test in `agent_ext::tests`.
-fn openssh_line_from_compressed_p256(compressed: &[u8]) -> Result<String, DynErr> {
-    use openssl::bn::BigNumContext;
-    use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
-    use openssl::nid::Nid;
-    use piggy_box::agent_ext::ec_point_to_ssh_pubkey_blob;
-    use piggy_box::piv_box::EcCurve;
-
-    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
-    let mut ctx = BigNumContext::new()?;
-    let point = EcPoint::from_bytes(&group, compressed, &mut ctx)?;
-    let uncompressed = point.to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)?;
-    let blob = ec_point_to_ssh_pubkey_blob(EcCurve::NistP256, &uncompressed);
-    let b64 = openssl::base64::encode_block(&blob);
-    Ok(format!("ecdsa-sha2-nistp256 {b64}"))
 }
 
 fn policy_ndjson_fields(
@@ -904,10 +885,7 @@ fn json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        format_human, format_ndjson, format_ssh, json_string, openssh_line_from_compressed_p256,
-        slot_sort_key,
-    };
+    use super::{format_human, format_ndjson, format_ssh, json_string, slot_sort_key};
     use piggy_ids::Classification;
     use piggy_markl::{FormatId, Id as MarklId, PurposeId};
     use piggy_piv::{Guid, PinPolicy, TouchPolicy};
@@ -1392,7 +1370,7 @@ mod tests {
         let mut bogus = vec![0x05_u8];
         bogus.extend(0u8..32);
         assert!(
-            openssh_line_from_compressed_p256(&bogus).is_err(),
+            piggy_ids::openssh_authorized_key(&bogus).is_err(),
             "invalid SEC1 prefix must not decode as a P-256 point"
         );
 
@@ -1400,7 +1378,7 @@ mod tests {
         // suppress the line entirely rather than emit a malformed
         // `ecdsa-sha2-nistp256 …` entry. MarklId::new accepts any
         // 33-byte payload — curve validation lives in
-        // openssh_line_from_compressed_p256, not in markl.
+        // openssh_authorized_key, not in markl.
         let bogus_id = MarklId::new(
             Some(PurposeId::PiggyPivAuthV1),
             FormatId::SshEcdsaNistp256Pub,
@@ -1424,14 +1402,14 @@ mod tests {
     }
 
     #[test]
-    fn openssh_line_from_compressed_p256_round_trips_through_ssh_wire_format() {
+    fn openssh_authorized_key_round_trips_through_ssh_wire_format() {
         // Sanity: feed a real compressed point in, get a parseable SSH
         // line out whose b64 body decodes back to a structurally-valid
         // sshkey blob (`string(keytype) | string(curve) | string(point)`)
         // with the original 65-byte uncompressed point as the third
         // string.
         let (compressed, uncompressed) = fresh_p256_point();
-        let line = openssh_line_from_compressed_p256(&compressed).expect("on-curve");
+        let line = piggy_ids::openssh_authorized_key(&compressed).expect("on-curve");
         let mut parts = line.splitn(2, ' ');
         let keytype = parts.next().expect("keytype");
         let b64 = parts.next().expect("b64 body");

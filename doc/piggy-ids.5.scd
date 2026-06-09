@@ -33,12 +33,13 @@ blank-line     = *WSP LF
 comment-line   = *WSP "#" *VCHAR LF
 recipient-line = *WSP markl-id [comment-suffix] LF
 comment-suffix = 1*WSP "#" [WSP *VCHAR]
-markl-id       = piggy-purpose-tagged / bare-format
-piggy-purpose-tagged = "piggy-recipient-v1" "@" recipient-blech32
+markl-id       = recipient-entry / ssh-auth-entry
+recipient-entry = ("piggy-recipient-v1" "@" recipient-blech32) / bare-format
 bare-format    = recipient-blech32
 recipient-blech32 = pivy-blech32 / age-blech32
 pivy-blech32   = "pivy_ecdh_p256_pub" "-" 1*charset
 age-blech32    = "age_x25519_pub"    "-" 1*charset
+ssh-auth-entry = "piggy-piv_auth-v1" "@" "ssh_ecdsa_nistp256_pub" "-" 1*charset
 ```
 
 The bech32 _charset_ is the alphabet from madder RFC 0002 §3.1.
@@ -62,7 +63,41 @@ the same 32 bytes that the upstream _age1..._ bech32 string encodes;
 the two encodings differ only in the surrounding envelope.
 
 A file MAY mix the two families freely. Other markl formats MUST be
-rejected at the *piggy-ids* layer.
+rejected at the *piggy-ids* layer (but see *SSH-AUTHENTICATION ENTRIES*
+below for the one additional, non-recipient entry type).
+
+# SSH-AUTHENTICATION ENTRIES (SLOT 9A)
+
+A *piggy-ids* file MAY additionally carry PIV slot-9A
+(PIV Authentication) SSH keys, tagged with the *piggy-piv_auth-v1*
+purpose and the *ssh_ecdsa_nistp256_pub* format:
+
+```
+piggy-piv_auth-v1@ssh_ecdsa_nistp256_pub-<blech32>  # alice login (9A)
+```
+
+These are *not encryption recipients*. They are SSH login keys for the
+same identities, kept alongside their 9D decrypt keys so one file
+describes both "who can decrypt the store" and "who may log in". They
+are:
+
+- *Excluded from encryption.* *piggy pass insert/generate/edit* and the
+  re-encryption walk skip 9A entries entirely — a secret is never
+  wrapped to an SSH-auth key, and a 9A line never forces re-encryption.
+- *Consumed by* *piggy ssh-copy-id*, which renders each 9A entry as an
+  *ecdsa-sha2-nistp256* _authorized_keys_ line and installs the set on a
+  remote host.
+- *Required to be purpose-tagged.* Unlike recipient formats, there is no
+  bare-format sugar for SSH-auth entries; a bare
+  _ssh_ecdsa_nistp256_pub-..._ (no _piggy-piv_auth-v1@_ prefix) is
+  rejected.
+
+Only slot 9A is accepted today; slots 9C (*piggy-piv_sig-v1*) and 9E
+(*piggy-piv_card_auth-v1*) are not yet accepted in a *piggy-ids* file.
+
+Discover an attached card's 9A markl ID with *piggy list*
+(_--format=human_ / _--format=ndjson_) and add it with *piggy pass
+recipients add*.
 
 # CANONICAL FORM
 
@@ -85,6 +120,7 @@ formatting).
 piggy-recipient-v1@pivy_ecdh_p256_pub-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd  # primary yubikey (9D)
 piggy-recipient-v1@pivy_ecdh_p256_pub-qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw7n8w8c0ydp7s8jtgqnxa  # backup yubikey (9D)
 piggy-recipient-v1@age_x25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu     # age identity (laptop)
+piggy-piv_auth-v1@ssh_ecdsa_nistp256_pub-qd43050juykyy3lchnnw2caygre8wqmasyk7kvaq7jsnj3wcnrpfv47nat8  # ssh login (9A)
 ```
 
 # AGE RECIPIENT STATUS
@@ -152,4 +188,4 @@ _$PIGGY_AGE_IDENTITY_
 
 *piggy*(1), *piggy-piv-slots*(7), madder RFC 0002 (markl ID format),
 piggy RFC 0003 (this file's normative spec), piggy RFC 0004 (age
-recipients wire-format extension)
+recipients wire-format extension), *ssh-copy-id*(1)

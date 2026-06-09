@@ -57,6 +57,7 @@ mod reencrypt;
 mod rm;
 mod show;
 mod show_batch;
+mod ssh_copy_id;
 mod store;
 mod tree_recipients;
 mod usage;
@@ -115,6 +116,21 @@ enum Command {
     /// All probes are read-only — nothing here prompts for a PIN or
     /// decrypts. Exits 0 iff no check fails (SKIPs count as ok).
     Health(HealthCmdArgs),
+    /// Install the SSH-auth keys from a piggy-ids file onto a remote host
+    /// via `ssh-copy-id`.
+    ///
+    /// Renders every PIV slot-9A (`piggy-piv_auth-v1`) recipient in the
+    /// file as an `ecdsa-sha2-nistp256` authorized_keys line and hands the
+    /// whole set to the system `ssh-copy-id`, authorizing them all for SSH
+    /// login in one invocation. `--ids <path>` overrides the store's
+    /// `piggy-ids`; every other argument — including `[user@]host` and any
+    /// `ssh-copy-id` options — passes through to `ssh-copy-id`. The 9D
+    /// encryption recipients in the same file are ignored.
+    #[command(name = "ssh-copy-id")]
+    SshCopyId {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
     /// PIV-backed SSH signing agent.
     ///
     /// `piggy agent` has its own clap parser; `--help`, `-h`, and any
@@ -485,6 +501,8 @@ fn main() {
         Command::Health(args) => std::process::exit(piggy::stats::timed_health(|| {
             health::run(args.format, args.verbose)
         })),
+
+        Command::SshCopyId { rest } => std::process::exit(ssh_copy_id::run(&rest)),
 
         // `agent` runs the Rust impl (piggy#58): a PIV-backed SSH agent that
         // prompts for the PIN on demand via SSH_ASKPASS and clears it on a

@@ -134,6 +134,8 @@
         # crates/piggy/src/fallback.rs) and as the decrypt backend for
         # `pass show` / `pass edit` / `pass generate -i` (the rust
         # `crypt::decrypt` shells to `pivy-box stream decrypt`).
+        # `openssh` provides `ssh-copy-id`, which `piggy ssh-copy-id`
+        # (crates/piggy/src/ssh_copy_id.rs) execs to install the 9A keys.
         runtimeDeps = [
           pivyPkg
           pkgs.git
@@ -141,6 +143,7 @@
           pkgs.qrencode
           pkgs.gnugrep
           pkgs.coreutils
+          pkgs.openssh
         ];
 
         # Runtime deps for contrib/piggy-askpass.sh when invoked by

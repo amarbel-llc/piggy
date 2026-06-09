@@ -188,7 +188,12 @@ fn recipients_from_piggy_ids(piggy_ids: &Path) -> Option<RecipientSet> {
     let text = std::fs::read_to_string(piggy_ids).ok()?;
     let file = RecipientFile::parse(&text).ok()?;
     let mut set = BTreeSet::new();
-    for r in file.recipients() {
+    // Compare against the *encryption* recipients only. A `piggy-ids`
+    // file may also carry SSH-auth (9A) keys (for `piggy ssh-copy-id`);
+    // those never appear in an ebox, so feeding them through
+    // `piv_part_from_markl` would error → `None` → a false "must
+    // re-encrypt" verdict on every `sync`.
+    for r in file.encryption_recipients() {
         let part = piv_part_from_markl(r.id()).ok()?;
         let pubkey = canonical_point(part.pubkey_curve, &part.pubkey)?;
         set.insert((curve_tag(part.pubkey_curve), pubkey));
@@ -690,6 +695,26 @@ ok 2 - b # SKIP recipients already current\n  ---\n  result: 'skipped'\n  reason
         .unwrap()
     }
 
+    /// A fresh, curve-valid PIV slot-9A SSH-auth markl ID (a 33-byte
+    /// compressed P-256 point under `ssh_ecdsa_nistp256_pub`). Not an
+    /// encryption recipient; used to prove a 9A line in a piggy-ids file
+    /// is excluded from the recipient-set comparison.
+    fn fresh_ssh_auth_id() -> Id {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = EcKey::generate(&group).unwrap();
+        let mut ctx = BigNumContext::new().unwrap();
+        let pubkey = key
+            .public_key()
+            .to_bytes(&group, PointConversionForm::COMPRESSED, &mut ctx)
+            .unwrap();
+        Id::new(
+            Some(PurposeId::PiggyPivAuthV1),
+            FormatId::SshEcdsaNistp256Pub,
+            pubkey,
+        )
+        .unwrap()
+    }
+
     /// Encrypt a real `.ebox` (stream type) to `ids` and write it under `dir`.
     fn write_ebox_for(dir: &Path, ids: &[Id]) -> PathBuf {
         let tpl = template_from_recipients(ids).unwrap();
@@ -737,6 +762,24 @@ ok 2 - b # SKIP recipients already current\n  ---\n  result: 'skipped'\n  reason
         let ebox = write_ebox_for(&dir, &[a.clone(), b]);
         let pids = write_piggy_ids_for(&dir, std::slice::from_ref(&a));
         assert!(!reencrypt_unnecessary(&ebox, &pids));
+    }
+
+    #[test]
+    fn reencrypt_unnecessary_ignores_ssh_auth_entries_in_piggy_ids() {
+        // A piggy-ids file may carry SSH-auth (9A) keys alongside the 9D
+        // encryption recipients. Those never appear in an ebox, so they
+        // must be excluded from the recipient-set comparison — otherwise
+        // a 9A line would force a re-encrypt on every `sync`.
+        let dir = tempdir();
+        let a = fresh_p256_id();
+        let b = fresh_p256_id();
+        let ebox = write_ebox_for(&dir, &[a.clone(), b.clone()]);
+        // Same two 9D recipients, plus an unrelated 9A SSH-auth key.
+        let pids = write_piggy_ids_for(&dir, &[a, b, fresh_ssh_auth_id()]);
+        assert!(
+            reencrypt_unnecessary(&ebox, &pids),
+            "9A SSH-auth entry must not force a re-encrypt when the 9D set matches"
+        );
     }
 
     #[test]

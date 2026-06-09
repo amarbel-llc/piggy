@@ -31,6 +31,7 @@ use piggy_markl::{FormatId, Id, ParseError as MarklParseError, PurposeId};
 pub mod classify;
 pub use classify::{
     Classification, classify_slot, classify_slot_9d, classify_ssh_slot, format_slot_id,
+    openssh_authorized_key,
 };
 
 /// One recipient line: a markl ID plus an optional human comment.
@@ -43,10 +44,12 @@ pub struct Recipient {
 }
 
 impl Recipient {
-    /// Construct a recipient. The id MUST carry the
-    /// `piggy-recipient-v1` purpose and one of the recipient formats
-    /// (`pivy_ecdh_p256_pub` or `age_x25519_pub`); otherwise
-    /// `InvalidRecipientShape` is returned.
+    /// Construct a recipient. The id MUST be a purpose-tagged
+    /// `piggy-ids` entry: either an encryption recipient
+    /// (`piggy-recipient-v1` + `pivy_ecdh_p256_pub`/`age_x25519_pub`) or
+    /// a PIV slot-9A SSH-auth key (`piggy-piv_auth-v1` +
+    /// `ssh_ecdsa_nistp256_pub`). Otherwise `InvalidRecipientShape` is
+    /// returned.
     pub fn new(id: Id, comment: Option<String>) -> Result<Self, ParseError> {
         validate_recipient_shape(&id)?;
         Ok(Self { id, comment })
@@ -63,6 +66,27 @@ impl Recipient {
     /// Set or replace the inline comment.
     pub fn set_comment(&mut self, comment: Option<String>) {
         self.comment = comment;
+    }
+
+    /// True iff this entry is an encryption recipient — a key the
+    /// encrypt pipeline can wrap a secret to (`pivy_ecdh_p256_pub` 9D
+    /// ECDH or `age_x25519_pub`). SSH-auth keys are excluded; callers
+    /// computing the recipient set for encryption MUST filter through
+    /// this (see [`RecipientFile::encryption_recipients`]).
+    pub fn is_encryption_recipient(&self) -> bool {
+        matches!(
+            self.id.format(),
+            FormatId::PivyEcdhP256Pub | FormatId::AgeX25519Pub
+        )
+    }
+
+    /// True iff this entry is a PIV slot-9A SSH-authentication key
+    /// (`piggy-piv_auth-v1` + `ssh_ecdsa_nistp256_pub`). These are
+    /// consumed by `piggy ssh-copy-id` and are never encryption
+    /// recipients.
+    pub fn is_ssh_auth(&self) -> bool {
+        matches!(self.id.purpose(), Some(PurposeId::PiggyPivAuthV1))
+            && self.id.format() == FormatId::SshEcdsaNistp256Pub
     }
 }
 
@@ -105,6 +129,25 @@ impl RecipientFile {
 
     pub fn push(&mut self, recipient: Recipient) {
         self.recipients.push(recipient);
+    }
+
+    /// Recipients the encrypt pipeline can wrap secrets to
+    /// (`pivy_ecdh_p256_pub`/`age_x25519_pub`). SSH-auth (9A) entries
+    /// are excluded — they live in the same file but are not encryption
+    /// recipients. Every consumer that builds an ebox template or
+    /// compares an ebox's recipient set against the file MUST iterate
+    /// this rather than [`recipients`](Self::recipients), or a 9A line
+    /// would poison the encrypt template / force perpetual re-encryption.
+    pub fn encryption_recipients(&self) -> impl Iterator<Item = &Recipient> {
+        self.recipients
+            .iter()
+            .filter(|r| r.is_encryption_recipient())
+    }
+
+    /// PIV slot-9A SSH-authentication keys declared in the file, in
+    /// input order. Consumed by `piggy ssh-copy-id`.
+    pub fn ssh_auth_recipients(&self) -> impl Iterator<Item = &Recipient> {
+        self.recipients.iter().filter(|r| r.is_ssh_auth())
     }
 
     /// Parse a `piggy-ids` text file. Blank lines and comment-only
@@ -200,8 +243,9 @@ pub enum ParseError {
         source: MarklParseError,
     },
     #[error(
-        "line {line}: recipient shape requires purpose=piggy-recipient-v1 and \
-         format in {{pivy_ecdh_p256_pub, age_x25519_pub}} \
+        "line {line}: entry shape requires either \
+         purpose=piggy-recipient-v1 with format in {{pivy_ecdh_p256_pub, age_x25519_pub}}, \
+         or purpose=piggy-piv_auth-v1 with format=ssh_ecdsa_nistp256_pub \
          (got purpose={purpose:?}, format={format:?})"
     )]
     InvalidRecipientShape {
@@ -213,10 +257,23 @@ pub enum ParseError {
     EmptyToken { line: usize },
 }
 
+/// True iff `id` is a purpose-tagged `piggy-ids` entry: an encryption
+/// recipient (`piggy-recipient-v1` + pivy/age) or a PIV slot-9A SSH-auth
+/// key (`piggy-piv_auth-v1` + `ssh_ecdsa_nistp256_pub`). SSH-auth entries
+/// MUST be purpose-tagged — there is no bare-format sugar for them, so
+/// [`canonicalize_for_render`] never has to promote a bare SSH format to
+/// a `piggy-recipient-v1@` pairing it cannot form.
+fn purpose_tagged_entry_ok(id: &Id) -> bool {
+    match id.purpose() {
+        Some(p @ (PurposeId::PiggyRecipientV1 | PurposeId::PiggyPivAuthV1)) => {
+            p.accepts(id.format())
+        }
+        _ => false,
+    }
+}
+
 fn validate_recipient_shape(id: &Id) -> Result<(), ParseError> {
-    let purpose_ok = matches!(id.purpose(), Some(PurposeId::PiggyRecipientV1));
-    let format_ok = PurposeId::PiggyRecipientV1.accepts(id.format());
-    if purpose_ok && format_ok {
+    if purpose_tagged_entry_ok(id) {
         Ok(())
     } else {
         Err(ParseError::InvalidRecipientShape {
@@ -279,11 +336,16 @@ fn parse_line(raw: &str, line_no: usize) -> Result<Recipient, ParseError> {
         source: e,
     })?;
 
-    // Permit bare format on input (no purpose) — we'll canonicalise
-    // on render.
-    let format_ok = PurposeId::PiggyRecipientV1.accepts(id.format());
-    let purpose_ok = matches!(id.purpose(), None | Some(PurposeId::PiggyRecipientV1));
-    if !(purpose_ok && format_ok) {
+    // Bare format (no purpose) is accepted only as recipient sugar —
+    // it canonicalises to `piggy-recipient-v1@…` on render. SSH-auth
+    // entries must already be purpose-tagged (a bare
+    // `ssh_ecdsa_nistp256_pub` is rejected here, since
+    // `PiggyRecipientV1` does not accept that format).
+    let shape_ok = match id.purpose() {
+        None => PurposeId::PiggyRecipientV1.accepts(id.format()),
+        Some(_) => purpose_tagged_entry_ok(&id),
+    };
+    if !shape_ok {
         return Err(ParseError::InvalidRecipientShape {
             line: line_no,
             purpose: id.purpose().cloned(),
@@ -324,6 +386,96 @@ mod tests {
             payload,
         )
         .unwrap()
+    }
+
+    /// A purpose-tagged PIV slot-9A SSH-auth markl ID. The
+    /// `ssh_ecdsa_nistp256_pub` format is a 33-byte compressed point,
+    /// same shape as `sample_pubkey`.
+    fn sample_ssh_auth_id(seed: u8) -> Id {
+        Id::new(
+            Some(PurposeId::PiggyPivAuthV1),
+            FormatId::SshEcdsaNistp256Pub,
+            sample_pubkey(seed),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn parse_accepts_ssh_auth_9a_round_trip() {
+        let id = sample_ssh_auth_id(7);
+        let r = Recipient::new(id.clone(), Some("alice 9A".into())).unwrap();
+        assert!(r.is_ssh_auth());
+        assert!(!r.is_encryption_recipient());
+        let file = RecipientFile::new(vec![r]);
+        let rendered = file.render();
+        assert!(
+            rendered.starts_with("piggy-piv_auth-v1@ssh_ecdsa_nistp256_pub-"),
+            "9A entry must render purpose-tagged: {rendered}"
+        );
+        let reparsed = RecipientFile::parse(&rendered).unwrap();
+        assert_eq!(reparsed.recipients()[0].id(), &id);
+        assert_eq!(reparsed.recipients()[0].comment(), Some("alice 9A"));
+    }
+
+    #[test]
+    fn parse_rejects_bare_ssh_format() {
+        // A bare `ssh_ecdsa_nistp256_pub-…` (no purpose) is NOT accepted:
+        // SSH-auth entries must be purpose-tagged so `render` never has to
+        // promote them to an invalid `piggy-recipient-v1@` pairing.
+        let bare = Id::new(None, FormatId::SshEcdsaNistp256Pub, sample_pubkey(3))
+            .unwrap()
+            .to_wire();
+        let err = RecipientFile::parse(&format!("{bare}\n")).unwrap_err();
+        assert!(matches!(err, ParseError::InvalidRecipientShape { .. }));
+    }
+
+    #[test]
+    fn parse_rejects_9c_and_9e_ssh_purposes() {
+        // Only 9A (piggy-piv_auth-v1) is accepted in a piggy-ids file:
+        // 9C/9E SSH purposes are out of scope (login uses 9A).
+        for purpose in [PurposeId::PiggyPivSigV1, PurposeId::PiggyPivCardAuthV1] {
+            let id = Id::new(
+                Some(purpose),
+                FormatId::SshEcdsaNistp256Pub,
+                sample_pubkey(9),
+            )
+            .unwrap();
+            let err = RecipientFile::parse(&id.to_wire()).unwrap_err();
+            assert!(matches!(err, ParseError::InvalidRecipientShape { .. }));
+        }
+    }
+
+    #[test]
+    fn mixed_file_splits_encryption_and_ssh_recipients() {
+        let piv = sample_id(2);
+        let age = sample_age_id(3);
+        let ssh = sample_ssh_auth_id(5);
+        let input = format!(
+            "{}  # 9d\n{}  # ssh 9a\n{}  # age\n",
+            piv.to_wire(),
+            ssh.to_wire(),
+            age.to_wire(),
+        );
+        let file = RecipientFile::parse(&input).unwrap();
+        assert_eq!(file.recipients().len(), 3);
+
+        let enc: Vec<&Id> = file.encryption_recipients().map(|r| r.id()).collect();
+        assert_eq!(
+            enc,
+            vec![&piv, &age],
+            "encryption set must exclude the 9A SSH key"
+        );
+
+        let ssh_only: Vec<&Id> = file.ssh_auth_recipients().map(|r| r.id()).collect();
+        assert_eq!(ssh_only, vec![&ssh], "ssh set must be exactly the 9A key");
+    }
+
+    #[test]
+    fn recipient_new_accepts_ssh_auth_format() {
+        let id = sample_ssh_auth_id(11);
+        let r = Recipient::new(id.clone(), None).unwrap();
+        assert_eq!(r.id(), &id);
+        assert!(r.is_ssh_auth());
     }
 
     #[test]
