@@ -1,7 +1,7 @@
 // Read PIGGY_VERSION from ../../version.env at build time and re-export
 // it as a rustc env var so the dispatcher binary can use
-// env!("PIGGY_VERSION") to inject the version into the bash subprocess
-// (see src/fallback.rs::set_piggy_version) and any future Rust handler.
+// env!("PIGGY_VERSION") in any Rust handler (today: src/version.rs and
+// the usage banner).
 //
 // The repo-root version.env is piggy's single source of truth (see
 // eng-versioning(7), piggy CLAUDE.md). flake.nix's piggy derivation reads
