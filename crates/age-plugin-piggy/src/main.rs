@@ -19,6 +19,7 @@ use age_plugin::run_state_machine;
 
 mod bech32id;
 mod convert;
+mod generate;
 mod identity;
 mod p256_stanza;
 mod plugin;
@@ -40,6 +41,7 @@ fn main() -> io::Result<()> {
 
     // Otherwise this is the (human) admin surface.
     match args.first().map(String::as_str) {
+        Some("generate") => generate::run(parse_guid(&args[1..])),
         Some("convert") => convert::run(args.get(1).map(String::as_str)),
         Some("--version" | "-V") => {
             println!("age-plugin-piggy {}", env!("CARGO_PKG_VERSION"));
@@ -52,17 +54,32 @@ fn main() -> io::Result<()> {
     }
 }
 
+/// Pull `--guid <GUID>` or `--guid=<GUID>` out of the trailing args.
+fn parse_guid(args: &[String]) -> Option<&str> {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if let Some(value) = arg.strip_prefix("--guid=") {
+            return Some(value);
+        }
+        if arg == "--guid" {
+            return it.next().map(String::as_str);
+        }
+    }
+    None
+}
+
 fn print_usage() {
     eprintln!("age-plugin-piggy: an age plugin backed by piggy PIV/agent ECDH.");
     eprintln!();
     eprintln!("Normally invoked by age via --age-plugin=recipient-v1|identity-v1.");
     eprintln!();
     eprintln!("Admin commands:");
+    eprintln!("  generate [--guid <GUID>]          read a card's slot-9D key and print its");
     eprintln!(
-        "  convert <markl-id | hex-pubkey>   print the age1piggy recipient + AGE-PLUGIN-PIGGY"
+        "                                    age1piggy recipient + AGE-PLUGIN-PIGGY identity"
     );
     eprintln!(
-        "                                    identity for an existing piggy recipient (offline)"
+        "  convert <markl-id | hex-pubkey>   same, but offline from an existing piggy recipient"
     );
     eprintln!("  --version                         print the version");
 }

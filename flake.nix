@@ -519,6 +519,12 @@
           # zz-tests_bats/conformance/pivy_agent_hardware.bats and
           # the test-bats-conformance-pivy-agent-hardware just recipe.
           pivy = pivyPkg;
+          # The `age` CLI (plugin-capable), exposed so the
+          # age-plugin-piggy hardware bats lane can `nix build .#age`
+          # to drive a real encrypt/decrypt round-trip through the
+          # plugin. See zz-tests_bats/conformance/age_plugin_piggy_fibby.bats
+          # and the test-bats-conformance-age-plugin-piggy recipe.
+          age = pkgs.age;
           # Standalone fibby binary. On Linux this carries the
           # `hardware-proxy` feature; on darwin it's VirtualCard-only
           # (vsmartcard upstream is broken on darwin). Consumed by

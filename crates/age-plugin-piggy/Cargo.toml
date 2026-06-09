@@ -20,9 +20,14 @@ hex = "0.4"
 p256 = { version = "0.13", features = ["ecdh"] }
 rand = "0.8"
 sha2 = "0.10"
+# `generate` reads slot 9D's public key off a card; ssh-key types the pubkey
+# the way piggy-piv returns it (KeyData::Ecdsa::NistP256).
+ssh-key = { version = "0.6", features = ["ecdsa", "alloc"] }
 # Reused piggy surfaces: the `ecdh@joyent.com` agent oracle (decrypt path)
 # and the EcdhOracle trait + sshkey-blob helpers + EcCurve (piggy-box). The
-# markl crate parses piggy recipient IDs for the offline `convert` command.
+# markl crate parses piggy recipient IDs for the offline `convert` command;
+# piggy-piv enumerates the card + reads slot 9D for `generate`.
 piggy = { path = "../piggy" }
 piggy-box = { path = "../piggy-box" }
 piggy-markl = { path = "../piggy-markl" }
+piggy-piv = { path = "../piggy-piv" }
