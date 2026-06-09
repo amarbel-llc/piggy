@@ -327,6 +327,14 @@
                             $out/libexec/piggy/piggy-rs
             install -m 0755 ${piggy-rs}/bin/piggy-ids \
                             $out/libexec/piggy/piggy-ids
+            # The age plugin is a standalone binary that age discovers by
+            # PATH name (`age-plugin-piggy`). It needs no wrapper or baked-in
+            # env — it reads PIGGY_AUTH_SOCK / SSH_AUTH_SOCK at runtime and
+            # talks to piggy-agent over the `ecdh@joyent.com` extension. So
+            # install it straight to $out/bin; having `piggy` on PATH then
+            # also exposes the plugin to age.
+            install -m 0755 ${piggy-rs}/bin/age-plugin-piggy \
+                            $out/bin/age-plugin-piggy
             # User-facing SSH_ASKPASS helper. Lives under libexec/piggy/
             # so consumers can reference it as
             # `''${piggy}/libexec/piggy/piggy-askpass.sh`, matching the

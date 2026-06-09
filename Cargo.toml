@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/age-plugin-piggy",
     "crates/fib-wait-ready",
     "crates/fibby",
     "crates/piggy",

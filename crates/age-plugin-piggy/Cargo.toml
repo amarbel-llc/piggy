@@ -1,0 +1,28 @@
+[package]
+name = "age-plugin-piggy"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "age plugin: PIV/agent-backed P-256 identities for piggy (decrypt via piggy-agent ECDH)"
+
+[[bin]]
+name = "age-plugin-piggy"
+path = "src/main.rs"
+
+[dependencies]
+age-core = "0.11"
+age-plugin = "0.6"
+base64 = "0.22"
+# Pinned to 0.9 to match the version age-plugin pulls in, so the recipient /
+# identity Bech32 encoding is byte-identical to `age_plugin::print_new_identity`.
+bech32 = "0.9"
+hex = "0.4"
+p256 = { version = "0.13", features = ["ecdh"] }
+rand = "0.8"
+sha2 = "0.10"
+# Reused piggy surfaces: the `ecdh@joyent.com` agent oracle (decrypt path)
+# and the EcdhOracle trait + sshkey-blob helpers + EcCurve (piggy-box). The
+# markl crate parses piggy recipient IDs for the offline `convert` command.
+piggy = { path = "../piggy" }
+piggy-box = { path = "../piggy-box" }
+piggy-markl = { path = "../piggy-markl" }
