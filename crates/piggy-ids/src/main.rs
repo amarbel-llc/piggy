@@ -271,7 +271,7 @@ fn cmd_encrypt(path: &Path) -> Result<ExitCode, DynErr> {
 /// one PIV card is attached, callers must pass the desired GUID via
 /// `--guid <hex>`.
 fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
-    use piggy_ids::{Classification, classify_slot};
+    use piggy_ids::{Classification, ClassifyInput, classify_slot};
 
     let ctx = PivContext::new()?;
     let tokens = ctx.enumerate_tokens()?;
@@ -281,17 +281,17 @@ fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
 
     let token = pick_token(&tokens, guid_hex)?;
     let slot = token.read_slot(0x9D)?;
-    match classify_slot(
-        0x9D,
-        token.guid().clone(),
-        token.reader_name().to_string(),
-        token.yk_serial(),
-        slot.algorithm(),
-        slot.cert_der(),
+    match classify_slot(ClassifyInput {
+        slot_id: 0x9D,
+        guid: token.guid().clone(),
+        reader: token.reader_name().to_string(),
+        serial: token.yk_serial(),
+        algo: slot.algorithm(),
+        cert_der: slot.cert_der(),
         // detect-pubkey doesn't surface PIN/touch policy.
-        None,
-        None,
-    ) {
+        pin_policy: None,
+        touch_policy: None,
+    }) {
         Classification::Supported { id, .. } => {
             let stdout = io::stdout();
             let mut out = stdout.lock();
@@ -336,7 +336,7 @@ fn pick_token<'a>(tokens: &'a [PivToken], guid_hex: Option<&str>) -> Result<&'a 
 /// row per card so unreadable 9D appears as `Unsupported` rather than
 /// being silently dropped.
 fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
-    use piggy_ids::{Classification, classify_slot};
+    use piggy_ids::{Classification, ClassifyInput, classify_slot};
 
     let ctx = PivContext::new()?;
     let tokens = ctx.enumerate_tokens()?;
@@ -349,16 +349,16 @@ fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
             // detect-all-pubkeys is the bash-friendly TSV path; it
             // doesn't surface PIN/touch policy, so skip the
             // attestation round-trip entirely.
-            Ok(slot) => classifications.push(classify_slot(
-                0x9D,
-                token.guid().clone(),
+            Ok(slot) => classifications.push(classify_slot(ClassifyInput {
+                slot_id: 0x9D,
+                guid: token.guid().clone(),
                 reader,
                 serial,
-                slot.algorithm(),
-                slot.cert_der(),
-                None,
-                None,
-            )),
+                algo: slot.algorithm(),
+                cert_der: slot.cert_der(),
+                pin_policy: None,
+                touch_policy: None,
+            })),
             Err(e) => classifications.push(Classification::Unsupported {
                 guid: token.guid().clone(),
                 reader,
@@ -412,7 +412,7 @@ fn slot_sort_key(slot_id: u8) -> (u8, u8) {
 /// treats as "policy unknown" (`None`) rather than failing the whole
 /// enumeration.
 fn enumerate_all_recipient_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
-    use piggy_ids::{Classification, classify_slot};
+    use piggy_ids::{Classification, ClassifyInput, classify_slot};
 
     let ctx = PivContext::new()?;
     let tokens = ctx.enumerate_tokens()?;
@@ -433,16 +433,16 @@ fn enumerate_all_recipient_slots() -> Result<Vec<piggy_ids::Classification>, Dyn
                 Ok((p, t)) => (Some(p), Some(t)),
                 Err(_) => (None, None),
             };
-            classifications.push(classify_slot(
+            classifications.push(classify_slot(ClassifyInput {
                 slot_id,
-                token.guid().clone(),
-                reader.clone(),
+                guid: token.guid().clone(),
+                reader: reader.clone(),
                 serial,
-                slot.algorithm(),
-                slot.cert_der(),
+                algo: slot.algorithm(),
+                cert_der: slot.cert_der(),
                 pin_policy,
                 touch_policy,
-            ));
+            }));
         }
     }
 
@@ -498,7 +498,7 @@ fn ssh_eligible_slots() -> &'static [u8] {
 /// cards and YubiKeys with the F9 attestation key cleared get `None`
 /// policies (graceful degradation, same as `enumerate_all_recipient_slots`).
 fn enumerate_all_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
-    use piggy_ids::{Classification, classify_slot, classify_ssh_slot};
+    use piggy_ids::{Classification, ClassifyInput, classify_slot, classify_ssh_slot};
 
     let ctx = PivContext::new()?;
     let tokens = ctx.enumerate_tokens()?;
@@ -520,28 +520,20 @@ fn enumerate_all_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
                 Ok((p, t)) => (Some(p), Some(t)),
                 Err(_) => (None, None),
             };
+            let input = ClassifyInput {
+                slot_id,
+                guid: token.guid().clone(),
+                reader: reader.clone(),
+                serial,
+                algo: slot.algorithm(),
+                cert_der: slot.cert_der(),
+                pin_policy,
+                touch_policy,
+            };
             let classification = if ssh_slots.contains(&slot_id) {
-                classify_ssh_slot(
-                    slot_id,
-                    token.guid().clone(),
-                    reader.clone(),
-                    serial,
-                    slot.algorithm(),
-                    slot.cert_der(),
-                    pin_policy,
-                    touch_policy,
-                )
+                classify_ssh_slot(input)
             } else {
-                classify_slot(
-                    slot_id,
-                    token.guid().clone(),
-                    reader.clone(),
-                    serial,
-                    slot.algorithm(),
-                    slot.cert_der(),
-                    pin_policy,
-                    touch_policy,
-                )
+                classify_slot(input)
             };
             classifications.push(classification);
         }

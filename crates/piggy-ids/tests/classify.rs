@@ -2,7 +2,9 @@
 //! `classify_ssh_slot`. No PIV context needed — we feed synthetic
 //! algorithm values and cert bytes.
 
-use piggy_ids::{Classification, classify_slot, classify_slot_9d, classify_ssh_slot};
+use piggy_ids::{
+    Classification, ClassifyInput, classify_slot, classify_slot_9d, classify_ssh_slot,
+};
 use piggy_piv::{Guid, PinPolicy, PivAlgorithm, TouchPolicy};
 
 fn fake_guid() -> Guid {
@@ -90,17 +92,17 @@ fn malformed_cert_in_9d_is_unsupported() {
 fn rsa_in_retired_slot_reason_names_that_slot() {
     let guid = fake_guid();
     let cert: &[u8] = &[];
-    match classify_slot(
-        0x82,
+    match classify_slot(ClassifyInput {
+        slot_id: 0x82,
         guid,
-        "Yubico YubiKey 00 00".into(),
-        None,
-        PivAlgorithm::Rsa2048,
-        cert,
+        reader: "Yubico YubiKey 00 00".into(),
+        serial: None,
+        algo: PivAlgorithm::Rsa2048,
+        cert_der: cert,
         // No policy info plumbed in.
-        None,
-        None,
-    ) {
+        pin_policy: None,
+        touch_policy: None,
+    }) {
         Classification::Unsupported {
             reason,
             slot_id,
@@ -125,16 +127,16 @@ fn classify_ssh_slot_rejects_non_9a_9c_9e() {
     // SSH slot classifier should refuse recipient slots — those go
     // through classify_slot.
     let cert: &[u8] = &[];
-    let result = classify_ssh_slot(
-        0x9D,
-        fake_guid(),
-        "reader".into(),
-        None,
-        PivAlgorithm::EcP256,
-        cert,
-        None,
-        None,
-    );
+    let result = classify_ssh_slot(ClassifyInput {
+        slot_id: 0x9D,
+        guid: fake_guid(),
+        reader: "reader".into(),
+        serial: None,
+        algo: PivAlgorithm::EcP256,
+        cert_der: cert,
+        pin_policy: None,
+        touch_policy: None,
+    });
     match result {
         Classification::Unsupported { reason, .. } => {
             assert!(
@@ -149,16 +151,16 @@ fn classify_ssh_slot_rejects_non_9a_9c_9e() {
 #[test]
 fn classify_ssh_slot_rejects_rsa() {
     let cert: &[u8] = &[];
-    let result = classify_ssh_slot(
-        0x9A,
-        fake_guid(),
-        "reader".into(),
-        None,
-        PivAlgorithm::Rsa2048,
-        cert,
-        None,
-        None,
-    );
+    let result = classify_ssh_slot(ClassifyInput {
+        slot_id: 0x9A,
+        guid: fake_guid(),
+        reader: "reader".into(),
+        serial: None,
+        algo: PivAlgorithm::Rsa2048,
+        cert_der: cert,
+        pin_policy: None,
+        touch_policy: None,
+    });
     match result {
         Classification::Unsupported { reason, .. } => {
             assert!(
@@ -182,16 +184,16 @@ fn classify_slot_threads_policies_into_unsupported_record() {
     // surfacing the slot's other metadata.
     let guid = fake_guid();
     let cert: &[u8] = &[];
-    match classify_slot(
-        0x83,
+    match classify_slot(ClassifyInput {
+        slot_id: 0x83,
         guid,
-        "Yubico YubiKey 00 00".into(),
-        None,
-        PivAlgorithm::Rsa2048,
-        cert,
-        Some(PinPolicy::Once),
-        Some(TouchPolicy::Cached),
-    ) {
+        reader: "Yubico YubiKey 00 00".into(),
+        serial: None,
+        algo: PivAlgorithm::Rsa2048,
+        cert_der: cert,
+        pin_policy: Some(PinPolicy::Once),
+        touch_policy: Some(TouchPolicy::Cached),
+    }) {
         Classification::Unsupported {
             pin_policy,
             touch_policy,

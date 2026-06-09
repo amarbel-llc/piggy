@@ -30,7 +30,8 @@ use piggy_markl::{FormatId, Id, ParseError as MarklParseError, PurposeId};
 
 pub mod classify;
 pub use classify::{
-    Classification, classify_slot, classify_slot_9d, classify_ssh_slot, format_slot_id,
+    Classification, ClassifyInput, classify_slot, classify_slot_9d, classify_ssh_slot,
+    format_slot_id,
 };
 
 /// One recipient line: a markl ID plus an optional human comment.

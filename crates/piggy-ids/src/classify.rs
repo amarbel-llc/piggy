@@ -110,10 +110,29 @@ impl Classification {
     }
 }
 
+/// Everything the classifiers need to know about one slot, grouped by
+/// domain: identity (`slot_id`, `guid`, `reader`, `serial`), crypto
+/// material (`algo`, `cert_der`), and YubicoPIV policies (`pin_policy`,
+/// `touch_policy`). Field semantics match the like-named fields on
+/// [`Classification`]; `cert_der` is the slot cert as read from the
+/// card, borrowed for the duration of the call. Replaces the former
+/// 8-positional-argument signatures (#118).
+#[derive(Debug, Clone)]
+pub struct ClassifyInput<'a> {
+    pub slot_id: u8,
+    pub guid: Guid,
+    pub reader: String,
+    pub serial: Option<u32>,
+    pub algo: PivAlgorithm,
+    pub cert_der: &'a [u8],
+    pub pin_policy: Option<PinPolicy>,
+    pub touch_policy: Option<TouchPolicy>,
+}
+
 /// Classify the given slot. Convenience wrapper for the common
-/// `classify_slot(0x9D, ...)` case. The 9D-only caller paths in
-/// `detect-pubkey` and `detect-all-pubkeys` don't surface policies, so
-/// this wrapper passes `None` for both.
+/// slot-9D case. The 9D-only caller paths in `detect-pubkey` and
+/// `detect-all-pubkeys` don't surface policies, so this wrapper passes
+/// `None` for both.
 pub fn classify_slot_9d(
     guid: Guid,
     reader: String,
@@ -121,25 +140,29 @@ pub fn classify_slot_9d(
     algo: PivAlgorithm,
     cert_der: &[u8],
 ) -> Classification {
-    classify_slot(0x9D, guid, reader, serial, algo, cert_der, None, None)
+    classify_slot(ClassifyInput {
+        slot_id: 0x9D,
+        guid,
+        reader,
+        serial,
+        algo,
+        cert_der,
+        pin_policy: None,
+        touch_policy: None,
+    })
 }
 
-// 8 args is past the clippy default of 7 — the lint is a style
-// suggestion, not a bug. These all describe one slot's identity +
-// crypto material + policies; grouping into a struct is a meaningful
-// API refactor, not a drive-by lint fix. Tracked separately if/when
-// the callers want the change.
-#[allow(clippy::too_many_arguments)]
-pub fn classify_slot(
-    slot_id: u8,
-    guid: Guid,
-    reader: String,
-    serial: Option<u32>,
-    algo: PivAlgorithm,
-    cert_der: &[u8],
-    pin_policy: Option<PinPolicy>,
-    touch_policy: Option<TouchPolicy>,
-) -> Classification {
+pub fn classify_slot(input: ClassifyInput) -> Classification {
+    let ClassifyInput {
+        slot_id,
+        guid,
+        reader,
+        serial,
+        algo,
+        cert_der,
+        pin_policy,
+        touch_policy,
+    } = input;
     let cn = extract_subject_cn(cert_der);
     if algo != PivAlgorithm::EcP256 {
         return Classification::Unsupported {
@@ -216,17 +239,17 @@ pub fn classify_slot(
 /// Only ECDSA P-256 is supported in v1; RSA, P-384, and Ed25519 in
 /// these slots are reported as `Unsupported` until the markl registry
 /// grows compatible format IDs.
-#[allow(clippy::too_many_arguments)] // See note on classify_slot above.
-pub fn classify_ssh_slot(
-    slot_id: u8,
-    guid: Guid,
-    reader: String,
-    serial: Option<u32>,
-    algo: PivAlgorithm,
-    cert_der: &[u8],
-    pin_policy: Option<PinPolicy>,
-    touch_policy: Option<TouchPolicy>,
-) -> Classification {
+pub fn classify_ssh_slot(input: ClassifyInput) -> Classification {
+    let ClassifyInput {
+        slot_id,
+        guid,
+        reader,
+        serial,
+        algo,
+        cert_der,
+        pin_policy,
+        touch_policy,
+    } = input;
     let cn = extract_subject_cn(cert_der);
 
     let purpose = match purpose_for_ssh_slot(slot_id) {
