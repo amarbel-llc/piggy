@@ -29,6 +29,19 @@
 #               agents reach this script with a scrubbed env).
 #   error     — neither available; refuses with stderr explanation.
 #
+# SSH_ASKPASS_REQUIRE (piggy#166) makes the routing caller-selectable,
+# following OpenSSH's semantics:
+#
+#   force          — skip the /dev/tty branch entirely; always render
+#                    via zenity. For agent-driven / scripted contexts
+#                    that must never steal a stray terminal.
+#   never          — tty-or-nothing; never fall through to zenity. If
+#                    /dev/tty is unusable, refuse with exit 2. For
+#                    interactive callers that must never get a
+#                    surprise GUI dialog.
+#   unset / prefer — the priority order above (tty first, then
+#                    zenity).
+#
 # This is the user-facing sibling to
 # zz-tests_bats/helpers/piggy-test-askpass.sh, which is the
 # *test-harness* askpass that NEVER prompts. The two are explicitly
@@ -75,6 +88,7 @@ set -euo pipefail
 prompt="${1:-<no prompt supplied>}"
 context="${PIGGY_ASKPASS_CONTEXT:-}"
 zenity_timeout="${PIGGY_ASKPASS_TIMEOUT:-30}"
+require="${SSH_ASKPASS_REQUIRE:-}"
 
 # Parent-process info. ps is universal on Linux + Darwin and avoids
 # the /proc-vs-no-/proc split. Tolerate ps failing (chrooted, etc).
@@ -121,12 +135,16 @@ fi
 # the controlling terminal usually still answers. read -s suppresses
 # echo without an external dep.
 #
+# Skipped entirely under SSH_ASKPASS_REQUIRE=force (piggy#166):
+# agent-driven / scripted callers export force so the prompt always
+# lands on zenity, never on whatever stray tty they happen to hold.
+#
 # Probe /dev/tty before the real `exec` redirect: when there's no
 # controlling terminal (pivy-agent fork, launchd-spawned context),
 # bash emits "/dev/tty: Device not configured" on stderr *before*
 # any `2>/dev/null` on the same `exec` line takes effect. A subshell
 # probe contains that noise so it never reaches pivy-agent's logs.
-if [[ -e /dev/tty ]] && (: >/dev/tty) 2>/dev/null; then
+if [[ $require != force ]] && [[ -e /dev/tty ]] && (: >/dev/tty) 2>/dev/null; then
   exec 3</dev/tty 4>/dev/tty
   render_context >&4
   pin=""
@@ -135,6 +153,19 @@ if [[ -e /dev/tty ]] && (: >/dev/tty) 2>/dev/null; then
   exec 3<&- 4>&-
   printf '%s\n' "$pin"
   exit 0
+fi
+
+# SSH_ASKPASS_REQUIRE=never is tty-or-nothing (piggy#166): reaching
+# this point means the tty branch didn't render, so refuse rather
+# than fall through to zenity. Exit 2 matches the no-render-target
+# refusal below.
+if [[ $require == never ]]; then
+  {
+    printf '[piggy-askpass] SSH_ASKPASS_REQUIRE=never but /dev/tty is unusable.\n'
+    printf '[piggy-askpass] refusing to fall through to zenity under the never policy.\n'
+    printf '[piggy-askpass] prompt was: %s\n' "$prompt"
+  } >&2
+  exit 2
 fi
 
 # Resolve a heads-up notifier (piggy#103). Priority order:

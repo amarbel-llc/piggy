@@ -118,10 +118,12 @@ fn unlock_ebox_against_real_card() {
 
     // ---- Unlock via the card ----
     //
-    // The recipe wires SSH_ASKPASS to the refusing test askpass and sets
+    // The recipe wires SSH_ASKPASS to the refusing test askpass (plus
+    // SSH_ASKPASS_REQUIRE=force per the harness safety net) and sets
     // PIGGY_TEST_FIB_PIN so the askpass non-interactively returns the
-    // fib PIN. Any unset SSH_ASKPASS would surface as a clear error
-    // ("no PIN source") rather than a GUI dialog.
+    // fib PIN. Under force, an unset SSH_ASKPASS surfaces as a clear
+    // error ("no PIN source") rather than a GUI dialog or a tty
+    // fallback (#166).
     let mut oracle = CardEcdhOracle::new(askpass_pin_supplier()).expect("build CardEcdhOracle");
     unlock_ebox(&mut ebox, None, Some(&mut oracle)).expect("unlock_ebox via card");
 

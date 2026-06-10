@@ -304,8 +304,18 @@ test-harness askpass above. Where the test askpass refuses to render
 any prompt, this one renders piggy-aware context (parent process,
 `PIGGY_ASKPASS_CONTEXT` env var, `[TEST]` tag heuristic) on top of
 the prompt text, then reads the PIN — preferring `/dev/tty`, falling
-back to `zenity` if `$DISPLAY` is set, refusing otherwise. Set in
-your shell as a drop-in `SSH_ASKPASS`:
+back to `zenity` (no `$DISPLAY` gate), refusing otherwise. The route
+is caller-selectable via OpenSSH's `SSH_ASKPASS_REQUIRE` (#166):
+`force` skips the tty branch (always zenity, for agent-driven /
+scripted contexts), `never` skips zenity (tty-or-refuse, for
+interactive callers), unset/`prefer` keeps the tty-first order. The
+same semantics live in the Rust `card_oracle::run_askpass` (behind
+`askpass_pin_supplier`, i.e. `show-batch`, the Rust agent's on-demand
+prompt, and the agentless card oracle): `force` requires
+`SSH_ASKPASS`, `never` reads from `/dev/tty` with echo off, and
+unset/`prefer` spawns `$SSH_ASKPASS` when exported and otherwise
+falls back to the tty read (pre-#166 an unset `SSH_ASKPASS`
+hard-errored there). Set in your shell as a drop-in `SSH_ASKPASS`:
 
 ```sh
 export SSH_ASKPASS="$PWD/contrib/piggy-askpass.sh"

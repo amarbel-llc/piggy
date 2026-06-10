@@ -454,6 +454,91 @@ STUB_EOF
   }
 }
 
+@test "require_force_skips_tty_branch_even_when_tty_available" {
+  # piggy#166: SSH_ASKPASS_REQUIRE=force must bypass the /dev/tty
+  # render target entirely — agent-driven / scripted contexts export
+  # it so the PIN prompt always lands on zenity, never on whatever
+  # stray tty the caller happens to hold. We allocate a real pty via
+  # python3's stdlib pty.spawn and feed it a line the tty branch WOULD
+  # read; the stubbed-zenity answer in the output proves the tty
+  # branch was skipped. (The fed line may still appear in the output
+  # via pty echo — assert on the zenity pin, not on its absence.)
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-force.XXXXXX")"
+  for tool in bash ps tr dirname mkdir date; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  cat >"$stub_dir/zenity" <<'STUB_EOF'
+#!/usr/bin/env bash
+echo "stubbed-pin-force"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" SSH_ASKPASS_REQUIRE=force \
+    "$python3_path" -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' \
+    "$ASKPASS" "Enter PIV PIN" <<<"tty-pin-should-be-ignored"
+
+  assert_success
+  assert_output --partial "stubbed-pin-force"
+}
+
+@test "require_never_refuses_zenity_when_tty_unreachable" {
+  # piggy#166: SSH_ASKPASS_REQUIRE=never means tty-or-nothing. In a
+  # tty-less env with zenity on PATH the helper must NOT fall through
+  # to zenity — it refuses with exit 2 and a banner naming the policy,
+  # so an interactive-only caller never gets a surprise GUI dialog.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-never.XXXXXX")"
+  for tool in bash ps tr dirname mkdir date; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  cat >"$stub_dir/zenity" <<'STUB_EOF'
+#!/usr/bin/env bash
+echo "stubbed-pin-never-should-not-render"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" SSH_ASKPASS_REQUIRE=never \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  [[ "$status" -eq 2 ]] || {
+    echo "expected exit 2 (refuse, never policy), got $status"
+    echo "stdout: $output"
+    return 1
+  }
+  assert_output --partial "SSH_ASKPASS_REQUIRE=never"
+  refute_output --partial "stubbed-pin-never-should-not-render"
+}
+
+@test "require_never_still_reads_tty_when_available" {
+  # piggy#166 companion pin: `never` forbids zenity, not the tty — a
+  # human at a terminal still gets the terminal prompt. pty.spawn
+  # supplies the tty; no zenity is present in the stub PATH so any
+  # accidental zenity fall-through would fail loudly instead.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-never-tty.XXXXXX")"
+  for tool in bash ps tr dirname mkdir date; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" SSH_ASKPASS_REQUIRE=never \
+    "$python3_path" -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' \
+    "$ASKPASS" "Enter PIV PIN" <<<"pty-pin-never"
+
+  assert_success
+  assert_output --partial "pty-pin-never"
+}
+
 @test "missing_notifier_does_not_block_or_fail_prompt" {
   # When no notifier is reachable (no env var, no terminal-notifier /
   # notify-send on PATH), the script must silently skip the heads-up

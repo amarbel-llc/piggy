@@ -1608,7 +1608,7 @@ mod tests {
         ));
         assert!(matches!(
             classify_pin_supplier_error(OracleError::Other(
-                "no PIN source: SSH_ASKPASS not set".into()
+                "no PIN source: SSH_ASKPASS_REQUIRE=force but SSH_ASKPASS not set".into()
             )),
             BatchFailure::PinCancelled(_)
         ));

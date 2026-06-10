@@ -20,11 +20,14 @@
 //! mid-operation (piggy#56). The PIN is cached per token GUID, so a
 //! multi-part decrypt still prompts the user only once.
 //!
-//! [`askpass_pin_supplier`] returns the default supplier: spawn the
-//! program named in `SSH_ASKPASS` with the prompt as argv[1]. That
-//! composes with both the user-facing `contrib/piggy-askpass.sh` (#33)
-//! and the test-harness `zz-tests_bats/helpers/piggy-test-askpass.sh`
-//! (#35) — neither requires any new Rust dependency.
+//! [`askpass_pin_supplier`] returns the default supplier: route the
+//! prompt per OpenSSH's `SSH_ASKPASS_REQUIRE` semantics (#166) — spawn
+//! the program named in `SSH_ASKPASS` with the prompt as argv[1], or
+//! read from `/dev/tty` with echo off when no askpass is configured
+//! (or under `SSH_ASKPASS_REQUIRE=never`). The askpass route composes
+//! with both the user-facing `contrib/piggy-askpass.sh` (#33) and the
+//! test-harness `zz-tests_bats/helpers/piggy-test-askpass.sh` (#35) —
+//! neither requires any new Rust dependency.
 //!
 //! ## Token matching
 //!
@@ -36,7 +39,8 @@
 //! than 0x9D are out of scope for v1 (matches `template::DEFAULT_SLOT`).
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::ffi::{OsStr, OsString};
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
 use openssl::bn::BigNumContext;
@@ -212,26 +216,145 @@ pub fn canonicalize_uncompressed(point: &[u8]) -> Result<Vec<u8>, OracleError> {
     Ok(bytes)
 }
 
-/// Run `$SSH_ASKPASS` with `prompt` as `argv[1]` and return the PIN it
-/// prints on stdout (trailing CR/LF trimmed, must be non-empty).
+/// Where a PIN prompt should be rendered, per OpenSSH's
+/// `SSH_ASKPASS_REQUIRE` semantics (piggy#166).
+#[derive(Debug, PartialEq, Eq)]
+enum PinRoute {
+    /// Spawn this askpass program with the prompt as `argv[1]`.
+    Askpass(OsString),
+    /// Prompt on the controlling terminal (`/dev/tty`, echo off).
+    Tty,
+}
+
+/// Decide the prompt route from `SSH_ASKPASS_REQUIRE` + `SSH_ASKPASS`
+/// (both passed in, not read here, so the decision is a pure function):
+///
+/// - `force` → always the askpass program; error if none is configured.
+/// - `never` → always the tty, even when an askpass is configured.
+/// - unset / `prefer` / anything else → the askpass program when one is
+///   configured, the tty otherwise. The tty fallback is new with #166:
+///   it gives `show-batch` (and every other [`askpass_pin_supplier`]
+///   consumer) a usable interactive path where the old code hard-errored
+///   on an unset `SSH_ASKPASS`.
+///
+/// An empty `SSH_ASKPASS` counts as unset, preserving [`run_askpass`]'s
+/// historical treatment.
+fn pin_route(require: Option<&OsStr>, askpass: Option<&OsStr>) -> Result<PinRoute, OracleError> {
+    if require == Some(OsStr::new("never")) {
+        return Ok(PinRoute::Tty);
+    }
+    match askpass {
+        Some(v) if !v.is_empty() => Ok(PinRoute::Askpass(v.to_os_string())),
+        _ if require == Some(OsStr::new("force")) => Err(OracleError::Other(
+            "no PIN source: SSH_ASKPASS_REQUIRE=force but SSH_ASKPASS not set".into(),
+        )),
+        _ => Ok(PinRoute::Tty),
+    }
+}
+
+/// Read a PIN from `/dev/tty` with echo disabled (termios `ECHO`
+/// cleared, restored before returning). The [`pin_route`] fallback when
+/// no askpass program is configured, and the only route under
+/// `SSH_ASKPASS_REQUIRE=never`.
+///
+/// Error messages mention `SSH_ASKPASS` so `show_batch`'s
+/// `classify_pin_supplier_error` keeps mapping no-PIN-source shapes to
+/// `PinCancelled`.
+fn read_pin_from_tty(
+    prompt: &str,
+    context: Option<&str>,
+) -> Result<Zeroizing<String>, OracleError> {
+    use std::os::fd::AsRawFd as _;
+
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|e| {
+            OracleError::Other(format!(
+                "no PIN source: askpass not routed (SSH_ASKPASS unset or \
+                 SSH_ASKPASS_REQUIRE=never) and /dev/tty is unusable: {e}"
+            ))
+        })?;
+
+    if let Some(ctx) = context {
+        writeln!(tty, "Context: {ctx}")
+            .map_err(|e| OracleError::Other(format!("write /dev/tty: {e}")))?;
+    }
+    write!(tty, "{prompt} ").map_err(|e| OracleError::Other(format!("write /dev/tty: {e}")))?;
+    tty.flush()
+        .map_err(|e| OracleError::Other(format!("flush /dev/tty: {e}")))?;
+
+    let fd = tty.as_raw_fd();
+    let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
+        return Err(OracleError::Other(format!(
+            "tcgetattr /dev/tty: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let saved = attrs;
+    attrs.c_lflag &= !libc::ECHO;
+    if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &attrs) } != 0 {
+        return Err(OracleError::Other(format!(
+            "tcsetattr /dev/tty: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let read_result = read_tty_line(&mut tty);
+
+    // Restore echo before surfacing any read error; emit the newline the
+    // suppressed echo swallowed so the caller's next line starts clean.
+    unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &saved) };
+    let _ = writeln!(tty);
+
+    let line = read_result?;
+    let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
+    if trimmed.is_empty() {
+        return Err(OracleError::Other("tty returned empty PIN".into()));
+    }
+    Ok(Zeroizing::new(trimmed))
+}
+
+/// Read one `\n`-terminated line from the (already echo-suppressed) tty.
+fn read_tty_line(tty: &mut std::fs::File) -> Result<String, OracleError> {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match tty.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) if byte[0] == b'\n' => break,
+            Ok(_) => buf.push(byte[0]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(OracleError::Other(format!("read /dev/tty: {e}"))),
+        }
+    }
+    String::from_utf8(buf).map_err(|_| OracleError::Other("tty PIN was not valid UTF-8".into()))
+}
+
+/// Prompt for a PIN, routed per `SSH_ASKPASS_REQUIRE` (#166, see
+/// [`pin_route`]): spawn `$SSH_ASKPASS` with `prompt` as `argv[1]` and
+/// return the PIN it prints on stdout (trailing CR/LF trimmed, must be
+/// non-empty), or read it from `/dev/tty` on the tty route.
 ///
 /// When `context` is `Some`, it is exported to the askpass child as
 /// `PIGGY_ASKPASS_CONTEXT`, which `contrib/piggy-askpass.sh` renders as
 /// origin info on the prompt (#33) and the test askpass surfaces in its
 /// banner (#35). The Rust `piggy agent`'s prompt-on-demand path sets this
 /// to identify the request (piggy#58); the agentless oracle passes `None`.
+/// On the tty route the context is rendered as a `Context:` line above
+/// the prompt.
 ///
 /// Synchronous (forks + waits). Async callers (the agent) wrap this in
 /// `tokio::task::spawn_blocking`. Reference impl: pivy's
 /// `vendor/pivy/src/ebox-cmd.c::run_askpass`.
 pub fn run_askpass(prompt: &str, context: Option<&str>) -> Result<Zeroizing<String>, OracleError> {
-    let askpass = match std::env::var_os("SSH_ASKPASS") {
-        Some(v) if !v.is_empty() => v,
-        _ => {
-            return Err(OracleError::Other(
-                "no PIN source: SSH_ASKPASS not set".into(),
-            ));
-        }
+    let require = std::env::var_os("SSH_ASKPASS_REQUIRE");
+    let askpass_env = std::env::var_os("SSH_ASKPASS");
+    let askpass = match pin_route(require.as_deref(), askpass_env.as_deref())? {
+        PinRoute::Tty => return read_pin_from_tty(prompt, context),
+        PinRoute::Askpass(path) => path,
     };
     let mut cmd = Command::new(&askpass);
     cmd.arg(prompt)
@@ -263,13 +386,16 @@ pub fn run_askpass(prompt: &str, context: Option<&str>) -> Result<Zeroizing<Stri
     Ok(Zeroizing::new(trimmed))
 }
 
-/// Default PIN supplier: spawn `$SSH_ASKPASS` with the prompt as `argv[1]`,
-/// read one line of stdout, return as `Zeroizing<String>`.
+/// Default PIN supplier: route the prompt per `SSH_ASKPASS_REQUIRE`
+/// (#166, see [`pin_route`]) — spawn `$SSH_ASKPASS` with the prompt as
+/// `argv[1]` and read one line of stdout, or read from `/dev/tty` with
+/// echo off — returning the PIN as `Zeroizing<String>`.
 ///
-/// Returns an error closure (deferred until first call) if `SSH_ASKPASS`
-/// is unset, so callers can construct the oracle once and let the supplier
-/// fail lazily — useful for the agent-then-card fallback in
-/// `cmd_stream_decrypt` where the card oracle may never be exercised.
+/// All routing (and any no-PIN-source error, e.g. `force` with no
+/// `SSH_ASKPASS` exported) is deferred until first call, so callers can
+/// construct the oracle once and let the supplier fail lazily — useful
+/// for the agent-then-card fallback in `cmd_stream_decrypt` where the
+/// card oracle may never be exercised.
 ///
 /// Composes with `contrib/piggy-askpass.sh` (#33) and
 /// `zz-tests_bats/helpers/piggy-test-askpass.sh` (#35). Thin wrapper over
@@ -337,7 +463,10 @@ mod tests {
         let askpass = write_executable(&dir.0, "askpass-ok.sh", "#!/bin/sh\necho 654321\n");
 
         let prev = std::env::var_os("SSH_ASKPASS");
+        let prev_require = std::env::var_os("SSH_ASKPASS_REQUIRE");
         std::env::set_var("SSH_ASKPASS", &askpass);
+        // An ambient `never` would reroute to /dev/tty and block the run.
+        std::env::remove_var("SSH_ASKPASS_REQUIRE");
 
         let mut supplier = askpass_pin_supplier();
         let pin = supplier("test prompt").expect("askpass should succeed");
@@ -347,16 +476,27 @@ mod tests {
             Some(v) => std::env::set_var("SSH_ASKPASS", v),
             None => std::env::remove_var("SSH_ASKPASS"),
         }
+        if let Some(v) = prev_require {
+            std::env::set_var("SSH_ASKPASS_REQUIRE", v);
+        }
     }
 
+    /// Pre-#166 this case was "unset SSH_ASKPASS always errors"; the
+    /// default route now falls back to /dev/tty, so the hard error is
+    /// pinned under SSH_ASKPASS_REQUIRE=force (which is exactly what
+    /// the test-harness safety net exports — see CLAUDE.md). The test
+    /// deliberately avoids exercising the tty fallback: a cargo test
+    /// run may hold a real controlling terminal and would block on it.
     #[test]
-    fn askpass_supplier_errors_when_unset() {
+    fn askpass_supplier_errors_when_unset_under_force() {
         let _guard = env_lock();
         let prev = std::env::var_os("SSH_ASKPASS");
+        let prev_require = std::env::var_os("SSH_ASKPASS_REQUIRE");
         std::env::remove_var("SSH_ASKPASS");
+        std::env::set_var("SSH_ASKPASS_REQUIRE", "force");
 
         let mut supplier = askpass_pin_supplier();
-        let err = supplier("test prompt").expect_err("must error without SSH_ASKPASS");
+        let err = supplier("test prompt").expect_err("must error without SSH_ASKPASS under force");
         match err {
             OracleError::Other(msg) => assert!(
                 msg.contains("SSH_ASKPASS"),
@@ -368,6 +508,65 @@ mod tests {
         if let Some(v) = prev {
             std::env::set_var("SSH_ASKPASS", v);
         }
+        match prev_require {
+            Some(v) => std::env::set_var("SSH_ASKPASS_REQUIRE", v),
+            None => std::env::remove_var("SSH_ASKPASS_REQUIRE"),
+        }
+    }
+
+    #[test]
+    fn pin_route_prefers_askpass_when_set() {
+        let route = pin_route(None, Some(OsStr::new("/bin/echo"))).unwrap();
+        assert_eq!(route, PinRoute::Askpass("/bin/echo".into()));
+    }
+
+    #[test]
+    fn pin_route_falls_back_to_tty_when_askpass_unset() {
+        assert_eq!(pin_route(None, None).unwrap(), PinRoute::Tty);
+    }
+
+    #[test]
+    fn pin_route_treats_empty_askpass_as_unset() {
+        assert_eq!(
+            pin_route(None, Some(OsStr::new(""))).unwrap(),
+            PinRoute::Tty
+        );
+    }
+
+    #[test]
+    fn pin_route_force_uses_askpass() {
+        let route = pin_route(Some(OsStr::new("force")), Some(OsStr::new("/bin/echo"))).unwrap();
+        assert_eq!(route, PinRoute::Askpass("/bin/echo".into()));
+    }
+
+    #[test]
+    fn pin_route_force_errors_when_askpass_unset() {
+        let err = pin_route(Some(OsStr::new("force")), None).unwrap_err();
+        match err {
+            OracleError::Other(msg) => assert!(
+                msg.contains("SSH_ASKPASS_REQUIRE=force") && msg.contains("SSH_ASKPASS"),
+                "error should name both vars, got: {msg}"
+            ),
+            other => panic!("expected OracleError::Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pin_route_never_routes_to_tty_even_with_askpass() {
+        let route = pin_route(Some(OsStr::new("never")), Some(OsStr::new("/bin/echo"))).unwrap();
+        assert_eq!(route, PinRoute::Tty);
+    }
+
+    #[test]
+    fn pin_route_prefer_behaves_like_unset() {
+        assert_eq!(
+            pin_route(Some(OsStr::new("prefer")), None).unwrap(),
+            PinRoute::Tty
+        );
+        assert_eq!(
+            pin_route(Some(OsStr::new("prefer")), Some(OsStr::new("/x"))).unwrap(),
+            PinRoute::Askpass("/x".into())
+        );
     }
 
     #[test]
@@ -377,7 +576,10 @@ mod tests {
         let askpass = write_executable(&dir.0, "askpass-fail.sh", "#!/bin/sh\nexit 1\n");
 
         let prev = std::env::var_os("SSH_ASKPASS");
+        let prev_require = std::env::var_os("SSH_ASKPASS_REQUIRE");
         std::env::set_var("SSH_ASKPASS", &askpass);
+        // An ambient `never` would reroute to /dev/tty and block the run.
+        std::env::remove_var("SSH_ASKPASS_REQUIRE");
 
         let mut supplier = askpass_pin_supplier();
         let err = supplier("test prompt").expect_err("nonzero exit must surface as error");
@@ -394,6 +596,9 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("SSH_ASKPASS", v),
             None => std::env::remove_var("SSH_ASKPASS"),
+        }
+        if let Some(v) = prev_require {
+            std::env::set_var("SSH_ASKPASS_REQUIRE", v);
         }
     }
 
