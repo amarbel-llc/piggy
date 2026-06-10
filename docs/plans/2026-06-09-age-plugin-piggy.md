@@ -119,9 +119,14 @@ must be reachable and unlocked **at the moment sops runs**:
   same constraint every PIV-interactive flow has.
 
 This recipe is documented from the module option shapes; it has **not** been
-exercised end-to-end against a live sops-nix here. Verify against your sops /
-sops-nix versions (age-plugin support on the encryption side also requires a
-sufficiently recent `sops`).
+exercised end-to-end against a live sops-nix here. A first fib-backed attempt
+to drive `sops decrypt` through the plugin **hung** rather than completing
+(cause not yet diagnosed — possibly an askpass/agent-prompt wiring difference
+when `sops` rather than `age` spawns the plugin, or a sops-side plugin gap);
+the equivalent `age -d` round-trip succeeds. So treat the sops path as
+**unverified — known to stall** until that is resolved, and verify against your
+own sops / sops-nix versions (age-plugin support on the encryption side also
+requires a sufficiently recent `sops`).
 
 ## Tests
 
@@ -144,4 +149,6 @@ sufficiently recent `sops`).
 - `generate` reads slot 9D specifically; other slots are not exposed.
 - A man page and a version `build.rs` (today `--version` reports the crate
   version, not piggy's `version+commit`) are not yet wired.
-- The sops-nix recipe above is documented, not yet integration-tested.
+- The sops-nix recipe above is documented but **unverified**: a fib-backed
+  `sops decrypt`-through-the-plugin attempt hung (see the sops-nix section).
+  Diagnosing that stall and landing a green sops bats lane is open work.

@@ -44,7 +44,15 @@ fn main() -> io::Result<()> {
         Some("generate") => generate::run(parse_guid(&args[1..])),
         Some("convert") => convert::run(args.get(1).map(String::as_str)),
         Some("--version" | "-V") => {
-            println!("age-plugin-piggy {}", env!("CARGO_PKG_VERSION"));
+            // eng-versioning(7): `age-plugin-piggy <version>+<commit>`, sourced
+            // from piggy's version.env / git (via build.rs) and overridable at
+            // runtime by the flake wrapper's --set, mirroring `piggy version`.
+            let version = runtime_or("PIGGY_VERSION", env!("PIGGY_VERSION"));
+            let commit = runtime_or(
+                "PIGGY_COMMIT",
+                option_env!("PIGGY_COMMIT").unwrap_or("unknown"),
+            );
+            println!("age-plugin-piggy {version}+{commit}");
             Ok(())
         }
         _ => {
@@ -52,6 +60,15 @@ fn main() -> io::Result<()> {
             Ok(())
         }
     }
+}
+
+/// A non-empty environment value for `key`, else `default`. Lets the flake
+/// wrapper's `--set` override the compile-time `build.rs` value.
+fn runtime_or(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 /// Pull `--guid <GUID>` or `--guid=<GUID>` out of the trailing args.
