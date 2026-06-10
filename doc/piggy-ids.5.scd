@@ -39,7 +39,8 @@ bare-format    = recipient-blech32
 recipient-blech32 = pivy-blech32 / age-blech32
 pivy-blech32   = "pivy_ecdh_p256_pub" "-" 1*charset
 age-blech32    = "age_x25519_pub"    "-" 1*charset
-ssh-auth-entry = "piggy-piv_auth-v1" "@" "ssh_ecdsa_nistp256_pub" "-" 1*charset
+ssh-auth-entry = "piggy-piv_auth-v1" "@" ssh-blech32
+ssh-blech32    = ("ssh_ecdsa_nistp256_pub" / "ssh_ecdsa_nistp384_pub" / "ssh_ed25519_pub") "-" 1*charset
 ```
 
 The bech32 _charset_ is the alphabet from madder RFC 0002 §3.1.
@@ -70,10 +71,14 @@ below for the one additional, non-recipient entry type).
 
 A *piggy-ids* file MAY additionally carry PIV slot-9A
 (PIV Authentication) SSH keys, tagged with the *piggy-piv_auth-v1*
-purpose and the *ssh_ecdsa_nistp256_pub* format:
+purpose and one of the SSH pubkey formats — *ssh_ecdsa_nistp256_pub*
+(33-byte compressed P-256 point), *ssh_ecdsa_nistp384_pub* (49-byte
+compressed P-384 point), or *ssh_ed25519_pub* (32-byte raw Ed25519
+key):
 
 ```
 piggy-piv_auth-v1@ssh_ecdsa_nistp256_pub-<blech32>  # alice login (9A)
+piggy-piv_auth-v1@ssh_ed25519_pub-<blech32>         # bob login (9A, ed25519)
 ```
 
 These are *not encryption recipients*. They are SSH login keys for the
@@ -85,11 +90,12 @@ are:
   re-encryption walk skip 9A entries entirely — a secret is never
   wrapped to an SSH-auth key, and a 9A line never forces re-encryption.
 - *Consumed by* *piggy ssh-copy-id*, which renders each 9A entry as an
-  *ecdsa-sha2-nistp256* _authorized_keys_ line and installs the set on a
+  _authorized_keys_ line (*ecdsa-sha2-nistp256*, *ecdsa-sha2-nistp384*,
+  or *ssh-ed25519*, per the entry's format) and installs the set on a
   remote host.
 - *Required to be purpose-tagged.* Unlike recipient formats, there is no
   bare-format sugar for SSH-auth entries; a bare
-  _ssh_ecdsa_nistp256_pub-..._ (no _piggy-piv_auth-v1@_ prefix) is
+  _ssh_..._pub-..._ (no _piggy-piv_auth-v1@_ prefix) is
   rejected.
 
 Only slot 9A is accepted today; slots 9C (*piggy-piv_sig-v1*) and 9E

@@ -31,7 +31,9 @@ recipient formats are accepted under that purpose:
 
 A `piggy-ids` file MAY additionally carry **SSH-authentication
 entries** — PIV slot 9A public keys tagged with the
-`piggy-piv_auth-v1` purpose and `ssh_ecdsa_nistp256_pub` format. These
+`piggy-piv_auth-v1` purpose and an `ssh_*_pub` format
+(`ssh_ecdsa_nistp256_pub`, `ssh_ecdsa_nistp384_pub`, or
+`ssh_ed25519_pub`). These
 are *not* encryption recipients: they declare the SSH-login keys of the
 same identities, are excluded from the encrypt pipeline and the
 re-encryption comparison, and are consumed by `piggy ssh-copy-id`. See
@@ -123,7 +125,8 @@ bare-format    = recipient-blech32
 recipient-blech32 = pivy-blech32 / age-blech32
 pivy-blech32   = "pivy_ecdh_p256_pub" "-" 1*charset
 age-blech32    = "age_x25519_pub"    "-" 1*charset
-ssh-auth-entry = "piggy-piv_auth-v1" "@" "ssh_ecdsa_nistp256_pub" "-" 1*charset
+ssh-auth-entry = "piggy-piv_auth-v1" "@" ssh-blech32
+ssh-blech32    = ("ssh_ecdsa_nistp256_pub" / "ssh_ecdsa_nistp384_pub" / "ssh_ed25519_pub") "-" 1*charset
 charset        = %x71 / %x70 / ...   ; bech32 alphabet, see madder RFC 0002 §3.1
 ```
 
@@ -163,12 +166,14 @@ For every recipient line:
 ### SSH-Authentication Entries (slot 9A)
 
 A `piggy-ids` file MAY also contain SSH-authentication entries: a markl
-ID with purpose `piggy-piv_auth-v1` and format `ssh_ecdsa_nistp256_pub`
-(33-byte SEC1-compressed P-256 point — the public key of PIV slot 9A,
-PIV Authentication). These describe the SSH-login keys of the
-identities in the file; they are kept alongside the 9D decrypt keys so
-a single file answers both "who can decrypt this store" and "who may
-log in".
+ID with purpose `piggy-piv_auth-v1` and one of the SSH pubkey formats —
+`ssh_ecdsa_nistp256_pub` (33-byte SEC1-compressed P-256 point),
+`ssh_ecdsa_nistp384_pub` (49-byte SEC1-compressed P-384 point), or
+`ssh_ed25519_pub` (32-byte raw Ed25519 key) — carrying the public key
+of PIV slot 9A (PIV Authentication). These describe the SSH-login keys
+of the identities in the file; they are kept alongside the 9D decrypt
+keys so a single file answers both "who can decrypt this store" and
+"who may log in".
 
 Constraints, distinct from recipient lines:
 
@@ -182,9 +187,9 @@ Constraints, distinct from recipient lines:
   path with the existing "at least one recipient is required" error.
 - **Purpose-tagged only.** Unlike recipient formats, there is no
   bare-format sugar for SSH-auth entries: a bare
-  `ssh_ecdsa_nistp256_pub-…` (no `piggy-piv_auth-v1@` prefix) MUST be
+  `ssh_*_pub-…` (no `piggy-piv_auth-v1@` prefix) MUST be
   rejected. This keeps canonicalisation total — a bare format is only
-  ever promoted to `piggy-recipient-v1@`, a pairing the SSH format
+  ever promoted to `piggy-recipient-v1@`, a pairing the SSH formats
   cannot form.
 - **9A only (v1).** Only the 9A authentication slot
   (`piggy-piv_auth-v1`) is accepted. The 9C (`piggy-piv_sig-v1`) and 9E
@@ -195,10 +200,11 @@ Constraints, distinct from recipient lines:
 
 SSH-auth entries are consumed by `piggy ssh-copy-id`, which renders
 each as an OpenSSH `authorized_keys` line
-(`ecdsa-sha2-nistp256 <base64> <comment>`) and installs the set on a
-remote host. The rendering is offline — the compressed point is read
-directly from the markl ID, no card access — and uses the same encoder
-as `piggy list --format=ssh`.
+(`<keytype> <base64> <comment>`, where `<keytype>` is
+`ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, or `ssh-ed25519` per the
+entry's format) and installs the set on a remote host. The rendering is
+offline — the key payload is read directly from the markl ID, no card
+access — and uses the same encoder as `piggy list --format=ssh`.
 
 ### Equality
 

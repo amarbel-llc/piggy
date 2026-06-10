@@ -1,15 +1,19 @@
-//! C-pivy + piggy-ids fallback dispatch.
+//! `exec(2)` hand-offs to sibling process images (C pivy + piggy-ids).
 //!
-//! Post Split B of #96 the piggy dispatcher is pure Rust on the
-//! pass-style path; no `cmd_*` function survives in bash. The two
-//! exec helpers below cover the remaining out-of-process hops:
+//! Formerly `fallback.rs`, renamed for #125: nothing here is a
+//! temporary bridge anymore. Post Split B of #96 the piggy dispatcher
+//! is pure Rust on the pass-style path (no `cmd_*` function survives
+//! in bash), and what remains is *deliberate* delegation:
 //!
 //! - [`exec_piggy_ids`] runs the `piggy-ids` helper binary for the
 //!   top-level `piggy list` (and previously for the
 //!   `recipients list-available` subcommand, kept for namespace
-//!   stability).
+//!   stability). Present to dodge the `piggy list` vs
+//!   `piggy pass list` name collision, not as a port stopgap.
 //! - [`exec_pivy`] runs `pivy-<tool>` for the C-pivy shortcuts
-//!   (`agent` / `box` / `tool` / `ca` / `luks` / `zfs`) and the
+//!   (`tool` / `ca` / `luks` / `zfs` — no Rust port planned; the C
+//!   pivy stack is the intended product architecture there), the
+//!   `piggy box` subcommands the Rust impl doesn't cover, and the
 //!   `piggy pivy <tool>` passthrough.
 //!
 //! Top-level dispatch is exhaustive in clap; this module owns no

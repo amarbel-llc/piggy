@@ -128,10 +128,10 @@
           src = ./vendor/pivy;
         };
 
-        # Runtime deps on PATH for the wrapped piggy binary. `pivy` is
-        # kept as a fallback for subcommands the rust binary hasn't
-        # implemented yet (box/tool/ca/luks/zfs — see
-        # crates/piggy/src/fallback.rs) and as the decrypt backend for
+        # Runtime deps on PATH for the wrapped piggy binary. `pivy`
+        # backs the C-pivy delegations (tool/ca/luks/zfs + the `piggy
+        # box` subcommands the rust impl doesn't cover — see
+        # crates/piggy/src/exec.rs) and the decrypt backend for
         # `pass show` / `pass edit` / `pass generate -i` (the rust
         # `crypt::decrypt` shells to `pivy-box stream decrypt`).
         # `openssh` provides `ssh-copy-id`, which `piggy ssh-copy-id`

@@ -33,6 +33,14 @@ pub enum FormatId {
     /// dodder/recipient pubkeys that happen to share the same byte
     /// shape.
     SshEcdsaNistp256Pub,
+    /// SSH-suitable Ed25519 public key, raw (32 bytes). Same
+    /// SSH-vs-dodder distinction as `ssh_ecdsa_nistp256_pub`: distinct
+    /// from `ed25519_pub` so an Ed25519 key read from a 9A/9C/9E PIV
+    /// slot doesn't masquerade as a dodder repo pubkey (#86).
+    SshEd25519Pub,
+    /// SSH-suitable ECDSA P-384 public key, SEC1-compressed (49 bytes).
+    /// Mirrors `ssh_ecdsa_nistp256_pub` one curve up (#86).
+    SshEcdsaNistp384Pub,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -57,6 +65,8 @@ impl FormatId {
             FormatId::Ed25519Ssh => "ed25519_ssh",
             FormatId::EcdsaP256Ssh => "ecdsa_p256_ssh",
             FormatId::SshEcdsaNistp256Pub => "ssh_ecdsa_nistp256_pub",
+            FormatId::SshEd25519Pub => "ssh_ed25519_pub",
+            FormatId::SshEcdsaNistp384Pub => "ssh_ecdsa_nistp384_pub",
         }
     }
 
@@ -76,8 +86,11 @@ impl FormatId {
             | FormatId::AgeX25519Pub
             | FormatId::AgeX25519Sec
             | FormatId::Nonce
-            | FormatId::Ed25519Ssh => 32,
+            | FormatId::Ed25519Ssh
+            | FormatId::SshEd25519Pub => 32,
             FormatId::Ed25519Sec | FormatId::Ed25519Sig | FormatId::EcdsaP256Sig => 64,
+            // P-384 compressed point: 1-byte y-parity + 48-byte x-coord.
+            FormatId::SshEcdsaNistp384Pub => 49,
         }
     }
 
@@ -97,6 +110,8 @@ impl FormatId {
             "ed25519_ssh" => Ok(FormatId::Ed25519Ssh),
             "ecdsa_p256_ssh" => Ok(FormatId::EcdsaP256Ssh),
             "ssh_ecdsa_nistp256_pub" => Ok(FormatId::SshEcdsaNistp256Pub),
+            "ssh_ed25519_pub" => Ok(FormatId::SshEd25519Pub),
+            "ssh_ecdsa_nistp384_pub" => Ok(FormatId::SshEcdsaNistp384Pub),
             other => Err(UnknownFormat(other.to_string())),
         }
     }
@@ -129,6 +144,8 @@ mod tests {
             FormatId::Ed25519Ssh,
             FormatId::EcdsaP256Ssh,
             FormatId::SshEcdsaNistp256Pub,
+            FormatId::SshEd25519Pub,
+            FormatId::SshEcdsaNistp384Pub,
         ] {
             let s = f.as_str();
             let parsed = FormatId::parse(s).unwrap();
@@ -140,6 +157,18 @@ mod tests {
     fn ssh_ecdsa_nistp256_pub_size_is_33() {
         // P-256 compressed point: 1-byte y-parity + 32-byte x-coord.
         assert_eq!(FormatId::SshEcdsaNistp256Pub.size(), 33);
+    }
+
+    #[test]
+    fn ssh_ed25519_pub_size_is_32() {
+        // Raw Ed25519 public key, no framing.
+        assert_eq!(FormatId::SshEd25519Pub.size(), 32);
+    }
+
+    #[test]
+    fn ssh_ecdsa_nistp384_pub_size_is_49() {
+        // P-384 compressed point: 1-byte y-parity + 48-byte x-coord.
+        assert_eq!(FormatId::SshEcdsaNistp384Pub.size(), 49);
     }
 
     #[test]

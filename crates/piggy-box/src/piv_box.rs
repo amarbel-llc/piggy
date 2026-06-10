@@ -34,6 +34,17 @@ impl EcCurve {
         }
     }
 
+    /// OpenSSH key type name for this curve — the first ssh-string of
+    /// an `ecdsa-sha2-nistpNNN` pubkey blob and the leading word of an
+    /// `authorized_keys` line. Kept here so blob framing and line
+    /// rendering can't drift apart.
+    pub fn ssh_keytype(&self) -> &'static str {
+        match self {
+            EcCurve::NistP256 => "ecdsa-sha2-nistp256",
+            EcCurve::NistP384 => "ecdsa-sha2-nistp384",
+        }
+    }
+
     pub fn from_wire_name(s: &str) -> Result<Self> {
         match s {
             "nistp256" => Ok(EcCurve::NistP256),

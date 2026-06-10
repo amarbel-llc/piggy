@@ -3,7 +3,7 @@
 //! All recipients subcommands are now in Rust: `list`, `add` (both the
 //! explicit-recipients form and the `-A`/`--all-attached` interactive
 //! card-detection path), `remove`, and `sync`. `list-available` is
-//! dispatched directly through `fallback::exec_piggy_ids` from main.rs
+//! dispatched directly through `exec::exec_piggy_ids` from main.rs
 //! (no module wiring needed). No recipients path reaches `piggy.sh`
 //! anymore (#96 step 6 retired the last bash recipients function).
 //!

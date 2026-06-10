@@ -30,8 +30,8 @@ use piggy_markl::{FormatId, Id, ParseError as MarklParseError, PurposeId};
 
 pub mod classify;
 pub use classify::{
-    Classification, classify_slot, classify_slot_9d, classify_ssh_slot, format_slot_id,
-    openssh_authorized_key,
+    Classification, ClassifyInput, classify_slot, classify_slot_9d, classify_ssh_slot,
+    format_slot_id, openssh_authorized_key,
 };
 
 /// One recipient line: a markl ID plus an optional human comment.
@@ -47,9 +47,8 @@ impl Recipient {
     /// Construct a recipient. The id MUST be a purpose-tagged
     /// `piggy-ids` entry: either an encryption recipient
     /// (`piggy-recipient-v1` + `pivy_ecdh_p256_pub`/`age_x25519_pub`) or
-    /// a PIV slot-9A SSH-auth key (`piggy-piv_auth-v1` +
-    /// `ssh_ecdsa_nistp256_pub`). Otherwise `InvalidRecipientShape` is
-    /// returned.
+    /// a PIV slot-9A SSH-auth key (`piggy-piv_auth-v1` + an `ssh_*_pub`
+    /// format). Otherwise `InvalidRecipientShape` is returned.
     pub fn new(id: Id, comment: Option<String>) -> Result<Self, ParseError> {
         validate_recipient_shape(&id)?;
         Ok(Self { id, comment })
@@ -81,12 +80,18 @@ impl Recipient {
     }
 
     /// True iff this entry is a PIV slot-9A SSH-authentication key
-    /// (`piggy-piv_auth-v1` + `ssh_ecdsa_nistp256_pub`). These are
-    /// consumed by `piggy ssh-copy-id` and are never encryption
-    /// recipients.
+    /// (`piggy-piv_auth-v1` + one of the SSH pubkey formats:
+    /// `ssh_ecdsa_nistp256_pub`, `ssh_ecdsa_nistp384_pub`, or
+    /// `ssh_ed25519_pub` — #86). These are consumed by
+    /// `piggy ssh-copy-id` and are never encryption recipients.
     pub fn is_ssh_auth(&self) -> bool {
         matches!(self.id.purpose(), Some(PurposeId::PiggyPivAuthV1))
-            && self.id.format() == FormatId::SshEcdsaNistp256Pub
+            && matches!(
+                self.id.format(),
+                FormatId::SshEcdsaNistp256Pub
+                    | FormatId::SshEcdsaNistp384Pub
+                    | FormatId::SshEd25519Pub
+            )
     }
 }
 
@@ -245,7 +250,8 @@ pub enum ParseError {
     #[error(
         "line {line}: entry shape requires either \
          purpose=piggy-recipient-v1 with format in {{pivy_ecdh_p256_pub, age_x25519_pub}}, \
-         or purpose=piggy-piv_auth-v1 with format=ssh_ecdsa_nistp256_pub \
+         or purpose=piggy-piv_auth-v1 with format in \
+         {{ssh_ecdsa_nistp256_pub, ssh_ecdsa_nistp384_pub, ssh_ed25519_pub}} \
          (got purpose={purpose:?}, format={format:?})"
     )]
     InvalidRecipientShape {
@@ -259,7 +265,7 @@ pub enum ParseError {
 
 /// True iff `id` is a purpose-tagged `piggy-ids` entry: an encryption
 /// recipient (`piggy-recipient-v1` + pivy/age) or a PIV slot-9A SSH-auth
-/// key (`piggy-piv_auth-v1` + `ssh_ecdsa_nistp256_pub`). SSH-auth entries
+/// key (`piggy-piv_auth-v1` + an `ssh_*_pub` format). SSH-auth entries
 /// MUST be purpose-tagged — there is no bare-format sugar for them, so
 /// [`canonicalize_for_render`] never has to promote a bare SSH format to
 /// a `piggy-recipient-v1@` pairing it cannot form.
@@ -476,6 +482,29 @@ mod tests {
         let r = Recipient::new(id.clone(), None).unwrap();
         assert_eq!(r.id(), &id);
         assert!(r.is_ssh_auth());
+    }
+
+    #[test]
+    fn recipient_new_accepts_ed25519_and_p384_ssh_auth_formats() {
+        // The 9A purpose accepts all three SSH pubkey formats (#86);
+        // each must classify as an SSH-auth (never encryption) entry.
+        for (format, len) in [
+            (FormatId::SshEd25519Pub, 32),
+            (FormatId::SshEcdsaNistp384Pub, 49),
+        ] {
+            let id = Id::new(
+                Some(PurposeId::PiggyPivAuthV1),
+                format,
+                (0..len).map(|i| i as u8).collect::<Vec<u8>>(),
+            )
+            .unwrap();
+            let r = Recipient::new(id, None).unwrap();
+            assert!(r.is_ssh_auth(), "{format:?} must be an ssh-auth entry");
+            assert!(
+                !r.is_encryption_recipient(),
+                "{format:?} must not be an encryption recipient"
+            );
+        }
     }
 
     #[test]

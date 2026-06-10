@@ -30,9 +30,10 @@ pub enum PurposeId {
     ///     declaring them validate cleanly.
     PiggyRecipientV1,
     /// `piggy-piv_auth-v1` — public key from PIV slot 9A (PIV
-    /// Authentication). Constrained to `ssh_ecdsa_nistp256_pub` for now;
-    /// other algorithms (Ed25519, RSA, P-384) are not yet enumerated in
-    /// `piggy list` output and will need new compatible format IDs.
+    /// Authentication). Accepts `ssh_ecdsa_nistp256_pub`,
+    /// `ssh_ed25519_pub`, and `ssh_ecdsa_nistp384_pub` (#86); RSA is
+    /// not yet enumerated in `piggy list` output and will need a new
+    /// compatible (variable-length) format ID.
     PiggyPivAuthV1,
     /// `piggy-piv_sig-v1` — public key from PIV slot 9C (Digital
     /// Signature). Same constraint as `PiggyPivAuthV1`.
@@ -114,7 +115,12 @@ impl PurposeId {
             PurposeId::PiggyPivAuthV1
             | PurposeId::PiggyPivSigV1
             | PurposeId::PiggyPivCardAuthV1 => {
-                matches!(format, FormatId::SshEcdsaNistp256Pub)
+                matches!(
+                    format,
+                    FormatId::SshEcdsaNistp256Pub
+                        | FormatId::SshEd25519Pub
+                        | FormatId::SshEcdsaNistp384Pub
+                )
             }
             PurposeId::DodderBlobDigestSha256V1 => {
                 matches!(format, FormatId::Sha256 | FormatId::Blake2b256)
@@ -156,7 +162,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn piggy_piv_purposes_accept_only_ssh_ecdsa_nistp256_pub() {
+    fn piggy_piv_purposes_accept_only_ssh_pub_formats() {
         for p in [
             PurposeId::PiggyPivAuthV1,
             PurposeId::PiggyPivSigV1,
@@ -167,12 +173,24 @@ mod tests {
                 "{p:?} should accept ssh_ecdsa_nistp256_pub"
             );
             assert!(
+                p.validate_format(FormatId::SshEd25519Pub).is_ok(),
+                "{p:?} should accept ssh_ed25519_pub (#86)"
+            );
+            assert!(
+                p.validate_format(FormatId::SshEcdsaNistp384Pub).is_ok(),
+                "{p:?} should accept ssh_ecdsa_nistp384_pub (#86)"
+            );
+            assert!(
                 p.validate_format(FormatId::PivyEcdhP256Pub).is_err(),
                 "{p:?} should reject pivy_ecdh_p256_pub — that's a recipient format"
             );
             assert!(
                 p.validate_format(FormatId::EcdsaP256Pub).is_err(),
                 "{p:?} should reject ecdsa_p256_pub — distinct from ssh form"
+            );
+            assert!(
+                p.validate_format(FormatId::Ed25519Pub).is_err(),
+                "{p:?} should reject ed25519_pub — that's the dodder repo-key form"
             );
         }
     }

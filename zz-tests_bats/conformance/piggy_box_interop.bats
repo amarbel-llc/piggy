@@ -8,7 +8,7 @@
 # History. This file was originally a cross-language *template*-format
 # compat probe (Rust `piggy box` ↔ C `pivy-box`) — see #29 / #41 / #55.
 # After commit `79658e1` (2026-04-28), `piggy box` itself exec's into C
-# `pivy-box` via `fallback::exec_pivy`, so both sides of the original
+# `pivy-box` via what is now `exec::exec_pivy`, so both sides of the original
 # tests reach the same binary. The cipher interop tests (`rust_encrypt_
 # c_decrypt` and the reverse) were deleted in #41; their bodies live in
 # git at `38df53c`. The remaining template tests have been relabeled
@@ -46,7 +46,7 @@ setup() {
 
   # Replace common.bash's mock pivy-box symlink with the real C
   # binary — wrapper smoke tests need `piggy box` (which exec's
-  # `pivy-box` from PATH via fallback::exec_pivy) to reach the real
+  # `pivy-box` from PATH via exec::exec_pivy) to reach the real
   # binary. Scoped to BATS_TEST_TMPDIR, so other bats files keep the
   # mock.
   ln -sf "$REAL_PIVY_BOX" "$BATS_TEST_TMPDIR/pivy-box"

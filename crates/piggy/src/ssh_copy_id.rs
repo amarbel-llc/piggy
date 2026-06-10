@@ -1,10 +1,10 @@
 //! `piggy ssh-copy-id` — authorize a whole recipient set for SSH login.
 //!
-//! Reads the SSH-authentication keys (PIV slot 9A,
-//! `piggy-piv_auth-v1@ssh_ecdsa_nistp256_pub`) declared in a `piggy-ids`
-//! file, renders each as an OpenSSH `authorized_keys` line, and hands the
-//! lot to the system `ssh-copy-id` so every listed identity is authorized
-//! on the remote host in a single invocation.
+//! Reads the SSH-authentication keys (PIV slot 9A, `piggy-piv_auth-v1`
+//! with an `ssh_*_pub` format: ECDSA P-256/P-384 or Ed25519) declared in
+//! a `piggy-ids` file, renders each as an OpenSSH `authorized_keys`
+//! line, and hands the lot to the system `ssh-copy-id` so every listed
+//! identity is authorized on the remote host in a single invocation.
 //!
 //! This is the SSH-auth sibling of the encryption-recipient set: a
 //! `piggy-ids` file may carry both 9D ECDH recipients (who can *decrypt*
@@ -12,8 +12,9 @@
 //! consumes only the latter — the 9D recipients are not SSH keys and are
 //! ignored here (mirroring how the encrypt pipeline ignores the 9A keys).
 //!
-//! The rendering is fully offline: each 9A markl ID already carries the
-//! 33-byte compressed P-256 point, so no card or PCSC access is needed.
+//! The rendering is fully offline: each 9A markl ID already carries its
+//! key payload (compressed EC point or raw Ed25519 key), so no card or
+//! PCSC access is needed.
 //! Reuses the same `piggy_ids::openssh_authorized_key` renderer behind
 //! `piggy list --format=ssh`, so the emitted line is byte-identical to
 //! that of a live-card enumeration of the same key.
@@ -66,7 +67,7 @@ fn run_inner(args: &[String]) -> Result<i32, String> {
         return Err(format!(
             "no SSH-auth (slot 9A) keys in {}\n\
              A piggy-ids file carries SSH-login keys as \
-             `piggy-piv_auth-v1@ssh_ecdsa_nistp256_pub` lines. Discover them \
+             `piggy-piv_auth-v1@ssh_*_pub` lines. Discover them \
              with `piggy list --format=human` and add them with \
              `piggy pass recipients add <markl-id>`.",
             ids_path.display(),
@@ -105,8 +106,8 @@ fn split_args(args: &[String]) -> Result<(Option<String>, Vec<String>), String> 
 }
 
 /// Parse the `piggy-ids` file and render each slot-9A SSH-auth recipient
-/// as an `ecdsa-sha2-nistp256 <b64> <comment>` `authorized_keys` line, in
-/// file order. The trailing comment is the recipient's inline `# …` note
+/// as a `<keytype> <b64> <comment>` `authorized_keys` line, in file
+/// order. The trailing comment is the recipient's inline `# …` note
 /// when present, else its markl ID (so an installed key is traceable back
 /// to the source line).
 fn authorized_key_lines(ids_path: &std::path::Path) -> Result<Vec<String>, String> {
@@ -117,7 +118,7 @@ fn authorized_key_lines(ids_path: &std::path::Path) -> Result<Vec<String>, Strin
 
     let mut lines = Vec::new();
     for r in file.ssh_auth_recipients() {
-        let prefix = openssh_authorized_key(r.id().data())
+        let prefix = openssh_authorized_key(r.id())
             .map_err(|e| format!("rendering SSH key for {}: {e}", r.id().to_wire()))?;
         let comment = r
             .comment()

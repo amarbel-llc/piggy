@@ -53,6 +53,25 @@ pub fn verify_ec_signature(
     Ok(sig.verify(prehash, &eckey)?)
 }
 
+/// Extract the raw 32-byte Ed25519 public key from a parsed SPKI. RFC
+/// 8410 stores Ed25519 keys as the raw point with no inner DER
+/// structure. Shared by [`extract_public_key`] and piggy-ids' slot
+/// classifier (which needs the raw bytes as a markl payload).
+pub fn raw_ed25519_from_spki(
+    pkey: &openssl::pkey::PKeyRef<openssl::pkey::Public>,
+) -> Result<[u8; 32], PivError> {
+    if pkey.id() != openssl::pkey::Id::ED25519 {
+        return Err(PivError::UnsupportedAlgorithm(format!(
+            "expected an Ed25519 SPKI, got openssl key id {:?}",
+            pkey.id()
+        )));
+    }
+    let raw = pkey.raw_public_key()?;
+    raw.as_slice()
+        .try_into()
+        .map_err(|_| PivError::Crypto(format!("Ed25519 pubkey length {} != 32", raw.len())))
+}
+
 /// Extract the public key algorithm and ssh_key::PublicKey from a DER-encoded X.509 cert.
 pub fn extract_public_key(cert_der: &[u8]) -> Result<(PivAlgorithm, PublicKey), PivError> {
     let cert = X509::from_der(cert_der)?;
@@ -81,6 +100,14 @@ pub fn extract_public_key(cert_der: &[u8]) -> Result<(PivAlgorithm, PublicKey), 
         });
         let pubkey = PublicKey::new(key_data, "");
         return Ok((alg, pubkey));
+    }
+
+    // Ed25519 (YubicoPIV 5.7+ extension slots, see apdu.rs).
+    if pkey.id() == openssl::pkey::Id::ED25519 {
+        let arr = raw_ed25519_from_spki(&pkey)?;
+        let key_data = KeyData::Ed25519(ssh_key::public::Ed25519PublicKey(arr));
+        let pubkey = PublicKey::new(key_data, "");
+        return Ok((PivAlgorithm::Ed25519, pubkey));
     }
 
     if let Ok(ec) = pkey.ec_key() {
@@ -114,7 +141,9 @@ pub fn extract_public_key(cert_der: &[u8]) -> Result<(PivAlgorithm, PublicKey), 
         let pubkey = PublicKey::new(key_data, "");
         Ok((alg, pubkey))
     } else {
-        Err(PivError::UnsupportedAlgorithm("not RSA or EC key".into()))
+        Err(PivError::UnsupportedAlgorithm(
+            "not an RSA, EC, or Ed25519 key".into(),
+        ))
     }
 }
 

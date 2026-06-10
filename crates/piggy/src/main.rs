@@ -18,13 +18,14 @@
 //!    `tpl create`/`show`) — restoring the agentless direct-PCSC decrypt
 //!    that C `pivy-box` lacks (piggy#57). Subcommands it doesn't handle
 //!    (`tpl edit` + the rest of the pivy-box surface) fall back to C
-//!    `pivy-box` via [`fallback::exec_pivy`], so `piggy box` is a superset.
-//! 4. C-pivy passthroughs — `agent`/`tool`/`ca`/`luks`/`zfs` `exec(2)` the
-//!    matching `pivy-*` binary from `$PATH` via [`fallback::exec_pivy`]
-//!    (`agent` → `pivy-agent`, `tool` → `pivy-tool`, `ca` → `pivy-ca`,
-//!    `luks` → `pivy-luks`, `zfs` → `pivy-zfs`). `piggy pivy <X>` is the
-//!    explicit escape hatch — `piggy pivy box` always reaches C `pivy-box`
-//!    even though `piggy box` runs the Rust impl.
+//!    `pivy-box` via [`exec::exec_pivy`], so `piggy box` is a superset.
+//! 4. C-pivy passthroughs — `tool`/`ca`/`luks`/`zfs` `exec(2)` the
+//!    matching `pivy-*` binary from `$PATH` via [`exec::exec_pivy`]
+//!    (`tool` → `pivy-tool`, `ca` → `pivy-ca`, `luks` → `pivy-luks`,
+//!    `zfs` → `pivy-zfs`). `piggy pivy <X>` is the explicit escape
+//!    hatch — `piggy pivy box` always reaches C `pivy-box` and
+//!    `piggy pivy agent` always reaches C `pivy-agent`, even though
+//!    `piggy box` and `piggy agent` run the Rust impls.
 //!
 //! Bare `piggy` and bare `piggy pass` both print clap help (no implicit
 //! `cmd_show ""`); `arg_required_else_help` handles that on the top-level
@@ -41,7 +42,7 @@
 mod copy_move;
 mod crypt;
 mod edit;
-mod fallback;
+mod exec;
 mod find;
 mod generate;
 mod git;
@@ -453,7 +454,7 @@ fn main() {
                     }))
                 }
                 RecipientsCommand::ListAvailable { rest } => {
-                    fallback::exec_piggy_ids("list-available", &rest)
+                    exec::exec_piggy_ids("list-available", &rest)
                 }
                 RecipientsCommand::Add { rest } => {
                     std::process::exit(piggy::stats::timed_pass("recipients_add", || {
@@ -495,7 +496,7 @@ fn main() {
             }
         },
 
-        Command::List { rest } => fallback::exec_piggy_ids("list-all", &rest),
+        Command::List { rest } => exec::exec_piggy_ids("list-all", &rest),
         Command::Help { .. } => std::process::exit(usage::run()),
         Command::Version { .. } => std::process::exit(version::run()),
         Command::Health(args) => std::process::exit(piggy::stats::timed_health(|| {
@@ -521,15 +522,15 @@ fn main() {
         // to C `pivy-box`, so `piggy box` stays a superset.
         Command::Box { rest } => match piggy::cmd::pivy_box::run(&rest) {
             Some(code) => std::process::exit(code),
-            None => fallback::exec_pivy("box", &rest),
+            None => exec::exec_pivy("box", &rest),
         },
-        Command::Tool { rest } => fallback::exec_pivy("tool", &rest),
-        Command::Ca { rest } => fallback::exec_pivy("ca", &rest),
-        Command::Luks { rest } => fallback::exec_pivy("luks", &rest),
-        Command::Zfs { rest } => fallback::exec_pivy("zfs", &rest),
+        Command::Tool { rest } => exec::exec_pivy("tool", &rest),
+        Command::Ca { rest } => exec::exec_pivy("ca", &rest),
+        Command::Luks { rest } => exec::exec_pivy("luks", &rest),
+        Command::Zfs { rest } => exec::exec_pivy("zfs", &rest),
 
         Command::Pivy { tool, rest } => match tool {
-            Some(tool) => fallback::exec_pivy(&tool, &rest),
+            Some(tool) => exec::exec_pivy(&tool, &rest),
             None => {
                 eprintln!("piggy pivy: missing tool name");
                 eprintln!("Usage: piggy pivy <tool> [args...]");

@@ -110,10 +110,62 @@ impl Classification {
     }
 }
 
+/// Everything the classifiers need to know about one slot, grouped by
+/// domain: identity (`slot_id`, `guid`, `reader`, `serial`), crypto
+/// material (`algo`, `cert_der`), and YubicoPIV policies (`pin_policy`,
+/// `touch_policy`). Field semantics match the like-named fields on
+/// [`Classification`]; `cert_der` is the slot cert as read from the
+/// card, borrowed for the duration of the call. Replaces the former
+/// 8-positional-argument signatures (#118).
+#[derive(Debug)]
+pub struct ClassifyInput<'a> {
+    pub slot_id: u8,
+    pub guid: Guid,
+    pub reader: String,
+    pub serial: Option<u32>,
+    pub algo: PivAlgorithm,
+    pub cert_der: &'a [u8],
+    pub pin_policy: Option<PinPolicy>,
+    pub touch_policy: Option<TouchPolicy>,
+}
+
+impl ClassifyInput<'_> {
+    /// Consume the input into a `Supported` record. Keeps the
+    /// 7-field threading at one site instead of repeating it in every
+    /// classifier branch.
+    fn supported(self, id: MarklId, cn: Option<String>) -> Classification {
+        Classification::Supported {
+            id,
+            guid: self.guid,
+            reader: self.reader,
+            serial: self.serial,
+            slot_id: self.slot_id,
+            cn,
+            pin_policy: self.pin_policy,
+            touch_policy: self.touch_policy,
+        }
+    }
+
+    /// Consume the input into an `Unsupported` record. Sibling of
+    /// [`ClassifyInput::supported`].
+    fn unsupported(self, cn: Option<String>, reason: String) -> Classification {
+        Classification::Unsupported {
+            guid: self.guid,
+            reader: self.reader,
+            serial: self.serial,
+            slot_id: self.slot_id,
+            cn,
+            pin_policy: self.pin_policy,
+            touch_policy: self.touch_policy,
+            reason,
+        }
+    }
+}
+
 /// Classify the given slot. Convenience wrapper for the common
-/// `classify_slot(0x9D, ...)` case. The 9D-only caller paths in
-/// `detect-pubkey` and `detect-all-pubkeys` don't surface policies, so
-/// this wrapper passes `None` for both.
+/// slot-9D case. The 9D-only caller paths in `detect-pubkey` and
+/// `detect-all-pubkeys` don't surface policies, so this wrapper passes
+/// `None` for both.
 pub fn classify_slot_9d(
     guid: Guid,
     reader: String,
@@ -121,85 +173,40 @@ pub fn classify_slot_9d(
     algo: PivAlgorithm,
     cert_der: &[u8],
 ) -> Classification {
-    classify_slot(0x9D, guid, reader, serial, algo, cert_der, None, None)
+    classify_slot(ClassifyInput {
+        slot_id: 0x9D,
+        guid,
+        reader,
+        serial,
+        algo,
+        cert_der,
+        pin_policy: None,
+        touch_policy: None,
+    })
 }
 
-// 8 args is past the clippy default of 7 — the lint is a style
-// suggestion, not a bug. These all describe one slot's identity +
-// crypto material + policies; grouping into a struct is a meaningful
-// API refactor, not a drive-by lint fix. Tracked separately if/when
-// the callers want the change.
-#[allow(clippy::too_many_arguments)]
-pub fn classify_slot(
-    slot_id: u8,
-    guid: Guid,
-    reader: String,
-    serial: Option<u32>,
-    algo: PivAlgorithm,
-    cert_der: &[u8],
-    pin_policy: Option<PinPolicy>,
-    touch_policy: Option<TouchPolicy>,
-) -> Classification {
-    let cn = extract_subject_cn(cert_der);
-    if algo != PivAlgorithm::EcP256 {
-        return Classification::Unsupported {
-            guid,
-            reader,
-            serial,
-            slot_id,
-            cn,
-            pin_policy,
-            touch_policy,
-            reason: format!("slot {} is {algo:?}", format_slot_id(slot_id)),
-        };
+pub fn classify_slot(input: ClassifyInput) -> Classification {
+    let cn = extract_subject_cn(input.cert_der);
+    if input.algo != PivAlgorithm::EcP256 {
+        let reason = format!("slot {} is {:?}", format_slot_id(input.slot_id), input.algo);
+        return input.unsupported(cn, reason);
     }
-    let compressed = match compress_p256_pubkey(cert_der) {
+    let format = FormatId::PivyEcdhP256Pub;
+    let compressed = match compress_ec_pubkey(input.cert_der, format.size()) {
         Ok(c) => c,
-        Err(e) => {
-            return Classification::Unsupported {
-                guid,
-                reader,
-                serial,
-                slot_id,
-                cn,
-                pin_policy,
-                touch_policy,
-                reason: format!("pubkey decode failed: {e}"),
-            };
-        }
+        Err(e) => return input.unsupported(cn, format!("pubkey decode failed: {e}")),
     };
     // `MarklId::new` cannot fail under the current invariants:
-    // `compress_p256_pubkey` enforced the 33-byte length above and the
-    // `PivyEcdhP256Pub` format is fixed-size. The `Err` arm is kept as a
-    // defensive net so that any future change to `PurposeId`/`FormatId`
-    // compatibility rules, or to the compressed-point length contract,
-    // surfaces as a user-visible classification rather than a panic in
-    // a code path that should never abort.
-    match MarklId::new(
-        Some(PurposeId::PiggyRecipientV1),
-        FormatId::PivyEcdhP256Pub,
-        compressed,
-    ) {
-        Ok(id) => Classification::Supported {
-            id,
-            guid,
-            reader,
-            serial,
-            slot_id,
-            cn,
-            pin_policy,
-            touch_policy,
-        },
-        Err(e) => Classification::Unsupported {
-            guid,
-            reader,
-            serial,
-            slot_id,
-            cn,
-            pin_policy,
-            touch_policy,
-            reason: format!("markl ID build failed: {e}"),
-        },
+    // `compress_ec_pubkey` enforced the format's payload length above
+    // and the `PivyEcdhP256Pub` format is fixed-size. The `Err` arm is
+    // kept as a defensive net so that any future change to
+    // `PurposeId`/`FormatId` compatibility rules, or to the
+    // compressed-point length contract, surfaces as a user-visible
+    // classification rather than a panic in a code path that should
+    // never abort.
+    match MarklId::new(Some(PurposeId::PiggyRecipientV1), format, compressed) {
+        Ok(id) => input.supported(id, cn),
+        Err(e) => input.unsupported(cn, format!("markl ID build failed: {e}")),
     }
 }
 
@@ -210,97 +217,53 @@ pub fn classify_slot(
 /// NIST 800-73 slot semantics — `piggy-piv_auth-v1`, `piggy-piv_sig-v1`,
 /// or `piggy-piv_card_auth-v1` — so a downstream tool seeing the
 /// markl ID can immediately tell what the key is meant for without
-/// needing to know which slot id it came from. The payload format is
-/// `ssh_ecdsa_nistp256_pub` (33-byte SEC1-compressed P-256 point).
+/// needing to know which slot id it came from. The payload format
+/// depends on the slot's algorithm: `ssh_ecdsa_nistp256_pub` (33-byte
+/// SEC1-compressed P-256 point) for ECDSA P-256,
+/// `ssh_ecdsa_nistp384_pub` (49 bytes, same shape one curve up) for
+/// ECDSA P-384, `ssh_ed25519_pub` (32-byte raw key) for Ed25519 (#86).
 ///
-/// Only ECDSA P-256 is supported in v1; RSA, P-384, and Ed25519 in
-/// these slots are reported as `Unsupported` until the markl registry
-/// grows compatible format IDs.
-#[allow(clippy::too_many_arguments)] // See note on classify_slot above.
-pub fn classify_ssh_slot(
-    slot_id: u8,
-    guid: Guid,
-    reader: String,
-    serial: Option<u32>,
-    algo: PivAlgorithm,
-    cert_der: &[u8],
-    pin_policy: Option<PinPolicy>,
-    touch_policy: Option<TouchPolicy>,
-) -> Classification {
-    let cn = extract_subject_cn(cert_der);
+/// RSA in these slots is reported as `Unsupported` until the markl
+/// registry grows a variable-length format ID (#86 step 3).
+pub fn classify_ssh_slot(input: ClassifyInput) -> Classification {
+    let cn = extract_subject_cn(input.cert_der);
 
-    let purpose = match purpose_for_ssh_slot(slot_id) {
+    let purpose = match purpose_for_ssh_slot(input.slot_id) {
         Some(p) => p,
         None => {
-            return Classification::Unsupported {
-                guid,
-                reader,
-                serial,
-                slot_id,
-                cn,
-                pin_policy,
-                touch_policy,
-                reason: format!(
-                    "slot {} is not an SSH-style PIV slot (expected 9A/9C/9E)",
-                    format_slot_id(slot_id),
-                ),
-            };
+            let reason = format!(
+                "slot {} is not an SSH-style PIV slot (expected 9A/9C/9E)",
+                format_slot_id(input.slot_id),
+            );
+            return input.unsupported(cn, reason);
         }
     };
 
-    if algo != PivAlgorithm::EcP256 {
-        return Classification::Unsupported {
-            guid,
-            reader,
-            serial,
-            slot_id,
-            cn,
-            pin_policy,
-            touch_policy,
-            reason: format!(
-                "slot {} is {algo:?}; only EcP256 has a markl format in v1",
-                format_slot_id(slot_id),
-            ),
-        };
-    }
-
-    let compressed = match compress_p256_pubkey(cert_der) {
-        Ok(c) => c,
-        Err(e) => {
-            return Classification::Unsupported {
-                guid,
-                reader,
-                serial,
-                slot_id,
-                cn,
-                pin_policy,
-                touch_policy,
-                reason: format!("pubkey decode failed: {e}"),
-            };
+    let format = match input.algo {
+        PivAlgorithm::EcP256 => FormatId::SshEcdsaNistp256Pub,
+        PivAlgorithm::EcP384 => FormatId::SshEcdsaNistp384Pub,
+        PivAlgorithm::Ed25519 => FormatId::SshEd25519Pub,
+        other => {
+            let reason = format!(
+                "slot {} is {other:?}; only EcP256, EcP384, and Ed25519 have markl formats (#86)",
+                format_slot_id(input.slot_id),
+            );
+            return input.unsupported(cn, reason);
         }
     };
 
-    match MarklId::new(Some(purpose), FormatId::SshEcdsaNistp256Pub, compressed) {
-        Ok(id) => Classification::Supported {
-            id,
-            guid,
-            reader,
-            serial,
-            slot_id,
-            cn,
-            pin_policy,
-            touch_policy,
-        },
-        Err(e) => Classification::Unsupported {
-            guid,
-            reader,
-            serial,
-            slot_id,
-            cn,
-            pin_policy,
-            touch_policy,
-            reason: format!("markl ID build failed: {e}"),
-        },
+    let payload = match format {
+        FormatId::SshEd25519Pub => raw_ed25519_pubkey(input.cert_der),
+        ec => compress_ec_pubkey(input.cert_der, ec.size()),
+    };
+    let payload = match payload {
+        Ok(p) => p,
+        Err(e) => return input.unsupported(cn, format!("pubkey decode failed: {e}")),
+    };
+
+    match MarklId::new(Some(purpose), format, payload) {
+        Ok(id) => input.supported(id, cn),
+        Err(e) => input.unsupported(cn, format!("markl ID build failed: {e}")),
     }
 }
 
@@ -333,7 +296,27 @@ fn extract_subject_cn(cert_der: &[u8]) -> Option<String> {
     entry.data().as_utf8().ok().map(|s| s.to_string())
 }
 
-fn compress_p256_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+/// Extract the raw 32-byte Ed25519 public key from a DER-encoded X.509
+/// cert. RFC 8410 stores Ed25519 SPKI keys as the raw point with no
+/// inner DER structure, which is exactly the `ssh_ed25519_pub` markl
+/// payload — no compression step needed. The extraction itself lives
+/// in `piggy_piv::cert` (shared with `extract_public_key`).
+fn raw_ed25519_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let cert = openssl::x509::X509::from_der(cert_der)?;
+    let pubkey = cert.public_key()?;
+    Ok(piggy_piv::cert::raw_ed25519_from_spki(&pubkey)?.to_vec())
+}
+
+/// Compress the EC public point from a DER-encoded X.509 cert and
+/// require the SEC1-compressed form to be exactly `expected_len`
+/// bytes (33 for P-256, 49 for P-384). The length check doubles as a
+/// curve check: a cert whose curve disagrees with the slot's declared
+/// algorithm compresses to the wrong length and classifies Unsupported
+/// instead of mis-building a markl ID.
+fn compress_ec_pubkey(
+    cert_der: &[u8],
+    expected_len: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let cert = openssl::x509::X509::from_der(cert_der)?;
     let pubkey = cert.public_key()?;
     let ec = pubkey.ec_key()?;
@@ -344,9 +327,9 @@ fn compress_p256_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::
         openssl::ec::PointConversionForm::COMPRESSED,
         &mut bn_ctx,
     )?;
-    if compressed.len() != 33 {
+    if compressed.len() != expected_len {
         return Err(format!(
-            "expected 33-byte compressed P-256 point, got {}",
+            "expected {expected_len}-byte compressed EC point, got {}",
             compressed.len()
         )
         .into());
@@ -354,36 +337,69 @@ fn compress_p256_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::
     Ok(compressed)
 }
 
-/// Decompress a 33-byte SEC1-compressed P-256 point and render the
-/// `ecdsa-sha2-nistp256 <base64-blob>` prefix of an OpenSSH
-/// `authorized_keys` line. The caller appends any trailing comment.
+/// Render a markl ID's SSH pubkey as the `<keytype> <base64-blob>`
+/// prefix of an OpenSSH `authorized_keys` line. The caller appends any
+/// trailing comment. Dispatches on the ID's format:
+/// `ssh_ecdsa_nistp256_pub` / `ssh_ecdsa_nistp384_pub` (SEC1-compressed
+/// points, decompressed via openssl) render as `ecdsa-sha2-nistpNNN`;
+/// `ssh_ed25519_pub` (raw 32-byte key, already the wire payload)
+/// renders as `ssh-ed25519`. Any other format is an `Err` — it has no
+/// OpenSSH wire form.
 ///
-/// Uses openssl (already a direct dep) to decompress and
-/// `piggy_box::agent_ext::ec_point_to_ssh_pubkey_blob` to frame the SSH
-/// wire blob, so byte-for-byte output matches what `ssh-key`'s
-/// `PublicKey::to_bytes` would produce for the same point — verified by
-/// the parity test in `agent_ext::tests`. Returns `Err` (rather than
-/// panicking) when `compressed` is not a valid on-curve P-256 point, so
-/// callers can suppress malformed entries.
+/// Blob framing goes through `piggy_box::agent_ext`, so byte-for-byte
+/// output matches what `ssh-key`'s `PublicKey::to_bytes` would produce
+/// for the same key — verified by the parity tests in
+/// `agent_ext::tests`. Returns `Err` (rather than panicking) when an EC
+/// payload is not a valid on-curve point, so callers can suppress
+/// malformed entries.
 ///
 /// This is the shared renderer behind both `piggy list --format=ssh`
 /// (live-card enumeration) and `piggy ssh-copy-id` (offline, from the
-/// markl IDs in a `piggy-ids` file). A `ssh_ecdsa_nistp256_pub` markl
-/// ID's `data()` is exactly the 33-byte compressed point this expects.
-pub fn openssh_authorized_key(compressed: &[u8]) -> Result<String, String> {
-    use openssl::bn::BigNumContext;
-    use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
-    use openssl::nid::Nid;
-    use piggy_box::agent_ext::ec_point_to_ssh_pubkey_blob;
+/// markl IDs in a `piggy-ids` file).
+pub fn openssh_authorized_key(id: &MarklId) -> Result<String, String> {
     use piggy_box::piv_box::EcCurve;
 
-    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).map_err(|e| e.to_string())?;
+    match id.format() {
+        FormatId::SshEcdsaNistp256Pub => {
+            openssh_line_from_compressed_ec(id.data(), EcCurve::NistP256)
+        }
+        FormatId::SshEcdsaNistp384Pub => {
+            openssh_line_from_compressed_ec(id.data(), EcCurve::NistP384)
+        }
+        FormatId::SshEd25519Pub => Ok(openssh_line_from_ed25519(id.data())),
+        other => Err(format!("{other} has no OpenSSH wire form")),
+    }
+}
+
+/// Decompress a SEC1-compressed EC point (33 bytes for P-256, 49 for
+/// P-384) and render the `ecdsa-sha2-nistpNNN <base64-blob>` line
+/// prefix.
+fn openssh_line_from_compressed_ec(
+    compressed: &[u8],
+    curve: piggy_box::piv_box::EcCurve,
+) -> Result<String, String> {
+    use openssl::bn::BigNumContext;
+    use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
+    use piggy_box::agent_ext::ec_point_to_ssh_pubkey_blob;
+
+    let group = EcGroup::from_curve_name(curve.nid()).map_err(|e| e.to_string())?;
     let mut ctx = BigNumContext::new().map_err(|e| e.to_string())?;
     let point = EcPoint::from_bytes(&group, compressed, &mut ctx).map_err(|e| e.to_string())?;
     let uncompressed = point
         .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
         .map_err(|e| e.to_string())?;
-    let blob = ec_point_to_ssh_pubkey_blob(EcCurve::NistP256, &uncompressed);
+    let blob = ec_point_to_ssh_pubkey_blob(curve, &uncompressed);
     let b64 = openssl::base64::encode_block(&blob);
-    Ok(format!("ecdsa-sha2-nistp256 {b64}"))
+    Ok(format!("{} {b64}", curve.ssh_keytype()))
+}
+
+/// Render the `ssh-ed25519 <base64-blob>` line prefix from a raw
+/// 32-byte Ed25519 key. Infallible because the markl payload is already
+/// the exact wire form — no decompression step.
+fn openssh_line_from_ed25519(key: &[u8]) -> String {
+    use piggy_box::agent_ext::ed25519_to_ssh_pubkey_blob;
+
+    let blob = ed25519_to_ssh_pubkey_blob(key);
+    let b64 = openssl::base64::encode_block(&blob);
+    format!("ssh-ed25519 {b64}")
 }
