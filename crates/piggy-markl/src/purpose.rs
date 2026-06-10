@@ -30,10 +30,10 @@ pub enum PurposeId {
     ///     declaring them validate cleanly.
     PiggyRecipientV1,
     /// `piggy-piv_auth-v1` — public key from PIV slot 9A (PIV
-    /// Authentication). Accepts `ssh_ecdsa_nistp256_pub` and
-    /// `ssh_ed25519_pub` (#86); other algorithms (RSA, P-384) are not
-    /// yet enumerated in `piggy list` output and will need new
-    /// compatible format IDs.
+    /// Authentication). Accepts `ssh_ecdsa_nistp256_pub`,
+    /// `ssh_ed25519_pub`, and `ssh_ecdsa_nistp384_pub` (#86); RSA is
+    /// not yet enumerated in `piggy list` output and will need a new
+    /// compatible (variable-length) format ID.
     PiggyPivAuthV1,
     /// `piggy-piv_sig-v1` — public key from PIV slot 9C (Digital
     /// Signature). Same constraint as `PiggyPivAuthV1`.
@@ -117,7 +117,9 @@ impl PurposeId {
             | PurposeId::PiggyPivCardAuthV1 => {
                 matches!(
                     format,
-                    FormatId::SshEcdsaNistp256Pub | FormatId::SshEd25519Pub
+                    FormatId::SshEcdsaNistp256Pub
+                        | FormatId::SshEd25519Pub
+                        | FormatId::SshEcdsaNistp384Pub
                 )
             }
             PurposeId::DodderBlobDigestSha256V1 => {
@@ -173,6 +175,10 @@ mod tests {
             assert!(
                 p.validate_format(FormatId::SshEd25519Pub).is_ok(),
                 "{p:?} should accept ssh_ed25519_pub (#86)"
+            );
+            assert!(
+                p.validate_format(FormatId::SshEcdsaNistp384Pub).is_ok(),
+                "{p:?} should accept ssh_ecdsa_nistp384_pub (#86)"
             );
             assert!(
                 p.validate_format(FormatId::PivyEcdhP256Pub).is_err(),

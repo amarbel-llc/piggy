@@ -176,7 +176,7 @@ pub fn classify_slot(input: ClassifyInput) -> Classification {
             reason: format!("slot {} is {algo:?}", format_slot_id(slot_id)),
         };
     }
-    let compressed = match compress_p256_pubkey(cert_der) {
+    let compressed = match compress_ec_pubkey(cert_der, 33) {
         Ok(c) => c,
         Err(e) => {
             return Classification::Unsupported {
@@ -192,7 +192,7 @@ pub fn classify_slot(input: ClassifyInput) -> Classification {
         }
     };
     // `MarklId::new` cannot fail under the current invariants:
-    // `compress_p256_pubkey` enforced the 33-byte length above and the
+    // `compress_ec_pubkey` enforced the 33-byte length above and the
     // `PivyEcdhP256Pub` format is fixed-size. The `Err` arm is kept as a
     // defensive net so that any future change to `PurposeId`/`FormatId`
     // compatibility rules, or to the compressed-point length contract,
@@ -235,11 +235,12 @@ pub fn classify_slot(input: ClassifyInput) -> Classification {
 /// markl ID can immediately tell what the key is meant for without
 /// needing to know which slot id it came from. The payload format
 /// depends on the slot's algorithm: `ssh_ecdsa_nistp256_pub` (33-byte
-/// SEC1-compressed P-256 point) for ECDSA P-256, `ssh_ed25519_pub`
-/// (32-byte raw key) for Ed25519 (#86).
+/// SEC1-compressed P-256 point) for ECDSA P-256,
+/// `ssh_ecdsa_nistp384_pub` (49 bytes, same shape one curve up) for
+/// ECDSA P-384, `ssh_ed25519_pub` (32-byte raw key) for Ed25519 (#86).
 ///
-/// RSA and P-384 in these slots are reported as `Unsupported` until
-/// the markl registry grows compatible format IDs (#86 steps 2-3).
+/// RSA in these slots is reported as `Unsupported` until the markl
+/// registry grows a variable-length format ID (#86 step 3).
 pub fn classify_ssh_slot(input: ClassifyInput) -> Classification {
     let ClassifyInput {
         slot_id,
@@ -273,7 +274,14 @@ pub fn classify_ssh_slot(input: ClassifyInput) -> Classification {
     };
 
     let (format, payload) = match algo {
-        PivAlgorithm::EcP256 => (FormatId::SshEcdsaNistp256Pub, compress_p256_pubkey(cert_der)),
+        PivAlgorithm::EcP256 => (
+            FormatId::SshEcdsaNistp256Pub,
+            compress_ec_pubkey(cert_der, 33),
+        ),
+        PivAlgorithm::EcP384 => (
+            FormatId::SshEcdsaNistp384Pub,
+            compress_ec_pubkey(cert_der, 49),
+        ),
         PivAlgorithm::Ed25519 => (FormatId::SshEd25519Pub, raw_ed25519_pubkey(cert_der)),
         other => {
             return Classification::Unsupported {
@@ -285,7 +293,7 @@ pub fn classify_ssh_slot(input: ClassifyInput) -> Classification {
                 pin_policy,
                 touch_policy,
                 reason: format!(
-                    "slot {} is {other:?}; only EcP256 and Ed25519 have markl formats (#86)",
+                    "slot {} is {other:?}; only EcP256, EcP384, and Ed25519 have markl formats (#86)",
                     format_slot_id(slot_id),
                 ),
             };
@@ -382,7 +390,16 @@ fn raw_ed25519_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Er
     Ok(raw)
 }
 
-fn compress_p256_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+/// Compress the EC public point from a DER-encoded X.509 cert and
+/// require the SEC1-compressed form to be exactly `expected_len`
+/// bytes (33 for P-256, 49 for P-384). The length check doubles as a
+/// curve check: a cert whose curve disagrees with the slot's declared
+/// algorithm compresses to the wrong length and classifies Unsupported
+/// instead of mis-building a markl ID.
+fn compress_ec_pubkey(
+    cert_der: &[u8],
+    expected_len: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let cert = openssl::x509::X509::from_der(cert_der)?;
     let pubkey = cert.public_key()?;
     let ec = pubkey.ec_key()?;
@@ -393,9 +410,9 @@ fn compress_p256_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::
         openssl::ec::PointConversionForm::COMPRESSED,
         &mut bn_ctx,
     )?;
-    if compressed.len() != 33 {
+    if compressed.len() != expected_len {
         return Err(format!(
-            "expected 33-byte compressed P-256 point, got {}",
+            "expected {expected_len}-byte compressed EC point, got {}",
             compressed.len()
         )
         .into());

@@ -264,25 +264,99 @@ fn classify_ssh_slot_rejects_ed25519_payload_under_non_ed25519_cert() {
     }
 }
 
+/// Build a self-signed ECDSA cert on the given curve. Returns
+/// `(cert_der, compressed_point)`.
+fn ec_self_signed_cert(nid: openssl::nid::Nid, cn: &str) -> (Vec<u8>, Vec<u8>) {
+    use openssl::asn1::Asn1Time;
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::x509::{X509, X509NameBuilder};
+
+    let group = openssl::ec::EcGroup::from_curve_name(nid).unwrap();
+    let ec = openssl::ec::EcKey::generate(&group).unwrap();
+    let mut ctx = openssl::bn::BigNumContext::new().unwrap();
+    let compressed = ec
+        .public_key()
+        .to_bytes(
+            &group,
+            openssl::ec::PointConversionForm::COMPRESSED,
+            &mut ctx,
+        )
+        .unwrap();
+    let key = PKey::from_ec_key(ec).unwrap();
+
+    let mut name = X509NameBuilder::new().unwrap();
+    name.append_entry_by_nid(openssl::nid::Nid::COMMONNAME, cn)
+        .unwrap();
+    let name = name.build();
+
+    let mut builder = X509::builder().unwrap();
+    builder.set_pubkey(&key).unwrap();
+    builder.set_subject_name(&name).unwrap();
+    builder.set_issuer_name(&name).unwrap();
+    builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    builder
+        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    builder.sign(&key, MessageDigest::sha256()).unwrap();
+    let cert = builder.build();
+
+    (cert.to_der().unwrap(), compressed)
+}
+
 #[test]
-fn classify_ssh_slot_rejects_p384() {
-    // P-384 stays Unsupported until #86 step 2 lands a markl format.
-    let cert: &[u8] = &[];
+fn classify_ssh_slot_supports_p384() {
+    use piggy_markl::{FormatId, PurposeId};
+
+    let (cert_der, compressed) =
+        ec_self_signed_cert(openssl::nid::Nid::SECP384R1, "piggy-test-p384");
+    assert_eq!(compressed.len(), 49);
     let result = classify_ssh_slot(ClassifyInput {
         slot_id: 0x9A,
         guid: fake_guid(),
         reader: "reader".into(),
         serial: None,
         algo: PivAlgorithm::EcP384,
-        cert_der: cert,
+        cert_der: &cert_der,
+        pin_policy: None,
+        touch_policy: None,
+    });
+    match result {
+        Classification::Supported { id, cn, .. } => {
+            assert_eq!(id.purpose(), Some(&PurposeId::PiggyPivAuthV1));
+            assert_eq!(id.format(), FormatId::SshEcdsaNistp384Pub);
+            assert_eq!(id.data(), &compressed[..]);
+            assert_eq!(cn.as_deref(), Some("piggy-test-p384"));
+        }
+        other => panic!("expected Supported, got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_ssh_slot_rejects_curve_algo_mismatch() {
+    // A slot whose declared algorithm (P-384) disagrees with the curve
+    // its cert actually carries (P-256) must classify Unsupported via
+    // the compressed-length check, not mis-build a 33-byte markl ID
+    // under the 49-byte ssh_ecdsa_nistp384_pub format.
+    let (cert_der, _) =
+        ec_self_signed_cert(openssl::nid::Nid::X9_62_PRIME256V1, "piggy-test-mismatch");
+    let result = classify_ssh_slot(ClassifyInput {
+        slot_id: 0x9A,
+        guid: fake_guid(),
+        reader: "reader".into(),
+        serial: None,
+        algo: PivAlgorithm::EcP384,
+        cert_der: &cert_der,
         pin_policy: None,
         touch_policy: None,
     });
     match result {
         Classification::Unsupported { reason, .. } => {
             assert!(
-                reason.contains("EcP384"),
-                "expected EcP384 in reason: {reason}"
+                reason.starts_with("pubkey decode failed:"),
+                "expected decode-failure reason: {reason}"
             );
         }
         other => panic!("expected Unsupported, got {other:?}"),
