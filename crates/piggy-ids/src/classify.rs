@@ -233,12 +233,13 @@ pub fn classify_slot(input: ClassifyInput) -> Classification {
 /// NIST 800-73 slot semantics — `piggy-piv_auth-v1`, `piggy-piv_sig-v1`,
 /// or `piggy-piv_card_auth-v1` — so a downstream tool seeing the
 /// markl ID can immediately tell what the key is meant for without
-/// needing to know which slot id it came from. The payload format is
-/// `ssh_ecdsa_nistp256_pub` (33-byte SEC1-compressed P-256 point).
+/// needing to know which slot id it came from. The payload format
+/// depends on the slot's algorithm: `ssh_ecdsa_nistp256_pub` (33-byte
+/// SEC1-compressed P-256 point) for ECDSA P-256, `ssh_ed25519_pub`
+/// (32-byte raw key) for Ed25519 (#86).
 ///
-/// Only ECDSA P-256 is supported in v1; RSA, P-384, and Ed25519 in
-/// these slots are reported as `Unsupported` until the markl registry
-/// grows compatible format IDs.
+/// RSA and P-384 in these slots are reported as `Unsupported` until
+/// the markl registry grows compatible format IDs (#86 steps 2-3).
 pub fn classify_ssh_slot(input: ClassifyInput) -> Classification {
     let ClassifyInput {
         slot_id,
@@ -271,24 +272,28 @@ pub fn classify_ssh_slot(input: ClassifyInput) -> Classification {
         }
     };
 
-    if algo != PivAlgorithm::EcP256 {
-        return Classification::Unsupported {
-            guid,
-            reader,
-            serial,
-            slot_id,
-            cn,
-            pin_policy,
-            touch_policy,
-            reason: format!(
-                "slot {} is {algo:?}; only EcP256 has a markl format in v1",
-                format_slot_id(slot_id),
-            ),
-        };
-    }
+    let (format, payload) = match algo {
+        PivAlgorithm::EcP256 => (FormatId::SshEcdsaNistp256Pub, compress_p256_pubkey(cert_der)),
+        PivAlgorithm::Ed25519 => (FormatId::SshEd25519Pub, raw_ed25519_pubkey(cert_der)),
+        other => {
+            return Classification::Unsupported {
+                guid,
+                reader,
+                serial,
+                slot_id,
+                cn,
+                pin_policy,
+                touch_policy,
+                reason: format!(
+                    "slot {} is {other:?}; only EcP256 and Ed25519 have markl formats (#86)",
+                    format_slot_id(slot_id),
+                ),
+            };
+        }
+    };
 
-    let compressed = match compress_p256_pubkey(cert_der) {
-        Ok(c) => c,
+    let payload = match payload {
+        Ok(p) => p,
         Err(e) => {
             return Classification::Unsupported {
                 guid,
@@ -303,7 +308,7 @@ pub fn classify_ssh_slot(input: ClassifyInput) -> Classification {
         }
     };
 
-    match MarklId::new(Some(purpose), FormatId::SshEcdsaNistp256Pub, compressed) {
+    match MarklId::new(Some(purpose), format, payload) {
         Ok(id) => Classification::Supported {
             id,
             guid,
@@ -354,6 +359,27 @@ fn extract_subject_cn(cert_der: &[u8]) -> Option<String> {
         .entries_by_nid(openssl::nid::Nid::COMMONNAME)
         .next()?;
     entry.data().as_utf8().ok().map(|s| s.to_string())
+}
+
+/// Extract the raw 32-byte Ed25519 public key from a DER-encoded X.509
+/// cert. RFC 8410 stores Ed25519 SPKI keys as the raw point with no
+/// inner DER structure, which is exactly the `ssh_ed25519_pub` markl
+/// payload — no compression step needed.
+fn raw_ed25519_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let cert = openssl::x509::X509::from_der(cert_der)?;
+    let pubkey = cert.public_key()?;
+    if pubkey.id() != openssl::pkey::Id::ED25519 {
+        return Err(format!(
+            "expected an Ed25519 SPKI, got openssl key id {:?}",
+            pubkey.id()
+        )
+        .into());
+    }
+    let raw = pubkey.raw_public_key()?;
+    if raw.len() != 32 {
+        return Err(format!("expected 32-byte Ed25519 key, got {}", raw.len()).into());
+    }
+    Ok(raw)
 }
 
 fn compress_p256_pubkey(cert_der: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

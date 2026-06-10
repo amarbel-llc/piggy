@@ -150,10 +150,11 @@ enum ListFormat {
     Human,
     Ndjson,
     /// OpenSSH `authorized_keys`-style output: one
-    /// `ecdsa-sha2-nistp256 <base64> piggy slot=<id> guid=<hex> [cn=<name>]`
-    /// line per supported SSH-style slot (9A/9C/9E). Every other slot
-    /// — recipient slots (9D + retired 0x82..=0x95), unsupported keys
-    /// (RSA, P-384, Ed25519), attestation failures — is suppressed
+    /// `<keytype> <base64> piggy slot=<id> guid=<hex> [cn=<name>]`
+    /// line per supported SSH-style slot (9A/9C/9E), where `<keytype>`
+    /// is `ecdsa-sha2-nistp256` or `ssh-ed25519` (#86). Every other
+    /// slot — recipient slots (9D + retired 0x82..=0x95), unsupported
+    /// keys (RSA, P-384), attestation failures — is suppressed
     /// entirely, so the output is a strict `authorized_keys`-compatible
     /// feed of SSH-capable keys. Re-run with `--format=human` to
     /// enumerate every slot. Rejected by `list-available`. Drives
@@ -789,18 +790,20 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
 /// Render a `Classification` as a single OpenSSH `authorized_keys`-style
 /// line, or `None` to suppress the line entirely.
 ///
-/// Supported 9A/9C/9E slots become `ecdsa-sha2-nistp256 <b64> piggy
-/// slot=<id> guid=<hex> [cn=<name>]` — safe to pipe straight into a
+/// Supported 9A/9C/9E slots become `<keytype> <b64> piggy slot=<id>
+/// guid=<hex> [cn=<name>]` — `ecdsa-sha2-nistp256` for P-256 keys,
+/// `ssh-ed25519` for Ed25519 keys (#86) — safe to pipe straight into a
 /// remote `authorized_keys`. Every other slot returns `None`:
 /// recipient slots (9D + retired 0x82..=0x95) have no
 /// `authorized_keys`-style representation, unsupported classifications
-/// (RSA, P-384, Ed25519, attestation failures) have no SSH wire form,
-/// and any classification whose payload fails to decompress as a P-256
-/// point cannot be safely rendered. Callers wanting to enumerate
-/// recipient and unsupported slots should re-run with `--format=human`
-/// or `--format=ndjson`.
+/// (RSA, P-384, attestation failures) have no SSH wire form, and any
+/// classification whose payload fails to render as its key type cannot
+/// be safely emitted. Callers wanting to enumerate recipient and
+/// unsupported slots should re-run with `--format=human` or
+/// `--format=ndjson`.
 fn format_ssh(c: &piggy_ids::Classification) -> Option<String> {
     use piggy_ids::Classification;
+    use piggy_markl::FormatId;
     let Classification::Supported {
         id,
         guid,
@@ -814,7 +817,13 @@ fn format_ssh(c: &piggy_ids::Classification) -> Option<String> {
     if !is_ssh_slot(*slot_id) {
         return None;
     }
-    let prefix = openssh_line_from_compressed_p256(id.data()).ok()?;
+    let prefix = match id.format() {
+        FormatId::SshEcdsaNistp256Pub => openssh_line_from_compressed_p256(id.data()).ok()?,
+        FormatId::SshEd25519Pub => openssh_line_from_ed25519(id.data()),
+        // A Supported SSH-slot record always carries one of the two
+        // formats above; anything else has no SSH wire form.
+        _ => return None,
+    };
     let cn_field = cn
         .as_deref()
         .map(|n| format!(" cn={n}"))
@@ -853,6 +862,20 @@ fn openssh_line_from_compressed_p256(compressed: &[u8]) -> Result<String, DynErr
     let blob = ec_point_to_ssh_pubkey_blob(EcCurve::NistP256, &uncompressed);
     let b64 = openssl::base64::encode_block(&blob);
     Ok(format!("ecdsa-sha2-nistp256 {b64}"))
+}
+
+/// Render the `ssh-ed25519 <base64-blob>` half of an OpenSSH
+/// `authorized_keys` line from a raw 32-byte Ed25519 key. The caller
+/// appends the trailing comment. Infallible because the markl payload
+/// is already the exact wire form (`ssh_ed25519_pub` is fixed at 32
+/// raw bytes — no decompression step); framing parity with `ssh-key`
+/// is pinned by `agent_ext`'s `blob_matches_ssh_key_crate_for_ed25519`.
+fn openssh_line_from_ed25519(key: &[u8]) -> String {
+    use piggy_box::agent_ext::ed25519_to_ssh_pubkey_blob;
+
+    let blob = ed25519_to_ssh_pubkey_blob(key);
+    let b64 = openssl::base64::encode_block(&blob);
+    format!("ssh-ed25519 {b64}")
 }
 
 fn policy_ndjson_fields(
@@ -1413,6 +1436,62 @@ mod tests {
             format_ssh(&c).is_none(),
             "format_ssh must suppress lines whose payload fails decompression"
         );
+    }
+
+    /// Build a `Classification::Supported` for an SSH-style slot
+    /// (9A/9C/9E) carrying a raw 32-byte Ed25519 key (#86). Returns
+    /// `(classification, raw_key)` so tests can independently re-derive
+    /// the expected SSH wire blob.
+    fn sample_supported_ssh_ed25519(slot_id: u8, cn: Option<&str>) -> (Classification, Vec<u8>) {
+        let key: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(11).wrapping_add(5)).collect();
+        let id = MarklId::new(
+            Some(purpose_for_ssh_slot(slot_id)),
+            FormatId::SshEd25519Pub,
+            key.clone(),
+        )
+        .expect("valid Ed25519 SSH-slot markl id");
+        let classification = Classification::Supported {
+            id,
+            guid: Guid::from_hex("00112233445566778899aabbccddeeff").expect("valid hex"),
+            reader: "Yubico YubiKey OTP+FIDO+CCID 00 00".into(),
+            serial: Some(12_345_678),
+            slot_id,
+            cn: cn.map(str::to_string),
+            pin_policy: None,
+            touch_policy: None,
+        };
+        (classification, key)
+    }
+
+    #[test]
+    fn format_ssh_emits_ssh_ed25519_line() {
+        let (c, key) = sample_supported_ssh_ed25519(0x9A, Some("user@host"));
+        let line = format_ssh(&c).expect("Ed25519 9A is a supported SSH slot");
+        assert!(
+            line.starts_with("ssh-ed25519 "),
+            "expected ssh-ed25519 keytype prefix: {line}"
+        );
+        assert!(
+            line.contains(" piggy slot=9A guid=00112233445566778899AABBCCDDEEFF"),
+            "expected piggy metadata after b64 blob: {line}"
+        );
+        assert!(
+            line.ends_with(" cn=user@host"),
+            "expected trailing cn=user@host: {line}"
+        );
+
+        // Parity: the b64 segment must equal an independently framed
+        // ssh-ed25519 blob over the same raw key, and the blob's tail
+        // must decode back to that key.
+        let expected_blob = piggy_box::agent_ext::ed25519_to_ssh_pubkey_blob(&key);
+        let expected_b64 = openssl::base64::encode_block(&expected_blob);
+        assert!(
+            line.starts_with(&format!("ssh-ed25519 {expected_b64}")),
+            "format_ssh blob diverged from independent encode: {line}"
+        );
+        // string("ssh-ed25519"): 4 + 11; string(key): 4 + 32.
+        assert_eq!(expected_blob.len(), 4 + 11 + 4 + 32);
+        assert_eq!(&expected_blob[expected_blob.len() - 32..], &key[..]);
     }
 
     #[test]

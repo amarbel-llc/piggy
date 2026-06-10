@@ -176,6 +176,119 @@ fn classify_ssh_slot_rejects_rsa() {
     }
 }
 
+/// Build a self-signed Ed25519 cert via openssl. Returns
+/// `(cert_der, raw_pubkey)` so the test can pin the markl payload
+/// against the key the cert actually carries. Ed25519 certs are signed
+/// with pure EdDSA, hence `MessageDigest::null()`.
+fn ed25519_self_signed_cert(cn: &str) -> (Vec<u8>, Vec<u8>) {
+    use openssl::asn1::Asn1Time;
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::x509::{X509, X509NameBuilder};
+
+    let key = PKey::generate_ed25519().expect("ed25519 keygen");
+    let mut name = X509NameBuilder::new().unwrap();
+    name.append_entry_by_nid(openssl::nid::Nid::COMMONNAME, cn)
+        .unwrap();
+    let name = name.build();
+
+    let mut builder = X509::builder().unwrap();
+    builder.set_pubkey(&key).unwrap();
+    builder.set_subject_name(&name).unwrap();
+    builder.set_issuer_name(&name).unwrap();
+    builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    builder
+        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    builder.sign(&key, MessageDigest::null()).unwrap();
+    let cert = builder.build();
+
+    (
+        cert.to_der().unwrap(),
+        key.raw_public_key().expect("raw ed25519 pubkey"),
+    )
+}
+
+#[test]
+fn classify_ssh_slot_supports_ed25519() {
+    use piggy_markl::{FormatId, PurposeId};
+
+    let (cert_der, raw_pubkey) = ed25519_self_signed_cert("piggy-test-ed25519");
+    let result = classify_ssh_slot(ClassifyInput {
+        slot_id: 0x9A,
+        guid: fake_guid(),
+        reader: "reader".into(),
+        serial: None,
+        algo: PivAlgorithm::Ed25519,
+        cert_der: &cert_der,
+        pin_policy: None,
+        touch_policy: None,
+    });
+    match result {
+        Classification::Supported { id, cn, .. } => {
+            assert_eq!(id.purpose(), Some(&PurposeId::PiggyPivAuthV1));
+            assert_eq!(id.format(), FormatId::SshEd25519Pub);
+            assert_eq!(id.data(), &raw_pubkey[..], "payload must be the raw key");
+            assert_eq!(cn.as_deref(), Some("piggy-test-ed25519"));
+        }
+        other => panic!("expected Supported, got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_ssh_slot_rejects_ed25519_payload_under_non_ed25519_cert() {
+    // An Ed25519-algo slot whose cert doesn't actually carry an
+    // Ed25519 SPKI (here: garbage DER) must classify Unsupported via
+    // the decode path, not panic or mis-build a markl ID.
+    let cert: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+    let result = classify_ssh_slot(ClassifyInput {
+        slot_id: 0x9C,
+        guid: fake_guid(),
+        reader: "reader".into(),
+        serial: None,
+        algo: PivAlgorithm::Ed25519,
+        cert_der: cert,
+        pin_policy: None,
+        touch_policy: None,
+    });
+    match result {
+        Classification::Unsupported { reason, .. } => {
+            assert!(
+                reason.starts_with("pubkey decode failed:"),
+                "expected decode-failure reason: {reason}"
+            );
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_ssh_slot_rejects_p384() {
+    // P-384 stays Unsupported until #86 step 2 lands a markl format.
+    let cert: &[u8] = &[];
+    let result = classify_ssh_slot(ClassifyInput {
+        slot_id: 0x9A,
+        guid: fake_guid(),
+        reader: "reader".into(),
+        serial: None,
+        algo: PivAlgorithm::EcP384,
+        cert_der: cert,
+        pin_policy: None,
+        touch_policy: None,
+    });
+    match result {
+        Classification::Unsupported { reason, .. } => {
+            assert!(
+                reason.contains("EcP384"),
+                "expected EcP384 in reason: {reason}"
+            );
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
 #[test]
 fn classify_slot_threads_policies_into_unsupported_record() {
     // Even when the slot is unsupported (RSA), the caller's policy

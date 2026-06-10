@@ -95,6 +95,22 @@ pub fn ec_point_to_ssh_pubkey_blob(curve: EcCurve, point: &[u8]) -> Vec<u8> {
     w.into_bytes()
 }
 
+/// Encode a raw 32-byte Ed25519 public key as an OpenSSH `ssh-ed25519`
+/// sshkey blob: `string("ssh-ed25519") | string(key)`. Sibling of
+/// [`ec_point_to_ssh_pubkey_blob`] for the Ed25519 keys `piggy list
+/// --format=ssh` renders from 9A/9C/9E slots (#86); matches what
+/// [`ssh_key::PublicKey::to_bytes`] produces for an Ed25519 key —
+/// verified by the parity test below.
+///
+/// Like its EC sibling, this helper does NOT validate `key`: a
+/// mis-sized key surfaces downstream rather than panicking here.
+pub fn ed25519_to_ssh_pubkey_blob(key: &[u8]) -> Vec<u8> {
+    let mut w = WireWriter::new();
+    w.put_string(b"ssh-ed25519");
+    w.put_string(key);
+    w.into_bytes()
+}
+
 /// Inverse of [`ec_point_to_ssh_pubkey_blob`]: pull the raw EC point bytes
 /// out of an OpenSSH `ecdsa-sha2-nistpNNN` sshkey blob.
 ///
@@ -377,6 +393,46 @@ mod tests {
         assert_eq!(
             ours, theirs,
             "P-384 sshkey blob must match ssh-key::PublicKey::to_bytes"
+        );
+    }
+
+    /// Frame layout for the Ed25519 sibling:
+    ///   string("ssh-ed25519")  = 4 + 11 = 15 bytes
+    ///   string(32-byte key)    = 4 + 32 = 36 bytes
+    /// total = 51 bytes.
+    #[test]
+    fn blob_has_expected_shape_ed25519() {
+        let key: Vec<u8> = (0..32u8).collect();
+
+        let blob = ed25519_to_ssh_pubkey_blob(&key);
+        assert_eq!(blob.len(), 51, "framed blob is 51 bytes");
+
+        assert_eq!(&blob[0..4], &[0x00, 0x00, 0x00, 0x0B]);
+        assert_eq!(&blob[4..15], b"ssh-ed25519");
+
+        assert_eq!(&blob[15..19], &[0x00, 0x00, 0x00, 0x20]);
+        assert_eq!(&blob[19..51], &key[..]);
+    }
+
+    /// Mirror of the EC interop checks for Ed25519.
+    #[test]
+    fn blob_matches_ssh_key_crate_for_ed25519() {
+        use ssh_key::PublicKey;
+        use ssh_key::public::{Ed25519PublicKey, KeyData};
+
+        // Any 32 bytes are a structurally valid Ed25519 public key for
+        // framing purposes; the helper (like its EC sibling) does not
+        // validate the point.
+        let key: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(3));
+
+        let ours = ed25519_to_ssh_pubkey_blob(&key);
+
+        let ssh_pub = PublicKey::from(KeyData::Ed25519(Ed25519PublicKey(key)));
+        let theirs = ssh_pub.to_bytes().unwrap();
+
+        assert_eq!(
+            ours, theirs,
+            "Ed25519 sshkey blob must match ssh-key::PublicKey::to_bytes"
         );
     }
 }

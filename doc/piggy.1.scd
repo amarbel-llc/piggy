@@ -332,10 +332,11 @@ passthroughs for the C pivy binaries:
 	- 9C (digital signature) → *piggy-piv_sig-v1*
 	- 9E (card authentication) → *piggy-piv_card_auth-v1*
 
-	The format ID for *piggy-piv_\** purposes is *ssh_ecdsa_nistp256_pub*
-	(33-byte SEC1-compressed P-256 point). Only ECDSA P-256 keys are
-	recognised in v1; RSA, ECDSA P-384, and Ed25519 in 9A/9C/9E emit
-	*# unsupported:* lines.
+	The format ID for *piggy-piv_\** purposes depends on the slot's key
+	algorithm: *ssh_ecdsa_nistp256_pub* (33-byte SEC1-compressed P-256
+	point) for ECDSA P-256, *ssh_ed25519_pub* (32-byte raw key) for
+	Ed25519. RSA and ECDSA P-384 in 9A/9C/9E emit *# unsupported:*
+	lines.
 
 	Same per-record fields (guid, serial, reader, slot, cn, pin_policy,
 	touch_policy) and same human/ndjson auto-selection as *piggy pass
@@ -343,15 +344,16 @@ passthroughs for the C pivy binaries:
 
 	*--format=ssh* renders OpenSSH _authorized_keys_-style output instead
 	of the markl-native human/ndjson forms. Supported 9A/9C/9E slots
-	emit one clean line each:
+	emit one clean line each, keyed by algorithm
+	(*ecdsa-sha2-nistp256* or *ssh-ed25519*):
 
 	```
 	ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNo… piggy slot=9A guid=…ABCDEF [cn=user@host]
 	```
 
 	Every other slot is suppressed entirely — recipient slots
-	(9D + retired 82..95), unsupported keys (RSA, P-384, Ed25519),
-	and any payload that fails to decompress as a P-256 point — so
+	(9D + retired 82..95), unsupported keys (RSA, P-384),
+	and any payload that fails to render as its key type — so
 	the output is a strict _authorized_keys_-compatible feed of
 	SSH-capable keys. Re-run with *--format=human* to enumerate
 	every slot, or *--format=ndjson* to capture them in a structured
