@@ -466,6 +466,7 @@ STUB_EOF
   }
 }
 
+# bats test_tags=pty
 @test "require_force_skips_tty_branch_even_when_tty_available" {
   # piggy#166: SSH_ASKPASS_REQUIRE=force must bypass the /dev/tty
   # render target entirely — agent-driven / scripted contexts export
@@ -530,6 +531,7 @@ STUB_EOF
   refute_output --partial "stubbed-pin-never-should-not-render"
 }
 
+# bats test_tags=pty
 @test "require_never_still_reads_tty_when_available" {
   # piggy#166 companion pin: `never` forbids zenity, not the tty — a
   # human at a terminal still gets the terminal prompt. pty.spawn

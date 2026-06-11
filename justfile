@@ -169,8 +169,20 @@ test-bats-conformance: build-rust
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     fibby_env=(PIVY_TOOL="$pivy_out/bin/pivy-tool" FIBBY_BIN="$fibby_out/bin/fibby")
   fi
+  # The fenced (batman) glob excludes `pty`-tagged tests: fence (the
+  # third-party Use-Tusk/fence sandbox) denies PTY allocation
+  # (open(/dev/ptmx) → EPERM), which breaks the two SSH_ASKPASS_REQUIRE
+  # tty tests that need a real terminal. They run unsandboxed below
+  # instead. Tracked at piggy#167 (fence-profile fix is upstream:
+  # amarbel-llc/igloo + Use-Tusk/fence).
   env "${fibby_env[@]}" BATS_TEST_TIMEOUT=30 \
-    bats --jobs {{ num_cpus() }} --tap zz-tests_bats/conformance/*.bats
+    bats --jobs {{ num_cpus() }} --filter-tags '!pty' --tap zz-tests_bats/conformance/*.bats
+  # The pty-tagged tests need a real /dev/ptmx, which fence blocks — run
+  # them outside the sandbox (the same escape the pcscd/hardware lanes
+  # use). pty-spawn.py surfaces the true errno if a future sandbox change
+  # ever re-blocks them here.
+  env "${fibby_env[@]}" BATS_TEST_TIMEOUT=30 \
+    bats --no-sandbox --filter-tags 'pty' --tap zz-tests_bats/conformance/*.bats
 
 [group('post-build')]
 test-bats-conformance-protocol: build-rust
