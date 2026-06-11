@@ -490,7 +490,8 @@ STUB_EOF
   python3_path="$(command -v python3)"
 
   run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" SSH_ASKPASS_REQUIRE=force \
-    "$python3_path" -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' \
+    BATS_RUN_TMPDIR="$BATS_RUN_TMPDIR" \
+    "$python3_path" "$PWD/zz-tests_bats/helpers/pty-spawn.py" \
     "$ASKPASS" "Enter PIV PIN" <<<"tty-pin-should-be-ignored"
 
   assert_success
@@ -544,7 +545,8 @@ STUB_EOF
   python3_path="$(command -v python3)"
 
   run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" SSH_ASKPASS_REQUIRE=never \
-    "$python3_path" -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' \
+    BATS_RUN_TMPDIR="$BATS_RUN_TMPDIR" \
+    "$python3_path" "$PWD/zz-tests_bats/helpers/pty-spawn.py" \
     "$ASKPASS" "Enter PIV PIN" <<<"pty-pin-never"
 
   assert_success

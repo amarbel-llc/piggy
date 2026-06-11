@@ -963,6 +963,36 @@ debug-pcsc-env:
     echo "=== lsusb (Yubico/CCID/smartcard) ==="
     lsusb 2>&1 | grep -iE 'yubico|yubikey|ccid|smart' || echo "no Yubico/CCID USB device"
 
+# Survey pseudo-terminal (PTY) usage to diagnose "OSError: out of pty
+# devices" / openpty() failures — notably the SSH_ASKPASS_REQUIRE tty
+# tests in conformance/piggy_askpass.bats, which need a real PTY and
+# hard-fail when the host pool is saturated. macOS uses a small fixed
+# pool capped by kern.tty.ptmx_max (default 511), unlike Linux devpts'
+# large dynamic limit, so saturation is a realistic transient here.
+# Read-only: reports the cap, current allocation, and which processes
+# hold ptys open (aggregated by command and by PID so a leaker shows as
+# many identical rows). Serves the askpass conformance dev-loop.
+[group('debug')]
+debug-pty-holders:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    lsof="${LSOF:-/usr/sbin/lsof}"
+    command -v "$lsof" >/dev/null 2>&1 || lsof="$(command -v lsof 2>/dev/null || echo lsof)"
+    echo "=== pty cap (kern.tty.ptmx_max) vs current allocation ==="
+    sysctl kern.tty.ptmx_max 2>/dev/null || echo "kern.tty.ptmx_max: (unavailable)"
+    allocated=$(ls /dev/ttys* 2>/dev/null | wc -l | tr -d ' ')
+    echo "allocated /dev/ttys* slaves: ${allocated:-0}"
+    echo
+    echo "=== holders by command (most ptys first) ==="
+    # -w suppresses warnings; +c 0 keeps full command names so a leaker is
+    # identifiable by name rather than truncated to 9 chars.
+    "$lsof" -w +c 0 2>/dev/null | grep -E '/dev/ttys' \
+      | awk '{print $1}' | sort | uniq -c | sort -rn || echo "(none)"
+    echo
+    echo "=== holders by (command, pid) — repeated identical rows = leak signature ==="
+    "$lsof" -w +c 0 2>/dev/null | grep -E '/dev/ttys' \
+      | awk '{print $1, $2}' | sort | uniq -c | sort -rn | head -50 || echo "(none)"
+
 # Verify stats-me telemetry end-to-end (#141 + the piggy.pass/box/agent
 # coverage expansion): report whether anything is collecting on the
 # configured 127.0.0.1:8125, then prove piggy emits by running an
