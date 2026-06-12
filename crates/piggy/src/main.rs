@@ -346,6 +346,14 @@ struct ShowBatchCmdArgs {
     /// Default: leave partials in place.
     #[arg(long = "all-or-nothing")]
     all_or_nothing: bool,
+    /// Skip the decrypt for entries whose plaintext at
+    /// `<out-dir>/<pass-name>` is already at least as new as the ebox
+    /// (mtime comparison, like `cp -u`); stale plaintext is
+    /// overwritten. Skipped entries count as ok and carry
+    /// `"skipped":true` in the NDJSON stream. When every entry is
+    /// fresh, no card session is opened and no PIN is prompted.
+    #[arg(short = 'u', long = "update")]
+    update: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -489,6 +497,7 @@ fn main() {
                         ShowBatchFormat::Human => show_batch::OutputFormat::Human,
                     },
                     all_or_nothing: args.all_or_nothing,
+                    update: args.update,
                 };
                 std::process::exit(piggy::stats::timed_pass("show_batch", move || {
                     show_batch::run(mapped)

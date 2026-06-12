@@ -56,6 +56,13 @@ pub struct ShowBatchArgs {
     /// When true, wipe partial outputs in `out_dir` if any decrypt
     /// fails. Default false (leave partials in place).
     pub all_or_nothing: bool,
+    /// When true (`--update`, cp/rsync `-u` semantics), skip the
+    /// decrypt for any entry whose plaintext at `<out_dir>/<name>`
+    /// already exists with an mtime at least as new as the ebox's,
+    /// and overwrite stale plaintext instead of failing on the
+    /// O_EXCL create. When every entry is fresh no card session is
+    /// opened and no PIN is prompted.
+    pub update: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,6 +124,14 @@ pub mod ndjson {
         pub out_path: Option<PathBuf>,
         /// `None` on success; describes the failure otherwise.
         pub diagnostic: Option<Diagnostic>,
+        /// True when no new plaintext was rendered because an
+        /// up-to-date file already existed at `out_path` (the
+        /// `--update` freshness skip). OPTIONAL per RFC 0005
+        /// §Compatibility — omitted entirely (not `false`) on
+        /// records for real decrypts, so pre-`--update` consumers
+        /// see an unchanged stream.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        pub skipped: bool,
     }
 
     #[derive(Debug, Serialize)]
@@ -205,6 +220,29 @@ pub mod ndjson {
                 ok: true,
                 out_path: Some(out_path.to_path_buf()),
                 diagnostic: None,
+                skipped: false,
+            }),
+        )
+    }
+
+    /// A `--update` freshness skip: `ok: true` with the existing
+    /// plaintext's path, plus `skipped: true` so consumers can tell
+    /// a no-op apart from a real decrypt.
+    pub fn emit_decrypt_skipped<W: Write>(
+        out: &mut W,
+        n: u32,
+        name: &str,
+        out_path: &Path,
+    ) -> std::io::Result<()> {
+        emit(
+            out,
+            &Record::Decrypt(Decrypt {
+                n,
+                name: name.to_string(),
+                ok: true,
+                out_path: Some(out_path.to_path_buf()),
+                diagnostic: None,
+                skipped: true,
             }),
         )
     }
@@ -223,6 +261,7 @@ pub mod ndjson {
                 ok: false,
                 out_path: None,
                 diagnostic: Some(diagnostic),
+                skipped: false,
             }),
         )
     }
@@ -320,6 +359,25 @@ impl<W: std::io::Write> Emitter<W> {
         }
     }
 
+    fn decrypt_skipped(
+        &mut self,
+        n: u32,
+        total: u32,
+        name: &str,
+        out_path: &Path,
+    ) -> std::io::Result<()> {
+        match self.format {
+            OutputFormat::Ndjson => ndjson::emit_decrypt_skipped(&mut self.out, n, name, out_path),
+            OutputFormat::Human => {
+                writeln!(
+                    self.out,
+                    "[{n}/{total}] {name} → {} ok (up-to-date, decrypt skipped)",
+                    out_path.display()
+                )
+            }
+        }
+    }
+
     fn decrypt_failed(
         &mut self,
         n: u32,
@@ -371,6 +429,29 @@ enum PreflightOutcome {
         canonical_name: String,
         diagnostic: Diagnostic,
     },
+    /// `--update` freshness skip: the plaintext at `out_path` is at
+    /// least as new as the ebox, so no decrypt happens for this
+    /// entry. Counted as `ok` in the summary; the ebox is never read
+    /// or parsed (the point of the flag is to avoid the work).
+    Skipped {
+        canonical_name: String,
+        out_path: PathBuf,
+    },
+}
+
+/// True when `out_path` exists with an mtime at least as new as the
+/// ebox's — the `--update` skip condition. Conservative: any stat or
+/// mtime error returns false so the decrypt proceeds (never a
+/// false skip).
+fn plaintext_is_fresh(ebox_path: &Path, out_path: &Path) -> bool {
+    let (Ok(ebox_meta), Ok(out_meta)) = (std::fs::metadata(ebox_path), std::fs::metadata(out_path))
+    else {
+        return false;
+    };
+    let (Ok(ebox_mtime), Ok(out_mtime)) = (ebox_meta.modified(), out_meta.modified()) else {
+        return false;
+    };
+    out_mtime >= ebox_mtime
 }
 
 /// Exit code conventions:
@@ -460,6 +541,20 @@ pub fn run(args: ShowBatchArgs) -> i32 {
     for raw in &names {
         let canonical = canonicalize_pass_name(raw);
         let path = pass_name_to_ebox_path(&store_root, raw);
+        // --update: if the rendered plaintext is already at least as
+        // new as the ebox, skip before even reading the ebox bytes.
+        // A missing ebox falls through to the read below so it still
+        // surfaces as `not-found`.
+        if args.update {
+            let out_path = args.out_dir.join(&canonical);
+            if plaintext_is_fresh(&path, &out_path) {
+                preflight.push(PreflightOutcome::Skipped {
+                    canonical_name: canonical,
+                    out_path,
+                });
+                continue;
+            }
+        }
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -504,26 +599,43 @@ pub fn run(args: ShowBatchArgs) -> i32 {
 
     // Step 4: pick the first ebox that pre-flighted successfully —
     // that's the one we'll match a card against. If none did, the
-    // whole batch is per-name failures; no card session needed.
+    // whole batch is per-name failures and/or `--update` freshness
+    // skips; no card session needed (and for an all-fresh batch, no
+    // PIN prompt — that is the point of the flag).
     let first_ready_idx = preflight
         .iter()
         .position(|p| matches!(p, PreflightOutcome::Ready { .. }));
     let Some(first_idx) = first_ready_idx else {
+        let mut ok_count: u32 = 0;
+        let mut failed_count: u32 = 0;
         for (i, outcome) in preflight.into_iter().enumerate() {
             let n = (i + 1) as u32;
-            if let PreflightOutcome::Failed {
-                canonical_name,
-                diagnostic,
-            } = outcome
-            {
-                if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diagnostic) {
-                    eprintln!("piggy pass show-batch: stdout write failed: {e}");
-                    return 1;
+            let emitted = match outcome {
+                PreflightOutcome::Failed {
+                    canonical_name,
+                    diagnostic,
+                } => {
+                    failed_count += 1;
+                    out.decrypt_failed(n, total, &canonical_name, diagnostic)
                 }
+                PreflightOutcome::Skipped {
+                    canonical_name,
+                    out_path,
+                } => {
+                    ok_count += 1;
+                    out.decrypt_skipped(n, total, &canonical_name, &out_path)
+                }
+                PreflightOutcome::Ready { .. } => {
+                    unreachable!("first_ready_idx is None — no Ready outcome exists")
+                }
+            };
+            if let Err(e) = emitted {
+                eprintln!("piggy pass show-batch: stdout write failed: {e}");
+                return 1;
             }
         }
-        let _ = out.summary(0, total);
-        return 1;
+        let _ = out.summary(ok_count, failed_count);
+        return if failed_count == 0 { 0 } else { 1 };
     };
 
     // The first ready ebox's PRIMARY config lists one or more recipient
@@ -576,6 +688,16 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         }
     };
 
+    // The prompt names only the entries the PIN will actually
+    // authorize — `--update` skips and preflight failures never reach
+    // the card, so listing them would overstate the authorization.
+    let decrypt_names: Vec<String> = preflight
+        .iter()
+        .filter_map(|p| match p {
+            PreflightOutcome::Ready { canonical_name, .. } => Some(canonical_name.clone()),
+            _ => None,
+        })
+        .collect();
     let mut oracle = BatchOracle {
         session: &mut session,
         slot_id: target_slot,
@@ -583,7 +705,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         target_curve,
         pin_verified: false,
         pin_supplier: askpass_pin_supplier(),
-        pin_prompt: batch_pin_prompt(&names),
+        pin_prompt: batch_pin_prompt(&decrypt_names),
         last_failure: None,
     };
 
@@ -625,35 +747,51 @@ pub fn run(args: ShowBatchArgs) -> i32 {
                 failed_count += 1;
                 false
             }
+            // Freshness skip counts as ok, but the pre-existing file
+            // is NOT recorded in written_paths: --all-or-nothing must
+            // not wipe plaintext this run didn't write.
+            PreflightOutcome::Skipped {
+                canonical_name,
+                out_path,
+            } => {
+                if let Err(e) = out.decrypt_skipped(n, total, &canonical_name, &out_path) {
+                    eprintln!("piggy pass show-batch: stdout write failed: {e}");
+                    return 1;
+                }
+                ok_count += 1;
+                true
+            }
             PreflightOutcome::Ready {
                 canonical_name,
                 bytes,
                 mut stream,
             } => match decrypt_one(&mut stream, &bytes, &mut oracle) {
-                Ok(plain) => match atomic_write_0600(&args.out_dir, &canonical_name, &plain) {
-                    Ok(out_path) => {
-                        written_paths.push(out_path.clone());
-                        if let Err(e) = out.decrypt_ok(n, total, &canonical_name, &out_path) {
-                            eprintln!("piggy pass show-batch: stdout write failed: {e}");
-                            return 1;
+                Ok(plain) => {
+                    match atomic_write_0600(&args.out_dir, &canonical_name, &plain, args.update) {
+                        Ok(out_path) => {
+                            written_paths.push(out_path.clone());
+                            if let Err(e) = out.decrypt_ok(n, total, &canonical_name, &out_path) {
+                                eprintln!("piggy pass show-batch: stdout write failed: {e}");
+                                return 1;
+                            }
+                            ok_count += 1;
+                            true
                         }
-                        ok_count += 1;
-                        true
-                    }
-                    Err(e) => {
-                        let diag = Diagnostic {
-                            kind: DiagnosticKind::IoError,
-                            message: e,
-                            retryable: None,
-                        };
-                        if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diag) {
-                            eprintln!("piggy pass show-batch: stdout write failed: {e}");
-                            return 1;
+                        Err(e) => {
+                            let diag = Diagnostic {
+                                kind: DiagnosticKind::IoError,
+                                message: e,
+                                retryable: None,
+                            };
+                            if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diag) {
+                                eprintln!("piggy pass show-batch: stdout write failed: {e}");
+                                return 1;
+                            }
+                            failed_count += 1;
+                            false
                         }
-                        failed_count += 1;
-                        false
                     }
-                },
+                }
                 Err(DecryptError {
                     diagnostic,
                     fatal_for_batch,
@@ -1078,10 +1216,28 @@ fn decrypt_one(
 /// decrypt rather than silently clobbering. Returns the absolute
 /// output path on success.
 ///
+/// Under `--update` (`overwrite_stale`) a pre-existing file at the
+/// path is stale by definition — the freshness check already skipped
+/// the fresh ones — so it is unlinked first; the O_EXCL create is
+/// kept (rather than O_TRUNC) so the write never follows a symlink
+/// planted at the path.
+///
 /// Parent directories implied by `name` (e.g. `config/ssh/foo` →
 /// `<out_dir>/config/ssh/`) are created with mode 0o700.
-fn atomic_write_0600(out_dir: &Path, name: &str, plaintext: &[u8]) -> Result<PathBuf, String> {
+fn atomic_write_0600(
+    out_dir: &Path,
+    name: &str,
+    plaintext: &[u8],
+    overwrite_stale: bool,
+) -> Result<PathBuf, String> {
     let out_path = out_dir.join(name);
+    if overwrite_stale {
+        match std::fs::remove_file(&out_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("remove stale {}: {e}", out_path.display())),
+        }
+    }
     if let Some(parent) = out_path.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent)
@@ -1337,6 +1493,7 @@ mod tests {
                     ok: true,
                     out_path: Some("/tmp/x".into()),
                     diagnostic: None,
+                    skipped: false,
                 }),
                 r#"{"type":"decrypt""#,
             ),
@@ -1386,6 +1543,7 @@ mod tests {
                     message: "msg".into(),
                     retryable: None,
                 }),
+                skipped: false,
             }));
             let needle = format!(r#""kind":"{}""#, expected);
             assert!(
@@ -1415,10 +1573,57 @@ mod tests {
                 message: "no ebox".into(),
                 retryable: None,
             }),
+            skipped: false,
         }));
         assert!(rendered.contains(r#""out_path":null"#), "{}", rendered);
         // retryable omitted, not null.
         assert!(!rendered.contains(r#""retryable""#), "{}", rendered);
+    }
+
+    /// `skipped` is OPTIONAL per RFC 0005 §Compatibility: present
+    /// (and `true`) only on `--update` freshness skips, omitted —
+    /// not `false` — on real decrypts, so pre-`--update` consumers
+    /// see a byte-identical stream.
+    #[test]
+    fn skipped_field_omitted_unless_true() {
+        use std::path::Path;
+
+        let skipped = render(&Record::Decrypt(Decrypt {
+            n: 1,
+            name: "fresh".into(),
+            ok: true,
+            out_path: Some("/tmp/fresh".into()),
+            diagnostic: None,
+            skipped: true,
+        }));
+        assert!(skipped.contains(r#""skipped":true"#), "{}", skipped);
+
+        let mut buf = Vec::new();
+        emit_decrypt_ok(&mut buf, 1, "real", Path::new("/tmp/real")).unwrap();
+        emit_decrypt_failed(
+            &mut buf,
+            2,
+            "broken",
+            Diagnostic {
+                kind: DiagnosticKind::NotFound,
+                message: "no ebox".into(),
+                retryable: None,
+            },
+        )
+        .unwrap();
+        let rendered = String::from_utf8(buf).unwrap();
+        assert!(!rendered.contains(r#""skipped""#), "{}", rendered);
+
+        let mut buf = Vec::new();
+        emit_decrypt_skipped(&mut buf, 3, "fresh", Path::new("/tmp/fresh")).unwrap();
+        let rendered = String::from_utf8(buf).unwrap();
+        assert!(rendered.contains(r#""ok":true"#), "{}", rendered);
+        assert!(rendered.contains(r#""skipped":true"#), "{}", rendered);
+        assert!(
+            rendered.contains(r#""out_path":"/tmp/fresh""#),
+            "{}",
+            rendered
+        );
     }
 
     /// Every record MUST end with a single LF (no buffering beyond
@@ -1468,6 +1673,97 @@ mod tests {
             names,
             vec!["config/ssh/foo", "config/ssh/bar", "config/api/baz"]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--update` freshness predicate: skip only when the plaintext
+    /// exists and is at least as new as the ebox; every error path
+    /// (missing plaintext, missing ebox) decrypts.
+    #[test]
+    fn plaintext_is_fresh_compares_mtimes_conservatively() {
+        use std::time::{Duration, SystemTime};
+
+        let dir = std::env::temp_dir().join(format!(
+            "piggy-show-batch-fresh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ebox = dir.join("secret.ebox");
+        let plain = dir.join("secret");
+        std::fs::write(&ebox, b"ciphertext").unwrap();
+
+        // Missing plaintext → not fresh.
+        assert!(!super::plaintext_is_fresh(&ebox, &plain));
+
+        let set_mtime = |path: &std::path::Path, t: SystemTime| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        };
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+
+        // Plaintext newer than ebox → fresh.
+        std::fs::write(&plain, b"plaintext").unwrap();
+        set_mtime(&ebox, base);
+        set_mtime(&plain, base + Duration::from_secs(60));
+        assert!(super::plaintext_is_fresh(&ebox, &plain));
+
+        // Equal mtimes → fresh (`>=`, not `>`).
+        set_mtime(&plain, base);
+        assert!(super::plaintext_is_fresh(&ebox, &plain));
+
+        // Ebox newer than plaintext → stale, must decrypt.
+        set_mtime(&ebox, base + Duration::from_secs(60));
+        assert!(!super::plaintext_is_fresh(&ebox, &plain));
+
+        // Missing ebox → not fresh (the read path reports not-found).
+        assert!(!super::plaintext_is_fresh(&dir.join("absent.ebox"), &plain));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--update` overwrites a stale plaintext (unlink + O_EXCL
+    /// recreate); without it an existing path still fails the write.
+    #[test]
+    fn atomic_write_overwrite_stale_replaces_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "piggy-show-batch-overwrite-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("secret"), b"old plaintext").unwrap();
+
+        // Default no-clobber posture is unchanged.
+        let err = super::atomic_write_0600(&dir, "secret", b"new plaintext", false)
+            .expect_err("existing path without overwrite_stale must fail");
+        assert!(err.contains("secret"), "{err}");
+
+        let out = super::atomic_write_0600(&dir, "secret", b"new plaintext", true)
+            .expect("overwrite_stale should replace the existing file");
+        assert_eq!(std::fs::read(&out).unwrap(), b"new plaintext");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "rewritten plaintext must be 0600");
+        }
+
+        // overwrite_stale with no pre-existing file is a plain create.
+        let out = super::atomic_write_0600(&dir, "secret2", b"v1", true)
+            .expect("overwrite_stale on a fresh path should create");
+        assert_eq!(std::fs::read(&out).unwrap(), b"v1");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
