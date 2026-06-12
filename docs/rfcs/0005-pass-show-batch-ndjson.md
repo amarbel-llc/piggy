@@ -125,6 +125,14 @@ order of pass-names supplied to `show-batch`.
                                                     record is emitted.
   `diagnostic`    object \| null  MUST              `null` when `ok` is `true`. Otherwise an object describing
                                                     the failure (see §Diagnostic Object).
+  `skipped`       boolean         OPTIONAL          `true` when the producer rendered no new plaintext because an
+                                                    up-to-date file already existed at `out_path` (a freshness
+                                                    skip, e.g. piggy's `--update` flag: the plaintext's mtime is
+                                                    at least as new as the ebox's). When present and `true`, `ok`
+                                                    MUST be `true` and `out_path` MUST reference the existing
+                                                    plaintext. Producers MUST omit the field (rather than emit
+                                                    `false`) for entries that were actually decrypted; consumers
+                                                    MUST treat absence as `false`.
 
 Producers MUST emit the `decrypt` record for ebox N before beginning
 work on ebox N+1. This sequencing guarantee allows consumers to
@@ -141,6 +149,12 @@ with piggy's next decrypt.
 
 ```json
 {"type":"decrypt","n":2,"name":"missing/secret","ok":false,"out_path":null,"diagnostic":{"kind":"not-found","message":"no ebox at $PIGGY_STORE_DIR/missing/secret.ebox"}}
+```
+
+#### Example (freshness skip)
+
+```json
+{"type":"decrypt","n":3,"name":"config/ssh/rcm/config-user-secret","ok":true,"out_path":"/tmp/show-batch-XYZ/config/ssh/rcm/config-user-secret","diagnostic":null,"skipped":true}
 ```
 
 ### `summary` Record

@@ -149,6 +149,83 @@ EOF
   assert_line --index 2 --partial '"name":"file-from-list"'
 }
 
+# --- --update freshness skip ---
+
+function show_batch_update_skips_fresh_plaintext { # @test
+  # With --update, an entry whose plaintext at <out-dir>/<name> is at
+  # least as new as the ebox is skipped: no decrypt, no card session,
+  # no PIN prompt, exit 0. The fixture ebox is deliberately NOT valid
+  # wire format — a skip must not even parse it.
+  mkdir -p "$PIGGY_STORE_DIR" "$OUT_DIR"
+  printf 'bogus ebox' >"$PIGGY_STORE_DIR/fresh.ebox"
+  printf 'rendered plaintext' >"$OUT_DIR/fresh"
+  # Ebox strictly older than the plaintext.
+  touch -t 200101010000 "$PIGGY_STORE_DIR/fresh.ebox"
+  run -0 "$PIGGY" pass show-batch --update --format ndjson --out-dir "$OUT_DIR" fresh
+  assert_line --index 0 --partial '"count":1'
+  assert_line --index 1 --partial '"ok":true'
+  assert_line --index 1 --partial '"skipped":true'
+  assert_output --partial '"ok":1,"failed":0'
+  # The pre-existing plaintext is untouched.
+  assert [ "$(cat "$OUT_DIR/fresh")" = "rendered plaintext" ]
+}
+
+function show_batch_update_decrypts_stale_plaintext { # @test
+  # Plaintext older than the ebox → no skip; the decrypt proceeds and
+  # (with this bogus fixture) fails at parse with `decrypt-failed`.
+  mkdir -p "$PIGGY_STORE_DIR" "$OUT_DIR"
+  printf 'bogus ebox' >"$PIGGY_STORE_DIR/stale.ebox"
+  printf 'old plaintext' >"$OUT_DIR/stale"
+  touch -t 200101010000 "$OUT_DIR/stale"
+  run "$PIGGY" pass show-batch --update --format ndjson --out-dir "$OUT_DIR" stale
+  assert_failure
+  assert_line --index 1 --partial '"ok":false'
+  assert_line --index 1 --partial '"kind":"decrypt-failed"'
+  refute_output --partial '"skipped"'
+}
+
+function show_batch_without_update_ignores_freshness { # @test
+  # The skip is opt-in: without --update, a fresh plaintext does not
+  # suppress the decrypt (which fails at parse on this fixture).
+  mkdir -p "$PIGGY_STORE_DIR" "$OUT_DIR"
+  printf 'bogus ebox' >"$PIGGY_STORE_DIR/fresh.ebox"
+  printf 'rendered plaintext' >"$OUT_DIR/fresh"
+  touch -t 200101010000 "$PIGGY_STORE_DIR/fresh.ebox"
+  run "$PIGGY" pass show-batch --format ndjson --out-dir "$OUT_DIR" fresh
+  assert_failure
+  assert_line --index 1 --partial '"kind":"decrypt-failed"'
+  refute_output --partial '"skipped"'
+}
+
+function show_batch_update_human_format_marks_skip { # @test
+  # Human format flags the skip so a terminal user can tell a no-op
+  # from a real decrypt.
+  mkdir -p "$PIGGY_STORE_DIR" "$OUT_DIR"
+  printf 'bogus ebox' >"$PIGGY_STORE_DIR/fresh.ebox"
+  printf 'rendered plaintext' >"$OUT_DIR/fresh"
+  touch -t 200101010000 "$PIGGY_STORE_DIR/fresh.ebox"
+  run -0 "$PIGGY" pass show-batch --update --format human --out-dir "$OUT_DIR" fresh
+  assert_output --partial "up-to-date"
+  assert_output --partial "Summary: 1 ok, 0 failed"
+}
+
+function show_batch_update_all_or_nothing_preserves_skipped_files { # @test
+  # --all-or-nothing wipes plaintext THIS run wrote; a skipped entry's
+  # pre-existing plaintext was not written by this run and must
+  # survive the wipe triggered by the missing sibling.
+  mkdir -p "$PIGGY_STORE_DIR" "$OUT_DIR"
+  printf 'bogus ebox' >"$PIGGY_STORE_DIR/fresh.ebox"
+  printf 'rendered plaintext' >"$OUT_DIR/fresh"
+  touch -t 200101010000 "$PIGGY_STORE_DIR/fresh.ebox"
+  run "$PIGGY" pass show-batch --update --all-or-nothing --format ndjson \
+    --out-dir "$OUT_DIR" fresh missing
+  assert_failure
+  assert_output --partial '"skipped":true'
+  assert_output --partial '"kind":"not-found"'
+  assert_output --partial '"ok":1,"failed":1'
+  assert [ -f "$OUT_DIR/fresh" ]
+}
+
 # --- human format ---
 
 function show_batch_human_format_renders_brackets_and_arrows { # @test
