@@ -600,115 +600,190 @@ pub fn run(args: ShowBatchArgs) -> i32 {
     // Step 4: pick the first ebox that pre-flighted successfully —
     // that's the one we'll match a card against. If none did, the
     // whole batch is per-name failures and/or `--update` freshness
-    // skips; no card session needed (and for an all-fresh batch, no
-    // PIN prompt — that is the point of the flag).
+    // skips: no card session is opened (and for an all-fresh batch, no
+    // PIN prompt — that is the point of the flag). Either way the SAME
+    // decrypt loop, counters, summary and exit-code path run via
+    // `run_decrypt_loop`; only the card-session setup is gated on there
+    // being something to decrypt (#173).
     let first_ready_idx = preflight
         .iter()
         .position(|p| matches!(p, PreflightOutcome::Ready { .. }));
-    let Some(first_idx) = first_ready_idx else {
-        let mut ok_count: u32 = 0;
-        let mut failed_count: u32 = 0;
-        for (i, outcome) in preflight.into_iter().enumerate() {
-            let n = (i + 1) as u32;
-            let emitted = match outcome {
-                PreflightOutcome::Failed {
-                    canonical_name,
-                    diagnostic,
-                } => {
-                    failed_count += 1;
-                    out.decrypt_failed(n, total, &canonical_name, diagnostic)
-                }
-                PreflightOutcome::Skipped {
-                    canonical_name,
-                    out_path,
-                } => {
-                    ok_count += 1;
-                    out.decrypt_skipped(n, total, &canonical_name, &out_path)
-                }
-                PreflightOutcome::Ready { .. } => {
-                    unreachable!("first_ready_idx is None — no Ready outcome exists")
-                }
-            };
-            if let Err(e) = emitted {
-                eprintln!("piggy pass show-batch: stdout write failed: {e}");
+
+    let totals = if let Some(first_idx) = first_ready_idx {
+        // The first ready ebox's PRIMARY config lists one or more recipient
+        // pubkeys (1-of-N). Collect them ALL; we'll open the batch session
+        // against whichever attached card matches ANY of them (piggy #153).
+        let targets = match primary_part_targets(&preflight[first_idx]) {
+            Ok(v) => v,
+            Err(diag) => {
+                let _ = out.bail_out(&format!(
+                    "cannot identify target recipient for batch: {}",
+                    diag.message
+                ));
                 return 1;
             }
+        };
+
+        // Step 5: enumerate connected PIV tokens; pick the first whose 9D
+        // slot pubkey matches any of the ebox's recipients. The chosen
+        // card's own (pubkey, curve) configures BatchOracle — it equals the
+        // recipient pubkey of whichever part the card satisfies.
+        let ctx = match PivContext::new() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = out.bail_out(&format!("PCSC unavailable: {e}"));
+                return 1;
+            }
+        };
+        let tokens = match ctx.enumerate_tokens() {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = out.bail_out(&format!("PCSC enumerate failed: {e}"));
+                return 1;
+            }
+        };
+        let target_slot = piggy_box::template::DEFAULT_SLOT;
+        let Some((mut token, (target_uncompressed, target_curve))) =
+            select_card_for_targets(tokens, &targets, target_slot)
+        else {
+            let _ = out.bail_out(
+                "no attached PIV card has a 9D slot matching any of the ebox's recipients",
+            );
+            return 1;
+        };
+
+        // Step 6: open the session and run the batch.
+        let mut session = match token.begin_pin_session() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = out.bail_out(&format!("begin_pin_session failed: {e}"));
+                return 1;
+            }
+        };
+
+        // The prompt names only the entries the PIN will actually
+        // authorize — `--update` skips and preflight failures never reach
+        // the card, so listing them would overstate the authorization.
+        let decrypt_names: Vec<String> = preflight
+            .iter()
+            .filter_map(|p| match p {
+                PreflightOutcome::Ready { canonical_name, .. } => Some(canonical_name.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut oracle = BatchOracle {
+            session: &mut session,
+            slot_id: target_slot,
+            self_pubkey_uncompressed: target_uncompressed,
+            target_curve,
+            pin_verified: false,
+            pin_supplier: askpass_pin_supplier(),
+            pin_prompt: batch_pin_prompt(&decrypt_names),
+            last_failure: None,
+        };
+
+        let mut totals = match run_decrypt_loop(
+            preflight,
+            &mut out,
+            &args.out_dir,
+            args.update,
+            total,
+            Some(&mut oracle),
+        ) {
+            Ok(t) => t,
+            Err(code) => return code,
+        };
+
+        // `oracle`'s &mut borrow of `session` ends at its last use (the
+        // call above), so we can end the session explicitly and propagate
+        // `SCardEndTransaction` errors as a non-zero exit. If end fails and
+        // we haven't already decided to bail, surface it as a bail-out so a
+        // downstream TAP bridge sees the truncation flag.
+        if let Err(e) = session.end() {
+            if totals.bail_reason.is_none() {
+                totals.bail_reason = Some(format!("SCardEndTransaction failed: {e}"));
+            }
         }
-        let _ = out.summary(ok_count, failed_count);
-        return if failed_count == 0 { 0 } else { 1 };
+        totals
+    } else {
+        // Nothing to decrypt: no card, no oracle, no PIN. The loop still
+        // runs to emit the per-entry skip/fail records (and their
+        // `show_batch_item` stats) and tally the summary.
+        match run_decrypt_loop(preflight, &mut out, &args.out_dir, args.update, total, None) {
+            Ok(t) => t,
+            Err(code) => return code,
+        }
     };
 
-    // The first ready ebox's PRIMARY config lists one or more recipient
-    // pubkeys (1-of-N). Collect them ALL; we'll open the batch session
-    // against whichever attached card matches ANY of them (piggy #153).
-    let targets = match primary_part_targets(&preflight[first_idx]) {
-        Ok(v) => v,
-        Err(diag) => {
-            let _ = out.bail_out(&format!(
-                "cannot identify target recipient for batch: {}",
-                diag.message
-            ));
-            return 1;
-        }
-    };
+    let LoopTotals {
+        ok_count,
+        failed_count,
+        written_paths,
+        bail_reason,
+    } = totals;
 
-    // Step 5: enumerate connected PIV tokens; pick the first whose 9D
-    // slot pubkey matches any of the ebox's recipients. The chosen
-    // card's own (pubkey, curve) configures BatchOracle — it equals the
-    // recipient pubkey of whichever part the card satisfies.
-    let ctx = match PivContext::new() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = out.bail_out(&format!("PCSC unavailable: {e}"));
-            return 1;
+    // --all-or-nothing: if any failure occurred and the flag is set,
+    // unlink every successfully-written plaintext. Best-effort; a
+    // consumer that has already read the decrypt-ok records may have
+    // copied the bytes — this cleanup reduces window-of-exposure but
+    // does NOT guarantee containment.
+    if args.all_or_nothing && (failed_count > 0 || bail_reason.is_some()) {
+        for path in &written_paths {
+            if let Err(e) = std::fs::remove_file(path) {
+                eprintln!(
+                    "piggy pass show-batch: all-or-nothing wipe failed to remove {}: {e}",
+                    path.display()
+                );
+            }
         }
-    };
-    let tokens = match ctx.enumerate_tokens() {
-        Ok(t) => t,
-        Err(e) => {
-            let _ = out.bail_out(&format!("PCSC enumerate failed: {e}"));
-            return 1;
-        }
-    };
-    let target_slot = piggy_box::template::DEFAULT_SLOT;
-    let Some((mut token, (target_uncompressed, target_curve))) =
-        select_card_for_targets(tokens, &targets, target_slot)
-    else {
-        let _ = out
-            .bail_out("no attached PIV card has a 9D slot matching any of the ebox's recipients");
+    }
+
+    if let Some(reason) = bail_reason {
+        let _ = out.bail_out(&reason);
         return 1;
-    };
+    }
 
-    // Step 6: open the session and run the batch.
-    let mut session = match token.begin_pin_session() {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = out.bail_out(&format!("begin_pin_session failed: {e}"));
-            return 1;
-        }
-    };
+    if let Err(e) = out.summary(ok_count, failed_count) {
+        eprintln!("piggy pass show-batch: stdout write failed: {e}");
+        return 1;
+    }
 
-    // The prompt names only the entries the PIN will actually
-    // authorize — `--update` skips and preflight failures never reach
-    // the card, so listing them would overstate the authorization.
-    let decrypt_names: Vec<String> = preflight
-        .iter()
-        .filter_map(|p| match p {
-            PreflightOutcome::Ready { canonical_name, .. } => Some(canonical_name.clone()),
-            _ => None,
-        })
-        .collect();
-    let mut oracle = BatchOracle {
-        session: &mut session,
-        slot_id: target_slot,
-        self_pubkey_uncompressed: target_uncompressed,
-        target_curve,
-        pin_verified: false,
-        pin_supplier: askpass_pin_supplier(),
-        pin_prompt: batch_pin_prompt(&decrypt_names),
-        last_failure: None,
-    };
+    if failed_count == 0 { 0 } else { 1 }
+}
 
+/// Tallies returned by [`run_decrypt_loop`] for the caller to finish the
+/// run: end the card session, apply the `--all-or-nothing` wipe, emit the
+/// summary, and compute the exit code.
+struct LoopTotals {
+    ok_count: u32,
+    failed_count: u32,
+    /// Output paths this run actually wrote (real decrypts only — never
+    /// `--update` skips, whose pre-existing files this run didn't write).
+    /// `--all-or-nothing` unlinks exactly these on failure.
+    written_paths: Vec<PathBuf>,
+    /// Set when a fatal-for-batch decrypt, a SIGINT, or (caller-side) a
+    /// session-end error truncated the run.
+    bail_reason: Option<String>,
+}
+
+/// The per-entry decrypt/skip/fail loop, shared by both run paths (#173):
+/// the has-a-Ready-ebox path passes `Some(oracle)`; the
+/// nothing-to-decrypt path (only `--update` skips and/or preflight
+/// failures, no card) passes `None`. Emitting one NDJSON/human `decrypt`
+/// record and one `piggy.pass.show_batch_item` stat per entry lives here
+/// so it happens for every entry regardless of batch composition — the
+/// no-card path is no longer a second, stats-blind copy of this logic.
+///
+/// Returns `Err(code)` only when a stdout write fails (the caller returns
+/// it as the process exit code); otherwise `Ok(LoopTotals)`.
+fn run_decrypt_loop<W: std::io::Write>(
+    preflight: Vec<PreflightOutcome>,
+    out: &mut Emitter<W>,
+    out_dir: &Path,
+    update: bool,
+    total: u32,
+    mut oracle: Option<&mut BatchOracle<'_, '_>>,
+) -> Result<LoopTotals, i32> {
     let mut ok_count: u32 = 0;
     let mut failed_count: u32 = 0;
     // Track which output paths we've written, so --all-or-nothing can
@@ -742,7 +817,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
             } => {
                 if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diagnostic) {
                     eprintln!("piggy pass show-batch: stdout write failed: {e}");
-                    return 1;
+                    return Err(1);
                 }
                 failed_count += 1;
                 false
@@ -756,7 +831,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
             } => {
                 if let Err(e) = out.decrypt_skipped(n, total, &canonical_name, &out_path) {
                     eprintln!("piggy pass show-batch: stdout write failed: {e}");
-                    return 1;
+                    return Err(1);
                 }
                 ok_count += 1;
                 true
@@ -765,63 +840,72 @@ pub fn run(args: ShowBatchArgs) -> i32 {
                 canonical_name,
                 bytes,
                 mut stream,
-            } => match decrypt_one(&mut stream, &bytes, &mut oracle) {
-                Ok(plain) => {
-                    match atomic_write_0600(&args.out_dir, &canonical_name, &plain, args.update) {
-                        Ok(out_path) => {
-                            written_paths.push(out_path.clone());
-                            if let Err(e) = out.decrypt_ok(n, total, &canonical_name, &out_path) {
-                                eprintln!("piggy pass show-batch: stdout write failed: {e}");
-                                return 1;
+            } => {
+                // Ready outcomes only exist when the caller set up a card
+                // session, so the oracle is always present here.
+                let oracle = oracle
+                    .as_deref_mut()
+                    .expect("Ready outcome requires a card oracle");
+                match decrypt_one(&mut stream, &bytes, oracle) {
+                    Ok(plain) => {
+                        match atomic_write_0600(out_dir, &canonical_name, &plain, update) {
+                            Ok(out_path) => {
+                                written_paths.push(out_path.clone());
+                                if let Err(e) = out.decrypt_ok(n, total, &canonical_name, &out_path)
+                                {
+                                    eprintln!("piggy pass show-batch: stdout write failed: {e}");
+                                    return Err(1);
+                                }
+                                ok_count += 1;
+                                true
                             }
-                            ok_count += 1;
-                            true
-                        }
-                        Err(e) => {
-                            let diag = Diagnostic {
-                                kind: DiagnosticKind::IoError,
-                                message: e,
-                                retryable: None,
-                            };
-                            if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diag) {
-                                eprintln!("piggy pass show-batch: stdout write failed: {e}");
-                                return 1;
+                            Err(e) => {
+                                let diag = Diagnostic {
+                                    kind: DiagnosticKind::IoError,
+                                    message: e,
+                                    retryable: None,
+                                };
+                                if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diag)
+                                {
+                                    eprintln!("piggy pass show-batch: stdout write failed: {e}");
+                                    return Err(1);
+                                }
+                                failed_count += 1;
+                                false
                             }
-                            failed_count += 1;
-                            false
                         }
+                    }
+                    Err(DecryptError {
+                        diagnostic,
+                        fatal_for_batch,
+                    }) => {
+                        // Capture the kind+message *before* moving the
+                        // diagnostic into the emitter — we use it as the
+                        // bail-out reason when fatal.
+                        let kind_label = format!("{:?}", diagnostic.kind);
+                        let summary = diagnostic.message.clone();
+                        if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diagnostic) {
+                            eprintln!("piggy pass show-batch: stdout write failed: {e}");
+                            return Err(1);
+                        }
+                        failed_count += 1;
+                        if fatal_for_batch {
+                            // Emit before the `break` (the post-match emit below
+                            // won't run for the bailing item).
+                            piggy::stats::pass_op(
+                                "show_batch_item",
+                                piggy::stats::Outcome::Failure,
+                                item_start.elapsed(),
+                            );
+                            bail_reason = Some(format!(
+                                "{kind_label} after decrypt n={n} of {total}: {summary}"
+                            ));
+                            break;
+                        }
+                        false
                     }
                 }
-                Err(DecryptError {
-                    diagnostic,
-                    fatal_for_batch,
-                }) => {
-                    // Capture the kind+message *before* moving the
-                    // diagnostic into the emitter — we use it as the
-                    // bail-out reason when fatal.
-                    let kind_label = format!("{:?}", diagnostic.kind);
-                    let summary = diagnostic.message.clone();
-                    if let Err(e) = out.decrypt_failed(n, total, &canonical_name, diagnostic) {
-                        eprintln!("piggy pass show-batch: stdout write failed: {e}");
-                        return 1;
-                    }
-                    failed_count += 1;
-                    if fatal_for_batch {
-                        // Emit before the `break` (the post-match emit below
-                        // won't run for the bailing item).
-                        piggy::stats::pass_op(
-                            "show_batch_item",
-                            piggy::stats::Outcome::Failure,
-                            item_start.elapsed(),
-                        );
-                        bail_reason = Some(format!(
-                            "{kind_label} after decrypt n={n} of {total}: {summary}"
-                        ));
-                        break;
-                    }
-                    false
-                }
-            },
+            }
         };
         piggy::stats::pass_op(
             "show_batch_item",
@@ -834,43 +918,12 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         );
     }
 
-    // Explicit session end so we can propagate
-    // `SCardEndTransaction` errors as a non-zero exit. If end fails,
-    // and we haven't already decided to bail, surface as a bail-out
-    // so a downstream TAP bridge sees the truncation flag.
-    if let Err(e) = session.end() {
-        if bail_reason.is_none() {
-            bail_reason = Some(format!("SCardEndTransaction failed: {e}"));
-        }
-    }
-
-    // --all-or-nothing: if any failure occurred and the flag is set,
-    // unlink every successfully-written plaintext. Best-effort; a
-    // consumer that has already read the decrypt-ok records may have
-    // copied the bytes — this cleanup reduces window-of-exposure but
-    // does NOT guarantee containment.
-    if args.all_or_nothing && (failed_count > 0 || bail_reason.is_some()) {
-        for path in &written_paths {
-            if let Err(e) = std::fs::remove_file(path) {
-                eprintln!(
-                    "piggy pass show-batch: all-or-nothing wipe failed to remove {}: {e}",
-                    path.display()
-                );
-            }
-        }
-    }
-
-    if let Some(reason) = bail_reason {
-        let _ = out.bail_out(&reason);
-        return 1;
-    }
-
-    if let Err(e) = out.summary(ok_count, failed_count) {
-        eprintln!("piggy pass show-batch: stdout write failed: {e}");
-        return 1;
-    }
-
-    if failed_count == 0 { 0 } else { 1 }
+    Ok(LoopTotals {
+        ok_count,
+        failed_count,
+        written_paths,
+        bail_reason,
+    })
 }
 
 /// Read pass-names one per line from `path`. Trims whitespace,
