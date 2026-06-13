@@ -209,21 +209,18 @@ function show_batch_update_human_format_marks_skip { # @test
   assert_output --partial "Summary: 1 ok, 0 failed"
 }
 
-function show_batch_update_all_or_nothing_preserves_skipped_files { # @test
-  # --all-or-nothing wipes plaintext THIS run wrote; a skipped entry's
-  # pre-existing plaintext was not written by this run and must
-  # survive the wipe triggered by the missing sibling.
-  mkdir -p "$PIGGY_STORE_DIR" "$OUT_DIR"
-  printf 'bogus ebox' >"$PIGGY_STORE_DIR/fresh.ebox"
-  printf 'rendered plaintext' >"$OUT_DIR/fresh"
-  touch -t 200101010000 "$PIGGY_STORE_DIR/fresh.ebox"
-  run "$PIGGY" pass show-batch --update --all-or-nothing --format ndjson \
-    --out-dir "$OUT_DIR" fresh missing
-  assert_failure
-  assert_output --partial '"skipped":true'
-  assert_output --partial '"kind":"not-found"'
-  assert_output --partial '"ok":1,"failed":1'
-  assert [ -f "$OUT_DIR/fresh" ]
+function show_batch_update_conflicts_with_all_or_nothing { # @test
+  # piggy#172: --update and --all-or-nothing encode contradictory
+  # out-dir models (incremental freshen vs. roll-back-to-empty), so
+  # the combination has no coherent failure semantics and clap rejects
+  # it at parse time — before any store read or card session. (An
+  # earlier revision allowed the pair and tried to preserve skipped
+  # files through the wipe; see git history of this file and #172 for
+  # why that was replaced with a hard conflict.)
+  run -2 "$PIGGY" pass show-batch --update --all-or-nothing --out-dir "$OUT_DIR" anyname
+  assert_output --partial "cannot be used with"
+  assert_output --partial "--update"
+  assert_output --partial "--all-or-nothing"
 }
 
 # --- human format ---

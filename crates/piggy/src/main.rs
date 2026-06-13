@@ -352,7 +352,17 @@ struct ShowBatchCmdArgs {
     /// overwritten. Skipped entries count as ok and carry
     /// `"skipped":true` in the NDJSON stream. When every entry is
     /// fresh, no card session is opened and no PIN is prompted.
-    #[arg(short = 'u', long = "update")]
+    ///
+    /// Conflicts with `--all-or-nothing` (piggy#172): the two encode
+    /// contradictory models of the out-dir. `--all-or-nothing` rolls
+    /// back to an *empty* out-dir (wipe what this run wrote);
+    /// `--update` assumes a *pre-populated* out-dir it incrementally
+    /// freshens. Combined, a failure leaves an incoherent state — the
+    /// skipped-fresh files survive (never written this run) while a
+    /// rewritten-from-stale file is wiped, destroying the prior copy.
+    /// Rather than pick a wrong rollback target, clap rejects the
+    /// pair.
+    #[arg(short = 'u', long = "update", conflicts_with = "all_or_nothing")]
     update: bool,
 }
 
