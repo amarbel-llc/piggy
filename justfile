@@ -245,6 +245,61 @@ test-bats-conformance-box-agentless-fibby: build-rust
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
 
+# Box interop against FIBBY — the fibby companion to
+# test-bats-conformance-interop, part of the fib→fibby retirement
+# (docs/plans/2026-06-15-retire-fib-for-fibby.md, Phase 1 spike). Runs the
+# SAME two card-agnostic interop bats files against fibby's virtual slot 9D:
+#   - piggy_box_interop.bats: `piggy box tpl create/show` reaches C pivy-box,
+#     which reads fibby's 9D pubkey for a local-guid template (PIN-free).
+#   - piggy_box_decrypt_interop.bats: Rust `piggy-ids encrypt` → C `pivy-box
+#     stream decrypt` against fibby's 9D ECDH (VERIFY PIN + GENERAL AUTHENTICATE).
+# Proves the C pivy-box ↔ fibby path, the last box lane still pinned to fib.
+# Pure-Rust card-under-test, no Java/jcardsim/hardware.
+[group('post-build')]
+[linux]
+test-bats-conformance-interop-fibby: build-rust
+  #!/usr/bin/env bash
+  set -uo pipefail
+  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+  export PATH="$pivy_out/bin:$PATH"
+  pivy_tool="$pivy_out/bin/pivy-tool"
+  real_pivy_box="$pivy_out/bin/pivy-box"
+  fibby_bin="$PWD/target/debug/fibby"
+  piggy_bin="$PWD/target/debug/piggy"
+  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
+
+  workdir=$(mktemp -d /tmp/pbox-interop-fibby-XXXXXX)
+  fibby_sock="$workdir/pcscd.comm"
+  fibby_log="$workdir/fibby.log"
+  fibby_pid=""
+  cleanup() { [[ -n "$fibby_pid" ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
+  trap cleanup EXIT
+
+  echo "=== Starting fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
+  FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+    --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+  fibby_pid=$!
+  for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+  [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
+
+  echo "=== discover fibby GUID via pivy-tool list ==="
+  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+  [[ -n $guid ]] || { echo "no GUID from fibby"; cat "$fibby_log"; exit 1; }
+  echo "  guid: $guid"
+
+  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+  INTEROP_GUID="$guid" \
+    REAL_PIVY_BOX="$real_pivy_box" \
+    PIGGY="$piggy_bin" \
+    PCSCLITE_CSOCK_NAME="$fibby_sock" \
+    SSH_ASKPASS="$askpass" \
+    SSH_ASKPASS_REQUIRE=force \
+    DISPLAY="" \
+    PIGGY_TEST_FIB_PIN=123456 \
+    BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
+    zz-tests_bats/conformance/piggy_box_interop.bats \
+    zz-tests_bats/conformance/piggy_box_decrypt_interop.bats
+
 # Bring up fib, generate a P-256 key in 9D, and run the
 # piggy_recipients_add_attached.bats conformance lane against the
 # real PCSC stack. Linux-only (fib is Linux-only). Opt-in — not
