@@ -395,6 +395,56 @@ test-bats-conformance-show-batch: build-rust
       BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
       zz-tests_bats/conformance/piggy_pass_show_batch_hardware.bats
 
+# show-batch against FIBBY — the fibby companion to
+# test-bats-conformance-show-batch, part of the fib→fibby retirement
+# (docs/plans/2026-06-15-retire-fib-for-fibby.md, Phase 1). Brings up fibby
+# (virtual backend, seeded slot 9D + canonical CHUID/GUID) and runs the SAME
+# card-agnostic piggy_pass_show_batch_hardware.bats against it: single-ebox
+# decrypt, the single-PIN-across-N guarantee, wrong-card bail-out, and the
+# heterogeneous per-ebox failure path — all through show-batch's agentless
+# BatchOracle → fibby's 9D ECDH. The wrong-card case seals to a foreign
+# *recipient* (a valid off-card P-256 point), so single-card fibby suffices.
+# The SIGINT bail-out case is a Rust unit test (#176), not part of this lane.
+# Pure-Rust card-under-test, no Java/jcardsim/hardware.
+[group('post-build')]
+[linux]
+test-bats-conformance-show-batch-fibby: build-rust
+  #!/usr/bin/env bash
+  set -uo pipefail
+  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+  pivy_tool="$pivy_out/bin/pivy-tool"
+  fibby_bin="$PWD/target/debug/fibby"
+  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
+
+  workdir=$(mktemp -d /tmp/show-batch-fibby-XXXXXX)
+  fibby_sock="$workdir/pcscd.comm"
+  fibby_log="$workdir/fibby.log"
+  fibby_pid=""
+  cleanup() { [[ -n "$fibby_pid" ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
+  trap cleanup EXIT
+
+  echo "=== Starting fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
+  FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+    --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+  fibby_pid=$!
+  for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+  [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
+
+  echo "=== discover fibby GUID via pivy-tool list ==="
+  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+  [[ -n $guid ]] || { echo "no GUID from fibby"; cat "$fibby_log"; exit 1; }
+  echo "  guid: $guid"
+
+  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+  INTEROP_GUID="$guid" \
+    PCSCLITE_CSOCK_NAME="$fibby_sock" \
+    SSH_ASKPASS="$askpass" \
+    SSH_ASKPASS_REQUIRE=force \
+    DISPLAY="" \
+    PIGGY_TEST_FIB_PIN=123456 \
+    BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
+    zz-tests_bats/conformance/piggy_pass_show_batch_hardware.bats
+
 # Hardware-free Phase 0 smoke for piggy#135: stand up fibby (virtual
 # backend, empty slots) and pivy-agent against it, run ssh-add -L,
 # assert the substrate works. Lives in the default `just test` lane

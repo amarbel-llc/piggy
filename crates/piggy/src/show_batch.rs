@@ -689,6 +689,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
             args.update,
             total,
             Some(&mut oracle),
+            sigint_caught,
         ) {
             Ok(t) => t,
             Err(code) => return code,
@@ -709,7 +710,15 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         // Nothing to decrypt: no card, no oracle, no PIN. The loop still
         // runs to emit the per-entry skip/fail records (and their
         // `show_batch_item` stats) and tally the summary.
-        match run_decrypt_loop(preflight, &mut out, &args.out_dir, args.update, total, None) {
+        match run_decrypt_loop(
+            preflight,
+            &mut out,
+            &args.out_dir,
+            args.update,
+            total,
+            None,
+            sigint_caught,
+        ) {
             Ok(t) => t,
             Err(code) => return code,
         }
@@ -783,6 +792,12 @@ fn run_decrypt_loop<W: std::io::Write>(
     update: bool,
     total: u32,
     mut oracle: Option<&mut BatchOracle<'_, '_>>,
+    // Injected so unit tests can drive a deterministic mid-batch SIGINT
+    // (the production caller passes `sigint_caught`, which reads the global
+    // signal-handler flag). #176: the bats SIGINT case raced wall-clock for
+    // a mid-batch window that doesn't exist on a fast backend like fibby;
+    // the loop's bail-at-boundary control flow is unit-tested here instead.
+    mut sigint_check: impl FnMut() -> bool,
 ) -> Result<LoopTotals, i32> {
     let mut ok_count: u32 = 0;
     let mut failed_count: u32 = 0;
@@ -799,7 +814,7 @@ fn run_decrypt_loop<W: std::io::Write>(
         // a half-written plaintext or wedge the card transaction).
         // K = n-1 because the prior iteration completed; the current
         // ebox has not started yet.
-        if sigint_caught() {
+        if sigint_check() {
             bail_reason = Some(format!(
                 "SIGINT received after decrypt n={} of {total}",
                 n - 1
@@ -2161,5 +2176,87 @@ mod tests {
         assert!(!super::candidate_matches_any(&[0x04u8; 33], &targets));
         // Empty target set never matches.
         assert!(!super::candidate_matches_any(&[0x02u8; 33], &[]));
+    }
+
+    /// #176: SIGINT arriving mid-batch must stop the loop at the next
+    /// iteration boundary — the just-completed item's record is emitted, the
+    /// remaining items are NOT processed, and `bail_reason` is set so the
+    /// caller emits a bail-out instead of a summary. Driven with a
+    /// deterministic injected sigint check (false on the first boundary, true
+    /// after) over `Skipped` outcomes, which need no card or crypto. This
+    /// replaces the wall-clock-racing bats SIGINT case, which could not
+    /// produce a reliable mid-batch window on a fast backend like fibby.
+    #[test]
+    fn sigint_after_first_item_bails_before_the_rest() {
+        use super::{Emitter, OutputFormat, PreflightOutcome, run_decrypt_loop};
+        use std::path::{Path, PathBuf};
+
+        let preflight = vec![
+            PreflightOutcome::Skipped {
+                canonical_name: "one".into(),
+                out_path: PathBuf::from("/tmp/one"),
+            },
+            PreflightOutcome::Skipped {
+                canonical_name: "two".into(),
+                out_path: PathBuf::from("/tmp/two"),
+            },
+            PreflightOutcome::Skipped {
+                canonical_name: "three".into(),
+                out_path: PathBuf::from("/tmp/three"),
+            },
+        ];
+
+        let mut out = Emitter {
+            out: Vec::<u8>::new(),
+            format: OutputFormat::Ndjson,
+        };
+
+        // SIGINT "arrives" after the first item: the boundary check returns
+        // false once (item 1 proceeds), then true (bail before item 2).
+        let mut checks: u32 = 0;
+        let sigint = move || {
+            let fired = checks >= 1;
+            checks += 1;
+            fired
+        };
+
+        let totals = run_decrypt_loop(
+            preflight,
+            &mut out,
+            Path::new("/tmp"),
+            false,
+            3,
+            None,
+            sigint,
+        )
+        .expect("run_decrypt_loop should not hit a stdout write error");
+
+        // Only item 1 was processed before the bail.
+        assert_eq!(totals.ok_count, 1, "only the first item should complete");
+        assert_eq!(totals.failed_count, 0);
+        let reason = totals
+            .bail_reason
+            .expect("SIGINT must set a bail_reason so run() emits bail-out, not summary");
+        assert!(
+            reason.contains("SIGINT received after decrypt n=1 of 3"),
+            "unexpected bail reason: {reason}"
+        );
+
+        let rendered = String::from_utf8(out.out).expect("NDJSON is UTF-8");
+        // Item 1's record is emitted; items 2 and 3 are not (loop bailed at
+        // the boundary before reaching them).
+        assert!(
+            rendered.contains("\"name\":\"one\""),
+            "item 1 missing: {rendered}"
+        );
+        assert!(
+            !rendered.contains("\"name\":\"two\""),
+            "item 2 must not be processed after SIGINT: {rendered}"
+        );
+        assert!(!rendered.contains("\"name\":\"three\""));
+        // run_decrypt_loop emits only per-item records; the bail-out record
+        // and summary suppression are run()'s straight-line mapping of
+        // bail_reason (record shapes are covered by record_types_field_order).
+        assert!(!rendered.contains("\"type\":\"summary\""));
     }
 }

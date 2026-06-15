@@ -4,15 +4,21 @@
 # Hardware-tagged conformance for `piggy pass show-batch`. Companion to
 # piggy_pass_show_batch.bats — the sandbox file covers usage validation
 # and the non-card error surface; this one covers the card-required
-# cases that need real PCSC + a real PIV card (typically fib):
+# cases that need real PCSC + a real PIV card (fib or fibby):
 #
 #   1. Single-ebox happy path (decrypt + 0600 atomic write).
 #   2. N>1 batch with the single-PIN guarantee (RFC 0005 marquee
 #      promise — one askpass invocation across N decrypts).
 #   3. Wrong-card bail-out (ebox sealed to a recipient no attached
 #      card holds; BatchOracle bails before any decrypt).
-#   4. SIGINT mid-batch (bail-out replaces summary; missing summary
-#      is how consumers detect truncation).
+#   4. Heterogeneous batch (per-ebox failure stays under decrypt-failed,
+#      NOT fatal-for-batch).
+#
+# The SIGINT-midbatch bail-out case used to live here too but was
+# inherently backend-speed-dependent (it raced wall-clock for a mid-batch
+# window that a fast backend like fibby never offers); it now has a
+# deterministic Rust unit test (#176, show_batch.rs
+# sigint_after_first_item_bails_before_the_rest).
 #
 # show-batch's single-card-path posture means there's no mock-pivy-box
 # shortcut — the only way to exercise its real BatchOracle is against
@@ -47,11 +53,16 @@ setup() {
   [[ -n $fib_recipient ]] || skip "detect-pubkey returned empty markl ID for INTEROP_GUID=$INTEROP_GUID"
   echo "$fib_recipient" >"$FIB_PIGGY_IDS"
 
-  # Foreign recipient (canonical RFC 0002 P-256 non-trivial vector,
-  # same string used by piggy_recipients_add_attached.bats). NOT held
-  # by fib — eboxes sealed to this drive the wrong-card bail-out.
+  # Foreign recipient: a VALID off-card P-256 point (the curve generator G,
+  # compressed SEC1) that no attached card holds — eboxes sealed to it drive
+  # the wrong-card bail-out. #176: the previous value was the markl
+  # FORMAT-test vector (payload bytes 0x00..0x20), whose 0x00 leading byte is
+  # not a valid SEC1 point prefix, so `pivy-box`/OpenSSL rejected it at
+  # encrypt time ("invalid encoding") and seal_to_foreign failed before the
+  # batch could run. G is on-curve and encrypts cleanly; the card holds the
+  # RFC-5903 point, so G stays correctly "foreign".
   FOREIGN_PIGGY_IDS="$BATS_TEST_TMPDIR/foreign-piggy-ids"
-  echo "piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu" >"$FOREIGN_PIGGY_IDS"
+  echo "piggy-recipient-v1@pivy_ecdh_p256_pub-qd43050juykyy3lchnnw2caygre8wqmasyk7kvaq7jsnj3wcnrpfve2jwdn" >"$FOREIGN_PIGGY_IDS"
 
   mkdir -p "$PIGGY_STORE_DIR"
 }
@@ -78,7 +89,10 @@ function show_batch_single_ebox_happy_path { # @test
   seal_to_fib "test1" "hello world"
 
   # 2. show-batch should decrypt it cleanly.
-  run "$PIGGY" pass show-batch --format ndjson --out-dir "$OUT_DIR" test1
+  # --separate-stderr: the on-demand askpass writes a `[piggy-test-askpass]`
+  # banner to stderr; without this, bats merges it into $output/$lines and
+  # shifts every assert_line --index (#176). Stdout is then pure NDJSON.
+  run --separate-stderr "$PIGGY" pass show-batch --format ndjson --out-dir "$OUT_DIR" test1
   assert_success
 
   # plan + decrypt-ok + summary, no bail-out.
@@ -131,7 +145,7 @@ EOF
   chmod +x "$wrapper"
 
   SSH_ASKPASS="$wrapper" \
-    run "$PIGGY" pass show-batch --format ndjson --out-dir "$OUT_DIR" test1 test2 test3
+    run --separate-stderr "$PIGGY" pass show-batch --format ndjson --out-dir "$OUT_DIR" test1 test2 test3
   assert_success
 
   assert_line --index 0 --partial '"count":3'
@@ -192,7 +206,8 @@ function show_batch_heterogeneous_batch_per_ebox_failure { # @test
   seal_to_fib "ok1" "first ok"
   seal_to_foreign "bad1" "second sealed off-card"
 
-  run "$PIGGY" pass show-batch --format ndjson --out-dir "$OUT_DIR" ok1 bad1
+  # --separate-stderr keeps the askpass banner out of $output (#176).
+  run --separate-stderr "$PIGGY" pass show-batch --format ndjson --out-dir "$OUT_DIR" ok1 bad1
   assert_failure
 
   assert_line --index 0 --partial '"count":2'
@@ -214,61 +229,12 @@ function show_batch_heterogeneous_batch_per_ebox_failure { # @test
   assert [ ! -f "$OUT_DIR/bad1" ]
 }
 
-function show_batch_sigint_midbatch_emits_bail_out_without_summary { # @test
-  # Background-spawn show-batch with a slow askpass so we have time
-  # to deliver SIGINT after the first decrypt completes but before
-  # all five do. The check_sigint poll in run() lives at the loop
-  # boundary — between decrypts — so SIGINT bails cleanly with no
-  # half-written plaintext. Consumers detect truncation via "missing
-  # summary AND bail-out emitted" per RFC 0005 §Stream Shapes.
-  seal_to_fib "s1" "one"
-  seal_to_fib "s2" "two"
-  seal_to_fib "s3" "three"
-  seal_to_fib "s4" "four"
-  seal_to_fib "s5" "five"
-
-  local slow="$BATS_TEST_TMPDIR/slow-askpass.sh"
-  cat >"$slow" <<EOF
-#!/usr/bin/env bash
-sleep 3
-exec "$PIGGY_BATS_HELPERS_DIR/piggy-test-askpass.sh" "\$@"
-EOF
-  chmod +x "$slow"
-
-  local stdout_file="$BATS_TEST_TMPDIR/sigint-stdout"
-  local stderr_file="$BATS_TEST_TMPDIR/sigint-stderr"
-  SSH_ASKPASS="$slow" \
-    "$PIGGY" pass show-batch --format ndjson --out-dir "$OUT_DIR" s1 s2 s3 s4 s5 \
-    >"$stdout_file" 2>"$stderr_file" &
-  local pid=$!
-
-  # Wait for the first decrypt-ok record to appear (proves we got past
-  # the initial PIN and one ebox is done). Bounded; if it never lands
-  # the test fails fast instead of hanging. Budget covers slow-askpass
-  # sleep + cold-fib ECDH (~5–10s observed) with headroom; the per-
-  # test BATS_TEST_TIMEOUT (60s, set by the recipe) is the outer cap.
-  local waited=0
-  while ! grep -q '"ok":true' "$stdout_file" 2>/dev/null; do
-    sleep 0.5
-    waited=$(( waited + 1 ))
-    if (( waited > 80 )); then
-      kill "$pid" 2>/dev/null || true
-      fail "first decrypt never landed in 40s — see $stdout_file / $stderr_file"
-    fi
-  done
-
-  kill -INT "$pid"
-  wait "$pid"
-  local exit_code=$?
-
-  [[ "$exit_code" -eq 1 ]] || fail "expected exit 1 from SIGINT bail, got $exit_code"
-
-  # plan + at least one decrypt-ok + bail-out, NO summary.
-  run cat "$stdout_file"
-  assert_output --partial '"type":"plan"'
-  assert_output --partial '"count":5'
-  assert_output --partial '"ok":true'
-  assert_output --partial '"type":"bail-out"'
-  assert_output --partial 'SIGINT received'
-  refute_output --partial '"type":"summary"'
-}
+# NOTE: the SIGINT-midbatch bail-out case used to live here but raced
+# wall-clock for a mid-batch window — it relied on a slow cold-fib ECDH
+# (~5–10s/decrypt) to deliver SIGINT after the first decrypt but before the
+# rest. On a fast backend like fibby the whole batch completes before the
+# signal lands, so the test was inherently backend-speed-dependent (#176).
+# The loop's bail-at-boundary control flow (item record emitted, remaining
+# items skipped, bail_reason set so run() emits bail-out not summary) is now
+# covered deterministically by the Rust unit test
+# `show_batch::tests::sigint_after_first_item_bails_before_the_rest`.
