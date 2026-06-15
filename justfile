@@ -655,6 +655,55 @@ test-rust-card-unlock: build-rust
   export SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=""
   cargo test --test unlock_ebox_card_integration -- --nocapture
 
+# Rust card-integration tests against FIBBY — the consolidated fibby
+# companion to test-rust-agent-ecdh / -agent-unlock / -card-unlock, part of
+# the fib→fibby retirement (docs/plans/2026-06-15-retire-fib-for-fibby.md,
+# Phase 2). Boots ONE fibby (virtual backend, seeded slot 9D + CHUID/GUID)
+# and runs all three card-agnostic integration tests against it: the agent
+# ECDH round-trip, the agent unlock round-trip, and the direct-PCSC
+# (CardEcdhOracle) unlock. The agent tests spawn `piggy agent` against the
+# FIBBY socket (not the system pcscd) and supply the PIN via the agent
+# unlock protocol; card-unlock reads it from the test askpass. fibby's PIN
+# is 123456. Pure-Rust card-under-test, no Java/jcardsim/hardware.
+[group('post-build')]
+[linux]
+test-rust-integration-fibby: build-rust
+  #!/usr/bin/env bash
+  set -uo pipefail
+  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+  pivy_tool="$pivy_out/bin/pivy-tool"
+  fibby_bin="$PWD/target/debug/fibby"
+  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
+
+  workdir=$(mktemp -d /tmp/rust-integration-fibby-XXXXXX)
+  fibby_sock="$workdir/pcscd.comm"
+  fibby_log="$workdir/fibby.log"
+  fibby_pid=""
+  cleanup() { [[ -n "$fibby_pid" ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
+  trap cleanup EXIT
+
+  echo "=== Starting fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
+  FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+    --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+  fibby_pid=$!
+  for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+  [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
+
+  export PCSCLITE_CSOCK_NAME="$fibby_sock"
+  export PIGGY_BIN="$PWD/target/debug/piggy"
+  # card-unlock reads the PIN from the test askpass; the agent tests
+  # supply it via the unlock protocol and ignore these. Setting them
+  # globally is harmless and keeps a stray pivy decrypt-path prompt from
+  # ever reaching the operator's real askpass (CLAUDE.md safety net).
+  export PIGGY_TEST_FIB_PIN=123456
+  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+  export SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=""
+
+  set -e
+  cargo test --test agent_ecdh_integration -- --nocapture
+  cargo test --test unlock_ebox_agent_integration -- --nocapture
+  cargo test --test unlock_ebox_card_integration -- --nocapture
+
 # `cargo check` type-evals without codegen — a pre-build validation
 # (hard failure on type errors), distinct from the `lint-rust` clippy
 # opinion pass. `validate-rust` covers the whole workspace; the
