@@ -131,6 +131,18 @@ echo "stubbed-pin-9D5C"
 STUB_EOF
   chmod +x "$stub_dir/zenity"
 
+  # Symlink the real tools the askpass script needs (bash for the
+  # `#!/usr/bin/env bash` shebang, ps + tr for the parent banner, plus
+  # dirname/mkdir/date) into the stub dir, resolved via `command -v` so
+  # they point at the dev-shell/nix-store binaries. PATH is then just
+  # "$stub_dir" — matching the sibling launchd tests below. Previously
+  # this test set PATH=$stub_dir:/usr/bin:/bin and relied on bash living
+  # in /usr/bin or /bin, which is false on NixOS hosts: the shebang's
+  # `env bash` lookup failed with exit 127 before the script could run.
+  for tool in bash ps tr dirname mkdir date; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+
   # Detach the controlling TTY before exec so the /dev/tty branch fails
   # the way pivy-agent's fork+pipe context does. setsid is Linux-only,
   # so we shell out to python3 (present on macOS + most Linuxes) and
@@ -145,7 +157,7 @@ STUB_EOF
   # sibling tests below already do this; test 8 was missed. See #91.
   python3_path="$(command -v python3)"
 
-  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir:/usr/bin:/bin" \
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" \
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "A new client is trying to use PIV token 9D5C" </dev/null
 
