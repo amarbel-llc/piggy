@@ -7,9 +7,9 @@
 //! point and comparing the scalars bit-for-bit.
 //!
 //! Gating: requires `PCSCLITE_CSOCK_NAME` (a live pcscd — typically the
-//! fib virtual card socket) and `PIGGY_BIN` (absolute path to the `piggy`
-//! binary under test). The `test-rust-agent-ecdh` just recipe sets both.
-//! Plain `cargo test` / `just test-rust` will skip this file.
+//! fibby virtual card socket) and `PIGGY_BIN` (absolute path to the `piggy`
+//! binary under test). The `test-rust-integration-fibby` just recipe sets
+//! both. Plain `cargo test` / `just test-rust` will skip this file.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -88,7 +88,7 @@ fn ecdh_roundtrip_against_real_agent() {
         Ok(v) if !v.is_empty() => v,
         _ => {
             eprintln!(
-                "PCSCLITE_CSOCK_NAME not set — skipping (run via `just test-rust-agent-ecdh`)"
+                "PCSCLITE_CSOCK_NAME not set — skipping (run via `just test-rust-integration-fibby`)"
             );
             return;
         }

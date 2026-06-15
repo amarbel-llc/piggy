@@ -16,7 +16,7 @@
 # 4. The recovered plaintext matches the input byte-for-byte.
 #
 # Requires the fib virtual PIV card stack
-# (`just test-bats-conformance-interop`). Tests skip when env vars
+# (`just test-bats-conformance-interop-fibby`). Tests skip when env vars
 # are absent.
 
 setup() {

@@ -6,10 +6,10 @@
 //! pcscd via `PCSCLITE_CSOCK_NAME` and reads the PIN from `SSH_ASKPASS`.
 //!
 //! Gating: the test no-ops unless `PCSCLITE_CSOCK_NAME` and `PIGGY_BIN`
-//! are both set. The `test-rust-card-unlock` just recipe brings up fib,
-//! generates a P-256 key in slot 9D, points `SSH_ASKPASS` at the
+//! are both set. The `test-rust-integration-fibby` just recipe brings up
+//! fibby with a seeded slot-9D P-256 key, points `SSH_ASKPASS` at the
 //! refusing test askpass, and exports `PIGGY_TEST_FIB_PIN=123456` so the
-//! askpass returns the fib PIN non-interactively.
+//! askpass returns the card PIN non-interactively.
 
 use openssl::bn::BigNumContext;
 use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
@@ -36,7 +36,7 @@ fn unlock_ebox_against_real_card() {
     if pcscd_sock.is_empty() && want_guid.is_empty() {
         eprintln!(
             "neither PCSCLITE_CSOCK_NAME nor PIGGY_TEST_CARD_GUID set — skipping \
-             (fib: `just test-rust-card-unlock`; hardware: the card-unlock-hw recipe)"
+             (fibby: `just test-rust-integration-fibby`; hardware: the card-unlock-hw recipe)"
         );
         return;
     }

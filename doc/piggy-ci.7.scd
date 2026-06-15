@@ -54,9 +54,10 @@ mask a Linux failure (and vice versa).
 	. *nix build* — build the piggy package
 	. *just test* — full end-to-end suite: cargo build, bats tests (piggy
 	  bash tests routed through the rust dispatcher), and cargo test
-	. *just fib-smoke* — smoke-test the virtual PIV card stack (Linux only)
-	. *just test-bats-conformance-interop* — interop tests between piggy box
-	  and pivy-box via the fib stack (Linux only)
+	. *just fib-smoke* — smoke-test the legacy fib virtual PIV card stack,
+	  retained as a fibby differential oracle (Linux only)
+	. *just test-bats-conformance-interop-fibby* — interop tests between
+	  piggy box and pivy-box against the fibby virtual card (Linux only)
 
 # LINUX-ONLY STEPS
 
@@ -68,12 +69,14 @@ gated on _matrix.system == 'x86_64-linux'_:
 	Starts the virtual PIV card stack (pcscd + vpcd + jCardSim with
 	PivApplet), runs basic card operations, and tears down.
 
-*just test-bats-conformance-interop*
+*just test-bats-conformance-interop-fibby*
 	Runs BATS interop tests that encrypt with piggy box and decrypt with
-	pivy-box (and vice versa) against the virtual PIV card.
+	pivy-box (and vice versa) against the fibby virtual card. (Pure-Rust;
+	gated on Linux only because the PCSCLITE_CSOCK_NAME redirect is a no-op
+	on macOS's PCSC.framework.)
 
-These steps are skipped on the Darwin runner because the fib stack has no
-macOS support.
+These steps are skipped on the Darwin runner: fib has no macOS support, and
+the fibby lanes' socket redirect is a no-op there.
 
 # SEE ALSO
 

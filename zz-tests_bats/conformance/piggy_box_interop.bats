@@ -27,8 +27,8 @@
 # $REAL_PIVY_BOX for this file's tests only (each bats test gets a
 # fresh BATS_TEST_TMPDIR).
 #
-# Requires the fib virtual PIV card stack (just test-bats-conformance-interop-fibby).
-# The recipe brings up fib, generates a key on slot 9D, captures the
+# Requires a virtual PIV card (just test-bats-conformance-interop-fibby).
+# The recipe brings up fibby with a seeded slot-9D key, captures the
 # real C pivy-box path BEFORE bats prepends the mock to PATH, and sets
 # PCSCLITE_CSOCK_NAME + REAL_PIVY_BOX + INTEROP_GUID before invoking
 # bats. Tests skip gracefully when these are absent.

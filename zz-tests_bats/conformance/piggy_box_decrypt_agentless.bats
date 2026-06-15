@@ -18,24 +18,23 @@
 # card path), PIN supplied non-interactively by the test askpass
 # (PIGGY_TEST_FIB_PIN), against a virtual PIV card.
 #
-# Card-agnostic (keyed on PCSCLITE_CSOCK_NAME + INTEROP_GUID) — driven by two
-# recipes: `test-bats-conformance-interop` (against fib / jcardsim, opt-in)
-# and `test-bats-conformance-box-agentless-fibby` (against fibby, the
-# pure-Rust VirtualCard — in the default `just test` lane). Tests skip when
-# the env vars are absent.
+# Card-agnostic (keyed on PCSCLITE_CSOCK_NAME + INTEROP_GUID) — driven by
+# `test-bats-conformance-box-agentless-fibby` (against fibby, the pure-Rust
+# VirtualCard — in the default `just test` lane). Tests skip when the env
+# vars are absent.
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   export output
 
   if [[ -z ${PCSCLITE_CSOCK_NAME:-} ]]; then
-    skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-interop)"
+    skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-box-agentless-fibby)"
   fi
   if [[ -z ${PIGGY:-} || ! -x ${PIGGY:-} ]]; then
-    skip "PIGGY not set or not executable (run: just test-bats-conformance-interop)"
+    skip "PIGGY not set or not executable (run: just test-bats-conformance-box-agentless-fibby)"
   fi
   if [[ -z ${INTEROP_GUID:-} ]]; then
-    skip "INTEROP_GUID not set (run: just test-bats-conformance-interop)"
+    skip "INTEROP_GUID not set (run: just test-bats-conformance-box-agentless-fibby)"
   fi
   if [[ -z ${PIGGY_IDS_REAL:-} || ! -x ${PIGGY_IDS_REAL:-} ]]; then
     skip "PIGGY_IDS_REAL not set or not built"

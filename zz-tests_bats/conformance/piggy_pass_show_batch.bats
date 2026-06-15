@@ -4,10 +4,11 @@
 # event stream, usage validation, and the non-card error surface.
 #
 # Card-required cases (single-ebox happy path, N>1 single-PIN, wrong-
-# card, SIGINT mid-batch) need a real PIV stack and live in the
-# `# bats file_tags=hardware` companion file (TODO; piggy#121 task #5
-# covers the sandboxable surface — the hardware surface lands when
-# the fib-driven `test-bats-conformance-show-batch` recipe does).
+# card) need a real PIV stack and live in the `# bats
+# file_tags=hardware` companion file piggy_pass_show_batch_hardware.bats,
+# run by the `test-bats-conformance-show-batch-fibby` recipe. (The SIGINT
+# mid-batch bail-out is covered by a Rust unit test, not the bats lane —
+# see show_batch.rs::sigint_after_first_item_bails_before_the_rest.)
 #
 # Uses `run -N` to assert specific exit codes; that syntax requires
 # bats 1.5.0+.

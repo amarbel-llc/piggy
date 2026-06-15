@@ -8,7 +8,7 @@
 //! original key through the abstract [`EcdhOracle`] seam.
 //!
 //! Gating is identical to `agent_ecdh_integration.rs`: requires
-//! `PCSCLITE_CSOCK_NAME` and `PIGGY_BIN`. The `test-rust-agent-unlock`
+//! `PCSCLITE_CSOCK_NAME` and `PIGGY_BIN`. The `test-rust-integration-fibby`
 //! just recipe sets both — plain `cargo test` will skip this file.
 
 use std::io::Read;
@@ -89,7 +89,7 @@ fn unlock_ebox_against_real_agent() {
         Ok(v) if !v.is_empty() => v,
         _ => {
             eprintln!(
-                "PCSCLITE_CSOCK_NAME not set — skipping (run via `just test-rust-agent-unlock`)"
+                "PCSCLITE_CSOCK_NAME not set — skipping (run via `just test-rust-integration-fibby`)"
             );
             return;
         }
