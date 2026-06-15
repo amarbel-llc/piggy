@@ -33,10 +33,10 @@ setup() {
   export output
 
   if [[ -z ${PCSCLITE_CSOCK_NAME:-} ]]; then
-    skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-show-batch)"
+    skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-show-batch-fibby)"
   fi
   if [[ -z ${INTEROP_GUID:-} ]]; then
-    skip "INTEROP_GUID not set (run: just test-bats-conformance-show-batch)"
+    skip "INTEROP_GUID not set (run: just test-bats-conformance-show-batch-fibby)"
   fi
   if [[ -z ${PIGGY_IDS_REAL:-} || ! -x ${PIGGY_IDS_REAL:-} ]]; then
     skip "PIGGY_IDS_REAL not set or not built"

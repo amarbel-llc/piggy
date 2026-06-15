@@ -19,7 +19,7 @@ setup() {
   export output
 
   if [[ -z ${PCSCLITE_CSOCK_NAME:-} ]]; then
-    skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-recipients-add-attached)"
+    skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-recipients-add-attached-fibby)"
   fi
 
   # Replace common.bash's mock-piggy-ids symlink with the real Rust

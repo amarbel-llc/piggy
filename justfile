@@ -123,78 +123,6 @@ test-bats-conformance-protocol: build-rust
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding \
     --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
 
-[group('post-build')]
-test-bats-conformance-interop: build-rust
-  #!/usr/bin/env bash
-  set -euo pipefail
-  trap 'just fib-down' EXIT
-  # Rebuild vendored pivy first so any changes to vendor/pivy/openssh.patch
-  # (e.g. #81's chacha20-poly1305@piggy.amarbel.net cipher entry) take
-  # effect. The C pivy package is built by the parent flake as a nested
-  # derivation (nix/pivy.nix, src = ./vendor/pivy); resolve its store path
-  # via --print-out-paths rather than $(command -v pivy-box), which may
-  # resolve to a stale direnv-cached binary. Mirrors the
-  # test-bats-conformance-pivy-agent-hardware pattern. See #124 — the
-  # vendor/pivy nested flake was removed, so the parent flake is the single
-  # build entry for the vendored pivy tree.
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  real_pivy_box="$pivy_out/bin/pivy-box"
-  if [[ ! -x "$real_pivy_box" ]]; then
-    echo "$real_pivy_box not executable — nix build .#pivy failed" >&2
-    exit 1
-  fi
-  # Prepend it to PATH so subprocesses also see the fresh binary
-  # (pivy-tool, etc.) consistently.
-  export PATH="$pivy_out/bin:$PATH"
-  # The dev piggy binary (built by the build-rust dep) for
-  # piggy_box_decrypt_agentless.bats (#57): `piggy box stream decrypt` now
-  # runs the Rust impl, whose CardEcdhOracle decrypts directly against the
-  # card with no agent. The dev binary suffices — the agentless decrypt path
-  # needs no makeWrapper env, and the C fallback finds pivy-box on $PATH.
-  piggy_bin="$PWD/target/debug/piggy"
-  just fib-up
-  eval "$(cat .fib/env)"
-  # Generate a key on the fib card's 9D slot (Key Management / ECDH)
-  # so `pivy-box tpl create` and `piggy box tpl create` have a card
-  # to read the GUID from. pivy-tool requires -a on `generate`;
-  # eccp256 matches what the rust template path exercises today.
-  pivy-tool -P 123456 -K default -a eccp256 generate 9d
-  # Discover the card's GUID for template creation. pivy-tool prints
-  # GUIDs in uppercase, so the grep must be case-insensitive.
-  guid=$(pivy-tool list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
-  # Safety net for PIN prompts. See CLAUDE.md "Test harness safety
-  # net for PIN prompts" and amarbel-llc/piggy#35. Required by the
-  # global policy for any recipe that could reach pivy's
-  # `assert_pin()` interactive fallback, even though the remaining
-  # template tests don't actually unlock anything.
-  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-  # Note: the agent provisioning that previously lived here (piggy
-  # agent spawn + ssh-add -X unlock + SSH_AUTH_SOCK propagation) was
-  # trimmed once #41 deleted the cipher interop tests. The remaining
-  # template tests don't unlock anything. If a future test needs an
-  # agent again, the recipe shape lives at commit `38df53c` —
-  # restore from there rather than re-deriving.
-  #
-  # --allow-local-binding is a batman sandbox escape needed by the pcscd
-  # path. (batman 0.1.3 removed the older --allow-unix-sockets flag;
-  # passing it now is fatal — batman forwards it to upstream bats-core,
-  # which rejects it. The pcscd.comm Unix socket is reachable via fence's
-  # filesystem allowRead.) See CLAUDE.md "Debugging → bats + PCSC".
-  # PIGGY_IDS_REAL is set by zz-tests_bats/common.bash; tests under
-  # conformance/ that bypass the mock-piggy-ids symlink (notably
-  # piggy_box_decrypt_interop.bats) reference it directly.
-  INTEROP_GUID="$guid" \
-    REAL_PIVY_BOX="$real_pivy_box" \
-    PIGGY="$piggy_bin" \
-    PCSCLITE_CSOCK_NAME="$PCSCLITE_CSOCK_NAME" \
-    SSH_ASKPASS="$askpass" \
-    SSH_ASKPASS_REQUIRE=force \
-    DISPLAY="" \
-    PIGGY_TEST_FIB_PIN=123456 \
-    BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
-    zz-tests_bats/conformance/piggy_box_interop.bats \
-    zz-tests_bats/conformance/piggy_box_decrypt_interop.bats \
-    zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
 
 # Agentless box decrypt against FIBBY (the Rust VirtualCard) — the fibby
 # companion to the piggy_box_decrypt_agentless test above (which runs against
@@ -300,26 +228,6 @@ test-bats-conformance-interop-fibby: build-rust
     zz-tests_bats/conformance/piggy_box_interop.bats \
     zz-tests_bats/conformance/piggy_box_decrypt_interop.bats
 
-# Bring up fib, generate a P-256 key in 9D, and run the
-# piggy_recipients_add_attached.bats conformance lane against the
-# real PCSC stack. Linux-only (fib is Linux-only). Opt-in — not
-# part of the default `just test` lane.
-[group('post-build')]
-test-bats-conformance-recipients-add-attached: build-rust
-    #!/usr/bin/env bash
-    set -euo pipefail
-    trap 'just fib-down' EXIT
-    just fib-up
-    eval "$(cat .fib/env)"
-    pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
-    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-    SSH_ASKPASS="$askpass" \
-      SSH_ASKPASS_REQUIRE=force \
-      DISPLAY="" \
-      PIGGY_TEST_FIB_PIN=123456 \
-      BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
-      zz-tests_bats/conformance/piggy_recipients_add_attached.bats
-
 # recipients add --all-attached against FIBBY — the fibby companion to
 # test-bats-conformance-recipients-add-attached, part of the fib→fibby
 # retirement (docs/plans/2026-06-15-retire-fib-for-fibby.md, Phase 3).
@@ -362,28 +270,6 @@ test-bats-conformance-recipients-add-attached-fibby: build-rust
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_recipients_add_attached.bats
 
-# Bring up fib, generate a P-256 key in 9D, and run the
-# piggy_pass_init.bats conformance lane against the real PCSC stack.
-# Exercises `piggy pass init`'s auto-detect path (no -k, and -g <guid>)
-# against the live card; the declarative -k path is covered by t0002
-# (mocked). Linux-only (fib is Linux-only). Opt-in — not part of the
-# default `just test` lane.
-[group('post-build')]
-test-bats-conformance-init: build-rust
-    #!/usr/bin/env bash
-    set -euo pipefail
-    trap 'just fib-down' EXIT
-    just fib-up
-    eval "$(cat .fib/env)"
-    pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
-    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-    SSH_ASKPASS="$askpass" \
-      SSH_ASKPASS_REQUIRE=force \
-      DISPLAY="" \
-      PIGGY_TEST_FIB_PIN=123456 \
-      BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
-      zz-tests_bats/conformance/piggy_pass_init.bats
-
 # Fibby-backed `piggy pass init` auto-detect lane — the pure-Rust
 # counterpart to test-bats-conformance-init, part of the fib→fibby
 # retirement (docs/plans/2026-06-15-retire-fib-for-fibby.md). Drives
@@ -404,38 +290,6 @@ test-bats-conformance-init-fibby:
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_pass_init_fibby.bats
-
-# Hardware lane for `piggy pass show-batch`. Seals real eboxes against
-# fib's 9D slot and verifies the end-to-end NDJSON event stream
-# including the single-PIN guarantee, the wrong-card bail-out, the
-# heterogeneous-batch per-ebox failure path, and the SIGINT bail-out
-# shape. Linux-only (fib is Linux-only). Opt-in — not part of the
-# default `just test` lane. Companion to the sandbox surface that
-# runs under `bats-default`; see #122.
-[group('post-build')]
-test-bats-conformance-show-batch: build-rust
-    #!/usr/bin/env bash
-    set -euo pipefail
-    trap 'just fib-down' EXIT
-    just fib-up
-    eval "$(cat .fib/env)"
-    pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
-    # Discover the card's GUID for `piggy-ids detect-pubkey --guid` —
-    # pivy-tool prints uppercase, so grep case-insensitively. Mirrors
-    # the same dance in test-bats-conformance-interop.
-    guid=$(pivy-tool list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
-    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-    # BATS_TEST_TIMEOUT=60 (vs 30 elsewhere) — the SIGINT test
-    # background-spawns piggy with a slow askpass and waits on the
-    # first decrypt-ok line, which can take ~5–10s on a cold fib.
-    INTEROP_GUID="$guid" \
-      PCSCLITE_CSOCK_NAME="$PCSCLITE_CSOCK_NAME" \
-      SSH_ASKPASS="$askpass" \
-      SSH_ASKPASS_REQUIRE=force \
-      DISPLAY="" \
-      PIGGY_TEST_FIB_PIN=123456 \
-      BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
-      zz-tests_bats/conformance/piggy_pass_show_batch_hardware.bats
 
 # show-batch against FIBBY — the fibby companion to
 # test-bats-conformance-show-batch, part of the fib→fibby retirement
@@ -687,65 +541,6 @@ test-nix-hm-module:
     printf '%s\n' "$json" | jq -r '.failures[] | "FAIL: \(.name)\n  got: \(.result.got)"'
     exit 1
   fi
-
-# End-to-end ECDH round-trip: boot fib, generate a 9D key, spawn
-# piggy-agent as a child of the test binary, and verify the agent's
-# ecdh@joyent.com extension agrees with a locally-computed shared
-# secret. Issue #32 checkpoint 2. Requires fib (just fib-up will be
-# called automatically and torn down on exit).
-[group('post-build')]
-test-rust-agent-ecdh: build-rust
-  #!/usr/bin/env bash
-  set -euo pipefail
-  trap 'just fib-down' EXIT
-  just fib-up
-  eval "$(cat .fib/env)"
-  # Generate a key on the fib card's 9D slot (Key Management / ECDH).
-  # eccp256 matches both the oracle and the PIV card's ECDH codepath.
-  pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
-  export PIGGY_BIN="$PWD/target/debug/piggy"
-  # Direct `cargo test` is fine here — the just recipe is the entry
-  # point, not cargo (see CLAUDE.md: "Use just recipes for all cargo
-  # ... operations" — the recipe *is* the single source of truth).
-  cargo test --test agent_ecdh_integration -- --nocapture
-
-# End-to-end unlock round-trip: boot fib, generate a 9D key, seal a
-# random AEAD key to it, push the ebox through the wire format, and
-# unlock it via a live piggy-agent (through the EcdhOracle trait).
-# Issue #32 checkpoint 3A. Mirrors the shape of test-rust-agent-ecdh.
-[group('post-build')]
-test-rust-agent-unlock: build-rust
-  #!/usr/bin/env bash
-  set -euo pipefail
-  trap 'just fib-down' EXIT
-  just fib-up
-  eval "$(cat .fib/env)"
-  # eccp256 matches the curve the Rust ECDH path exercises; 9D is the
-  # Key-Management slot used by the EcP256 unlock flow.
-  pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
-  export PIGGY_BIN="$PWD/target/debug/piggy"
-  cargo test --test unlock_ebox_agent_integration -- --nocapture
-
-# End-to-end unlock round-trip via the direct-PCSC card path (no agent).
-# Boots fib, generates a 9D key, seals a random AEAD key to it, pushes
-# the ebox through the wire format, and unlocks it via CardEcdhOracle.
-# Issue #31. SSH_ASKPASS routes to the refusing test askpass; the recipe
-# exports PIGGY_TEST_FIB_PIN so the askpass non-interactively supplies
-# the fib PIN. Any code path that falls through to a real askpass
-# surfaces as a `[piggy-test-askpass]` stderr banner, not a GUI dialog.
-[group('post-build')]
-test-rust-card-unlock: build-rust
-  #!/usr/bin/env bash
-  set -euo pipefail
-  trap 'just fib-down' EXIT
-  just fib-up
-  eval "$(cat .fib/env)"
-  pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
-  export PIGGY_BIN="$PWD/target/debug/piggy"
-  export PIGGY_TEST_FIB_PIN=123456
-  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-  export SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=""
-  cargo test --test unlock_ebox_card_integration -- --nocapture
 
 # Rust card-integration tests against FIBBY — the consolidated fibby
 # companion to test-rust-agent-ecdh / -agent-unlock / -card-unlock, part of

@@ -27,7 +27,7 @@
 # $REAL_PIVY_BOX for this file's tests only (each bats test gets a
 # fresh BATS_TEST_TMPDIR).
 #
-# Requires the fib virtual PIV card stack (just test-bats-conformance-interop).
+# Requires the fib virtual PIV card stack (just test-bats-conformance-interop-fibby).
 # The recipe brings up fib, generates a key on slot 9D, captures the
 # real C pivy-box path BEFORE bats prepends the mock to PATH, and sets
 # PCSCLITE_CSOCK_NAME + REAL_PIVY_BOX + INTEROP_GUID before invoking
@@ -38,10 +38,10 @@ setup() {
   export output
 
   if [[ -z ${PCSCLITE_CSOCK_NAME:-} ]]; then
-    skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-interop)"
+    skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-interop-fibby)"
   fi
   if [[ -z ${REAL_PIVY_BOX:-} || ! -x ${REAL_PIVY_BOX:-} ]]; then
-    skip "REAL_PIVY_BOX not set (run: just test-bats-conformance-interop)"
+    skip "REAL_PIVY_BOX not set (run: just test-bats-conformance-interop-fibby)"
   fi
 
   # Replace common.bash's mock pivy-box symlink with the real C
