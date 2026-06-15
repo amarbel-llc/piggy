@@ -287,6 +287,27 @@ test-bats-conformance-init: build-rust
       BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
       zz-tests_bats/conformance/piggy_pass_init.bats
 
+# Fibby-backed `piggy pass init` auto-detect lane — the pure-Rust
+# counterpart to test-bats-conformance-init, part of the fib→fibby
+# retirement (docs/plans/2026-06-15-retire-fib-for-fibby.md). Drives
+# `piggy pass init` (no-args + explicit -g) against fibby's seeded slot
+# 9D (which also installs the canonical CHUID/GUID). PIN-free, no agent.
+# [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect
+# is a no-op on macOS's PCSC.framework).
+[group('post-build')]
+[linux]
+test-bats-conformance-init-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIVY_TOOL="$pivy_out/bin/pivy-tool" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_pass_init_fibby.bats
+
 # Hardware lane for `piggy pass show-batch`. Seals real eboxes against
 # fib's 9D slot and verifies the end-to-end NDJSON event stream
 # including the single-PIN guarantee, the wrong-card bail-out, the
