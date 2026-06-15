@@ -1,7 +1,8 @@
 //! Background PIV-card presence probe.
 //!
 //! Ported from `pivy-agent/src/card.rs` with the `pivy_piv` crate
-//! dependency relabelled to `piggy_piv`. No behavioural changes.
+//! dependency relabelled to `piggy_piv`. The original behaviour (PIN-clearing
+//! presence probe) is unchanged; the recovery loop (piggy#175) is new.
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -9,8 +10,20 @@ use tokio::time::{Duration, interval};
 
 use piggy_piv::{Guid, PivContext};
 
+use super::session::CachedKey;
+
 const PROBE_INTERVAL: Duration = Duration::from_secs(60);
 const PROBE_FAIL_LIMIT: u32 = 3;
+
+/// Cadence at which a 0-key agent re-attempts PIV enumeration to recover from
+/// a transient startup PCSC failure (piggy#175). Deliberately shorter than
+/// [`PROBE_INTERVAL`] so an agent wedged at login (e.g. a polkit-gated,
+/// socket-activated pcscd that denied the first call before the logind
+/// session was polkit-`active`) self-heals within seconds once the card
+/// becomes reachable. Cheap to poll: a card-absent enumeration returns before
+/// any slot certs are read, and the heavier `read_all_slots` only runs once a
+/// token actually appears.
+pub(crate) const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Background task that periodically probes the PIV card.
 /// Forgets the cached PIN if the card disappears.
@@ -102,6 +115,53 @@ pub async fn probe_loop_with<F>(
                     );
                 }
                 failures = 0;
+            }
+        }
+    }
+}
+
+/// Recovery loop for a 0-key startup (piggy#175).
+///
+/// When the agent enumerates no PIV keys at startup — typically a transient
+/// PCSC denial at login on a polkit-gated, socket-activated pcscd — there is
+/// otherwise no path back to a working agent short of a manual
+/// `systemctl --user restart`. This loop keeps re-running `load` every
+/// `interval_duration` and, the first time `load` yields a non-empty key set,
+/// writes it into the agent's shared `keys` vec (which the identity/sign
+/// handlers read live) and returns the recovered card's GUID so the caller can
+/// hand off to the normal PIN-clearing [`probe_loop`].
+///
+/// `load` is the card-enumeration closure (the real one re-enumerates tokens
+/// and rebuilds the cached keys; tests inject a fake). It returns the loaded
+/// keys plus the primary GUID; an empty load (card still unreachable) is a
+/// no-op that simply waits for the next tick.
+///
+/// Generic over `load` for unit testing; the production caller passes a
+/// closure over `super::load_cached_keys_from_cards`.
+pub async fn recovery_loop_with<F>(
+    keys: Arc<Mutex<Vec<CachedKey>>>,
+    mut load: F,
+    interval_duration: Duration,
+) -> Guid
+where
+    F: FnMut() -> (Vec<CachedKey>, Option<Guid>) + Send,
+{
+    let mut interval = interval(interval_duration);
+
+    loop {
+        interval.tick().await;
+
+        let (loaded, guid) = load();
+        if let Some(guid) = guid {
+            if !loaded.is_empty() {
+                let n = loaded.len();
+                *keys.lock().await = loaded;
+                tracing::info!(
+                    keys = n,
+                    guid = %guid.short_id(),
+                    "recovered keys from PIV tokens after a transient startup failure"
+                );
+                return guid;
             }
         }
     }
@@ -373,6 +433,104 @@ mod tests {
         for h in seen.iter() {
             assert_eq!(h, &guid.to_hex());
         }
+        handle.abort();
+    }
+
+    // -------- Recovery loop (piggy#175) --------
+
+    /// Build an arbitrary `CachedKey` for the recovery-loop tests. The key
+    /// material is never verified by the loop — only its presence (non-empty
+    /// vec) and the carried GUID matter.
+    fn cached_test_key(guid: &Guid) -> CachedKey {
+        use ssh_key::public::{Ed25519PublicKey, KeyData};
+        CachedKey {
+            guid: guid.clone(),
+            reader_name: "MockReader".into(),
+            slot_id: 0x9d,
+            algorithm: piggy_piv::PivAlgorithm::Ed25519,
+            public_key: KeyData::Ed25519(Ed25519PublicKey([7u8; 32])),
+            comment: "recovery-test".into(),
+        }
+    }
+
+    /// Issue #175: an agent that starts with 0 keys (transient PCSC failure)
+    /// must keep retrying and adopt keys into its shared vec once the card
+    /// becomes reachable, returning the recovered GUID so the caller can hand
+    /// off to the PIN-clearing probe loop.
+    #[tokio::test(start_paused = true)]
+    async fn recovery_loop_adopts_keys_once_card_appears() {
+        let keys: Arc<Mutex<Vec<CachedKey>>> = Arc::new(Mutex::new(Vec::new()));
+        let guid = sample_guid();
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_cl = counter.clone();
+        let guid_cl = guid.clone();
+        // Fail (card unreachable) for the first two loads, then succeed.
+        let load = move || {
+            let n = counter_cl.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                (Vec::new(), None)
+            } else {
+                (vec![cached_test_key(&guid_cl)], Some(guid_cl.clone()))
+            }
+        };
+
+        let keys_cl = keys.clone();
+        let handle = tokio::spawn(async move {
+            recovery_loop_with(keys_cl, load, Duration::from_millis(10)).await
+        });
+
+        // First tick fires immediately (load #1 = fail). Advancing two more
+        // intervals reaches load #3, the first success.
+        for _ in 0..4 {
+            yield_now().await;
+        }
+        for _ in 0..2 {
+            tokio::time::advance(Duration::from_millis(10)).await;
+            for _ in 0..4 {
+                yield_now().await;
+            }
+        }
+
+        let recovered = handle.await.unwrap();
+        assert_eq!(recovered.to_hex(), guid.to_hex());
+        assert_eq!(keys.lock().await.len(), 1);
+        assert!(counter.load(Ordering::SeqCst) >= 3);
+    }
+
+    /// While the card stays unreachable the loop must keep the shared key vec
+    /// empty and keep running (never returning) — the agent serves 0 keys but
+    /// remains poised to self-heal.
+    #[tokio::test(start_paused = true)]
+    async fn recovery_loop_keeps_waiting_while_card_absent() {
+        let keys: Arc<Mutex<Vec<CachedKey>>> = Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_cl = counter.clone();
+        let load = move || {
+            counter_cl.fetch_add(1, Ordering::SeqCst);
+            (Vec::new(), None)
+        };
+
+        let keys_cl = keys.clone();
+        let handle = tokio::spawn(async move {
+            recovery_loop_with(keys_cl, load, Duration::from_millis(10)).await
+        });
+
+        for _ in 0..4 {
+            yield_now().await;
+        }
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_millis(10)).await;
+            for _ in 0..4 {
+                yield_now().await;
+            }
+        }
+
+        assert!(
+            !handle.is_finished(),
+            "loop must not return while card absent"
+        );
+        assert!(keys.lock().await.is_empty());
+        assert!(counter.load(Ordering::SeqCst) >= 5);
         handle.abort();
     }
 

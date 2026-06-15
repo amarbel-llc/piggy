@@ -65,6 +65,13 @@ impl PiggyAgent {
         self.pin.clone()
     }
 
+    /// Shared handle to the agent's served key set. The identity/sign handlers
+    /// read this live, so writing into it (e.g. from the piggy#175 recovery
+    /// loop) makes the agent serve the new keys without a restart.
+    pub fn keys_handle(&self) -> Arc<Mutex<Vec<CachedKey>>> {
+        self.keys.clone()
+    }
+
     fn find_key(keys: &[CachedKey], pubkey: &KeyData) -> Option<CachedKey> {
         keys.iter().find(|k| k.public_key == *pubkey).cloned()
     }

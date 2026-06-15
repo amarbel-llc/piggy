@@ -5,9 +5,12 @@
 //! async body are lifted verbatim from the original `pivy-agent/src/main.rs`
 //! with only the clap parser and the runtime bootstrapping adjusted.
 
+use std::sync::Arc;
+
 use clap::Parser;
 use ssh_agent_lib::agent::listen;
 use tokio::net::UnixListener;
+use tokio::sync::Mutex;
 
 mod cak;
 mod card;
@@ -136,17 +139,6 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         }
     };
 
-    let tokens = match piggy_piv::PivContext::new() {
-        Ok(ctx) => ctx.enumerate_tokens().unwrap_or_else(|e| {
-            tracing::warn!("Failed to enumerate PIV tokens: {e}");
-            Vec::new()
-        }),
-        Err(e) => {
-            tracing::warn!("PCSC not available: {e}");
-            Vec::new()
-        }
-    };
-
     // Parse the optional CAK (Card Authentication Key, piggy#143). Invalid
     // input is a hard startup error — better than silently exposing keys.
     let cak: Option<ssh_key::public::KeyData> = match cli.cak.as_deref() {
@@ -160,63 +152,16 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         None => None,
     };
 
-    let mut cached_keys = Vec::new();
-    let mut primary_guid = None;
-    for token in &tokens {
-        let guid = token.guid().clone();
+    // The full set of inputs that select and shape the key load. Bundled so the
+    // piggy#175 recovery loop can re-run the exact same enumeration later.
+    let config = KeyLoadConfig {
+        guid_filter: cli.guid.clone(),
+        all_cards: cli.all_cards,
+        allowed_slots,
+        cak,
+    };
 
-        if let Some(ref filter_guid) = cli.guid {
-            if guid.to_hex() != *filter_guid && guid.short_id() != *filter_guid {
-                continue;
-            }
-        }
-
-        // Read this token's keys BEFORE the CAK check. CAK auth opens its own
-        // card connection and signs; a co-resident reset on disconnect can
-        // disturb the live enumerated connection this read uses (observed on
-        // fibby). Read first, then discard the keys if the card fails CAK.
-        let slots = token.read_all_slots().unwrap_or_default();
-        let mut token_keys = Vec::new();
-        for slot in &slots {
-            if let Some(ref allowed) = allowed_slots {
-                if !allowed.contains(&slot.id()) {
-                    continue;
-                }
-            }
-
-            token_keys.push(CachedKey {
-                guid: guid.clone(),
-                reader_name: token.reader_name().to_string(),
-                slot_id: slot.id(),
-                algorithm: slot.algorithm(),
-                public_key: slot.public_key().key_data().clone(),
-                comment: format!("PIV_slot_{:02X} {}", slot.id(), guid.short_id()),
-            });
-        }
-
-        // CAK anti-swap (piggy#143): if a CAK is configured, only expose a
-        // card whose slot 9E authenticates against it.
-        if let Some(ref cak) = cak {
-            if cak::authenticate(&guid, cak) {
-                tracing::info!(guid = %guid.short_id(), "CAK authentication succeeded");
-            } else {
-                tracing::warn!(
-                    guid = %guid.short_id(),
-                    "CAK authentication failed; not exposing this card's keys"
-                );
-                continue;
-            }
-        }
-
-        if primary_guid.is_none() {
-            primary_guid = Some(guid.clone());
-        }
-        cached_keys.extend(token_keys);
-
-        if !cli.all_cards {
-            break;
-        }
-    }
+    let (cached_keys, primary_guid) = load_cached_keys_from_cards(&config);
 
     if cli.info {
         if cached_keys.is_empty() {
@@ -248,7 +193,7 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         }
     };
 
-    match rt.block_on(run_async(cli, cached_keys, primary_guid, cak)) {
+    match rt.block_on(run_async(cli, cached_keys, primary_guid, config)) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("piggy agent: {}", e);
@@ -257,11 +202,115 @@ pub fn run(full_argv: Vec<String>) -> i32 {
     }
 }
 
+/// Inputs that select and shape the PIV key load (and re-load): the GUID
+/// filter, all-cards mode, the optional slot whitelist, and the optional CAK.
+/// Owned by `run` and threaded into `run_async` so the piggy#175 recovery loop
+/// can re-run the identical enumeration after a transient startup PCSC failure.
+#[derive(Clone)]
+struct KeyLoadConfig {
+    guid_filter: Option<String>,
+    all_cards: bool,
+    allowed_slots: Option<Vec<u8>>,
+    cak: Option<ssh_key::public::KeyData>,
+}
+
+/// Enumerate PIV tokens, logging and degrading to an empty list on any PCSC
+/// failure (no card, denied access, cold pcscd). Both the startup load and the
+/// recovery loop go through here so they treat a transient failure identically.
+fn enumerate_tokens_or_empty() -> Vec<piggy_piv::PivToken> {
+    match piggy_piv::PivContext::new() {
+        Ok(ctx) => ctx.enumerate_tokens().unwrap_or_else(|e| {
+            tracing::warn!("Failed to enumerate PIV tokens: {e}");
+            Vec::new()
+        }),
+        Err(e) => {
+            tracing::warn!("PCSC not available: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Build the cached key set (and the primary card's GUID) from already-
+/// enumerated `tokens`, applying the GUID filter, slot whitelist, CAK
+/// anti-swap, and all-cards/first-card selection from `config`. Returns an
+/// empty vec / `None` GUID when no matching card is reachable.
+fn build_cached_keys(
+    tokens: &[piggy_piv::PivToken],
+    config: &KeyLoadConfig,
+) -> (Vec<CachedKey>, Option<piggy_piv::Guid>) {
+    let mut cached_keys = Vec::new();
+    let mut primary_guid = None;
+    for token in tokens {
+        let guid = token.guid().clone();
+
+        if let Some(ref filter_guid) = config.guid_filter {
+            if guid.to_hex() != *filter_guid && guid.short_id() != *filter_guid {
+                continue;
+            }
+        }
+
+        // Read this token's keys BEFORE the CAK check. CAK auth opens its own
+        // card connection and signs; a co-resident reset on disconnect can
+        // disturb the live enumerated connection this read uses (observed on
+        // fibby). Read first, then discard the keys if the card fails CAK.
+        let slots = token.read_all_slots().unwrap_or_default();
+        let mut token_keys = Vec::new();
+        for slot in &slots {
+            if let Some(ref allowed) = config.allowed_slots {
+                if !allowed.contains(&slot.id()) {
+                    continue;
+                }
+            }
+
+            token_keys.push(CachedKey {
+                guid: guid.clone(),
+                reader_name: token.reader_name().to_string(),
+                slot_id: slot.id(),
+                algorithm: slot.algorithm(),
+                public_key: slot.public_key().key_data().clone(),
+                comment: format!("PIV_slot_{:02X} {}", slot.id(), guid.short_id()),
+            });
+        }
+
+        // CAK anti-swap (piggy#143): if a CAK is configured, only expose a
+        // card whose slot 9E authenticates against it.
+        if let Some(ref cak) = config.cak {
+            if cak::authenticate(&guid, cak) {
+                tracing::info!(guid = %guid.short_id(), "CAK authentication succeeded");
+            } else {
+                tracing::warn!(
+                    guid = %guid.short_id(),
+                    "CAK authentication failed; not exposing this card's keys"
+                );
+                continue;
+            }
+        }
+
+        if primary_guid.is_none() {
+            primary_guid = Some(guid.clone());
+        }
+        cached_keys.extend(token_keys);
+
+        if !config.all_cards {
+            break;
+        }
+    }
+    (cached_keys, primary_guid)
+}
+
+/// Enumerate the cards and build the cached key set in one shot. Used for the
+/// startup load and re-run each tick by the piggy#175 recovery loop.
+fn load_cached_keys_from_cards(
+    config: &KeyLoadConfig,
+) -> (Vec<CachedKey>, Option<piggy_piv::Guid>) {
+    build_cached_keys(&enumerate_tokens_or_empty(), config)
+}
+
 async fn run_async(
     cli: AgentArgs,
     cached_keys: Vec<CachedKey>,
     primary_guid: Option<piggy_piv::Guid>,
-    cak: Option<ssh_key::public::KeyData>,
+    config: KeyLoadConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Determine socket path
     let socket_path = match cli.socket {
@@ -309,19 +358,30 @@ async fn run_async(
     // PROBE_FAIL_LIMIT (3) consecutive failures, so an unattended agent drops
     // its PIN shortly after the card is removed. This is piggy-specific — the
     // C pivy-agent has its own card-presence handling with different timing.
-    if let Some(guid) = primary_guid {
-        let pin_handle = agent.pin_handle();
-        match cak {
-            Some(cak) => {
-                // CAK mode (piggy#143): the probe also re-runs the slot-9E
-                // challenge each tick, so a mid-session card swap clears the PIN.
-                tracing::info!(guid = %guid.short_id(), "spawning CAK-reauthenticating card probe loop");
-                tokio::spawn(card::probe_loop_cak(guid, pin_handle, cak));
-            }
-            None => {
-                tracing::info!(guid = %guid.short_id(), "spawning card-presence probe loop");
-                tokio::spawn(card::probe_loop(guid, pin_handle));
-            }
+    let pin_handle = agent.pin_handle();
+    match primary_guid {
+        Some(guid) => spawn_probe_loop(guid, pin_handle, config.cak.clone()),
+        None => {
+            // piggy#175: 0 keys at startup almost always means a *transient*
+            // PCSC failure (a polkit-gated, socket-activated pcscd that denied
+            // the agent's first call before the logind session was
+            // polkit-`active`, or a card not yet inserted). The old code
+            // spawned no loop here, leaving the agent wedged at 0 keys until a
+            // manual restart. Spawn a recovery loop that re-enumerates until a
+            // card is reachable, adopts its keys into the live set, then hands
+            // off to the normal probe loop — so the agent self-heals.
+            tracing::warn!("0 keys loaded at startup; spawning PIV recovery loop (piggy#175)");
+            let keys_handle = agent.keys_handle();
+            let cak_for_probe = config.cak.clone();
+            tokio::spawn(async move {
+                let guid = card::recovery_loop_with(
+                    keys_handle,
+                    move || load_cached_keys_from_cards(&config),
+                    card::RECOVERY_INTERVAL,
+                )
+                .await;
+                spawn_probe_loop(guid, pin_handle, cak_for_probe);
+            });
         }
     }
 
@@ -354,6 +414,28 @@ async fn run_async(
     listen(listener, agent).await?;
 
     Ok(())
+}
+
+/// Spawn the card-presence PIN-clearing probe loop for `guid`, choosing the
+/// CAK-reauthenticating variant when a CAK is configured. Shared by the
+/// card-present-at-startup path and the piggy#175 post-recovery handoff.
+fn spawn_probe_loop(
+    guid: piggy_piv::Guid,
+    pin_handle: Arc<Mutex<Option<String>>>,
+    cak: Option<ssh_key::public::KeyData>,
+) {
+    match cak {
+        Some(cak) => {
+            // CAK mode (piggy#143): the probe also re-runs the slot-9E
+            // challenge each tick, so a mid-session card swap clears the PIN.
+            tracing::info!(guid = %guid.short_id(), "spawning CAK-reauthenticating card probe loop");
+            tokio::spawn(card::probe_loop_cak(guid, pin_handle, cak));
+        }
+        None => {
+            tracing::info!(guid = %guid.short_id(), "spawning card-presence probe loop");
+            tokio::spawn(card::probe_loop(guid, pin_handle));
+        }
+    }
 }
 
 fn kill_agent() -> Result<(), Box<dyn std::error::Error>> {
