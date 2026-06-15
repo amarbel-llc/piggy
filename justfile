@@ -320,6 +320,48 @@ test-bats-conformance-recipients-add-attached: build-rust
       BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
       zz-tests_bats/conformance/piggy_recipients_add_attached.bats
 
+# recipients add --all-attached against FIBBY — the fibby companion to
+# test-bats-conformance-recipients-add-attached, part of the fib→fibby
+# retirement (docs/plans/2026-06-15-retire-fib-for-fibby.md, Phase 3).
+# Brings up fibby (virtual backend, seeded slot 9D + canonical CHUID/GUID)
+# and runs the SAME piggy_recipients_add_attached.bats against it: the live
+# card is added on top of an existing foreign recipient, and the already-a-
+# recipient case is a no-op. The RSA-9D "unsupported" case was dropped (fibby
+# is P-256-only; that path is unit-tested — see the bats file's note).
+# Pure-Rust card-under-test, no Java/jcardsim/hardware.
+[group('post-build')]
+[linux]
+test-bats-conformance-recipients-add-attached-fibby: build-rust
+  #!/usr/bin/env bash
+  set -uo pipefail
+  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+  pivy_tool="$pivy_out/bin/pivy-tool"
+  fibby_bin="$PWD/target/debug/fibby"
+  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
+
+  workdir=$(mktemp -d /tmp/recipients-add-fibby-XXXXXX)
+  fibby_sock="$workdir/pcscd.comm"
+  fibby_log="$workdir/fibby.log"
+  fibby_pid=""
+  cleanup() { [[ -n "$fibby_pid" ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
+  trap cleanup EXIT
+
+  echo "=== Starting fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
+  FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+    --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+  fibby_pid=$!
+  for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+  [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
+
+  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+  PCSCLITE_CSOCK_NAME="$fibby_sock" \
+    SSH_ASKPASS="$askpass" \
+    SSH_ASKPASS_REQUIRE=force \
+    DISPLAY="" \
+    PIGGY_TEST_FIB_PIN=123456 \
+    BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
+    zz-tests_bats/conformance/piggy_recipients_add_attached.bats
+
 # Bring up fib, generate a P-256 key in 9D, and run the
 # piggy_pass_init.bats conformance lane against the real PCSC stack.
 # Exercises `piggy pass init`'s auto-detect path (no -k, and -g <guid>)

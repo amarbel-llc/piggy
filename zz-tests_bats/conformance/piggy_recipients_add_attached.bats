@@ -2,17 +2,17 @@
 # bats file_tags=hardware
 #
 # Conformance tier-2 tests for piggy pass recipients add --all-attached
-# against the real fib virtual PIV card. Multi-card permutations
-# (mixed supported+unsupported, dedup across N cards) live in the
-# tier-1 mock bats at zz-tests_bats/t0610-recipients-add-attached.bats
-# because fib is single-card by construction; see amarbel-llc/piggy#83.
+# against a real virtual PIV card. Multi-card permutations (mixed
+# supported+unsupported, dedup across N cards) live in the tier-1 mock
+# bats at zz-tests_bats/t0610-recipients-add-attached.bats because both
+# fib and fibby are single-card by construction; see amarbel-llc/piggy#83.
 #
-# Driven by `just test-bats-conformance-recipients-add-attached` which
-# brings up fib, generates a P-256 key in slot 9D, exports
-# PCSCLITE_CSOCK_NAME, and runs bats with --allow-local-binding plus
-# the askpass safety net.
+# Driven by `just test-bats-conformance-recipients-add-attached-fibby`
+# (fibby, virtual slot 9D) — or the legacy fib recipe — which exports
+# PCSCLITE_CSOCK_NAME and runs bats with --allow-local-binding plus the
+# askpass safety net.
 #
-# Tests skip gracefully when fib env vars are absent.
+# Tests skip gracefully when the card env vars are absent.
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
@@ -32,13 +32,6 @@ setup() {
   else
     skip "piggy-ids binary not found (run: just build-rust)"
   fi
-
-  # Same treatment for pivy-tool: test 3 calls `pivy-tool -P ... -a
-  # rsa2048 generate 9d` to re-key fib's slot 9D. The mock at
-  # zz-tests_bats/helpers/mock-pivy-tool.sh only knows `pubkey` and
-  # `list` and errors on `-P`. Remove the mock symlink so the dev-shell
-  # pivy-tool (the real C binary) on PATH is found.
-  rm -f "$BATS_TEST_TMPDIR/pivy-tool"
 
   init_test_git
 
@@ -81,20 +74,13 @@ function fib_attached_already_a_recipient_is_noop { # @test
   [[ "$before_sha" = "$after_sha" ]] || fail "expected no commit"
 }
 
-function fib_attached_rsa_in_9d_is_unsupported { # @test
-  # Re-key slot 9D as RSA. The card is then unsupported for piggy.
-  # NOTE: this test leaves the card in RSA state. The just recipe
-  # re-generates EcP256 before each lane invocation, so re-running
-  # the lane is safe; running THIS test alone (without re-init)
-  # would leave fib in an RSA-9D state. That's why this is the LAST
-  # test in this file.
-  pivy-tool -P "${PIGGY_TEST_FIB_PIN:-123456}" -K default -a rsa2048 generate 9d >/dev/null
-
-  "$PIGGY" pass init -k "$FOREIGN_RECIPIENT"
-
-  run "$PIGGY" pass recipients add --all-attached --yes
-  assert_success
-  assert_output --partial "Cannot encrypt to 1 attached card"
-  assert_output --partial "Rsa"  # algorithm-name substring (Rsa2048, RsaP2048, etc.)
-  assert_output --partial "nothing to add"
-}
+# NOTE: the RSA-in-9D "unsupported card" case used to live here, re-keying
+# slot 9D to RSA via `pivy-tool -a rsa2048 generate 9d`. It was dropped when
+# this lane moved to fibby: fibby is P-256-only (GENERATE rejects RSA 0x07),
+# and the rejection logic is already covered deterministically without a
+# card — classify_slot_9d(Rsa2048) → Unsupported
+# (crates/piggy-ids/tests/classify.rs::rsa_in_9d_is_unsupported),
+# detect-all-pubkeys emits the unsupported line (piggy-ids main.rs tests),
+# and `recipients add` reports "Cannot encrypt" (recipients.rs
+# parse_detect_supported_and_unsupported). So the hardware confirmation was
+# redundant. See the fib→fibby retirement plan + #176.
