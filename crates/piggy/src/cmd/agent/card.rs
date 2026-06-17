@@ -136,15 +136,30 @@ pub async fn probe_loop_with<F>(
 /// keys plus the primary GUID; an empty load (card still unreachable) is a
 /// no-op that simply waits for the next tick.
 ///
-/// Generic over `load` for unit testing; the production caller passes a
-/// closure over `super::load_cached_keys_from_cards`.
-pub async fn recovery_loop_with<F>(
+/// `verify` is a sign-path reconnect probe (piggy#179). Enumeration is
+/// PIN-free and read-only, but signing reconnects through
+/// `reconnect_to_token` + a GENERAL AUTHENTICATE. A card that enumerates but
+/// does not round-trip through the sign-path's own reconnect helper would be
+/// adopted as sign-incapable keys — the #179 wedge, where the agent serves
+/// keys that enumerate but refuse every sign. So the handoff is gated on
+/// `verify(&guid)`: the recovered keys are adopted (and the loop returns) only
+/// once the GUID reconnects; a probe failure logs a diagnostic and keeps
+/// retrying rather than serving keys that can't sign. The production caller
+/// passes a closure over `super::session::reconnect_to_token`; tests inject a
+/// fake (Ok = reconnectable, Err = wedged).
+///
+/// Generic over `load`/`verify` for unit testing; the production caller passes
+/// closures over `super::load_cached_keys_from_cards` and
+/// `super::session::reconnect_to_token`.
+pub async fn recovery_loop_with<F, V>(
     keys: Arc<Mutex<Vec<CachedKey>>>,
     mut load: F,
+    mut verify: V,
     interval_duration: Duration,
 ) -> Guid
 where
     F: FnMut() -> (Vec<CachedKey>, Option<Guid>) + Send,
+    V: FnMut(&Guid) -> Result<(), String> + Send,
 {
     let mut interval = interval(interval_duration);
 
@@ -152,18 +167,30 @@ where
         interval.tick().await;
 
         let (loaded, guid) = load();
-        if let Some(guid) = guid {
-            if !loaded.is_empty() {
-                let n = loaded.len();
-                *keys.lock().await = loaded;
-                tracing::info!(
-                    keys = n,
-                    guid = %guid.short_id(),
-                    "recovered keys from PIV tokens after a transient startup failure"
-                );
-                return guid;
-            }
+        let Some(guid) = guid else { continue };
+        if loaded.is_empty() {
+            continue;
         }
+
+        // piggy#179: gate the handoff on a sign-path reconnect probe so a
+        // card that enumerates but can't sign is never adopted as live keys.
+        if let Err(cause) = verify(&guid) {
+            tracing::warn!(
+                guid = %guid.short_id(),
+                cause = %cause,
+                "recovered card enumerated but did not reconnect via the sign-path helper; retrying (piggy#179)"
+            );
+            continue;
+        }
+
+        let n = loaded.len();
+        *keys.lock().await = loaded;
+        tracing::info!(
+            keys = n,
+            guid = %guid.short_id(),
+            "recovered keys from PIV tokens after a transient startup failure"
+        );
+        return guid;
     }
 }
 
@@ -475,8 +502,10 @@ mod tests {
         };
 
         let keys_cl = keys.clone();
+        // The recovered card reconnects through the sign-path helper.
+        let verify = |_g: &Guid| Ok(());
         let handle = tokio::spawn(async move {
-            recovery_loop_with(keys_cl, load, Duration::from_millis(10)).await
+            recovery_loop_with(keys_cl, load, verify, Duration::from_millis(10)).await
         });
 
         // First tick fires immediately (load #1 = fail). Advancing two more
@@ -511,8 +540,10 @@ mod tests {
         };
 
         let keys_cl = keys.clone();
+        // verify is never reached while load stays empty.
+        let verify = |_g: &Guid| Ok(());
         let handle = tokio::spawn(async move {
-            recovery_loop_with(keys_cl, load, Duration::from_millis(10)).await
+            recovery_loop_with(keys_cl, load, verify, Duration::from_millis(10)).await
         });
 
         for _ in 0..4 {
@@ -530,6 +561,54 @@ mod tests {
             "loop must not return while card absent"
         );
         assert!(keys.lock().await.is_empty());
+        assert!(counter.load(Ordering::SeqCst) >= 5);
+        handle.abort();
+    }
+
+    /// piggy#179: a card that enumerates (load returns keys + GUID) but fails
+    /// the sign-path reconnect probe must NOT be adopted — the loop keeps the
+    /// shared vec empty and keeps running, so the agent never serves
+    /// sign-incapable keys. This is the gate that distinguishes "served 0
+    /// keys" (honest, already handled) from "serves keys that can't sign"
+    /// (the #179 wedge).
+    #[tokio::test(start_paused = true)]
+    async fn recovery_loop_does_not_adopt_when_reconnect_probe_fails() {
+        let keys: Arc<Mutex<Vec<CachedKey>>> = Arc::new(Mutex::new(Vec::new()));
+        let guid = sample_guid();
+        let guid_cl = guid.clone();
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_cl = counter.clone();
+        // Card always enumerates...
+        let load = move || {
+            counter_cl.fetch_add(1, Ordering::SeqCst);
+            (vec![cached_test_key(&guid_cl)], Some(guid.clone()))
+        };
+        // ...but never reconnects through the sign-path helper.
+        let verify = |_g: &Guid| Err("PIV token no longer available".to_string());
+
+        let keys_cl = keys.clone();
+        let handle = tokio::spawn(async move {
+            recovery_loop_with(keys_cl, load, verify, Duration::from_millis(10)).await
+        });
+
+        for _ in 0..4 {
+            yield_now().await;
+        }
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_millis(10)).await;
+            for _ in 0..4 {
+                yield_now().await;
+            }
+        }
+
+        assert!(
+            !handle.is_finished(),
+            "loop must not return while the reconnect probe fails"
+        );
+        assert!(
+            keys.lock().await.is_empty(),
+            "sign-incapable keys must not be adopted"
+        );
         assert!(counter.load(Ordering::SeqCst) >= 5);
         handle.abort();
     }

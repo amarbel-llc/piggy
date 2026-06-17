@@ -377,6 +377,15 @@ async fn run_async(
                 let guid = card::recovery_loop_with(
                     keys_handle,
                     move || load_cached_keys_from_cards(&config),
+                    // piggy#179: confirm the recovered GUID round-trips through
+                    // the sign-path's own reconnect helper before adopting its
+                    // keys, so a card that enumerates but can't sign is not
+                    // served as live keys.
+                    |guid: &piggy_piv::Guid| {
+                        session::reconnect_to_token(guid)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    },
                     card::RECOVERY_INTERVAL,
                 )
                 .await;
