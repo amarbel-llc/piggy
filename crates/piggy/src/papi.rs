@@ -158,7 +158,7 @@ fn sign_inner(args: SignArgs) -> Result<String, String> {
     let socket = resolve_agent_socket()?;
     let sig = piggy::agent_client::sign_bytes(&socket, &key_data, &signing_input, SIGN_TIMEOUT)
         .map_err(|e| format!("agent sign: {e}"))?;
-    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_bytes());
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(ssh_signature_wire(&sig));
 
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -181,6 +181,26 @@ fn sign_inner(args: SignArgs) -> Result<String, String> {
     } else {
         Ok(serde_json::to_string_pretty(&signature).map_err(|e| e.to_string())? + "\n")
     }
+}
+
+/// Serialize an agent `Signature` to the SSH signature wire blob
+/// `string(algorithm) || string(signature)` — the bytes the ssh-agent SIGN
+/// response carries verbatim, which PAPI §10.4 base64s into `sig` (the
+/// `"ecdsa-sha2-nistp256"` name string followed by the RFC 5656 §3.1.2 (r,s)
+/// blob). `Signature::as_bytes()` is only the inner algorithm blob, so the
+/// algorithm-name string MUST be prepended for a verifier to recover the key
+/// type and decode the signature. `string` is the SSH `uint32`-length-prefixed
+/// byte string (RFC 4251 §5).
+fn ssh_signature_wire(sig: &ssh_key::Signature) -> Vec<u8> {
+    let algorithm = sig.algorithm();
+    let algo = algorithm.as_str().as_bytes();
+    let blob = sig.as_bytes();
+    let mut out = Vec::with_capacity(8 + algo.len() + blob.len());
+    out.extend_from_slice(&(algo.len() as u32).to_be_bytes());
+    out.extend_from_slice(algo);
+    out.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+    out.extend_from_slice(blob);
+    out
 }
 
 /// Build the §10.1 signature object `{alg, key, sig, created}`.
@@ -446,6 +466,24 @@ mod tests {
         let v: Value = serde_json::from_str(r#"{"b":1,"a":2}"#).unwrap();
         let bytes = jcs_signing_input(&v).unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), r#"{"a":2,"b":1}"#);
+    }
+
+    #[test]
+    fn ssh_signature_wire_prepends_algorithm_name_string() {
+        // PAPI §10.4: `sig` is the raw agent blob = string(alg) || string(blob),
+        // NOT the bare inner blob from Signature::as_bytes(). Pin that framing.
+        use ssh_key::{Algorithm, Signature};
+        let blob = vec![7u8; 64]; // Ed25519 sig length; no inner structure to validate.
+        let sig = Signature::new(Algorithm::new("ssh-ed25519").unwrap(), blob.clone()).unwrap();
+
+        let name = b"ssh-ed25519";
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        expected.extend_from_slice(name);
+        expected.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+        expected.extend_from_slice(&blob);
+
+        assert_eq!(ssh_signature_wire(&sig), expected);
     }
 
     #[test]
