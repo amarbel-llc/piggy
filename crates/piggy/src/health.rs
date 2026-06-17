@@ -454,14 +454,26 @@ pub fn exit_code(results: &[CheckResult]) -> i32 {
     }
 }
 
+/// Per-identity timeout for the opt-in `--sign-test` probe (piggy#179). Far
+/// more generous than [`PROBE_TIMEOUT`] because a real sign may legitimately
+/// block on a human entering a PIN at the askpass prompt.
+pub const SIGN_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// `piggy health` entry point: [`gather`] → [`evaluate`] → render to
 /// stdout via the format-selected [`HealthSink`] → [`exit_code`].
 ///
+/// `sign_test` adds the opt-in #179 agent self-sign probe AFTER the standard
+/// run: it writes a diagnostic block to stderr (kept out of the pinned
+/// 9-point stdout stream) and folds a sign failure into the exit code. It is
+/// the only path in `piggy health` that exercises the private key, so it may
+/// prompt for a PIN — hence opt-in.
+///
 /// Exit code conventions (the render-error 2 mirrors `pass verify`):
-/// - 0: no point failed (SKIPs count as ok)
-/// - 1: at least one point is `not ok`
+/// - 0: no point failed (SKIPs count as ok); with `--sign-test`, also every
+///   served identity signed
+/// - 1: at least one point is `not ok`, or a `--sign-test` sign was refused
 /// - 2: the report itself could not be rendered (stdout IO error)
-pub fn run(format: Format, verbose: bool) -> i32 {
+pub fn run(format: Format, verbose: bool, sign_test: bool) -> i32 {
     use std::io::IsTerminal;
 
     let results = evaluate(&gather());
@@ -478,7 +490,76 @@ pub fn run(format: Format, verbose: bool) -> i32 {
         eprintln!("piggy health: failed to render report: {e}");
         return 2;
     }
-    exit_code(&results)
+    let base = exit_code(&results);
+    if sign_test {
+        base.max(run_sign_test())
+    } else {
+        base
+    }
+}
+
+/// Opt-in #179 agent self-sign probe. Resolves the agent socket the same way
+/// the standard run does, asks the agent to sign a fixed nonce with every
+/// served identity, and writes the per-identity result to stderr (not the
+/// stdout TAP/ndjson stream, whose 9-point plan is a pinned contract).
+///
+/// Returns 1 if the agent is unreachable or any sign was refused, else 0 —
+/// so a sign-incapable-but-enumerable agent (the #179 wedge) fails the run
+/// even when every enumeration-only point passed.
+fn run_sign_test() -> i32 {
+    // Flush the stdout TAP/ndjson stream before the stderr block so a merged
+    // capture (bats `run`) keeps the two sections in order.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    eprintln!("piggy health --sign-test (piggy#179): agent self-sign probe");
+    let path = match resolve_socket() {
+        SocketProbe::Resolved { source, path, .. } => {
+            eprintln!("  socket: {} ({source})", path.display());
+            path
+        }
+        SocketProbe::Unresolved => {
+            eprintln!("  agent socket unresolved: set PIGGY_AUTH_SOCK or SSH_AUTH_SOCK");
+            return 1;
+        }
+    };
+    match piggy::agent_client::probe_sign(&path, SIGN_PROBE_TIMEOUT) {
+        Ok(probes) => {
+            eprint!("{}", format_sign_probes(&probes));
+            i32::from(probes.iter().any(|p| p.outcome.is_err()))
+        }
+        Err(e) => {
+            eprintln!("  could not reach agent: {e}");
+            1
+        }
+    }
+}
+
+/// Render the sign-test per-identity outcomes as a stderr diagnostic block.
+/// Pure: returns the text. One line per identity, `PASS`/`FAIL` with the
+/// signature algorithm + length + duration on success or the agent's error
+/// (e.g. `agent refused operation`) on refusal.
+fn format_sign_probes(probes: &[piggy::agent_client::SignProbe]) -> String {
+    use std::fmt::Write;
+    if probes.is_empty() {
+        return "  (agent serves no identities)\n".to_string();
+    }
+    let mut s = String::new();
+    for p in probes {
+        match &p.outcome {
+            Ok((algo, len, dur)) => {
+                let _ = writeln!(
+                    s,
+                    "  PASS  {}  {}  {algo}  {len} bytes  {}ms",
+                    p.comment,
+                    p.fingerprint,
+                    dur.as_millis()
+                );
+            }
+            Err(e) => {
+                let _ = writeln!(s, "  FAIL  {}  {}  {e}", p.comment, p.fingerprint);
+            }
+        }
+    }
+    s
 }
 
 /// Render a full health run (the 9 [`CheckResult`]s from [`evaluate`])
@@ -870,6 +951,41 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------- sign-test rendering (piggy#179) --------
+
+    #[test]
+    fn format_sign_probes_marks_pass_and_fail() {
+        use piggy::agent_client::SignProbe;
+        let probes = vec![
+            SignProbe {
+                comment: "PIV_slot_9A AAAA".into(),
+                fingerprint: "SHA256:aaa".into(),
+                outcome: Ok((
+                    "ecdsa-sha2-nistp256".into(),
+                    72,
+                    std::time::Duration::from_millis(118),
+                )),
+            },
+            SignProbe {
+                comment: "PIV_slot_9C BBBB".into(),
+                fingerprint: "SHA256:bbb".into(),
+                outcome: Err("agent refused operation".into()),
+            },
+        ];
+        let out = format_sign_probes(&probes);
+        assert!(out.contains("PASS  PIV_slot_9A AAAA"), "got: {out}");
+        assert!(out.contains("ecdsa-sha2-nistp256"), "got: {out}");
+        assert!(out.contains("72 bytes"), "got: {out}");
+        assert!(out.contains("FAIL  PIV_slot_9C BBBB"), "got: {out}");
+        assert!(out.contains("agent refused operation"), "got: {out}");
+    }
+
+    #[test]
+    fn format_sign_probes_handles_no_identities() {
+        let out = format_sign_probes(&[]);
+        assert!(out.contains("no identities"), "got: {out}");
+    }
 
     fn empty_probes() -> Probes {
         Probes {

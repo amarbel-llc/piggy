@@ -26,7 +26,7 @@ use piggy_box::agent_ext::{decode_ecdh_response, encode_ecdh_request};
 use piggy_box::oracle::{EcdhOracle, OracleError};
 use ssh_agent_lib::agent::Session;
 use ssh_agent_lib::client::Client;
-use ssh_agent_lib::proto::Extension;
+use ssh_agent_lib::proto::{Extension, SignRequest};
 use tokio::net::UnixStream;
 use tokio::runtime::Runtime;
 
@@ -193,6 +193,83 @@ pub fn probe_extensions(socket_path: &Path, timeout: Duration) -> Result<Vec<Str
         })
         .await
         .map_err(|_| format!("timeout after {timeout:?}"))?
+    })
+}
+
+/// Fixed nonce the sign-test probe asks the agent to sign. Its content is
+/// irrelevant — the probe only cares whether the agent produces a signature
+/// at all — but a recognizable, non-secret marker keeps it obvious in any
+/// trace that this is piggy's own self-test, not a real auth challenge.
+pub const SIGN_TEST_PAYLOAD: &[u8] = b"piggy health sign-test (piggy#179)";
+
+/// Outcome of one agent-sign attempt in the `piggy health --sign-test` probe.
+#[derive(Debug)]
+pub struct SignProbe {
+    /// The served identity's comment (piggy keys carry `PIV_slot_9A <guid>`).
+    pub comment: String,
+    /// SHA-256 SSH fingerprint of the identity (`SHA256:…`).
+    pub fingerprint: String,
+    /// `Ok((algorithm, signature_byte_len, elapsed))` on success, or the
+    /// agent's error string (e.g. `agent refused operation`) on refusal.
+    pub outcome: Result<(String, usize, Duration), String>,
+}
+
+/// piggy#179 troubleshooting probe: ask the agent to actually SIGN a fixed
+/// nonce with every served identity. Unlike [`probe_identities`] /
+/// [`probe_extensions`] — which only enumerate — this exercises the
+/// private-key path, so a sign-incapable-but-enumerable agent (the #179
+/// wedge) is caught instead of reading as healthy. It MAY therefore prompt
+/// for a PIN, which is why it is gated behind the opt-in `--sign-test` flag
+/// and never part of the default PIN-free `piggy health` run.
+///
+/// Returns one [`SignProbe`] per served identity (empty vec if the agent
+/// serves none). `Err` is a connection/enumeration failure that precluded
+/// any sign attempt. Each sign is individually bounded by `timeout` (kept
+/// generous by the caller to allow human PIN entry).
+pub fn probe_sign(socket_path: &Path, timeout: Duration) -> Result<Vec<SignProbe>, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+
+    let socket_path = socket_path.to_path_buf();
+
+    runtime.block_on(async move {
+        let stream = UnixStream::connect(&socket_path)
+            .await
+            .map_err(|e| format!("connect {}: {e}", socket_path.display()))?;
+        let mut client = Client::new(stream);
+        let ids = client
+            .request_identities()
+            .await
+            .map_err(|e| format!("request_identities: {e}"))?;
+
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let comment = id.comment.clone();
+            let fingerprint = id.pubkey.fingerprint(ssh_key::HashAlg::Sha256).to_string();
+            let req = SignRequest {
+                pubkey: id.pubkey,
+                data: SIGN_TEST_PAYLOAD.to_vec(),
+                flags: 0,
+            };
+            let start = std::time::Instant::now();
+            let outcome = match tokio::time::timeout(timeout, client.sign(req)).await {
+                Ok(Ok(sig)) => Ok((
+                    sig.algorithm().to_string(),
+                    sig.as_bytes().len(),
+                    start.elapsed(),
+                )),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(_) => Err(format!("timeout after {timeout:?}")),
+            };
+            out.push(SignProbe {
+                comment,
+                fingerprint,
+                outcome,
+            });
+        }
+        Ok(out)
     })
 }
 
@@ -363,6 +440,18 @@ mod tests {
     #[test]
     fn query_probe_on_missing_socket_errors_fast() {
         let err = probe_extensions(
+            Path::new("/nonexistent/health.sock"),
+            Duration::from_secs(2),
+        )
+        .expect_err("missing socket must fail");
+        assert!(err.contains("connect"), "got: {err}");
+    }
+
+    /// piggy#179: the sign-test probe surfaces a connect error (not a
+    /// panic/hang) when no agent is reachable — and never prompts.
+    #[test]
+    fn sign_probe_on_missing_socket_errors_fast() {
+        let err = probe_sign(
             Path::new("/nonexistent/health.sock"),
             Duration::from_secs(2),
         )

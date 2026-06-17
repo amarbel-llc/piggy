@@ -380,6 +380,12 @@ struct HealthCmdArgs {
     /// Attach the diagnostic block to every point, not just failures.
     #[arg(short = 'v', long = "verbose")]
     verbose: bool,
+    /// Also probe the agent's *signing* path: ask it to sign a fixed nonce
+    /// with every served identity, printing per-key debug output to stderr
+    /// (piggy#179). Unlike the default read-only checks this exercises the
+    /// private key and MAY prompt for a PIN; a refused sign fails the run.
+    #[arg(long = "sign-test")]
+    sign_test: bool,
 }
 
 #[derive(Args, Debug)]
@@ -519,7 +525,7 @@ fn main() {
         Command::Help { .. } => std::process::exit(usage::run()),
         Command::Version { .. } => std::process::exit(version::run()),
         Command::Health(args) => std::process::exit(piggy::stats::timed_health(|| {
-            health::run(args.format, args.verbose)
+            health::run(args.format, args.verbose, args.sign_test)
         })),
 
         Command::SshCopyId { rest } => std::process::exit(ssh_copy_id::run(&rest)),

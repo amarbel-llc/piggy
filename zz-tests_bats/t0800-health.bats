@@ -63,6 +63,19 @@ function health_ndjson_emits_parseable_records_with_summary { # @test
   assert_success
 }
 
+function health_sign_test_reports_unreachable_agent_without_disturbing_plan { # @test
+  # piggy#179: `--sign-test` adds an opt-in agent self-sign probe on stderr.
+  # With both sockets unset it cannot reach an agent (so it never signs and
+  # never prompts for a PIN), reports the unresolved socket, and the run
+  # still fails. The pinned 9-point TAP stream on stdout is unchanged.
+  unset PIGGY_AUTH_SOCK SSH_AUTH_SOCK
+  run "$PIGGY" health --format tap --sign-test
+  assert_failure
+  assert_line --index 1 "1..9"
+  assert_output --partial "piggy health --sign-test (piggy#179): agent self-sign probe"
+  assert_output --partial "agent socket unresolved"
+}
+
 function health_pcscd_absent_fails_point_6_and_skips_card_points { # @test
   # Environment asymmetry: this case is only real inside the sandboxed
   # nix lane, where no pcscd exists. On a dev machine a live pcscd
