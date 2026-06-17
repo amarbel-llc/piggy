@@ -78,12 +78,21 @@ ssh_agent_exec() {
   # seeded entry on the happy path but won't abort the run if the ephemeral
   # localhost fixture's key isn't pre-trusted — host-key trust of a throwaway
   # test sshd is not what this lane exercises; the forwarded rebox decrypt is.
+  # Pin the per-user config to the empty test file with -F. Per ssh(1), a
+  # command-line config file makes ssh ignore the system-wide
+  # /etc/ssh/ssh_config too — so the operator's eng-ssh setup can't leak in.
+  # Without this the operator's system config injected a `RemoteForward` of
+  # the piggy-agent socket (~/.local/state/ssh/piggy-agent.sock) that failed
+  # against the throwaway sshd and left the remote pivy-box with no forwarded
+  # agent, so the decrypt fell back to a (missing) local token (piggy#180).
+  # -A (agent forwarding) and the explicit -o options below are command-line,
+  # so they survive the config isolation.
   env -i \
     HOME="$SSHD_CLIENT_HOME" \
     SSH_HOME="$SSHD_CLIENT_HOME/.ssh" \
     SSH_AUTH_SOCK="$auth_sock" \
     PATH="$PATH" \
-    ssh -A -i "$SSHD_CLIENT_KEY" \
+    ssh -A -F "$SSHD_CLIENT_HOME/.ssh/config" -i "$SSHD_CLIENT_KEY" \
     -o IdentitiesOnly=yes \
     -o UserKnownHostsFile="$SSHD_CLIENT_HOME/.ssh/known_hosts" \
     -o GlobalKnownHostsFile=/dev/null \
