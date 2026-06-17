@@ -2307,8 +2307,10 @@ debug-piggy-test-sshd:
       HOME="$client_home" \
       SSH_HOME="$client_home/.ssh" \
       PATH="$PATH" \
-      ssh -i "$key" \
+      ssh -F "$client_home/.ssh/config" -i "$key" \
         -o IdentitiesOnly=yes \
+        -o UserKnownHostsFile="$client_home/.ssh/known_hosts" \
+        -o GlobalKnownHostsFile=/dev/null \
         -o StrictHostKeyChecking=yes \
         -o BatchMode=yes \
         -p "$port" testuser@127.0.0.1 \
@@ -2339,8 +2341,10 @@ debug-piggy-test-sshd:
       SSH_HOME="$client_home/.ssh" \
       SSH_AUTH_SOCK="$agentsock" \
       PATH="$PATH" \
-      ssh -A -i "$key" \
+      ssh -A -F "$client_home/.ssh/config" -i "$key" \
         -o IdentitiesOnly=yes \
+        -o UserKnownHostsFile="$client_home/.ssh/known_hosts" \
+        -o GlobalKnownHostsFile=/dev/null \
         -o StrictHostKeyChecking=yes \
         -o BatchMode=yes \
         -p "$port" testuser@127.0.0.1 \
@@ -2598,8 +2602,10 @@ debug-ssh-decrypt-via-fibby:
       SSH_HOME="$client_home/.ssh" \
       SSH_AUTH_SOCK="$agent_sock" \
       PATH="$PATH" \
-      ssh -A -i "$key" \
+      ssh -A -F "$client_home/.ssh/config" -i "$key" \
         -o IdentitiesOnly=yes \
+        -o UserKnownHostsFile="$client_home/.ssh/known_hosts" \
+        -o GlobalKnownHostsFile=/dev/null \
         -o StrictHostKeyChecking=yes \
         -o BatchMode=yes \
         -p "$port" testuser@127.0.0.1 \
