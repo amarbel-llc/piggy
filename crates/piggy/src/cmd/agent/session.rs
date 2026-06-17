@@ -156,8 +156,26 @@ impl Session for PiggyAgent {
 
     async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
         let start = std::time::Instant::now();
+        let pubkey = request.pubkey.clone();
         let res = self.sign_inner(request).await;
         crate::stats::agent_op("sign", crate::stats::outcome_of(&res), start.elapsed());
+        if let Err(err) = &res {
+            // piggy#178: a refused/failed sign otherwise returns
+            // SSH_AGENT_FAILURE with no journal trace — the only evidence is
+            // ssh's client-side error. Log the slot, key fingerprint/comment,
+            // and underlying cause so a refusal is explainable directly from
+            // `journalctl --user -u piggy-agent`. The key lookup is best-effort:
+            // a refusal at find_cached_key (key not served) leaves it absent.
+            let cached = self.find_cached_key(&pubkey).await.ok();
+            let refusal = describe_sign_refusal(cached.as_ref(), &pubkey, err);
+            tracing::warn!(
+                slot = %refusal.slot,
+                fingerprint = %refusal.fingerprint,
+                comment = %refusal.comment,
+                cause = %refusal.cause,
+                "refused signing operation"
+            );
+        }
         res
     }
 
@@ -622,6 +640,44 @@ fn prepare_sign_data(alg: PivAlgorithm, data: &[u8], flags: u32) -> Result<Vec<u
             // Ed25519 does its own hashing on card; pass raw data
             Ok(data.to_vec())
         }
+    }
+}
+
+/// Fields describing a refused/failed signing operation, for the piggy#178
+/// WARN log. The agent otherwise returns `SSH_AGENT_FAILURE` with no journal
+/// trace, leaving a refusal diagnosable only from ssh's client-side error.
+///
+/// Split out as a pure function so the field assembly — slot hex formatting,
+/// comment fallback, fingerprint derivation — is unit-testable without a
+/// tracing subscriber.
+struct SignRefusal {
+    /// PIV slot in the card's hex convention (e.g. `9A`), or `unknown` when the
+    /// requested key isn't in the served set.
+    slot: String,
+    /// SHA-256 SSH fingerprint of the requested key (`SHA256:…`).
+    fingerprint: String,
+    /// The cached key's comment, or `<none>` when absent/empty.
+    comment: String,
+    /// Underlying cause (card APDU / PIN / handle error) as rendered by the
+    /// agent error.
+    cause: String,
+}
+
+fn describe_sign_refusal(
+    key: Option<&CachedKey>,
+    pubkey: &KeyData,
+    err: &AgentError,
+) -> SignRefusal {
+    SignRefusal {
+        slot: key
+            .map(|k| format!("{:02X}", k.slot_id))
+            .unwrap_or_else(|| "unknown".to_string()),
+        fingerprint: pubkey.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+        comment: key
+            .map(|k| k.comment.clone())
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| "<none>".to_string()),
+        cause: err.to_string(),
     }
 }
 
@@ -1730,6 +1786,49 @@ mod tests {
         };
         let err = agent.sign(req).await.unwrap_err();
         assert_agent_error_other_eq(&err, "key not found");
+    }
+
+    // -------- describe_sign_refusal (piggy#178) --------
+
+    #[test]
+    fn describe_sign_refusal_with_cached_key_reports_slot_and_comment() {
+        let key = cached_ed25519(0x11, 0x9A);
+        let err = AgentError::Other("card transaction failed".into());
+        let refusal = describe_sign_refusal(Some(&key), &key.public_key, &err);
+        assert_eq!(refusal.slot, "9A");
+        assert_eq!(refusal.comment, "seed-17");
+        assert!(
+            refusal.cause.contains("card transaction failed"),
+            "cause should carry the underlying error, got {:?}",
+            refusal.cause
+        );
+        assert_eq!(
+            refusal.fingerprint,
+            key.public_key
+                .fingerprint(ssh_key::HashAlg::Sha256)
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn describe_sign_refusal_unknown_key_uses_placeholders() {
+        // A refusal at find_cached_key (key not served) has no slot/comment.
+        let pubkey = ed25519_key_data(0x42);
+        let err = AgentError::Other("key not found".into());
+        let refusal = describe_sign_refusal(None, &pubkey, &err);
+        assert_eq!(refusal.slot, "unknown");
+        assert_eq!(refusal.comment, "<none>");
+        assert!(refusal.cause.contains("key not found"));
+    }
+
+    #[test]
+    fn describe_sign_refusal_empty_comment_falls_back() {
+        let mut key = cached_ed25519(0x11, 0x9C);
+        key.comment = String::new();
+        let err = AgentError::Other("x".into());
+        let refusal = describe_sign_refusal(Some(&key), &key.public_key, &err);
+        assert_eq!(refusal.slot, "9C");
+        assert_eq!(refusal.comment, "<none>");
     }
 
     // -------- Session impl: lock / unlock --------
