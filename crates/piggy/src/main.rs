@@ -52,6 +52,7 @@ mod health;
 mod init;
 mod insert;
 mod internal_clipboard_restore;
+mod papi;
 mod platform;
 mod recipients;
 mod reencrypt;
@@ -129,6 +130,16 @@ enum Command {
     /// encryption recipients in the same file are ignored.
     #[command(name = "ssh-copy-id")]
     SshCopyId {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Produce & verify PAPI identity proofs and document signatures.
+    ///
+    /// `piggy papi` has its own clap parser (sign / prove / …); `--help`,
+    /// `-h`, and any other flags pass through to that parser rather than
+    /// being consumed by this top-level one.
+    #[command(disable_help_flag = true)]
+    Papi {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
@@ -529,6 +540,10 @@ fn main() {
         })),
 
         Command::SshCopyId { rest } => std::process::exit(ssh_copy_id::run(&rest)),
+
+        // papi::run owns its own clap parser and per-subcommand
+        // `stats::timed_papi` wrapping, so no timed wrapper here.
+        Command::Papi { rest } => std::process::exit(papi::run(&rest)),
 
         // `agent` runs the Rust impl (piggy#58): a PIV-backed SSH agent that
         // prompts for the PIN on demand via SSH_ASKPASS and clears it on a

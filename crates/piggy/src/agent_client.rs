@@ -273,6 +273,46 @@ pub fn probe_sign(socket_path: &Path, timeout: Duration) -> Result<Vec<SignProbe
     })
 }
 
+/// Sign arbitrary `data` with one served identity (selected by `pubkey`) via
+/// the agent at `socket_path`. Generalizes the [`probe_sign`]
+/// connect→`Client::sign` path: where `probe_sign` signs a fixed nonce with
+/// every identity, this signs caller-supplied bytes with the single identity
+/// whose public key matches `pubkey` (the agent rejects an unserved key with
+/// "key not found"). Returns the agent's raw `ssh_key::Signature`. MAY prompt
+/// for a PIN at the agent. Backs `piggy papi sign`/`prove` (piggy#182).
+pub fn sign_bytes(
+    socket_path: &Path,
+    pubkey: &ssh_key::public::KeyData,
+    data: &[u8],
+    timeout: Duration,
+) -> Result<ssh_key::Signature, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+
+    let socket_path = socket_path.to_path_buf();
+    let pubkey = pubkey.clone();
+    let data = data.to_vec();
+
+    runtime.block_on(async move {
+        let stream = UnixStream::connect(&socket_path)
+            .await
+            .map_err(|e| format!("connect {}: {e}", socket_path.display()))?;
+        let mut client = Client::new(stream);
+        let req = SignRequest {
+            pubkey,
+            data,
+            flags: 0,
+        };
+        match tokio::time::timeout(timeout, client.sign(req)).await {
+            Ok(Ok(sig)) => Ok(sig),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err(format!("timeout after {timeout:?}")),
+        }
+    })
+}
+
 /// Decode the body of a `query` extension response into the advertised
 /// extension names.
 ///

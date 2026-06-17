@@ -53,6 +53,10 @@ serde_json = "1"
 # TAP-14 text + tap-ndjson(7) writers for `piggy health`. Git dep on the
 # spec repo's Rust crate; see docs/plans/2026-06-07-piggy-health-design.md.
 tap-dancer = { git = "https://github.com/amarbel-llc/tap", tag = "v0.1.12" }
+# Base64 for the `piggy papi` §10 signature `sig` field (and §9 proof
+# tokens). Already in the lock closure (transitive via ssh-agent-lib); the
+# explicit entry makes the encode/decode use-site legal. See piggy#182.
+base64 = "0.22"
 
 [dev-dependencies]
 # tokio's test-util feature enables `tokio::time::pause` / `advance` and
