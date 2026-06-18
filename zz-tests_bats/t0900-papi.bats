@@ -46,10 +46,14 @@ function papi_prove_defaults_id_to_service { # @test
   assert_output --partial '"id": "dns"'
 }
 
-function papi_prove_signature_fmt_is_deferred { # @test
-  run "$PIGGY" papi prove --claim c --recipient r --fmt signature
+function papi_prove_signature_needs_a_9a_key { # @test
+  # fmt=signature now signs over the agent; with no piggy-ids / slot-9A key in
+  # the sandbox store it fails at key selection (no longer "not yet
+  # implemented"). The happy path is the fibby lane.
+  unset PIGGY_AUTH_SOCK SSH_AUTH_SOCK
+  run "$PIGGY" papi prove --claim https://x.test/a --recipient r --fmt signature
   assert_failure
-  assert_output --partial "not yet implemented"
+  refute_output --partial "not yet implemented"
 }
 
 function papi_sign_rejects_non_json_input { # @test

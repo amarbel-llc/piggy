@@ -89,6 +89,13 @@ test-bats-default:
 test-bats-piggy-local: build-rust
   BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/t*.bats
 
+# piggy#182 dev loop: run `piggy papi verify` against a LIVE domain (real
+# curl, no card — verify is read-only). E.g.
+# `just explore-papi-verify-live api.linenisgreat.com --json`.
+[group('explore')]
+explore-papi-verify-live domain *ARGS: build-rust
+  target/debug/piggy papi verify {{ domain }} {{ ARGS }}
+
 [group('post-build')]
 test-bats-conformance: build-rust
   #!/usr/bin/env bash

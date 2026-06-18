@@ -5,17 +5,17 @@
 //! asserts and is verifiable against a key rather than the host that served
 //! it: bidirectional ownership **proofs** (§9) and a detached document
 //! **signature** (§10). piggy owns the *producing* side because it holds the
-//! keys (slot-9D ECDH recipients, slot-9A SSH-auth); the *verification* side
-//! is the papi validator's job (a convenience `verify` is a planned
-//! follow-up). Design: `docs/plans/2026-06-17-piggy-papi-design.md`.
+//! keys (slot-9D ECDH recipients, slot-9A SSH-auth); the authoritative
+//! *verification* side is the papi validator's job, and piggy ships a
+//! convenience `verify`. Design: `docs/plans/2026-06-17-piggy-papi-design.md`.
 //!
-//! Subcommands (this increment):
+//! Subcommands:
 //! - `papi sign`  — emit a §10 `signature` object (`alg: ssh-9a`) over the
 //!   RFC 8785 (JCS) canonicalization of the signature-stripped source doc,
 //!   signed with a slot-9A SSH signature via the agent.
 //! - `papi prove` — emit a §9 proof backlink token + the ready-to-merge
-//!   `proofs[]` entry (`fmt: recipient` first; `fmt: signature` is a
-//!   follow-up).
+//!   `proofs[]` entry. `fmt: recipient` is the bare recipient id; `fmt:
+//!   signature` is a slot-9A SSH signature over the `claim` (§9.3).
 //! - `papi verify` — convenience client: fetch a live domain (bounded
 //!   `curl`), run the §9.4 proof verdicts and the §10.3 signature verdict
 //!   (ECDSA/Ed25519 over the §10.2 JCS bytes), emit a TAP/ndjson stream. The
@@ -94,6 +94,10 @@ struct ProveArgs {
     /// The published recipient id this proof binds the claim to (slot-9D).
     #[arg(long)]
     recipient: String,
+    /// For --fmt signature: the slot-9A signing key as an authorized_keys
+    /// line (default: the store's single slot-9A key).
+    #[arg(long = "ssh-key")]
+    ssh_key: Option<String>,
     /// Service-provider matcher hint (github, gitlab, mastodon, dns, …).
     #[arg(long)]
     service: Option<String>,
@@ -256,25 +260,43 @@ fn prove(args: ProveArgs) -> i32 {
 }
 
 fn prove_inner(args: ProveArgs) -> Result<String, String> {
-    if args.fmt == Fmt::Signature {
-        return Err(
-            "fmt=signature is not yet implemented; use --fmt recipient (piggy#182 follow-up)"
-                .into(),
-        );
-    }
-    // §9.3 fmt=recipient: the backlink token is the bare recipient id.
-    let token = args.recipient.clone();
     let id = args
         .id
         .clone()
         .or_else(|| args.service.clone())
         .unwrap_or_else(|| "proof".into());
+
+    let token = match args.fmt {
+        // §9.3 fmt=recipient: the backlink token is the bare recipient id.
+        Fmt::Recipient => args.recipient.clone(),
+        // §9.3 fmt=signature: a slot-9A SSH signature over the exact `claim`
+        // string, verifiable against the doc's ssh_authorized_keys[]. The
+        // signing key is a slot-9A key (NOT the --recipient, which is the
+        // slot-9D binding); default to the store's single 9A, --ssh-key to
+        // override. The signed string is the bare `claim` per §9.3 as written
+        // (namespacing for replay-resistance is an open spec question raised
+        // with the papi side; bare keeps us interoperable with the validator
+        // today).
+        Fmt::Signature => {
+            let (_key_line, key_data) = select_signing_key(None, args.ssh_key.as_deref())?;
+            let socket = resolve_agent_socket()?;
+            let sig = piggy::agent_client::sign_bytes(
+                &socket,
+                &key_data,
+                args.claim.as_bytes(),
+                SIGN_TIMEOUT,
+            )
+            .map_err(|e| format!("agent sign: {e}"))?;
+            base64::engine::general_purpose::STANDARD.encode(ssh_signature_wire(&sig))
+        }
+    };
+
     let entry = proof_entry(
         &id,
         &args.recipient,
         &args.claim,
         args.service.as_deref(),
-        Fmt::Recipient,
+        args.fmt,
     );
     let entry_json = serde_json::to_string_pretty(&entry).map_err(|e| e.to_string())?;
 
@@ -1010,5 +1032,11 @@ mod tests {
     fn proof_entry_omits_absent_service() {
         let v = proof_entry("p", "r", "c", None, Fmt::Recipient);
         assert!(v.get("service").is_none());
+    }
+
+    #[test]
+    fn proof_entry_signature_fmt() {
+        let v = proof_entry("p", "r", "c", None, Fmt::Signature);
+        assert_eq!(v["fmt"], "signature");
     }
 }
