@@ -1,5 +1,19 @@
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
+
+  # `papi verify` shells out to curl; mock it with a URL→fixture lookup so the
+  # verdict orchestration runs offline.
+  piggy_install_helper_as mock-curl.sh curl
+  export MOCK_CURL_DIR="$BATS_TEST_TMPDIR/curl-fixtures"
+  mkdir -p "$MOCK_CURL_DIR"
+}
+
+# Stage a curl fixture for $url with body $2, keyed the same way mock-curl.sh
+# sanitizes the URL.
+mock_fixture() {
+  local url="$1" body="$2" key
+  key="$(printf '%s' "$url" | tr -c 'A-Za-z0-9' '_')"
+  printf '%s' "$body" >"$MOCK_CURL_DIR/$key"
 }
 
 # `piggy papi` producing surface (piggy#182). The sandbox lane covers `prove`
@@ -64,4 +78,73 @@ function papi_bare_prints_help { # @test
   assert_failure
   assert_output --partial "sign"
   assert_output --partial "prove"
+}
+
+# -------- verify (§9.4 / §10.3) via mock curl --------
+#
+# These exercise the fetch → parse → verdict → exit-code orchestration. The
+# signed-AND-valid crypto path is unit-tested (verify_ssh9a round-trip) and
+# lives end-to-end in the fibby lane; here we cover the structural verdicts.
+
+function papi_verify_unsigned_doc_skips_signature { # @test
+  mock_fixture "https://pp.test/papi" '{"piggy":{"encryption_recipients":[],"ssh_authorized_keys":[]}}'
+  mock_fixture "https://pp.test/papi/proofs" '{"data":[]}'
+  run "$PIGGY" papi verify pp.test --json
+  assert_success
+  assert_output --partial '"signature"'
+}
+
+function papi_verify_require_signed_on_unsigned_fails { # @test
+  mock_fixture "https://pp.test/papi" '{"piggy":{"encryption_recipients":[],"ssh_authorized_keys":[]}}'
+  mock_fixture "https://pp.test/papi/proofs" '{"data":[]}'
+  run "$PIGGY" papi verify pp.test --json --require-signed
+  assert_failure
+}
+
+function papi_verify_signed_but_invalid_fails { # @test
+  command -v ssh-keygen >/dev/null || skip "ssh-keygen not on PATH"
+  ssh-keygen -t ecdsa -b 256 -N '' -f "$BATS_TEST_TMPDIR/k" -q
+  local key
+  key="$(cut -d' ' -f1,2 <"$BATS_TEST_TMPDIR/k.pub")"
+  # alg understood + key published, but a structurally-bogus sig => not ok.
+  mock_fixture "https://pp.test/papi" \
+    "{\"piggy\":{\"ssh_authorized_keys\":[\"$key\"]},\"signature\":{\"alg\":\"ssh-9a\",\"key\":\"$key\",\"sig\":\"AAAA\"}}"
+  mock_fixture "https://pp.test/papi/proofs" '{"data":[]}'
+  run "$PIGGY" papi verify pp.test --json
+  assert_failure
+  assert_output --partial '"signature"'
+}
+
+function papi_verify_unknown_alg_is_unsigned { # @test
+  mock_fixture "https://pp.test/papi" \
+    '{"piggy":{"ssh_authorized_keys":[]},"signature":{"alg":"pgp","key":"x","sig":"y"}}'
+  mock_fixture "https://pp.test/papi/proofs" '{"data":[]}'
+  run "$PIGGY" papi verify pp.test --json
+  # unknown alg => treated as unsigned (skip), not a failure.
+  assert_success
+}
+
+function papi_verify_proof_recipient_backlink_verifies { # @test
+  local rcpt="piggy-recipient-v1@pivy_ecdh_p256_pub-qqq"
+  mock_fixture "https://pp.test/papi" \
+    "{\"piggy\":{\"encryption_recipients\":[\"$rcpt\"],\"ssh_authorized_keys\":[]}}"
+  mock_fixture "https://pp.test/papi/proofs" \
+    "{\"data\":[{\"id\":\"gh\",\"recipient\":\"$rcpt\",\"claim\":\"https://github.com/a\",\"proof_uri\":\"https://gist.test/a\",\"fmt\":\"recipient\"}]}"
+  # The backlink body contains the recipient id => verified.
+  mock_fixture "https://gist.test/a" "my keys: $rcpt — verified"
+  run "$PIGGY" papi verify pp.test --json
+  assert_success
+  assert_output --partial '"proof: gh"'
+}
+
+function papi_verify_proof_backlink_absent_fails { # @test
+  local rcpt="piggy-recipient-v1@pivy_ecdh_p256_pub-qqq"
+  mock_fixture "https://pp.test/papi" \
+    "{\"piggy\":{\"encryption_recipients\":[\"$rcpt\"],\"ssh_authorized_keys\":[]}}"
+  mock_fixture "https://pp.test/papi/proofs" \
+    "{\"data\":[{\"id\":\"gh\",\"recipient\":\"$rcpt\",\"claim\":\"https://github.com/a\",\"proof_uri\":\"https://gist.test/a\",\"fmt\":\"recipient\"}]}"
+  # Backlink body does NOT contain the recipient id => unverified (not ok).
+  mock_fixture "https://gist.test/a" "nothing relevant here"
+  run "$PIGGY" papi verify pp.test --json
+  assert_failure
 }

@@ -16,6 +16,15 @@
 //! - `papi prove` — emit a §9 proof backlink token + the ready-to-merge
 //!   `proofs[]` entry (`fmt: recipient` first; `fmt: signature` is a
 //!   follow-up).
+//! - `papi verify` — convenience client: fetch a live domain (bounded
+//!   `curl`), run the §9.4 proof verdicts and the §10.3 signature verdict
+//!   (ECDSA/Ed25519 over the §10.2 JCS bytes), emit a TAP/ndjson stream. The
+//!   authoritative verifier is the amarbel-llc/papi validator; this is the
+//!   ergonomic paved path (mirrors `piggy health` vs `ssh-agent-mux health`).
+//!
+//! Per §10.2 (Amendment 6) the signature commits to the ANONYMOUS /papi
+//! projection: feed `papi sign --in` the document you will serve at anonymous
+//! `/papi`, and `verify` checks the signature against anonymous `/papi`.
 //!
 //! No new crypto: signing reuses `agent_client::sign_bytes` (the slot-9A
 //! agent path), key selection reuses the `piggy_ids` 9A grammar +
@@ -53,6 +62,8 @@ enum PapiCommand {
     Sign(SignArgs),
     /// Emit a §9 proof backlink token + the proofs[] entry to merge.
     Prove(ProveArgs),
+    /// Verify a live domain's proofs (§9.4) and document signature (§10.3).
+    Verify(VerifyArgs),
 }
 
 #[derive(Args, Debug)]
@@ -94,6 +105,21 @@ struct ProveArgs {
     id: Option<String>,
 }
 
+#[derive(Args, Debug)]
+struct VerifyArgs {
+    /// Domain to verify, optionally `#<proof-id>` to select one proof.
+    domain: String,
+    /// Emit tap-ndjson(7) records instead of TAP-14.
+    #[arg(long)]
+    json: bool,
+    /// Fail the run if the document is unsigned or signed-but-invalid.
+    #[arg(long = "require-signed")]
+    require_signed: bool,
+    /// Restrict verification to these proof ids (repeatable).
+    #[arg(long = "proof")]
+    proof: Vec<String>,
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum Fmt {
     Recipient,
@@ -123,6 +149,7 @@ pub fn run(argv: &[String]) -> i32 {
     match cli.cmd {
         PapiCommand::Sign(a) => piggy::stats::timed_papi("sign", || sign(a)),
         PapiCommand::Prove(a) => piggy::stats::timed_papi("prove", || prove(a)),
+        PapiCommand::Verify(a) => piggy::stats::timed_papi("verify", || verify(a)),
     }
 }
 
@@ -364,6 +391,400 @@ fn read_input(path: Option<&str>) -> Result<String, String> {
     }
 }
 
+// -------- verify (§9.4 / §10.3) --------
+
+/// curl bounds for the convenience verifier (this is not the authoritative
+/// validator). HTTPS only, no redirect following (so a cross-host redirect at
+/// a `proof_uri` yields an empty body → unverified, never a silent cross-host
+/// fetch), bounded time + size.
+const FETCH_MAX_TIME: &str = "10";
+const FETCH_MAX_FILESIZE: &str = "1048576"; // 1 MiB
+
+/// A single verify verdict line (proof or signature). Owned `name` because
+/// proof ids are dynamic, so this can't reuse `health::CheckResult`.
+struct Point {
+    name: String,
+    status: Verdict,
+    diags: Vec<(String, String)>,
+}
+
+enum Verdict {
+    Pass,
+    Fail,
+    Skip(String),
+}
+
+fn verify(args: VerifyArgs) -> i32 {
+    match verify_inner(&args) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("piggy papi verify: {e}");
+            2
+        }
+    }
+}
+
+fn verify_inner(args: &VerifyArgs) -> Result<i32, String> {
+    let (domain, anchor) = match args.domain.split_once('#') {
+        Some((d, p)) => (d.to_string(), Some(p.to_string())),
+        None => (args.domain.clone(), None),
+    };
+
+    // The signature commits to the ANONYMOUS /papi projection (§10.2,
+    // Amendment 6), so verify against /papi requested anonymously.
+    let doc = fetch_json(&format!("https://{domain}/papi"))?;
+    let proofs = match fetch_text(&format!("https://{domain}/papi/proofs")) {
+        Ok(body) => serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("data").cloned())
+            .unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+
+    let mut points: Vec<Point> = Vec::new();
+
+    // §9.4 — proofs.
+    if let Some(arr) = proofs.as_array() {
+        for entry in arr {
+            let id = entry.get("id").and_then(Value::as_str).unwrap_or("?");
+            if anchor.as_deref().is_some_and(|a| a != id) {
+                continue;
+            }
+            if !args.proof.is_empty() && !args.proof.iter().any(|p| p == id) {
+                continue;
+            }
+            points.push(verify_proof(entry, &doc));
+        }
+    }
+
+    // §10.3 — document signature.
+    points.push(verify_document_signature(&doc));
+
+    let format = if args.json {
+        crate::health::Format::Ndjson
+    } else {
+        crate::health::Format::Auto
+    };
+    render_points(&points, format)?;
+
+    let proof_fail = points
+        .iter()
+        .any(|p| p.name.starts_with("proof:") && matches!(p.status, Verdict::Fail));
+    let sig_bad = points.iter().any(|p| {
+        p.name == "signature"
+            && (matches!(p.status, Verdict::Fail)
+                || (args.require_signed && matches!(p.status, Verdict::Skip(_))))
+    });
+    Ok(i32::from(proof_fail || sig_bad))
+}
+
+/// §9.4 verdict for one proof entry. `fmt:recipient`: the `recipient` id must
+/// be published in `piggy.encryption_recipients[]` (else unverifiable) and the
+/// body at `proof_uri` must contain it (verified) or not (unverified). An
+/// unknown `fmt` is skipped (§9.3).
+fn verify_proof(entry: &Value, doc: &Value) -> Point {
+    let id = entry.get("id").and_then(Value::as_str).unwrap_or("?");
+    let name = format!("proof: {id}");
+    let recipient = entry.get("recipient").and_then(Value::as_str).unwrap_or("");
+    let claim = entry.get("claim").and_then(Value::as_str).unwrap_or("");
+    let proof_uri = entry.get("proof_uri").and_then(Value::as_str).unwrap_or("");
+    let fmt = entry
+        .get("fmt")
+        .and_then(Value::as_str)
+        .unwrap_or("recipient");
+
+    let diags = vec![
+        ("claim".into(), claim.to_string()),
+        ("recipient".into(), recipient.to_string()),
+        ("fmt".into(), fmt.to_string()),
+    ];
+
+    if fmt != "recipient" {
+        return Point {
+            name,
+            status: Verdict::Skip(format!("unsupported fmt {fmt}")),
+            diags: vec![],
+        };
+    }
+    if !published_recipients(doc).iter().any(|r| r == recipient) {
+        return Point {
+            name,
+            status: Verdict::Skip(format!("recipient not published: {recipient}")),
+            diags,
+        };
+    }
+    match fetch_text(proof_uri) {
+        Ok(body) if body.contains(recipient) => Point {
+            name,
+            status: Verdict::Pass,
+            diags,
+        },
+        Ok(_) => Point {
+            name,
+            status: Verdict::Fail,
+            diags: with(diags, "reason", "backlink absent at proof_uri"),
+        },
+        Err(e) => Point {
+            name,
+            status: Verdict::Fail,
+            diags: with(diags, "reason", &format!("fetch proof_uri: {e}")),
+        },
+    }
+}
+
+/// §10.3 verdict for the document `signature` member.
+fn verify_document_signature(doc: &Value) -> Point {
+    let name = "signature".to_string();
+    let Some(sig) = doc.get("signature") else {
+        return Point {
+            name,
+            status: Verdict::Skip("no signature member".into()),
+            diags: vec![],
+        };
+    };
+    let alg = sig.get("alg").and_then(Value::as_str).unwrap_or("");
+    let key = sig.get("key").and_then(Value::as_str).unwrap_or("");
+    let sig_b64 = sig.get("sig").and_then(Value::as_str).unwrap_or("");
+    let diags = vec![
+        ("alg".into(), alg.to_string()),
+        ("key".into(), key.to_string()),
+    ];
+
+    if alg != "ssh-9a" {
+        // §10.1: unknown alg → treat as unsigned (skip), not invalid.
+        return Point {
+            name,
+            status: Verdict::Skip(format!("unknown alg {alg}")),
+            diags: vec![],
+        };
+    }
+    if !published_ssh_keys(doc).iter().any(|k| k == key) {
+        // key not in ssh_authorized_keys[] → unverifiable → unsigned.
+        return Point {
+            name,
+            status: Verdict::Skip("key not published in ssh_authorized_keys".into()),
+            diags,
+        };
+    }
+    let signing_input = match jcs_signing_input(doc) {
+        Ok(b) => b,
+        Err(e) => {
+            return Point {
+                name,
+                status: Verdict::Fail,
+                diags: with(diags, "reason", &format!("canonicalize: {e}")),
+            };
+        }
+    };
+    match verify_ssh9a(key, sig_b64, &signing_input) {
+        Ok(true) => Point {
+            name,
+            status: Verdict::Pass,
+            diags,
+        },
+        Ok(false) => Point {
+            name,
+            status: Verdict::Fail,
+            diags: with(diags, "reason", "signature does not verify"),
+        },
+        Err(e) => Point {
+            name,
+            status: Verdict::Fail,
+            diags: with(diags, "reason", &e),
+        },
+    }
+}
+
+fn with(mut diags: Vec<(String, String)>, k: &str, v: &str) -> Vec<(String, String)> {
+    diags.push((k.to_string(), v.to_string()));
+    diags
+}
+
+fn published_recipients(doc: &Value) -> Vec<String> {
+    string_array(doc.pointer("/piggy/encryption_recipients"))
+}
+
+fn published_ssh_keys(doc: &Value) -> Vec<String> {
+    string_array(doc.pointer("/piggy/ssh_authorized_keys"))
+}
+
+fn string_array(v: Option<&Value>) -> Vec<String> {
+    v.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// -------- §10.4 ssh-9a signature verification (openssl) --------
+
+/// Verify a §10.4 `ssh-9a` signature. `sig_b64` is base64 of the SSH wire blob
+/// `string(algo) || string(blob)`; verify it against `key_line` (an
+/// authorized_keys line) over `message` (the §10.2 JCS bytes). ECDSA uses
+/// SHA-256 (P-256) / SHA-384 (P-384); Ed25519 hashes internally. `Ok(false)`
+/// = a well-formed signature that doesn't verify; `Err` = a structural problem
+/// (the caller renders both as a failing verdict).
+fn verify_ssh9a(key_line: &str, sig_b64: &str, message: &[u8]) -> Result<bool, String> {
+    use base64::engine::general_purpose::STANDARD;
+    let wire = STANDARD
+        .decode(sig_b64.trim())
+        .map_err(|e| format!("sig is not valid base64: {e}"))?;
+    let (algo, blob) = parse_ssh_string_pair(&wire).map_err(|e| format!("sig blob: {e}"))?;
+    let algo = String::from_utf8(algo).map_err(|e| format!("sig algorithm not UTF-8: {e}"))?;
+    let key = key_data_from_line(key_line)?;
+
+    use openssl::hash::MessageDigest;
+    use openssl::nid::Nid;
+    use ssh_key::public::KeyData;
+    match (algo.as_str(), &key) {
+        ("ecdsa-sha2-nistp256", KeyData::Ecdsa(ec)) => verify_ecdsa(
+            Nid::X9_62_PRIME256V1,
+            MessageDigest::sha256(),
+            ec.as_sec1_bytes(),
+            &blob,
+            message,
+        ),
+        ("ecdsa-sha2-nistp384", KeyData::Ecdsa(ec)) => verify_ecdsa(
+            Nid::SECP384R1,
+            MessageDigest::sha384(),
+            ec.as_sec1_bytes(),
+            &blob,
+            message,
+        ),
+        ("ssh-ed25519", KeyData::Ed25519(ed)) => verify_ed25519(ed.as_ref(), &blob, message),
+        _ => Err(format!("signature alg {algo} does not match key type")),
+    }
+}
+
+fn verify_ecdsa(
+    nid: openssl::nid::Nid,
+    md: openssl::hash::MessageDigest,
+    sec1_point: &[u8],
+    blob: &[u8],
+    message: &[u8],
+) -> Result<bool, String> {
+    use openssl::bn::{BigNum, BigNumContext};
+    use openssl::ec::{EcGroup, EcKey, EcPoint};
+    use openssl::ecdsa::EcdsaSig;
+
+    // The ECDSA signature blob is string(mpint r) || string(mpint s) (RFC 5656).
+    let (r, s) = parse_ssh_string_pair(blob).map_err(|e| format!("ecdsa sig: {e}"))?;
+    let group = EcGroup::from_curve_name(nid).map_err(|e| e.to_string())?;
+    let mut ctx = BigNumContext::new().map_err(|e| e.to_string())?;
+    let point = EcPoint::from_bytes(&group, sec1_point, &mut ctx)
+        .map_err(|e| format!("bad ec point: {e}"))?;
+    let eckey = EcKey::from_public_key(&group, &point).map_err(|e| e.to_string())?;
+    let r = BigNum::from_slice(&r).map_err(|e| e.to_string())?;
+    let s = BigNum::from_slice(&s).map_err(|e| e.to_string())?;
+    let sig = EcdsaSig::from_private_components(r, s).map_err(|e| e.to_string())?;
+    let digest = openssl::hash::hash(md, message).map_err(|e| e.to_string())?;
+    sig.verify(&digest, &eckey).map_err(|e| e.to_string())
+}
+
+fn verify_ed25519(pubkey: &[u8], sig: &[u8], message: &[u8]) -> Result<bool, String> {
+    use openssl::pkey::{Id, PKey};
+    use openssl::sign::Verifier;
+    let pkey = PKey::public_key_from_raw_bytes(pubkey, Id::ED25519)
+        .map_err(|e| format!("ed25519 key: {e}"))?;
+    let mut verifier = Verifier::new_without_digest(&pkey).map_err(|e| e.to_string())?;
+    verifier
+        .verify_oneshot(sig, message)
+        .map_err(|e| e.to_string())
+}
+
+/// Read two consecutive SSH `string`s (uint32-length-prefixed, RFC 4251 §5)
+/// from the front of `buf`, returning their byte contents.
+fn parse_ssh_string_pair(buf: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let (a, rest) = read_ssh_string(buf)?;
+    let (b, _) = read_ssh_string(rest)?;
+    Ok((a.to_vec(), b.to_vec()))
+}
+
+fn read_ssh_string(buf: &[u8]) -> Result<(&[u8], &[u8]), String> {
+    if buf.len() < 4 {
+        return Err("truncated length prefix".into());
+    }
+    let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    let rest = &buf[4..];
+    if rest.len() < len {
+        return Err(format!(
+            "truncated string (want {len}, have {})",
+            rest.len()
+        ));
+    }
+    Ok((&rest[..len], &rest[len..]))
+}
+
+// -------- fetch (curl shell-out) --------
+
+fn fetch_text(url: &str) -> Result<String, String> {
+    let out = std::process::Command::new("curl")
+        .args([
+            "-fsS",
+            "--proto",
+            "=https",
+            "--max-time",
+            FETCH_MAX_TIME,
+            "--max-filesize",
+            FETCH_MAX_FILESIZE,
+            url,
+        ])
+        .output()
+        .map_err(|e| format!("spawn curl: {e} (is curl installed?)"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "curl {url} failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("response not UTF-8: {e}"))
+}
+
+fn fetch_json(url: &str) -> Result<Value, String> {
+    serde_json::from_str(&fetch_text(url)?).map_err(|e| format!("parse {url} JSON: {e}"))
+}
+
+// -------- verdict rendering (tap-dancer) --------
+
+fn render_points(points: &[Point], format: crate::health::Format) -> Result<(), String> {
+    use std::io::IsTerminal;
+    let stdout = std::io::stdout();
+    let mut buf = stdout.lock();
+    let mut rep = match format {
+        crate::health::Format::Ndjson => {
+            tap_dancer::Reporter::Ndjson(tap_dancer::NdjsonWriter::new(&mut buf))
+        }
+        crate::health::Format::Auto if !std::io::stdout().is_terminal() => {
+            tap_dancer::Reporter::Ndjson(tap_dancer::NdjsonWriter::new(&mut buf))
+        }
+        _ => tap_dancer::Reporter::Tap(
+            tap_dancer::TapWriterBuilder::new(&mut buf)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+    };
+    rep.plan_ahead(points.len()).map_err(|e| e.to_string())?;
+    for p in points {
+        let diags: Vec<(&str, serde_json::Value)> = p
+            .diags
+            .iter()
+            .map(|(k, v)| (k.as_str(), Value::String(v.clone())))
+            .collect();
+        let r = match &p.status {
+            Verdict::Pass if diags.is_empty() => rep.ok(&p.name),
+            Verdict::Pass => rep.ok_diag(&p.name, &diags),
+            Verdict::Fail => rep.not_ok_diag(&p.name, &diags),
+            Verdict::Skip(reason) => rep.skip(&p.name, reason),
+        };
+        r.map_err(|e| e.to_string())?;
+    }
+    rep.finish().map_err(|e| e.to_string())
+}
+
 // -------- RFC 8785 (JCS) canonicalization --------
 
 /// The §10.2 signing input: the source document with the top-level
@@ -484,6 +905,79 @@ mod tests {
         expected.extend_from_slice(&blob);
 
         assert_eq!(ssh_signature_wire(&sig), expected);
+    }
+
+    fn ssh_string(bytes: &[u8]) -> Vec<u8> {
+        let mut v = (bytes.len() as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(bytes);
+        v
+    }
+
+    /// SSH mpint: minimal big-endian, sign-extended with a leading 0x00 when
+    /// the high bit is set (matches what the agent emits).
+    fn mpint(bytes: &[u8]) -> Vec<u8> {
+        let mut b = bytes;
+        while b.len() > 1 && b[0] == 0 {
+            b = &b[1..];
+        }
+        if !b.is_empty() && b[0] & 0x80 != 0 {
+            let mut out = vec![0u8];
+            out.extend_from_slice(b);
+            out
+        } else {
+            b.to_vec()
+        }
+    }
+
+    #[test]
+    fn verify_ssh9a_ecdsa_p256_roundtrip_and_tamper() {
+        use openssl::bn::BigNumContext;
+        use openssl::ec::{EcGroup, EcKey, PointConversionForm};
+        use openssl::ecdsa::EcdsaSig;
+        use openssl::hash::{MessageDigest, hash};
+        use openssl::nid::Nid;
+
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = EcKey::generate(&group).unwrap();
+        let mut ctx = BigNumContext::new().unwrap();
+        let sec1 = key
+            .public_key()
+            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+            .unwrap();
+
+        let message = br#"{"a":1,"b":2}"#;
+        let digest = hash(MessageDigest::sha256(), message).unwrap();
+        let sig = EcdsaSig::sign(&digest, &key).unwrap();
+
+        // blob = string(mpint r) || string(mpint s); wire = string(alg) || string(blob)
+        let mut blob = ssh_string(&mpint(&sig.r().to_vec()));
+        blob.extend(ssh_string(&mpint(&sig.s().to_vec())));
+        let mut wire = ssh_string(b"ecdsa-sha2-nistp256");
+        wire.extend(ssh_string(&blob));
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&wire);
+
+        let pk = ssh_key::public::EcdsaPublicKey::from_sec1_bytes(&sec1).unwrap();
+        let line = ssh_key::PublicKey::new(ssh_key::public::KeyData::Ecdsa(pk), "")
+            .to_openssh()
+            .unwrap();
+
+        assert!(
+            verify_ssh9a(&line, &sig_b64, message).unwrap(),
+            "valid sig must verify"
+        );
+        assert!(
+            !verify_ssh9a(&line, &sig_b64, b"tampered").unwrap(),
+            "tampered message must not verify"
+        );
+    }
+
+    #[test]
+    fn read_ssh_string_parses_length_prefixed() {
+        let mut buf = ssh_string(b"first");
+        buf.extend(ssh_string(b"second"));
+        let (a, b) = parse_ssh_string_pair(&buf).unwrap();
+        assert_eq!(a, b"first");
+        assert_eq!(b, b"second");
     }
 
     #[test]
