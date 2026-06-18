@@ -809,14 +809,20 @@ fn render_points(points: &[Point], format: crate::health::Format) -> Result<(), 
 
 // -------- RFC 8785 (JCS) canonicalization --------
 
-/// The §10.2 signing input: the source document with the top-level
-/// `signature` member removed, RFC 8785 (JCS) canonicalized, as UTF-8 bytes.
+/// The §10.2 signing input: the source document with the signature members
+/// removed, RFC 8785 (JCS) canonicalized, as UTF-8 bytes. Both `signature`
+/// (the Amendment-5/6 single signature) and `signatures` (the Amendment-7
+/// multi-signature array, forthcoming — pinned with the papi side) are
+/// stripped, so the signed bytes never include any signature member.
+/// Stripping `signatures` today is a forward-compatible no-op until the array
+/// exists; it keeps the signing input stable across the Amendment-7 cutover.
 fn jcs_signing_input(doc: &Value) -> Result<Vec<u8>, String> {
     let mut obj = doc
         .as_object()
         .ok_or("document must be a JSON object")?
         .clone();
     obj.remove("signature");
+    obj.remove("signatures");
     Ok(canonical_json(&Value::Object(obj))?.into_bytes())
 }
 
@@ -909,6 +915,17 @@ mod tests {
         let v: Value = serde_json::from_str(r#"{"b":1,"a":2}"#).unwrap();
         let bytes = jcs_signing_input(&v).unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), r#"{"a":2,"b":1}"#);
+    }
+
+    #[test]
+    fn jcs_signing_input_strips_signatures_array_too() {
+        // Amendment 7 forward-compat: the signing input excludes `signatures[]`.
+        let v: Value = serde_json::from_str(
+            r#"{"piggy":{"x":1},"signature":{"alg":"ssh-9a"},"signatures":[{"alg":"ssh-9a"}]}"#,
+        )
+        .unwrap();
+        let bytes = jcs_signing_input(&v).unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), r#"{"piggy":{"x":1}}"#);
     }
 
     #[test]
