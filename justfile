@@ -62,7 +62,7 @@ test: test-bats-default test-bats-conformance test-rust _test-conformance-linux-
 # macOS.) Gate them all behind a per-platform shim: the real dependencies on
 # Linux, a no-op on macOS, keeping the `test` dep list single-source.
 [linux]
-_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-age-plugin-piggy
+_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-age-plugin-piggy test-bats-conformance-papi-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -439,6 +439,25 @@ test-bats-conformance-age-plugin-piggy:
       AGE_BIN="$age_out/bin/age" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/age_plugin_piggy_fibby.bats
+
+# piggy#182: `piggy papi` end-to-end over fibby. Sign a PAPI document with the
+# real slot-9A key on a virtual card, then verify the §10 signature back
+# through `piggy papi verify`. The hardware-crypto confirmation of the §10.4
+# wire contract the unit tests pin only in software, and the cross-impl anchor
+# for the amarbel-llc/papi validator (same wire blob). No hardware.
+[group('post-build')]
+[linux]
+test-bats-conformance-papi-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      PIVY_AGENT="$pivy_out/bin/pivy-agent" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_papi_fibby.bats
 
 # Fibby-backed gate for `recipients sync` with NO file: re-encrypt the store
 # (whole or `-p` subtree) to the current piggy-ids recipients, then prove the
