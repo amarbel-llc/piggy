@@ -1955,12 +1955,19 @@ bump-version new_version:
 # Sign + push a tag named after the current version.env. The "v"
 # prefix is added for you. Usage: just tag "release v0.1.1"
 [group('maintenance')]
-tag message:
+[positional-arguments]
+tag message="":
     #!/usr/bin/env bash
     set -euo pipefail
     . version.env
     tag="v${PIGGY_VERSION:?missing PIGGY_VERSION in version.env}"
-    git tag -s -m "{{message}}" "$tag"
+    # `$1`, not `{{message}}`: positional-arguments passes the message as a
+    # real shell parameter so bash never re-parses it. `{{message}}` would
+    # text-substitute the changelog into the recipe body, and backticks in
+    # commit subjects (e.g. `signatures[]`, `piggy papi verify`) would then
+    # execute as command substitution.
+    msg="${1:-release $tag}"
+    git tag -s -m "$msg" "$tag"
     gum log --level info "Created tag: $tag"
     git push origin "$tag"
     gum log --level info "Pushed $tag"
