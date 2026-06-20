@@ -1,7 +1,6 @@
 package markl
 
 import (
-	"crypto/ed25519"
 	"fmt"
 
 	"github.com/amarbel-llc/piggy/go/markl/internal/0/domain_interfaces"
@@ -39,93 +38,10 @@ const (
 	FormatIdNonceSec = "nonce"
 )
 
-// Format registrations are framework infrastructure (the actual crypto
-// primitives), not consumer vocabulary, so they live in this package.
-// Purpose registrations and purpose-id aliases moved out to
-// internal/charlie/markl_registrations as of #106 step 2/3.
-func init() {
-	// Ed22519
-	RegisterFormat(
-		FormatPub{
-			Id:     FormatIdEd25519Pub,
-			Size:   ed25519.PublicKeySize,
-			Verify: Ed25519Verify,
-		},
-	)
-
-	RegisterFormat(
-		FormatSec{
-			Id:   FormatIdEd25519Sec,
-			Size: ed25519.PrivateKeySize,
-
-			Generate: Ed25519GeneratePrivateKey,
-
-			PubFormatId:  FormatIdEd25519Pub,
-			GetPublicKey: Ed25519GetPublicKey,
-
-			SigFormatId: FormatIdEd25519Sig,
-			Sign:        Ed25519Sign,
-		},
-	)
-
-	RegisterFormat(
-		Format{
-			Id:   FormatIdEd25519Sig,
-			Size: ed25519.SignatureSize,
-		},
-	)
-
-	makeStubSSHFormat()
-
-	// AgeX25519
-	RegisterFormat(
-		Format{
-			Id:   FormatIdAgeX25519Pub,
-			Size: 32,
-		},
-	)
-
-	makeStubAgeX25519SecFormat()
-
-	// ECDSA P256
-	RegisterFormat(
-		FormatPub{
-			Id:     FormatIdEcdsaP256Pub,
-			Size:   33,
-			Verify: EcdsaP256Verify,
-		},
-	)
-
-	RegisterFormat(
-		Format{
-			Id:   FormatIdEcdsaP256Sig,
-			Size: 64,
-		},
-	)
-
-	makeStubEcdsaP256SSHFormat()
-
-	RegisterFormat(
-		FormatPub{
-			Id:     FormatIdSshEcdsaNistp256Pub,
-			Size:   33,
-			Verify: EcdsaP256Verify,
-		},
-	)
-
-	// PivyEcdhP256
-	makeStubPivyEcdhP256Format()
-
-	// Nonce
-	RegisterFormat(
-		FormatSec{
-			Id:       FormatIdNonceSec,
-			Size:     32,
-			Generate: NonceGenerate32,
-		},
-	)
-}
-
+// Concrete format registrations (the actual crypto primitives) and the
+// format-stub makers moved out to internal/charlie/markl_registrations as
+// of #106 step 2/3. This package stays pure mechanism: the formats map,
+// RegisterFormat, the lookup/swap helpers, and the FormatId/Format types.
 var formats map[string]domain_interfaces.MarklFormat = map[string]domain_interfaces.MarklFormat{}
 
 // SwapFormat replaces the registered format for id with f. The seam by

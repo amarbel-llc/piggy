@@ -1,4 +1,4 @@
-package markl
+package markl_registrations
 
 import (
 	"crypto/ed25519"
@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/amarbel-llc/piggy/go/markl/internal/0/domain_interfaces"
+	markl "github.com/amarbel-llc/piggy/go/markl/internal/bravo/markl"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
 )
 
@@ -30,7 +31,7 @@ func Ed25519GetPublicKey(private domain_interfaces.MarklId) (bites []byte, err e
 		// explicitly via ed25519.NewKeyFromSeed rather than relying on
 		// implicit conversion here — otherwise they'll drift against
 		// Ed25519Sign, which panics on non-64-byte input.
-		err = errors.WrapSkip(1, ErrEd25519SeedNotPrivateKey)
+		err = errors.WrapSkip(1, markl.ErrEd25519SeedNotPrivateKey)
 		return bites, err
 
 	case ed25519.PrivateKeySize:
@@ -102,7 +103,7 @@ func Ed25519Sign(
 		// Same RFC 8032 seed-vs-privkey distinction Ed25519GetPublicKey
 		// catches (see #15); keep the pair symmetric so external callers
 		// can errors.Is against one sentinel for either function.
-		err = errors.WrapSkip(1, ErrEd25519SeedNotPrivateKey)
+		err = errors.WrapSkip(1, markl.ErrEd25519SeedNotPrivateKey)
 		return sigBites, err
 
 	case ed25519.PrivateKeySize:

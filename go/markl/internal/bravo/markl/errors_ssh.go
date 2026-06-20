@@ -8,6 +8,10 @@ var ErrEd25519SSHAgentNotConnected, IsErrEd25519SSHAgentNotConnected = errors.Ma
 	"ed25519 SSH agent signer not connected",
 )
 
+var ErrEcdsaP256SSHAgentNotConnected, IsErrEcdsaP256SSHAgentNotConnected = errors.MakeTypedSentinel[pkgErrDisamb](
+	"ecdsa P256 SSH agent signer not connected",
+)
+
 var ErrPivyEcdhP256NotConnected, IsErrPivyEcdhP256NotConnected = errors.MakeTypedSentinel[pkgErrDisamb](
 	"pivy ECDH p256 agent not connected",
 )

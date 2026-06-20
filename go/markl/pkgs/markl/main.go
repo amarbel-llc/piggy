@@ -90,11 +90,6 @@ var AssertIdIsNull = internal.AssertIdIsNull
 var Clone = internal.Clone
 var CompareToReader = internal.CompareToReader
 var CompareToReaderAt = internal.CompareToReaderAt
-var EcdsaP256Verify = internal.EcdsaP256Verify
-var Ed25519GeneratePrivateKey = internal.Ed25519GeneratePrivateKey
-var Ed25519GetPublicKey = internal.Ed25519GetPublicKey
-var Ed25519Sign = internal.Ed25519Sign
-var Ed25519Verify = internal.Ed25519Verify
 var Equals = internal.Equals
 var EqualsReader = internal.EqualsReader
 var ErrAgeX25519NotConnected = internal.ErrAgeX25519NotConnected
@@ -144,8 +139,6 @@ var MakeErrEmptyType = internal.MakeErrEmptyType
 var MakeErrNotEqualBytes = internal.MakeErrNotEqualBytes
 var MakeErrWrongHasher = internal.MakeErrWrongHasher
 var MakeErrWrongType = internal.MakeErrWrongType
-var NonceGenerate = internal.NonceGenerate
-var NonceGenerate32 = internal.NonceGenerate32
 var ReadFrom = internal.ReadFrom
 
 // RegisterFormat installs a MarklFormat in the package-global registry.

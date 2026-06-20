@@ -1,4 +1,4 @@
-package markl
+package markl_registrations
 
 import (
 	"io"

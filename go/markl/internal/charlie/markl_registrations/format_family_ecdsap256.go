@@ -1,4 +1,4 @@
-package markl
+package markl_registrations
 
 import (
 	"crypto/ecdsa"
@@ -8,11 +8,8 @@ import (
 	"math/big"
 
 	"github.com/amarbel-llc/piggy/go/markl/internal/0/domain_interfaces"
+	markl "github.com/amarbel-llc/piggy/go/markl/internal/bravo/markl"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
-)
-
-var ErrEcdsaP256SSHAgentNotConnected, IsErrEcdsaP256SSHAgentNotConnected = errors.MakeTypedSentinel[pkgErrDisamb](
-	"ecdsa P256 SSH agent signer not connected",
 )
 
 func EcdsaP256Verify(pub, message, sig domain_interfaces.MarklId) (err error) {
@@ -56,19 +53,19 @@ func EcdsaP256Verify(pub, message, sig domain_interfaces.MarklId) (err error) {
 // agent package instead — the core stays ssh-free.
 
 func makeStubEcdsaP256SSHFormat() {
-	formats[FormatIdEcdsaP256SSH] = FormatSec{
-		Id:          FormatIdEcdsaP256SSH,
+	markl.RegisterFormat(markl.FormatSec{
+		Id:          markl.FormatIdEcdsaP256SSH,
 		Size:        33,
-		PubFormatId: FormatIdEcdsaP256Pub,
+		PubFormatId: markl.FormatIdEcdsaP256Pub,
 		GetPublicKey: func(_ domain_interfaces.MarklId) ([]byte, error) {
-			return nil, errors.Wrap(ErrEcdsaP256SSHAgentNotConnected)
+			return nil, errors.Wrap(markl.ErrEcdsaP256SSHAgentNotConnected)
 		},
-		SigFormatId: FormatIdEcdsaP256Sig,
+		SigFormatId: markl.FormatIdEcdsaP256Sig,
 		Sign: func(
 			_, _ domain_interfaces.MarklId,
 			_ io.Reader,
 		) ([]byte, error) {
-			return nil, errors.Wrap(ErrEcdsaP256SSHAgentNotConnected)
+			return nil, errors.Wrap(markl.ErrEcdsaP256SSHAgentNotConnected)
 		},
-	}
+	})
 }

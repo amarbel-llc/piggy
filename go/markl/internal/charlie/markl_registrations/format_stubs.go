@@ -1,9 +1,10 @@
-package markl
+package markl_registrations
 
 import (
 	"io"
 
 	"github.com/amarbel-llc/piggy/go/markl/internal/0/domain_interfaces"
+	markl "github.com/amarbel-llc/piggy/go/markl/internal/bravo/markl"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/interfaces"
 )
@@ -13,13 +14,13 @@ import (
 // go/markl/agent (dewey/pivy) and is injected over this stub via
 // SwapFormat — keeping the dewey/pivy dep out of the markl core.
 func makeStubPivyEcdhP256Format() {
-	formats[FormatIdPivyEcdhP256Pub] = FormatSec{
-		Id:   FormatIdPivyEcdhP256Pub,
+	markl.RegisterFormat(markl.FormatSec{
+		Id:   markl.FormatIdPivyEcdhP256Pub,
 		Size: 33,
 		GetIOWrapper: func(_ domain_interfaces.MarklId) (interfaces.IOWrapper, error) {
-			return nil, errors.Wrap(ErrPivyEcdhP256NotConnected)
+			return nil, errors.Wrap(markl.ErrPivyEcdhP256NotConnected)
 		},
-	}
+	})
 }
 
 // makeStubAgeX25519SecFormat registers an erroring stub for the
@@ -27,14 +28,14 @@ func makeStubPivyEcdhP256Format() {
 // go/markl/age (dewey/age) and are injected over this stub via SwapFormat —
 // keeping the dewey/age dep out of the markl core.
 func makeStubAgeX25519SecFormat() {
-	formats[FormatIdAgeX25519Sec] = FormatSec{
-		Id:   FormatIdAgeX25519Sec,
+	markl.RegisterFormat(markl.FormatSec{
+		Id:   markl.FormatIdAgeX25519Sec,
 		Size: 32,
 		Generate: func(_ io.Reader) ([]byte, error) {
-			return nil, errors.Wrap(ErrAgeX25519NotConnected)
+			return nil, errors.Wrap(markl.ErrAgeX25519NotConnected)
 		},
 		GetIOWrapper: func(_ domain_interfaces.MarklId) (interfaces.IOWrapper, error) {
-			return nil, errors.Wrap(ErrAgeX25519NotConnected)
+			return nil, errors.Wrap(markl.ErrAgeX25519NotConnected)
 		},
-	}
+	})
 }
