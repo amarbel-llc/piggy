@@ -291,6 +291,12 @@ madder repoints from owning the registry to depending on it:
   one more entry that piggy now owns canonically; no re-registration.
 - **#184 (rename)** — gated on this inversion landing, so it targets the
   relocated source of truth.
+- **#186 (papi functionality moves down to papi)** — papi is a *downstream*
+  consumer of piggy's markl. The papi vocabulary (`papi-doc-sig-v1`,
+  `papi-proof-sig-v1`) + `PurposeTypePapiSig` live in piggy's core
+  transitionally (canonical / joint holder); per ADR 0006 they move *down* to
+  papi — which registers its own purposes consumer-side via `RegisterPurpose` —
+  once papi depends on piggy's published module. Flagged in-code (`MOVE-DOWN`).
 - **#185 (madder out-of-process delegation)** — the deferred whole-closure
   shed; gated on this inversion. Per the audit it reduces to delegating blob
   **encryption** out-of-process (the `Id.GetIOWrapper` →
