@@ -4,6 +4,15 @@ package markl
 
 import internal "github.com/amarbel-llc/piggy/go/markl/internal/bravo/markl"
 
+type FormatPub = internal.FormatPub
+type FormatSec = internal.FormatSec
+type FuncFormatPubVerify = internal.FuncFormatPubVerify
+
+// TODO switch to accepting bytes?
+type FuncFormatSecGenerate = internal.FuncFormatSecGenerate
+type FuncFormatSecGetIOWrapper = internal.FuncFormatSecGetIOWrapper
+type FuncFormatSecGetPublicKey = internal.FuncFormatSecGetPublicKey
+type FuncFormatSecSign = internal.FuncFormatSecSign
 type Purpose = internal.Purpose
 type PurposeType = internal.PurposeType
 
@@ -18,6 +27,8 @@ type RegisterPurposeOpts = internal.RegisterPurposeOpts
 var GetDigestTypeForSigType = internal.GetDigestTypeForSigType
 var GetMotherSigTypeForSigType = internal.GetMotherSigTypeForSigType
 var GetPurpose = internal.GetPurpose
+var NonceGenerate = internal.NonceGenerate
+var NonceGenerate32 = internal.NonceGenerate32
 
 // RegisterPurpose installs a Purpose in the package-global registry. Panics
 // if Id is already registered, or if FormatIds contains a duplicate. Returns
