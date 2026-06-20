@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"crypto/sha512"
 	"io"
 	"math/big"
 
@@ -39,6 +40,44 @@ func EcdsaP256Verify(pub, message, sig domain_interfaces.MarklId) (err error) {
 	if !ecdsa.Verify(pubKey, digest[:], r, s) {
 		return errors.Err422UnprocessableEntity.Errorf(
 			"invalid ECDSA P256 signature: %q",
+			sig.StringWithFormat(),
+		)
+	}
+
+	return nil
+}
+
+// EcdsaP384Verify mirrors EcdsaP256Verify for NIST P-384: a 49-byte
+// SEC1-compressed public key, a 96-byte r‖s signature, and SHA-384.
+// Backs the ssh_ecdsa_nistp384_pub format added for parity with the Rust
+// piggy-markl (piggy#86).
+func EcdsaP384Verify(pub, message, sig domain_interfaces.MarklId) (err error) {
+	compressed := pub.GetBytes()
+
+	x, y := elliptic.UnmarshalCompressed(elliptic.P384(), compressed)
+	if x == nil {
+		return errors.Errorf("invalid compressed P-384 point")
+	}
+
+	pubKey := &ecdsa.PublicKey{
+		Curve: elliptic.P384(),
+		X:     x,
+		Y:     y,
+	}
+
+	sigBytes := sig.GetBytes()
+	if len(sigBytes) != 96 {
+		return errors.Errorf("invalid ECDSA P384 signature length: %d", len(sigBytes))
+	}
+
+	r := new(big.Int).SetBytes(sigBytes[:48])
+	s := new(big.Int).SetBytes(sigBytes[48:96])
+
+	digest := sha512.Sum384(message.GetBytes())
+
+	if !ecdsa.Verify(pubKey, digest[:], r, s) {
+		return errors.Err422UnprocessableEntity.Errorf(
+			"invalid ECDSA P384 signature: %q",
 			sig.StringWithFormat(),
 		)
 	}

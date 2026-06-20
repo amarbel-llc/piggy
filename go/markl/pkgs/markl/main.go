@@ -228,6 +228,14 @@ const FormatIdPivyEcdhP256Pub = internal.FormatIdPivyEcdhP256Pub
 // of the same shape. Owned jointly with amarbel-llc/piggy (mirrored
 // in its piggy-markl crate). See RFC 0002 §5.
 const FormatIdSshEcdsaNistp256Pub = internal.FormatIdSshEcdsaNistp256Pub
+const FormatIdSshEcdsaNistp384Pub = internal.FormatIdSshEcdsaNistp384Pub
+
+// SSH-suitable Ed25519 (raw 32-byte) and ECDSA P-384 (49-byte
+// SEC1-compressed) public keys from PIV slots 9A/9C/9E (piggy#86).
+// Distinct ids let a piggy-piv_* purpose carry an Ed25519 or P-384
+// auth key alongside the P-256 form. Added to the Go core for parity
+// with the Rust piggy-markl. See RFC 0002 §5.
+const FormatIdSshEd25519Pub = internal.FormatIdSshEd25519Pub
 const IdFormatBlech32 = internal.IdFormatBlech32
 const IdFormatDefault = internal.IdFormatDefault
 const IdFormatHex = internal.IdFormatHex

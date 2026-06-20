@@ -30,6 +30,14 @@ const (
 	// in its piggy-markl crate). See RFC 0002 §5.
 	FormatIdSshEcdsaNistp256Pub = "ssh_ecdsa_nistp256_pub"
 
+	// SSH-suitable Ed25519 (raw 32-byte) and ECDSA P-384 (49-byte
+	// SEC1-compressed) public keys from PIV slots 9A/9C/9E (piggy#86).
+	// Distinct ids let a piggy-piv_* purpose carry an Ed25519 or P-384
+	// auth key alongside the P-256 form. Added to the Go core for parity
+	// with the Rust piggy-markl. See RFC 0002 §5.
+	FormatIdSshEd25519Pub       = "ssh_ed25519_pub"
+	FormatIdSshEcdsaNistp384Pub = "ssh_ecdsa_nistp384_pub"
+
 	FormatIdPivyEcdhP256Pub = "pivy_ecdh_p256_pub"
 
 	FormatIdHashSha256     = "sha256"

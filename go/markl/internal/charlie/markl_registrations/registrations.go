@@ -8,10 +8,12 @@ import (
 	markl "github.com/amarbel-llc/piggy/go/markl/internal/bravo/markl"
 )
 
-// Format registrations are framework infrastructure (the actual crypto
-// primitives), not consumer vocabulary, so they live in this package.
-// Purpose registrations and purpose-id aliases moved out to
-// internal/charlie/markl_registrations as of #106 step 2/3.
+// init installs piggy's native FORMAT registrations into the framework
+// registry: the actual crypto primitives plus the four erroring stubs the
+// agent/age sub-packages later swap real impls over via SwapFormat. Under
+// piggy#183 the format registrations moved OUT of the framework into this
+// package (parallel to the purpose registrations) — the framework is pure
+// mechanism. Activated by blank-importing this package.
 func init() {
 	// Ed22519
 	markl.RegisterFormat(
@@ -79,6 +81,24 @@ func init() {
 			Id:     markl.FormatIdSshEcdsaNistp256Pub,
 			Size:   33,
 			Verify: EcdsaP256Verify,
+		},
+	)
+
+	// piggy#86: SSH-suitable Ed25519 + ECDSA P-384 PIV auth pubkeys
+	// (parity with the Rust piggy-markl; madder's Go core lacked these).
+	markl.RegisterFormat(
+		markl.FormatPub{
+			Id:     markl.FormatIdSshEd25519Pub,
+			Size:   ed25519.PublicKeySize,
+			Verify: Ed25519Verify,
+		},
+	)
+
+	markl.RegisterFormat(
+		markl.FormatPub{
+			Id:     markl.FormatIdSshEcdsaNistp384Pub,
+			Size:   49,
+			Verify: EcdsaP384Verify,
 		},
 	)
 
