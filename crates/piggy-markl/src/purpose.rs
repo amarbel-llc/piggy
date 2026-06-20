@@ -41,6 +41,14 @@ pub enum PurposeId {
     /// `piggy-piv_card_auth-v1` — public key from PIV slot 9E (Card
     /// Authentication). Same constraint as `PiggyPivAuthV1`.
     PiggyPivCardAuthV1,
+    /// `papi-doc-sig-v1` — detached signature over a PAPI document's
+    /// canonical (RFC 8785 JCS) signing input, per amarbel-llc/papi
+    /// RFC-0001 §10. Produced by `piggy papi sign` from a PIV slot-9A
+    /// key. Accepts only `ecdsa_p256_sig` (raw 64-byte r‖s P-256
+    /// signature). Registered in madder RFC-0002 §6.1 (commit
+    /// `b852d42`) and mirrored here; piggy#183 re-homes the registry
+    /// to piggy as the source of truth.
+    PapiDocSigV1,
     /// `dodder-blob-digest-sha256-v1` — blob content hash. Piggy does
     /// not produce these, but accepts them for round-trip purposes.
     DodderBlobDigestSha256V1,
@@ -72,6 +80,7 @@ impl PurposeId {
             PurposeId::PiggyPivAuthV1 => "piggy-piv_auth-v1",
             PurposeId::PiggyPivSigV1 => "piggy-piv_sig-v1",
             PurposeId::PiggyPivCardAuthV1 => "piggy-piv_card_auth-v1",
+            PurposeId::PapiDocSigV1 => "papi-doc-sig-v1",
             PurposeId::DodderBlobDigestSha256V1 => "dodder-blob-digest-sha256-v1",
             PurposeId::DodderObjectDigestV2 => "dodder-object-digest-v2",
             PurposeId::DodderObjectSigV2 => "dodder-object-sig-v2",
@@ -87,6 +96,7 @@ impl PurposeId {
             "piggy-piv_auth-v1" => PurposeId::PiggyPivAuthV1,
             "piggy-piv_sig-v1" => PurposeId::PiggyPivSigV1,
             "piggy-piv_card_auth-v1" => PurposeId::PiggyPivCardAuthV1,
+            "papi-doc-sig-v1" => PurposeId::PapiDocSigV1,
             "dodder-blob-digest-sha256-v1" => PurposeId::DodderBlobDigestSha256V1,
             "dodder-object-digest-v2" => PurposeId::DodderObjectDigestV2,
             "dodder-object-sig-v2" => PurposeId::DodderObjectSigV2,
@@ -122,6 +132,7 @@ impl PurposeId {
                         | FormatId::SshEcdsaNistp384Pub
                 )
             }
+            PurposeId::PapiDocSigV1 => matches!(format, FormatId::EcdsaP256Sig),
             PurposeId::DodderBlobDigestSha256V1 => {
                 matches!(format, FormatId::Sha256 | FormatId::Blake2b256)
             }
@@ -211,6 +222,23 @@ mod tests {
     }
 
     #[test]
+    fn papi_doc_sig_v1_accepts_only_ecdsa_p256_sig() {
+        let p = PurposeId::PapiDocSigV1;
+        // Per amarbel-llc/papi RFC-0001 §10 + madder RFC-0002 §6.1:
+        // the only compatible format is the raw 64-byte r‖s P-256 sig.
+        assert!(p.validate_format(FormatId::EcdsaP256Sig).is_ok());
+        assert!(
+            p.validate_format(FormatId::Ed25519Sig).is_err(),
+            "papi-doc-sig-v1 has no ed25519 document-signing path"
+        );
+        assert!(
+            p.validate_format(FormatId::SshEcdsaNistp256Pub).is_err(),
+            "the slot-9A key is the signer, not a doc-sig format"
+        );
+        assert!(p.validate_format(FormatId::EcdsaP256Pub).is_err());
+    }
+
+    #[test]
     fn dodder_blob_digest_sha256_v1_accepts_both_sha256_and_blake2b256() {
         let p = PurposeId::DodderBlobDigestSha256V1;
         assert!(p.validate_format(FormatId::Sha256).is_ok());
@@ -238,6 +266,7 @@ mod tests {
             PurposeId::PiggyPivAuthV1,
             PurposeId::PiggyPivSigV1,
             PurposeId::PiggyPivCardAuthV1,
+            PurposeId::PapiDocSigV1,
             PurposeId::DodderBlobDigestSha256V1,
             PurposeId::DodderObjectDigestV2,
             PurposeId::DodderObjectSigV2,

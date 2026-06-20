@@ -1,8 +1,10 @@
 //! Conformance tests against madder RFC 0002's portable test
 //! vectors (madder#150 + #159). Sourced from
 //! `go/internal/charlie/markl_registrations/testdata/0002-markl-id-format-vectors.json`
-//! at madder commit `fd53684` (the split-HRP revert) and pinned in
-//! this crate's `testdata/` directory.
+//! at madder commit `b852d42` (which adds the `papi-doc-sig-v1`
+//! purpose vector, RFC-0002 §6.1, plus the previously-missing
+//! `piggy-*` purpose / `ssh_ecdsa_nistp256_pub` format vectors) and
+//! pinned in this crate's `testdata/` directory.
 //!
 //! Round-trips every valid vector (encode-from-bytes match,
 //! decode-from-string match) and asserts each invalid vector fails

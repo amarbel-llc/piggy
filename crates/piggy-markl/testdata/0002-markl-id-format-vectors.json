@@ -67,6 +67,12 @@
       "encoded": "ecdsa_p256_ssh-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqamtkgf"
     },
     {
+      "name": "format/ssh_ecdsa_nistp256_pub/non_trivial",
+      "format": "ssh_ecdsa_nistp256_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg"
+    },
+    {
       "name": "format/age_x25519_pub/non_trivial",
       "format": "age_x25519_pub",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
@@ -166,6 +172,48 @@
       "format": "ed25519_ssh",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
       "encoded": "dodder-repo-private_key-v1@ed25519_ssh-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0slgq3w8"
+    },
+    {
+      "name": "purpose/piggy-piv_auth-v1/ssh_ecdsa_nistp256_pub",
+      "purpose": "piggy-piv_auth-v1",
+      "format": "ssh_ecdsa_nistp256_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "piggy-piv_auth-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg"
+    },
+    {
+      "name": "purpose/piggy-piv_sig-v1/ssh_ecdsa_nistp256_pub",
+      "purpose": "piggy-piv_sig-v1",
+      "format": "ssh_ecdsa_nistp256_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg"
+    },
+    {
+      "name": "purpose/piggy-piv_card_auth-v1/ssh_ecdsa_nistp256_pub",
+      "purpose": "piggy-piv_card_auth-v1",
+      "format": "ssh_ecdsa_nistp256_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "piggy-piv_card_auth-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg"
+    },
+    {
+      "name": "purpose/piggy-recipient-v1/age_x25519_pub",
+      "purpose": "piggy-recipient-v1",
+      "format": "age_x25519_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "piggy-recipient-v1@age_x25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0scveleg"
+    },
+    {
+      "name": "purpose/piggy-recipient-v1/pivy_ecdh_p256_pub",
+      "purpose": "piggy-recipient-v1",
+      "format": "pivy_ecdh_p256_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu"
+    },
+    {
+      "name": "purpose/papi-doc-sig-v1/ecdsa_p256_sig",
+      "purpose": "papi-doc-sig-v1",
+      "format": "ecdsa_p256_sig",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "papi-doc-sig-v1@ecdsa_p256_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cywvqw8"
     }
   ],
   "invalid": [
