@@ -100,13 +100,13 @@ codemod-rfc0002-fixture:
     cd go/markl && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
 
 # gofmt the hand-written go/markl sources: the internal/ core + the public
-# sub-packages (agent — and age once it lands). The pkgs/ facades are EXCLUDED:
+# sub-packages (agent, age). The pkgs/ facades are EXCLUDED:
 # they are formatted by dagnabit's own conformist pass, so reformatting them
 # with plain gofmt would risk drift against `lint-facades`. (treefmt/`nix fmt`
 # does not cover Go, so this recipe is the canonical go/markl formatter.)
 [group('codemod')]
 fmt-go-markl:
-    cd go/markl && gofmt -w internal agent
+    cd go/markl && gofmt -w internal agent age
 
 run-nix *ARGS:
     nix run . -- {{ARGS}}
