@@ -2044,11 +2044,14 @@ tag message="":
     set -euo pipefail
     . version.env
     version="${PIGGY_VERSION:?missing PIGGY_VERSION in version.env}"
-    # `$1`, not `{{message}}`: positional-arguments passes the message as a
-    # real shell parameter so bash never re-parses it. `{{message}}` would
-    # text-substitute the changelog into the recipe body, and backticks in
-    # commit subjects (e.g. `signatures[]`, `piggy papi verify`) would then
-    # execute as command substitution.
+    # Read the message from the positional $1, NOT from a just interpolation of
+    # the message parameter. positional-arguments passes it as a real shell
+    # parameter so bash never re-parses it. A just interpolation of the message
+    # would text-substitute the multi-line changelog into the recipe body, where
+    # parens and backticks in commit subjects (feat(x): ..., signatures[], piggy
+    # papi verify) would run as command substitution and break the script. This
+    # comment must itself avoid the literal two-brace interpolation token, since
+    # just expands those even inside comments — that bug broke the v0.1.16 cut.
     msg="${1:-release v$version}"
     tags=()
     for prefix in {{release_tag_prefixes}}; do
