@@ -13,6 +13,21 @@
       inputs.igloo.follows = "igloo";
     };
 
+    # purse-first provides `dagnabit` (cmd/dagnabit), the code-org +
+    # export-facade generator used by go/markl: each `internal/` package
+    # marked `//go:generate dagnabit export` gets a `pkgs/` facade so
+    # consumers (eventually madder) import a stable public API instead of
+    # internal/ (#183). On the devShell PATH for `just gen-go-markl`; the
+    # nix package also installs dagnabit(1). Follows piggy's shared inputs
+    # to collapse the lock — purse-first brings its own gomod2nix +
+    # conformist.
+    purse-first = {
+      url = "github:amarbel-llc/purse-first";
+      inputs.igloo.follows = "igloo";
+      inputs.nixpkgs-master.follows = "nixpkgs-master";
+      inputs.utils.follows = "utils";
+    };
+
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "igloo";
@@ -52,6 +67,7 @@
       nixpkgs-master,
       utils,
       bats,
+      purse-first,
       treefmt-nix,
       jcardsim,
       pivapplet,
@@ -585,6 +601,11 @@
               # buildGoModule (which uses its own pkgs.go); this is the
               # same toolchain, exposed on the devShell PATH.
               pkgs.go
+              # dagnabit (from purse-first): generates go/markl's pkgs/
+              # export facades from its internal/ packages. Drives
+              # `just gen-go-markl` (dagnabit export); also installs
+              # dagnabit(1). See #183 and the go/markl module.
+              purse-first.packages.${system}.dagnabit
               # gum drives terminal UI logging in the maint group recipes
               # (`bump-version`, `tag`, `release`). See eng-versioning(7)
               # "JUSTFILE RELEASE RECIPES".
