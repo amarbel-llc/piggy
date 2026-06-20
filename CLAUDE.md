@@ -99,6 +99,59 @@ Rust re-implementations of `agent` and `box` live under `crates/piggy/src/cmd/{a
   `crates/piggy-box/src/piv_box.rs::tests::rfc0002_vectors`. Drift
   between the spec and the test module is a CI failure.
 
+## go/markl module (piggy#183)
+
+`go/markl` (module `github.com/amarbel-llc/piggy/go/markl`) is piggy's
+canonical markl-id (purpose/format registry + Id codec) Go library —
+inverting the historic relationship where piggy's `crates/piggy-markl`
+Rust crate was a port of madder's registry. madder will consume this
+module as an external dependency (`dewey → piggy → madder` layering).
+Authoritative design: `docs/plans/2026-06-20-markl-id-ownership-inversion.md`;
+resume guide / status: piggy#188; umbrella: piggy#183.
+
+Layout (dagnabit `internal/<layer>/<pkg>` → `pkgs/<pkg>` facades):
+
+- `internal/0/domain_interfaces` — the markl-id interfaces (piggy's copy).
+- `internal/alfa/blech32` — the split-HRP blech32 codec.
+- `internal/bravo/markl` — the **pure framework**: the `Id` codec, the
+  registry *mechanism* (`formats` map, `RegisterFormat` panic-on-dup,
+  `SwapFormat` closed-set overwrite, `GetFormatOrError`), the
+  `FormatId`/`Purpose`/`PurposeType` types, the vocabulary **constants**
+  (every `FormatId*`/`Purpose*` — incl. papi-* with a `MOVE-DOWN` note,
+  piggy#186), and error sentinels. Installs no concrete format except the
+  hash family (coupled to `FormatHash` + a private map `id.go` reads).
+- `internal/charlie/markl_registrations` — piggy's **native
+  registrations**: `RegisterFormat`/`RegisterPurpose` calls, crypto
+  (`Ed25519*`, `EcdsaP256Verify`, `EcdsaP384Verify`, nonce), the four
+  erroring stubs (`ed25519_ssh`, `ecdsa_p256_ssh`, `pivy_ecdh_p256`,
+  `age_x25519_sec`), and piggy's purposes. **Opt-in: blank-import to fire
+  `init()`.** Also holds the RFC-0002 vector generator + replay
+  (`rfc0002_*_test.go`, `testdata/`).
+- `agent/` (public sub-package) — the **heavy** ssh/pivy signer-discovery
+  layer (`x/crypto/ssh` + `dewey/pivy`); swaps real impls over the
+  `ecdsa_p256_ssh`/`ed25519_ssh` (consumer-driven via `Register*` after
+  `Connect*`) and `pivy_ecdh_p256` (auto at `init()`) stubs via
+  `SwapFormat`. Off the dep-light core's import path.
+- `age/` (public sub-package) — the age x25519 encryption layer
+  (`dewey/age` + `dewey/bech32`); swaps the real Generate/GetIOWrapper
+  over the `age_x25519_sec` stub at `init()`.
+
+**Gate**: `build-go-markl` / `test-go-markl` / `lint-facades` (dagnabit
+facade-drift check) are wired into the `build`/`test`/`lint` aggregates,
+so the pre-merge `just` hook exercises the module. Per the #183/#188
+maintainer ruling there is **no `buildGoModule` derivation** — go/markl
+is a consumed library with no piggy-shipped binary; the nix-level gate is
+the dagnabit facade check. A hermetic gomod2nix/conformist lane is a
+deferred follow-up (piggy isn't on conformist yet). The Rust
+`crates/piggy-markl` replays the cross-domain RFC-0002 fixture
+(madder-sourced); cross-domain fixture unification is piggy#187.
+
+Recipes: `build-go-markl`, `test-go-markl` (`go test -tags test`),
+`tidy-go-markl`, `fmt-go-markl` (gofmt the hand-written `internal`/`agent`/`age`
+— NOT pkgs/), `codemod-facades` (`dagnabit export`), `lint-facades`
+(`dagnabit export --check`), `codemod-rfc0002-fixture` (regenerate the
+piggy-scoped vector fixture).
+
 ## Just Recipes
 
 Use just recipes for all cargo and bats operations instead of calling cargo/bats directly via `develop-run` or shell:
