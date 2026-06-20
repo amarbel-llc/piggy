@@ -1998,15 +1998,31 @@ clean-rust:
 #
 # Three recipes per eng-versioning(7). `version.env` is the single
 # source of truth: `bump-version` is a pure mutation, `tag` reads the
-# current value and pushes a signed tag, `release` orchestrates the
-# whole flow (changelog → bump → commit → tag → gh release).
+# current value and pushes the signed tag SET, `release` orchestrates
+# the whole flow (changelog → bump → commit → tag set → gh release).
 # `version.env` is also read by `flake.nix` at eval time and by
 # `crates/piggy/build.rs` at compile time.
+#
+# MULTI-ARTIFACT RELEASE (mirrors purse-first; eng-versioning(7)): one
+# PIGGY_VERSION covers every artifact in this repo, so piggy and the
+# go/markl Go module always release in lockstep at the same version.
+# `tag` materializes the whole tag set from that single version (see
+# release_tag_prefixes below).
 #
 # Grouped under the canonical `maintenance` lifecycle group of
 # eng-design_patterns-justfile(7) (alongside update-*/clean-*);
 # eng-versioning(7) still says "maint" — reconciling that wording
 # onto `maintenance` is tracked at amarbel-llc/eng#122.
+
+# The release tag prefixes, in order. The bare "v" tag is primary
+# (piggy's repo-root Rust/C package + the GitHub release); the
+# path-prefixed entries are the sub-directory Go modules the Go module
+# proxy needs to resolve a versioned `go get` (so `go/markl/v<sem>`
+# resolves `github.com/amarbel-llc/piggy/go/markl@v<sem>`, which madder
+# pins). The `go/` conformance module is intentionally absent: it's a
+# vendored test binary nobody `go get`s by version. Add a prefix here
+# when a new sub-directory module must be independently consumable.
+release_tag_prefixes := "v go/markl/v"
 
 # Rewrite the PIGGY_VERSION line in version.env. Touches no other
 # file — committing is `release`'s job. Usage: just bump-version 0.1.1
@@ -2014,32 +2030,46 @@ clean-rust:
 bump-version new_version:
     sed -E -i "s/^(export PIGGY_VERSION)=.*/\1={{new_version}}/" version.env
 
-# Sign + push a tag named after the current version.env. The "v"
-# prefix is added for you. Usage: just tag "release v0.1.1"
+# Sign + push the full release tag set named after the current
+# version.env: the bare v<sem> plus each release_tag_prefixes entry
+# (v<sem>, go/markl/v<sem>), all at the single PIGGY_VERSION so piggy and
+# the go/markl module tag in lockstep. The whole set is created locally
+# first, then pushed — a mid-set failure (signing, a pre-existing tag)
+# leaves only local tags to delete, with nothing pushed to roll back.
+# Usage: just tag "release v0.1.1"
 [group('maintenance')]
 [positional-arguments]
 tag message="":
     #!/usr/bin/env bash
     set -euo pipefail
     . version.env
-    tag="v${PIGGY_VERSION:?missing PIGGY_VERSION in version.env}"
+    version="${PIGGY_VERSION:?missing PIGGY_VERSION in version.env}"
     # `$1`, not `{{message}}`: positional-arguments passes the message as a
     # real shell parameter so bash never re-parses it. `{{message}}` would
     # text-substitute the changelog into the recipe body, and backticks in
     # commit subjects (e.g. `signatures[]`, `piggy papi verify`) would then
     # execute as command substitution.
-    msg="${1:-release $tag}"
-    git tag -s -m "$msg" "$tag"
-    gum log --level info "Created tag: $tag"
-    git push origin "$tag"
-    gum log --level info "Pushed $tag"
-    git tag -v "$tag"
+    msg="${1:-release v$version}"
+    tags=()
+    for prefix in {{release_tag_prefixes}}; do
+        tag="${prefix}${version}"
+        git tag -s -m "$msg" "$tag"
+        gum log --level info "Created tag: $tag"
+        tags+=("$tag")
+    done
+    for tag in "${tags[@]}"; do
+        git push origin "$tag"
+        gum log --level info "Pushed $tag"
+        git tag -v "$tag"
+    done
 
-# Cut a release: must be run on master. Generates an auto-changelog
-# (commits since the previous v* tag) BEFORE bumping so the bump
-# commit doesn't appear in its own changelog, then bumps version.env,
-# commits, signs+pushes a v<sem> tag, and creates a GitHub release
-# whose body is the changelog. Usage: just release 0.1.1
+# Cut a release: must be run on master. Versions every artifact together
+# at one PIGGY_VERSION. Generates a repo-wide auto-changelog (commits
+# since the previous primary v* tag) BEFORE bumping so the bump commit
+# doesn't appear in its own changelog, then bumps version.env, commits,
+# signs+pushes the v<sem> + go/markl/v<sem> tag set, and creates a GitHub
+# release (pointed at the primary v<sem>) whose notes are the changelog
+# plus the sibling sub-module tags. Usage: just release 0.1.1
 [group('maintenance')]
 release new_version:
     #!/usr/bin/env bash
@@ -2051,17 +2081,23 @@ release new_version:
         exit 1
     fi
 
-    prev=$(git tag --sort=-v:refname -l "v*" | head -1)
+    # Match only the PRIMARY version tags (v<digit>…); the path-prefixed
+    # sub-module tags (go/markl/v…) sort separately and must not bound the
+    # changelog range.
+    prev=$(git tag --sort=-v:refname -l "v*" | grep -E '^v[0-9]' | head -1 || true)
     header="release v{{new_version}}"
+    # Enumerated in the tag annotation + GitHub release notes; `tag` creates
+    # these from release_tag_prefixes, the release points at the primary.
+    siblings=$'\n\nTags: go/markl/v{{new_version}}'
     if [[ -n "$prev" ]]; then
         summary=$(git log --format='- %s' "$prev"..HEAD)
         if [[ -n "$summary" ]]; then
-            msg="$header"$'\n\n'"$summary"
+            msg="$header"$'\n\n'"$summary""$siblings"
         else
-            msg="$header"
+            msg="$header""$siblings"
         fi
     else
-        msg="$header"
+        msg="$header""$siblings"
     fi
 
     just bump-version "{{new_version}}"
