@@ -88,6 +88,17 @@ codemod-facades:
 lint-facades:
     cd go/markl && dagnabit export --check
 
+# Regenerate the piggy-scoped RFC 0002 conformance fixture under
+# go/markl/internal/charlie/markl_registrations/testdata/. Run after changing a
+# registered format or purpose. The committed JSON is the canonical artifact;
+# test-go-markl's TestRFC0002VectorsRoundTrip verifies every entry on every run.
+# Scope is piggy-only (piggy purposes + every registered format incl. the #86
+# ssh formats); cross-domain fixture assembly is the #187 RFC. Mirrors madder's
+# codemod-rfc0002-fixture. #183 (#9).
+[group('codemod')]
+codemod-rfc0002-fixture:
+    cd go/markl && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
+
 # gofmt the hand-written go/markl sources. Scoped to internal/ — the pkgs/
 # facades are formatted by dagnabit's own conformist pass, so reformatting them
 # with plain gofmt would risk drift against `lint-facades`.
