@@ -2,8 +2,55 @@
 
 package markl
 
-import internal "github.com/amarbel-llc/piggy/go/markl/internal/bravo/markl"
+import (
+	internal "github.com/amarbel-llc/piggy/go/markl/internal/bravo/markl"
+	domaininterfaces "github.com/amarbel-llc/piggy/go/markl/pkgs/domain_interfaces"
+	interfaces "github.com/amarbel-llc/purse-first/libs/dewey/pkgs/interfaces"
+	constraints "golang.org/x/exp/constraints"
+)
 
+type ErrFormatOperationNotSupported = internal.ErrFormatOperationNotSupported
+type ErrIsNull = internal.ErrIsNull
+
+// ErrLegacyCombinedHRPWireForm signals that a markl-id wire string
+// failed checksum verification under the canonical split-HRP rule
+// (RFC 0002 §3.3) but verifies under the legacy combined-HRP form
+// (RFC 0002 §9.1) where the entire `<purpose>@<format>` string was
+// used as the blech32 HRP.
+//
+// The combined-HRP form shipped briefly between commits `8dc78c7`
+// and the #159 revert (`fd53684`); see madder#167 for the broader
+// migration story. UnmarshalText returns this in place of the bare
+// blech32 ErrInvalidChecksum so callers can distinguish a legacy
+// pre-v0.3.16 file from genuine corruption.
+//
+// Recovery — two shapes, pick one:
+//
+//  1. Programmatic: build a fresh markl.Id and re-marshal —
+//
+//     var id markl.Id
+//     _ = id.SetPurposeId(legacy.Purpose)
+//     _ = id.SetMarklId(legacy.FormatId, legacy.Data)
+//     canonical, _ := id.MarshalText()
+//
+//  2. Splice: the legacy and canonical bodies differ only in the
+//     last 6 chars (the checksum). Replace them with
+//     SplitHRPChecksum:
+//
+//     body := legacy.Raw // (or just the post-`@` section)
+//     canonical := body[:len(body)-6] + legacy.SplitHRPChecksum
+//
+// Sensitivity (#169 coupling): for `*_sec` formats, Data is the
+// secret. Error() MUST NOT render Data; Raw rendering will be
+// redacted when #169 ships. SplitHRPChecksum is derived public
+// material and is safe to render unredacted.
+type ErrLegacyCombinedHRPWireForm = internal.ErrLegacyCombinedHRPWireForm
+type ErrNotEqual = internal.ErrNotEqual
+type ErrNotEqualBytes = internal.ErrNotEqualBytes
+type ErrUnsupportedIdFormat = internal.ErrUnsupportedIdFormat
+type Format = internal.Format
+type FormatHash = internal.FormatHash
+type FormatId = internal.FormatId
 type FormatPub = internal.FormatPub
 type FormatSec = internal.FormatSec
 type FuncFormatPubVerify = internal.FuncFormatPubVerify
@@ -13,6 +60,17 @@ type FuncFormatSecGenerate = internal.FuncFormatSecGenerate
 type FuncFormatSecGetIOWrapper = internal.FuncFormatSecGetIOWrapper
 type FuncFormatSecGetPublicKey = internal.FuncFormatSecGetPublicKey
 type FuncFormatSecSign = internal.FuncFormatSecSign
+type Hash = internal.Hash
+type Id = internal.Id
+type IdBinaryDecodingFormatTypeData = internal.IdBinaryDecodingFormatTypeData
+type IdBinaryDecodingTypeData = internal.IdBinaryDecodingTypeData
+type IdBinaryEncodingFormatTypeData = internal.IdBinaryEncodingFormatTypeData
+type IdBinaryEncodingTypeData = internal.IdBinaryEncodingTypeData
+type IdBroken = internal.IdBroken
+type IdFormat = internal.IdFormat
+type Lock[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]] = internal.Lock[KEY, KEY_PTR]
+type LockBinaryMarshaler[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]] = internal.LockBinaryMarshaler[KEY, KEY_PTR]
+type MutableLockBinaryMarshaler[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]] = internal.MutableLockBinaryMarshaler[KEY, KEY_PTR]
 type Purpose = internal.Purpose
 type PurposeType = internal.PurposeType
 
@@ -23,17 +81,163 @@ type PurposeType = internal.PurposeType
 // role, and a downstream caller passing the result to GetPurpose is what
 // surfaces typos.
 type RegisterPurposeOpts = internal.RegisterPurposeOpts
+type Slice = internal.Slice
 
+var AssertEqual = internal.AssertEqual
+var AssertIdIsNotNull = internal.AssertIdIsNotNull
+var AssertIdIsNotNullWithPurpose = internal.AssertIdIsNotNullWithPurpose
+var AssertIdIsNull = internal.AssertIdIsNull
+var Clone = internal.Clone
+var CompareToReader = internal.CompareToReader
+var CompareToReaderAt = internal.CompareToReaderAt
+var EcdsaP256Verify = internal.EcdsaP256Verify
+var Ed25519GeneratePrivateKey = internal.Ed25519GeneratePrivateKey
+var Ed25519GetPublicKey = internal.Ed25519GetPublicKey
+var Ed25519Sign = internal.Ed25519Sign
+var Ed25519Verify = internal.Ed25519Verify
+var Equals = internal.Equals
+var EqualsReader = internal.EqualsReader
+var ErrAgeX25519NotConnected = internal.ErrAgeX25519NotConnected
+var ErrEcdsaP256SSHAgentNotConnected = internal.ErrEcdsaP256SSHAgentNotConnected
+var ErrEd25519SSHAgentNotConnected = internal.ErrEd25519SSHAgentNotConnected
+
+// ErrEd25519SeedNotPrivateKey signals that Ed25519GetPublicKey received a
+// 32-byte value. RFC 8032 uses a 32-byte seed as the canonical private key,
+// but Go's crypto/ed25519 uses a 64-byte representation (seed ‖ pubkey) —
+// and so does madder (see FormatSec{Id: FormatIdEd25519Sec, Size:
+// ed25519.PrivateKeySize}). Callers with a seed must explicitly expand it
+// via ed25519.NewKeyFromSeed before presenting it as a private-key MarklId.
+var ErrEd25519SeedNotPrivateKey = internal.ErrEd25519SeedNotPrivateKey
+var ErrEmptyType = internal.ErrEmptyType
+
+// ErrNilFormat signals that an Id mutation requires a non-nil MarklFormat
+// but received nil. Raised via panic from resetDataForFormat — the sole
+// mutation primitive — so any in-package bug that tries to populate an Id
+// without first supplying a format surfaces at the point of mutation.
+var ErrNilFormat = internal.ErrNilFormat
+var ErrPivyEcdhP256NotConnected = internal.ErrPivyEcdhP256NotConnected
+
+// Creates a human-readable string representation of a digest.
+// TODO add type information
+var FormatBytesAsHex = internal.FormatBytesAsHex
+var FormatHashBlake2b256 = internal.FormatHashBlake2b256
+
+// TODO remove unnecessary references
+var FormatHashSha256 = internal.FormatHashSha256
+var FormatOrEmptyOnNull = internal.FormatOrEmptyOnNull
 var GetDigestTypeForSigType = internal.GetDigestTypeForSigType
+var GetFormatHashOrError = internal.GetFormatHashOrError
+var GetFormatOrError = internal.GetFormatOrError
+
+// move to Id
+var GetFormatSecOrError = internal.GetFormatSecOrError
+var GetId = internal.GetId
 var GetMotherSigTypeForSigType = internal.GetMotherSigTypeForSigType
 var GetPurpose = internal.GetPurpose
+var IsErrAgeX25519NotConnected = internal.IsErrAgeX25519NotConnected
+var IsErrEcdsaP256SSHAgentNotConnected = internal.IsErrEcdsaP256SSHAgentNotConnected
+var IsErrEd25519SSHAgentNotConnected = internal.IsErrEd25519SSHAgentNotConnected
+var IsErrNull = internal.IsErrNull
+var IsErrPivyEcdhP256NotConnected = internal.IsErrPivyEcdhP256NotConnected
+var IsNull = internal.IsNull
+var MakeErrEmptyType = internal.MakeErrEmptyType
+var MakeErrNotEqualBytes = internal.MakeErrNotEqualBytes
+var MakeErrWrongHasher = internal.MakeErrWrongHasher
+var MakeErrWrongType = internal.MakeErrWrongType
 var NonceGenerate = internal.NonceGenerate
 var NonceGenerate32 = internal.NonceGenerate32
+var ReadFrom = internal.ReadFrom
+
+// RegisterFormat installs a MarklFormat in the package-global registry.
+// Panics on nil format, empty format id, or duplicate registration. Returns
+// the registered format value so callers may keep a typed handle.
+var RegisterFormat = internal.RegisterFormat
 
 // RegisterPurpose installs a Purpose in the package-global registry. Panics
 // if Id is already registered, or if FormatIds contains a duplicate. Returns
 // the constructed Purpose so callers may keep a typed handle.
 var RegisterPurpose = internal.RegisterPurpose
+
+// RegisterPurposeIdAlias installs an alias from a purposeId-shaped string
+// to a formatId. Panics on duplicate alias to match the registry's
+// stability convention. The aliased formatId is not validated at
+// registration time — GetFormatOrError surfaces an unknown target via its
+// usual "unknown format id" error.
+var RegisterPurposeIdAlias = internal.RegisterPurposeIdAlias
+var SetDigester = internal.SetDigester
+var SetFromPath = internal.SetFromPath
+var SetHexBytes = internal.SetHexBytes
+var SetHexStringFromAbsolutePath = internal.SetHexStringFromAbsolutePath
+var SetHexStringFromRelPath = internal.SetHexStringFromRelPath
+var SetMarklIdWithFormatBlech32 = internal.SetMarklIdWithFormatBlech32
+
+// TODO remove
+var SetMaybeSha256 = internal.SetMaybeSha256
+
+// SwapFormat replaces the registered format for id with f. The seam by
+// which the go/markl/agent + go/markl/age sub-packages inject their real
+// ssh/pivy/age-backed FormatSec over the erroring stub the core registered
+// at init (the formats map is package-private). Closed-set: errors if no
+// format is currently registered for id.
+var SwapFormat = internal.SwapFormat
+
+// Generic function wrappers — Go does not support assigning
+// generic functions to variables without instantiation.
+// See https://github.com/golang/go/issues/52654
+func LockEquals[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](left domaininterfaces.Lock[KEY, KEY_PTR], right domaininterfaces.Lock[KEY, KEY_PTR]) bool {
+	return internal.LockEquals[KEY, KEY_PTR](left, right)
+}
+func MakeErrLength[INTEGER constraints.Integer](expected INTEGER, actual INTEGER) error {
+	return internal.MakeErrLength[INTEGER](expected, actual)
+}
+func MakeLock[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]]() internal.Lock[KEY, KEY_PTR] {
+	return internal.MakeLock[KEY, KEY_PTR]()
+}
+func MakeLockCoder[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](lock domaininterfaces.Lock[KEY, KEY_PTR], requireValue bool) internal.LockBinaryMarshaler[KEY, KEY_PTR] {
+	return internal.MakeLockCoder[KEY, KEY_PTR](lock, requireValue)
+}
+func MakeLockCoderValueNotRequired[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](lock domaininterfaces.Lock[KEY, KEY_PTR]) internal.LockBinaryMarshaler[KEY, KEY_PTR] {
+	return internal.MakeLockCoderValueNotRequired[KEY, KEY_PTR](lock)
+}
+func MakeLockWith[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](key KEY, value domaininterfaces.MarklId) internal.Lock[KEY, KEY_PTR] {
+	return internal.MakeLockWith[KEY, KEY_PTR](key, value)
+}
+func MakeMutableLockCoder[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](lock domaininterfaces.LockMutable[KEY, KEY_PTR], requireValue bool) internal.MutableLockBinaryMarshaler[KEY, KEY_PTR] {
+	return internal.MakeMutableLockCoder[KEY, KEY_PTR](lock, requireValue)
+}
+func MakeMutableLockCoderValueNotRequired[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](lock domaininterfaces.LockMutable[KEY, KEY_PTR]) internal.MutableLockBinaryMarshaler[KEY, KEY_PTR] {
+	return internal.MakeMutableLockCoderValueNotRequired[KEY, KEY_PTR](lock)
+}
+func MakeMutableLockCoderValueRequired[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](lock domaininterfaces.LockMutable[KEY, KEY_PTR]) internal.MutableLockBinaryMarshaler[KEY, KEY_PTR] {
+	return internal.MakeMutableLockCoderValueRequired[KEY, KEY_PTR](lock)
+}
+
+const FormatIdAgeX25519Pub = internal.FormatIdAgeX25519Pub
+const FormatIdAgeX25519Sec = internal.FormatIdAgeX25519Sec
+const FormatIdEcdsaP256Pub = internal.FormatIdEcdsaP256Pub
+const FormatIdEcdsaP256SSH = internal.FormatIdEcdsaP256SSH
+const FormatIdEcdsaP256Sig = internal.FormatIdEcdsaP256Sig
+
+// keep sorted
+const FormatIdEd25519Pub = internal.FormatIdEd25519Pub
+const FormatIdEd25519SSH = internal.FormatIdEd25519SSH
+const FormatIdEd25519Sec = internal.FormatIdEd25519Sec
+const FormatIdEd25519Sig = internal.FormatIdEd25519Sig
+const FormatIdHashBlake2b256 = internal.FormatIdHashBlake2b256
+const FormatIdHashSha256 = internal.FormatIdHashSha256
+const FormatIdNonceSec = internal.FormatIdNonceSec
+const FormatIdPivyEcdhP256Pub = internal.FormatIdPivyEcdhP256Pub
+
+// SEC1-compressed P-256 public key (33 bytes), surfaced via the SSH
+// agent from a PIV authentication/signature slot (9A/9C/9E). Byte
+// shape is identical to ecdsa_p256_pub; the distinct format id lets a
+// purpose distinguish piggy PIV SSH-auth keys from recipient pubkeys
+// of the same shape. Owned jointly with amarbel-llc/piggy (mirrored
+// in its piggy-markl crate). See RFC 0002 §5.
+const FormatIdSshEcdsaNistp256Pub = internal.FormatIdSshEcdsaNistp256Pub
+const IdFormatBlech32 = internal.IdFormatBlech32
+const IdFormatDefault = internal.IdFormatDefault
+const IdFormatHex = internal.IdFormatHex
 
 // Blob Digests
 const PurposeBlobDigestV1 = internal.PurposeBlobDigestV1

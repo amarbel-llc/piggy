@@ -1,0 +1,40 @@
+package markl
+
+import (
+	"io"
+
+	"github.com/amarbel-llc/piggy/go/markl/internal/0/domain_interfaces"
+	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
+	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/interfaces"
+)
+
+// makeStubPivyEcdhP256Format registers an erroring stub for the
+// pivy_ecdh_p256_pub format. The real PIV-backed GetIOWrapper lives in
+// go/markl/agent (dewey/pivy) and is injected over this stub via
+// SwapFormat — keeping the dewey/pivy dep out of the markl core.
+func makeStubPivyEcdhP256Format() {
+	formats[FormatIdPivyEcdhP256Pub] = FormatSec{
+		Id:   FormatIdPivyEcdhP256Pub,
+		Size: 33,
+		GetIOWrapper: func(_ domain_interfaces.MarklId) (interfaces.IOWrapper, error) {
+			return nil, errors.Wrap(ErrPivyEcdhP256NotConnected)
+		},
+	}
+}
+
+// makeStubAgeX25519SecFormat registers an erroring stub for the
+// age_x25519_sec format. The real age-backed Generate/GetIOWrapper live in
+// go/markl/age (dewey/age) and are injected over this stub via SwapFormat —
+// keeping the dewey/age dep out of the markl core.
+func makeStubAgeX25519SecFormat() {
+	formats[FormatIdAgeX25519Sec] = FormatSec{
+		Id:   FormatIdAgeX25519Sec,
+		Size: 32,
+		Generate: func(_ io.Reader) ([]byte, error) {
+			return nil, errors.Wrap(ErrAgeX25519NotConnected)
+		},
+		GetIOWrapper: func(_ domain_interfaces.MarklId) (interfaces.IOWrapper, error) {
+			return nil, errors.Wrap(ErrAgeX25519NotConnected)
+		},
+	}
+}
