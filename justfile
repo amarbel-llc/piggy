@@ -2,12 +2,12 @@
 default: lint build test
 
 [group('pre-build')]
-lint: lint-fmt lint-rust
+lint: lint-fmt lint-rust lint-facades
 
 # --- build ---
 
 [group('build')]
-build: build-nix build-rust
+build: build-nix build-rust build-go-markl
 
 [group('build')]
 build-nix:
@@ -48,9 +48,15 @@ build-rust-release:
 
 # go/markl module (#183): the registry/codec Go library that becomes the
 # canonical markl-id source madder will depend on (inverting today's
-# Rust-port-of-madder relationship). These back the dev loop while the module
-# is ported under #183 Phase 1; the buildGoModule derivation + nix wiring is a
-# follow-up (#183 task: vector generator + conformance).
+# Rust-port-of-madder relationship). These recipes back the dev loop AND the
+# merge gate: build-go-markl, test-go-markl, and lint-facades are now wired into
+# the build/test/lint aggregates (so the pre-merge `just` hook exercises the
+# module). Per the maintainer ruling (#183/#188) the nix-level gate is the
+# dagnabit export facade check (lint-facades), NOT a buildGoModule derivation —
+# go/markl is a consumed library with no piggy-shipped binary, so there is
+# nothing for buildGoModule to produce. A hermetic gomod2nix/conformist lane
+# (madder-style buildGoApplication + conformist pre-commit) is a separate
+# migration deferred until piggy moves off treefmt onto conformist.
 [group('build')]
 tidy-go-markl:
     cd go/markl && go mod tidy
@@ -74,8 +80,10 @@ codemod-facades:
     cd go/markl && dagnabit export
 
 # Verify the committed go/markl facades match a fresh dagnabit export; fails on
-# drift. Mirrors madder's lint-facades; the conformist pre-commit lane will
-# eventually run this (#183).
+# drift. Mirrors madder's lint-facades. Wired into the `lint` aggregate, so the
+# pre-merge `just` hook runs it (this is the nix-level facade gate per the
+# #183/#188 ruling — see the go/markl block above). Adopting madder's hermetic
+# conformist pre-commit lane is deferred to piggy's conformist migration.
 [group('pre-build')]
 lint-facades:
     cd go/markl && dagnabit export --check
@@ -93,7 +101,7 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: test-bats-default test-bats-conformance test-rust _test-conformance-linux-only
+test: test-bats-default test-bats-conformance test-rust test-go-markl _test-conformance-linux-only
 
 # The fibby-backed conformance lanes are Linux-only: fibby is a virtual PCSC
 # card reached via libpcsclite's PCSCLITE_CSOCK_NAME socket redirect, which
