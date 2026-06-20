@@ -65,6 +65,28 @@ build-go-markl:
 test-go-markl:
     cd go/markl && go test -tags test ./...
 
+# Regenerate go/markl's dagnabit export facades: each internal/ package marked
+# `//go:generate dagnabit export` gets a thin re-export at pkgs/<pkg> (the layer
+# prefix is flattened). Run after changing an exported internal API. dagnabit is
+# on the devShell PATH via the purse-first flake input. #183.
+[group('codemod')]
+codemod-facades:
+    cd go/markl && dagnabit export
+
+# Verify the committed go/markl facades match a fresh dagnabit export; fails on
+# drift. Mirrors madder's lint-facades; the conformist pre-commit lane will
+# eventually run this (#183).
+[group('pre-build')]
+lint-facades:
+    cd go/markl && dagnabit export --check
+
+# gofmt the hand-written go/markl sources. Scoped to internal/ — the pkgs/
+# facades are formatted by dagnabit's own conformist pass, so reformatting them
+# with plain gofmt would risk drift against `lint-facades`.
+[group('codemod')]
+fmt-go-markl:
+    cd go/markl && gofmt -w internal
+
 run-nix *ARGS:
     nix run . -- {{ARGS}}
 

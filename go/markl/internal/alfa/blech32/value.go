@@ -1,6 +1,7 @@
 package blech32
 
 import (
+	"github.com/amarbel-llc/piggy/go/markl/internal/0/domain_interfaces"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
 )
 
@@ -99,12 +100,19 @@ func (value *Value) UnmarshalText(text []byte) (err error) {
 	return err
 }
 
-// NOTE (piggy #183 port): madder's blech32.Value carried a
-// WriteToMerkleId(domain_interfaces.MarklIdMutable) convenience method —
-// a back-reference from the low-level codec UP to the markl Id
-// interface. That is the reverse of the dewey -> piggy -> madder
-// layering (the codec must not depend on the Id type), and it imported
-// madder's internal/0/domain_interfaces (a madder-internal package, not
-// importable from piggy). Dropped here; the Value -> Id conversion lives
-// on the Id side in go/markl core. Confirm the seam with madder when the
-// core lands.
+// WriteToMerkleId stamps this blech32 value into a markl Id via the
+// domain_interfaces.MarklIdMutable contract. Restored from madder's
+// original under piggy#183 — but pointed at piggy's OWN
+// internal/0/domain_interfaces (the canonical copy), not madder's
+// internal package. piggy now owns the markl-id interface surface;
+// madder will drop its copy and depend on piggy's facade.
+func (value Value) WriteToMerkleId(
+	merkleId domain_interfaces.MarklIdMutable,
+) (err error) {
+	if err = merkleId.SetMarklId(value.HRP, value.Data); err != nil {
+		err = errors.Wrap(err)
+		return err
+	}
+
+	return err
+}

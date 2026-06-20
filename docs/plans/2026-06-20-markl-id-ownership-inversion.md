@@ -172,12 +172,27 @@ core skeleton lands.
 
 ### Port decisions (this branch)
 
-- **Dropped `blech32.Value.WriteToMerkleId`** (+ its `internal/0/domain_interfaces`
-  import): a back-reference from the low-level codec *up* to the markl Id
-  interface — reversing the layering and importing a madder-*internal* package
-  (not importable from piggy). madder confirmed the method is **globally dead**
-  (zero callers across madder/dodder/cutting-garden), so nothing needs the
-  inverse; the Value → Id conversion belongs on the Id side in core regardless.
+- **piggy owns the markl-id interface surface.** The markl interfaces
+  (`MarklId`/`MarklIdMutable`/`MarklFormat`/`Hash`/`Lock`/…) are lifted from
+  madder's `go/internal/0/domain_interfaces/markl.go` into
+  `go/markl/internal/0/domain_interfaces` — piggy's canonical copy (imports
+  `dewey/pkgs/interfaces`, as madder's does). madder will drop its copy and
+  depend on piggy's facade.
+- **Kept `blech32.Value.WriteToMerkleId`**, repointed at piggy's *own*
+  `domain_interfaces.MarklIdMutable`. It stamps a blech32 value into a markl Id;
+  the original imported madder's *internal* `0/domain_interfaces`. With piggy
+  owning the interfaces, `blech32` (layer alfa) now depends *down* onto piggy's
+  layer-0 interface package — a proper downward dependency, not the
+  back-reference it looked like against madder's concrete type. (madder
+  confirmed the method is globally dead today, so the inverse is moot — keeping
+  it preserves API parity for the eventual shim.)
+- **dagnabit `internal/`→`pkgs/` facade layout** (mirrors madder). Internal
+  packages carry `//go:generate dagnabit export`; `just codemod-facades`
+  (= `dagnabit export`) emits thin re-export facades at `go/markl/pkgs/<pkg>`
+  (layer prefix flattened), and `just lint-facades` (= `dagnabit export --check`)
+  gates drift. dagnabit (from the purse-first flake input, #183) is on the
+  devShell PATH. Current: `internal/0/domain_interfaces` + `internal/alfa/blech32`
+  → `pkgs/{domain_interfaces,blech32}`.
 - **Kept the madder `*_test.go`** via dewey's `test_ui` harness. The originals
   imported `dewey/pkgs/ui` (the prod UI package) whose `T` is behind
   `//go:build test`, so bare `go test` reported `undefined: ui.T`. Ported
