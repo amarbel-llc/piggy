@@ -46,6 +46,25 @@ build-rust *ARGS:
 build-rust-release:
     cargo build --release
 
+# go/markl module (#183): the registry/codec Go library that becomes the
+# canonical markl-id source madder will depend on (inverting today's
+# Rust-port-of-madder relationship). These back the dev loop while the module
+# is ported under #183 Phase 1; the buildGoModule derivation + nix wiring is a
+# follow-up (#183 task: vector generator + conformance).
+[group('build')]
+tidy-go-markl:
+    cd go/markl && go mod tidy
+
+[group('build')]
+build-go-markl:
+    cd go/markl && go build ./...
+
+# `-tags test` activates dewey's test_ui harness (dewey/pkgs/test_ui is behind
+# //go:build test, mirroring madder's own `go test -tags test` convention).
+[group('post-build')]
+test-go-markl:
+    cd go/markl && go test -tags test ./...
+
 run-nix *ARGS:
     nix run . -- {{ARGS}}
 

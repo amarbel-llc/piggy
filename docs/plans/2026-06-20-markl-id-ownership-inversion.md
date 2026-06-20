@@ -93,8 +93,10 @@ layer**. Proposed split:
 - **`go/markl/` — the canonical core** (own `go.mod`, module path
   `github.com/amarbel-llc/piggy/go/markl`). Pure: the `Id` type, text/binary
   /blech32 coding (split-HRP), format families, the purpose/format registries
-  + `RegisterPurpose`/`RegisterFormat`. Dependency-light (blech32 is vendored
-  in as a sub-package or sibling). **This is what madder depends on.**
+  + `RegisterPurpose`/`RegisterFormat` + the `SwapFormat` swap hook (see the
+  boundary section). Carries a broad-but-light dewey dep and is free of the
+  ssh/pivy/age machinery, which lives in sub-packages. **This is what madder
+  depends on.**
 - **`go/markl/blech32/`** (or a sibling module) — the blech32 codec, moved
   from madder's `internal/alfa/blech32`.
 - **`go/markl/agent/` — signer/agent discovery, moved up into piggy.** Per the
@@ -111,33 +113,78 @@ layer**. Proposed split:
   not a new cut. Net: madder depends on piggy for the registry core and (where
   it needs signer discovery) `go/markl/agent`; *how completely* madder sheds
   pivy/dewey then turns on the direct-vs-transitive crux (see Open questions).
+- **`go/markl/age/` — age x25519 encryption, a third sub-package.** `dewey/age`
+  + `dewey/bech32` (the `age_x25519_sec` encryption machinery) are confined here,
+  parallel to `agent`, so neither lands in the core.
 
-### Core/agent file boundary (madder first-pass)
+### Core / agent / age boundary (madder per-symbol audit)
 
-`madder/stark-maple`'s first-pass classification of `internal/bravo/markl`'s
-files (heavy deps = `x/crypto/ssh`, `ssh/agent`, `dewey/pivy`). A design-stage
-map; confirm with a per-symbol audit when the module is stood up.
+`madder/stark-maple`'s rigorous audit (2026-06-20) — authoritative file +
+symbol split; supersedes the earlier first-pass map.
 
-- **Move up to `go/markl/agent`** (heavy deps): `ssh_agent.go`,
-  `ssh_agent_discover.go`, `pivy_agent_discover.go`,
-  `format_family_pivyecdhp256.go`.
-- **Mixed — symbol-level split:**
-  - `format_family_ecdsap256.go`: `EcdsaP256Verify` is pure stdlib
-    (`crypto/ecdsa`) → **core**, along with the `Format{ecdsa_p256_sig,64}` +
-    `FormatPub{ecdsa_p256_pub,Verify}` registrations; `Connect` /
-    `ecdsaP256AgentSigner` / `parseSSHEcdsaSignatureBlob` /
-    `RegisterEcdsaP256SSHFormat` are ssh-agent → **agent**.
-  - `format.go`: the `init()` registering core formats (incl. the pure
-    `makeStub*SSHFormat` stubs) is **core**; the real signer registrations are
-    **agent**.
-- **Stay in dep-light core** (stdlib crypto + dewey errors/domain interfaces):
-  `id*.go`, `purposes.go` / `purpose_type.go` / `registration*.go`,
-  `format_pub/sec/hash.go` + `hash.go`, `format_family_ed25519.go` (stdlib),
-  `format_family_nonce.go`, `util.go` / `slice.go` / `lock*.go` / `main.go`,
-  and the blech32 package.
-- **To verify in the audit:** `format_family_ssh_ed25519.go` and
-  `format_family_agex25519.go` (agex25519 pulls `x/crypto/curve25519` —
-  non-stdlib but lightweight; decide core vs. agent).
+**Dewey surface — "dep-light" reframed.** The core is *not* dewey-free: it takes
+a broad dewey dep — `dewey/pkgs/{errors, interfaces, pool, ohio, values, files,
+ui}` + `x/crypto/blake2b` (hashing). "Dep-light" means specifically that the
+core is free of `x/crypto/ssh`, `ssh/agent`, `dewey/pivy` (the agent deps) and
+`dewey/age` + `dewey/bech32` (the encryption deps). So `dewey → piggy → madder`
+holds — the core depends *down* on dewey; the ssh/pivy/age machinery is confined
+to sub-packages. (The lone `x/crypto/curve25519` use in `format.go` is just
+`ScalarSize`, inlined to `32` so the core need not take that dep.)
+
+- **CORE (`go/markl`):** `id*.go` (Id + text/binary/blech coding, crypto_pub/sec
+  stamping), `purposes.go` + `purpose_type.go`, `format.go` (registry skeleton +
+  init), `format_pub/sec/hash.go` + `hash.go`, `format_family_ed25519.go`
+  (stdlib software ed25519), `format_family_nonce.go`, `lock*.go`, `util.go`,
+  `slice.go`, `main.go`, `errors.go`, + `blech32/`.
+- **AGENT (`go/markl/agent`):** `ssh_agent.go`, `ssh_agent_discover.go`,
+  `ssh_agent_discovered_key.go`, `errors_ssh.go` (the `*NotConnected`
+  sentinels), `pivy_agent_discover.go`, `format_family_pivyecdhp256.go` (pivy
+  ECDH recipient).
+- **AGE (`go/markl/age`) — a third sub-package.** `format_family_agex25519.go`
+  pulls `dewey/age` + `dewey/bech32` — *encryption*, not signing/ssh/pivy.
+  `age_x25519_pub` is pure (Size 32 → core); the `age_x25519_sec` machinery
+  (`AgeX25519Generate`/`GetIOWrapper`) → `go/markl/age`.
+- **Mixed — symbol-level cut:**
+  - `format_family_ecdsap256.go` → CORE: `EcdsaP256Verify` (stdlib),
+    `makeStubEcdsaP256SSHFormat`, `resetEcdsaP256SSHFormatForTesting`,
+    `ErrEcdsaP256SSHAgentNotConnected`. AGENT: `ConnectEcdsaP256AgentSigner`,
+    `ecdsaP256AgentSigner`, `parseSSHEcdsaSignatureBlob`,
+    `RegisterEcdsaP256SSHFormat`.
+  - `format_family_ssh_ed25519.go` → CORE: `makeStubSSHFormat` + the
+    `*NotConnected` sentinel. `RegisterSSHEd25519Format` takes a stdlib
+    `crypto.Signer`, but its only caller is the agent → move to AGENT.
+
+**The swap-seam contract (⚠ load-bearing port problem).** Today the agent swaps
+real signers into the core's stub formats by writing the package-private
+`formats` map *directly* (bypassing `RegisterFormat`, which panics on the dup
+the stub already holds). Once `agent`/`age` are separate packages they cannot
+touch `formats`, so the core must **export a swap hook** — `SwapFormat(id,
+MarklFormat)` with overwrite (not panic-on-dup) semantics. The `Register*` funcs
+move to `agent`/`age` and hand the core a *finished* `FormatSec` (they build the
+ssh/pivy/age-backed closure; the core stays ssh/pivy/age-free — the hook takes
+the core `MarklFormat`, never an `ssh.Signer`). **Extend the stub pattern to all
+four pairs:** `ed25519_ssh` + `ecdsa_p256_ssh` are stubbed today; `pivy_ecdh_p256`
++ `age_x25519_sec` are **not** (`format.go` init wires their real machinery
+directly, so the core currently pulls `dewey/pivy` + `dewey/age` transitively).
+Both must become core stubs swapped in by `agent`/`age`, or the split is
+incomplete. madder offered to propose the exact `SwapFormat` signature once the
+core skeleton lands.
+
+### Port decisions (this branch)
+
+- **Dropped `blech32.Value.WriteToMerkleId`** (+ its `internal/0/domain_interfaces`
+  import): a back-reference from the low-level codec *up* to the markl Id
+  interface — reversing the layering and importing a madder-*internal* package
+  (not importable from piggy). madder confirmed the method is **globally dead**
+  (zero callers across madder/dodder/cutting-garden), so nothing needs the
+  inverse; the Value → Id conversion belongs on the Id side in core regardless.
+- **Kept the madder `*_test.go`** via dewey's `test_ui` harness. The originals
+  imported `dewey/pkgs/ui` (the prod UI package) whose `T` is behind
+  `//go:build test`, so bare `go test` reported `undefined: ui.T`. Ported
+  `main_test.go` to the dedicated `dewey/pkgs/test_ui` harness
+  (`test_ui.MakeTestCase` + `T.Run`), tagged `//go:build test`; the two stdlib
+  override tests (`#168`/`#170`) carry over verbatim. `just test-go-markl` runs
+  `go test -tags test`, mirroring madder's own convention.
 
 ### Reference implementation & cross-impl conformance
 
@@ -229,9 +276,14 @@ madder repoints from owning the registry to depending on it:
   one more entry that piggy now owns canonically; no re-registration.
 - **#184 (rename)** — gated on this inversion landing, so it targets the
   relocated source of truth.
-- **#185 (madder out-of-process signing delegation)** — the deferred
-  whole-closure pivy/ssh shed; gated on this inversion landing. #183 only does
-  the direct-dep shed.
+- **#185 (madder out-of-process delegation)** — the deferred whole-closure
+  shed; gated on this inversion. Per the audit it reduces to delegating blob
+  **encryption** out-of-process (the `Id.GetIOWrapper` →
+  `PivyEcdhP256GetIOWrapper`/`AgeX25519GetIOWrapper` call-sites in
+  `blob_store_configs/encryption_keys.go`, `blob_stores/store_inventory_archive*.go`,
+  `blob_io/main.go`), **not** signing — madder already signs with software
+  ed25519 and does no agent-backed in-process signing. #183 only does the
+  direct-dep shed.
 - **papi#7 / RFC-0001 Amendment 9** — downstream and independent: papi's
   verifier consumes the pinned wire form directly and does not import the
   registry. The producer side (`piggy papi sign`) + cross-impl conformance ride
