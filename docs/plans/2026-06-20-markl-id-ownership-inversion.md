@@ -1,7 +1,12 @@
 # markl-id ownership inversion — piggy as the canonical registry + Go library
 
 - **Date**: 2026-06-20
-- **Status**: draft (design for review)
+- **Status**: core built & merged to master (#183); `agent`/`age`
+  sub-packages + RFC-0002 vector generator in progress. The as-built
+  module differs from the original sketch below in one structural axis —
+  the **framework / registrations split** (see "As-built refinement"
+  under Target architecture). Resume guide:
+  [#188](https://github.com/amarbel-llc/piggy/issues/188).
 - **Driver**: [amarbel-llc/piggy#183](https://github.com/amarbel-llc/piggy/issues/183).
   Today madder (`go/internal/bravo/markl`) is the canonical purpose/format
   registry and piggy's `crates/piggy-markl` is a hand Rust port that mirrors
@@ -116,6 +121,56 @@ layer**. Proposed split:
 - **`go/markl/age/` — age x25519 encryption, a third sub-package.** `dewey/age`
   + `dewey/bech32` (the `age_x25519_sec` encryption machinery) are confined here,
   parallel to `agent`, so neither lands in the core.
+
+### As-built refinement: framework vs. registrations (2026-06-20)
+
+The module sketch above put the concrete format/purpose registrations in the
+core package's `init()` (mirroring madder, where `format.go`'s init wires the
+real machinery). **As built (#183, merged to master)** the core module splits
+that one step further, along a **mechanism / registrations** axis, so the
+framework package carries *no* concrete crypto or vocabulary *data*:
+
+- **`internal/bravo/markl` — pure framework.** The `Id` codec (text/binary
+  /blech32, split-HRP), the format-registry *mechanism* (`formats` map,
+  `RegisterFormat` panic-on-dup, `SwapFormat` closed-set overwrite,
+  `GetFormatOrError`, `RegisterPurposeIdAlias`), the purpose-registry mechanism
+  (`RegisterPurpose`, `Purpose`, `PurposeType`), the `FormatId`/`Format` types,
+  the **vocabulary constants** (every `FormatId*` / `Purpose*` string — including
+  the `papi-*` purpose constants carried transitionally with a `MOVE-DOWN` note
+  for #186), and the error sentinels. It installs **no** concrete format or
+  purpose. The lone exception is the **hash family**
+  (`FormatHashSha256`/`FormatHashBlake2b256`): it stays in the framework because
+  it is coupled to the `FormatHash` type and a private `formatHashes` map that
+  `id.go` reads directly — lifting it out is a rewrite, not a relocation, so it
+  was left in place (its own `init()` in `format_hash.go`, not `RegisterFormat`).
+- **`internal/charlie/markl_registrations` — piggy's native registrations.** The
+  format registrations (`init()` calling `RegisterFormat`), the crypto primitives
+  (`Ed25519*`, `EcdsaP256Verify`, `EcdsaP384Verify`, `NonceGenerate32`), the
+  **four erroring stub makers** (`ed25519_ssh`, `ecdsa_p256_ssh`,
+  `pivy_ecdh_p256`, `age_x25519_sec`) that the `agent`/`age` sub-packages later
+  swap real impls over via `SwapFormat`, and piggy's **purpose** registrations
+  (`piggy-piv_auth/sig/card_auth-v1`, `piggy-recipient-v1`). **Opt-in**: a
+  consumer must blank-import this package to fire its `init()`. Validated by
+  `installed_test.go`.
+- **`pkgs/{domain_interfaces,blech32,markl,markl_registrations}`** — the dagnabit
+  `export` facades, drift-gated by `lint-facades`.
+
+Why the extra split: it keeps the framework a pure mechanism a downstream domain
+can import *without* inheriting piggy's concrete crypto, and makes registration
+**opt-in and parallel** for formats and purposes alike — the same posture ADR
+0006 takes for purposes (go/markl registers only piggy's; madder/papi/dodder
+register their own). It also sets up the `agent`/`age` ports cleanly: those
+sub-packages swap real impls over the four core stubs that `markl_registrations`
+already installs, rather than the core having wired the real (`dewey/pivy`,
+`dewey/age`) machinery directly.
+
+The nix/gate wiring landed as a **`just`-level dagnabit-export gate**
+(`build-go-markl` / `test-go-markl` / `lint-facades` threaded into
+`build`/`test`/`lint`, so the pre-merge `just` hook exercises the module),
+**not** a `buildGoModule` derivation — go/markl is a consumed library with no
+piggy-shipped binary (maintainer ruling, #183/#188). A hermetic
+gomod2nix/conformist lane is deferred until piggy moves off treefmt onto
+conformist.
 
 ### Core / agent / age boundary (madder per-symbol audit)
 
