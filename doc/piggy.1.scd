@@ -346,6 +346,18 @@ passthroughs for the C pivy binaries:
 	touch_policy) and same human/ndjson auto-selection as *piggy pass
 	recipients list-available*.
 
+	*Uninitialized cards.* A factory-blank PIV card (no CHUID, so an
+	all-zeros GUID and no slots) is also enumerated, as a card-level
+	discovery record carrying its *reader* and — on a YubiKey — its
+	*serial* (the handle for provisioning). In *--format=ndjson* it is an
+	object with *uninitialized* set to true, the all-zeros *guid*, the
+	*reader*, and (when available) *serial* — a boolean marker mirroring
+	*unsupported:true*, with no *slot* or *id*. In *--format=human* it is
+	a *# uninitialized:* comment line; in *--format=ssh* it is suppressed
+	(no key). This is the only piggy surface that shows blank cards: every
+	other command enumerates strictly, so a blank card never perturbs
+	sole-card auto-selection.
+
 	*--format=ssh* renders OpenSSH _authorized_keys_-style output instead
 	of the markl-native human/ndjson forms. Supported 9A/9C/9E slots
 	emit one clean line each, keyed by algorithm

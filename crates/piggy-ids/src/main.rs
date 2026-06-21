@@ -306,6 +306,12 @@ fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
             Ok(ExitCode::SUCCESS)
         }
         Classification::Unsupported { reason, .. } => Err(reason.into()),
+        // `classify_slot` only ever returns Supported/Unsupported (it is
+        // handed an already-read slot); Uninitialized is a card-level record
+        // produced by the enumerators, never here.
+        Classification::Uninitialized { .. } => {
+            unreachable!("classify_slot never returns Uninitialized")
+        }
     }
 }
 
@@ -406,6 +412,18 @@ fn slot_sort_key(slot_id: u8) -> (u8, u8) {
     (retired as u8, slot_id)
 }
 
+/// Build the card-level `Uninitialized` discovery record for a factory-blank
+/// token (no CHUID → all-zeros GUID, no slots). Carries the `reader` and the
+/// YubiKey `serial` (when available) so a caller can find and provision the
+/// card (piggy#193/#194).
+fn uninitialized_classification(token: &piggy_piv::PivToken) -> piggy_ids::Classification {
+    piggy_ids::Classification::Uninitialized {
+        guid: token.guid().clone(),
+        reader: token.reader_name().to_string(),
+        serial: token.yk_serial(),
+    }
+}
+
 /// Enumerate every attached PIV card and emit one `Classification` per
 /// populated recipient-eligible slot. Skip empty/unreadable slots
 /// silently — a card with only a populated 9D produces one row, a card
@@ -422,11 +440,17 @@ fn enumerate_all_recipient_slots() -> Result<Vec<piggy_ids::Classification>, Dyn
     use piggy_ids::{Classification, ClassifyInput, classify_slot};
 
     let ctx = PivContext::new()?;
-    let tokens = ctx.enumerate_tokens()?;
+    let tokens = ctx.enumerate_tokens_including_uninitialized()?;
 
     let slots = recipient_eligible_slots();
     let mut classifications: Vec<Classification> = Vec::new();
     for token in &tokens {
+        // A factory-blank card has no CHUID and no slots; surface it as a
+        // discovery record (piggy#193) rather than an empty omission.
+        if !token.is_initialized() {
+            classifications.push(uninitialized_classification(token));
+            continue;
+        }
         let reader = token.reader_name().to_string();
         let serial = token.yk_serial();
         for &slot_id in &slots {
@@ -481,6 +505,9 @@ fn cmd_detect_all_pubkeys() -> Result<ExitCode, DynErr> {
             Classification::Unsupported { guid, reason, .. } => {
                 writeln!(out, "unsupported\t{}\t{}", guid.to_hex(), reason)?;
             }
+            // This path enumerates strictly (no blank cards), and a blank card
+            // has no recipient to add anyway — skip it.
+            Classification::Uninitialized { .. } => {}
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -508,13 +535,19 @@ fn enumerate_all_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
     use piggy_ids::{Classification, ClassifyInput, classify_slot, classify_ssh_slot};
 
     let ctx = PivContext::new()?;
-    let tokens = ctx.enumerate_tokens()?;
+    let tokens = ctx.enumerate_tokens_including_uninitialized()?;
 
     let recipient_slots = recipient_eligible_slots();
     let ssh_slots = ssh_eligible_slots();
 
     let mut classifications: Vec<Classification> = Vec::new();
     for token in &tokens {
+        // A factory-blank card has no CHUID and no slots; surface it as a
+        // discovery record (piggy#193) rather than an empty omission.
+        if !token.is_initialized() {
+            classifications.push(uninitialized_classification(token));
+            continue;
+        }
         let reader = token.reader_name().to_string();
         let serial = token.yk_serial();
 
@@ -679,6 +712,22 @@ fn format_human(c: &piggy_ids::Classification) -> String {
             ),
             reason,
         ),
+        Classification::Uninitialized {
+            guid,
+            reader,
+            serial,
+        } => {
+            let serial_field = match serial {
+                Some(s) => format!(", serial={s}"),
+                None => String::new(),
+            };
+            format!(
+                "# uninitialized: guid={}, reader={}{}",
+                guid.to_hex(),
+                reader,
+                serial_field,
+            )
+        }
     }
 }
 
@@ -788,6 +837,24 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
                 cn_field,
                 policy_fields,
                 json_string(reason),
+            )
+        }
+        Classification::Uninitialized {
+            guid,
+            reader,
+            serial,
+        } => {
+            // Card-level discovery record (piggy#193): a boolean marker
+            // mirroring `unsupported:true`, plus the all-zeros guid, reader, and
+            // (when available) serial — the handle for provisioning. No slot.
+            let serial_field = serial
+                .map(|s| format!(",\"serial\":{}", s))
+                .unwrap_or_default();
+            format!(
+                "{{\"uninitialized\":true,\"guid\":{},\"reader\":{}{}}}",
+                json_string(&guid.to_hex()),
+                json_string(reader),
+                serial_field,
             )
         }
     }
@@ -961,6 +1028,66 @@ mod tests {
             touch_policy: None,
             reason: "slot 9D is Rsa2048".into(),
         }
+    }
+
+    fn sample_uninitialized(serial: Option<u32>) -> Classification {
+        Classification::Uninitialized {
+            guid: Guid::from_bytes(&[0u8; 16]).expect("all-zeros guid"),
+            reader: "Yubico YubiKey OTP+FIDO+CCID 00 00".into(),
+            serial,
+        }
+    }
+
+    #[test]
+    fn format_ndjson_uninitialized_marks_uninitialized_true() {
+        let line = format_ndjson(&sample_uninitialized(Some(15909078)));
+        assert!(
+            line.contains("\"uninitialized\":true"),
+            "expected uninitialized flag: {line}"
+        );
+        assert!(
+            line.contains("\"guid\":\"00000000000000000000000000000000\""),
+            "expected all-zeros guid: {line}"
+        );
+        assert!(
+            line.contains("\"serial\":15909078"),
+            "serial dropped: {line}"
+        );
+        // Card-level: no slot, no id.
+        assert!(!line.contains("\"slot\""), "unexpected slot key: {line}");
+        assert!(!line.contains("\"id\""), "unexpected id key: {line}");
+    }
+
+    #[test]
+    fn format_ndjson_uninitialized_omits_serial_when_absent() {
+        let line = format_ndjson(&sample_uninitialized(None));
+        assert!(
+            line.contains("\"uninitialized\":true"),
+            "flag missing: {line}"
+        );
+        assert!(!line.contains("\"serial\""), "serial key present: {line}");
+    }
+
+    #[test]
+    fn format_human_uninitialized_is_comment() {
+        let line = format_human(&sample_uninitialized(Some(15909078)));
+        assert!(
+            line.starts_with("# uninitialized:"),
+            "expected uninitialized comment: {line}"
+        );
+        assert!(line.contains("serial=15909078"), "serial missing: {line}");
+        assert!(
+            line.contains("guid=00000000000000000000000000000000"),
+            "guid missing: {line}"
+        );
+    }
+
+    #[test]
+    fn format_ssh_uninitialized_returns_none() {
+        assert!(
+            format_ssh(&sample_uninitialized(Some(1))).is_none(),
+            "uninitialized cards have no SSH key and must be suppressed"
+        );
     }
 
     #[test]

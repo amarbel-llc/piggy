@@ -67,10 +67,41 @@ pub struct PivToken {
     /// non-9000 SW) or YubiKey firmware too old to support the INS.
     /// See `read_yk_serial` for the failure-as-None policy.
     yk_serial: Option<u32>,
+    /// Whether the card carries a CHUID (and thus a real GUID). `false` for
+    /// a factory-blank / uninitialized PIV card. Only `connect_inner` with
+    /// `require_chuid = false` can yield `false` here; the strict `connect`
+    /// errors instead, so existing callers never see an uninitialized token.
+    initialized: bool,
 }
 
 impl PivToken {
     pub fn connect(ctx: &PivContext, reader: &str) -> Result<Self, PivError> {
+        Self::connect_inner(ctx, reader, true)
+    }
+
+    /// Like [`PivToken::connect`], but a PIV card with no CHUID (an
+    /// uninitialized / factory-blank card) is returned as a token with an
+    /// all-zeros GUID and [`PivToken::is_initialized`] == `false`, instead of
+    /// erroring. A non-PIV card (SELECT PIV fails) still errors.
+    ///
+    /// Used by [`PivContext::enumerate_tokens_including_uninitialized`] so
+    /// `piggy list` can surface blank cards for provisioning discovery
+    /// (piggy#193). The strict [`PivToken::connect`] keeps every other caller —
+    /// which auto-selects the sole card and errors on more than one — from
+    /// seeing blanks, so plugging a blank card in next to a real one does not
+    /// turn an auto-select into an ambiguity error.
+    pub fn connect_allowing_uninitialized(
+        ctx: &PivContext,
+        reader: &str,
+    ) -> Result<Self, PivError> {
+        Self::connect_inner(ctx, reader, false)
+    }
+
+    fn connect_inner(
+        ctx: &PivContext,
+        reader: &str,
+        require_chuid: bool,
+    ) -> Result<Self, PivError> {
         let cstr = std::ffi::CString::new(reader).map_err(|e| PivError::Other(e.to_string()))?;
         let card = ctx
             .pcsc_context()
@@ -80,9 +111,23 @@ impl PivToken {
             guid: Guid::from_bytes(&[0; 16])?,
             reader_name: reader.to_string(),
             yk_serial: None,
+            initialized: false,
         };
         token.select_piv()?;
-        token.read_chuid()?;
+        match token.read_chuid() {
+            Ok(()) => token.initialized = true,
+            Err(e) => {
+                // A non-blank card that fails CHUID read is a real error for
+                // strict callers. For the tolerant path, treat any CHUID-read
+                // failure on an otherwise-selectable PIV applet as
+                // "uninitialized": leave the GUID all-zeros (set above) and
+                // initialized = false, matching how `pivy-tool list` reports a
+                // factory-blank card (guid 0000…, "needs initialization").
+                if require_chuid {
+                    return Err(e);
+                }
+            }
+        }
         token.yk_serial = token.read_yk_serial();
         Ok(token)
     }
@@ -147,6 +192,14 @@ impl PivToken {
     /// `read_yk_serial`; never re-queries the card.
     pub fn yk_serial(&self) -> Option<u32> {
         self.yk_serial
+    }
+
+    /// Whether the card is initialized (carries a CHUID, and thus a real
+    /// GUID). `false` only for a factory-blank card returned via
+    /// [`PivToken::connect_allowing_uninitialized`]; the strict
+    /// [`PivToken::connect`] never returns an uninitialized token.
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
     }
 
     /// Probe the YubiKey factory-serial vendor INS (0xF8) against the
@@ -616,6 +669,24 @@ impl PivContext {
         let mut tokens = Vec::new();
         for reader in &readers {
             match PivToken::connect(self, reader) {
+                Ok(token) => tokens.push(token),
+                Err(_) => continue, // Not a PIV card or not inserted
+            }
+        }
+        Ok(tokens)
+    }
+
+    /// Like [`PivContext::enumerate_tokens`], but ALSO includes uninitialized
+    /// (factory-blank, no-CHUID) PIV cards — returned with an all-zeros GUID
+    /// and [`PivToken::is_initialized`] == `false`. Non-PIV cards are still
+    /// skipped. Used by `piggy list` to surface blank cards for provisioning
+    /// discovery (piggy#193); other callers keep [`enumerate_tokens`] so a
+    /// blank card never perturbs their sole-card auto-selection.
+    pub fn enumerate_tokens_including_uninitialized(&self) -> Result<Vec<PivToken>, PivError> {
+        let readers = self.list_readers()?;
+        let mut tokens = Vec::new();
+        for reader in &readers {
+            match PivToken::connect_allowing_uninitialized(self, reader) {
                 Ok(token) => tokens.push(token),
                 Err(_) => continue, // Not a PIV card or not inserted
             }

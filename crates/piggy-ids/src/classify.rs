@@ -57,6 +57,17 @@ pub enum Classification {
         touch_policy: Option<TouchPolicy>,
         reason: String,
     },
+    /// A factory-blank / uninitialized PIV card: no CHUID (so an all-zeros
+    /// GUID) and no usable slots. Card-level, not slot-level — it carries only
+    /// the identifiers needed to discover and later provision the card
+    /// (piggy#193): `reader` and, on a YubiKey, `serial`. Surfaced only by the
+    /// `enumerate_tokens_including_uninitialized` path (`piggy list` /
+    /// `recipients list-available`).
+    Uninitialized {
+        guid: Guid,
+        reader: String,
+        serial: Option<u32>,
+    },
 }
 
 impl Classification {
@@ -64,6 +75,7 @@ impl Classification {
         match self {
             Classification::Supported { guid, .. } => guid,
             Classification::Unsupported { guid, .. } => guid,
+            Classification::Uninitialized { guid, .. } => guid,
         }
     }
 
@@ -71,6 +83,7 @@ impl Classification {
         match self {
             Classification::Supported { reader, .. } => reader,
             Classification::Unsupported { reader, .. } => reader,
+            Classification::Uninitialized { reader, .. } => reader,
         }
     }
 
@@ -78,13 +91,18 @@ impl Classification {
         match self {
             Classification::Supported { serial, .. } => *serial,
             Classification::Unsupported { serial, .. } => *serial,
+            Classification::Uninitialized { serial, .. } => *serial,
         }
     }
 
+    /// PIV slot id for slot-level classifications. `Uninitialized` is
+    /// card-level (no slot); it returns `0x00` purely so the existing
+    /// `(guid, slot_id)` sort is total — `0x00` is not a real slot.
     pub fn slot_id(&self) -> u8 {
         match self {
             Classification::Supported { slot_id, .. } => *slot_id,
             Classification::Unsupported { slot_id, .. } => *slot_id,
+            Classification::Uninitialized { .. } => 0x00,
         }
     }
 
@@ -92,6 +110,7 @@ impl Classification {
         match self {
             Classification::Supported { cn, .. } => cn.as_deref(),
             Classification::Unsupported { cn, .. } => cn.as_deref(),
+            Classification::Uninitialized { .. } => None,
         }
     }
 
@@ -99,6 +118,7 @@ impl Classification {
         match self {
             Classification::Supported { pin_policy, .. } => *pin_policy,
             Classification::Unsupported { pin_policy, .. } => *pin_policy,
+            Classification::Uninitialized { .. } => None,
         }
     }
 
@@ -106,6 +126,7 @@ impl Classification {
         match self {
             Classification::Supported { touch_policy, .. } => *touch_policy,
             Classification::Unsupported { touch_policy, .. } => *touch_policy,
+            Classification::Uninitialized { .. } => None,
         }
     }
 }

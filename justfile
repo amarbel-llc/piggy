@@ -546,6 +546,22 @@ test-bats-conformance-sign-bytes-fibby:
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_sign_bytes_fibby.bats
 
+# Fibby-backed gate for `piggy list` blank-card discovery (piggy#193): a no-seed
+# yk5 fibby card presents as uninitialized (no CHUID); assert `piggy list`
+# surfaces it as a card-level `uninitialized` ndjson record with serial, and that
+# a seeded card is NOT mislabelled. Agentless; [linux]-only like the fibby lanes.
+[group('post-build')]
+[linux]
+test-bats-conformance-list-blank-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_list_blank_fibby.bats
+
 # Fibby-backed gate for `recipients sync` with NO file: re-encrypt the store
 # (whole or `-p` subtree) to the current piggy-ids recipients, then prove the
 # result still decrypts through the agent <-> fibby slot-9D rebox path. The
