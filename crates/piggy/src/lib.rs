@@ -15,7 +15,12 @@
 //!   card-presence probe loop, atop the #56 PC/SC transactions. See
 //!   the head of `main.rs` for the dispatch rationale.
 
+//! - `ecdsa_sig` — shared DER ECDSA signature reframing (DER → raw
+//!   `r‖s` or `(r, s)`), used by both the agent's SSH-signature path
+//!   and `piggy sign-bytes`.
+
 pub mod agent_client;
 pub mod card_oracle;
 pub mod cmd;
+pub mod ecdsa_sig;
 pub mod stats;

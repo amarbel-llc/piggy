@@ -188,6 +188,16 @@ pub fn timed_papi<F: FnOnce() -> i32>(sub: &str, f: F) -> i32 {
     code
 }
 
+/// Time `f` — the `piggy sign-bytes` handler returning its exit code — and
+/// emit a `piggy.sign_bytes.run` counter + timer. Returns the code. Rust-only
+/// category, like `piggy.health` — the C agent has no CLI sign-bytes path.
+pub fn timed_sign_bytes<F: FnOnce() -> i32>(f: F) -> i32 {
+    let start = Instant::now();
+    let code = f();
+    record("sign_bytes", "run", outcome_of_code(code), start.elapsed());
+    code
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

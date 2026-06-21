@@ -12,6 +12,8 @@ piggy - stores, retrieves, generates, and synchronizes passwords using PIV smart
 
 *piggy ssh-copy-id* [*--ids* _PATH_] [_SSH-COPY-ID-OPTIONS_]... [_user_@]_host_
 
+*piggy sign-bytes* *--slot* _9a_|_9c_ [*--guid* _GUID_] [*--format* _raw_|_der_] [*-P* _PIN_]
+
 *piggy help*
 
 *piggy version*
@@ -399,6 +401,39 @@ passthroughs for the C pivy binaries:
 	```
 	piggy ssh-copy-id alice@server.example
 	piggy ssh-copy-id --ids ./team-ids -p 2222 deploy@host
+	```
+
+*sign-bytes* *--slot* _9a_|_9c_ [*--guid* _GUID_] [*--format* _raw_|_der_] [*-P* _PIN_]
+	Sign the bytes read from stdin with a PIV signing-slot key and write
+	the signature to stdout. A low-level, caller-agnostic primitive:
+	piggy applies no canonicalization to the message — the caller controls
+	the exact bytes. *SHA-256* (P-256) / *SHA-384* (P-384) hashing is
+	intrinsic to the *ecdsa-sha2-nistp256*/*384* algorithm and is applied
+	before the card signs, matching *pivy-tool sign*.
+
+	*--slot* selects the signing slot: *9a* (PIV Authentication) or *9c*
+	(Digital Signature). Slot *9d* (Key Management / ECDH) is rejected — it
+	cannot sign. The slot must hold an ECDSA P-256 or P-384 key.
+
+	*--format* sets the output framing (default *raw*):
+	*raw* emits the fixed-width _r‖s_ (P-256 → 64 bytes, P-384 → 96) — the
+	markl *...@ecdsa_p256_sig* payload a downstream consumer can wrap
+	directly. *der* emits the card-native ASN.1 _SEQUENCE { INTEGER r,
+	INTEGER s }_ (matches *pivy-tool sign*; for callers that already parse
+	DER).
+
+	*--guid* _GUID_ selects among several attached cards (direct-PCSC, no
+	agent); with one card it is optional. The PIN comes from *-P* _PIN_ or,
+	absent that, an *SSH_ASKPASS*/tty prompt (see *ENVIRONMENT VARIABLES*).
+	Signing on slot 9A/9C exercises the private key and requires the card
+	PIN per the slot's policy — this is the only top-level command besides
+	the agent that does so.
+
+	The output is binary; redirect it to a file or pipe it. Example
+	(produce a raw _r‖s_ signature over a file):
+
+	```
+	piggy sign-bytes --slot 9a --guid DEADBEEF... < message > sig.raw
 	```
 
 *help*

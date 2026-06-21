@@ -59,6 +59,7 @@ mod reencrypt;
 mod rm;
 mod show;
 mod show_batch;
+mod sign_bytes;
 mod ssh_copy_id;
 mod store;
 mod tree_recipients;
@@ -130,6 +131,19 @@ enum Command {
     /// encryption recipients in the same file are ignored.
     #[command(name = "ssh-copy-id")]
     SshCopyId {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Sign stdin with a PIV signing-slot key and emit the signature.
+    ///
+    /// A low-level, caller-agnostic byte-signer: reads a message on stdin,
+    /// signs it with slot 9A (auth) or 9C (signature) on a selected card, and
+    /// writes the signature to stdout as raw `r‖s` (default) or DER. piggy
+    /// applies no canonicalization — the caller controls the exact bytes.
+    /// `sign-bytes` owns its argv parsing (`--slot`/`--guid`/`--format`/`-P`);
+    /// flags pass through to that parser.
+    #[command(name = "sign-bytes", disable_help_flag = true)]
+    SignBytes {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
@@ -540,6 +554,10 @@ fn main() {
         })),
 
         Command::SshCopyId { rest } => std::process::exit(ssh_copy_id::run(&rest)),
+
+        Command::SignBytes { rest } => {
+            std::process::exit(piggy::stats::timed_sign_bytes(|| sign_bytes::run(&rest)))
+        }
 
         // papi::run owns its own clap parser and per-subcommand
         // `stats::timed_papi` wrapping, so no timed wrapper here.

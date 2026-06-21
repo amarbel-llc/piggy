@@ -528,6 +528,24 @@ test-bats-conformance-papi-fibby:
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_papi_fibby.bats
 
+# Fibby-backed gate for `piggy sign-bytes` (piggy#190): seed slot 9A on fibby,
+# sign a message direct-PCSC, and verify the signature with openssl against the
+# slot-9A pubkey (read back via `piggy list --format=ssh`). Confirms real card
+# crypto + the DER framing (the fibby DER confirmation from the papi#15
+# co-design). sign-bytes is agentless, so no pivy-agent is needed. [linux]-only
+# like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect is a no-op on macOS).
+[group('post-build')]
+[linux]
+test-bats-conformance-sign-bytes-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_sign_bytes_fibby.bats
+
 # Fibby-backed gate for `recipients sync` with NO file: re-encrypt the store
 # (whole or `-p` subtree) to the current piggy-ids recipients, then prove the
 # result still decrypts through the agent <-> fibby slot-9D rebox path. The

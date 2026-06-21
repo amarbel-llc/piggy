@@ -758,122 +758,13 @@ fn to_ssh_signature(
 }
 
 /// Decode a DER-encoded ECDSA signature into (r, s) as big-endian byte arrays.
-/// DER format: SEQUENCE { INTEGER r, INTEGER s }.
 ///
-/// Every bounds check is explicit — the card may return arbitrary bytes, and
-/// a malformed length field (e.g. `r_len = 0xFF` on a short buffer) must be
-/// rejected with an error, never cause an index-out-of-bounds panic.
-///
-/// Supports DER long-form SEQUENCE / INTEGER lengths (0x81 LL, 0x82 LL LL)
-/// so P-384 signatures at or beyond the short-form 0-127 threshold decode
-/// correctly.
+/// Thin agent-side wrapper over the shared, bounds-checked parser in
+/// [`crate::ecdsa_sig`], adapting its `String` error into [`AgentError`]. The
+/// parsing logic (and its exhaustive malformed-input tests) lives in the
+/// shared module so `piggy sign-bytes` reuses the exact same decoder.
 fn decode_der_ecdsa_signature(der: &[u8]) -> Result<(Vec<u8>, Vec<u8>), AgentError> {
-    // Outer SEQUENCE tag.
-    if der.first().copied() != Some(0x30) {
-        return Err(AgentError::Other(
-            "invalid DER ECDSA signature: not a SEQUENCE".into(),
-        ));
-    }
-
-    // Parse SEQUENCE length and its header size (tag + length-of-length).
-    let (seq_len, seq_hdr) = parse_der_length(&der[1..])?;
-    let seq_start = 1 + seq_hdr;
-    let seq_end = seq_start
-        .checked_add(seq_len)
-        .ok_or_else(|| AgentError::Other("DER SEQUENCE length overflows usize".into()))?;
-    if der.len() < seq_end {
-        return Err(AgentError::Other(
-            "invalid DER ECDSA signature: truncated body".into(),
-        ));
-    }
-
-    let (r, after_r) = read_der_integer(der, seq_start, seq_end, "r")?;
-    let (s, after_s) = read_der_integer(der, after_r, seq_end, "s")?;
-    if after_s != seq_end {
-        return Err(AgentError::Other(
-            "invalid DER ECDSA signature: trailing bytes after s".into(),
-        ));
-    }
-
-    Ok((r, s))
-}
-
-/// Read a DER INTEGER `{ 0x02 len bytes }` starting at `pos`. Returns the
-/// integer bytes and the position just past the integer. `end` caps the
-/// enclosing SEQUENCE body so we never read past it.
-fn read_der_integer(
-    der: &[u8],
-    pos: usize,
-    end: usize,
-    label: &str,
-) -> Result<(Vec<u8>, usize), AgentError> {
-    if pos >= end {
-        return Err(AgentError::Other(
-            format!("invalid DER ECDSA signature: missing INTEGER for {}", label).into(),
-        ));
-    }
-    if der[pos] != 0x02 {
-        return Err(AgentError::Other(
-            format!("expected INTEGER tag for {}", label).into(),
-        ));
-    }
-    let (int_len, int_hdr) = parse_der_length(&der[pos + 1..end])?;
-    let int_start = pos + 1 + int_hdr;
-    let int_end = int_start
-        .checked_add(int_len)
-        .ok_or_else(|| AgentError::Other("DER INTEGER length overflows usize".into()))?;
-    if int_end > end {
-        return Err(AgentError::Other(
-            format!(
-                "invalid DER ECDSA signature: {} INTEGER length exceeds SEQUENCE",
-                label
-            )
-            .into(),
-        ));
-    }
-    Ok((der[int_start..int_end].to_vec(), int_end))
-}
-
-/// Parse a DER length prefix. Returns `(length, header_byte_count)` where
-/// `header_byte_count` is 1 (short form), 2 (0x81 LL), or 3 (0x82 LL LL).
-/// Rejects indefinite form (0x80) and lengths > 0x82 (longer than needed
-/// for any realistic ECDSA signature).
-fn parse_der_length(bytes: &[u8]) -> Result<(usize, usize), AgentError> {
-    let first = *bytes
-        .first()
-        .ok_or_else(|| AgentError::Other("DER length: missing length byte".into()))?;
-    if first < 0x80 {
-        Ok((first as usize, 1))
-    } else if first == 0x81 {
-        let b = *bytes
-            .get(1)
-            .ok_or_else(|| AgentError::Other("DER length: truncated 0x81".into()))?;
-        // 0x81 MUST be used only for lengths >= 128; reject non-canonical encoding.
-        if b < 0x80 {
-            return Err(AgentError::Other(
-                "DER length: non-canonical 0x81 short length".into(),
-            ));
-        }
-        Ok((b as usize, 2))
-    } else if first == 0x82 {
-        let hi = *bytes
-            .get(1)
-            .ok_or_else(|| AgentError::Other("DER length: truncated 0x82".into()))?;
-        let lo = *bytes
-            .get(2)
-            .ok_or_else(|| AgentError::Other("DER length: truncated 0x82".into()))?;
-        // 0x82 MUST be used only for lengths >= 256.
-        if hi == 0 {
-            return Err(AgentError::Other(
-                "DER length: non-canonical 0x82 encoding".into(),
-            ));
-        }
-        Ok((u16::from_be_bytes([hi, lo]) as usize, 3))
-    } else {
-        Err(AgentError::Other(
-            format!("DER length: unsupported form 0x{:02x}", first).into(),
-        ))
-    }
+    crate::ecdsa_sig::decode_der_ecdsa_signature(der).map_err(|e| AgentError::Other(e.into()))
 }
 
 /// Read an SSH string (u32 length prefix + payload) from `data` at `offset`.
