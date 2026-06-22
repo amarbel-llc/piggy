@@ -440,6 +440,14 @@ enum CardCommand {
         /// multiple are present.
         #[arg(long)]
         serial: Option<u32>,
+        /// Also accept an already-initialized card-in-hand and re-provision it
+        /// (piggy#204). Without this, only a factory-blank card is eligible.
+        /// Reprovision overwrites the card's 9A + 9D keys/certs and resets
+        /// PIN/PUK/management key, behind a destructive-overwrite confirm; it
+        /// requires the card to still be at its factory-default credentials
+        /// (a card whose creds were rotated fails at admin-auth).
+        #[arg(long = "allow-reprovision")]
+        allow_reprovision: bool,
         /// Interaction frontend: `tty` (default, askpass) or `jsonrpc` (an
         /// external program drives the prompts over `--socket`).
         #[arg(long, value_enum, default_value_t = piggy::card::frontend::select::FrontendKind::Tty)]
@@ -615,10 +623,11 @@ fn main() {
         Command::Card(args) => match args.cmd {
             CardCommand::Init {
                 serial,
+                allow_reprovision,
                 frontend,
                 socket,
             } => std::process::exit(piggy::stats::timed_card("init", || {
-                piggy::card::init_cmd::run(serial, frontend, socket.as_deref())
+                piggy::card::init_cmd::run(serial, allow_reprovision, frontend, socket.as_deref())
             })),
         },
 

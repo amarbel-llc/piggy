@@ -69,22 +69,40 @@ impl ProvisionCard for SessionCard<'_, '_> {
     }
 }
 
-/// Select the blank card to provision: by `--serial` if given, else the sole
-/// uninitialized card. Errors clearly on none / ambiguity.
-fn select_blank(tokens: Vec<PivToken>, serial: Option<u32>) -> Result<PivToken, String> {
-    let mut blanks: Vec<PivToken> = tokens.into_iter().filter(|t| !t.is_initialized()).collect();
+/// Select the card to provision: by `--serial` if given, else the sole
+/// eligible card. Errors clearly on none / ambiguity.
+///
+/// Without `allow_reprovision`, only an uninitialized (factory-blank) card is
+/// eligible — the default `card init`. With `allow_reprovision` (piggy#204) an
+/// already-initialized card-in-hand is eligible too, so `card init
+/// --allow-reprovision` can re-provision it. A card whose credentials have been
+/// rotated off the factory defaults still fails later at admin-auth (the
+/// creds-lost path is out of scope — papi revocation), so accepting it here
+/// only broadens *selection*, not the trust model.
+fn select_card_for_provision(
+    tokens: Vec<PivToken>,
+    serial: Option<u32>,
+    allow_reprovision: bool,
+) -> Result<PivToken, String> {
+    let mut eligible: Vec<PivToken> = tokens
+        .into_iter()
+        .filter(|t| allow_reprovision || !t.is_initialized())
+        .collect();
+    let noun = if allow_reprovision {
+        "PIV card"
+    } else {
+        "uninitialized (factory-blank) PIV card"
+    };
     match serial {
-        Some(want) => blanks
+        Some(want) => eligible
             .into_iter()
             .find(|t| t.yk_serial() == Some(want))
-            .ok_or_else(|| format!("no uninitialized PIV card with serial {want}")),
-        None => match blanks.len() {
-            0 => Err(
-                "no uninitialized (factory-blank) PIV card found; insert one to provision".into(),
-            ),
-            1 => Ok(blanks.remove(0)),
+            .ok_or_else(|| format!("no {noun} with serial {want}")),
+        None => match eligible.len() {
+            0 => Err(format!("no {noun} found; insert one to provision")),
+            1 => Ok(eligible.remove(0)),
             n => Err(format!(
-                "{n} uninitialized cards present; choose one with --serial <N>"
+                "{n} candidate cards present; choose one with --serial <N>"
             )),
         },
     }
@@ -100,14 +118,20 @@ fn select_blank(tokens: Vec<PivToken>, serial: Option<u32>) -> Result<PivToken, 
 /// [`SessionCard`] adapter then holds the live session for the engine.
 pub fn provision_with_frontend(
     serial: Option<u32>,
+    allow_reprovision: bool,
     frontend: &mut dyn Frontend,
 ) -> Result<ProvisionOutcome, ProvisionError> {
     let ctx = PivContext::new().map_err(|e| ProvisionError::Setup(format!("PC/SC: {e}")))?;
     let tokens = ctx
         .enumerate_tokens_including_uninitialized()
         .map_err(|e| ProvisionError::Setup(format!("enumerate cards: {e}")))?;
-    let mut token = select_blank(tokens, serial).map_err(ProvisionError::Setup)?;
+    let mut token = select_card_for_provision(tokens, serial, allow_reprovision)
+        .map_err(ProvisionError::Setup)?;
     let card_serial = token.yk_serial();
+    // Reprovision iff the selected card is already initialized — so the engine's
+    // confirm escalates (it is about to destroy real keys), even on a blank card
+    // passed with --allow-reprovision (which is just a normal init).
+    let reprovision = token.is_initialized();
 
     let mut session = token
         .begin_pin_session()
@@ -119,25 +143,31 @@ pub fn provision_with_frontend(
 
     let mut guid = [0u8; 16];
     rand_bytes(&mut guid).map_err(|e| ProvisionError::Setup(format!("generate GUID: {e}")))?;
-    let cfg = ProvisionConfig { guid };
+    let cfg = ProvisionConfig { guid, reprovision };
 
     engine::run(&mut card, frontend, &cfg)
 }
 
 fn run_inner(
     serial: Option<u32>,
+    allow_reprovision: bool,
     frontend: FrontendKind,
     socket: Option<&Path>,
 ) -> Result<ProvisionOutcome, String> {
     // Build the frontend first: a jsonrpc channel that can't be opened must
     // fail before we touch any card (RFC 0006 §6).
     let mut frontend = build_frontend(frontend, socket, "card init")?;
-    provision_with_frontend(serial, frontend.as_mut()).map_err(|e| e.to_string())
+    provision_with_frontend(serial, allow_reprovision, frontend.as_mut()).map_err(|e| e.to_string())
 }
 
 /// `piggy card init` entry point. Returns a process exit code.
-pub fn run(serial: Option<u32>, frontend: FrontendKind, socket: Option<&Path>) -> i32 {
-    match run_inner(serial, frontend, socket) {
+pub fn run(
+    serial: Option<u32>,
+    allow_reprovision: bool,
+    frontend: FrontendKind,
+    socket: Option<&Path>,
+) -> i32 {
+    match run_inner(serial, allow_reprovision, frontend, socket) {
         Ok(outcome) => {
             // stdout: the provisioned GUID (machine-readable; papi re-lists by
             // serial and ignores this, but a human/script can capture it).

@@ -92,8 +92,14 @@ pub fn card_init(params: &Value, fe: &mut dyn Frontend) -> Result<Value, (i64, S
             "card.init: 'serial' must be a u32".to_string(),
         ))?),
     };
+    // Also accept an already-initialized card-in-hand and re-provision it
+    // (piggy#204) — default false (factory-blank only).
+    let allow_reprovision = params
+        .get("allow_reprovision")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
-    match provision_with_frontend(serial, fe) {
+    match provision_with_frontend(serial, allow_reprovision, fe) {
         Ok(outcome) => {
             let mut result = serde_json::json!({ "guid": outcome.guid });
             if let Some(key) = &outcome.generated_mgmt_key {

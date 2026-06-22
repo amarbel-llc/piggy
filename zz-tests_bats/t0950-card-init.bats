@@ -27,6 +27,7 @@ function card_init_help_lists_flags { # @test
   run "$PIGGY" card init --help
   assert_success
   assert_output --partial "--serial"
+  assert_output --partial "--allow-reprovision"
   assert_output --partial "--frontend"
   assert_output --partial "--socket"
 }

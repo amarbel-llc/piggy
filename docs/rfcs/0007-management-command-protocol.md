@@ -144,12 +144,17 @@ is the client's concern. `include_uninitialized: false` omits the
 
 #### 5.2 `card.init`
 
-    params := { "serial": <integer> }   ; OPTIONAL; omitted ⇒ the sole blank card
+    params := { "serial": <integer>,             ; OPTIONAL; omitted ⇒ the sole eligible card
+                "allow_reprovision": <boolean> }  ; OPTIONAL; default false
     result := { "guid": <string>, "generated_management_key": <string> }
                                   ; generated_management_key present iff a random
                                   ; key was generated (RFC 0006 §2.3 "random")
 
-Provisions a factory-blank card (piggy#194). Issues `confirm`, `secret`
+Provisions a factory-blank card (piggy#194). With `allow_reprovision: true`
+(piggy#204) an already-initialized card-in-hand is also eligible and is
+re-provisioned (the destructive `confirm` escalates accordingly); a card whose
+credentials were rotated off the factory defaults fails — the full creds-lost
+reset is out of scope. Issues `confirm`, `secret`
 (new PIN/PUK), `mgmt_key`, and `progress`/`completed` interaction requests. The
 `generated_management_key` is sensitive (§Security).
 

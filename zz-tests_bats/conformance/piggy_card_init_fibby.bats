@@ -179,3 +179,41 @@ function card_init_jsonrpc_provisions_blank_card { # @test
   }
   assert_provisioned "$guid"
 }
+
+# --allow-reprovision (piggy#204): a CHUID-stamped card at factory creds presents
+# as initialized, so plain `card init` refuses it; `--allow-reprovision` accepts
+# it and re-provisions to a fresh GUID + 9D recipient. The seeded card keeps its
+# factory-default PIN/mgmt key, so the engine's default admin-auth succeeds (the
+# case-A path; a creds-rotated card would fail at admin-auth, by design).
+function card_init_allow_reprovision_reinits_an_initialized_card { # @test
+  spawn_fibby --model yk5 --seed-chuid
+
+  # Without the flag: an initialized card is not a blank card → refused, no writes.
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    PIGGY_TEST_FIB_PIN=654321 \
+    run --separate-stderr setsid -w "$PIGGY_BIN" card init <<<"y"
+  [[ $status -ne 0 ]] || {
+    echo "plain card init should refuse an already-initialized card" >&2
+    printf 'stdout: %s\n' "$output" >&2
+    return 1
+  }
+
+  # With the flag: reprovisions to a fresh GUID.
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    PIGGY_TEST_FIB_PIN=654321 \
+    run --separate-stderr setsid -w "$PIGGY_BIN" card init --allow-reprovision <<<"y"
+  [[ $status -eq 0 ]] || {
+    echo "card init --allow-reprovision exited $status" >&2
+    printf 'stdout: %s\n' "$output" >&2
+    printf 'stderr: %s\n' "$stderr" >&2
+    tail -60 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  local guid="$output"
+  [[ $guid =~ ^[0-9A-F]{32}$ ]] || {
+    echo "reprovision stdout was not a bare GUID: '$guid'" >&2
+    return 1
+  }
+  assert_provisioned "$guid"
+}

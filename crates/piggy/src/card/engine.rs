@@ -87,6 +87,11 @@ pub struct ProvisionConfig {
     /// 16-byte GUID to write into the CHUID (random in production; pinned by
     /// tests for determinism).
     pub guid: [u8; 16],
+    /// True when the selected card is already initialized and is being
+    /// re-provisioned (piggy#204 `--allow-reprovision`). Only escalates the
+    /// confirmation wording — the engine flow is identical (a blank card and a
+    /// factory-cred reprovision both run admin-auth with the default key).
+    pub reprovision: bool,
 }
 
 /// What a successful provision produced.
@@ -182,11 +187,21 @@ fn run_inner(
     };
 
     // Confirm before touching the card — this overwrites slots 9A and 9D.
-    let proceed = fe.confirm(ConfirmRequest {
-        message: format!(
+    // Reprovisioning an already-initialized card is more destructive (it
+    // replaces keys/certs that are in use), so escalate the wording.
+    let message = if cfg.reprovision {
+        format!(
+            "Card {} is ALREADY PROVISIONED — reprovisioning DESTROYS its existing 9A + 9D keys and overwrites their certs (and resets PIN/PUK/management key). Proceed?",
+            card_id.short_label()
+        )
+    } else {
+        format!(
             "Provision card {} — this generates new 9A + 9D keys and overwrites their certs. Proceed?",
             card_id.short_label()
-        ),
+        )
+    };
+    let proceed = fe.confirm(ConfirmRequest {
+        message,
         default: Some(false),
     })?;
     if !proceed {
@@ -391,6 +406,7 @@ mod tests {
         mgmt: MgmtKeyChoice,
         steps: Vec<String>,
         completed: Option<CompletedStatus>,
+        confirm_message: Option<String>,
     }
 
     impl ScriptedFrontend {
@@ -401,6 +417,7 @@ mod tests {
                 mgmt,
                 steps: Vec::new(),
                 completed: None,
+                confirm_message: None,
             }
         }
     }
@@ -421,7 +438,8 @@ mod tests {
         ) -> Result<MgmtKeyChoice, FrontendError> {
             Ok(self.mgmt.clone())
         }
-        fn confirm(&mut self, _req: ConfirmRequest) -> Result<bool, FrontendError> {
+        fn confirm(&mut self, req: ConfirmRequest) -> Result<bool, FrontendError> {
+            self.confirm_message = Some(req.message);
             Ok(self.confirm)
         }
         fn select_card(&mut self, _req: CardSelectRequest) -> Result<String, FrontendError> {
@@ -441,6 +459,7 @@ mod tests {
                 0x19, 0x17, 0x55, 0xCF, 0xF3, 0x9E, 0xFE, 0x52, 0x2C, 0x07, 0xA3, 0x83, 0x27, 0x5B,
                 0xBE, 0xB1,
             ],
+            reprovision: false,
         }
     }
 
@@ -568,6 +587,42 @@ mod tests {
         );
         let err = run(&mut card, &mut fe, &cfg()).unwrap_err();
         assert!(matches!(err, ProvisionError::BadMgmtKey(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn reprovision_escalates_the_confirm_wording() {
+        // Default (fresh provision): standard wording, no destruction warning.
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(
+            &["999999", "999999", "12345678", "12345678"],
+            true,
+            MgmtKeyChoice::Default,
+        );
+        run(&mut card, &mut fe, &cfg()).unwrap();
+        let msg = fe.confirm_message.clone().unwrap();
+        assert!(msg.contains("Provision card"), "default wording: {msg}");
+        assert!(
+            !msg.contains("ALREADY PROVISIONED"),
+            "default wording: {msg}"
+        );
+
+        // Reprovision: escalated wording naming the destruction.
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(
+            &["999999", "999999", "12345678", "12345678"],
+            true,
+            MgmtKeyChoice::Default,
+        );
+        let reprov = ProvisionConfig {
+            reprovision: true,
+            ..cfg()
+        };
+        run(&mut card, &mut fe, &reprov).unwrap();
+        let msg = fe.confirm_message.clone().unwrap();
+        assert!(
+            msg.contains("ALREADY PROVISIONED") && msg.contains("DESTROYS"),
+            "reprovision wording: {msg}"
+        );
     }
 
     #[test]
