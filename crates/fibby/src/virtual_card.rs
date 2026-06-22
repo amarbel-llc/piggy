@@ -918,7 +918,18 @@ impl Backend for VirtualCard {
         // digital-signature signing paths. The mgmt-key challenge-response
         // (alg=0x03, slot=0x9B) is handled below.
         if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9D {
-            return Ok(self.handle_general_authenticate_ecdh_slot_9d(apdu_body(command_apdu)));
+            let body = apdu_body(command_apdu);
+            // The slot-9D EC key serves BOTH ECDH key agreement (decrypt path,
+            // EXPONENT/0x85) and ECDSA signing (e.g. self-signing its own cert
+            // during provisioning, CHALLENGE/0x81), mirroring real YubiKey
+            // behavior — the "key management" designation does not block GENERAL
+            // AUTHENTICATE sign. Route by which dynamic-auth tag the request
+            // carries. 9D sign is PIN-gated, policy "once" (consume_pin=false).
+            if body.is_some_and(|b| parse_ga_sign_request(b).is_some()) {
+                let scalar = self.slot_9d_priv;
+                return Ok(self.sign_ecdsa_slot(body, scalar, "9D", true, false));
+            }
+            return Ok(self.handle_general_authenticate_ecdh_slot_9d(body));
         }
 
         // GENERAL AUTHENTICATE ECDSA sign (alg=0x11 P-256). The request
@@ -2963,6 +2974,44 @@ mod tests {
         let vk = VerifyingKey::from(&SigningKey::from_slice(&RFC6979_SCALAR).unwrap());
         assert_eq!(point, vk.to_encoded_point(false).as_bytes());
         assert_eq!(c.slot_9d_priv, Some(RFC6979_SCALAR), "9D key installed");
+    }
+
+    /// The slot-9D EC key can ECDSA-sign (not just ECDH), so it can self-sign
+    /// its own certificate during provisioning — real-YubiKey behavior. A
+    /// CHALLENGE (0x81) GENERAL AUTHENTICATE on 9D returns a DER signature that
+    /// verifies against the slot-9D public key.
+    #[test]
+    fn slot_9d_signs_for_self_signed_cert() {
+        use p256::ecdsa::signature::hazmat::PrehashVerifier;
+        use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        c.set_generate_override(0x9D, RFC6979_SCALAR);
+        let point = extract_generate_point(&c.transmit(&generate_apdu(0x9D)).unwrap());
+
+        // 9D sign is PIN-gated (policy "once").
+        c.pin_verified = true;
+        let prehash = [0x9Du8; 32];
+        let der = extract_ga_sign_der(&c.transmit(&ga_sign_apdu_slot(0x9D, &prehash)).unwrap());
+
+        let vk = VerifyingKey::from(&SigningKey::from_slice(&RFC6979_SCALAR).unwrap());
+        let sig = Signature::from_der(&der).expect("DER ECDSA sig");
+        assert!(
+            vk.verify_prehash(&prehash, &sig).is_ok(),
+            "slot-9D signature verifies against the 9D public key"
+        );
+        assert_eq!(point, vk.to_encoded_point(false).as_bytes());
+    }
+
+    /// Slot-9D sign is refused without a verified PIN (same gate as ECDH).
+    #[test]
+    fn slot_9d_sign_requires_verified_pin() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        c.set_generate_override(0x9D, RFC6979_SCALAR);
+        let _ = c.transmit(&generate_apdu(0x9D)).unwrap();
+        let resp = c.transmit(&ga_sign_apdu_slot(0x9D, &[0u8; 32])).unwrap();
+        assert_eq!(resp, vec![0x69, 0x82], "9D sign requires a verified PIN");
     }
 
     /// Random keygen (no override): the returned point matches the now-stored
