@@ -144,24 +144,49 @@ impl Frontend for TtyFrontend {
             Some(false) => " [y/N] ",
             None => " [y/n] ",
         };
-        // Read the y/n from the controlling tty (not stdin, which may carry
-        // piped data). Echo stays on — this is not a secret.
-        let mut tty = std::fs::OpenOptions::new()
+        // Prefer the controlling tty so a piped stdin carrying data is not
+        // consumed; fall back to a stderr-prompt + stdin read when there is no
+        // tty (non-interactive automation, a piped invocation, some sudo
+        // setups). This y/n channel is entirely separate from secret entry:
+        // PINs/PUKs always come via `$SSH_ASKPASS` (`run_askpass`), never the
+        // tty or stdin, so this fallback cannot interfere with the askpass
+        // flow. Echo stays on — a y/n is not a secret.
+        match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/tty")
-            .map_err(|e| FrontendError::Transport(format!("/dev/tty: {e}")))?;
-        write!(tty, "{}{hint}", req.message)
-            .and_then(|()| tty.flush())
-            .map_err(|e| FrontendError::Transport(e.to_string()))?;
-        let mut buf = [0u8; 256];
-        let n = tty
-            .read(&mut buf)
-            .map_err(|e| FrontendError::Transport(e.to_string()))?;
-        let answer = String::from_utf8_lossy(&buf[..n]);
-        parse_confirm_answer(&answer, req.default).ok_or_else(|| {
-            FrontendError::Declined(format!("unrecognized answer {:?}", answer.trim()))
-        })
+        {
+            Ok(mut tty) => {
+                write!(tty, "{}{hint}", req.message)
+                    .and_then(|()| tty.flush())
+                    .map_err(|e| FrontendError::Transport(e.to_string()))?;
+                let mut buf = [0u8; 256];
+                let n = tty
+                    .read(&mut buf)
+                    .map_err(|e| FrontendError::Transport(e.to_string()))?;
+                let answer = String::from_utf8_lossy(&buf[..n]);
+                parse_confirm_answer(&answer, req.default).ok_or_else(|| {
+                    FrontendError::Declined(format!("unrecognized answer {:?}", answer.trim()))
+                })
+            }
+            Err(_) => {
+                eprint!("{}{hint}", req.message);
+                let _ = std::io::stderr().flush();
+                let mut line = String::new();
+                let n = std::io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|e| FrontendError::Transport(e.to_string()))?;
+                if n == 0 {
+                    // EOF with no answer: take the offered default, else decline.
+                    return req.default.ok_or_else(|| {
+                        FrontendError::Declined("no answer (eof, no controlling tty)".into())
+                    });
+                }
+                parse_confirm_answer(&line, req.default).ok_or_else(|| {
+                    FrontendError::Declined(format!("unrecognized answer {:?}", line.trim()))
+                })
+            }
+        }
     }
 
     fn select_card(&mut self, req: CardSelectRequest) -> Result<String, FrontendError> {
