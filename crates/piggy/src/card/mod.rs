@@ -10,4 +10,5 @@
 
 pub mod engine;
 pub mod frontend;
+pub mod init_cmd;
 pub mod protocol;

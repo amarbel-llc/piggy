@@ -188,6 +188,16 @@ pub fn timed_papi<F: FnOnce() -> i32>(sub: &str, f: F) -> i32 {
     code
 }
 
+/// Time `f` — a `piggy card` subcommand handler returning its exit code — and
+/// emit a `piggy.card.<sub>` counter + timer. Returns the code. Rust-only
+/// category (provisioning has no C-agent path).
+pub fn timed_card<F: FnOnce() -> i32>(sub: &str, f: F) -> i32 {
+    let start = Instant::now();
+    let code = f();
+    record("card", sub, outcome_of_code(code), start.elapsed());
+    code
+}
+
 /// Time `f` — the `piggy sign-bytes` handler returning its exit code — and
 /// emit a `piggy.sign_bytes.run` counter + timer. Returns the code. Rust-only
 /// category, like `piggy.health` — the C agent has no CLI sign-bytes path.

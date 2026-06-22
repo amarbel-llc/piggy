@@ -147,6 +147,8 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
+    /// Manage PIV cards (provisioning).
+    Card(CardArgs),
     /// Produce & verify PAPI identity proofs and document signatures.
     ///
     /// `piggy papi` has its own clap parser (sign / prove / …); `--help`,
@@ -414,6 +416,35 @@ struct HealthCmdArgs {
 }
 
 #[derive(Args, Debug)]
+struct CardArgs {
+    #[command(subcommand)]
+    cmd: CardCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum CardCommand {
+    /// Provision a factory-blank PIV card: write CHUID, generate 9D + 9A keys
+    /// with self-signed certs, change PIN + PUK off the defaults, and rotate
+    /// the management key (piggy#194). Operator interaction runs through the
+    /// selected frontend (RFC 0006).
+    Init {
+        /// YubiKey serial of the card to provision. Optional: with one blank
+        /// card attached it is auto-selected; required to disambiguate when
+        /// multiple are present.
+        #[arg(long)]
+        serial: Option<u32>,
+        /// Interaction frontend: `tty` (default, askpass) or `jsonrpc` (an
+        /// external program drives the prompts over `--socket`).
+        #[arg(long, value_enum, default_value_t = piggy::card::init_cmd::FrontendKind::Tty)]
+        frontend: piggy::card::init_cmd::FrontendKind,
+        /// `AF_UNIX` socket path the JSON-RPC frontend listens on. Required
+        /// (and only used) when `--frontend jsonrpc`.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
+}
+
+#[derive(Args, Debug)]
 struct RecipientsArgs {
     #[command(subcommand)]
     cmd: RecipientsCommand,
@@ -558,6 +589,16 @@ fn main() {
         Command::SignBytes { rest } => {
             std::process::exit(piggy::stats::timed_sign_bytes(|| sign_bytes::run(&rest)))
         }
+
+        Command::Card(args) => match args.cmd {
+            CardCommand::Init {
+                serial,
+                frontend,
+                socket,
+            } => std::process::exit(piggy::stats::timed_card("init", || {
+                piggy::card::init_cmd::run(serial, frontend, socket.as_deref())
+            })),
+        },
 
         // papi::run owns its own clap parser and per-subcommand
         // `stats::timed_papi` wrapping, so no timed wrapper here.
