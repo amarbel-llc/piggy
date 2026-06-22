@@ -33,6 +33,51 @@ pub fn cert_tag_for_slot(slot_id: u8) -> Option<u32> {
     }
 }
 
+/// A 25-byte all-zero FASC-N — pivy's `PIV_FASCN_ALL_ZERO` canonical form
+/// (`piv-fascn.c::piv_fascn_encode`, the fast path returning 25 zero bytes,
+/// which its decoder at the top of the same file recognizes as the all-zero
+/// FASC-N). We emit this rather than `pivy-tool setup`'s `piv_fascn_zero()` —
+/// whose zero-valued *fields* BCD-encode (ISO 7811 sentinels + parity + LRC) to
+/// a non-zero blob — because the FASC-N is inert for piggy (every piggy/pivy
+/// reader keys off the GUID at CHUID tag `0x34`; the FASC-N matters only to
+/// federal physical-access readers, which piggy does not target) and a real
+/// YubiKey stores the CHUID object opaquely without validating FASC-N BCD
+/// structure. So the all-zero form is byte-accepted everywhere piggy operates,
+/// round-trips through pivy's own decoder as "all zero", and spares us porting
+/// the entire BCD codec for a field we never interpret.
+const FASCN_ALL_ZERO: [u8; 25] = [0u8; 25];
+
+/// Fixed CHUID expiry (`YYYYMMDD`, the SP 800-73-4 §3.1.2 format). pivy-tool
+/// computes `now + lifetime`; piggy uses a fixed far-future date because the
+/// expiry — like the FASC-N — is inert for piggy (read paths only extract the
+/// GUID), and a constant keeps `write_chuid` clock-free and deterministic for
+/// tests. The CHUID is unsigned, so this asserts nothing verifiable anyway.
+const CHUID_EXPIRY: &[u8] = b"20991231";
+
+/// Build the CHUID data-object body (the bytes that go inside the `53` wrapper
+/// `put_data` adds): `30 <FASC-N> 34 <GUID> 35 <expiry> 3E 00`, matching pivy's
+/// `piv_chuid_write_tbs_tlv` element order plus the compulsory empty signature
+/// tag (`3E 00`, written when the CHUID is unsigned — `piv_chuid_encode`).
+fn build_chuid_object(guid: &[u8; 16]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(2 + 25 + 2 + 16 + 2 + 8 + 2);
+    // 0x30 FASC-N (25 bytes, all-zero form).
+    v.push(0x30);
+    v.push(FASCN_ALL_ZERO.len() as u8);
+    v.extend_from_slice(&FASCN_ALL_ZERO);
+    // 0x34 GUID (16 bytes).
+    v.push(0x34);
+    v.push(guid.len() as u8);
+    v.extend_from_slice(guid);
+    // 0x35 expiry (8 ASCII bytes, YYYYMMDD).
+    v.push(0x35);
+    v.push(CHUID_EXPIRY.len() as u8);
+    v.extend_from_slice(CHUID_EXPIRY);
+    // 0x3E signature — compulsory tag, empty (unsigned CHUID).
+    v.push(0x3E);
+    v.push(0x00);
+    v
+}
+
 impl PinSession<'_> {
     /// Write a raw PIV data object at `tag` (value is wrapped as `53 <value>`
     /// by the APDU builder). Use [`PinSession::put_cert`] for slot certs.
@@ -43,6 +88,17 @@ impl PinSession<'_> {
             return Err(PivError::Apdu { sw: sw.as_u16() });
         }
         Ok(())
+    }
+
+    /// Write the CHUID for a freshly-provisioned card (piggy#194): an all-zero
+    /// FASC-N, the supplied 16-byte GUID, a fixed expiry, and an empty
+    /// signature. Marks the card initialized so `read_chuid` (and thus
+    /// `piggy list` / recipient discovery) sees a real GUID instead of treating
+    /// it as factory-blank. Ports the element layout of pivy's
+    /// `piv_write_chuid` → `piv_chuid_encode`. Requires a prior
+    /// [`PinSession::authenticate_admin`] on real hardware.
+    pub fn write_chuid(&mut self, guid: &[u8; 16]) -> Result<(), PivError> {
+        self.put_data(object_tag::CHUID, &build_chuid_object(guid))
     }
 
     /// Write a slot certificate: PUT DATA at the slot's cert tag with the PIV
@@ -113,6 +169,51 @@ mod tests {
         b.clear();
         push_der_len(&mut b, 0x1B8);
         assert_eq!(b, vec![0x82, 0x01, 0xB8]);
+    }
+
+    #[test]
+    fn build_chuid_object_frames_fascn_guid_expiry_empty_sig() {
+        let guid: [u8; 16] = [
+            0x19, 0x17, 0x55, 0xCF, 0xF3, 0x9E, 0xFE, 0x52, 0x2C, 0x07, 0xA3, 0x83, 0x27, 0x5B,
+            0xBE, 0xB1,
+        ];
+        let body = build_chuid_object(&guid);
+        // 30 19 <25 zero> 34 10 <guid> 35 08 "20991231" 3E 00
+        assert_eq!(&body[..2], &[0x30, 0x19], "FASC-N tag + len 25");
+        assert_eq!(
+            &body[2..27],
+            &[0u8; 25],
+            "FASC-N is all-zero (pivy ALL_ZERO)"
+        );
+        assert_eq!(&body[27..29], &[0x34, 0x10], "GUID tag + len 16");
+        assert_eq!(&body[29..45], &guid, "GUID bytes");
+        assert_eq!(&body[45..47], &[0x35, 0x08], "expiry tag + len 8");
+        assert_eq!(&body[47..55], b"20991231", "expiry YYYYMMDD");
+        assert_eq!(&body[55..], &[0x3E, 0x00], "empty signature tag");
+        // Total 57 bytes — matches the real-card-captured CHUID length (0x39).
+        assert_eq!(body.len(), 57);
+    }
+
+    #[test]
+    fn chuid_guid_is_recoverable_by_a_tlv_walk() {
+        // The read path (token::read_chuid) walks the 53 body's TLVs for tag
+        // 0x34. Prove our body yields the GUID back under that same walk.
+        let guid: [u8; 16] = [0xAB; 16];
+        let body = build_chuid_object(&guid);
+        let mut r = crate::tlv::TlvReader::new(&body);
+        let mut found = None;
+        while r.has_remaining() {
+            let tag = r.read_tag().unwrap();
+            let val = r.read_value().unwrap();
+            if tag == 0x34 {
+                found = Some(val.to_vec());
+            }
+        }
+        assert_eq!(
+            found.as_deref(),
+            Some(&guid[..]),
+            "GUID recovered at tag 0x34"
+        );
     }
 
     #[test]
