@@ -7,6 +7,7 @@ pub mod context;
 pub mod error;
 pub mod guid;
 pub mod keygen;
+pub mod pin_mgmt;
 pub mod policy;
 pub mod put_data;
 pub mod slot;

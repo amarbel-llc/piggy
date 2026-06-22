@@ -29,6 +29,10 @@ pub mod ins {
     /// `ykpiv_read_serial`). Non-YubiKey cards reject the INS with a
     /// non-9000 status word; callers treat that as "no serial".
     pub const YK_GET_SERIAL: u8 = 0xF8;
+    /// YubicoPIV vendor-specific: set the PIV management key. Data is
+    /// `<alg> <0x9B ref> <key_len> <key>`. Mirrors yubico-piv-tool's
+    /// `YKPIV_INS_SET_MGMKEY`.
+    pub const SET_MGMT_KEY: u8 = 0xFF;
 }
 
 /// PIV slot IDs

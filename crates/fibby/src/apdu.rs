@@ -42,6 +42,18 @@ pub mod ins {
     /// application PIN; other P2 values address PUK / mgmt-key (not
     /// implemented yet).
     pub const VERIFY: u8 = 0x20;
+    /// PIV CHANGE REFERENCE DATA (SP 800-73-4 §3.2.2). Replaces the PIV
+    /// PIN (`P2 = 80`) or PUK (`P2 = 81`). The data field is
+    /// `<old8> <new8>`, each reference value padded to 8 bytes with
+    /// trailing `0xFF` — the same block shape VERIFY uses. Takes the OLD
+    /// value directly; no prior VERIFY is needed.
+    pub const CHANGE_REFERENCE_DATA: u8 = 0x24;
+    /// YubicoPIV vendor SET MANAGEMENT KEY. `P1 P2 = FF FF`; data field is
+    /// `<alg> <0x9B ref> <key_len> <key>` (e.g. `03 9B 18 <24-byte 3DES>`).
+    /// Rotates the card's PIV management key; gated on a prior successful
+    /// mgmt-key GENERAL AUTHENTICATE. Not in SP 800-73-4 — mirrors
+    /// yubico-piv-tool's `YKPIV_INS_SET_MGMKEY`.
+    pub const SET_MGMT_KEY: u8 = 0xFF;
     /// YubiKey vendor "get serial number". Real YK4 firmware <5.x
     /// doesn't implement this — the wire shows the card returning
     /// `6D00`. YK5 firmware emits a 4-byte big-endian serial number +

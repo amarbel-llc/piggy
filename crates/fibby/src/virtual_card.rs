@@ -221,6 +221,17 @@ pub struct VirtualCard {
     /// (e.g. GA ECDH on slot 9D) consult this before honoring the
     /// request and return `69 82` when unset.
     pin_verified: bool,
+    /// PUK (PIN Unblocking Key) value, stored as raw ASCII bytes. The
+    /// YubiKey factory default is `"12345678"` (8 bytes, no 0xFF
+    /// padding). Used by CHANGE REFERENCE DATA (P2=0x81) to authorize a
+    /// PUK rotation. fibby does not yet model RESET RETRY (PUK-driven PIN
+    /// unblock); the PUK exists so a full-setup provision (piggy#194) can
+    /// rotate it off the factory default.
+    puk: Vec<u8>,
+    /// Number of remaining PUK CHANGE attempts. Reset to 3 on a
+    /// successful PUK change; decremented on a wrong-PUK attempt; blocks
+    /// at 0. Mirrors `pin_retries`.
+    puk_retries: u8,
     /// Raw P-256 scalar (big-endian) installed in slot 9A (PIV
     /// Authentication), or `None` if no key is present. This is the
     /// SSH-auth signing slot: GA ECDSA requests (INS 0x87, P1=0x11,
@@ -295,8 +306,14 @@ pub struct VirtualCard {
 /// byte sequence when verifying a freshly-init'd card.
 const DEFAULT_PIN: &[u8] = &[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF];
 
+/// YubiKey factory-default PUK: ASCII "12345678", 8 bytes, no padding.
+const DEFAULT_PUK: &[u8] = &[0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38];
+
 /// PIV factory-default PIN retry count.
 const DEFAULT_PIN_RETRIES: u8 = 3;
+
+/// PIV factory-default PUK retry count.
+const DEFAULT_PUK_RETRIES: u8 = 3;
 
 /// YubiKey factory-default TripleDES mgmt-key: three identical 8-byte
 /// halves `01 02 03 04 05 06 07 08`. Every freshly-reset throwaway in
@@ -578,6 +595,8 @@ impl VirtualCard {
             pin: DEFAULT_PIN.to_vec(),
             pin_retries: DEFAULT_PIN_RETRIES,
             pin_verified: false,
+            puk: DEFAULT_PUK.to_vec(),
+            puk_retries: DEFAULT_PUK_RETRIES,
             slot_9a_priv: None,
             slot_9d_priv: None,
             slot_9c_priv: None,
@@ -912,6 +931,22 @@ impl Backend for VirtualCard {
             return Ok(self.handle_verify(apdu_body(command_apdu)));
         }
 
+        // CHANGE REFERENCE DATA (00 24 00 <P2>). P2=0x80 changes the PIV
+        // PIN, P2=0x81 changes the PUK. Body is `<old8> <new8>`. Any other
+        // P1/P2 → 6A80. The full-setup provision (piggy#194) uses both to
+        // rotate the card off its factory PIN/PUK.
+        if cla == 0x00 && ins == apdu::ins::CHANGE_REFERENCE_DATA {
+            if p1 != 0x00 || !matches!(p2, 0x80 | 0x81) {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!("CHANGE REFERENCE DATA P1={p1:#04x} P2={p2:#04x} -> 6A80"),
+                );
+                return Ok(sw(0x6A, 0x80));
+            }
+            return Ok(self.handle_change_reference_data(p2, apdu_body(command_apdu)));
+        }
+
         // GENERAL AUTHENTICATE (00 87 <alg> <slot> <Lc> 7C ...). Slot 9D
         // ECDH (alg=0x11, slot=0x9D) is the piggy decrypt path; slots 9A
         // and 9C ECDSA (alg=0x11, slot=0x9A / 0x9C) are the SSH-auth and
@@ -963,6 +998,13 @@ impl Backend for VirtualCard {
         // §3.2.4 and the yk4-init.fixture wire.
         if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x03 && p2 == 0x9B {
             return Ok(self.handle_general_authenticate_mgmt_key(apdu_body(command_apdu)));
+        }
+
+        // SET MANAGEMENT KEY (00 FF FF FF <Lc> 03 9B 18 <24-byte key>).
+        // YubicoPIV vendor instruction; rotates the 3DES mgmt-key. Gated on
+        // a prior successful mgmt-key GENERAL AUTHENTICATE this session.
+        if cla == 0x00 && ins == apdu::ins::SET_MGMT_KEY && p1 == 0xFF && p2 == 0xFF {
+            return Ok(self.handle_set_mgmt_key(apdu_body(command_apdu)));
         }
 
         // YK ATTEST (00 F9 <slot> 00 ...). Real silicon returns a
@@ -1183,6 +1225,106 @@ impl VirtualCard {
             );
             sw(0x6A, 0x80)
         }
+    }
+
+    /// Handle CHANGE REFERENCE DATA (INS 0x24) for the PIV PIN
+    /// (`p2 == 0x80`) or PUK (`p2 == 0x81`). Body is `<old8> <new8>`,
+    /// each reference value 8 bytes. Verifies the old value against the
+    /// stored secret (decrementing the matching retry counter on a
+    /// mismatch), then replaces it with the new value. Status words:
+    ///
+    /// - `90 00` on success (retry counter reset to 3).
+    /// - `6A 80` on a malformed body (not exactly 16 bytes).
+    /// - `63 Cx` on a wrong old value, `x` = retries remaining.
+    /// - `69 83` when the counter is already at 0 (blocked).
+    fn handle_change_reference_data(&mut self, p2: u8, body: Option<&[u8]>) -> Vec<u8> {
+        let body = match body {
+            Some(b) if b.len() == 16 => b,
+            _ => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "CHANGE REFERENCE DATA -> 6A80 (body must be 16 bytes)",
+                );
+                return sw(0x6A, 0x80);
+            }
+        };
+        let (old, new) = (&body[..8], &body[8..]);
+        let kind = if p2 == 0x80 { "PIN" } else { "PUK" };
+        let (current, retries) = if p2 == 0x80 {
+            (&self.pin, &mut self.pin_retries)
+        } else {
+            (&self.puk, &mut self.puk_retries)
+        };
+        if *retries == 0 {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("CHANGE {kind} -> 6983 (blocked)"),
+            );
+            return sw(0x69, 0x83);
+        }
+        if old != current.as_slice() {
+            *retries -= 1;
+            let left = *retries;
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("CHANGE {kind} -> 63 C{left} (wrong old {kind})"),
+            );
+            return sw(0x63, 0xC0 | left);
+        }
+        let new_value = new.to_vec();
+        if p2 == 0x80 {
+            self.pin = new_value;
+            self.pin_retries = DEFAULT_PIN_RETRIES;
+        } else {
+            self.puk = new_value;
+            self.puk_retries = DEFAULT_PUK_RETRIES;
+        }
+        trace::emit(
+            trace::DEBUG,
+            "vcard",
+            &format!("CHANGE {kind} -> 9000 (changed)"),
+        );
+        sw(0x90, 0x00)
+    }
+
+    /// Handle SET MANAGEMENT KEY (YubicoPIV INS 0xFF, P1=P2=0xFF). Body is
+    /// `<alg> <0x9B ref> <key_len> <key>`. Rotates `self.mgmt_key` to the
+    /// supplied 24-byte 3DES key. Gated on a prior successful mgmt-key
+    /// GENERAL AUTHENTICATE this session. Status words:
+    ///
+    /// - `90 00` on success.
+    /// - `69 82` if the mgmt-key hasn't been authenticated this session.
+    /// - `6A 80` on a malformed body or a non-3DES (`0x03`) / wrong-length
+    ///   key (fibby models 3DES only, mirroring [`super`]'s admin auth).
+    fn handle_set_mgmt_key(&mut self, body: Option<&[u8]>) -> Vec<u8> {
+        if !self.mgmt_authenticated {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                "SET MGMT KEY -> 6982 (mgmt-key not authenticated)",
+            );
+            return sw(0x69, 0x82);
+        }
+        let body = match body {
+            Some(b) => b,
+            None => return sw(0x6A, 0x80),
+        };
+        // Expect `03 9B 18 <24-byte key>`.
+        if body.len() != 3 + 24 || body[0] != 0x03 || body[1] != 0x9B || body[2] != 0x18 {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                "SET MGMT KEY -> 6A80 (expect 03 9B 18 + 24-byte 3DES key)",
+            );
+            return sw(0x6A, 0x80);
+        }
+        let key: [u8; 24] = body[3..].try_into().expect("checked len == 27");
+        self.mgmt_key = key;
+        trace::emit(trace::DEBUG, "vcard", "SET MGMT KEY -> 9000 (rotated)");
+        sw(0x90, 0x00)
     }
 
     /// Handle a `GENERAL AUTHENTICATE` (INS 0x87) for the ECDH key
@@ -3060,6 +3202,127 @@ mod tests {
             vec![0x69, 0x82],
             "GENERATE gated again after power cycle"
         );
+    }
+
+    // -- CHANGE REFERENCE DATA (INS 0x24) + SET MGMT KEY (INS 0xFF) tests -
+
+    /// Build a CHANGE REFERENCE DATA APDU: `00 24 00 <p2> 10 <old8> <new8>`.
+    fn change_ref_apdu(p2: u8, old: &[u8; 8], new: &[u8; 8]) -> Vec<u8> {
+        let mut a = vec![0x00, 0x24, 0x00, p2, 0x10];
+        a.extend_from_slice(old);
+        a.extend_from_slice(new);
+        a
+    }
+
+    #[test]
+    fn change_pin_with_correct_old_succeeds_and_new_pin_verifies() {
+        let mut c = VirtualCard::new();
+        let old: [u8; 8] = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF]; // 123456
+        let new: [u8; 8] = [0x31, 0x32, 0x33, 0x34, 0x35, 0x37, 0xFF, 0xFF]; // 123457
+        assert_eq!(
+            c.transmit(&change_ref_apdu(0x80, &old, &new)).unwrap(),
+            vec![0x90, 0x00],
+            "correct old PIN -> 9000"
+        );
+        // The new PIN now verifies; the old one fails.
+        let verify = |c: &mut VirtualCard, pin: &[u8; 8]| {
+            let mut a = vec![0x00, 0x20, 0x00, 0x80, 0x08];
+            a.extend_from_slice(pin);
+            c.transmit(&a).unwrap()
+        };
+        assert_eq!(verify(&mut c, &new), vec![0x90, 0x00], "new PIN verifies");
+        assert_eq!(
+            verify(&mut c, &old)[0],
+            0x63,
+            "old PIN no longer verifies (63 Cx)"
+        );
+    }
+
+    #[test]
+    fn change_pin_wrong_old_decrements_retries() {
+        let mut c = VirtualCard::new();
+        let wrong: [u8; 8] = [0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0xFF, 0xFF];
+        let new: [u8; 8] = [0x31, 0x32, 0x33, 0x34, 0x35, 0x37, 0xFF, 0xFF];
+        let resp = c.transmit(&change_ref_apdu(0x80, &wrong, &new)).unwrap();
+        assert_eq!(resp, vec![0x63, 0xC2], "wrong old PIN -> 63 C2 (2 left)");
+        assert_eq!(c.pin_retries, 2);
+        // The real PIN is untouched.
+        assert_eq!(c.pin, DEFAULT_PIN);
+    }
+
+    #[test]
+    fn change_puk_with_correct_old_succeeds() {
+        let mut c = VirtualCard::new();
+        let old: [u8; 8] = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38]; // 12345678
+        let new: [u8; 8] = [0x38, 0x37, 0x36, 0x35, 0x34, 0x33, 0x32, 0x31]; // 87654321
+        assert_eq!(
+            c.transmit(&change_ref_apdu(0x81, &old, &new)).unwrap(),
+            vec![0x90, 0x00],
+            "correct old PUK -> 9000"
+        );
+        assert_eq!(c.puk, new.to_vec(), "PUK rotated");
+    }
+
+    #[test]
+    fn change_reference_data_bad_p2_returns_6a80() {
+        let mut c = VirtualCard::new();
+        let v: [u8; 8] = [0xFF; 8];
+        // P2=0x82 is neither PIN (0x80) nor PUK (0x81).
+        assert_eq!(
+            c.transmit(&change_ref_apdu(0x82, &v, &v)).unwrap(),
+            vec![0x6A, 0x80]
+        );
+    }
+
+    #[test]
+    fn change_reference_data_malformed_body_returns_6a80() {
+        let mut c = VirtualCard::new();
+        // Lc=0x08, only the old block, no new block.
+        let apdu = vec![
+            0x00, 0x24, 0x00, 0x80, 0x08, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF,
+        ];
+        assert_eq!(c.transmit(&apdu).unwrap(), vec![0x6A, 0x80]);
+    }
+
+    /// Build a SET MANAGEMENT KEY APDU: `00 FF FF FF 1B 03 9B 18 <24 key>`.
+    fn set_mgmt_key_apdu(key: &[u8; 24]) -> Vec<u8> {
+        let mut a = vec![0x00, 0xFF, 0xFF, 0xFF, 0x1B, 0x03, 0x9B, 0x18];
+        a.extend_from_slice(key);
+        a
+    }
+
+    #[test]
+    fn set_mgmt_key_without_auth_returns_6982() {
+        let mut c = VirtualCard::new();
+        let key = [0xAB_u8; 24];
+        assert_eq!(
+            c.transmit(&set_mgmt_key_apdu(&key)).unwrap(),
+            vec![0x69, 0x82],
+            "SET MGMT KEY without prior mgmt-auth -> 6982"
+        );
+    }
+
+    #[test]
+    fn set_mgmt_key_after_auth_rotates_the_key() {
+        let mut c = VirtualCard::new();
+        authenticate_mgmt(&mut c);
+        let key = [0xAB_u8; 24];
+        assert_eq!(
+            c.transmit(&set_mgmt_key_apdu(&key)).unwrap(),
+            vec![0x90, 0x00],
+            "SET MGMT KEY after mgmt-auth -> 9000"
+        );
+        assert_eq!(c.mgmt_key, key, "mgmt key rotated to the new value");
+    }
+
+    #[test]
+    fn set_mgmt_key_malformed_returns_6a80() {
+        let mut c = VirtualCard::new();
+        authenticate_mgmt(&mut c);
+        // Wrong algorithm prefix (0x08 = AES-128, not modeled).
+        let mut apdu = vec![0x00, 0xFF, 0xFF, 0xFF, 0x1B, 0x08, 0x9B, 0x18];
+        apdu.extend_from_slice(&[0xAB_u8; 24]);
+        assert_eq!(c.transmit(&apdu).unwrap(), vec![0x6A, 0x80]);
     }
 
     // -- YK ATTEST (INS 0xF9) tests --------------------------------------
