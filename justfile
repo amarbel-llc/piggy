@@ -2102,8 +2102,8 @@ tag message="":
     # the message parameter. positional-arguments passes it as a real shell
     # parameter so bash never re-parses it. A just interpolation of the message
     # would text-substitute the multi-line changelog into the recipe body, where
-    # parens and backticks in commit subjects (feat(x): ..., signatures[], piggy
-    # papi verify) would run as command substitution and break the script. This
+    # parens and backticks in commit subjects (feat(x): ..., signatures[],
+    # `card init`) would run as command substitution and break the script. This
     # comment must itself avoid the literal two-brace interpolation token, since
     # just expands those even inside comments — that bug broke the v0.1.16 cut.
     msg="${1:-release v$version}"
