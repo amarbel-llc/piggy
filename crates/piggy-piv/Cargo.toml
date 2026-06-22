@@ -11,3 +11,12 @@ ssh-key = { version = "0.6", features = ["alloc", "ecdsa", "rsa", "ed25519"] }
 thiserror = "2"
 tracing = "0.1"
 zeroize = { version = "1", features = ["derive"] }
+# X.509 building for self-signed slot certs at provisioning time (piggy#194).
+# der/spki/const-oid are already in the lock (transitive via ssh-key); x509-cert
+# 0.2 pins those same majors. We assemble the cert manually (build TBS -> card
+# sign -> assemble) rather than via the `builder` Signer trait, so no extra
+# features are needed.
+x509-cert = "0.2"
+der = "0.7"
+const-oid = "0.9"
+spki = "0.7"

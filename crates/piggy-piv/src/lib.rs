@@ -2,6 +2,7 @@ pub mod admin;
 pub mod apdu;
 pub mod attest;
 pub mod cert;
+pub mod cert_builder;
 pub mod context;
 pub mod error;
 pub mod guid;
