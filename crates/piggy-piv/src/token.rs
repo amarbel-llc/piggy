@@ -519,7 +519,10 @@ impl<'tok> PinSession<'tok> {
         parse_ga_response(&resp)
     }
 
-    fn transmit(&self, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord), PivError> {
+    /// Transmit an APDU within this session's transaction. `pub(crate)` so the
+    /// write-op modules (`admin`, `keygen`, `put_data`) can build on the same
+    /// transaction the PIN/sign/ECDH ops use.
+    pub(crate) fn transmit(&self, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord), PivError> {
         let txn = self
             .txn
             .as_ref()

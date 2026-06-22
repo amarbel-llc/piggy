@@ -129,6 +129,55 @@ impl Apdu {
         }
     }
 
+    /// GENERATE ASYMMETRIC (INS 0x47) — generate a new key pair on `slot`.
+    ///
+    /// Data is the `AC` template `{ 80 <key_alg> }`, optionally followed by the
+    /// YubicoPIV `AA <pin_policy>` / `AB <touch_policy>` policy bytes. The
+    /// response carries the new public key in a `7F49 { 86 <point> }` template.
+    /// Requires a prior management-key auth (see [`super::admin`]).
+    pub fn generate_asym(
+        slot: u8,
+        key_alg: u8,
+        pin_policy: Option<u8>,
+        touch_policy: Option<u8>,
+    ) -> Self {
+        let mut tmpl = TlvWriter::new();
+        tmpl.write_tag_value(0x80, &[key_alg]);
+        if let Some(p) = pin_policy {
+            tmpl.write_tag_value(0xAA, &[p]);
+        }
+        if let Some(t) = touch_policy {
+            tmpl.write_tag_value(0xAB, &[t]);
+        }
+        let mut outer = TlvWriter::new();
+        outer.write_tag_value(0xAC, tmpl.as_bytes());
+        Self {
+            cla: 0x00,
+            ins: ins::GEN_ASYM,
+            p1: 0x00,
+            p2: slot,
+            data: outer.into_vec(),
+            le: None,
+        }
+    }
+
+    /// PUT DATA (INS 0xDB) — write a PIV data object at `tag` (e.g. the CHUID
+    /// `5FC102` or a slot cert). Wraps `value` as `5C <tag>` + `53 <value>`.
+    /// Requires a prior management-key auth on real hardware.
+    pub fn put_data(tag: u32, value: &[u8]) -> Self {
+        let mut w = TlvWriter::new();
+        w.write_tag_value(0x5C, &tag_to_bytes(tag));
+        w.write_tag_value(0x53, value);
+        Self {
+            cla: 0x00,
+            ins: ins::PUT_DATA,
+            p1: 0x3F,
+            p2: 0xFF,
+            data: w.into_vec(),
+            le: None,
+        }
+    }
+
     /// YubiKey ATTEST command — generates an attestation certificate for a slot.
     pub fn yk_attest(slot: u8) -> Self {
         Self {

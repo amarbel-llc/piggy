@@ -1,14 +1,18 @@
+pub mod admin;
 pub mod apdu;
 pub mod attest;
 pub mod cert;
 pub mod context;
 pub mod error;
 pub mod guid;
+pub mod keygen;
 pub mod policy;
+pub mod put_data;
 pub mod slot;
 pub mod tlv;
 pub mod token;
 
+pub use admin::DEFAULT_ADMIN_KEY;
 pub use context::PivContext;
 pub use error::PivError;
 pub use guid::Guid;

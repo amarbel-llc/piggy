@@ -29,6 +29,9 @@ pub enum PivError {
     #[error("PIN is blocked")]
     PinBlocked,
 
+    #[error("management-key authentication failed (wrong key)")]
+    ManagementAuthFailed,
+
     #[error("slot {0:#04x} not found or empty")]
     SlotEmpty(u8),
 
