@@ -43,4 +43,14 @@ function sign_bytes_help_lists_flags { # @test
   assert_success
   assert_output --partial "--slot"
   assert_output --partial "--format"
+  assert_output --partial "--frontend"
+}
+
+# `--frontend jsonrpc` without `--socket` fails before any card op (RFC 0006
+# §6): the frontend channel is built before card enumeration, so a missing
+# socket is rejected card-free.
+function sign_bytes_jsonrpc_requires_socket { # @test
+  run "$PIGGY" sign-bytes --slot 9a --frontend jsonrpc </dev/null
+  assert_failure
+  assert_output --partial "--socket"
 }

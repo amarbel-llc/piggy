@@ -9,4 +9,5 @@
 //! [`crate::card::engine`] (Phase 3b).
 
 pub mod jsonrpc;
+pub mod select;
 pub mod tty;

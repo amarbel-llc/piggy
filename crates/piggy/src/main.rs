@@ -435,8 +435,8 @@ enum CardCommand {
         serial: Option<u32>,
         /// Interaction frontend: `tty` (default, askpass) or `jsonrpc` (an
         /// external program drives the prompts over `--socket`).
-        #[arg(long, value_enum, default_value_t = piggy::card::init_cmd::FrontendKind::Tty)]
-        frontend: piggy::card::init_cmd::FrontendKind,
+        #[arg(long, value_enum, default_value_t = piggy::card::frontend::select::FrontendKind::Tty)]
+        frontend: piggy::card::frontend::select::FrontendKind,
         /// `AF_UNIX` socket path the JSON-RPC frontend listens on. Required
         /// (and only used) when `--frontend jsonrpc`.
         #[arg(long, value_name = "PATH")]

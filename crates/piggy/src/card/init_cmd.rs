@@ -8,8 +8,6 @@
 //! single `begin_pin_session()` persists across every engine card-op (admin
 //! auth and PIN verify are session state) without a self-referential struct.
 
-use std::io::BufReader;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use openssl::rand::rand_bytes;
@@ -17,20 +15,7 @@ use openssl::rand::rand_bytes;
 use piggy_piv::{PinSession, PivAlgorithm, PivContext, PivError, PivToken};
 
 use crate::card::engine::{self, ProvisionCard, ProvisionConfig, ProvisionOutcome};
-use crate::card::frontend::jsonrpc::JsonRpcFrontend;
-use crate::card::frontend::tty::TtyFrontend;
-use crate::card::protocol::Frontend;
-
-/// Which interaction binding to use (RFC 0006 §6). `tty` is the interim default;
-/// see piggy#197 for the eventual GUI-auto-launch default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum FrontendKind {
-    /// In-process terminal / askpass (default).
-    Tty,
-    /// JSON-RPC over an `AF_UNIX` socket (`--socket`); an external program
-    /// (e.g. a charmbracelet TUI) drives the interactions.
-    Jsonrpc,
-}
+use crate::card::frontend::select::{FrontendKind, build_frontend};
 
 /// Adapter wiring the engine's [`ProvisionCard`] seam to a live
 /// [`PinSession`]. Each method delegates to the session; `serial` is captured
@@ -104,26 +89,6 @@ fn select_blank(tokens: Vec<PivToken>, serial: Option<u32>) -> Result<PivToken, 
     }
 }
 
-/// Build the interaction frontend. For JSON-RPC the socket is connected here —
-/// before any card operation — so `--frontend jsonrpc` without a usable channel
-/// fails fast (RFC 0006 §6).
-fn build_frontend(kind: FrontendKind, socket: Option<&Path>) -> Result<Box<dyn Frontend>, String> {
-    match kind {
-        FrontendKind::Tty => Ok(Box::new(TtyFrontend::new())),
-        FrontendKind::Jsonrpc => {
-            let path = socket.ok_or("--frontend jsonrpc requires --socket <PATH>")?;
-            let stream = UnixStream::connect(path)
-                .map_err(|e| format!("connect frontend socket {}: {e}", path.display()))?;
-            let reader = BufReader::new(
-                stream
-                    .try_clone()
-                    .map_err(|e| format!("clone socket handle: {e}"))?,
-            );
-            Ok(Box::new(JsonRpcFrontend::new(reader, stream, "card-init")))
-        }
-    }
-}
-
 fn run_inner(
     serial: Option<u32>,
     frontend: FrontendKind,
@@ -131,7 +96,7 @@ fn run_inner(
 ) -> Result<ProvisionOutcome, String> {
     // Build the frontend first: a jsonrpc channel that can't be opened must
     // fail before we touch any card (RFC 0006 §6).
-    let mut frontend = build_frontend(frontend, socket)?;
+    let mut frontend = build_frontend(frontend, socket, "card init")?;
 
     let ctx = PivContext::new().map_err(|e| format!("PC/SC: {e}"))?;
     let tokens = ctx
@@ -177,21 +142,5 @@ pub fn run(serial: Option<u32>, frontend: FrontendKind, socket: Option<&Path>) -
             eprintln!("piggy card init: {e}");
             1
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn jsonrpc_frontend_without_socket_fails_fast() {
-        // RFC 0006 §6: no usable channel → error before any card op. This
-        // returns before touching PC/SC, so it is card-free.
-        // `Box<dyn Frontend>` isn't Debug, so map the Ok away before unwrap_err.
-        let err = build_frontend(FrontendKind::Jsonrpc, None)
-            .map(|_| ())
-            .unwrap_err();
-        assert!(err.contains("--socket"), "got {err}");
     }
 }

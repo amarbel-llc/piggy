@@ -41,12 +41,14 @@ setup() {
   FIBBY_SOCK="$WORKDIR/pcscd.comm"
   FIBBY_LOG="$WORKDIR/fibby.log"
   FIBBY_PID=
+  RPC_PID=
 
   # No ambient agent: sign-bytes talks to fibby directly via PCSCLITE_CSOCK_NAME.
   unset SSH_AUTH_SOCK PIGGY_AUTH_SOCK
 }
 
 teardown() {
+  [[ -n ${RPC_PID:-} ]] && kill "$RPC_PID" 2>/dev/null || true
   [[ -n ${FIBBY_PID:-} ]] && kill "$FIBBY_PID" 2>/dev/null || true
   if [[ -n ${FIBBY_PID:-} ]]; then wait "$FIBBY_PID" 2>/dev/null || true; fi
   [[ -n ${WORKDIR:-} ]] && rm -rf "$WORKDIR" 2>/dev/null || true
@@ -127,6 +129,58 @@ function sign_bytes_raw_is_64_byte_rs { # @test
   [[ $n -eq 64 ]] || {
     echo "expected a 64-byte raw r‖s signature, got $n bytes" >&2
     tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+}
+
+# `sign-bytes --frontend jsonrpc` obtains the PIN from an external JSON-RPC
+# frontend over an AF_UNIX socket instead of askpass (RFC 0006 / #200). The
+# scripted card-frontend-server answers initialize + secret.request(current_pin)
+# with fibby's default PIN; the resulting signature verifies — proving the
+# JSON-RPC PIN path drives a real card sign end-to-end.
+function sign_bytes_jsonrpc_frontend_supplies_pin { # @test
+  if [[ -z ${CARD_FRONTEND_BIN:-} ]] || [[ ! -x ${CARD_FRONTEND_BIN:-/nonexistent} ]]; then
+    skip "CARD_FRONTEND_BIN unset; run via just test-bats-conformance-sign-bytes-fibby"
+  fi
+  _seed_and_pubkey
+  printf 'enrollment-receipt-bytes' >"$WORKDIR/msg"
+
+  local rpc_sock="$WORKDIR/frontend.sock"
+  local rpc_log="$WORKDIR/frontend.log"
+  "$CARD_FRONTEND_BIN" --socket "$rpc_sock" --pin 123456 >"$rpc_log" 2>&1 &
+  RPC_PID=$!
+  local _
+  for _ in $(seq 1 50); do
+    [[ -S $rpc_sock ]] && break
+    sleep 0.1
+  done
+  [[ -S $rpc_sock ]] || {
+    echo "frontend server socket never appeared at $rpc_sock" >&2
+    cat "$rpc_log" >&2 || true
+    return 1
+  }
+
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    "$PIGGY_BIN" sign-bytes --slot 9a --frontend jsonrpc --socket "$rpc_sock" \
+    --format der <"$WORKDIR/msg" >"$WORKDIR/sig.der"
+  local rc=$?
+  [[ $rc -eq 0 && -s "$WORKDIR/sig.der" ]] || {
+    echo "sign-bytes --frontend jsonrpc failed (rc=$rc)" >&2
+    cat "$rpc_log" >&2 || true
+    tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  run openssl dgst -sha256 -verify "$WORKDIR/pub.pem" \
+    -signature "$WORKDIR/sig.der" "$WORKDIR/msg"
+  [[ $status -eq 0 ]] || {
+    echo "openssl failed to verify the jsonrpc-PIN signature (status $status)" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  printf '%s\n' "$output" | grep -q "Verified OK" || {
+    echo "openssl did not report 'Verified OK'" >&2
+    printf '%s\n' "$output" >&2
     return 1
   }
 }

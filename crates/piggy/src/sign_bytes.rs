@@ -23,11 +23,15 @@
 //! private key and requires the card PIN per the slot's policy.
 
 use std::io::{Read, Write};
+use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use piggy_piv::{PivAlgorithm, PivContext, PivError, PivToken};
 use sha2::{Digest, Sha256, Sha384};
 use zeroize::Zeroizing;
+
+use piggy::card::frontend::select::{FrontendKind, build_frontend};
+use piggy::card::protocol::{CardId, Frontend, SecretKind, SecretRequest};
 
 /// Bounded re-prompt on a wrong interactive PIN (a fixed `-P` PIN never
 /// retries — it can't change between attempts).
@@ -50,10 +54,19 @@ struct SignBytesCli {
     /// Output framing for the signature.
     #[arg(long, value_enum, default_value_t = OutFormat::Raw)]
     format: OutFormat,
-    /// PIN to authenticate with. When omitted, piggy prompts via
-    /// `SSH_ASKPASS`/tty (see card_oracle).
+    /// PIN to authenticate with. When omitted, piggy prompts via the selected
+    /// frontend (`--frontend`).
     #[arg(short = 'P', long = "pin")]
     pin: Option<String>,
+    /// Interaction frontend for the PIN prompt (RFC 0006 §6): `tty` (default,
+    /// askpass) or `jsonrpc` (an external program supplies the PIN over
+    /// `--socket`). Ignored when `-P/--pin` is given.
+    #[arg(long, value_enum, default_value_t = FrontendKind::Tty)]
+    frontend: FrontendKind,
+    /// `AF_UNIX` socket the JSON-RPC frontend listens on. Required (and only
+    /// used) when `--frontend jsonrpc`.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -86,6 +99,19 @@ pub fn run(argv: &[String]) -> i32 {
 fn execute(args: SignBytesCli) -> Result<(), String> {
     let slot_id = parse_slot(&args.slot)?;
 
+    // Build the frontend before any card operation (RFC 0006 §6): a
+    // `--frontend jsonrpc` without a usable `--socket` must fail fast, before
+    // we enumerate cards. Skipped when a fixed `-P` PIN short-circuits the
+    // prompt (no frontend needed, no unused socket connected).
+    let mut frontend: Option<Box<dyn Frontend>> = match args.pin {
+        Some(_) => None,
+        None => Some(build_frontend(
+            args.frontend,
+            args.socket.as_deref(),
+            "sign-bytes",
+        )?),
+    };
+
     let mut token = select_token(args.guid.as_deref())?;
 
     // Read the slot's algorithm (a PIN-free cert read) to choose the digest
@@ -114,19 +140,23 @@ fn execute(args: SignBytesCli) -> Result<(), String> {
     // card attached, an unlabeled "Enter PIN" let an operator enter the wrong
     // PIN (e.g. a freshly-provisioned card's default vs a trusted card's real
     // PIN) and block a card. Carry GUID + serial + CN — all three the operator
-    // asked for — sourced from the already-selected card and its slot cert.
-    let guid_short = token.guid().short_id();
-    let serial = token.yk_serial();
-    let cn = slot_cn(slot_meta.cert_der());
-    let prompt = pin_prompt(&args.slot, &guid_short, serial, cn.as_deref());
-    let context = pin_context(&args.slot, &guid_short, serial, cn.as_deref());
+    // asked for — sourced from the already-selected card and its slot cert. The
+    // RFC 0006 frontend renders this structured identity (the tty binding into
+    // the same prompt as before; a JSON-RPC binding ships it to its client).
+    let card_id = CardId {
+        guid: token.guid().to_hex(),
+        serial: token.yk_serial(),
+        cn: slot_cn(slot_meta.cert_der()),
+    };
+
     let der = sign_with_card(
         &mut token,
         slot_id,
         &digest,
         args.pin.as_deref(),
-        &prompt,
-        &context,
+        &card_id,
+        &args.slot,
+        frontend.take(),
     )?;
 
     let out = match args.format {
@@ -153,40 +183,6 @@ fn slot_cn(cert_der: &[u8]) -> Option<String> {
         .next()
         .and_then(|e| e.data().as_utf8().ok())
         .map(|s| s.to_string())
-}
-
-/// Build the PIN prompt for a sign on `slot`, NAMING the target card so an
-/// operator holding more than one card can't enter the wrong PIN and block one
-/// (piggy#195). Carries all three identifiers the operator asked for — short
-/// GUID, serial (the handle that matches `piggy list` + the physical card),
-/// and the slot cert's CN — omitting serial/CN gracefully when unavailable,
-/// e.g. `Enter PIN — card 2835305C… · serial 15909078 · piv-auth@2835305C
-/// (slot 9a) [piggy sign-bytes]: `. This card-identity context is exactly what
-/// a structured / JSON-RPC front-end (piggy#194's `ProvisionFrontend` seam +
-/// the #197 management-API epic) carries in its PIN request, so an alternate
-/// TUI can render it itself rather than show a bare "Enter PIN".
-fn pin_prompt(slot: &str, guid_short: &str, serial: Option<u32>, cn: Option<&str>) -> String {
-    let mut id = format!("card {guid_short}…");
-    if let Some(s) = serial {
-        id.push_str(&format!(" · serial {s}"));
-    }
-    if let Some(c) = cn {
-        id.push_str(&format!(" · {c}"));
-    }
-    format!("Enter PIN — {id} (slot {slot}) [piggy sign-bytes]: ")
-}
-
-/// The `PIGGY_ASKPASS_CONTEXT` string the user-facing askpass renders as a
-/// `Context:` line — same card identity as the prompt, machine-ish form.
-fn pin_context(slot: &str, guid_short: &str, serial: Option<u32>, cn: Option<&str>) -> String {
-    let mut id = format!("guid {guid_short}");
-    if let Some(s) = serial {
-        id.push_str(&format!(" serial {s}"));
-    }
-    if let Some(c) = cn {
-        id.push_str(&format!(" cn {c}"));
-    }
-    format!("piggy sign-bytes: card {id} slot {slot}")
 }
 
 /// Map a user-facing slot string to its PIV slot id. Only signing-capable
@@ -244,15 +240,31 @@ fn sign_with_card(
     slot_id: u8,
     digest: &[u8],
     fixed_pin: Option<&str>,
-    prompt: &str,
-    context: &str,
+    card: &CardId,
+    slot_label: &str,
+    mut frontend: Option<Box<dyn Frontend>>,
 ) -> Result<Vec<u8>, String> {
     let mut attempt = 0u32;
+    // Carried into the re-prompt so the operator sees how many tries remain
+    // (None on the first prompt — no "tries left" clause, preserving the
+    // original first-prompt text).
+    let mut attempts_remaining: Option<u32> = None;
     loop {
         let pin: Zeroizing<String> = match fixed_pin {
             Some(p) => Zeroizing::new(p.to_string()),
-            None => piggy::card_oracle::run_askpass(prompt, Some(context))
-                .map_err(|e| format!("PIN entry: {e}"))?,
+            None => {
+                let fe = frontend
+                    .as_deref_mut()
+                    .expect("frontend is built when no -P/--pin is given");
+                fe.request_secret(SecretRequest {
+                    kind: SecretKind::CurrentPin,
+                    prompt: "Enter PIN".to_string(),
+                    card: Some(card.clone()),
+                    slot: Some(slot_label.to_string()),
+                    attempts_remaining,
+                })
+                .map_err(|e| format!("PIN entry: {e}"))?
+            }
         };
 
         let mut session = token
@@ -266,6 +278,7 @@ fn sign_with_card(
                     return Err(format!("incorrect PIN ({retries} retries remaining)"));
                 }
                 attempt += 1;
+                attempts_remaining = Some(retries);
                 eprintln!("piggy sign-bytes: incorrect PIN, {retries} retries remaining");
                 // `session` drops here, ending the transaction before we
                 // re-prompt and re-open on the next iteration.
@@ -284,42 +297,9 @@ fn sign_with_card(
 mod tests {
     use super::*;
 
-    #[test]
-    fn pin_prompt_names_guid_serial_cn_and_slot() {
-        // All three identifiers the operator asked for (piggy#195).
-        let p = pin_prompt("9a", "2835305C", Some(15909078), Some("piv-auth@2835305C"));
-        assert!(p.contains("2835305C"), "prompt names the guid: {p}");
-        assert!(
-            p.contains("serial 15909078"),
-            "prompt names the serial: {p}"
-        );
-        assert!(p.contains("piv-auth@2835305C"), "prompt names the CN: {p}");
-        assert!(p.contains("9a"), "prompt names the slot: {p}");
-    }
-
-    #[test]
-    fn pin_prompt_omits_absent_serial_and_cn() {
-        let p = pin_prompt("9c", "AABBCCDD", None, None);
-        assert!(p.contains("AABBCCDD"), "prompt names the guid: {p}");
-        assert!(p.contains("9c"));
-        assert!(
-            !p.contains("serial"),
-            "no serial clause when serial absent: {p}"
-        );
-        assert!(
-            !p.contains(" · "),
-            "no dangling separators when serial/CN absent: {p}"
-        );
-    }
-
-    #[test]
-    fn pin_context_carries_guid_serial_and_cn() {
-        let c = pin_context("9a", "DEADBEEF", Some(42), Some("piv-auth@DEADBEEF"));
-        assert!(c.contains("serial 42"));
-        assert!(c.contains("DEADBEEF"));
-        assert!(c.contains("cn piv-auth@DEADBEEF"));
-        assert!(c.contains("9a"));
-    }
+    // The PIN-prompt card-naming (#195) now lives in the shared TtyFrontend
+    // (crates/piggy/src/card/frontend/tty.rs) and is unit-tested there; sign-bytes
+    // builds a CardId and routes the PIN through the Frontend trait (#200).
 
     #[test]
     fn parse_slot_accepts_signing_slots_case_insensitive() {
@@ -367,6 +347,27 @@ mod tests {
         assert_eq!(a.guid.as_deref(), Some("DEADBEEF"));
         assert!(matches!(a.format, OutFormat::Der));
         assert_eq!(a.pin.as_deref(), Some("123456"));
+        // --frontend defaults to tty.
+        assert!(matches!(a.frontend, FrontendKind::Tty));
+    }
+
+    #[test]
+    fn cli_parses_jsonrpc_frontend_and_socket() {
+        let a = SignBytesCli::try_parse_from([
+            "piggy sign-bytes",
+            "--slot",
+            "9a",
+            "--frontend",
+            "jsonrpc",
+            "--socket",
+            "/tmp/piggy-ui.sock",
+        ])
+        .unwrap();
+        assert!(matches!(a.frontend, FrontendKind::Jsonrpc));
+        assert_eq!(
+            a.socket.as_deref(),
+            Some(std::path::Path::new("/tmp/piggy-ui.sock"))
+        );
     }
 
     #[test]

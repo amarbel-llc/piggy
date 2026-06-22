@@ -28,12 +28,21 @@ use crate::card::protocol::{
 use crate::card_oracle::run_askpass;
 
 /// The default terminal/askpass frontend.
-#[derive(Debug, Default)]
-pub struct TtyFrontend;
+///
+/// `operation` is the command label rendered in prompts (`[piggy <operation>]`)
+/// and the askpass context (`piggy <operation>:`), so every interactive command
+/// (`card init`, `sign-bytes`, …) names itself consistently while sharing this
+/// one binding.
+#[derive(Debug)]
+pub struct TtyFrontend {
+    operation: String,
+}
 
 impl TtyFrontend {
-    pub fn new() -> Self {
-        Self
+    pub fn new(operation: impl Into<String>) -> Self {
+        Self {
+            operation: operation.into(),
+        }
     }
 }
 
@@ -77,7 +86,7 @@ fn card_suffix(card: Option<&CardId>, slot: Option<&str>) -> String {
 /// the caller-supplied `prompt` is used verbatim (it is already human text);
 /// every other kind gets a card-named prompt. Pure, so the #195 card-naming is
 /// unit-testable without spawning askpass.
-fn secret_prompt(req: &SecretRequest) -> String {
+fn secret_prompt(req: &SecretRequest, operation: &str) -> String {
     if req.kind == SecretKind::Generic {
         return req.prompt.clone();
     }
@@ -89,13 +98,13 @@ fn secret_prompt(req: &SecretRequest) -> String {
     if let Some(n) = req.attempts_remaining {
         p.push_str(&format!(" · {n} tries left"));
     }
-    p.push_str(" [piggy card init]: ");
+    p.push_str(&format!(" [piggy {operation}]: "));
     p
 }
 
 /// The `PIGGY_ASKPASS_CONTEXT` string for a secret request — the same card
 /// identity in a `Context:`-line form for the user-facing askpass.
-fn secret_context(req: &SecretRequest) -> Option<String> {
+fn secret_context(req: &SecretRequest, operation: &str) -> Option<String> {
     let card = req.card.as_ref()?;
     let mut id = format!("guid {}", card.guid);
     if let Some(s) = card.serial {
@@ -107,7 +116,7 @@ fn secret_context(req: &SecretRequest) -> Option<String> {
     if let Some(slot) = &req.slot {
         id.push_str(&format!(" slot {slot}"));
     }
-    Some(format!("piggy card init: card {id}"))
+    Some(format!("piggy {operation}: card {id}"))
 }
 
 /// Interpret a tty yes/no answer. Empty falls back to `default` (if a default
@@ -124,8 +133,8 @@ fn parse_confirm_answer(answer: &str, default: Option<bool>) -> Option<bool> {
 
 impl Frontend for TtyFrontend {
     fn request_secret(&mut self, req: SecretRequest) -> Result<Zeroizing<String>, FrontendError> {
-        let prompt = secret_prompt(&req);
-        let context = secret_context(&req);
+        let prompt = secret_prompt(&req, &self.operation);
+        let context = secret_context(&req, &self.operation);
         // At the tty there is no channel distinct from the operation; a failure
         // to obtain the secret (refused askpass, no tty, I/O error) aborts the
         // operation without retry — exactly the engine's `Declined` semantics.
@@ -245,13 +254,28 @@ mod tests {
             slot: Some("9a".into()),
             attempts_remaining: Some(3),
         };
-        let p = secret_prompt(&req);
+        let p = secret_prompt(&req, "card init");
         assert!(p.starts_with("Enter PIN"), "{p}");
         assert!(p.contains("2835305C…"), "short guid: {p}");
         assert!(p.contains("serial 15909078"), "serial: {p}");
         assert!(p.contains("piv-auth@2835305C"), "cn: {p}");
         assert!(p.contains("(slot 9a)"), "slot: {p}");
         assert!(p.contains("3 tries left"), "attempts: {p}");
+    }
+
+    #[test]
+    fn secret_prompt_carries_operation_label() {
+        let req = SecretRequest {
+            kind: SecretKind::CurrentPin,
+            prompt: String::new(),
+            card: Some(card()),
+            slot: Some("9a".into()),
+            attempts_remaining: None,
+        };
+        // The operation label lets each command name itself while sharing the
+        // one binding — and keeps sign-bytes' prompt byte-stable post-retrofit.
+        assert!(secret_prompt(&req, "sign-bytes").ends_with(" [piggy sign-bytes]: "));
+        assert!(secret_prompt(&req, "card init").ends_with(" [piggy card init]: "));
     }
 
     #[test]
@@ -263,9 +287,15 @@ mod tests {
             slot: None,
             attempts_remaining: None,
         };
-        assert!(secret_prompt(&mk(SecretKind::NewPin)).starts_with("Enter NEW PIN"));
-        assert!(secret_prompt(&mk(SecretKind::ConfirmNewPuk)).starts_with("Confirm NEW PUK"));
-        assert!(secret_prompt(&mk(SecretKind::ManagementKey)).starts_with("Enter management key"));
+        assert!(secret_prompt(&mk(SecretKind::NewPin), "card init").starts_with("Enter NEW PIN"));
+        assert!(
+            secret_prompt(&mk(SecretKind::ConfirmNewPuk), "card init")
+                .starts_with("Confirm NEW PUK")
+        );
+        assert!(
+            secret_prompt(&mk(SecretKind::ManagementKey), "card init")
+                .starts_with("Enter management key")
+        );
     }
 
     #[test]
@@ -277,7 +307,7 @@ mod tests {
             slot: None,
             attempts_remaining: None,
         };
-        assert_eq!(secret_prompt(&req), "Type the magic word: ");
+        assert_eq!(secret_prompt(&req, "sign-bytes"), "Type the magic word: ");
     }
 
     #[test]
@@ -293,7 +323,7 @@ mod tests {
             slot: None,
             attempts_remaining: None,
         };
-        let p = secret_prompt(&req);
+        let p = secret_prompt(&req, "sign-bytes");
         assert!(p.contains("AABBCCDD…"));
         assert!(!p.contains("serial"), "no serial line: {p}");
         assert!(!p.contains("·  ·"), "no empty separators: {p}");
@@ -308,7 +338,8 @@ mod tests {
             slot: Some("9a".into()),
             attempts_remaining: None,
         };
-        let c = secret_context(&req).unwrap();
+        let c = secret_context(&req, "sign-bytes").unwrap();
+        assert!(c.starts_with("piggy sign-bytes: "), "operation label: {c}");
         assert!(c.contains("guid 2835305C6024B3255557BF6901443404"));
         assert!(c.contains("serial 15909078"));
         assert!(c.contains("cn piv-auth@2835305C"));
@@ -324,7 +355,7 @@ mod tests {
             slot: None,
             attempts_remaining: None,
         };
-        assert!(secret_context(&req).is_none());
+        assert!(secret_context(&req, "card init").is_none());
     }
 
     #[test]
@@ -343,7 +374,7 @@ mod tests {
 
     #[test]
     fn tty_default_mgmt_key_choice_is_random() {
-        let mut fe = TtyFrontend::new();
+        let mut fe = TtyFrontend::new("card init");
         let choice = fe
             .request_mgmt_key(MgmtKeyRequest {
                 prompt: "mgmt key".into(),

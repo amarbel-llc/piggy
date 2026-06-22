@@ -541,8 +541,12 @@ test-bats-conformance-sign-bytes-fibby:
     set -euo pipefail
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
+    # The jsonrpc-frontend lane supplies the PIN via the scripted
+    # card-frontend-server test helper (cargo-built, mirroring fib-wait-ready).
+    cargo build -p card-frontend-server --quiet
     FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
+      CARD_FRONTEND_BIN="$PWD/target/debug/card-frontend-server" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_sign_bytes_fibby.bats
 
