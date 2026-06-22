@@ -22,6 +22,9 @@ use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use piggy::card::frontend::select::{FrontendKind, build_frontend};
+use piggy::card::protocol::ConfirmRequest;
+
 use crate::git_ops;
 use crate::reencrypt;
 use crate::store::{find_piggy_ids, resolve_target, store_root};
@@ -83,7 +86,12 @@ pub fn add(args: &[String]) -> i32 {
     };
 
     if parsed.all_attached {
-        return add_all_attached(&parsed.subfolder, parsed.assume_yes);
+        return add_all_attached(
+            &parsed.subfolder,
+            parsed.assume_yes,
+            parsed.frontend,
+            parsed.socket.as_deref(),
+        );
     }
 
     if parsed.ids.is_empty() {
@@ -146,7 +154,12 @@ pub fn add(args: &[String]) -> i32 {
 /// any unsupported cards, then reuse the add-path tail (atomic tempfile
 /// add + canonicalize + install + commit + reencrypt + commit) for the
 /// survivors.
-fn add_all_attached(subfolder: &str, assume_yes: bool) -> i32 {
+fn add_all_attached(
+    subfolder: &str,
+    assume_yes: bool,
+    frontend: FrontendKind,
+    socket: Option<&Path>,
+) -> i32 {
     let root = store_root();
     let piggy_ids = match find_piggy_ids(&root, subfolder) {
         Ok(p) => p,
@@ -213,24 +226,38 @@ fn add_all_attached(subfolder: &str, assume_yes: bool) -> i32 {
         }
 
         if !assume_yes {
-            if std::io::stdin().is_terminal() {
-                eprint!(
-                    "Continue and add the {} supported card(s)? [y/N] ",
-                    to_add.len()
-                );
-                let _ = std::io::stderr().flush();
-                let reply = read_tty_line();
-                match reply.as_str() {
-                    "y" | "Y" | "yes" | "Yes" | "YES" => {}
-                    _ => {
-                        eprintln!("aborted");
-                        return 1;
-                    }
-                }
-            } else {
+            // A non-interactive tty run can't prompt safely — keep the
+            // actionable hint. The jsonrpc binding always has a client to
+            // answer, so this guard is tty-only.
+            if frontend == FrontendKind::Tty && !std::io::stdin().is_terminal() {
                 eprintln!(
                     "aborted: unsupported cards detected and stdin is not a TTY; pass --yes to proceed"
                 );
+                return 1;
+            }
+            // Route the yes/no through the RFC 0006 Frontend (#200): the tty
+            // binding prompts at the terminal, a jsonrpc binding asks its
+            // client. Built lazily — only when a confirmation is actually
+            // needed (unsupported cards present, no --yes).
+            let mut fe = match build_frontend(frontend, socket, "recipients add") {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            let proceed = match fe.confirm(ConfirmRequest {
+                message: format!("Continue and add the {} supported card(s)?", to_add.len()),
+                default: Some(false),
+            }) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("aborted: {e}");
+                    return 1;
+                }
+            };
+            if !proceed {
+                eprintln!("aborted");
                 return 1;
             }
         }
@@ -432,6 +459,13 @@ struct AddArgs {
     all_attached: bool,
     assume_yes: bool,
     ids: Vec<String>,
+    /// Interaction frontend for the `--all-attached` confirmation (RFC 0006
+    /// §6). `tty` (default) prompts at the terminal; `jsonrpc` lets an external
+    /// program answer over `--socket`.
+    frontend: FrontendKind,
+    /// `AF_UNIX` socket the JSON-RPC frontend listens on (only used with
+    /// `--frontend jsonrpc`).
+    socket: Option<PathBuf>,
 }
 
 /// Parse the `add` argv: `-p <subfolder>`, `-A`/`--all-attached`,
@@ -444,6 +478,8 @@ fn parse_add(args: &[String]) -> Result<AddArgs, String> {
     let mut all_attached = false;
     let mut assume_yes = false;
     let mut ids = Vec::new();
+    let mut frontend = FrontendKind::Tty;
+    let mut socket: Option<PathBuf> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -453,6 +489,24 @@ fn parse_add(args: &[String]) -> Result<AddArgs, String> {
             },
             "-A" | "--all-attached" => all_attached = true,
             "--yes" => assume_yes = true,
+            "--frontend" => match iter.next() {
+                Some(v) => {
+                    frontend = match v.as_str() {
+                        "tty" => FrontendKind::Tty,
+                        "jsonrpc" => FrontendKind::Jsonrpc,
+                        other => {
+                            return Err(format!(
+                                "Error: unknown --frontend {other:?}; use tty|jsonrpc"
+                            ));
+                        }
+                    }
+                }
+                None => return Err("Error: --frontend requires a value (tty|jsonrpc)".into()),
+            },
+            "--socket" => match iter.next() {
+                Some(v) => socket = Some(PathBuf::from(v)),
+                None => return Err("Error: --socket requires a path argument".into()),
+            },
             other if other.starts_with('-') => {
                 return Err(format!("Error: unknown flag: {other}"));
             }
@@ -469,6 +523,8 @@ fn parse_add(args: &[String]) -> Result<AddArgs, String> {
         all_attached,
         assume_yes,
         ids,
+        frontend,
+        socket,
     })
 }
 
@@ -760,22 +816,6 @@ pub(crate) fn piggy_ids_output(args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Read one line from `/dev/tty`, matching the bash `read -r reply
-/// </dev/tty`. The trailing newline is stripped; a read failure yields
-/// an empty reply (the bash `|| reply=""`).
-fn read_tty_line() -> String {
-    use std::io::BufRead as _;
-    let Ok(tty) = std::fs::File::open("/dev/tty") else {
-        return String::new();
-    };
-    let mut reader = std::io::BufReader::new(tty);
-    let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(_) => line.trim_end_matches(['\n', '\r']).to_string(),
-        Err(_) => String::new(),
-    }
-}
-
 /// The shared tail of all three flows: commit the piggy-ids change,
 /// re-encrypt the affected subtree, then commit the re-encryption.
 /// Mirrors the `set_git "$PIGGY_IDS"; git_add_file … reencrypt_path …
@@ -1023,6 +1063,36 @@ mod tests {
         let parsed = parse_add(&strings(&["-A", "--yes"])).unwrap();
         assert!(parsed.all_attached);
         assert!(parsed.assume_yes);
+    }
+
+    #[test]
+    fn parse_add_defaults_to_tty_frontend() {
+        let parsed = parse_add(&strings(&["-A"])).unwrap();
+        assert_eq!(parsed.frontend, FrontendKind::Tty);
+        assert!(parsed.socket.is_none());
+    }
+
+    #[test]
+    fn parse_add_accepts_jsonrpc_frontend_and_socket() {
+        let parsed = parse_add(&strings(&[
+            "-A",
+            "--frontend",
+            "jsonrpc",
+            "--socket",
+            "/tmp/ui.sock",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.frontend, FrontendKind::Jsonrpc);
+        assert_eq!(
+            parsed.socket.as_deref(),
+            Some(std::path::Path::new("/tmp/ui.sock"))
+        );
+    }
+
+    #[test]
+    fn parse_add_rejects_unknown_frontend() {
+        let err = parse_add(&strings(&["-A", "--frontend", "gui"])).unwrap_err();
+        assert!(err.contains("--frontend"), "{err}");
     }
 
     #[test]
