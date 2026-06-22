@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/age-plugin-piggy",
+    "crates/card-frontend-server",
     "crates/fib-wait-ready",
     "crates/fibby",
     "crates/piggy",

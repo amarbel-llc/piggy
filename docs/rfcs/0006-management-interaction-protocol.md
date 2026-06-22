@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-06-22
 ---
 
@@ -254,10 +254,16 @@ any card operation.
 
 ## Conformance Testing
 
-A reference implementation (piggy#194 Phase 3, the provisioning engine and both
-bindings) is planned; conformance tests land with it under
-`zz-tests_bats/`. Tests MUST use binary injection via `bats-emo`
-(`require_bin PIGGY piggy`) so the suite is portable across implementations.
+The reference implementation landed in piggy#194: the provisioning engine
+(`crates/piggy/src/card/engine.rs`) and both bindings
+(`crates/piggy/src/card/frontend/{tty,jsonrpc}.rs`), consumed by `piggy card
+init`. Conformance lives in `zz-tests_bats/conformance/piggy_card_init_fibby.bats`
+(`hardware` tag), which provisions a blank fibby card end-to-end through BOTH
+bindings — the tty lane and a scripted JSON-RPC frontend server
+(`crates/card-frontend-server`) over an `AF_UNIX` socket — exercising §4.1
+framing, §4.3 methods + the `initialize` handshake, and §6 selection. The §5 tty
+card-identity requirement additionally has card-free unit coverage in
+`crates/piggy/src/card/frontend/tty.rs` and `crates/piggy/src/sign_bytes.rs`.
 
 ### Covered requirements (to be implemented with the engine)
 

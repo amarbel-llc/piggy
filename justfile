@@ -562,6 +562,27 @@ test-bats-conformance-list-blank-fibby:
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_list_blank_fibby.bats
 
+# Fibby-backed gate for `piggy card init` (piggy#194): provision a blank yk5
+# fibby end to end through BOTH interaction frontends — the tty/askpass default
+# and the JSON-RPC binding driven by the scripted `card-frontend-server` test
+# helper (cargo-built on demand, mirroring `fib-wait-ready`). Asserts `piggy
+# list` then shows the card provisioned (CHUID GUID + 9D recipient). [linux]-
+# only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect is a no-op on
+# macOS's PCSC.framework).
+[group('post-build')]
+[linux]
+test-bats-conformance-card-init-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    cargo build -p card-frontend-server --quiet
+    FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      CARD_FRONTEND_BIN="$PWD/target/debug/card-frontend-server" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_card_init_fibby.bats
+
 # Fibby-backed gate for `recipients sync` with NO file: re-encrypt the store
 # (whole or `-p` subtree) to the current piggy-ids recipients, then prove the
 # result still decrypts through the agent <-> fibby slot-9D rebox path. The

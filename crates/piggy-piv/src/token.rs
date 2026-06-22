@@ -425,6 +425,24 @@ impl<'tok> PinSession<'tok> {
         self.general_authenticate(slot.algorithm().to_byte(), slot_id, ga_tag::CHALLENGE, data)
     }
 
+    /// Sign pre-hashed data with the slot key using an explicitly-supplied PIV
+    /// algorithm byte (e.g. `0x11` ECCP256), skipping the cert read that
+    /// [`PinSession::sign_prehash`] does to discover the algorithm.
+    ///
+    /// Needed during provisioning (piggy#194): a freshly-generated key must
+    /// sign its own self-signed certificate *before* that cert is written to
+    /// the slot, so `read_slot` would 6A82 ("slot empty"). The caller knows the
+    /// algorithm from the GENERATE that just created the key. Same
+    /// PIN-policy/transaction semantics as `sign_prehash`.
+    pub fn sign_prehash_with_alg(
+        &mut self,
+        slot_id: u8,
+        alg: u8,
+        data: &[u8],
+    ) -> Result<Vec<u8>, PivError> {
+        self.general_authenticate(alg, slot_id, ga_tag::CHALLENGE, data)
+    }
+
     /// Perform ECDH key agreement with the slot's private key, inside this
     /// session's transaction. Same PIN-policy semantics as `sign_prehash`.
     pub fn ecdh_derive(&mut self, slot_id: u8, peer_ec_point: &[u8]) -> Result<Vec<u8>, PivError> {

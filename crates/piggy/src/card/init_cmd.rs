@@ -58,8 +58,16 @@ impl ProvisionCard for SessionCard<'_, '_> {
         // Card-default PIN/touch policy (no AA/AB tags), like pivy `piv_generate`.
         self.session.generate_key(slot, alg.to_byte(), None, None)
     }
-    fn sign_prehash(&mut self, slot: u8, digest: &[u8]) -> Result<Vec<u8>, PivError> {
-        self.session.sign_prehash(slot, digest)
+    fn sign_prehash(
+        &mut self,
+        slot: u8,
+        alg: PivAlgorithm,
+        digest: &[u8],
+    ) -> Result<Vec<u8>, PivError> {
+        // The cert is signed before it is written, so the algorithm comes from
+        // the engine (which just generated the key) rather than a cert read.
+        self.session
+            .sign_prehash_with_alg(slot, alg.to_byte(), digest)
     }
     fn put_cert(&mut self, slot: u8, cert_der: &[u8]) -> Result<(), PivError> {
         self.session.put_cert(slot, cert_der)

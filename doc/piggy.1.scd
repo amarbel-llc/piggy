@@ -450,6 +450,36 @@ passthroughs for the C pivy binaries:
 	piggy sign-bytes --slot 9a --guid DEADBEEF... < message > sig.raw
 	```
 
+*card init* [*--serial* _N_] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]
+	Provision a factory-blank PIV card in one step: write the CHUID (a fresh
+	random GUID), generate slot 9D (Key Management / ECDH — piggy's decrypt
+	recipient) and slot 9A (PIV Authentication — the SSH-auth key) as ECDSA
+	P-256, build and card-sign a self-signed certificate for each (CN
+	_piv-key-mgmt@<guid8>_ / _piv-auth@<guid8>_), change the PIN and PUK off
+	their factory defaults, and rotate the management key. The provisioned GUID
+	is printed to stdout.
+
+	*--serial* _N_ selects the card by its YubiKey serial; with exactly one
+	factory-blank card attached it is optional, and required only to
+	disambiguate when several are present.
+
+	The operator interactions — the new PIN, the new PUK, a proceed
+	confirmation, and the management-key source — run through a pluggable
+	frontend. *--frontend tty* (the default) prompts via *SSH_ASKPASS*/tty,
+	naming the card in each prompt as *sign-bytes* does. *--frontend jsonrpc*
+	hands every interaction to an external program (e.g. a richer UI) over the
+	*--socket* _PATH_ AF_UNIX stream: the program listens and answers
+	newline-framed JSON-RPC, piggy connects as the client. A missing or
+	unusable channel fails before any card operation. The management key rotates
+	to a fresh random value, displayed once on stderr by the tty frontend
+	(record it — it is not recoverable).
+
+	```
+	piggy card init
+	piggy card init --serial 15909078
+	piggy card init --frontend jsonrpc --socket /run/user/1000/piggy-ui.sock
+	```
+
 *help*
 	Show piggy's pass-style usage message.
 

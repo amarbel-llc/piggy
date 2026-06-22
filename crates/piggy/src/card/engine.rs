@@ -59,9 +59,16 @@ pub trait ProvisionCard {
     /// Generate a key pair in `slot`; returns the uncompressed public point
     /// (`04 ‖ X ‖ Y`).
     fn generate_key(&mut self, slot: u8, alg: PivAlgorithm) -> Result<Vec<u8>, PivError>;
-    /// Sign a prehash with `slot`'s key; returns a DER ECDSA signature (used to
-    /// self-sign the slot's cert).
-    fn sign_prehash(&mut self, slot: u8, digest: &[u8]) -> Result<Vec<u8>, PivError>;
+    /// Sign a prehash with `slot`'s key using the given algorithm; returns a
+    /// DER ECDSA signature (used to self-sign the slot's cert). `alg` is passed
+    /// explicitly because here the key exists but its cert does not yet — so
+    /// the card layer cannot read the algorithm back from a cert.
+    fn sign_prehash(
+        &mut self,
+        slot: u8,
+        alg: PivAlgorithm,
+        digest: &[u8],
+    ) -> Result<Vec<u8>, PivError>;
     /// Write a slot's X.509 cert object.
     fn put_cert(&mut self, slot: u8, cert_der: &[u8]) -> Result<(), PivError>;
     /// Change the PIV PIN.
@@ -125,7 +132,7 @@ fn provision_slot(card: &mut dyn ProvisionCard, slot: u8, cn: &str) -> Result<()
         &point,
         PivAlgorithm::EcP256,
         cn,
-        |digest| card.sign_prehash(slot, digest),
+        |digest| card.sign_prehash(slot, PivAlgorithm::EcP256, digest),
     )?;
     card.put_cert(slot, &cert)?;
     Ok(())
@@ -339,7 +346,12 @@ mod tests {
             p.extend_from_slice(&[0u8; 64]);
             Ok(p)
         }
-        fn sign_prehash(&mut self, slot: u8, _digest: &[u8]) -> Result<Vec<u8>, PivError> {
+        fn sign_prehash(
+            &mut self,
+            slot: u8,
+            _alg: PivAlgorithm,
+            _digest: &[u8],
+        ) -> Result<Vec<u8>, PivError> {
             self.log.push(format!("sign:{slot:02x}"));
             // A minimal DER SEQUENCE { INTEGER 1, INTEGER 1 } — embedded verbatim.
             Ok(vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01])
