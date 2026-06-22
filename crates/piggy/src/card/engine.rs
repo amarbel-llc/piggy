@@ -103,6 +103,12 @@ pub struct ProvisionOutcome {
 /// Why a provision failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ProvisionError {
+    /// A pre-engine setup failure (no/ambiguous blank card, PC/SC enumeration,
+    /// opening the card session, RNG). Distinct from [`ProvisionError::Card`]
+    /// (an on-card APDU failure during the run) so callers can render it
+    /// plainly; not a declined interaction.
+    #[error("{0}")]
+    Setup(String),
     #[error("card error: {0}")]
     Card(#[from] PivError),
     #[error("frontend error: {0}")]

@@ -35,7 +35,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::card::frontend::jsonrpc::JsonRpcFrontend;
 use crate::card::protocol::PROTOCOL_VERSION;
+
+mod methods;
 
 /// JSON-RPC parse error (malformed JSON on the wire).
 pub const PARSE_ERROR: i64 = -32700;
@@ -152,30 +155,39 @@ fn handle_initialize(params: &Value) -> Result<Value, (i64, String)> {
     Ok(serde_json::json!({ "protocol": PROTOCOL_VERSION }))
 }
 
-/// Dispatch one command method (RFC 0007 §5). `reader`/`writer` are the live
-/// connection: an interactive method (Phase 3 `card.init` / `sign_bytes`) will
-/// build a [`JsonRpcFrontend::already_initialized`] over them to issue its
-/// PIN/confirm/progress requests inline before returning the method result.
+/// Dispatch one command method (RFC 0007 §5). For the interactive methods
+/// (`card.init` / `sign_bytes`) a [`JsonRpcFrontend::already_initialized`] is
+/// built over the live connection (`reader`/`writer`) so the method's
+/// PIN/confirm/progress requests travel back to the client inline; the frontend
+/// is dropped before the method *result* is written, freeing the writer.
 ///
 /// [`JsonRpcFrontend::already_initialized`]: crate::card::frontend::jsonrpc::JsonRpcFrontend::already_initialized
 fn dispatch<R: BufRead, W: Write>(
     method: &str,
-    _params: &Value,
+    params: &Value,
     id: &Value,
-    _reader: &mut R,
+    reader: &mut R,
     writer: &mut W,
 ) -> std::io::Result<()> {
     match method {
-        // The v1 method set (RFC 0007 §5) — wired in Phase 3 (piggy#201). Until
-        // then they are recognized (so the error is "not implemented", not
-        // "method not found") but not yet served.
-        "card.list" | "card.init" | "sign_bytes" => write_error(
-            writer,
-            id,
-            CARD_OP_FAILED,
-            format!("method {method:?} is not implemented yet (piggy#201 phase 3)"),
-            None,
-        ),
+        // Read-only, PIN-free: no interaction frontend needed.
+        "card.list" => respond(writer, id, methods::card_list(params)),
+        "card.init" => {
+            let outcome = {
+                let mut fe =
+                    JsonRpcFrontend::already_initialized(&mut *reader, &mut *writer, "card init");
+                methods::card_init(params, &mut fe)
+            };
+            respond(writer, id, outcome)
+        }
+        "sign_bytes" => {
+            let outcome = {
+                let mut fe =
+                    JsonRpcFrontend::already_initialized(&mut *reader, &mut *writer, "sign-bytes");
+                methods::sign_bytes(params, &mut fe)
+            };
+            respond(writer, id, outcome)
+        }
         other => write_error(
             writer,
             id,
@@ -183,6 +195,18 @@ fn dispatch<R: BufRead, W: Write>(
             format!("unknown method {other:?}"),
             None,
         ),
+    }
+}
+
+/// Write a method handler's `Result` as the matching JSON-RPC response.
+fn respond<W: Write>(
+    writer: &mut W,
+    id: &Value,
+    outcome: Result<Value, (i64, String)>,
+) -> std::io::Result<()> {
+    match outcome {
+        Ok(result) => write_result(writer, id, result),
+        Err((code, message)) => write_error(writer, id, code, message, None),
     }
 }
 
@@ -406,36 +430,27 @@ mod tests {
         assert_eq!(out[1]["error"]["code"], METHOD_NOT_FOUND);
     }
 
-    #[test]
-    fn v1_methods_are_recognized_but_not_yet_implemented() {
-        // Phase 2: the v1 methods return the piggy-specific "not implemented"
-        // error (-32050), distinct from "method not found" — Phase 3 wires them.
-        for method in ["card.list", "card.init", "sign_bytes"] {
-            let call = format!(r#"{{"jsonrpc":"2.0","id":3,"method":"{method}","params":{{}}}}"#);
-            let input = format!("{}\n{call}\n", init_line());
-            let out = run_serve(&input);
-            assert_eq!(out.len(), 2, "{method}: initialize + the method response");
-            assert_eq!(
-                out[1]["error"]["code"], CARD_OP_FAILED,
-                "{method} should be recognized-but-unimplemented, not unknown"
-            );
-        }
-    }
+    // The card.list/card.init/sign_bytes methods touch real PC/SC hardware, so
+    // they are NOT driven through `serve` in these unit tests (this dev machine
+    // has live YubiKeys); their param-validation is covered card-free in
+    // `methods::tests`, and the end-to-end card paths by the fibby conformance
+    // lane (piggy#201 Phase 4). The serve-loop mechanics below use only the
+    // hardware-free `initialize` and unknown-method paths.
 
     #[test]
     fn single_flight_sequential_calls_each_get_a_response_in_order() {
         let input = format!(
             "{}\n{}\n{}\n",
             init_line(),
-            r#"{"jsonrpc":"2.0","id":1,"method":"card.list","params":{}}"#,
-            r#"{"jsonrpc":"2.0","id":2,"method":"nope","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"nope.one","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"nope.two","params":{}}"#,
         );
         let out = run_serve(&input);
         assert_eq!(out.len(), 3);
         assert_eq!(out[0]["id"], 0); // initialize
-        assert_eq!(out[1]["id"], 1); // card.list (not-implemented)
-        assert_eq!(out[1]["error"]["code"], CARD_OP_FAILED);
-        assert_eq!(out[2]["id"], 2); // unknown method
+        assert_eq!(out[1]["id"], 1); // first unknown method
+        assert_eq!(out[1]["error"]["code"], METHOD_NOT_FOUND);
+        assert_eq!(out[2]["id"], 2); // second unknown method
         assert_eq!(out[2]["error"]["code"], METHOD_NOT_FOUND);
     }
 

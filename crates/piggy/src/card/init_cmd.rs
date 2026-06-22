@@ -14,8 +14,9 @@ use openssl::rand::rand_bytes;
 
 use piggy_piv::{PinSession, PivAlgorithm, PivContext, PivError, PivToken};
 
-use crate::card::engine::{self, ProvisionCard, ProvisionConfig, ProvisionOutcome};
+use crate::card::engine::{self, ProvisionCard, ProvisionConfig, ProvisionError, ProvisionOutcome};
 use crate::card::frontend::select::{FrontendKind, build_frontend};
+use crate::card::protocol::Frontend;
 
 /// Adapter wiring the engine's [`ProvisionCard`] seam to a live
 /// [`PinSession`]. Each method delegates to the session; `serial` is captured
@@ -89,6 +90,40 @@ fn select_blank(tokens: Vec<PivToken>, serial: Option<u32>) -> Result<PivToken, 
     }
 }
 
+/// Provision a blank card through an already-built frontend, returning the
+/// structured [`ProvisionOutcome`] (or a [`ProvisionError`] preserving the
+/// decline-vs-failure distinction). This is the binding-agnostic entry the
+/// `piggy manage` `card.init` method (piggy#201) calls with a JSON-RPC
+/// frontend bound to the live connection; the CLI ([`run`]) reaches it via
+/// [`run_inner`] with a tty/socket frontend. Selecting the blank card, opening
+/// the one PIN session, and minting the GUID happen here; the
+/// [`SessionCard`] adapter then holds the live session for the engine.
+pub fn provision_with_frontend(
+    serial: Option<u32>,
+    frontend: &mut dyn Frontend,
+) -> Result<ProvisionOutcome, ProvisionError> {
+    let ctx = PivContext::new().map_err(|e| ProvisionError::Setup(format!("PC/SC: {e}")))?;
+    let tokens = ctx
+        .enumerate_tokens_including_uninitialized()
+        .map_err(|e| ProvisionError::Setup(format!("enumerate cards: {e}")))?;
+    let mut token = select_blank(tokens, serial).map_err(ProvisionError::Setup)?;
+    let card_serial = token.yk_serial();
+
+    let mut session = token
+        .begin_pin_session()
+        .map_err(|e| ProvisionError::Setup(format!("open card session: {e}")))?;
+    let mut card = SessionCard {
+        session: &mut session,
+        serial: card_serial,
+    };
+
+    let mut guid = [0u8; 16];
+    rand_bytes(&mut guid).map_err(|e| ProvisionError::Setup(format!("generate GUID: {e}")))?;
+    let cfg = ProvisionConfig { guid };
+
+    engine::run(&mut card, frontend, &cfg)
+}
+
 fn run_inner(
     serial: Option<u32>,
     frontend: FrontendKind,
@@ -97,27 +132,7 @@ fn run_inner(
     // Build the frontend first: a jsonrpc channel that can't be opened must
     // fail before we touch any card (RFC 0006 §6).
     let mut frontend = build_frontend(frontend, socket, "card init")?;
-
-    let ctx = PivContext::new().map_err(|e| format!("PC/SC: {e}"))?;
-    let tokens = ctx
-        .enumerate_tokens_including_uninitialized()
-        .map_err(|e| format!("enumerate cards: {e}"))?;
-    let mut token = select_blank(tokens, serial)?;
-    let card_serial = token.yk_serial();
-
-    let mut session = token
-        .begin_pin_session()
-        .map_err(|e| format!("open card session: {e}"))?;
-    let mut card = SessionCard {
-        session: &mut session,
-        serial: card_serial,
-    };
-
-    let mut guid = [0u8; 16];
-    rand_bytes(&mut guid).map_err(|e| format!("generate GUID: {e}"))?;
-    let cfg = ProvisionConfig { guid };
-
-    engine::run(&mut card, frontend.as_mut(), &cfg).map_err(|e| e.to_string())
+    provision_with_frontend(serial, frontend.as_mut()).map_err(|e| e.to_string())
 }
 
 /// `piggy card init` entry point. Returns a process exit code.
