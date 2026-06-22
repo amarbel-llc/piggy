@@ -111,6 +111,37 @@ Enumerates attached PIV cards (the data behind `piggy list`), including
 factory-blank cards (piggy#193) when `include_uninitialized` is true. Read-only,
 PIN-free; issues no interaction requests.
 
+A `<card record>` is one JSON object per *populated slot* (or per blank card),
+exactly the structured form `piggy list --format=ndjson` emits. Three shapes,
+discriminated by the boolean markers `unsupported` / `uninitialized` (absent ⇒
+a supported, recipient-eligible slot):
+
+    ; supported populated slot
+    { "id":     <string>,    ; the markl id (e.g. piggy-recipient-v1@pivy_ecdh_p256_pub-…,
+                             ;   piggy-piv_auth-v1@… for slot 9A) — the key handle
+      "guid":   <string>,    ; 32 uppercase hex
+      "serial": <integer>,   ; OPTIONAL (YubiKey serial, when available)
+      "reader": <string>,
+      "slot":   <string>,    ; "9A" | "9C" | "9D" | "9E" | "82".."95"
+      "cn":     <string>,    ; OPTIONAL (slot cert Subject CN)
+      "pin_policy":   <string>,   ; OPTIONAL
+      "touch_policy": <string> }  ; OPTIONAL
+
+    ; slot whose key piggy cannot use as a recipient (e.g. non-P-256 9D)
+    { "unsupported": true, "guid", "serial"?, "reader", "slot",
+      "cn"?, "pin_policy"?, "touch_policy"?, "reason": <string> }
+
+    ; factory-blank card (no CHUID) — card-level, no slot (piggy#193)
+    { "uninitialized": true, "guid": <all-zeros>, "reader", "serial"? }
+
+A client reconstructs derived forms itself from the markl `id`: e.g. papi
+renders the OpenSSH `authorized_keys` line for a slot-9A entry from its
+`piggy-piv_auth-v1@…` id, so the protocol intentionally exposes **no**
+`--format=ssh` projection. The `id` (and the slot-9D `piggy-recipient-v1@…`
+id, from which an age recipient is derived) is the neutral key handle; framing
+is the client's concern. `include_uninitialized: false` omits the
+`uninitialized` records.
+
 #### 5.2 `card.init`
 
     params := { "serial": <integer> }   ; OPTIONAL; omitted ⇒ the sole blank card
