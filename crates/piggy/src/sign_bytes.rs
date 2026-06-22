@@ -110,8 +110,24 @@ fn execute(args: SignBytesCli) -> Result<(), String> {
         }
     };
 
-    let prompt = format!("Enter PIN for slot {} (sign-bytes): ", args.slot);
-    let der = sign_with_card(&mut token, slot_id, &digest, args.pin.as_deref(), &prompt)?;
+    // Name the target card in the PIN prompt (piggy#195): with more than one
+    // card attached, an unlabeled "Enter PIN" let an operator enter the wrong
+    // PIN (e.g. a freshly-provisioned card's default vs a trusted card's real
+    // PIN) and block a card. Carry GUID + serial + CN — all three the operator
+    // asked for — sourced from the already-selected card and its slot cert.
+    let guid_short = token.guid().short_id();
+    let serial = token.yk_serial();
+    let cn = slot_cn(slot_meta.cert_der());
+    let prompt = pin_prompt(&args.slot, &guid_short, serial, cn.as_deref());
+    let context = pin_context(&args.slot, &guid_short, serial, cn.as_deref());
+    let der = sign_with_card(
+        &mut token,
+        slot_id,
+        &digest,
+        args.pin.as_deref(),
+        &prompt,
+        &context,
+    )?;
 
     let out = match args.format {
         OutFormat::Raw => piggy::ecdsa_sig::der_to_raw_rs(&der, field_len)
@@ -125,6 +141,52 @@ fn execute(args: SignBytesCli) -> Result<(), String> {
         .map_err(|e| format!("write stdout: {e}"))?;
     stdout.flush().map_err(|e| format!("flush stdout: {e}"))?;
     Ok(())
+}
+
+/// Extract the Subject Common Name from a slot's cert DER (e.g.
+/// `piv-auth@2835305C`), for naming the card in the PIN prompt. `None` if the
+/// cert doesn't parse or has no CN.
+fn slot_cn(cert_der: &[u8]) -> Option<String> {
+    let x509 = openssl::x509::X509::from_der(cert_der).ok()?;
+    x509.subject_name()
+        .entries_by_nid(openssl::nid::Nid::COMMONNAME)
+        .next()
+        .and_then(|e| e.data().as_utf8().ok())
+        .map(|s| s.to_string())
+}
+
+/// Build the PIN prompt for a sign on `slot`, NAMING the target card so an
+/// operator holding more than one card can't enter the wrong PIN and block one
+/// (piggy#195). Carries all three identifiers the operator asked for — short
+/// GUID, serial (the handle that matches `piggy list` + the physical card),
+/// and the slot cert's CN — omitting serial/CN gracefully when unavailable,
+/// e.g. `Enter PIN — card 2835305C… · serial 15909078 · piv-auth@2835305C
+/// (slot 9a) [piggy sign-bytes]: `. This card-identity context is exactly what
+/// a structured / JSON-RPC front-end (piggy#194's `ProvisionFrontend` seam +
+/// the #197 management-API epic) carries in its PIN request, so an alternate
+/// TUI can render it itself rather than show a bare "Enter PIN".
+fn pin_prompt(slot: &str, guid_short: &str, serial: Option<u32>, cn: Option<&str>) -> String {
+    let mut id = format!("card {guid_short}…");
+    if let Some(s) = serial {
+        id.push_str(&format!(" · serial {s}"));
+    }
+    if let Some(c) = cn {
+        id.push_str(&format!(" · {c}"));
+    }
+    format!("Enter PIN — {id} (slot {slot}) [piggy sign-bytes]: ")
+}
+
+/// The `PIGGY_ASKPASS_CONTEXT` string the user-facing askpass renders as a
+/// `Context:` line — same card identity as the prompt, machine-ish form.
+fn pin_context(slot: &str, guid_short: &str, serial: Option<u32>, cn: Option<&str>) -> String {
+    let mut id = format!("guid {guid_short}");
+    if let Some(s) = serial {
+        id.push_str(&format!(" serial {s}"));
+    }
+    if let Some(c) = cn {
+        id.push_str(&format!(" cn {c}"));
+    }
+    format!("piggy sign-bytes: card {id} slot {slot}")
 }
 
 /// Map a user-facing slot string to its PIV slot id. Only signing-capable
@@ -183,12 +245,13 @@ fn sign_with_card(
     digest: &[u8],
     fixed_pin: Option<&str>,
     prompt: &str,
+    context: &str,
 ) -> Result<Vec<u8>, String> {
     let mut attempt = 0u32;
     loop {
         let pin: Zeroizing<String> = match fixed_pin {
             Some(p) => Zeroizing::new(p.to_string()),
-            None => piggy::card_oracle::run_askpass(prompt, Some("piggy sign-bytes"))
+            None => piggy::card_oracle::run_askpass(prompt, Some(context))
                 .map_err(|e| format!("PIN entry: {e}"))?,
         };
 
@@ -220,6 +283,43 @@ fn sign_with_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pin_prompt_names_guid_serial_cn_and_slot() {
+        // All three identifiers the operator asked for (piggy#195).
+        let p = pin_prompt("9a", "2835305C", Some(15909078), Some("piv-auth@2835305C"));
+        assert!(p.contains("2835305C"), "prompt names the guid: {p}");
+        assert!(
+            p.contains("serial 15909078"),
+            "prompt names the serial: {p}"
+        );
+        assert!(p.contains("piv-auth@2835305C"), "prompt names the CN: {p}");
+        assert!(p.contains("9a"), "prompt names the slot: {p}");
+    }
+
+    #[test]
+    fn pin_prompt_omits_absent_serial_and_cn() {
+        let p = pin_prompt("9c", "AABBCCDD", None, None);
+        assert!(p.contains("AABBCCDD"), "prompt names the guid: {p}");
+        assert!(p.contains("9c"));
+        assert!(
+            !p.contains("serial"),
+            "no serial clause when serial absent: {p}"
+        );
+        assert!(
+            !p.contains(" · "),
+            "no dangling separators when serial/CN absent: {p}"
+        );
+    }
+
+    #[test]
+    fn pin_context_carries_guid_serial_and_cn() {
+        let c = pin_context("9a", "DEADBEEF", Some(42), Some("piv-auth@DEADBEEF"));
+        assert!(c.contains("serial 42"));
+        assert!(c.contains("DEADBEEF"));
+        assert!(c.contains("cn piv-auth@DEADBEEF"));
+        assert!(c.contains("9a"));
+    }
 
     #[test]
     fn parse_slot_accepts_signing_slots_case_insensitive() {

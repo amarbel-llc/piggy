@@ -437,9 +437,11 @@ passthroughs for the C pivy binaries:
 	*--guid* _GUID_ selects among several attached cards (direct-PCSC, no
 	agent); with one card it is optional. The PIN comes from *-P* _PIN_ or,
 	absent that, an *SSH_ASKPASS*/tty prompt (see *ENVIRONMENT VARIABLES*).
-	Signing on slot 9A/9C exercises the private key and requires the card
-	PIN per the slot's policy — this is the only top-level command besides
-	the agent that does so.
+	The prompt NAMES the target card — its short GUID, serial (when
+	available), and the signing slot's certificate CN — so an operator
+	holding more than one card cannot enter the wrong PIN and block a card. Signing on slot 9A/9C exercises the private key and
+	requires the card PIN per the slot's policy — this is the only top-level
+	command besides the agent that does so.
 
 	The output is binary; redirect it to a file or pipe it. Example
 	(produce a raw _r‖s_ signature over a file):
