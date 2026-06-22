@@ -1,0 +1,17 @@
+[package]
+name = "manage-client"
+version = "0.1.0"
+edition = "2021"
+
+# Test-only helper: a scripted JSON-RPC *command client* for the `piggy manage`
+# conformance lane (piggy#201, RFC 0007). The inverse of card-frontend-server —
+# it invokes a management method on piggy (the server) and answers the RFC 0006
+# interaction requests piggy issues back over the same connection. Built via
+# `cargo build -p manage-client` by the conformance recipe, not shipped.
+[[bin]]
+name = "manage-client"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"

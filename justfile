@@ -587,6 +587,27 @@ test-bats-conformance-card-init-fibby:
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_card_init_fibby.bats
 
+# Fibby-backed gate for `piggy manage --jsonrpc` (piggy#201, RFC 0007): drive
+# the headless command server end to end against a virtual fibby card through
+# the scripted `manage-client` test peer (cargo-built on demand, mirroring
+# `card-frontend-server`) — card.init over BOTH stdio and an AF_UNIX socket,
+# a real slot-9A sign_bytes whose DER output openssl verifies, and card.list.
+# [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect is a
+# no-op on macOS's PCSC.framework).
+[group('post-build')]
+[linux]
+test-bats-conformance-manage-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    cargo build -p manage-client --quiet
+    FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      MANAGE_CLIENT_BIN="$PWD/target/debug/manage-client" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_manage_fibby.bats
+
 # Fibby-backed gate for `recipients sync` with NO file: re-encrypt the store
 # (whole or `-p` subtree) to the current piggy-ids recipients, then prove the
 # result still decrypts through the agent <-> fibby slot-9D rebox path. The
