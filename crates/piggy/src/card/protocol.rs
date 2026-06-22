@@ -79,6 +79,13 @@ pub struct SecretRequest {
     /// Remaining tries before lockout, when known.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub attempts_remaining: Option<u32>,
+    /// Operation-specific context the frontend renders alongside the card
+    /// identity — e.g. `show-batch`'s "decrypt 5 secrets: a, b, c" telling the
+    /// operator what they are authorizing. Distinct from `prompt` (the verb)
+    /// and `card` (the structured identity): a free-text note appended to a
+    /// card-scoped prompt without displacing the #195 card naming.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub detail: Option<String>,
 }
 
 /// Choose a management-key source on provision (RFC 0006 §2.3).
@@ -297,6 +304,7 @@ mod tests {
             }),
             slot: Some("9a".into()),
             attempts_remaining: Some(3),
+            detail: Some("decrypt 5 secrets: a, b, c".into()),
         };
         roundtrip(&req);
     }

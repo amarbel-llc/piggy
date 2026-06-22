@@ -275,6 +275,7 @@ mod tests {
                 card: Some(sample_card()),
                 slot: Some("9a".into()),
                 attempts_remaining: Some(3),
+                detail: None,
             })
             .unwrap();
         assert_eq!(&*secret, "123456");
@@ -307,6 +308,7 @@ mod tests {
                 card: Some(sample_card()),
                 slot: None,
                 attempts_remaining: None,
+                detail: None,
             })
             .unwrap_err();
         assert!(

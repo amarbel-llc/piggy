@@ -262,6 +262,7 @@ fn sign_with_card(
                     card: Some(card.clone()),
                     slot: Some(slot_label.to_string()),
                     attempts_remaining,
+                    detail: None,
                 })
                 .map_err(|e| format!("PIN entry: {e}"))?
             }

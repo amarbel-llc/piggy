@@ -91,9 +91,18 @@ present, else GUID) in any card-scoped prompt.
       "prompt": <string>,    ; REQUIRED human-readable text (the fallback rendering)
       "card":   CardId,      ; OPTIONAL; present for card-scoped secrets
       "slot":   <string>,    ; OPTIONAL PIV slot id, e.g. "9a"
-      "attempts_remaining": <integer>  ; OPTIONAL; remaining tries before lockout
+      "attempts_remaining": <integer>, ; OPTIONAL; remaining tries before lockout
+      "detail": <string>     ; OPTIONAL operation-specific context, e.g.
+                             ;   "decrypt 5 secrets: a, b, c"
     }
     response result := { "secret": <string> }
+
+`detail` is free-text context a frontend renders alongside (not in place of) the
+card identity — telling the operator *what* they are authorizing (e.g.
+`show-batch`'s pending decrypt set). It is distinct from `prompt` (the verb the
+fallback rendering opens with) and `card` (the structured #2.1 identity): a
+frontend SHOULD surface `detail` without displacing the card naming required by
+§2.1 / §5.
 
 The engine MUST treat the returned `secret` as sensitive: it MUST NOT be logged
 and MUST be zeroized after use. A frontend that cannot or will not provide the

@@ -261,6 +261,7 @@ fn collect_new_secret(
         card: Some(card.clone()),
         slot: None,
         attempts_remaining: None,
+        detail: None,
     })?;
     let second = fe.request_secret(SecretRequest {
         kind: confirm,
@@ -268,6 +269,7 @@ fn collect_new_secret(
         card: Some(card.clone()),
         slot: None,
         attempts_remaining: None,
+        detail: None,
     })?;
     if first.as_str() != second.as_str() {
         return Err(mismatch);

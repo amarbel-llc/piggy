@@ -95,6 +95,9 @@ fn secret_prompt(req: &SecretRequest, operation: &str) -> String {
         "{verb}{}",
         card_suffix(req.card.as_ref(), req.slot.as_deref())
     );
+    if let Some(detail) = &req.detail {
+        p.push_str(&format!(" — {detail}"));
+    }
     if let Some(n) = req.attempts_remaining {
         p.push_str(&format!(" · {n} tries left"));
     }
@@ -253,6 +256,7 @@ mod tests {
             card: Some(card()),
             slot: Some("9a".into()),
             attempts_remaining: Some(3),
+            detail: None,
         };
         let p = secret_prompt(&req, "card init");
         assert!(p.starts_with("Enter PIN"), "{p}");
@@ -271,11 +275,34 @@ mod tests {
             card: Some(card()),
             slot: Some("9a".into()),
             attempts_remaining: None,
+            detail: None,
         };
         // The operation label lets each command name itself while sharing the
         // one binding — and keeps sign-bytes' prompt byte-stable post-retrofit.
         assert!(secret_prompt(&req, "sign-bytes").ends_with(" [piggy sign-bytes]: "));
         assert!(secret_prompt(&req, "card init").ends_with(" [piggy card init]: "));
+    }
+
+    #[test]
+    fn secret_prompt_appends_detail_without_displacing_card_identity() {
+        // show-batch's batch context (#200): a free-text note appended after
+        // the card identity, before the operation tag.
+        let req = SecretRequest {
+            kind: SecretKind::CurrentPin,
+            prompt: String::new(),
+            card: Some(card()),
+            slot: Some("9d".into()),
+            attempts_remaining: None,
+            detail: Some("decrypt 5 secrets: a, b, c".into()),
+        };
+        let p = secret_prompt(&req, "show-batch");
+        assert!(p.contains("serial 15909078"), "card identity kept: {p}");
+        assert!(p.contains("(slot 9d)"), "slot kept: {p}");
+        assert!(
+            p.contains("— decrypt 5 secrets: a, b, c"),
+            "detail appended: {p}"
+        );
+        assert!(p.ends_with(" [piggy show-batch]: "), "op tag last: {p}");
     }
 
     #[test]
@@ -286,6 +313,7 @@ mod tests {
             card: Some(card()),
             slot: None,
             attempts_remaining: None,
+            detail: None,
         };
         assert!(secret_prompt(&mk(SecretKind::NewPin), "card init").starts_with("Enter NEW PIN"));
         assert!(
@@ -306,6 +334,7 @@ mod tests {
             card: None,
             slot: None,
             attempts_remaining: None,
+            detail: None,
         };
         assert_eq!(secret_prompt(&req, "sign-bytes"), "Type the magic word: ");
     }
@@ -322,6 +351,7 @@ mod tests {
             }),
             slot: None,
             attempts_remaining: None,
+            detail: None,
         };
         let p = secret_prompt(&req, "sign-bytes");
         assert!(p.contains("AABBCCDD…"));
@@ -337,6 +367,7 @@ mod tests {
             card: Some(card()),
             slot: Some("9a".into()),
             attempts_remaining: None,
+            detail: None,
         };
         let c = secret_context(&req, "sign-bytes").unwrap();
         assert!(c.starts_with("piggy sign-bytes: "), "operation label: {c}");
@@ -354,6 +385,7 @@ mod tests {
             card: None,
             slot: None,
             attempts_remaining: None,
+            detail: None,
         };
         assert!(secret_context(&req, "card init").is_none());
     }
