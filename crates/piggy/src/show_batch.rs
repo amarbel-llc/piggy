@@ -30,9 +30,9 @@ use ssh_key::public::{EcdsaPublicKey, KeyData};
 
 use crate::store;
 use ndjson::{Diagnostic, DiagnosticKind};
-use piggy::card_oracle::{
-    PinSupplier, askpass_pin_supplier, canonicalize_uncompressed, piv_to_oracle_pin_error,
-};
+use piggy::card::frontend::select::{FrontendKind, build_frontend};
+use piggy::card::protocol::{CardId, Frontend, FrontendError, SecretKind, SecretRequest};
+use piggy::card_oracle::{canonicalize_uncompressed, piv_to_oracle_pin_error};
 
 /// CLI arguments for `piggy pass show-batch`, parsed by clap and
 /// passed in from the top-level dispatcher.
@@ -63,6 +63,13 @@ pub struct ShowBatchArgs {
     /// O_EXCL create. When every entry is fresh no card session is
     /// opened and no PIN is prompted.
     pub update: bool,
+    /// Interaction frontend for the batch PIN prompt (RFC 0006 §6):
+    /// `tty` (default, askpass) or `jsonrpc` (an external program supplies
+    /// the PIN over `socket`).
+    pub frontend: FrontendKind,
+    /// `AF_UNIX` socket the JSON-RPC frontend listens on. Required (and only
+    /// used) when `frontend` is `Jsonrpc`.
+    pub socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -652,6 +659,23 @@ pub fn run(args: ShowBatchArgs) -> i32 {
             return 1;
         };
 
+        // Capture the card identity (#195) before the session borrows the
+        // token, and build the RFC 0006 frontend (#200) before opening the
+        // PIN-bearing session so a `--frontend jsonrpc` with no usable socket
+        // fails before any decrypt.
+        let card_id = CardId {
+            guid: token.guid().to_hex(),
+            serial: token.yk_serial(),
+            cn: None,
+        };
+        let frontend = match build_frontend(args.frontend, args.socket.as_deref(), "show-batch") {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = out.bail_out(&format!("frontend: {e}"));
+                return 1;
+            }
+        };
+
         // Step 6: open the session and run the batch.
         let mut session = match token.begin_pin_session() {
             Ok(s) => s,
@@ -677,8 +701,9 @@ pub fn run(args: ShowBatchArgs) -> i32 {
             self_pubkey_uncompressed: target_uncompressed,
             target_curve,
             pin_verified: false,
-            pin_supplier: askpass_pin_supplier(),
-            pin_prompt: batch_pin_prompt(&decrypt_names),
+            frontend,
+            card: card_id,
+            detail: batch_detail(&decrypt_names),
             last_failure: None,
         };
 
@@ -973,19 +998,21 @@ fn canonicalize_pass_name(raw: &str) -> String {
         .to_string()
 }
 
-/// Build the `SSH_ASKPASS` prompt for a show-batch run (piggy#140).
-///
-/// The single PIN entry authorizes decryption of the whole batch, so
-/// the prompt names *what* is being decrypted — the count of secrets
-/// plus a capped sample of their canonical pass-names — rather than a
-/// generic "PIV PIN". `contrib/piggy-askpass.sh` renders this on top of
+/// Build the batch's `SecretRequest.detail` for a show-batch run (piggy#140,
+/// #200). The single PIN entry authorizes decryption of the whole batch, so
+/// the detail names *what* is being decrypted — the count of secrets plus a
+/// capped sample of their canonical pass-names. The RFC 0006 frontend renders
+/// it alongside the card identity (tty: after the card naming, before the
+/// operation tag; JSON-RPC: as the request's `detail` field). The legacy
+/// rendering path notes below still hold for the tty/askpass binding:
+/// `contrib/piggy-askpass.sh` renders this on top of
 /// its context banner; `libexec/pivy-askpass` passes it straight to
 /// `zenity --title`, so the user sees the batch they are authorizing.
 ///
 /// The name list is capped at [`PROMPT_MAX_NAMES`] so a large batch
 /// can't blow out a dialog title; the remainder is summarized as
 /// "+N more".
-fn batch_pin_prompt(names: &[String]) -> String {
+fn batch_detail(names: &[String]) -> String {
     /// Cap on how many pass-names to spell out before eliding.
     const PROMPT_MAX_NAMES: usize = 3;
 
@@ -1001,7 +1028,7 @@ fn batch_pin_prompt(names: &[String]) -> String {
         use std::fmt::Write as _;
         let _ = write!(list, ", +{} more", count - PROMPT_MAX_NAMES);
     }
-    format!("piggy PIV PIN — decrypt {count} {noun}: {list}")
+    format!("decrypt {count} {noun}: {list}")
 }
 
 /// Resolve a pass-name to its on-disk ebox path. Mirrors the bash
@@ -1421,17 +1448,15 @@ fn classify_piv_error(e: &PivError) -> BatchFailure {
     }
 }
 
-/// Heuristic: classify an [`OracleError`] from the askpass pin
-/// supplier into a [`BatchFailure`]. `askpass_pin_supplier` reports
-/// "exited with..." or "spawn askpass..." via `OracleError::Other`;
-/// both should surface as `PinCancelled` so consumers can offer a
-/// retry. Other shapes fall through to `Other`.
-fn classify_pin_supplier_error(e: OracleError) -> BatchFailure {
-    match &e {
-        OracleError::Other(msg) if msg.contains("askpass") || msg.contains("SSH_ASKPASS") => {
-            BatchFailure::PinCancelled(msg.clone())
-        }
-        _ => BatchFailure::Other(format!("PIN supply failed: {e}")),
+/// Map a [`FrontendError`] from the RFC 0006 PIN request into a
+/// [`BatchFailure`]. An operator decline/cancel (`-32010` on the JSON-RPC
+/// binding; a refused askpass on the tty binding) surfaces as `PinCancelled`
+/// so consumers can offer a retry; transport/protocol faults fall through to
+/// `Other`.
+fn frontend_err_to_batch_failure(e: &FrontendError) -> BatchFailure {
+    match e {
+        FrontendError::Declined(msg) => BatchFailure::PinCancelled(msg.clone()),
+        other => BatchFailure::Other(format!("PIN supply failed: {other}")),
     }
 }
 
@@ -1468,12 +1493,17 @@ struct BatchOracle<'sess, 'tok> {
     /// "UnlockFailed".
     target_curve: piggy_box::piv_box::EcCurve,
     pin_verified: bool,
-    pin_supplier: PinSupplier,
-    /// Prompt handed to `pin_supplier`. Carries the batch's request
-    /// context (count + pass-names) so the askpass dialog tells the
-    /// user what they are authorizing — see [`batch_pin_prompt`]
-    /// (piggy#140).
-    pin_prompt: String,
+    /// The RFC 0006 frontend the batch PIN is requested through (#200).
+    /// `tty` (default) renders the card-named askpass prompt; `jsonrpc`
+    /// ships the structured request to an external client.
+    frontend: Box<dyn Frontend>,
+    /// Identity of the card the batch decrypts against (#195), named in
+    /// the PIN prompt.
+    card: CardId,
+    /// Batch request context (count + pass-names) carried as the
+    /// `SecretRequest.detail` so the operator sees what they are
+    /// authorizing — see [`batch_detail`] (piggy#140).
+    detail: String,
     last_failure: Option<BatchFailure>,
 }
 
@@ -1505,10 +1535,18 @@ impl<'sess, 'tok> EcdhOracle for BatchOracle<'sess, 'tok> {
         }
 
         if !self.pin_verified {
-            let pin = match (self.pin_supplier)(&self.pin_prompt) {
+            let req = SecretRequest {
+                kind: SecretKind::CurrentPin,
+                prompt: "Enter PIN".to_string(),
+                card: Some(self.card.clone()),
+                slot: Some(format!("{:02x}", self.slot_id)),
+                attempts_remaining: None,
+                detail: Some(self.detail.clone()),
+            };
+            let pin = match self.frontend.request_secret(req) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.last_failure = Some(classify_pin_supplier_error(e));
+                    self.last_failure = Some(frontend_err_to_batch_failure(&e));
                     return Err(OracleError::Other("PIN supply failed".into()));
                 }
             };
@@ -1872,7 +1910,7 @@ mod tests {
     #[test]
     fn batch_pin_prompt_includes_count_and_canonical_names() {
         let names = vec!["deploy/db".to_string(), "/deploy/api.ebox".to_string()];
-        let prompt = super::batch_pin_prompt(&names);
+        let prompt = super::batch_detail(&names);
         assert!(
             prompt.contains('2'),
             "prompt should state the count: {prompt}"
@@ -1894,7 +1932,7 @@ mod tests {
     /// A single secret uses the singular noun.
     #[test]
     fn batch_pin_prompt_singular_for_one_secret() {
-        let prompt = super::batch_pin_prompt(&["solo".to_string()]);
+        let prompt = super::batch_detail(&["solo".to_string()]);
         assert!(prompt.contains("1 secret"), "expected singular: {prompt}");
         assert!(
             !prompt.contains("secrets"),
@@ -1907,7 +1945,7 @@ mod tests {
     #[test]
     fn batch_pin_prompt_caps_long_name_list() {
         let names: Vec<String> = (0..10).map(|i| format!("secret-{i}")).collect();
-        let prompt = super::batch_pin_prompt(&names);
+        let prompt = super::batch_detail(&names);
         assert!(prompt.contains("10 secrets"), "expected count: {prompt}");
         assert!(
             prompt.contains("+7 more"),
@@ -1958,27 +1996,24 @@ mod tests {
         ));
     }
 
-    /// askpass cancel/failure messages map to PinCancelled so the
-    /// RFC 0005 consumer can offer a retry, rather than treating
-    /// them as opaque internal errors.
+    /// A declined RFC 0006 interaction (operator cancel / refused askpass /
+    /// JSON-RPC -32010) maps to PinCancelled so the RFC 0005 consumer can
+    /// offer a retry; transport/protocol faults fall through to Other.
     #[test]
-    fn classify_pin_supplier_error_recognizes_askpass_cancel() {
-        use super::{BatchFailure, classify_pin_supplier_error};
-        use piggy_box::oracle::OracleError;
+    fn frontend_err_maps_decline_to_pin_cancelled() {
+        use super::{BatchFailure, frontend_err_to_batch_failure};
+        use piggy::card::protocol::FrontendError;
 
         assert!(matches!(
-            classify_pin_supplier_error(OracleError::Other("askpass exited with status 1".into())),
+            frontend_err_to_batch_failure(&FrontendError::Declined("operator cancelled".into())),
             BatchFailure::PinCancelled(_)
         ));
         assert!(matches!(
-            classify_pin_supplier_error(OracleError::Other(
-                "no PIN source: SSH_ASKPASS_REQUIRE=force but SSH_ASKPASS not set".into()
-            )),
-            BatchFailure::PinCancelled(_)
+            frontend_err_to_batch_failure(&FrontendError::Transport("channel closed".into())),
+            BatchFailure::Other(_)
         ));
-        // Unrelated OracleError shapes fall through to Other.
         assert!(matches!(
-            classify_pin_supplier_error(OracleError::Transport("socket eof".into())),
+            frontend_err_to_batch_failure(&FrontendError::Protocol("bad json".into())),
             BatchFailure::Other(_)
         ));
     }

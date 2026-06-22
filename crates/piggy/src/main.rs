@@ -391,6 +391,15 @@ struct ShowBatchCmdArgs {
     /// pair.
     #[arg(short = 'u', long = "update", conflicts_with = "all_or_nothing")]
     update: bool,
+    /// Interaction frontend for the batch PIN prompt (RFC 0006 §6): `tty`
+    /// (default, askpass) or `jsonrpc` (an external program supplies the PIN
+    /// over `--socket`).
+    #[arg(long, value_enum, default_value_t = piggy::card::frontend::select::FrontendKind::Tty)]
+    frontend: piggy::card::frontend::select::FrontendKind,
+    /// `AF_UNIX` socket the JSON-RPC frontend listens on. Required (and only
+    /// used) when `--frontend jsonrpc`.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -570,6 +579,8 @@ fn main() {
                     },
                     all_or_nothing: args.all_or_nothing,
                     update: args.update,
+                    frontend: args.frontend,
+                    socket: args.socket,
                 };
                 std::process::exit(piggy::stats::timed_pass("show_batch", move || {
                     show_batch::run(mapped)
