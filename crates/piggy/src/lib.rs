@@ -20,6 +20,7 @@
 //!   and `piggy sign-bytes`.
 
 pub mod agent_client;
+pub mod card;
 pub mod card_oracle;
 pub mod cmd;
 pub mod ecdsa_sig;
