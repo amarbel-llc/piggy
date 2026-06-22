@@ -149,6 +149,15 @@ enum Command {
     },
     /// Manage PIV cards (provisioning).
     Card(CardArgs),
+    /// Run the headless JSON-RPC management server (RFC 0007).
+    ///
+    /// Exposes piggy's neutral management primitives (`card.list`,
+    /// `card.init`, `sign_bytes`) as JSON-RPC methods over stdio (default) or
+    /// an `AF_UNIX` socket (`--socket`), so an external program (e.g. papi,
+    /// piggy#203; a GUI, piggy#202) drives piggy headless without spawning CLI
+    /// subprocesses. While a method runs, piggy issues the RFC 0006 interaction
+    /// requests (PIN/confirm/progress) back over the same connection.
+    Manage(ManageArgs),
     /// Produce & verify PAPI identity proofs and document signatures.
     ///
     /// `piggy papi` has its own clap parser (sign / prove / …); `--help`,
@@ -454,6 +463,19 @@ enum CardCommand {
 }
 
 #[derive(Args, Debug)]
+struct ManageArgs {
+    /// Speak the JSON-RPC command protocol (RFC 0007). Currently the only
+    /// supported protocol, so it is required; reserved so a future protocol can
+    /// be selected explicitly.
+    #[arg(long)]
+    jsonrpc: bool,
+    /// `AF_UNIX` socket to listen on. When omitted, serve a single session over
+    /// stdio (the headless default — the spawner owns the channel lifetime).
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct RecipientsArgs {
     #[command(subcommand)]
     cmd: RecipientsCommand,
@@ -610,6 +632,10 @@ fn main() {
                 piggy::card::init_cmd::run(serial, frontend, socket.as_deref())
             })),
         },
+
+        Command::Manage(args) => std::process::exit(piggy::stats::timed_manage(|| {
+            piggy::manage::run(args.jsonrpc, args.socket.as_deref())
+        })),
 
         // papi::run owns its own clap parser and per-subcommand
         // `stats::timed_papi` wrapping, so no timed wrapper here.

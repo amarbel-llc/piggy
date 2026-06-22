@@ -98,6 +98,22 @@ impl<R: BufRead, W: Write> JsonRpcFrontend<R, W> {
         }
     }
 
+    /// Construct a frontend for the **server-side interaction role** (RFC 0007):
+    /// the connection's `initialize` handshake has already been performed by the
+    /// command layer (`piggy manage`), so this binding skips its own lazy
+    /// handshake and issues interaction requests directly. Used to drive a
+    /// running command's PIN/confirm/progress prompts back over the same
+    /// connection the client invoked the command on.
+    pub fn already_initialized(reader: R, writer: W, operation: impl Into<String>) -> Self {
+        Self {
+            reader,
+            writer,
+            next_id: 0,
+            initialized: true,
+            operation: operation.into(),
+        }
+    }
+
     /// Issue a request and block for its single response, deserializing the
     /// `result` into `T`. Maps a `-32010` error to [`FrontendError::Declined`],
     /// any other error to [`FrontendError::Protocol`], and I/O / EOF to
@@ -290,6 +306,40 @@ mod tests {
         assert!(lines[1].contains(r#""method":"secret.request""#));
         assert!(lines[1].contains(r#""kind":"current_pin""#));
         assert!(lines[1].contains("15909078"), "request carries the serial");
+    }
+
+    #[test]
+    fn already_initialized_skips_the_handshake() {
+        // The server-side role (RFC 0007): the connection was already
+        // `initialize`d by the command layer, so the first interaction goes out
+        // as the real request — no initialize line, and the reader is not
+        // expected to carry an initialize response.
+        let responses = concat!(
+            r#"{"jsonrpc":"2.0","id":0,"result":{"secret":"123456"}}"#,
+            "\n",
+        );
+        let reader = BufReader::new(std::io::Cursor::new(responses.as_bytes().to_vec()));
+        let mut fe = JsonRpcFrontend::already_initialized(reader, Vec::new(), "manage");
+        let secret = fe
+            .request_secret(SecretRequest {
+                kind: SecretKind::CurrentPin,
+                prompt: "Enter PIN".into(),
+                card: Some(sample_card()),
+                slot: Some("9a".into()),
+                attempts_remaining: None,
+                detail: None,
+            })
+            .unwrap();
+        assert_eq!(&*secret, "123456");
+
+        let written = String::from_utf8(fe.writer.clone()).unwrap();
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines.len(), 1, "no initialize, just the secret.request");
+        assert!(lines[0].contains(r#""method":"secret.request""#));
+        assert!(
+            !written.contains(r#""method":"initialize""#),
+            "handshake must be skipped: {written}"
+        );
     }
 
     #[test]

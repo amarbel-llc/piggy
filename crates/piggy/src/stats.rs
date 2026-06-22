@@ -208,6 +208,16 @@ pub fn timed_sign_bytes<F: FnOnce() -> i32>(f: F) -> i32 {
     code
 }
 
+/// Time `f` — the `piggy manage` JSON-RPC server handler returning its exit
+/// code — and emit a `piggy.manage.run` counter + timer. Returns the code.
+/// Rust-only category (the headless command server has no C-agent path).
+pub fn timed_manage<F: FnOnce() -> i32>(f: F) -> i32 {
+    let start = Instant::now();
+    let code = f();
+    record("manage", "run", outcome_of_code(code), start.elapsed());
+    code
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +250,14 @@ mod tests {
         assert!(
             payload("health", "run", Outcome::Success, 5)
                 .starts_with("piggy.health.run.success:1|c|")
+        );
+    }
+
+    #[test]
+    fn payload_manage_category() {
+        assert!(
+            payload("manage", "run", Outcome::Success, 4)
+                .starts_with("piggy.manage.run.success:1|c|")
         );
     }
 

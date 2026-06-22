@@ -24,4 +24,5 @@ pub mod card;
 pub mod card_oracle;
 pub mod cmd;
 pub mod ecdsa_sig;
+pub mod manage;
 pub mod stats;
