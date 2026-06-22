@@ -144,12 +144,6 @@ pub fn box_op(op: &str, outcome: Outcome, elapsed: Duration) {
     record("box", op, outcome, elapsed);
 }
 
-/// `piggy papi` telemetry: `piggy.papi.<sub>` (`sign`/`prove`/`verify`).
-/// Rust-only category, like `piggy.health` — the C agent has no PAPI path.
-pub fn papi_op(sub: &str, outcome: Outcome, elapsed: Duration) {
-    record("papi", sub, outcome, elapsed);
-}
-
 /// Time `f` — a `pass` subcommand handler returning its process exit code —
 /// emit a `piggy.pass.<cmd>` counter + timer, and return the code so the
 /// caller can `std::process::exit` it. The closure runs even when telemetry
@@ -176,15 +170,6 @@ pub fn timed_health<F: FnOnce() -> i32>(f: F) -> i32 {
     let start = Instant::now();
     let code = f();
     record("health", "run", outcome_of_code(code), start.elapsed());
-    code
-}
-
-/// Time `f` — a `piggy papi` subcommand handler returning its exit code — and
-/// emit a `piggy.papi.<sub>` counter + timer. Returns the code.
-pub fn timed_papi<F: FnOnce() -> i32>(sub: &str, f: F) -> i32 {
-    let start = Instant::now();
-    let code = f();
-    papi_op(sub, outcome_of_code(code), start.elapsed());
     code
 }
 

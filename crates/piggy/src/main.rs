@@ -52,7 +52,6 @@ mod health;
 mod init;
 mod insert;
 mod internal_clipboard_restore;
-mod papi;
 mod platform;
 mod recipients;
 mod reencrypt;
@@ -158,16 +157,6 @@ enum Command {
     /// subprocesses. While a method runs, piggy issues the RFC 0006 interaction
     /// requests (PIN/confirm/progress) back over the same connection.
     Manage(ManageArgs),
-    /// Produce & verify PAPI identity proofs and document signatures.
-    ///
-    /// `piggy papi` has its own clap parser (sign / prove / …); `--help`,
-    /// `-h`, and any other flags pass through to that parser rather than
-    /// being consumed by this top-level one.
-    #[command(disable_help_flag = true)]
-    Papi {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
     /// PIV-backed SSH signing agent.
     ///
     /// `piggy agent` has its own clap parser; `--help`, `-h`, and any
@@ -636,10 +625,6 @@ fn main() {
         Command::Manage(args) => std::process::exit(piggy::stats::timed_manage(|| {
             piggy::manage::run(args.jsonrpc, args.socket.as_deref())
         })),
-
-        // papi::run owns its own clap parser and per-subcommand
-        // `stats::timed_papi` wrapping, so no timed wrapper here.
-        Command::Papi { rest } => std::process::exit(papi::run(&rest)),
 
         // `agent` runs the Rust impl (piggy#58): a PIV-backed SSH agent that
         // prompts for the PIN on demand via SSH_ASKPASS and clears it on a

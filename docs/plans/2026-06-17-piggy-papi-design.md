@@ -1,7 +1,15 @@
 # `piggy papi` — produce & verify PAPI identity proofs and document signatures
 
+> **Superseded (2026-06-22, piggy#191): the `piggy papi` namespace was removed.**
+> Per the layering directive (papi is downstream of piggy; piggy exposes only
+> neutral primitives), papi composes its own document/proof/signature semantics
+> caller-side on `piggy sign-bytes` (#190) + the headless `piggy manage`
+> JSON-RPC API (#201, RFC 0007). papi never depended on `piggy papi` (confirmed
+> with papi/deft-birch). This document is retained as the historical design
+> record for the removed feature.
+
 - **Date**: 2026-06-17
-- **Status**: proposed
+- **Status**: superseded (piggy#191 — `piggy papi` removed)
 - **Driver**: PAPI RFC-0001 Amendment 3 (amarbel-llc/papi,
   `docs/rfcs/0001-personal-api-papi-wire-format.md` §9–§10) adapts
   Keyoxide/Ariadne's key-anchored, third-party-verifiable identity model into
