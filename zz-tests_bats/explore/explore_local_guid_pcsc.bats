@@ -13,7 +13,7 @@
 # zz-tests_bats/conformance/ so the conformance glob
 # (`zz-tests_bats/conformance/*.bats`) does not pick them up and run them
 # under the default (non-permissive) sandbox, which this file requires
-# escapes from to run `just fib-up`.
+# escapes from to run `just load-fib`.
 #
 # FINDING (2026-04-24): the root cause is batman's sandbox. libpcsclite
 # cannot connect to pcscd's Unix socket (pcscd.comm) unless bats is run
@@ -35,15 +35,15 @@
 
 setup_file() {
   # Bring up the fib virtual-PIV stack and capture its PCSC socket path
-  # into the process env for all tests in this file. fib-up is
+  # into the process env for all tests in this file. load-fib is
   # idempotent, so back-to-back runs don't stomp each other.
   #
-  # NOTE: running `just fib-up` from inside bats only works if bats is
+  # NOTE: running `just load-fib` from inside bats only works if bats is
   # invoked with --no-sandbox. batman's default sandbox makes CWD and
   # /run/user read-only, so the recipe fails on `mkdir .fib` or on just's
   # own tempdir creation. The `explore-bats` driver recipe sets that
   # flag; other drivers must too.
-  just fib-up >&2
+  just load-fib >&2
   # shellcheck disable=SC1091
   source .fib/env
 
@@ -60,7 +60,7 @@ setup_file() {
 }
 
 teardown_file() {
-  just fib-down >&2 || true
+  just clean-fib >&2 || true
 }
 
 setup() {
@@ -69,7 +69,7 @@ setup() {
   load "$(dirname "$BATS_TEST_FILE")/../common.bash"
   export output
 
-  [[ -n ${PCSCLITE_CSOCK_NAME:-} ]] || skip "PCSCLITE_CSOCK_NAME not set (fib-up failed?)"
+  [[ -n ${PCSCLITE_CSOCK_NAME:-} ]] || skip "PCSCLITE_CSOCK_NAME not set (load-fib failed?)"
   [[ -n ${INTEROP_GUID:-} ]] || skip "INTEROP_GUID not set (key generation failed?)"
   [[ -n ${REAL_PIVY_TOOL:-} && -x ${REAL_PIVY_TOOL:-} ]] ||
     skip "REAL_PIVY_TOOL not set or not executable"

@@ -48,22 +48,22 @@ The recipe runs Maven on the host (pure Java, works on any platform),
 applies the same `pom.xml` patches as the nix build, downloads deps, and
 strips ephemeral metadata files.
 
-## Runtime use: `just fib-up` / `fib-down` / `fib-shell`
+## Runtime use: `just load-fib` / `clean-fib` / `run-fib-shell`
 
 The private `pcscd` approach avoids touching `/etc/reader.conf.d/`. The
 recipes manage a `.fib/` runtime dir under the repo root (gitignored).
 
 ```sh
-just fib-up           # start private pcscd + fib
+just load-fib           # start private pcscd + fib
 eval "$(cat .fib/env)"  # export PCSCLITE_CSOCK_NAME for this shell
 pivy-tool list         # should show "Virtual PCD piggy fib"
-just fib-down         # kill pcscd + fib, remove .fib/
+just clean-fib         # kill pcscd + fib, remove .fib/
 ```
 
 For interactive sessions:
 
 ```sh
-just fib-shell        # opens a subshell with env set; teardown on exit
+just run-fib-shell    # opens a subshell with env set; teardown on exit
 ```
 
 ### Wire-up
@@ -78,14 +78,14 @@ just fib-shell        # opens a subshell with env set; teardown on exit
 `PCSCLITE_CSOCK_NAME` is a libpcsclite env var that redirects both the
 server (pcscd) and the client (pivy-tool) to a non-default Unix socket.
 This is how we avoid contention with a system pcscd that may also be
-running. `fib-up` starts pcscd, waits for the socket to appear, launches
+running. `load-fib` starts pcscd, waits for the socket to appear, launches
 the jCardSim process, and sends the jCardSim activation APDU to call
-`PivApplet.install()`. After `fib-up` returns, the applet is ready for
+`PivApplet.install()`. After `load-fib` returns, the applet is ready for
 use — no manual activation step needed.
 
 ## Generating keys
 
-After `fib-up`, the applet is active but has no keys. Generate one:
+After `load-fib`, the applet is active but has no keys. Generate one:
 
 ```sh
 pivy-tool -P 123456 -K default generate 9a
@@ -123,7 +123,7 @@ Keep the hardware-gated bats file (`*_hardware.bats`, pattern from
 
 ## Troubleshooting
 
-- **`fib-up`: pcscd socket never appeared.** Check `.fib/pcscd.log`.
+- **`load-fib`: pcscd socket never appeared.** Check `.fib/pcscd.log`.
   Common causes: another pcscd holding port 35963, a stale
   `.fib/pcscd.comm` socket (normally deleted on startup but not on kill
   -9), or vpcd driver path mismatch (the nix-store path for
@@ -132,9 +132,9 @@ Keep the hardware-gated bats file (`*_hardware.bats`, pattern from
   needs vpcd to be loaded. Verify via `pcsc_scan -n` against
   `PCSCLITE_CSOCK_NAME=$PWD/.fib/pcscd.comm`.
 - **SELECT AID fails with `69 86` (SW_COMMAND_NOT_ALLOWED).** The
-  `PivApplet.install()` APDU wasn't sent. `fib-up` does this
+  `PivApplet.install()` APDU wasn't sent. `load-fib` does this
   automatically; if you're running jCardSim manually, send:
   `opensc-tool -r 'Virtual PCD piggy fib 00 00' -s '80 b8 00 00 12 0b a0 00 00 03 08 00 00 10 00 01 00 05 00 00 02 0F 0F 7f'`
-- **`fib-up`: PivApplet activation timed out.** jCardSim didn't connect
+- **`load-fib`: PivApplet activation timed out.** jCardSim didn't connect
   to vpcd within 5 seconds. Check `.fib/fib.log` for Java errors and
   `.fib/activate.log` for the opensc-tool output.

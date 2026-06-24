@@ -145,7 +145,7 @@ fn ecdh_roundtrip_against_real_agent() {
     assert_eq!(
         slot_9d.algorithm(),
         PivAlgorithm::EcP256,
-        "test assumes 9D was generated with eccp256 (just fib-up + pivy-tool -a eccp256 generate 9d)"
+        "test assumes 9D was generated with eccp256 (just load-fib + pivy-tool -a eccp256 generate 9d)"
     );
 
     // self_pubkey_ssh_blob: the SSH-wire encoding of the card's 9D pubkey.

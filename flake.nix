@@ -17,20 +17,31 @@
     # export-facade generator used by go/markl: each `internal/` package
     # marked `//go:generate dagnabit export` gets a `pkgs/` facade so
     # consumers (eventually madder) import a stable public API instead of
-    # internal/ (#183). On the devShell PATH for `just gen-go-markl`; the
-    # nix package also installs dagnabit(1). Follows piggy's shared inputs
-    # to collapse the lock — purse-first brings its own gomod2nix +
-    # conformist.
+    # internal/ (#183). On the devShell PATH; the nix package also installs
+    # dagnabit(1). It also publishes `lib.conformistLinters.dewey-facade-export`
+    # (purse-first#163) — the conformist linter module behind piggy's facade
+    # drift check/repair lanes (see flake.nix conformistFacadeModule below).
+    # Follows piggy's shared inputs to collapse the lock, and follows the
+    # top-level `conformist` so the lock keeps ONE conformist node.
     purse-first = {
       url = "github:amarbel-llc/purse-first";
       inputs.igloo.follows = "igloo";
       inputs.nixpkgs-master.follows = "nixpkgs-master";
       inputs.utils.follows = "utils";
+      inputs.conformist.follows = "conformist";
     };
 
-    treefmt-nix = {
-      url = "github:numtide/treefmt-nix";
-      inputs.nixpkgs.follows = "igloo";
+    # conformist: the linter + formatter multiplexer (treefmt successor).
+    # piggy's config is Nix-generated from ./conformist.nix (+ presets.eng)
+    # via conformist.lib.evalModule — see flake.nix's conformistEval. Drives
+    # `nix fmt`, the read-only `checks.formatting` gate, the impure facade
+    # CHECK lane (lint-worktree), and the per-commit facade REPAIR hook
+    # (conformist-pre-commit). Replaces the retired treefmt-nix.
+    conformist = {
+      url = "github:amarbel-llc/conformist";
+      inputs.igloo.follows = "igloo";
+      inputs.nixpkgs-master.follows = "nixpkgs-master";
+      inputs.utils.follows = "utils";
     };
 
     # Software PIV smart card for tests — see nix/virtual-piv.nix.
@@ -68,7 +79,7 @@
       utils,
       bats,
       purse-first,
-      treefmt-nix,
+      conformist,
       jcardsim,
       pivapplet,
       oracle-javacard-sdks,
@@ -250,7 +261,7 @@
         # status. The `VirtualCard` backend is always available on both
         # platforms.
         #
-        # Used by: `just fibby-up` (downstream of this output), the wet-env
+        # Used by: `just load-fibby` (downstream of this output), the wet-env
         # capture recipes (`debug-fibby-roundtrip-capture` /
         # `debug-fibby-roundtrip-via-fib`), and any consumer of #129's
         # planned packaging story (e.g. a future home-manager service).
@@ -523,11 +534,96 @@
           batsSrc = ./zz-tests_bats;
         };
 
-        # Tree-wide formatter: nixfmt + shfmt + rustfmt under one
-        # wrapper. Exposed as `formatter.${system}` (so `nix fmt`
-        # works) and dropped into the devShell so `treefmt` resolves
-        # there too. See ./treefmt.nix for the program config.
-        treefmtEval = treefmt-nix.lib.evalModule pkgs ./treefmt.nix;
+        # conformist config, Nix-generated from ./conformist.nix merged with the
+        # eng-convention preset (conformist.lib.presets.eng). Drives `nix fmt`
+        # (build.wrapper — config + every formatter baked as /nix/store paths)
+        # and the read-only `checks.formatting` gate (build.check). Replaces the
+        # retired treefmt-nix. See conformist-nix(7).
+        conformistEval = conformist.lib.evalModule pkgs {
+          imports = [
+            conformist.lib.presets.eng
+            ./conformist.nix
+          ];
+          package = conformist.packages.${system}.default;
+        };
+
+        # Impure lane: the eng-convention checks that need a live working tree /
+        # host tools (git-remotes, git-default-branch, sweatfile, agents-md), so
+        # they cannot run in the sandboxed pure config — `just lint-worktree`
+        # runs them against the real worktree via this config. See
+        # conformist.lib.presets.eng-impure.
+        #
+        # It also carries the dewey-facade-export drift CHECK as the merge-gate
+        # safety net: `just lint-worktree` is in the `lint` aggregate the
+        # pre-merge `just` hook runs, so committed go/markl facade drift fails
+        # the merge even if the pre-commit auto-repair hook was bypassed. This
+        # replaces the old standalone `lint-facades` recipe
+        # (`dagnabit export --check`). The pre-commit lane (conformistCodegenEval)
+        # does the REPAIR; this lane does the merge CHECK — same module, two
+        # lanes.
+        conformistImpureEval = conformist.lib.evalModule pkgs {
+          imports = [
+            conformist.lib.presets.eng-impure
+            purse-first.lib.conformistLinters.dewey-facade-export
+            conformistFacadeModule
+          ];
+          package = conformist.packages.${system}.default;
+          projectRootFile = "flake.nix";
+        };
+
+        # The dewey pkgs/ facade-export lane, CONSUMED from purse-first's
+        # published module (purse-first#163) rather than hand-wired: the module
+        # owns the `dagnabit export` invocation + the DAGNABIT_CONFORMIST_CONFIG
+        # threading, fed the PURE formatter config so its facade-format pass
+        # matches `nix fmt`. The tier opt-ins are layered on here (the upstream
+        # module ships the check/repair commands but not the stage-mutation
+        # flags). Shared by BOTH the impure merge-gate CHECK
+        # (conformistImpureEval) and the pre-commit REPAIR
+        # (conformistCodegenEval).
+        #
+        # conformistConfig = conformistEval.config.build.configFile is the PURE
+        # eval's output, referenced from a SEPARATE eval — so it is not a
+        # self-reference: the facade linter does not live in the eval that
+        # produces the config it bakes. Same cycle-free shape madder uses.
+        conformistFacadeModule =
+          { ... }:
+          {
+            linters.dewey-facade-export.enable = true;
+            # piggy's dewey-layout module root (holds internal/ + pkgs/).
+            linters.dewey-facade-export.deweyDir = "go/markl";
+            # go/markl uses `//go:generate dagnabit export` directives, not
+            # `--library`.
+            linters.dewey-facade-export.library = false;
+            # Pinned package ⇒ hermetic, PATH-independent dagnabit.
+            linters.dewey-facade-export.dagnabitPackage = purse-first.packages.${system}.dagnabit;
+            linters.dewey-facade-export.conformistConfig = conformistEval.config.build.configFile;
+            # Layer the stage-mutation tiers (conformist#55/#56/#57) onto the
+            # module's generated linter so the pre-commit hook regenerates AND
+            # stages drift into the commit.
+            settings.linter.dewey-facade-export = {
+              "restage-repair-outputs" = true; # tier 2: restage modified facades
+              "stage-new-outputs" = true; # tier 3: stage a brand-new pkgs/ facade
+              "stage-deleted-outputs" = true; # tier 4: stage a removed/relocated facade
+            };
+          };
+
+        # Dedicated PRE-COMMIT (facade-repair) eval. EXPLICIT membership: the
+        # formatters + excludes from ./conformist.nix, plus the facade-export
+        # repair lane — but deliberately NOT presets.eng (its convention linters
+        # stay at the merge/worktree gate, not commit time).
+        # build.preCommit from THIS eval is the sweatfile [hooks].pre-commit
+        # hook, so a commit auto-formats and regenerates-and-stages go/markl
+        # facade drift, and nothing else.
+        conformistCodegenEval = conformist.lib.evalModule pkgs {
+          imports = [
+            ./conformist.nix
+            # The facade-export linter MODULE (options.linters.dewey-facade-export.*);
+            # conformistFacadeModule above sets its enable + params.
+            purse-first.lib.conformistLinters.dewey-facade-export
+            conformistFacadeModule
+          ];
+          package = conformist.packages.${system}.default;
+        };
       in
       {
         packages = {
@@ -551,13 +647,22 @@
           # Standalone fibby binary. On Linux this carries the
           # `hardware-proxy` feature; on darwin it's VirtualCard-only
           # (vsmartcard upstream is broken on darwin). Consumed by
-          # `just fibby-up` and the wet-env capture recipes; future
+          # `just load-fibby` and the wet-env capture recipes; future
           # consumer is the planned home-manager service (#129 stretch).
           fibby = fibby;
           # Go test-only SSH server for the SSH-over-fibby bats lane
           # (piggy#135). Consumed by the forthcoming Phase D recipe via
           # `nix build .#piggy-test-sshd`.
           piggy-test-sshd = piggy-test-sshd;
+          # The toolchain-hermetic per-commit facade-repair hook, named by the
+          # sweatfile [hooks].pre-commit command and put on the devShell PATH as
+          # `conformist-pre-commit`. `nix build .#conformist-pre-commit` dogfoods
+          # it (forces the codegen eval + facade lane to resolve).
+          conformist-pre-commit = conformistCodegenEval.config.build.preCommit;
+          # The impure-lane config (eng git-state checks + the facade CHECK),
+          # consumed by `just lint-worktree` via `nix build
+          # .#conformist-impure-config`.
+          conformist-impure-config = conformistImpureEval.config.build.configFile;
         }
         // batsLib.batsLaneOutputs
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
@@ -572,13 +677,15 @@
         checks = {
           bats-default = batsLib.batsLaneOutputs.bats-default;
           # Read-only CI gate: builds in /nix/store off a source
-          # snapshot, runs treefmt, fails if any file would change.
-          # Driven from `just lint-fmt` and surfaced under `nix flake
-          # check`.
-          formatting = treefmtEval.config.build.check self;
+          # snapshot, runs the conformist formatters + the eng preset's
+          # file-based linters, and fails if any file would change. Driven
+          # from `just lint-fmt` and surfaced under `nix flake check`.
+          formatting = conformistEval.config.build.check self;
         };
 
-        formatter = treefmtEval.config.build.wrapper;
+        # `nix fmt` runs the generated conformist wrapper (config + every
+        # formatter baked as /nix/store paths). See conformistEval.
+        formatter = conformistEval.config.build.wrapper;
 
         devShells.default = pkgs.mkShell {
           packages =
@@ -592,7 +699,13 @@
               pkgs-master.rustfmt
               pkgs-master.clippy
               pkgs-master.rust-analyzer
-              treefmtEval.config.build.wrapper
+              # conformist (treefmt successor): the bare CLI for `just
+              # lint-worktree` (`conformist check --config-file …`), plus the
+              # toolchain-hermetic per-commit facade-repair wrapper on PATH as
+              # `conformist-pre-commit` (the sweatfile [hooks].pre-commit
+              # command). `nix fmt` uses the wrapper from `formatter` above.
+              conformist.packages.${system}.default
+              conformistCodegenEval.config.build.preCommit
               pkgs.scdoc
               # Go toolchain for the go/ module (piggy-agent-conformance
               # + piggy-test-sshd): `go build`/`vet`/`gofmt` for fast
@@ -602,8 +715,11 @@
               # same toolchain, exposed on the devShell PATH.
               pkgs.go
               # dagnabit (from purse-first): generates go/markl's pkgs/
-              # export facades from its internal/ packages. Drives
-              # `just gen-go-markl` (dagnabit export); also installs
+              # export facades from its internal/ packages. The facade
+              # check/repair now runs through conformist's
+              # dewey-facade-export lane (pre-commit REPAIR + lint-worktree
+              # CHECK), which invokes a store-pinned dagnabit; this bare
+              # copy stays on PATH for ad-hoc `dagnabit export` and installs
               # dagnabit(1). See #183 and the go/markl module.
               purse-first.packages.${system}.dagnabit
               # gum drives terminal UI logging in the maint group recipes
@@ -619,7 +735,7 @@
               bats.packages.${system}.bats
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-              # `just fib-up` needs pcscd + fib + opensc-tool on PATH.
+              # `just load-fib` needs pcscd + fib + opensc-tool on PATH.
               pkgs.pcsclite
               pkgs.opensc
               virtualPiv.fib

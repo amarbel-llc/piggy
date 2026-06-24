@@ -113,6 +113,30 @@ init_test_git() {
   git init --separate-git-dir="$BATS_TEST_TMPDIR/git-dir" --template="" "$PIGGY_STORE_DIR"
 }
 
+# Skip the calling test unless an AF_UNIX socket can actually be bind(2)ed
+# under $BATS_TEST_TMPDIR in this environment. Two known failure modes, both on
+# darwin (macOS):
+#   - the darwin nix build sandbox denies AF_UNIX bind with EPERM ("Operation
+#     not permitted") — so tests that bind a real socket to fixture a Wayland
+#     display pass in CI (Linux `nix build .#bats-default`) yet fail the local
+#     darwin pre-merge hook;
+#   - a deep $BATS_TEST_TMPDIR (e.g. a nested worktree/scratch path) overruns
+#     macOS's ~104-byte sun_path limit → "AF_UNIX path too long".
+# Probe under the test tmpdir (same root the tests bind in) and skip rather
+# than fail on either. See piggy#208 for the platform-safe unskip (fixture the
+# socket without a real bind, or run these in a non-sandboxed lane).
+skip_unless_af_unix_bind() {
+  local probe py
+  py="$(command -v python3 || true)"
+  [[ -n $py ]] || skip "python3 not on PATH (AF_UNIX bind probe unavailable)"
+  probe="$BATS_TEST_TMPDIR/af-unix-bind-probe.$$.sock"
+  if ! "$py" -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' \
+    "$probe" 2>/dev/null; then
+    skip "AF_UNIX bind unavailable here (darwin sandbox EPERM or sun_path too long; piggy#208)"
+  fi
+  rm -f "$probe"
+}
+
 # Create a test piggy-ids file with a canonical RFC 0002 recipient
 # (the `pivy_ecdh_p256_pub` non-trivial vector at madder fd53684).
 # The mock piggy-ids encrypt only checks file existence, so any valid

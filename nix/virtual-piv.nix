@@ -4,7 +4,7 @@
 # `fib`, a launcher that runs PivApplet inside jCardSim attached to a
 # vsmartcard-vpcd virtual reader over TCP.
 #
-# The pcscd-side wiring is handled by `just fib-up` / `just fib-down`:
+# The pcscd-side wiring is handled by `just load-fib` / `just clean-fib`:
 # they launch a private pcscd with the reader.conf emitted here, set
 # PCSCLITE_CSOCK_NAME, and leave pivy-tool reachable against the virtual
 # reader without touching /etc/reader.conf.d/.
@@ -172,7 +172,7 @@ let
   });
 
   # reader.conf snippet pointing at the nix-store-provided vpcd PCSC driver.
-  # Used by `just fib-up` to start a private pcscd; not intended for
+  # Used by `just load-fib` to start a private pcscd; not intended for
   # installation into /etc/reader.conf.d/.
   #
   # CHANNELID is the default TCP port vpcd listens on for the applet side
@@ -186,7 +186,7 @@ let
 
   # Launcher: starts PivApplet inside jCardSim. The applet connects to
   # whatever vpcd is listening on localhost:35963 — that is either a
-  # private pcscd launched by `just fib-up`, or a system pcscd with the
+  # private pcscd launched by `just load-fib`, or a system pcscd with the
   # vpcd driver registered manually.
   fib = pkgs.writeShellApplication {
     name = "fib";

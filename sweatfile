@@ -16,3 +16,23 @@
 # darwin-specific bats failure on the maintainer's host blocks the
 # merge instead of waiting for post-merge CI to flag it.
 pre-merge = "just"
+
+# Per-commit repair (conformist#47/#51): regenerate-and-stage go/markl's
+# dagnabit pkgs/ facades (and format the index-staged content) at authoring
+# time, so facade drift never reaches the merge gate. Names
+# `conformist-pre-commit` — the CONFIG-SPECIFIC, TOOLCHAIN-HERMETIC wrapper
+# flake.nix exposes from `conformistCodegenEval.config.build.preCommit`, placed
+# on the devShell PATH under that name. Its dewey-facade-export lane runs a
+# store-pinned `dagnabit export` and (via the stage-mutation tiers)
+# `git add`s the regenerated facades into the commit.
+#
+# Do NOT use a bare `pre-commit = "dagnabit export"` here: spinclass runs the
+# hook non-blocking and does NOT stage what the command changes, so a bare
+# export would regenerate but leave the facades UNSTAGED — the commit would
+# still carry stale facades. The wrapper's stage-mutation tiers are what make
+# the repair land in the commit. The merge-gate CHECK
+# (`just lint-worktree`, in the `lint` aggregate this hook's `just` runs)
+# stays as the loud backstop. Requires the devShell active (direnv) so
+# `conformist-pre-commit` is on PATH; spinclass installs the hook at session
+# start/resume, so a fresh session is needed after this lands.
+pre-commit = "conformist-pre-commit"

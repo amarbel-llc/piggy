@@ -594,6 +594,9 @@ STUB_EOF
   # the Wayland socket is discoverable under XDG_RUNTIME_DIR (present even in
   # the frozen env). We assert the value zenity actually inherited.
   unset PIGGY_ASKPASS_DRY_RUN
+  # Binds a real AF_UNIX socket for the script's `-S` test; the darwin nix
+  # sandbox denies bind(2) (piggy#208).
+  skip_unless_af_unix_bind
 
   local stub_dir runtime python3_path
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-reattach.XXXXXX")"
@@ -704,6 +707,9 @@ STUB_EOF
   # already set (the common, healthy case) it must be left untouched even if a
   # different socket is discoverable under XDG_RUNTIME_DIR.
   unset PIGGY_ASKPASS_DRY_RUN
+  # Binds a real AF_UNIX socket for the script's `-S` test; the darwin nix
+  # sandbox denies bind(2) (piggy#208).
+  skip_unless_af_unix_bind
 
   local stub_dir runtime python3_path
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-present.XXXXXX")"

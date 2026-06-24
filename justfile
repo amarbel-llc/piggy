@@ -2,13 +2,16 @@
 default: lint build test
 
 [group('pre-build')]
-lint: lint-fmt lint-rust lint-facades
+lint: lint-fmt lint-rust lint-worktree
 
 # --- build ---
 
 [group('build')]
 build: build-nix build-rust build-go-markl
 
+# Build the default piggy nix package, plus the .#fibby and .#piggy-test-sshd
+# packages that aren't transitive deps of .#default, so flake.nix regressions
+# in those surface at the merge gate.
 [group('build')]
 build-nix:
     nix build --show-trace
@@ -17,7 +20,7 @@ build-nix:
     # depend on `.#fibby`. Without an explicit second build, a broken
     # flake.nix change to the fibby package would only surface the
     # next time someone ran `nix build .#fibby` directly or
-    # `just fibby-up` (#129).
+    # `just load-fibby` (#129).
     nix build .#fibby --no-link --show-trace
     # Same rationale for the Go piggy-test-sshd binary (piggy#135): it's
     # not a transitive dep of `.#default`, so build it explicitly here to
@@ -25,6 +28,8 @@ build-nix:
     # than only when `just debug-piggy-test-sshd` or the Phase D bats run.
     nix build .#piggy-test-sshd --no-link --show-trace
 
+# Cargo-build the workspace; on Linux with no ARGS, also build fibby with
+# --features hardware-proxy so pcsc-sys's link-time pkg-config runs at the gate.
 [group('build')]
 build-rust *ARGS:
     #!/usr/bin/env bash
@@ -43,24 +48,37 @@ build-rust *ARGS:
     fi
 
 [group('build')]
+build-release: build-rust-release
+
+# Cargo-build the workspace in release mode (cargo build --release).
+[group('build')]
 build-rust-release:
     cargo build --release
 
 # go/markl module (#183): the registry/codec Go library that becomes the
 # canonical markl-id source madder will depend on (inverting today's
-# Rust-port-of-madder relationship). These recipes back the dev loop AND the
-# merge gate: build-go-markl, test-go-markl, and lint-facades are now wired into
-# the build/test/lint aggregates (so the pre-merge `just` hook exercises the
-# module). Per the maintainer ruling (#183/#188) the nix-level gate is the
-# dagnabit export facade check (lint-facades), NOT a buildGoModule derivation —
-# go/markl is a consumed library with no piggy-shipped binary, so there is
-# nothing for buildGoModule to produce. A hermetic gomod2nix/conformist lane
-# (madder-style buildGoApplication + conformist pre-commit) is a separate
-# migration deferred until piggy moves off treefmt onto conformist.
+# Rust-port-of-madder relationship). build-go-markl + test-go-markl are wired
+# into the build/test aggregates so the pre-merge `just` hook exercises the
+# module. Per the maintainer ruling (#183/#188) the nix-level gate is the
+# dagnabit export facade check, NOT a buildGoModule derivation — go/markl is a
+# consumed library with no piggy-shipped binary, so there is nothing for
+# buildGoModule to produce.
+#
+# The facade check/repair now runs through conformist's dewey-facade-export
+# lane (the conformist migration the old comment here deferred): drift is
+# REPAIRED at commit time by the `conformist-pre-commit` hook (regenerate +
+# stage the pkgs/ facades) and CHECKED at the merge gate by `just lint-worktree`
+# (in the `lint` aggregate). The standalone `codemod-facades` / `lint-facades`
+# recipes were retired in favor of those lanes; `nix run …#conform`-style ad-hoc
+# `dagnabit export` is still possible (bare dagnabit is on the devShell PATH).
+# Refresh go/markl's go.mod/go.sum (`go mod tidy`). Run after adding or
+# dropping an import in the module.
 [group('build')]
-tidy-go-markl:
+update-go-markl:
     cd go/markl && go mod tidy
 
+# Compile the go/markl module (`go build ./...`). Wired into the `build`
+# aggregate so the pre-merge `just` hook exercises it.
 [group('build')]
 build-go-markl:
     cd go/markl && go build ./...
@@ -71,22 +89,14 @@ build-go-markl:
 test-go-markl:
     cd go/markl && go test -tags test ./...
 
-# Regenerate go/markl's dagnabit export facades: each internal/ package marked
-# `//go:generate dagnabit export` gets a thin re-export at pkgs/<pkg> (the layer
-# prefix is flattened). Run after changing an exported internal API. dagnabit is
-# on the devShell PATH via the purse-first flake input. #183.
-[group('codemod')]
-codemod-facades:
-    cd go/markl && dagnabit export
-
-# Verify the committed go/markl facades match a fresh dagnabit export; fails on
-# drift. Mirrors madder's lint-facades. Wired into the `lint` aggregate, so the
-# pre-merge `just` hook runs it (this is the nix-level facade gate per the
-# #183/#188 ruling — see the go/markl block above). Adopting madder's hermetic
-# conformist pre-commit lane is deferred to piggy's conformist migration.
-[group('pre-build')]
-lint-facades:
-    cd go/markl && dagnabit export --check
+# NOTE: the standalone `codemod-facades` (`dagnabit export`) and `lint-facades`
+# (`dagnabit export --check`) recipes were RETIRED in piggy's conformist
+# migration. Facade drift is now REPAIRED at commit time by the
+# `conformist-pre-commit` hook (regenerate + stage the pkgs/ facades) and
+# CHECKED at the merge gate by `just lint-worktree` (in the `lint` aggregate) —
+# both run conformist's dewey-facade-export lane (a store-pinned
+# `dagnabit export`). See the go/markl block above and flake.nix
+# conformistFacadeModule.
 
 # Regenerate the piggy-scoped RFC 0002 conformance fixture under
 # go/markl/internal/charlie/markl_registrations/testdata/. Run after changing a
@@ -100,14 +110,16 @@ codemod-rfc0002-fixture:
     cd go/markl && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
 
 # gofmt the hand-written go/markl sources: the internal/ core + the public
-# sub-packages (agent, age). The pkgs/ facades are EXCLUDED:
-# they are formatted by dagnabit's own conformist pass, so reformatting them
-# with plain gofmt would risk drift against `lint-facades`. (treefmt/`nix fmt`
-# does not cover Go, so this recipe is the canonical go/markl formatter.)
+# sub-packages (agent, age). The pkgs/ facades are EXCLUDED: they are formatted
+# by dagnabit's own conformist pass (the dewey-facade-export lane), so
+# reformatting them with plain gofmt would risk drift against the facade CHECK
+# (`just lint-worktree`). conformist's `nix fmt` does not cover Go, so this
+# recipe is the canonical go/markl formatter for the hand-written sources.
 [group('codemod')]
-fmt-go-markl:
+codemod-fmt-go-markl:
     cd go/markl && gofmt -w internal agent age
 
+# Run the nix-built piggy package (nix run . --), forwarding ARGS.
 run-nix *ARGS:
     nix run . -- {{ARGS}}
 
@@ -115,6 +127,9 @@ run-nix *ARGS:
 
 [group('post-build')]
 test: test-bats-default test-bats-conformance test-rust test-go-markl _test-conformance-linux-only
+
+[group('post-build')]
+test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module
 
 # The fibby-backed conformance lanes are Linux-only: fibby is a virtual PCSC
 # card reached via libpcsclite's PCSCLITE_CSOCK_NAME socket redirect, which
@@ -151,6 +166,9 @@ test-bats-default:
 test-bats-piggy-local: build-rust
   BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/t*.bats
 
+# Run the conformance bats glob outside the sandbox: the non-pty tests under
+# batman (with fibby/pivy redirect on Linux) plus the pty-tagged tests
+# unsandboxed (fence blocks /dev/ptmx).
 [group('post-build')]
 test-bats-conformance: build-rust
   #!/usr/bin/env bash
@@ -184,6 +202,8 @@ test-bats-conformance: build-rust
   env "${fibby_env[@]}" BATS_TEST_TIMEOUT=30 \
     bats --no-sandbox --filter-tags 'pty' --tap zz-tests_bats/conformance/*.bats
 
+# Run the SSH-agent wire-protocol conformance bats against a freshly built
+# piggy-agent-conformance binary (the .#piggy.tests.conformance package).
 [group('post-build')]
 test-bats-conformance-protocol: build-rust
   #!/usr/bin/env bash
@@ -665,10 +685,13 @@ test-bats-conformance-pivy-agent-hardware: build-rust
       BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
       zz-tests_bats/conformance/pivy_agent_hardware.bats
 
+# Run the given bats FILES outside the sandbox against target/debug/piggy —
+# the fast single-file iteration path.
 [group('post-build')]
 test-bats-file *FILES: build-rust
     BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
 
+# Run the Rust test suite (cargo test), forwarding ARGS.
 [group('post-build')]
 test-rust *ARGS:
     cargo test {{ARGS}}
@@ -745,6 +768,9 @@ test-rust-integration-fibby: build-rust
   cargo test --test unlock_ebox_agent_integration -- --nocapture
   cargo test --test unlock_ebox_card_integration -- --nocapture
 
+[group('pre-build')]
+validate: validate-box validate-piggy validate-rust
+
 # `cargo check` type-evals without codegen — a pre-build validation
 # (hard failure on type errors), distinct from the `lint-rust` clippy
 # opinion pass. `validate-rust` covers the whole workspace; the
@@ -753,10 +779,14 @@ test-rust-integration-fibby: build-rust
 validate-rust *ARGS:
     cargo check {{ARGS}}
 
+# `cargo check` the piggy-box crate only — a fast per-crate type-eval subset of
+# validate-rust.
 [group('pre-build')]
 validate-box:
     cargo check -p piggy-box
 
+# `cargo check` the piggy crate only — a fast per-crate type-eval subset of
+# validate-rust.
 [group('pre-build')]
 validate-piggy:
     cargo check -p piggy
@@ -771,8 +801,8 @@ validate-piggy:
 debug-interop-stream-bytes: build-rust
   #!/usr/bin/env bash
   set -euo pipefail
-  trap 'just fib-down' EXIT
-  just fib-up
+  trap 'just clean-fib' EXIT
+  just load-fib
   eval "$(cat .fib/env)"
   pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
   guid=$(pivy-tool list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
@@ -878,7 +908,7 @@ explore-darwin-vpcd-build-patched:
 # sockets), bind local ports, shell out to `just` to bring up fib (which
 # writes .fib/ into CWD and /run/user/$UID), etc. The narrow-escape flag
 # (--allow-local-binding) covers local binding but leaves CWD read-only,
-# which breaks fib-up. Explores are not part of the CI gate so the
+# which breaks load-fib. Explores are not part of the CI gate so the
 # broader trust is fine.
 [group('explore')]
 explore-bats *FILES: build-rust
@@ -931,6 +961,8 @@ debug-pcsclite-opens: build-rust
       echo
     done
 
+# Report which libpcsclite each PIV client (piggy/pivy-tool/pcscd) links and
+# embeds — diagnoses "smart card resource manager has shut down" linkage skew.
 [group('debug')]
 debug-pcsclite-linkage:
     #!/usr/bin/env bash
@@ -1211,16 +1243,16 @@ debug-fibby-roundtrip-capture-test-vector:
 # instead of a real YubiKey. fib provides a second oracle — same APDU
 # script, second capture — so we have differential fixtures even when
 # no hardware is around. Brings fib up first (idempotent); does NOT
-# tear it down on exit (run `just fib-down` when you're done).
+# tear it down on exit (run `just clean-fib` when you're done).
 #
 # Prereq: fib's slot 9D must already have an ECDH key. Bootstrap once
-# per fib-up session:
+# per load-fib session:
 #   just debug-fibby-proxy-via-fib pivy-tool -K default init
 #   just debug-fibby-proxy-via-fib pivy-tool -P 123456 -K default -a eccp256 generate 9d
 #
 # The captured trace lands under crates/fibby/tests/fixtures/captures/fib/.
 [group('debug')]
-debug-fibby-roundtrip-via-fib: build-rust fib-up
+debug-fibby-roundtrip-via-fib: build-rust load-fib
     FIBBY_BACKEND_PCSCD=/tmp/piggy-fib-ipc/pcscd.comm \
     FIBBY_READER="piggy fib" \
     FIBBY_KEEP_LOGS=crates/fibby/tests/fixtures/captures/fib \
@@ -1234,7 +1266,7 @@ debug-fibby-roundtrip-via-fib: build-rust fib-up
 #   just debug-fibby-proxy-via-fib pivy-tool list
 #   just debug-fibby-proxy-via-fib pivy-tool -K default init
 [group('debug')]
-debug-fibby-proxy-via-fib *CLIENT_CMD: build-rust fib-up
+debug-fibby-proxy-via-fib *CLIENT_CMD: build-rust load-fib
     FIBBY_BACKEND_PCSCD=/tmp/piggy-fib-ipc/pcscd.comm \
     FIBBY_READER="piggy fib" \
       just debug-fibby-proxy {{CLIENT_CMD}}
@@ -1381,15 +1413,18 @@ debug-conformance-run-hw: build-rust
 # --- format / lint ---
 
 [group('codemod')]
-codemod-fmt: codemod-fmt-treefmt
+codemod: codemod-fmt codemod-fmt-go-markl codemod-rfc0002-fixture
 
-# Run treefmt via the flake's `formatter.${system}` wrapper, which
-# composes nixfmt + shfmt + rustfmt under one CLI. See treefmt.nix
-# for the program config.
+# Format the tree in place via `nix fmt`, which runs the conformist wrapper
+# (formatter.${system}) — nixfmt + shfmt + rustfmt under one CLI. See
+# conformist.nix for the program config. (Go is NOT covered here; use
+# codemod-fmt-go-markl for go/markl hand-written sources.)
 [group('codemod')]
-codemod-fmt-treefmt:
+codemod-fmt:
     nix fmt
 
+# Clippy the workspace with warnings-as-errors; on Linux also clippy fibby
+# with --features hardware-proxy so wet-env-path regressions fail the gate.
 [group('pre-build')]
 lint-rust:
     #!/usr/bin/env bash
@@ -1408,10 +1443,10 @@ lint-rust:
     fi
 
 # Read-only formatting gate: builds the `checks.formatting`
-# derivation, which runs treefmt against a /nix/store snapshot of
-# the source tree and fails if anything would change. Does NOT
-# modify files in the worktree -- the modifying counterpart is
-# `codemod-fmt`.
+# derivation, which runs the conformist formatters + the eng preset's
+# file-based linters against a /nix/store snapshot of the source tree
+# and fails if anything would change. Does NOT modify files in the
+# worktree -- the modifying counterpart is `codemod-fmt`.
 [group('pre-build')]
 lint-fmt:
     #!/usr/bin/env bash
@@ -1419,15 +1454,29 @@ lint-fmt:
     system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
     nix build ".#checks.${system}.formatting" --no-link --print-build-logs
 
+# Impure lane: the eng-convention checks that need the live worktree (git
+# remotes / default branch / sweatfile / agents-md) PLUS the go/markl facade
+# drift CHECK (conformist's dewey-facade-export). This is the merge-gate safety
+# net for facade drift — it runs in the `lint` aggregate, so the pre-merge
+# `just` hook fails on committed drift even if the `conformist-pre-commit`
+# repair hook was bypassed. The pre-commit hook does the REPAIR; this does the
+# CHECK (same dewey-facade-export module, two lanes — see flake.nix).
+[group('pre-build')]
+lint-worktree:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cfg=$(nix build --no-link --print-out-paths '.#conformist-impure-config')
+    conformist check --config-file "$cfg" --tree-root .
+
 # --- fib: virtual PIV smart card ---
 #
 # `fib` is a software PIV card built from PivApplet + jCardSim + vsmartcard-vpcd.
 # Packaged via nix/virtual-piv.nix; see docs/virtual-piv.md for architecture
 # and troubleshooting.
 #
-# `fib-up` starts a private pcscd and the applet; `fib-down` tears them down.
-# Callers must `eval .fib/env` after `fib-up` to redirect PC/SC clients at
-# the private socket (via PCSCLITE_CSOCK_NAME). `fib-shell` is the
+# `load-fib` starts a private pcscd and the applet; `clean-fib` tears them down.
+# Callers must `eval .fib/env` after `load-fib` to redirect PC/SC clients at
+# the private socket (via PCSCLITE_CSOCK_NAME). `run-fib-shell` is the
 # interactive convenience wrapper — opens a subshell with the env set and
 # cleans up on exit.
 
@@ -1435,13 +1484,13 @@ lint-fmt:
 # `eval $(cat .fib/env)` in your shell; then `pivy-tool list` etc. will
 # see "Virtual PCD piggy fib" as the reader.
 [group('operational')]
-fib-up:
+load-fib:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p .fib
     # Short-circuit if already running.
     if [[ -f .fib/pcscd.pid ]] && kill -0 "$(cat .fib/pcscd.pid)" 2>/dev/null; then
-      echo "fib-up: already running (pid $(cat .fib/pcscd.pid)). eval \$(cat .fib/env)" >&2
+      echo "load-fib: already running (pid $(cat .fib/pcscd.pid)). eval \$(cat .fib/env)" >&2
       exit 0
     fi
     reader_conf=$(nix build --no-link --print-out-paths .#fib-reader-conf)
@@ -1467,7 +1516,7 @@ fib-up:
     # Wait for the socket.
     for _ in $(seq 1 30); do [[ -S $sock ]] && break; sleep 0.1; done
     if [[ ! -S $sock ]]; then
-      echo "fib-up: pcscd socket never appeared — see .fib/pcscd.log" >&2
+      echo "load-fib: pcscd socket never appeared — see .fib/pcscd.log" >&2
       kill "$pcscd_pid" 2>/dev/null || true
       exit 1
     fi
@@ -1491,7 +1540,7 @@ fib-up:
         --reader "$reader" \
         --timeout 30 \
         --activate "$activate_apdu"; then
-      echo "fib-up: fib-wait-ready failed — card never became ready" >&2
+      echo "load-fib: fib-wait-ready failed — card never became ready" >&2
       kill "$fib_pid" "$pcscd_pid" 2>/dev/null || true
       exit 1
     fi
@@ -1505,7 +1554,7 @@ fib-up:
 
 # Tear down the private pcscd + fib pair.
 [group('operational')]
-fib-down:
+clean-fib:
     #!/usr/bin/env bash
     set -uo pipefail
     if [[ -f .fib/fib.pid ]]; then
@@ -1518,12 +1567,12 @@ fib-down:
     echo "fib: down"
 
 # Bring up the standalone `fibby` server in hardware-proxy mode, fronted
-# by the system pcscd. Mirrors fib-up's UX: short-circuits if already
+# by the system pcscd. Mirrors load-fib's UX: short-circuits if already
 # running, drops a PID file under .fibby/, and writes an env file
 # (.fibby/env) consumers `eval` to set PCSCLITE_CSOCK_NAME.
 #
 # Unlike fib (which brings up its own pcscd + jcardsim + applet),
-# fibby-up assumes a real PC/SC reader + card are already plugged in
+# load-fibby assumes a real PC/SC reader + card are already plugged in
 # and the system pcscd is up — its sole job is to translate pcsc-lite
 # daemon-protocol traffic into PC/SC client traffic against the system
 # pcscd. If no card is present, fibby's startup error surfaces via the
@@ -1534,21 +1583,21 @@ fib-down:
 # on isLinux). Use the dev-loop alternative `debug-fibby-proxy` if you
 # need fast iteration off `./target/debug/fibby` instead.
 [group('operational')]
-fibby-up:
+load-fibby:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p .fibby
     sock="/tmp/piggy-fibby-ipc/pcscd.comm"
     # Short-circuit if already running.
     if [[ -f .fibby/fibby.pid ]] && kill -0 "$(cat .fibby/fibby.pid)" 2>/dev/null; then
-      echo "fibby-up: already running (pid $(cat .fibby/fibby.pid)). eval \$(cat .fibby/env)" >&2
+      echo "load-fibby: already running (pid $(cat .fibby/fibby.pid)). eval \$(cat .fibby/env)" >&2
       exit 0
     fi
     # System pcscd sanity check: HardwareProxy::new fails noisily if
     # neither standard socket is present; check first for a better
     # error than a stack trace.
     if [[ ! -S /run/pcscd/pcscd.comm && ! -S /var/run/pcscd/pcscd.comm ]]; then
-      echo "fibby-up: no system pcscd socket — start pcscd first" >&2
+      echo "load-fibby: no system pcscd socket — start pcscd first" >&2
       exit 1
     fi
     fibby_bin=$(nix build --no-link --print-out-paths .#fibby)/bin/fibby
@@ -1568,7 +1617,7 @@ fibby-up:
       sleep 0.1
     done
     if [[ ! -S "$sock" ]]; then
-      echo "fibby-up: socket never appeared — see .fibby/fibby.log" >&2
+      echo "load-fibby: socket never appeared — see .fibby/fibby.log" >&2
       cat .fibby/fibby.log >&2
       kill "$fibby_pid" 2>/dev/null || true
       rm -f .fibby/fibby.pid
@@ -1580,9 +1629,9 @@ fibby-up:
     EOF
     echo "fibby: up — eval \$(cat .fibby/env) to connect"
 
-# Tear down the standalone fibby server brought up by `fibby-up`.
+# Tear down the standalone fibby server brought up by `load-fibby`.
 [group('operational')]
-fibby-down:
+clean-fibby:
     #!/usr/bin/env bash
     set -uo pipefail
     if [[ -f .fibby/fibby.pid ]]; then
@@ -1595,21 +1644,24 @@ fibby-down:
 
 # Open a subshell with fib up and the env preloaded; tears down on exit.
 [group('operational')]
-fib-shell:
+run-fib-shell:
     #!/usr/bin/env bash
     set -euo pipefail
-    just fib-up
-    trap 'just fib-down' EXIT
+    just load-fib
+    trap 'just clean-fib' EXIT
     export PCSCLITE_CSOCK_NAME="/tmp/piggy-fib-ipc/pcscd.comm"
     PS1="(fib) $PS1" exec "$SHELL"
 
+[group('post-build')]
+verify: verify-fib
+
 # Smoke test: bring up fib, verify pivy-tool sees the virtual card, tear down.
 [group('post-build')]
-fib-smoke:
+verify-fib:
     #!/usr/bin/env bash
     set -euo pipefail
-    trap 'just fib-down' EXIT
-    just fib-up
+    trap 'just clean-fib' EXIT
+    just load-fib
     eval "$(cat .fib/env)"
 
     # Minimal diagnostics — see #20 for full investigation history.
@@ -1637,23 +1689,23 @@ fib-smoke:
       sleep 0.5
     done
     if [[ "$found" != true ]]; then
-      echo "fib-smoke: FAIL — virtual card not visible after 10 attempts" >&2
+      echo "verify-fib: FAIL — virtual card not visible after 10 attempts" >&2
       echo
       echo "--- dumping debug-fib-pivy-trace on failure (see #20) ---" >&2
       just debug-fib-pivy-trace >&2 || true
       exit 1
     fi
-    echo "fib-smoke: PASS"
+    echo "verify-fib: PASS"
 
 # Trace pivy-tool vs opensc-tool against a running fib stack.
-# Fib must already be up (just fib-up). Used to investigate #20
+# Fib must already be up (just load-fib). Used to investigate #20
 # (pivy-tool list empty despite opensc-tool seeing the virtual card).
 [group('debug')]
 debug-fib-pivy-trace:
     #!/usr/bin/env bash
     set -uo pipefail
     if [[ ! -f .fib/env ]]; then
-      echo "ERROR: .fib/env not found - run 'just fib-up' first" >&2
+      echo "ERROR: .fib/env not found - run 'just load-fib' first" >&2
       exit 1
     fi
     eval "$(cat .fib/env)"
@@ -2107,14 +2159,14 @@ debug-lock-contention-probe guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456"
 # support. Sends GENERATE ASYMMETRIC KEY PAIR for several alg bytes and
 # captures each SW. Hardware-free: only touches the virtual card behind
 # fib. Used to settle issue #11 (X25519 ECDH) — see findings on the
-# issue. Bring fib up with `just fib-up` first; this recipe fails fast
+# issue. Bring fib up with `just load-fib` first; this recipe fails fast
 # if it isn't running rather than managing the lifecycle.
 [group('explore')]
 explore-x25519-pivapplet:
     #!/usr/bin/env bash
     set -uo pipefail
     if [[ ! -f .fib/env ]]; then
-      echo "ERROR: .fib/env not found - run 'just fib-up' first" >&2
+      echo "ERROR: .fib/env not found - run 'just load-fib' first" >&2
       exit 1
     fi
     eval "$(cat .fib/env)"
@@ -2145,6 +2197,7 @@ explore-x25519-pivapplet:
 [group('maintenance')]
 update: update-nix
 
+# Update flake.lock to the latest inputs (nix flake update).
 [group('maintenance')]
 update-nix:
     nix flake update
@@ -2152,10 +2205,12 @@ update-nix:
 [group('maintenance')]
 clean: clean-build clean-rust
 
+# Remove the nix build result symlink (rm -rf result).
 [group('maintenance')]
 clean-build:
     rm -rf result
 
+# Remove the cargo build artifacts (cargo clean).
 [group('maintenance')]
 clean-rust:
     cargo clean
