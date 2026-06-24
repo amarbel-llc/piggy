@@ -582,3 +582,149 @@ STUB_EOF
   assert_success
   assert_output "stubbed-pin-no-notifier"
 }
+
+@test "reattach_globs_wayland_socket_when_env_display_blind" {
+  # piggy#179: a display-blind agent env (frozen at unit-start before the
+  # compositor published WAYLAND_DISPLAY) must re-derive the display before
+  # zenity, or every sign is refused with "Failed to open display". Source 2:
+  # the Wayland socket is discoverable under XDG_RUNTIME_DIR (present even in
+  # the frozen env). We assert the value zenity actually inherited.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir runtime python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-reattach.XXXXXX")"
+  runtime="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-xdg.XXXXXX")"
+  for tool in bash ps tr dirname mkdir date; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  python3_path="$(command -v python3)"
+  # A real AF_UNIX socket so the script's `-S` test matches; a bind()-ed path
+  # stays a socket inode after the process exits (nothing unlinks it).
+  "$python3_path" -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' \
+    "$runtime/wayland-7"
+  # Stub zenity records the WAYLAND_DISPLAY it inherited, then echoes a PIN.
+  cat >"$stub_dir/zenity" <<STUB_EOF
+#!/usr/bin/env bash
+printf '%s' "\${WAYLAND_DISPLAY-}" > "$stub_dir/seen-wayland"
+echo "stubbed-pin-reattach"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+
+  # env -i scrubs WAYLAND_DISPLAY/DISPLAY but keeps XDG_RUNTIME_DIR; systemctl
+  # is absent from the stub PATH so source 1 is skipped and source 2 (glob)
+  # resolves. setsid detaches the tty so the /dev/tty branch is skipped.
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" XDG_RUNTIME_DIR="$runtime" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  assert_success
+  assert_output "stubbed-pin-reattach"
+  [[ "$(cat "$stub_dir/seen-wayland")" == "wayland-7" ]] || {
+    echo "expected zenity to inherit WAYLAND_DISPLAY=wayland-7; saw [$(cat "$stub_dir/seen-wayland")]"
+    return 1
+  }
+}
+
+@test "reattach_imports_display_from_systemctl_user_environment" {
+  # piggy#179 source 1 (authoritative): import WAYLAND_DISPLAY/DISPLAY from
+  # `systemctl --user show-environment`, which the compositor refreshes after
+  # the agent froze its env. Stub systemctl emits a canned block; no
+  # XDG_RUNTIME_DIR is passed, so a pass proves the import came from source 1.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-systemctl.XXXXXX")"
+  for tool in bash ps tr dirname mkdir date grep sed; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  python3_path="$(command -v python3)"
+  cat >"$stub_dir/systemctl" <<'STUB_EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--user" && "${2:-}" == "show-environment" ]]; then
+  printf 'WAYLAND_DISPLAY=wayland-3\nDISPLAY=:0\nXDG_RUNTIME_DIR=/run/user/9999\n'
+fi
+STUB_EOF
+  chmod +x "$stub_dir/systemctl"
+  cat >"$stub_dir/zenity" <<STUB_EOF
+#!/usr/bin/env bash
+printf '%s' "\${WAYLAND_DISPLAY-}" > "$stub_dir/seen-wayland"
+echo "stubbed-pin-systemctl"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  assert_success
+  assert_output "stubbed-pin-systemctl"
+  [[ "$(cat "$stub_dir/seen-wayland")" == "wayland-3" ]] || {
+    echo "expected import from systemctl (wayland-3); saw [$(cat "$stub_dir/seen-wayland")]"
+    return 1
+  }
+}
+
+@test "reattach_is_noop_when_no_display_source_available" {
+  # Negative control: display-blind env, no systemctl, no Wayland socket under
+  # XDG_RUNTIME_DIR → no reattach, WAYLAND_DISPLAY stays empty. The script must
+  # NOT fabricate a bogus display (it falls through to "trust zenity to fail").
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir runtime python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-nosrc.XXXXXX")"
+  runtime="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-xdg-empty.XXXXXX")"
+  for tool in bash ps tr dirname mkdir date; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  python3_path="$(command -v python3)"
+  cat >"$stub_dir/zenity" <<STUB_EOF
+#!/usr/bin/env bash
+printf '%s' "\${WAYLAND_DISPLAY-}" > "$stub_dir/seen-wayland"
+echo "stubbed-pin-nosrc"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" XDG_RUNTIME_DIR="$runtime" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  assert_success
+  [[ -z "$(cat "$stub_dir/seen-wayland")" ]] || {
+    echo "expected no reattach; zenity saw WAYLAND_DISPLAY=[$(cat "$stub_dir/seen-wayland")]"
+    return 1
+  }
+}
+
+@test "reattach_does_not_override_present_display" {
+  # The reattach is guarded on an EMPTY display env: when WAYLAND_DISPLAY is
+  # already set (the common, healthy case) it must be left untouched even if a
+  # different socket is discoverable under XDG_RUNTIME_DIR.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir runtime python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-present.XXXXXX")"
+  runtime="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-xdg-present.XXXXXX")"
+  for tool in bash ps tr dirname mkdir date; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  python3_path="$(command -v python3)"
+  "$python3_path" -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' \
+    "$runtime/wayland-7"
+  cat >"$stub_dir/zenity" <<STUB_EOF
+#!/usr/bin/env bash
+printf '%s' "\${WAYLAND_DISPLAY-}" > "$stub_dir/seen-wayland"
+echo "stubbed-pin-present"
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" XDG_RUNTIME_DIR="$runtime" \
+    WAYLAND_DISPLAY=wayland-existing \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "Enter PIV PIN" </dev/null
+
+  assert_success
+  [[ "$(cat "$stub_dir/seen-wayland")" == "wayland-existing" ]] || {
+    echo "reattach clobbered a present display; saw [$(cat "$stub_dir/seen-wayland")]"
+    return 1
+  }
+}

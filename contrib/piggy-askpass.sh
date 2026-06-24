@@ -208,6 +208,44 @@ fire_heads_up() {
   ("$notifier" "$title" "$body" >/dev/null 2>&1 &) >/dev/null 2>&1 || true
 }
 
+# Reattach to the live graphical session before rendering via zenity.
+#
+# piggy-agent is a long-lived `systemd --user` service whose environment is
+# frozen at unit-start. If it started before the compositor published
+# WAYLAND_DISPLAY/DISPLAY into the user-manager env (early-boot ordering), or
+# the compositor was restarted after the agent came up, the inherited env is
+# empty or stale. Because the PIN prompt only spawns zenity lazily at sign
+# time, every signature is then refused for the agent's *entire* lifetime with
+# `Gtk-WARNING: Failed to open display` (zenity exit 1), until a manual
+# restart re-inherits a populated env. See amarbel-llc/piggy#179.
+#
+# The prompt is lazy, so by the time we reach here the display IS available
+# even though piggy's frozen env predates it — re-derive it now, most-
+# authoritative source first. No-op when the env already carries a display
+# (the common case) and on macOS (no systemctl, no XDG_RUNTIME_DIR, so both
+# branches skip and zenity reaches the Aqua session on its own).
+if [[ -z ${WAYLAND_DISPLAY:-} && -z ${DISPLAY:-} ]]; then
+  # 1. The systemd user-manager environment, which the compositor refreshes
+  #    via `systemctl --user import-environment` after the agent forked. This
+  #    is authoritative — it's the display the session actually registered.
+  if command -v systemctl >/dev/null 2>&1; then
+    eval "$(systemctl --user show-environment 2>/dev/null |
+      grep -E '^(WAYLAND_DISPLAY|DISPLAY|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS)=' |
+      sed 's/^/export /')" || true
+  fi
+  # 2. Fallback: discover the Wayland socket directly. XDG_RUNTIME_DIR is set
+  #    by pam_systemd at login and is present even in the display-blind env,
+  #    so this still works when systemctl is unavailable. The `-S` test skips
+  #    the sibling `wayland-N.lock` regular files.
+  if [[ -z ${WAYLAND_DISPLAY:-} && -n ${XDG_RUNTIME_DIR:-} ]]; then
+    for _sock in "$XDG_RUNTIME_DIR"/wayland-*; do
+      [[ -S $_sock ]] || continue
+      export WAYLAND_DISPLAY="${_sock##*/}"
+      break
+    done
+  fi
+fi
+
 # Render target 2: zenity. We don't gate on $DISPLAY/$WAYLAND_DISPLAY —
 # macOS zenity reaches the Aqua session without either var being set,
 # and launchd-spawned agents (pivy-agent) reach this script with a

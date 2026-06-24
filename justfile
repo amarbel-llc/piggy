@@ -1248,6 +1248,76 @@ debug-askpass-launchd-env: build-nix
     run_case "askpass-call (pivy-agent.c:841)" "Enter PIV PIN for token 12345"
     run_case "confirm-call (pivy-agent.c:1055)" "A new client is trying to use PIV token 12345"
 
+# piggy#179: prove contrib/piggy-askpass.sh re-derives WAYLAND_DISPLAY from the
+# live session when the frozen agent env lacks it. Hermetic and dependency-light
+# (bash/python3/coreutils only — no bats, no rust build, no card, no display):
+# stub zenity records the WAYLAND_DISPLAY it inherits, a python-made AF_UNIX
+# socket feeds the glob source, and a stub systemctl feeds the import source.
+# Mirrors the four `reattach_*` cases in conformance/piggy_askpass.bats for
+# environments where bats isn't on PATH. See amarbel-llc/piggy#179.
+[group('debug')]
+debug-askpass-reattach:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    askpass="$PWD/contrib/piggy-askpass.sh"
+    py="$(command -v python3)"
+    rc=0
+    new_stub() {
+      local d; d="$(mktemp -d)"
+      local t
+      for t in bash ps tr dirname mkdir date grep sed; do ln -sf "$(command -v "$t")" "$d/$t"; done
+      {
+        echo '#!/usr/bin/env bash'
+        echo "printf '%s' \"\${WAYLAND_DISPLAY-}\" > \"$d/seen\""
+        echo 'echo pin'
+      } > "$d/zenity"
+      chmod +x "$d/zenity"
+      printf '%s' "$d"
+    }
+    check() {  # $1 label  $2 expected  $3 stub-dir
+      local got; got="$(cat "$3/seen" 2>/dev/null || true)"
+      if [[ "$got" == "$2" ]]; then echo "PASS  $1 (WAYLAND_DISPLAY=[$got])"
+      else echo "FAIL  $1: expected [$2], saw [$got]"; rc=1; fi
+    }
+
+    # 1. glob: a Wayland socket discoverable under XDG_RUNTIME_DIR.
+    d1="$(new_stub)"; rt1="$(mktemp -d)"
+    "$py" -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$rt1/wayland-7"
+    env -i HOME="$d1" PATH="$d1" XDG_RUNTIME_DIR="$rt1" \
+      "$py" -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+      "$askpass" "piggy-test: glob" </dev/null >/dev/null 2>&1 || true
+    check "glob socket under XDG_RUNTIME_DIR" "wayland-7" "$d1"
+
+    # 2. systemctl --user show-environment (authoritative import source).
+    d2="$(new_stub)"
+    {
+      echo '#!/usr/bin/env bash'
+      echo 'if [[ "${1:-}" == "--user" && "${2:-}" == "show-environment" ]]; then printf "WAYLAND_DISPLAY=wayland-3\nDISPLAY=:0\n"; fi'
+    } > "$d2/systemctl"; chmod +x "$d2/systemctl"
+    env -i HOME="$d2" PATH="$d2" \
+      "$py" -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+      "$askpass" "piggy-test: systemctl" </dev/null >/dev/null 2>&1 || true
+    check "systemctl show-environment import" "wayland-3" "$d2"
+
+    # 3. no source available → must NOT fabricate a display.
+    d3="$(new_stub)"; rt3="$(mktemp -d)"
+    env -i HOME="$d3" PATH="$d3" XDG_RUNTIME_DIR="$rt3" \
+      "$py" -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+      "$askpass" "piggy-test: none" </dev/null >/dev/null 2>&1 || true
+    check "no source leaves display empty" "" "$d3"
+
+    # 4. present display must not be clobbered.
+    d4="$(new_stub)"; rt4="$(mktemp -d)"
+    "$py" -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$rt4/wayland-7"
+    env -i HOME="$d4" PATH="$d4" XDG_RUNTIME_DIR="$rt4" WAYLAND_DISPLAY=wayland-existing \
+      "$py" -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+      "$askpass" "piggy-test: present" </dev/null >/dev/null 2>&1 || true
+    check "present display not clobbered" "wayland-existing" "$d4"
+
+    echo
+    [[ $rc -eq 0 ]] && echo "ALL PASS" || echo "FAILURES ABOVE"
+    exit $rc
+
 # Like debug-conformance-run, but with --hardware. Prompts for the card PIN
 # via `ssh-add -X` so the sign test can actually execute against the card.
 [group('debug')]
