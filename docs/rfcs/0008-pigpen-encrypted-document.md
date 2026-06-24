@@ -503,8 +503,8 @@ prototypes ship round-trip and known-answer unit tests in the interim
 
 Pigpen is a **new** format. It does not change the ebox (RFC 0002),
 `piggy-ids` (RFC 0003), or age (RFC 0004) formats, and nothing in piggy
-emits or consumes `pigpen-v1` in production at this revision. A
-follow-up cutover RFC will specify:
+emits or consumes `pigpen-v1` in production at this revision. The
+**cutover RFC 0009** specifies:
 
 - the `.pigpen` file extension and store layout;
 - the `piggy pass`-level commands (seal / open / `recipients`) and
