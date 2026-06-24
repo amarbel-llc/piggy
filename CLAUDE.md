@@ -361,7 +361,13 @@ test-harness askpass above. Where the test askpass refuses to render
 any prompt, this one renders piggy-aware context (parent process,
 `PIGGY_ASKPASS_CONTEXT` env var, `[TEST]` tag heuristic) on top of
 the prompt text, then reads the PIN — preferring `/dev/tty`, falling
-back to `zenity` (no `$DISPLAY` gate), refusing otherwise. The route
+back to `zenity` (no `$DISPLAY` gate), refusing otherwise. Before the
+`zenity` branch, when the inherited (frozen `systemd --user` agent) env
+carries no display, it re-derives a live one — importing from `systemctl
+--user show-environment`, else globbing `$XDG_RUNTIME_DIR/wayland-*` — so
+a piggy-agent that started before the compositor published
+`WAYLAND_DISPLAY` can still prompt (#179); a no-op when a display is
+already present and on macOS. The route
 is caller-selectable via OpenSSH's `SSH_ASKPASS_REQUIRE` (#166):
 `force` skips the tty branch (always zenity, for agent-driven /
 scripted contexts), `never` skips zenity (tty-or-refuse, for
