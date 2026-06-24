@@ -15,4 +15,10 @@ members = [
 # vendor/ holds the imported pivy source tree (see vendor/pivy/README.adoc
 # and piggy #21). It has its own rust/Cargo.toml workspace that must not
 # merge with piggy's — excluding keeps cargo from walking into it.
-exclude = ["vendor"]
+#
+# crates/piggy-pigpen is the RFC 0008 prototype. It is excluded from the
+# workspace on purpose: it depends on the pure-Rust RustCrypto stack (so a
+# wasm32 build is possible) rather than the OpenSSL-backed piggy-box, and
+# carries its own Cargo.lock that is not part of the nix `sharedCargoLock`.
+# Promoting it into `members` is a cutover step (RFC 0008 "Compatibility").
+exclude = ["vendor", "crates/piggy-pigpen"]
