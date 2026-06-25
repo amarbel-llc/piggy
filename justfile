@@ -89,14 +89,30 @@ build-go-markl:
 test-go-markl:
     cd go/markl && go test -tags test ./...
 
-# NOTE: the standalone `codemod-facades` (`dagnabit export`) and `lint-facades`
-# (`dagnabit export --check`) recipes were RETIRED in piggy's conformist
-# migration. Facade drift is now REPAIRED at commit time by the
-# `conformist-pre-commit` hook (regenerate + stage the pkgs/ facades) and
-# CHECKED at the merge gate by `just lint-worktree` (in the `lint` aggregate) —
-# both run conformist's dewey-facade-export lane (a store-pinned
-# `dagnabit export`). See the go/markl block above and flake.nix
-# conformistFacadeModule.
+# Regenerate the go/markl pkgs/ facades in place — the apply-mode inverse of
+# `just lint-worktree`'s facade CHECK, and the codemod sibling of
+# `codemod-rfc0002-fixture` (both regenerate committed artifacts). Runs
+# conformist's dewey-facade-export lane off the SAME impure config as the CHECK
+# (the shared conformistFacadeModule, pinning one `dagnabit`), so its output
+# matches the merge-gate CHECK byte-for-byte — unlike a bare devShell
+# `dagnabit export`, which can drift on generator version. Part of the `codemod`
+# aggregate, so a routine `just codemod` keeps the facades current; also the
+# explicit standalone repair when committed drift reaches the merge gate.
+#
+# Facade drift is normally REPAIRED automatically at commit time by the
+# `conformist-pre-commit` hook (spinclass installs it per session; it runs
+# `conformist --staged`, so it only acts on staged content — a clean tree with
+# already-committed drift slips past it). The loud backstop is `just
+# lint-worktree`, in the `lint` aggregate. This recipe rewrites the facades in
+# place; `git add` them yourself. Re-added after the conformist migration
+# retired the standalone facade recipes and left no paved repair path. See the
+# go/markl block above and flake.nix conformistFacadeModule.
+[group('codemod')]
+codemod-facades:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cfg=$(nix build --no-link --print-out-paths '.#conformist-impure-config')
+    conformist --config-file "$cfg" --tree-root .
 
 # Regenerate the piggy-scoped RFC 0002 conformance fixture under
 # go/markl/internal/charlie/markl_registrations/testdata/. Run after changing a
@@ -1413,7 +1429,7 @@ debug-conformance-run-hw: build-rust
 # --- format / lint ---
 
 [group('codemod')]
-codemod: codemod-fmt codemod-fmt-go-markl codemod-rfc0002-fixture
+codemod: codemod-fmt codemod-fmt-go-markl codemod-rfc0002-fixture codemod-facades
 
 # Format the tree in place via `nix fmt`, which runs the conformist wrapper
 # (formatter.${system}) — nixfmt + shfmt + rustfmt under one CLI. See
