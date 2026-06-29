@@ -65,6 +65,104 @@ pub fn der_to_raw_rs(der: &[u8], field_len: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Reframe an SSH ECDSA signature blob into DER `SEQUENCE { INTEGER r,
+/// INTEGER s }`.
+///
+/// This is the inverse of [`crate::cmd::agent::session`]'s forward path
+/// (`decode_der_ecdsa_signature` → `encode_ecdsa_ssh_signature`): an SSH
+/// agent returns an `ecdsa-sha2-nistp256/384` signature whose inner blob
+/// (`ssh_key::Signature::as_bytes()`) is
+///
+/// ```text
+///   string(r as mpint) || string(s as mpint)
+/// ```
+///
+/// where each `string` is a `u32` big-endian length prefix followed by the
+/// payload. An SSH mpint body and a DER INTEGER body are byte-identical for a
+/// positive integer — both big-endian, both carry exactly one leading `0x00`
+/// when the high bit is set, both minimally encoded (RFC 4251 / DER) — so each
+/// mpint body is re-wrapped verbatim as a DER `INTEGER`. The DER output then
+/// flows through [`der_to_raw_rs`] (raw framing) or is emitted as-is (DER
+/// framing), keeping reframing single-sourced with the card path.
+///
+/// Every length is bounds-checked; malformed input is rejected with an `Err`,
+/// never a panic. `r`/`s` are signature scalars and are always positive, so an
+/// empty mpint body (value 0) is encoded as the DER INTEGER `0x00`.
+pub fn ssh_ecdsa_blob_to_der(blob: &[u8]) -> Result<Vec<u8>, String> {
+    let (r, pos) = read_ssh_string(blob, 0, "r")?;
+    let (s, end) = read_ssh_string(blob, pos, "s")?;
+    if end != blob.len() {
+        return Err(format!(
+            "invalid SSH ECDSA signature: {} trailing bytes after s",
+            blob.len() - end
+        ));
+    }
+
+    let mut body = Vec::new();
+    encode_der_integer(&mut body, r);
+    encode_der_integer(&mut body, s);
+
+    let mut der = vec![0x30];
+    encode_der_length(&mut der, body.len());
+    der.extend_from_slice(&body);
+    Ok(der)
+}
+
+/// Read an SSH `string` (u32 big-endian length prefix + payload) from `data`
+/// at `offset`. Returns `(payload, next_offset)`. Every bound is checked so a
+/// malformed length can never index out of range.
+fn read_ssh_string<'a>(
+    data: &'a [u8],
+    offset: usize,
+    label: &str,
+) -> Result<(&'a [u8], usize), String> {
+    let hdr_end = offset
+        .checked_add(4)
+        .filter(|&e| e <= data.len())
+        .ok_or_else(|| format!("SSH ECDSA signature: truncated length prefix for {label}"))?;
+    let len = u32::from_be_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ]) as usize;
+    let end = hdr_end
+        .checked_add(len)
+        .filter(|&e| e <= data.len())
+        .ok_or_else(|| format!("SSH ECDSA signature: {label} length {len} exceeds buffer"))?;
+    Ok((&data[hdr_end..end], end))
+}
+
+/// Append a DER `INTEGER { 0x02 len body }` to `out`. An empty `body` (the
+/// SSH mpint encoding of value 0) is normalized to the single byte `0x00` so
+/// the emitted INTEGER is valid DER.
+fn encode_der_integer(out: &mut Vec<u8>, body: &[u8]) {
+    out.push(0x02);
+    if body.is_empty() {
+        out.push(1);
+        out.push(0x00);
+    } else {
+        encode_der_length(out, body.len());
+        out.extend_from_slice(body);
+    }
+}
+
+/// Append a DER length prefix for `len` to `out`. Emits short form (`< 0x80`),
+/// `0x81 LL`, or `0x82 LL LL` — the same forms [`parse_der_length`] accepts.
+fn encode_der_length(out: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        out.push(len as u8);
+    } else if len <= 0xFF {
+        out.push(0x81);
+        out.push(len as u8);
+    } else {
+        // ECDSA r/s and their SEQUENCE never reach 0x10000; cap at u16.
+        let len = len.min(0xFFFF) as u16;
+        out.push(0x82);
+        out.extend_from_slice(&len.to_be_bytes());
+    }
+}
+
 /// Normalize a DER INTEGER's big-endian bytes to exactly `field_len`: drop a
 /// leading `0x00` sign byte (DER adds one when the high bit is set to keep the
 /// integer positive), then left-pad with zeros. Errors if the significant
@@ -242,6 +340,99 @@ mod tests {
             for fill in [0x00u8, 0x30, 0x02, 0xFF, 0x81, 0x82] {
                 buf.iter_mut().for_each(|b| *b = fill);
                 let _ = decode_der_ecdsa_signature(&buf);
+            }
+        }
+    }
+
+    // -------- ssh_ecdsa_blob_to_der --------
+
+    /// Build the SSH ECDSA signature blob `string(r) || string(s)`, byte-for-
+    /// byte the agent's `encode_ecdsa_ssh_signature` (cmd/agent/session.rs).
+    fn ssh_blob(r: &[u8], s: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(r.len() as u32).to_be_bytes());
+        buf.extend_from_slice(r);
+        buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+        buf.extend_from_slice(s);
+        buf
+    }
+
+    #[test]
+    fn ssh_blob_round_trips_through_der() {
+        // The agent's forward path is DER -> (r,s) -> SSH blob. Reversing the
+        // SSH blob must reproduce the same (r,s) the DER decoder yields.
+        let r = vec![0x11u8; 32];
+        let s = vec![0x22u8; 32];
+        let der = ssh_ecdsa_blob_to_der(&ssh_blob(&r, &s)).unwrap();
+        let (dr, ds) = decode_der_ecdsa_signature(&der).unwrap();
+        assert_eq!(dr, r);
+        assert_eq!(ds, s);
+    }
+
+    #[test]
+    fn ssh_blob_to_raw_matches_der_to_raw() {
+        // End-to-end: a card DER, framed to raw directly, equals the same DER
+        // round-tripped DER -> ssh blob -> der -> raw. Proves the agent path
+        // and card path produce identical raw output for the same (r,s).
+        let r_body = vec![0x00, 0xFF]; // mpint/DER sign byte + 0xFF
+        let s_body = vec![0x7F, 0xAB];
+        let der_direct = der_sig(&r_body, &s_body);
+        let raw_card = der_to_raw_rs(&der_direct, 32).unwrap();
+
+        let der_via_ssh = ssh_ecdsa_blob_to_der(&ssh_blob(&r_body, &s_body)).unwrap();
+        let raw_agent = der_to_raw_rs(&der_via_ssh, 32).unwrap();
+        assert_eq!(raw_card, raw_agent);
+    }
+
+    #[test]
+    fn ssh_blob_p384_field_width() {
+        let r = vec![0x11u8; 48];
+        let s = vec![0x22u8; 48];
+        let der = ssh_ecdsa_blob_to_der(&ssh_blob(&r, &s)).unwrap();
+        let raw = der_to_raw_rs(&der, 48).unwrap();
+        assert_eq!(raw.len(), 96);
+    }
+
+    #[test]
+    fn ssh_blob_rejects_trailing_bytes() {
+        let mut blob = ssh_blob(&[0x01], &[0x02]);
+        blob.push(0xFF);
+        let err = ssh_ecdsa_blob_to_der(&blob).unwrap_err();
+        assert!(err.contains("trailing"), "got: {err}");
+    }
+
+    #[test]
+    fn ssh_blob_rejects_truncated_length() {
+        // 3-byte buffer can't even hold the first u32 length prefix.
+        let err = ssh_ecdsa_blob_to_der(&[0x00, 0x00, 0x00]).unwrap_err();
+        assert!(err.contains("truncated"), "got: {err}");
+    }
+
+    #[test]
+    fn ssh_blob_rejects_length_past_buffer() {
+        // r claims 32 bytes but only 1 follows.
+        let blob = vec![0x00, 0x00, 0x00, 0x20, 0xAA];
+        let err = ssh_ecdsa_blob_to_der(&blob).unwrap_err();
+        assert!(err.contains("exceeds buffer"), "got: {err}");
+    }
+
+    #[test]
+    fn ssh_blob_empty_mpint_becomes_zero_integer() {
+        // A zero-length mpint (value 0) encodes to the DER INTEGER 0x00 so the
+        // SEQUENCE stays valid DER.
+        let der = ssh_ecdsa_blob_to_der(&ssh_blob(&[], &[0x01])).unwrap();
+        let (r, s) = decode_der_ecdsa_signature(&der).unwrap();
+        assert_eq!(r, vec![0x00]);
+        assert_eq!(s, vec![0x01]);
+    }
+
+    #[test]
+    fn ssh_blob_never_panics_on_malformed_input() {
+        for len in 0..=10usize {
+            let mut buf = vec![0u8; len];
+            for fill in [0x00u8, 0x01, 0x20, 0xFF] {
+                buf.iter_mut().for_each(|b| *b = fill);
+                let _ = ssh_ecdsa_blob_to_der(&buf);
             }
         }
     }

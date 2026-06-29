@@ -79,10 +79,36 @@ pub fn sign_message<F: Frontend + ?Sized>(
     frontend: Option<&mut F>,
 ) -> Result<Vec<u8>, SignError> {
     let slot_id = parse_slot(slot).map_err(SignError::Failed)?;
-    let mut token = select_token(guid).map_err(SignError::Failed)?;
 
-    // Read the slot's algorithm (a PIN-free cert read) to choose the digest
-    // and the raw field width.
+    // Card-first: use a locally-attached PIV card when one is reachable. On
+    // ANY card-selection failure (PCSC unavailable, no card, no GUID match)
+    // fall back to a forwarded SSH/piggy agent — the agentless-host case. A
+    // card present but otherwise failing (declined PIN, empty slot) is
+    // authoritative and does NOT fall back: its error propagates.
+    let (der, field_len) = match select_token(guid) {
+        Ok(mut token) => sign_with_token(&mut token, slot, slot_id, message, fixed_pin, frontend)?,
+        Err(card_err) => sign_via_agent(slot_id, guid, message, fixed_pin, card_err)?,
+    };
+
+    match format {
+        SigFormat::Raw => crate::ecdsa_sig::der_to_raw_rs(&der, field_len)
+            .map_err(|e| SignError::Failed(format!("reframe signature: {e}"))),
+        SigFormat::Der => Ok(der),
+    }
+}
+
+/// Sign `message` against a locally-attached `token`, returning
+/// `(der_signature, field_len)`. Reads the slot algorithm (PIN-free cert read)
+/// to pick the digest + raw field width, names the card for the PIN prompt
+/// (piggy#195), then verifies+signs in one session via [`sign_with_card`].
+fn sign_with_token<F: Frontend + ?Sized>(
+    token: &mut PivToken,
+    slot: &str,
+    slot_id: u8,
+    message: &[u8],
+    fixed_pin: Option<&str>,
+    frontend: Option<&mut F>,
+) -> Result<(Vec<u8>, usize), SignError> {
     let slot_meta = token
         .read_slot(slot_id)
         .map_err(|e| SignError::Failed(format!("read slot {slot}: {e}")))?;
@@ -97,23 +123,49 @@ pub fn sign_message<F: Frontend + ?Sized>(
         }
     };
 
-    // Name the target card in the PIN prompt (piggy#195): GUID + serial + CN,
-    // sourced from the selected card and its slot cert.
     let card_id = CardId {
         guid: token.guid().to_hex(),
         serial: token.yk_serial(),
         cn: slot_cn(slot_meta.cert_der()),
     };
 
-    let der = sign_with_card(
-        &mut token, slot_id, &digest, fixed_pin, &card_id, slot, frontend,
-    )?;
+    let der = sign_with_card(token, slot_id, &digest, fixed_pin, &card_id, slot, frontend)?;
+    Ok((der, field_len))
+}
 
-    match format {
-        SigFormat::Raw => crate::ecdsa_sig::der_to_raw_rs(&der, field_len)
-            .map_err(|e| SignError::Failed(format!("reframe signature: {e}"))),
-        SigFormat::Der => Ok(der),
-    }
+/// Agentless-host fallback: when no local card serves the request, sign through
+/// a forwarded `piggy-agent`/`pivy-agent`. Resolves the agent socket
+/// (`PIGGY_AUTH_SOCK`, else a non-empty `SSH_AUTH_SOCK`); with no socket there
+/// is nothing to fall back to, so the original card error is returned verbatim.
+///
+/// The agent owns its own PIN prompt; `fixed_pin` (`-P`) is forwarded as a
+/// best-effort agent `UNLOCK` but piggy's interaction frontend is not consulted
+/// here (see [`crate::agent_client::agent_sign_message`]).
+fn sign_via_agent(
+    slot_id: u8,
+    guid: Option<&str>,
+    message: &[u8],
+    fixed_pin: Option<&str>,
+    card_err: String,
+) -> Result<(Vec<u8>, usize), SignError> {
+    let socket = crate::agent_client::piggy_auth_sock_override()
+        .or_else(|| std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty()));
+    let Some(socket) = socket else {
+        return Err(SignError::Failed(card_err));
+    };
+
+    crate::agent_client::agent_sign_message(
+        std::path::Path::new(&socket),
+        slot_id,
+        guid,
+        fixed_pin,
+        message,
+    )
+    .map_err(|agent_err| {
+        SignError::Failed(format!(
+            "no local card ({card_err}); agent fallback failed: {agent_err}"
+        ))
+    })
 }
 
 /// Extract the Subject Common Name from a slot's cert DER (e.g.

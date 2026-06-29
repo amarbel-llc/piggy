@@ -30,6 +30,7 @@ use ssh_key::public::{EcdsaPublicKey, KeyData};
 
 use crate::store;
 use ndjson::{Diagnostic, DiagnosticKind};
+use piggy::agent_client::AgentEcdhOracle;
 use piggy::card::frontend::select::{FrontendKind, build_frontend};
 use piggy::card::protocol::{CardId, Frontend, FrontendError, SecretKind, SecretRequest};
 use piggy::card_oracle::{canonicalize_uncompressed, piv_to_oracle_pin_error};
@@ -616,6 +617,27 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         .iter()
         .position(|p| matches!(p, PreflightOutcome::Ready { .. }));
 
+    // Agentless-host fallback: a forwarded `piggy-agent`/`pivy-agent`
+    // (preferred via `PIGGY_AUTH_SOCK`, else the ambient `SSH_AUTH_SOCK`) can
+    // decrypt the batch when no local PCSC card is reachable. Construction is
+    // lazy-connecting (mirrors `cmd::pivy_box`), so building it is cheap even
+    // when a card ends up serving the batch. Card-first: this is consulted
+    // only when card setup below fails. The agent caches its own PIN, so the
+    // run still prompts at most once (the one-PIN-per-batch property).
+    let agent_socket = piggy::agent_client::piggy_auth_sock_override()
+        .or_else(|| std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty()))
+        .map(PathBuf::from);
+    let mut agent_oracle: Option<AgentEcdhOracle> = match &agent_socket {
+        Some(sock) => match AgentEcdhOracle::new(sock) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                tracing::warn!("show-batch: failed to build agent oracle: {e} — card-only");
+                None
+            }
+        },
+        None => None,
+    };
+
     let totals = if let Some(first_idx) = first_ready_idx {
         // The first ready ebox's PRIMARY config lists one or more recipient
         // pubkeys (1-of-N). Collect them ALL; we'll open the batch session
@@ -634,103 +656,131 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         // Step 5: enumerate connected PIV tokens; pick the first whose 9D
         // slot pubkey matches any of the ebox's recipients. The chosen
         // card's own (pubkey, curve) configures BatchOracle — it equals the
-        // recipient pubkey of whichever part the card satisfies.
-        let ctx = match PivContext::new() {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = out.bail_out(&format!("PCSC unavailable: {e}"));
-                return 1;
-            }
-        };
-        let tokens = match ctx.enumerate_tokens() {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = out.bail_out(&format!("PCSC enumerate failed: {e}"));
-                return 1;
-            }
-        };
+        // recipient pubkey of whichever part the card satisfies. Card-first:
+        // ANY failure here (no PCSC, no matching card) is NOT fatal when an
+        // agent is available — we fall through to an agent-only run. `ctx` is
+        // bound for the whole branch so the PCSC context outlives the batch.
         let target_slot = piggy_box::template::DEFAULT_SLOT;
-        let Some((mut token, (target_uncompressed, target_curve))) =
-            select_card_for_targets(tokens, &targets, target_slot)
-        else {
-            let _ = out.bail_out(
-                "no attached PIV card has a 9D slot matching any of the ebox's recipients",
-            );
-            return 1;
+        let ctx = PivContext::new();
+        let card = match &ctx {
+            Err(e) => Err(format!("PCSC unavailable: {e}")),
+            Ok(ctx) => match ctx.enumerate_tokens() {
+                Err(e) => Err(format!("PCSC enumerate failed: {e}")),
+                Ok(tokens) => {
+                    select_card_for_targets(tokens, &targets, target_slot).ok_or_else(|| {
+                        "no attached PIV card has a 9D slot matching any of the ebox's recipients"
+                            .to_string()
+                    })
+                }
+            },
         };
 
-        // Capture the card identity (#195) before the session borrows the
-        // token, and build the RFC 0006 frontend (#200) before opening the
-        // PIN-bearing session so a `--frontend jsonrpc` with no usable socket
-        // fails before any decrypt.
-        let card_id = CardId {
-            guid: token.guid().to_hex(),
-            serial: token.yk_serial(),
-            cn: None,
-        };
-        let frontend = match build_frontend(args.frontend, args.socket.as_deref(), "show-batch") {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = out.bail_out(&format!("frontend: {e}"));
-                return 1;
+        match card {
+            Ok((mut token, (target_uncompressed, target_curve))) => {
+                // Capture the card identity (#195) before the session borrows
+                // the token, and build the RFC 0006 frontend (#200) before
+                // opening the PIN-bearing session so a `--frontend jsonrpc`
+                // with no usable socket fails before any decrypt.
+                let card_id = CardId {
+                    guid: token.guid().to_hex(),
+                    serial: token.yk_serial(),
+                    cn: None,
+                };
+                let frontend =
+                    match build_frontend(args.frontend, args.socket.as_deref(), "show-batch") {
+                        Ok(f) => f,
+                        Err(e) => {
+                            let _ = out.bail_out(&format!("frontend: {e}"));
+                            return 1;
+                        }
+                    };
+
+                // Step 6: open the session and run the batch.
+                let mut session = match token.begin_pin_session() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = out.bail_out(&format!("begin_pin_session failed: {e}"));
+                        return 1;
+                    }
+                };
+
+                // The prompt names only the entries the PIN will actually
+                // authorize — `--update` skips and preflight failures never
+                // reach the card, so listing them would overstate the
+                // authorization.
+                let decrypt_names: Vec<String> = preflight
+                    .iter()
+                    .filter_map(|p| match p {
+                        PreflightOutcome::Ready { canonical_name, .. } => {
+                            Some(canonical_name.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut oracle = BatchOracle {
+                    session: &mut session,
+                    slot_id: target_slot,
+                    self_pubkey_uncompressed: target_uncompressed,
+                    target_curve,
+                    pin_verified: false,
+                    frontend,
+                    card: card_id,
+                    detail: batch_detail(&decrypt_names),
+                    last_failure: None,
+                };
+
+                let mut totals = match run_decrypt_loop(
+                    preflight,
+                    &mut out,
+                    &args.out_dir,
+                    args.update,
+                    total,
+                    Some(&mut oracle),
+                    None,
+                    sigint_caught,
+                ) {
+                    Ok(t) => t,
+                    Err(code) => return code,
+                };
+
+                // `oracle`'s &mut borrow of `session` ends at its last use (the
+                // call above), so we can end the session explicitly and
+                // propagate `SCardEndTransaction` errors as a non-zero exit. If
+                // end fails and we haven't already decided to bail, surface it
+                // as a bail-out so a downstream TAP bridge sees the truncation
+                // flag.
+                if let Err(e) = session.end() {
+                    if totals.bail_reason.is_none() {
+                        totals.bail_reason = Some(format!("SCardEndTransaction failed: {e}"));
+                    }
+                }
+                totals
             }
-        };
-
-        // Step 6: open the session and run the batch.
-        let mut session = match token.begin_pin_session() {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = out.bail_out(&format!("begin_pin_session failed: {e}"));
-                return 1;
-            }
-        };
-
-        // The prompt names only the entries the PIN will actually
-        // authorize — `--update` skips and preflight failures never reach
-        // the card, so listing them would overstate the authorization.
-        let decrypt_names: Vec<String> = preflight
-            .iter()
-            .filter_map(|p| match p {
-                PreflightOutcome::Ready { canonical_name, .. } => Some(canonical_name.clone()),
-                _ => None,
-            })
-            .collect();
-        let mut oracle = BatchOracle {
-            session: &mut session,
-            slot_id: target_slot,
-            self_pubkey_uncompressed: target_uncompressed,
-            target_curve,
-            pin_verified: false,
-            frontend,
-            card: card_id,
-            detail: batch_detail(&decrypt_names),
-            last_failure: None,
-        };
-
-        let mut totals = match run_decrypt_loop(
-            preflight,
-            &mut out,
-            &args.out_dir,
-            args.update,
-            total,
-            Some(&mut oracle),
-            sigint_caught,
-        ) {
-            Ok(t) => t,
-            Err(code) => return code,
-        };
-
-        // `oracle`'s &mut borrow of `session` ends at its last use (the
-        // call above), so we can end the session explicitly and propagate
-        // `SCardEndTransaction` errors as a non-zero exit. If end fails and
-        // we haven't already decided to bail, surface it as a bail-out so a
-        // downstream TAP bridge sees the truncation flag.
-        if let Err(e) = session.end() {
-            if totals.bail_reason.is_none() {
-                totals.bail_reason = Some(format!("SCardEndTransaction failed: {e}"));
-            }
+            // No local card served the batch: fall back to the forwarded agent
+            // if one is available, else bail naming both routes.
+            Err(card_err) => match agent_oracle.as_mut() {
+                Some(agent) => match run_decrypt_loop(
+                    preflight,
+                    &mut out,
+                    &args.out_dir,
+                    args.update,
+                    total,
+                    None,
+                    Some(agent),
+                    sigint_caught,
+                ) {
+                    Ok(t) => t,
+                    Err(code) => return code,
+                },
+                None => {
+                    let _ = out.bail_out(&format!(
+                        "{card_err}; and no agent fallback available \
+                         (set PIGGY_AUTH_SOCK or SSH_AUTH_SOCK to a forwarded piggy-agent)"
+                    ));
+                    return 1;
+                }
+            },
         }
-        totals
     } else {
         // Nothing to decrypt: no card, no oracle, no PIN. The loop still
         // runs to emit the per-entry skip/fail records (and their
@@ -741,6 +791,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
             &args.out_dir,
             args.update,
             total,
+            None,
             None,
             sigint_caught,
         ) {
@@ -801,15 +852,23 @@ struct LoopTotals {
 }
 
 /// The per-entry decrypt/skip/fail loop, shared by both run paths (#173):
-/// the has-a-Ready-ebox path passes `Some(oracle)`; the
-/// nothing-to-decrypt path (only `--update` skips and/or preflight
-/// failures, no card) passes `None`. Emitting one NDJSON/human `decrypt`
-/// record and one `piggy.pass.show_batch_item` stat per entry lives here
-/// so it happens for every entry regardless of batch composition — the
-/// no-card path is no longer a second, stats-blind copy of this logic.
+/// the has-a-Ready-ebox path passes an unlock backend — a card `oracle` OR a
+/// forwarded `agent` (the agentless-host fallback) — while the
+/// nothing-to-decrypt path (only `--update` skips and/or preflight failures)
+/// passes `None` for both. Emitting one NDJSON/human `decrypt` record and one
+/// `piggy.pass.show_batch_item` stat per entry lives here so it happens for
+/// every entry regardless of batch composition — the no-card path is no longer
+/// a second, stats-blind copy of this logic.
+///
+/// `oracle` (local card) is preferred when present; otherwise `agent` carries
+/// the unlock. At most one is `Some` on a Ready batch.
 ///
 /// Returns `Err(code)` only when a stdout write fails (the caller returns
 /// it as the process exit code); otherwise `Ok(LoopTotals)`.
+// The parameter list is cohesive (preflight inputs + both unlock backends + the
+// injected SIGINT probe); bundling them purely to satisfy the lint would add
+// indirection without clarifying anything.
+#[allow(clippy::too_many_arguments)]
 fn run_decrypt_loop<W: std::io::Write>(
     preflight: Vec<PreflightOutcome>,
     out: &mut Emitter<W>,
@@ -817,6 +876,7 @@ fn run_decrypt_loop<W: std::io::Write>(
     update: bool,
     total: u32,
     mut oracle: Option<&mut BatchOracle<'_, '_>>,
+    mut agent: Option<&mut AgentEcdhOracle>,
     // Injected so unit tests can drive a deterministic mid-batch SIGINT
     // (the production caller passes `sigint_caught`, which reads the global
     // signal-handler flag). #176: the bats SIGINT case raced wall-clock for
@@ -881,12 +941,14 @@ fn run_decrypt_loop<W: std::io::Write>(
                 bytes,
                 mut stream,
             } => {
-                // Ready outcomes only exist when the caller set up a card
-                // session, so the oracle is always present here.
-                let oracle = oracle
-                    .as_deref_mut()
-                    .expect("Ready outcome requires a card oracle");
-                match decrypt_one(&mut stream, &bytes, oracle) {
+                // Ready outcomes only exist when the caller set up an unlock
+                // backend — a local card oracle or the forwarded agent.
+                match decrypt_one(
+                    &mut stream,
+                    &bytes,
+                    oracle.as_deref_mut(),
+                    agent.as_deref_mut(),
+                ) {
                     Ok(plain) => {
                         match atomic_write_0600(out_dir, &canonical_name, &plain, update) {
                             Ok(out_path) => {
@@ -1204,42 +1266,79 @@ fn check_curve_mismatch(
 fn decrypt_one(
     stream: &mut EboxStream,
     bytes: &[u8],
-    oracle: &mut BatchOracle<'_, '_>,
+    card: Option<&mut BatchOracle<'_, '_>>,
+    agent: Option<&mut AgentEcdhOracle>,
 ) -> Result<Vec<u8>, DecryptError> {
-    if let Some(mismatch) = check_curve_mismatch(stream, oracle.target_curve) {
-        return Err(DecryptError {
-            diagnostic: Diagnostic {
-                kind: DiagnosticKind::DecryptFailed,
-                message: mismatch,
-                retryable: None,
-            },
-            fatal_for_batch: false,
-        });
-    }
+    // Unlock the ebox's AES key via the local card (preferred) or, on an
+    // agentless host, the forwarded agent. The shared chunk-walk tail below is
+    // backend-agnostic once `stream.ebox` is unlocked.
+    match (card, agent) {
+        (Some(oracle), _) => {
+            // Card path: the curve pre-flight + typed-failure drain are
+            // specific to the held PIN session.
+            if let Some(mismatch) = check_curve_mismatch(stream, oracle.target_curve) {
+                return Err(DecryptError {
+                    diagnostic: Diagnostic {
+                        kind: DiagnosticKind::DecryptFailed,
+                        message: mismatch,
+                        retryable: None,
+                    },
+                    fatal_for_batch: false,
+                });
+            }
 
-    let oracle_dyn: &mut dyn EcdhOracle = oracle;
-    if let Err(e) = unlock_ebox(&mut stream.ebox, None, Some(oracle_dyn)) {
-        return Err(match oracle.take_failure() {
-            Some(failure) => DecryptError {
-                fatal_for_batch: failure.is_fatal_for_batch(),
-                diagnostic: failure.into_diagnostic(),
-            },
-            None => DecryptError {
+            let oracle_dyn: &mut dyn EcdhOracle = oracle;
+            if let Err(e) = unlock_ebox(&mut stream.ebox, None, Some(oracle_dyn)) {
+                return Err(match oracle.take_failure() {
+                    Some(failure) => DecryptError {
+                        fatal_for_batch: failure.is_fatal_for_batch(),
+                        diagnostic: failure.into_diagnostic(),
+                    },
+                    None => DecryptError {
+                        diagnostic: Diagnostic {
+                            kind: DiagnosticKind::DecryptFailed,
+                            message: format!("unlock failed: {e}"),
+                            retryable: None,
+                        },
+                        fatal_for_batch: false,
+                    },
+                });
+            }
+            // Defensive: drain any failure that may have been recorded on a
+            // part that ultimately resolved (e.g. a transient PC/SC blip on
+            // an early part followed by success on a later part). Without
+            // the drain, the *next* ebox's decrypt_one would consume a
+            // stale failure.
+            let _ = oracle.take_failure();
+        }
+        (None, Some(agent)) => {
+            // Agent path: no card-curve pre-flight (the agent matches by
+            // pubkey and answers NoKey for non-matching parts, so
+            // `unlock_ebox` simply tries the next part) and no typed-failure
+            // channel — surface a generic decrypt-failed.
+            let agent_dyn: &mut dyn EcdhOracle = agent;
+            if let Err(e) = unlock_ebox(&mut stream.ebox, Some(agent_dyn), None) {
+                return Err(DecryptError {
+                    diagnostic: Diagnostic {
+                        kind: DiagnosticKind::DecryptFailed,
+                        message: format!("unlock failed (agent): {e}"),
+                        retryable: None,
+                    },
+                    fatal_for_batch: false,
+                });
+            }
+        }
+        (None, None) => {
+            return Err(DecryptError {
                 diagnostic: Diagnostic {
-                    kind: DiagnosticKind::DecryptFailed,
-                    message: format!("unlock failed: {e}"),
+                    kind: DiagnosticKind::Internal,
+                    message: "no unlock backend (neither card nor agent)".into(),
                     retryable: None,
                 },
                 fatal_for_batch: false,
-            },
-        });
+            });
+        }
     }
-    // Defensive: drain any failure that may have been recorded on a
-    // part that ultimately resolved (e.g. a transient PC/SC blip on
-    // an early part followed by success on a later part). Without
-    // the drain, the *next* ebox's decrypt_one would consume a
-    // stale failure.
-    let _ = oracle.take_failure();
 
     let header_bytes = stream.to_bytes().map_err(|e| DecryptError {
         diagnostic: Diagnostic {
@@ -2262,6 +2361,7 @@ mod tests {
             false,
             3,
             None,
+            None::<&mut super::AgentEcdhOracle>,
             sigint,
         )
         .expect("run_decrypt_loop should not hit a stdout write error");

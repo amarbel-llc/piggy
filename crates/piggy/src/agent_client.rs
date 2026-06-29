@@ -27,6 +27,7 @@ use piggy_box::oracle::{EcdhOracle, OracleError};
 use ssh_agent_lib::agent::Session;
 use ssh_agent_lib::client::Client;
 use ssh_agent_lib::proto::{Extension, SignRequest};
+use ssh_key::public::{EcdsaPublicKey, KeyData};
 use tokio::net::UnixStream;
 use tokio::runtime::Runtime;
 
@@ -273,6 +274,157 @@ pub fn probe_sign(socket_path: &Path, timeout: Duration) -> Result<Vec<SignProbe
     })
 }
 
+/// Sign `message` with a card key served by the SSH agent at `socket`,
+/// returning `(der_signature, field_len)`.
+///
+/// This is the agentless-host fallback for `piggy sign-bytes` (and the
+/// `manage` JSON-RPC `sign_bytes` method): when no local PCSC card is
+/// reachable, sign through a forwarded `piggy-agent`/`pivy-agent` instead. The
+/// agent must serve the requested slot — identities are labeled
+/// `PIV_slot_{:02X} <short-guid>` (`cmd/agent/mod.rs`), so we match `slot_id`
+/// (and, if given, `guid_hint`) against the served comments. Only ECDSA
+/// P-256 / P-384 slot keys are supported.
+///
+/// The agent hashes `message` itself (SHA-256 for P-256, SHA-384 for P-384,
+/// per `prepare_sign_data`), exactly as `sign_core`'s card path digests before
+/// `sign_prehash` — so the agent path is semantically equivalent (ECDSA is
+/// randomized, so `r,s` differ but verify against the same key over the same
+/// digest). The returned `ecdsa-sha2-nistp256/384` blob is reframed to DER via
+/// [`crate::ecdsa_sig::ssh_ecdsa_blob_to_der`] so framing stays single-sourced
+/// with the card path.
+///
+/// PIN: the agent owns its PIN prompt (its own askpass, or a prior
+/// `ssh-add -X`). When `fixed_pin` is supplied we send an agent `UNLOCK` first
+/// as a best-effort convenience; an agent that doesn't gate signing on UNLOCK
+/// (or rejects it) still gets a chance to sign. piggy's interaction frontend is
+/// not consulted on this path.
+pub fn agent_sign_message(
+    socket: &Path,
+    slot_id: u8,
+    guid_hint: Option<&str>,
+    fixed_pin: Option<&str>,
+    message: &[u8],
+) -> Result<(Vec<u8>, usize), String> {
+    // Best-effort pre-unlock so a locked agent doesn't refuse the sign below.
+    if let Some(pin) = fixed_pin {
+        let _ = unlock_agent_pin(socket, pin);
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+
+    let socket = socket.to_path_buf();
+    let message = message.to_vec();
+    let guid_hint = guid_hint.map(|g| g.to_string());
+
+    runtime.block_on(async move {
+        let stream = UnixStream::connect(&socket)
+            .await
+            .map_err(|e| format!("connect {}: {e}", socket.display()))?;
+        let mut client = Client::new(stream);
+
+        let ids = client
+            .request_identities()
+            .await
+            .map_err(|e| format!("request_identities: {e}"))?;
+        if ids.is_empty() {
+            return Err("agent serves no identities".to_string());
+        }
+
+        let comments: Vec<String> = ids.iter().map(|i| i.comment.clone()).collect();
+        let idx = select_signing_identity(&comments, slot_id, guid_hint.as_deref())?;
+        let pubkey = ids[idx].pubkey.clone();
+        let field_len = ecdsa_field_len(&pubkey)?;
+
+        let sig = client
+            .sign(SignRequest {
+                pubkey,
+                data: message,
+                flags: 0,
+            })
+            .await
+            .map_err(|e| format!("agent sign: {e}"))?;
+
+        let algo = sig.algorithm().to_string();
+        if !algo.starts_with("ecdsa-sha2-nistp") {
+            return Err(format!(
+                "agent returned a {algo} signature; expected ecdsa-sha2-nistp256/384"
+            ));
+        }
+        let der = crate::ecdsa_sig::ssh_ecdsa_blob_to_der(sig.as_bytes())?;
+        Ok((der, field_len))
+    })
+}
+
+/// Field width (bytes) for an agent-served ECDSA identity's curve: P-256 → 32,
+/// P-384 → 48. Errors for any non-ECDSA or unsupported-curve key.
+fn ecdsa_field_len(pubkey: &KeyData) -> Result<usize, String> {
+    match pubkey {
+        KeyData::Ecdsa(EcdsaPublicKey::NistP256(_)) => Ok(32),
+        KeyData::Ecdsa(EcdsaPublicKey::NistP384(_)) => Ok(48),
+        KeyData::Ecdsa(other) => Err(format!(
+            "agent key uses unsupported curve {}; sign-bytes supports P-256 / P-384",
+            other.curve()
+        )),
+        other => Err(format!(
+            "agent key algorithm {} is not ECDSA; sign-bytes signs with ECDSA P-256 / P-384",
+            other.algorithm()
+        )),
+    }
+}
+
+/// Pick the index of the agent identity serving `slot_id` (matched from the
+/// `PIV_slot_{:02X}` comment tag), optionally constrained to `guid_hint`
+/// (matched against the comment's short GUID, prefix either way). Errors when
+/// nothing matches or the match is ambiguous, naming the served comments.
+fn select_signing_identity(
+    comments: &[String],
+    slot_id: u8,
+    guid_hint: Option<&str>,
+) -> Result<usize, String> {
+    let tag = format!("PIV_slot_{slot_id:02X}");
+    let matches: Vec<usize> = comments
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            let mut parts = c.split_whitespace();
+            if !parts.next().is_some_and(|t| t.eq_ignore_ascii_case(&tag)) {
+                return false;
+            }
+            match guid_hint {
+                None => true,
+                Some(hint) => guid_prefix_match(parts.next().unwrap_or(""), hint),
+            }
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    match matches.as_slice() {
+        [] => Err(format!(
+            "agent serves no key for slot {tag}{} (served: [{}])",
+            guid_hint.map(|g| format!(" guid {g}")).unwrap_or_default(),
+            comments.join(", ")
+        )),
+        [idx] => Ok(*idx),
+        many => Err(format!(
+            "agent serves {} keys for slot {tag}; disambiguate with --guid (served: [{}])",
+            many.len(),
+            comments.join(", ")
+        )),
+    }
+}
+
+/// Case-insensitive prefix match in either direction — the comment carries the
+/// 8-hex-char short GUID (`Guid::short_id`) while `--guid` may be the full hex
+/// or a shorter prefix.
+fn guid_prefix_match(comment_guid: &str, hint: &str) -> bool {
+    let a = comment_guid.to_ascii_lowercase();
+    let b = hint.to_ascii_lowercase();
+    !a.is_empty() && !b.is_empty() && (a.starts_with(&b) || b.starts_with(&a))
+}
+
 /// Decode the body of a `query` extension response into the advertised
 /// extension names.
 ///
@@ -512,5 +664,103 @@ mod tests {
     fn decode_query_response_single_flat_entry_errors_like_pivy() {
         let buf = flat_cstrings(&[ECDH_EXT]);
         decode_query_response(&buf).expect_err("single flat entry aliases the wrapped shape");
+    }
+
+    // -------- agent_sign_message helpers --------
+
+    fn ecdsa_keydata(nid: openssl::nid::Nid) -> KeyData {
+        use openssl::bn::BigNumContext;
+        use openssl::ec::{EcGroup, EcKey, PointConversionForm};
+        let group = EcGroup::from_curve_name(nid).unwrap();
+        let key = EcKey::generate(&group).unwrap();
+        let mut ctx = BigNumContext::new().unwrap();
+        let sec1 = key
+            .public_key()
+            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+            .unwrap();
+        KeyData::Ecdsa(EcdsaPublicKey::from_sec1_bytes(&sec1).unwrap())
+    }
+
+    #[test]
+    fn field_len_for_supported_curves() {
+        assert_eq!(
+            ecdsa_field_len(&ecdsa_keydata(openssl::nid::Nid::X9_62_PRIME256V1)).unwrap(),
+            32
+        );
+        assert_eq!(
+            ecdsa_field_len(&ecdsa_keydata(openssl::nid::Nid::SECP384R1)).unwrap(),
+            48
+        );
+    }
+
+    #[test]
+    fn field_len_rejects_non_ecdsa() {
+        use ssh_key::public::Ed25519PublicKey;
+        let ed = KeyData::Ed25519(Ed25519PublicKey([7u8; 32]));
+        let err = ecdsa_field_len(&ed).unwrap_err();
+        assert!(err.contains("not ECDSA"), "got: {err}");
+    }
+
+    #[test]
+    fn select_identity_matches_slot_among_mixed() {
+        let comments = vec![
+            "PIV_slot_9D 0A1B2C3D".to_string(),
+            "PIV_slot_9A 0A1B2C3D".to_string(),
+            "PIV_slot_9C 0A1B2C3D".to_string(),
+        ];
+        assert_eq!(select_signing_identity(&comments, 0x9A, None).unwrap(), 1);
+        assert_eq!(select_signing_identity(&comments, 0x9C, None).unwrap(), 2);
+    }
+
+    #[test]
+    fn select_identity_slot_tag_case_insensitive() {
+        let comments = vec!["piv_slot_9a 0A1B2C3D".to_string()];
+        assert_eq!(select_signing_identity(&comments, 0x9A, None).unwrap(), 0);
+    }
+
+    #[test]
+    fn select_identity_guid_disambiguates_two_slot_keys() {
+        let comments = vec![
+            "PIV_slot_9A AAAAAAAA".to_string(),
+            "PIV_slot_9A BBBBBBBB".to_string(),
+        ];
+        // Full-length GUID hint whose short prefix is BBBBBBBB.
+        let full = "BBBBBBBB1122334455667788AABBCCDD";
+        assert_eq!(
+            select_signing_identity(&comments, 0x9A, Some(full)).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn select_identity_ambiguous_without_guid_errors() {
+        let comments = vec![
+            "PIV_slot_9A AAAAAAAA".to_string(),
+            "PIV_slot_9A BBBBBBBB".to_string(),
+        ];
+        let err = select_signing_identity(&comments, 0x9A, None).unwrap_err();
+        assert!(err.contains("disambiguate"), "got: {err}");
+    }
+
+    #[test]
+    fn select_identity_no_match_names_served() {
+        let comments = vec!["PIV_slot_9D 0A1B2C3D".to_string()];
+        let err = select_signing_identity(&comments, 0x9A, None).unwrap_err();
+        assert!(err.contains("no key for slot PIV_slot_9A"), "got: {err}");
+        assert!(err.contains("PIV_slot_9D 0A1B2C3D"), "got: {err}");
+    }
+
+    #[test]
+    fn guid_prefix_match_both_directions() {
+        // comment short GUID is a prefix of the full hint.
+        assert!(guid_prefix_match(
+            "0A1B2C3D",
+            "0a1b2c3d1122334455667788aabbccdd"
+        ));
+        // a shorter hint is a prefix of the comment short GUID.
+        assert!(guid_prefix_match("0A1B2C3D", "0a1b"));
+        assert!(!guid_prefix_match("0A1B2C3D", "FFFF"));
+        assert!(!guid_prefix_match("", "0a1b"));
+        assert!(!guid_prefix_match("0A1B2C3D", ""));
     }
 }

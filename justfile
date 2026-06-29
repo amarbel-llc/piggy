@@ -147,18 +147,17 @@ test: test-bats-default test-bats-conformance test-rust test-go-markl _test-conf
 [group('post-build')]
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module
 
-# The fibby-backed conformance lanes are Linux-only: fibby is a virtual PCSC
-# card reached via libpcsclite's PCSCLITE_CSOCK_NAME socket redirect, which
-# macOS's PCSC.framework ignores — so the virtual card is invisible there and
-# every pivy/piggy card op reports "no PIV cards". (`just` also won't even
-# parse a `[linux]`-only recipe named as an unconditional dependency on
-# macOS.) Gate them all behind a per-platform shim: the real dependencies on
-# Linux, a no-op on macOS, keeping the `test` dep list single-source.
 [linux]
 _test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-age-plugin-piggy
 
 [macos]
 _test-conformance-linux-only:
+
+[linux]
+_test-fibby-manual: test-bats-conformance-sign-bytes-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-recipients-add-attached-fibby test-bats-conformance-recipients-sync-fibby test-rust-integration-fibby
+
+[macos]
+_test-fibby-manual:
 
 # Sandboxed bats lane: runs every top-level t*.bats NOT tagged
 # `# bats file_tags=hardware` inside the nix build sandbox. See
@@ -571,6 +570,23 @@ test-bats-conformance-sign-bytes-fibby:
       CARD_FRONTEND_BIN="$PWD/target/debug/card-frontend-server" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_sign_bytes_fibby.bats
+
+# Fibby-backed gate for the agentless-host fallback: with NO local PCSC (dead
+# PCSCLITE_CSOCK_NAME) but a forwarded piggy-agent holding fibby, both
+# `piggy sign-bytes` and `piggy pass show-batch` must fall back to the agent
+# instead of failing. Drives the agent's on-demand PIN via the test askpass.
+# [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect).
+[group('post-build')]
+[linux]
+test-bats-conformance-agentless-fallback-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_agentless_fallback_fibby.bats
 
 # Fibby-backed gate for `piggy list` blank-card discovery (piggy#193): a no-seed
 # yk5 fibby card presents as uninitialized (no CHUID); assert `piggy list`

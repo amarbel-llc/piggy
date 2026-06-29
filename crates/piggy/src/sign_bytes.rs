@@ -13,9 +13,18 @@
 //! - `raw` — fixed-width `r‖s` (P-256 → 64 bytes, P-384 → 96).
 //! - `der` — the card-native ASN.1 `SEQUENCE { INTEGER r, INTEGER s }`.
 //!
-//! Card / PIN: `--guid` selects among attached cards (direct-PCSC, no agent);
-//! the PIN comes from `-P/--pin` or, absent that, the selected `--frontend`
-//! (tty askpass by default, or a JSON-RPC program over `--socket`).
+//! Card / PIN: `--guid` selects among attached cards (direct-PCSC); the PIN
+//! comes from `-P/--pin` or, absent that, the selected `--frontend` (tty
+//! askpass by default, or a JSON-RPC program over `--socket`).
+//!
+//! Agentless-host fallback: when no local card is reachable (no PCSC, or no
+//! attached card matches `--guid`), the signature is requested from a forwarded
+//! SSH/piggy agent (`PIGGY_AUTH_SOCK`, else `SSH_AUTH_SOCK`) instead — the
+//! card-first / agent-fallback shape that `pass show` already has. The agent
+//! must serve the requested slot's key (typically 9A; `--slot 9c` works only if
+//! the agent serves 9C). On the agent path the agent owns the PIN prompt
+//! (`-P/--pin` is forwarded as a best-effort agent UNLOCK; `--frontend` is not
+//! consulted). See `sign_core` and `agent_client::agent_sign_message`.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
