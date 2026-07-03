@@ -29,8 +29,8 @@ function add_attached_happy_path_one_new_card { # @test
   assert_success
   run cat "$PIGGY_STORE_DIR/piggy-ids"
   assert_success
-  assert_output --partial "$RECIPIENT_SECONDARY"  # new card
-  assert_output --partial "$RECIPIENT_PRIMARY"    # original still present
+  assert_output --partial "$RECIPIENT_SECONDARY" # new card
+  assert_output --partial "$RECIPIENT_PRIMARY"   # original still present
 }
 
 function add_attached_already_present_prints_info_line { # @test
@@ -50,7 +50,7 @@ function add_attached_already_present_prints_info_line { # @test
 
   local after_sha
   after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
-  [[ "$before_sha" = "$after_sha" ]] || fail "expected no new commit when all attached cards are already recipients"
+  [[ $before_sha == "$after_sha" ]] || fail "expected no new commit when all attached cards are already recipients"
 }
 
 function add_attached_unsupported_without_yes_aborts { # @test
@@ -70,7 +70,7 @@ function add_attached_unsupported_without_yes_aborts { # @test
 
   local after_sha
   after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
-  [[ "$before_sha" = "$after_sha" ]] || fail "expected no commit when aborted"
+  [[ $before_sha == "$after_sha" ]] || fail "expected no commit when aborted"
 }
 
 function add_attached_unsupported_with_yes_adds_supported_only { # @test
@@ -101,7 +101,7 @@ function add_attached_only_unsupported_yes_is_nothing_to_add { # @test
 
   local after_sha
   after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
-  [[ "$before_sha" = "$after_sha" ]] || fail "expected no commit when nothing to add"
+  [[ $before_sha == "$after_sha" ]] || fail "expected no commit when nothing to add"
 }
 
 function add_attached_no_cards_errors { # @test
@@ -143,7 +143,7 @@ function add_attached_lowercase_a_rejected_as_unknown_flag { # @test
   assert_output --partial "unknown flag: -a"
   local after
   after="$(cat "$PIGGY_STORE_DIR/piggy-ids")"
-  [[ "$before" = "$after" ]] || fail "piggy-ids should be unchanged after unknown-flag rejection"
+  [[ $before == "$after" ]] || fail "piggy-ids should be unchanged after unknown-flag rejection"
 }
 
 function add_attached_typo_long_flag_rejected_as_unknown_flag { # @test
@@ -155,7 +155,7 @@ function add_attached_typo_long_flag_rejected_as_unknown_flag { # @test
   assert_output --partial "unknown flag: --all-attachedc"
   local after
   after="$(cat "$PIGGY_STORE_DIR/piggy-ids")"
-  [[ "$before" = "$after" ]] || fail "piggy-ids should be unchanged after unknown-flag rejection"
+  [[ $before == "$after" ]] || fail "piggy-ids should be unchanged after unknown-flag rejection"
 }
 
 function add_attached_two_cards_both_already_recipients { # @test
@@ -178,5 +178,5 @@ function add_attached_two_cards_both_already_recipients { # @test
 
   local after_sha
   after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
-  [[ "$before_sha" = "$after_sha" ]] || fail "expected no commit when nothing to add"
+  [[ $before_sha == "$after_sha" ]] || fail "expected no commit when nothing to add"
 }

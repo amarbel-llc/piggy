@@ -59,6 +59,6 @@ function rust_encrypt_through_pivy_box_stream_decrypt_via_fib { # @test
   recovered="$("$REAL_PIVY_BOX" stream decrypt <"$ebox")" ||
     fail "pivy-box stream decrypt failed (status $?)"
 
-  [[ "$recovered" == "$plaintext" ]] ||
+  [[ $recovered == "$plaintext" ]] ||
     fail "round-trip lost the plaintext; got: '$recovered'"
 }

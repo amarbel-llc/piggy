@@ -206,7 +206,7 @@ function recipients_sync_no_file_skips_already_current_via_fibby { # @test
   }
   local skips
   skips="$(printf '%s\n' "$output" | grep -c '# SKIP recipients already current' || true)"
-  [[ "$skips" -eq 2 ]] || {
+  [[ $skips -eq 2 ]] || {
     echo "expected 2 SKIP points, got $skips" >&2
     printf '%s\n' "$output" >&2
     return 1
@@ -216,14 +216,14 @@ function recipients_sync_no_file_skips_already_current_via_fibby { # @test
   # never touched (no new slot-9D GA ECDH during the sync window).
   local after
   after="$(git -C "$store" rev-parse HEAD)"
-  [[ "$before" == "$after" ]] || {
+  [[ $before == "$after" ]] || {
     echo "expected NO new commit (every ebox SKIP'd), but HEAD moved" >&2
     git -C "$store" log --oneline -3 >&2 || true
     return 1
   }
   local new_ga
   new_ga="$(tail -n "+$((fibby_lines_before + 1))" "$FIBBY_LOG" | grep -c 'GA ECDH 9D' || true)"
-  [[ "$new_ga" -eq 0 ]] || {
+  [[ $new_ga -eq 0 ]] || {
     echo "SKIP path unexpectedly hit the card ($new_ga GA ECDH ops during sync)" >&2
     tail -40 "$FIBBY_LOG" >&2 || true
     return 1
@@ -289,11 +289,11 @@ function recipients_sync_no_file_p_scopes_subtree_via_fibby { # @test
   a_after="$(_ebox_sha "$store/alpha/cred.ebox")"
   b_after="$(_ebox_sha "$store/beta/cred.ebox")"
 
-  [[ "$a_before" == "$a_after" ]] || {
+  [[ $a_before == "$a_after" ]] || {
     echo "expected alpha/cred.ebox to be SKIP'd byte-identical (sha changed: $a_after)" >&2
     return 1
   }
-  [[ "$b_before" == "$b_after" ]] || {
+  [[ $b_before == "$b_after" ]] || {
     echo "beta/cred.ebox changed but was out of -p scope ($b_before -> $b_after)" >&2
     return 1
   }
@@ -348,7 +348,7 @@ function recipients_sync_follows_symlink_into_external_dir_via_fibby { # @test
   # The EXTERNAL target was re-encrypted (fresh ciphertext under real crypto).
   local after
   after="$(_ebox_sha "$ext/linked.ebox")"
-  [[ "$before" != "$after" ]] || {
+  [[ $before != "$after" ]] || {
     echo "expected external target to be re-encrypted (sha unchanged: $after)" >&2
     return 1
   }

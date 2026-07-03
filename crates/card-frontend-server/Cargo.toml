@@ -7,6 +7,7 @@ edition = "2021"
 # init` JSON-RPC conformance lane (piggy#194, RFC 0006 §4). Mirrors the
 # fib-wait-ready precedent — a small Rust test binary built via
 # `cargo build -p card-frontend-server` by the conformance recipe, not shipped.
+
 [[bin]]
 name = "card-frontend-server"
 path = "src/main.rs"

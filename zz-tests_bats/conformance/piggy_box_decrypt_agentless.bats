@@ -65,6 +65,6 @@ function rust_encrypt_through_piggy_box_stream_decrypt_agentless { # @test
     "$PIGGY" box stream decrypt <"$ebox")" ||
     fail "piggy box stream decrypt (agentless) failed (status $?)"
 
-  [[ "$recovered" == "$plaintext" ]] ||
+  [[ $recovered == "$plaintext" ]] ||
     fail "agentless round-trip lost the plaintext; got: '$recovered'"
 }

@@ -69,6 +69,11 @@
       flake = false;
     };
 
+    igloo.inputs.treefmt-nix.follows = "bats/treefmt-nix";
+    utils.inputs.systems.follows = "igloo/systems";
+    bats.inputs.nixpkgs-master.follows = "nixpkgs-master";
+    igloo.inputs.nixpkgs-master.follows = "nixpkgs-master";
+    bats.inputs.utils.follows = "utils";
   };
 
   outputs =

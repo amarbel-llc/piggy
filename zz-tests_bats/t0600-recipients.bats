@@ -187,7 +187,7 @@ function recipients_add_commits_piggy_ids_change { # @test
   assert_success
   local after_sha
   after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
-  [[ "$before_sha" != "$after_sha" ]] || fail "expected a new commit after recipients add"
+  [[ $before_sha != "$after_sha" ]] || fail "expected a new commit after recipients add"
   run git -C "$PIGGY_STORE_DIR" log -1 --pretty=%s
   assert_output --partial "Add recipient(s) to piggy-ids."
 }
@@ -211,10 +211,10 @@ function recipients_add_invalid_id_does_not_corrupt_piggy_ids { # @test
   # File MUST be unchanged.
   local after_contents
   after_contents="$(cat "$PIGGY_STORE_DIR/piggy-ids")"
-  [[ "$before_contents" = "$after_contents" ]] || fail "piggy-ids was modified despite the canonicalize rejection"
+  [[ $before_contents == "$after_contents" ]] || fail "piggy-ids was modified despite the canonicalize rejection"
 
   # No new commit lands.
   local after_sha
   after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
-  [[ "$before_sha" = "$after_sha" ]] || fail "expected no commit when add fails validation"
+  [[ $before_sha == "$after_sha" ]] || fail "expected no commit when add fails validation"
 }

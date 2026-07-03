@@ -8,6 +8,7 @@ edition = "2021"
 # it invokes a management method on piggy (the server) and answers the RFC 0006
 # interaction requests piggy issues back over the same connection. Built via
 # `cargo build -p manage-client` by the conformance recipe, not shipped.
+
 [[bin]]
 name = "manage-client"
 path = "src/main.rs"

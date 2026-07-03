@@ -122,7 +122,7 @@ function show_batch_single_ebox_happy_path { # @test
   # Mode is 0o600 — atomic_write_0600 in show_batch.rs.
   local mode
   mode="$(stat -c '%a' "$out_path" 2>/dev/null || stat -f '%Lp' "$out_path")"
-  [[ "$mode" == "600" ]] || fail "expected mode 600, got $mode"
+  [[ $mode == "600" ]] || fail "expected mode 600, got $mode"
 }
 
 function show_batch_batch_of_three_invokes_askpass_exactly_once { # @test
@@ -164,12 +164,15 @@ EOF
   # The promise: exactly one PIN prompt for N decrypts.
   local count
   count="$(cat "$counter" 2>/dev/null || echo 0)"
-  [[ "$count" == "1" ]] || fail "expected exactly 1 askpass call, got $count"
+  [[ $count == "1" ]] || fail "expected exactly 1 askpass call, got $count"
 
   # And the three plaintexts landed correctly.
-  run cat "$OUT_DIR/test1"; assert_output "first"
-  run cat "$OUT_DIR/test2"; assert_output "second"
-  run cat "$OUT_DIR/test3"; assert_output "third"
+  run cat "$OUT_DIR/test1"
+  assert_output "first"
+  run cat "$OUT_DIR/test2"
+  assert_output "second"
+  run cat "$OUT_DIR/test3"
+  assert_output "third"
 }
 
 function show_batch_wrong_card_emits_bail_out { # @test
@@ -225,7 +228,8 @@ function show_batch_heterogeneous_batch_per_ebox_failure { # @test
   refute_output --partial '"type":"bail-out"'
 
   # The first plaintext was written; the second was not.
-  run cat "$OUT_DIR/ok1"; assert_output "first ok"
+  run cat "$OUT_DIR/ok1"
+  assert_output "first ok"
   assert [ ! -f "$OUT_DIR/bad1" ]
 }
 

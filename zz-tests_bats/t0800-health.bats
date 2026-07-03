@@ -81,7 +81,7 @@ function health_pcscd_absent_fails_point_6_and_skips_card_points { # @test
   # nix lane, where no pcscd exists. On a dev machine a live pcscd
   # (and possibly a real card) is reachable, so probe for it cheaply
   # and skip — asserting on live-host card state is forbidden.
-  if [[ -S "${PCSCLITE_CSOCK_NAME:-}" || -S /run/pcscd/pcscd.comm ]]; then
+  if [[ -S ${PCSCLITE_CSOCK_NAME:-} || -S /run/pcscd/pcscd.comm ]]; then
     skip "pcscd reachable on this host"
   fi
   unset PIGGY_AUTH_SOCK SSH_AUTH_SOCK

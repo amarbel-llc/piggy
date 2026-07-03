@@ -14,7 +14,7 @@ setup() {
   # Repo-rooted absolute path to the helper. PWD when bats runs is
   # the repo root (set by `just test-bats-conformance`).
   ASKPASS="$PWD/contrib/piggy-askpass.sh"
-  if [[ ! -x "$ASKPASS" ]]; then
+  if [[ ! -x $ASKPASS ]]; then
     skip "contrib/piggy-askpass.sh missing or not executable: $ASKPASS"
   fi
 
@@ -196,7 +196,7 @@ STUB_EOF
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
-  [[ "$status" -eq 2 ]] || {
+  [[ $status -eq 2 ]] || {
     echo "expected exit 2, got $status"
     echo "stdout: $output"
     return 1
@@ -235,7 +235,7 @@ STUB_EOF
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
-  [[ "$status" -eq 1 ]] || {
+  [[ $status -eq 1 ]] || {
     echo "expected exit 1 (zenity's exit, propagated), got $status"
     echo "stdout: $output"
     return 1
@@ -271,7 +271,7 @@ STUB_EOF
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
-  [[ "$status" -eq 5 ]] || {
+  [[ $status -eq 5 ]] || {
     echo "expected exit 5 (zenity timeout propagated), got $status"
     echo "stdout: $output"
     return 1
@@ -307,7 +307,7 @@ STUB_EOF
 
   assert_success
   assert_output "stubbed-pin-timeout-check"
-  [[ -f "$argv_log" ]] || {
+  [[ -f $argv_log ]] || {
     echo "expected argv log at $argv_log, missing"
     return 1
   }
@@ -394,12 +394,12 @@ STUB_EOF
 
   # Poll up to 2s for the detached notifier to land its sentinel.
   local waited=0
-  while [[ ! -s "$notifier_log" && "$waited" -lt 20 ]]; do
+  while [[ ! -s $notifier_log && $waited -lt 20 ]]; do
     sleep 0.1
     waited=$((waited + 1))
   done
 
-  [[ -s "$notifier_log" ]] || {
+  [[ -s $notifier_log ]] || {
     echo "notifier never wrote sentinel within 2s"
     ls -la "$stub_dir"
     return 1
@@ -450,12 +450,12 @@ STUB_EOF
   assert_success
 
   local waited=0
-  while [[ ! -s "$notifier_log" && "$waited" -lt 20 ]]; do
+  while [[ ! -s $notifier_log && $waited -lt 20 ]]; do
     sleep 0.1
     waited=$((waited + 1))
   done
 
-  [[ -s "$notifier_log" ]] || {
+  [[ -s $notifier_log ]] || {
     echo "SSH_NOTIFY_SEND-resolved notifier never fired"
     return 1
   }
@@ -522,7 +522,7 @@ STUB_EOF
     "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     "$ASKPASS" "Enter PIV PIN" </dev/null
 
-  [[ "$status" -eq 2 ]] || {
+  [[ $status -eq 2 ]] || {
     echo "expected exit 2 (refuse, never policy), got $status"
     echo "stdout: $output"
     return 1

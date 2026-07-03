@@ -71,7 +71,7 @@ function fib_attached_already_a_recipient_is_noop { # @test
 
   local after_sha
   after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
-  [[ "$before_sha" = "$after_sha" ]] || fail "expected no commit"
+  [[ $before_sha == "$after_sha" ]] || fail "expected no commit"
 }
 
 # NOTE: the RSA-in-9D "unsupported card" case used to live here, re-keying
