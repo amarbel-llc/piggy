@@ -214,6 +214,38 @@ payload-substitution attacks (§6). A recipient-set (payload-less) pigpen
 has no file key and therefore no MAC: its type line is the bare
 `! pigpen-v1`.
 
+### 2.7 Descriptions and comments
+
+The optional document description (`#` line) and the optional per-recipient
+comment are free UTF-8 text. To keep them unambiguous within the single-line
+hyphence framing, the following rules are normative:
+
+- **Comment delimiter.** A recipient comment is separated from its markl ID by
+  the exact four-byte sequence `  # ` (two spaces, `#`, one space). A reader
+  MUST look for this comment delimiter **before** the ` < ` wrap delimiter, and
+  MUST take the entire remainder of the line as the comment **verbatim** (no
+  trimming of leading `#` or space). This lets a comment contain a ` < ` or a
+  leading `#` without being mistaken for a wrap lock or having characters
+  eaten. Because a recipient markl ID and a blech32 wrap value never contain
+  `  # `, the delimiter is unambiguous. A recipient line is EITHER wrapped
+  (sealed mode) OR carries a comment — never both.
+
+- **Empty is absent.** A description or comment whose text is empty is
+  equivalent to its absence and MUST NOT be serialized as a line. In
+  particular a writer MUST NOT emit a bare `# ` description line, and a reader
+  MUST treat an empty `# ` line as no description. (An empty description that
+  was serialized by one implementation but dropped by another would desync the
+  §4.6 header MAC, making the sealed document undecryptable across
+  implementations.)
+
+- **Single-line only.** A description or comment MUST NOT contain a
+  line-breaking control character (`\n` or `\r`); a writer MUST reject such
+  input rather than emit it, since an embedded newline would break the
+  metadata framing and silently corrupt the document on re-parse.
+
+Comments are excluded from recipient-set identity (§5, reusing RFC 0003
+§"Equality").
+
 ## 3. Versioning
 
 Pigpen is versioned the way every hyphence type is: by the type string.

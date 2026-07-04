@@ -1,6 +1,6 @@
 //! pigpen document model, hyphence codec, and seal/open (RFC 0008 §2).
 
-use piggy_markl::{blech32, FormatId, Id, PurposeId};
+use piggy_markl::{FormatId, Id, PurposeId, blech32};
 
 use crate::crypto;
 use crate::hyphence::{HyphenceDoc, MetaLine};
@@ -60,7 +60,9 @@ impl Document {
     /// All wraps are pure software (P-256 encrypt needs no card).
     pub fn seal(plaintext: &[u8], recipients: &[Id]) -> Result<Document> {
         if recipients.is_empty() {
-            return Err(Error::Malformed("at least one recipient is required".into()));
+            return Err(Error::Malformed(
+                "at least one recipient is required".into(),
+            ));
         }
         let file_key = crypto::random_file_key();
 
@@ -92,9 +94,15 @@ impl Document {
 
     /// Recover the plaintext, trying each recipient against the supplied
     /// X25519 identities and, for P-256 recipients, the oracle.
-    pub fn open(&self, oracle: Option<&dyn EcdhOracle>, x25519: &[X25519Identity]) -> Result<Vec<u8>> {
+    pub fn open(
+        &self,
+        oracle: Option<&dyn EcdhOracle>,
+        x25519: &[X25519Identity],
+    ) -> Result<Vec<u8>> {
         if !self.sealed() {
-            return Err(Error::Malformed("document is a recipient set, not sealed".into()));
+            return Err(Error::Malformed(
+                "document is a recipient set, not sealed".into(),
+            ));
         }
         let mac = self.mac.as_ref().unwrap();
         for r in &self.recipients {
@@ -129,11 +137,17 @@ impl Document {
 
     fn build(&self, include_mac: bool) -> Result<HyphenceDoc> {
         let mut h = HyphenceDoc::default();
+        // An empty description is equivalent to none (the Go impl models the
+        // description as a bare String, so `""` renders nothing): emitting a
+        // "# " line for it would desync the header MAC across implementations.
         if let Some(desc) = &self.description {
-            h.meta.push(MetaLine {
-                prefix: b'#',
-                body: desc.clone(),
-            });
+            if !desc.is_empty() {
+                reject_control("description", desc)?;
+                h.meta.push(MetaLine {
+                    prefix: b'#',
+                    body: desc.clone(),
+                });
+            }
         }
         for r in &self.recipients {
             let mut body = r.id.to_wire();
@@ -141,8 +155,11 @@ impl Document {
                 body.push_str(" < ");
                 body.push_str(&encode_wrap(r.id.format(), wrap)?);
             } else if let Some(c) = &r.comment {
-                body.push_str("  # ");
-                body.push_str(c);
+                if !c.is_empty() {
+                    reject_control("comment", c)?;
+                    body.push_str("  # ");
+                    body.push_str(c);
+                }
             }
             h.meta.push(MetaLine { prefix: b'-', body });
         }
@@ -183,17 +200,22 @@ impl Document {
         for l in &h.meta {
             match l.prefix {
                 b'#' => {
-                    let d = doc.description.get_or_insert_with(String::new);
-                    if !d.is_empty() {
-                        d.push(' ');
+                    // Skip empty "# " lines so an empty description stays None
+                    // (symmetric with Go), keeping the canonical header — and
+                    // thus the MAC — identical across implementations.
+                    if !l.body.is_empty() {
+                        let d = doc.description.get_or_insert_with(String::new);
+                        if !d.is_empty() {
+                            d.push(' ');
+                        }
+                        d.push_str(&l.body);
                     }
-                    d.push_str(&l.body);
                 }
                 b'-' => doc.recipients.push(parse_recipient_line(&l.body)?),
                 b'@' => {
                     return Err(Error::Malformed(
                         "'@'-referenced payload not supported in prototype (inline only)".into(),
-                    ))
+                    ));
                 }
                 b'!' => {
                     parse_type_line(&mut doc, &l.body)?;
@@ -221,7 +243,9 @@ impl Document {
             return Err(Error::Malformed("mixed sealed/unsealed recipients".into()));
         }
         if self.mac.is_none() {
-            return Err(Error::Malformed("sealed document missing header MAC".into()));
+            return Err(Error::Malformed(
+                "sealed document missing header MAC".into(),
+            ));
         }
         if self.payload.is_empty() {
             return Err(Error::Malformed("sealed document missing payload".into()));
@@ -267,7 +291,9 @@ fn parse_type_line(doc: &mut Document, body: &str) -> Result<()> {
         None => (body, None),
     };
     if tag != TYPE_TAG {
-        return Err(Error::Malformed(format!("unexpected type {tag:?} (want {TYPE_TAG:?})")));
+        return Err(Error::Malformed(format!(
+            "unexpected type {tag:?} (want {TYPE_TAG:?})"
+        )));
     }
     doc.mac = mac;
     Ok(())
@@ -276,12 +302,20 @@ fn parse_type_line(doc: &mut Document, body: &str) -> Result<()> {
 fn parse_recipient_line(body: &str) -> Result<Recipient> {
     let mut comment = None;
     let mut wrap = None;
-    let id_str = if let Some((left, right)) = body.split_once(" < ") {
+    // Split the comment on the exact "  # " delimiter (two spaces, hash,
+    // space) and take the remainder verbatim, BEFORE looking for the " < "
+    // wrap delimiter. A comment is free text that MAY contain " < " or a
+    // leading '#'; checking it first (and not trimming its body) keeps those
+    // characters intact instead of mistaking a comment for a key wrap or
+    // eating a leading '#'. The id and blech32 wrap never contain "  # ".
+    let id_str = if let Some((left, right)) = body.split_once("  # ") {
+        if !right.is_empty() {
+            comment = Some(right.to_string());
+        }
+        left.trim().to_string()
+    } else if let Some((left, right)) = body.split_once(" < ") {
         wrap = Some(decode_wrap(right.trim())?);
         left.trim().to_string()
-    } else if let Some(idx) = body.find(" #") {
-        comment = Some(body[idx + 2..].trim_start_matches(['#', ' ']).to_string());
-        body[..idx].trim().to_string()
     } else {
         body.trim().to_string()
     };
@@ -289,9 +323,22 @@ fn parse_recipient_line(body: &str) -> Result<Recipient> {
     Ok(Recipient { id, comment, wrap })
 }
 
+/// Reject a description/comment carrying a line-breaking control character.
+/// Metadata is single-line (RFC 0001 framing), so an embedded newline would
+/// silently corrupt the document on re-parse; refuse it at serialization time.
+fn reject_control(field: &str, s: &str) -> Result<()> {
+    if s.contains(['\n', '\r']) {
+        return Err(Error::Malformed(format!(
+            "{field} must not contain a newline (metadata is single-line)"
+        )));
+    }
+    Ok(())
+}
+
 /// Build a recipient ID from raw key bytes (test/helper convenience).
 pub fn recipient_id(format: FormatId, bytes: Vec<u8>) -> Result<Id> {
-    Id::new(Some(PurposeId::PiggyRecipientV1), format, bytes).map_err(|e| Error::Markl(format!("{e}")))
+    Id::new(Some(PurposeId::PiggyRecipientV1), format, bytes)
+        .map_err(|e| Error::Markl(format!("{e}")))
 }
 
 #[cfg(test)]
@@ -320,8 +367,7 @@ mod tests {
         fn ecdh(&self, _self: &Id, partner_epk: &[u8]) -> Result<[u8; 32]> {
             let epk = p256::PublicKey::from_sec1_bytes(partner_epk)
                 .map_err(|e| Error::Crypto(format!("{e}")))?;
-            let shared =
-                p256::ecdh::diffie_hellman(self.sk.to_nonzero_scalar(), epk.as_affine());
+            let shared = p256::ecdh::diffie_hellman(self.sk.to_nonzero_scalar(), epk.as_affine());
             let mut out = [0u8; 32];
             out.copy_from_slice(shared.raw_secret_bytes());
             Ok(out)
@@ -410,5 +456,64 @@ mod tests {
     fn reject_at_ref_with_body() {
         let raw = b"---\n@ blake2b256-abc\n! pigpen-v1\n---\n\ninline\n";
         assert!(Document::parse(raw).is_err());
+    }
+
+    #[test]
+    fn comment_with_delimiters_round_trips() {
+        let (pub_, _) = new_x25519();
+        let id = recipient_id(FormatId::AgeX25519Pub, pub_).unwrap();
+        // A comment may contain the wrap delimiter " < ", a leading '#', or an
+        // inner "  # " — none of these must corrupt the round-trip (#1/#3).
+        for c in ["a < b", "#1 backup", "has  # inner", "plain"] {
+            let doc = Document::new_recipient_set(vec![Recipient {
+                id: id.clone(),
+                comment: Some(c.to_string()),
+                wrap: None,
+            }]);
+            let wire = doc.to_bytes().unwrap();
+            let got = Document::parse(&wire).unwrap();
+            assert_eq!(
+                got.recipients[0].comment.as_deref(),
+                Some(c),
+                "comment {c:?} corrupted through round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_description_absent_from_canonical_header() {
+        let (pub_, _) = new_x25519();
+        let id = recipient_id(FormatId::AgeX25519Pub, pub_).unwrap();
+        let doc = Document {
+            description: Some(String::new()),
+            recipients: vec![Recipient {
+                id,
+                comment: None,
+                wrap: None,
+            }],
+            payload: Vec::new(),
+            mac: None,
+        };
+        // An empty description must NOT render a "# " line — otherwise the
+        // header MAC desyncs against the Go impl, which drops it (#4).
+        let canon = doc.canonical_header().unwrap();
+        assert!(
+            !canon.windows(2).any(|w| w == b"# "),
+            "empty description leaked into canonical header: {}",
+            String::from_utf8_lossy(&canon)
+        );
+    }
+
+    #[test]
+    fn newline_in_comment_rejected() {
+        let (pub_, _) = new_x25519();
+        let id = recipient_id(FormatId::AgeX25519Pub, pub_).unwrap();
+        // A newline would break the single-line metadata framing (#2).
+        let doc = Document::new_recipient_set(vec![Recipient {
+            id,
+            comment: Some("line1\nline2".into()),
+            wrap: None,
+        }]);
+        assert!(matches!(doc.to_bytes(), Err(Error::Malformed(_))));
     }
 }

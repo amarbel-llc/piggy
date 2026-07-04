@@ -13,7 +13,12 @@ import (
 // MAC pre-image, RFC 0008 §4.6); otherwise it carries the MAC lock.
 func (d *Document) buildHyphence(includeMAC bool) (*hyphenceDoc, error) {
 	h := &hyphenceDoc{}
+	// An empty description renders nothing (a "# " line would desync the
+	// header MAC against the Rust impl, which also drops it).
 	if d.Description != "" {
+		if err := rejectControl("description", d.Description); err != nil {
+			return nil, err
+		}
 		h.meta = append(h.meta, metaLine{'#', d.Description})
 	}
 	for _, r := range d.Recipients {
@@ -26,6 +31,9 @@ func (d *Document) buildHyphence(includeMAC bool) (*hyphenceDoc, error) {
 			}
 			body += " < " + wrapStr
 		case r.Comment != "":
+			if err := rejectControl("comment", r.Comment); err != nil {
+				return nil, err
+			}
 			body += "  # " + r.Comment
 		}
 		h.meta = append(h.meta, metaLine{'-', body})
@@ -75,10 +83,15 @@ func ParseDocument(raw []byte) (*Document, error) {
 	for _, l := range h.meta {
 		switch l.prefix {
 		case '#':
-			if d.Description != "" {
-				d.Description += " "
+			// Skip empty "# " lines so an empty description stays "" (the
+			// none sentinel, symmetric with Rust), keeping the canonical
+			// header — and thus the MAC — identical across implementations.
+			if l.body != "" {
+				if d.Description != "" {
+					d.Description += " "
+				}
+				d.Description += l.body
 			}
-			d.Description += l.body
 		case '-':
 			r, err := parseRecipientLine(l.body)
 			if err != nil {
@@ -123,20 +136,24 @@ func (d *Document) parseTypeLine(body string) error {
 func parseRecipientLine(body string) (Recipient, error) {
 	var r Recipient
 	idStr := body
-	switch {
-	case strings.Contains(body, " < "):
-		parts := strings.SplitN(body, " < ", 2)
-		idStr = strings.TrimSpace(parts[0])
-		wrap, err := decodeWrap(strings.TrimSpace(parts[1]))
+	// Split the comment on the exact "  # " delimiter (two spaces, hash,
+	// space) and take the remainder verbatim, BEFORE looking for the " < "
+	// wrap delimiter. A comment is free text that MAY contain " < " or a
+	// leading '#'; checking it first (and not trimming its body) keeps those
+	// characters intact instead of mistaking a comment for a key wrap or
+	// eating a leading '#'. The id and blech32 wrap never contain "  # ".
+	if i := strings.Index(body, "  # "); i >= 0 {
+		idStr = strings.TrimSpace(body[:i])
+		r.Comment = body[i+4:]
+	} else if i := strings.Index(body, " < "); i >= 0 {
+		idStr = strings.TrimSpace(body[:i])
+		wrap, err := decodeWrap(strings.TrimSpace(body[i+3:]))
 		if err != nil {
 			return r, err
 		}
 		r.Wrap = wrap
-	default:
-		if i := strings.Index(body, " #"); i >= 0 {
-			idStr = strings.TrimSpace(body[:i])
-			r.Comment = strings.TrimLeft(body[i+2:], "# ")
-		}
+	} else {
+		idStr = strings.TrimSpace(body)
 	}
 	var id markl.Id
 	if err := id.Set(idStr); err != nil {
@@ -144,6 +161,17 @@ func parseRecipientLine(body string) (Recipient, error) {
 	}
 	r.ID = id
 	return r, nil
+}
+
+// rejectControl refuses a description/comment carrying a line-breaking
+// control character. Metadata is single-line (RFC 0001 framing), so an
+// embedded newline would silently corrupt the document on re-parse; refuse
+// it at serialization time.
+func rejectControl(field, s string) error {
+	if strings.ContainsAny(s, "\n\r") {
+		return fmt.Errorf("pigpen: %s must not contain a newline (metadata is single-line)", field)
+	}
+	return nil
 }
 
 // validate enforces the structural rules of RFC 0008 §2.2: a document is

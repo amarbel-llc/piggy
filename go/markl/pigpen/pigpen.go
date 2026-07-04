@@ -1,6 +1,7 @@
 package pigpen
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"errors"
 	"fmt"
@@ -222,7 +223,7 @@ func decodeMAC(s string) ([]byte, error) {
 
 func findX25519(ids []X25519Identity, pub []byte) *X25519Identity {
 	for i := range ids {
-		if string(ids[i].Public) == string(pub) {
+		if bytes.Equal(ids[i].Public, pub) {
 			return &ids[i]
 		}
 	}

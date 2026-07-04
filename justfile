@@ -7,7 +7,7 @@ lint: lint-fmt lint-rust lint-worktree
 # --- build ---
 
 [group('build')]
-build: build-nix build-rust build-go-markl
+build: build-nix build-rust build-go-markl build-pigpen
 
 # Build the default piggy nix package, plus the .#fibby and .#piggy-test-sshd
 # packages that aren't transitive deps of .#default, so flake.nix regressions
@@ -89,6 +89,20 @@ build-go-markl:
 test-go-markl:
     cd go/markl && go test -tags test ./...
 
+# piggy-pigpen (RFC 0008/0009 prototype): a pure-RustCrypto, wasm-buildable
+# crate INTENTIONALLY excluded from the cargo workspace (root Cargo.toml
+# `exclude`), so `build-rust`/`test-rust` (which operate on the workspace) do
+# not reach it. These recipes give it a paved build/test path and are wired
+# into the build/test aggregates so the pre-merge `just` hook exercises it,
+# mirroring the go/markl satellite-module treatment above.
+[group('build')]
+build-pigpen:
+    cd crates/piggy-pigpen && cargo build
+
+[group('post-build')]
+test-pigpen:
+    cd crates/piggy-pigpen && cargo test
+
 # Regenerate the go/markl pkgs/ facades in place — the apply-mode inverse of
 # `just lint-worktree`'s facade CHECK, and the codemod sibling of
 # `codemod-rfc0002-fixture` (both regenerate committed artifacts). Runs
@@ -126,14 +140,14 @@ codemod-rfc0002-fixture:
     cd go/markl && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
 
 # gofmt the hand-written go/markl sources: the internal/ core + the public
-# sub-packages (agent, age). The pkgs/ facades are EXCLUDED: they are formatted
-# by dagnabit's own conformist pass (the dewey-facade-export lane), so
+# sub-packages (agent, age, pigpen). The pkgs/ facades are EXCLUDED: they are
+# formatted by dagnabit's own conformist pass (the dewey-facade-export lane), so
 # reformatting them with plain gofmt would risk drift against the facade CHECK
 # (`just lint-worktree`). conformist's `nix fmt` does not cover Go, so this
 # recipe is the canonical go/markl formatter for the hand-written sources.
 [group('codemod')]
 codemod-fmt-go-markl:
-    cd go/markl && gofmt -w internal agent age
+    cd go/markl && gofmt -w internal agent age pigpen
 
 # Run the nix-built piggy package (nix run . --), forwarding ARGS.
 run-nix *ARGS:
@@ -142,7 +156,7 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: test-bats-default test-bats-conformance test-rust test-go-markl _test-conformance-linux-only
+test: test-bats-default test-bats-conformance test-rust test-go-markl test-pigpen _test-conformance-linux-only
 
 [group('post-build')]
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module

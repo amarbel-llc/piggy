@@ -25,7 +25,8 @@ const INFO_X25519: &[u8] = b"pigpen-v1 x25519";
 fn hkdf32(ikm: &[u8], salt: &[u8], info: &[u8]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = [0u8; 32];
-    hk.expand(info, &mut okm).expect("32 is a valid HKDF length");
+    hk.expand(info, &mut okm)
+        .expect("32 is a valid HKDF length");
     okm
 }
 
