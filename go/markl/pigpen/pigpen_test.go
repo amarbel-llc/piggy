@@ -193,3 +193,48 @@ func TestRejectAtRefWithBody(t *testing.T) {
 		t.Fatal("expected rejection of @-ref with inline body")
 	}
 }
+
+func TestCommentWithDelimitersRoundTrip(t *testing.T) {
+	pub, _ := newX25519(t)
+	id := mustRecipientID(t, formatAgeX25519, pub)
+	// A comment may contain the wrap delimiter " < ", a leading '#', or an
+	// inner "  # " — none of these must corrupt the round-trip (#1/#3).
+	for _, c := range []string{"a < b", "#1 backup", "has  # inner", "plain"} {
+		d := NewRecipientSet([]Recipient{{ID: id, Comment: c}})
+		out, err := d.MarshalText()
+		if err != nil {
+			t.Fatalf("marshal %q: %v", c, err)
+		}
+		got, err := ParseDocument(out)
+		if err != nil {
+			t.Fatalf("parse %q: %v\n%s", c, err, out)
+		}
+		if got.Recipients[0].Comment != c {
+			t.Fatalf("comment %q corrupted to %q", c, got.Recipients[0].Comment)
+		}
+	}
+}
+
+func TestEmptyDescriptionAbsentFromCanonicalHeader(t *testing.T) {
+	pub, _ := newX25519(t)
+	id := mustRecipientID(t, formatAgeX25519, pub)
+	d := NewRecipientSet([]Recipient{{ID: id}})
+	d.Description = "" // empty — must not render a "# " line (#4)
+	canon, err := d.canonicalHeader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(canon, []byte("# ")) {
+		t.Fatalf("empty description leaked into canonical header: %s", canon)
+	}
+}
+
+func TestNewlineInCommentRejected(t *testing.T) {
+	pub, _ := newX25519(t)
+	id := mustRecipientID(t, formatAgeX25519, pub)
+	// A newline would break the single-line metadata framing (#2).
+	d := NewRecipientSet([]Recipient{{ID: id, Comment: "line1\nline2"}})
+	if _, err := d.MarshalText(); err == nil {
+		t.Fatal("expected marshal to reject newline in comment")
+	}
+}

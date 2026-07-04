@@ -29,6 +29,14 @@ const (
 	infoX25519  = "pigpen-v1 x25519"
 )
 
+// concat returns a fresh slice holding a followed by b, allocated once. Used
+// to build the epk‖recipient HKDF salt without aliasing either input.
+func concat(a, b []byte) []byte {
+	out := make([]byte, 0, len(a)+len(b))
+	out = append(out, a...)
+	return append(out, b...)
+}
+
 func hkdf32(secret, salt []byte, info string) []byte {
 	out, err := hkdf.Key(sha256.New, secret, salt, info, 32)
 	if err != nil {
@@ -74,7 +82,7 @@ func wrapX25519(fileKey, recipientPub []byte, rng io.Reader) (blob []byte, err e
 		return nil, err
 	}
 	epk := esk.PublicKey().Bytes() // 32 bytes
-	salt := append(append([]byte{}, epk...), recipientPub...)
+	salt := concat(epk, recipientPub)
 	kw := hkdf32(shared, salt, infoX25519)
 	ct, err := aeadSeal(kw, zeroNonce, fileKey)
 	if err != nil {
@@ -101,7 +109,7 @@ func unwrapX25519(blob, recipientPub, recipientSec []byte) (fileKey []byte, err 
 	if err != nil {
 		return nil, err
 	}
-	salt := append(append([]byte{}, epk...), recipientPub...)
+	salt := concat(epk, recipientPub)
 	kw := hkdf32(shared, salt, infoX25519)
 	return aeadOpen(kw, zeroNonce, ct)
 }
@@ -130,7 +138,7 @@ func wrapP256(fileKey, recipientCompressed []byte, rng io.Reader) (blob []byte, 
 	if err != nil {
 		return nil, err
 	}
-	salt := append(append([]byte{}, epkCompressed...), recipientCompressed...)
+	salt := concat(epkCompressed, recipientCompressed)
 	kw := hkdf32(shared, salt, infoP256)
 	ct, err := aeadSeal(kw, zeroNonce, fileKey)
 	if err != nil {
@@ -148,7 +156,7 @@ func unwrapP256(blob, recipientCompressed []byte, oracle ECDHOracle, self markId
 	if err != nil {
 		return nil, err
 	}
-	salt := append(append([]byte{}, epkCompressed...), recipientCompressed...)
+	salt := concat(epkCompressed, recipientCompressed)
 	kw := hkdf32(shared, salt, infoP256)
 	return aeadOpen(kw, zeroNonce, ct)
 }

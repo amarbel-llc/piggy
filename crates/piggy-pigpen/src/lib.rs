@@ -22,7 +22,7 @@ mod crypto;
 mod document;
 mod hyphence;
 
-pub use document::{recipient_id, Document, EcdhOracle, Recipient, X25519Identity};
+pub use document::{Document, EcdhOracle, Recipient, X25519Identity, recipient_id};
 
 /// Errors produced by the pigpen prototype.
 #[derive(Debug, thiserror::Error)]

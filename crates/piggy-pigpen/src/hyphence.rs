@@ -95,7 +95,10 @@ pub fn parse(raw: &[u8]) -> Result<HyphenceDoc> {
                 body: String::from_utf8_lossy(&content[2..]).into_owned(),
             }),
             other => {
-                return Err(Error::Hyphence(format!("unknown metadata prefix {:?}", other as char)))
+                return Err(Error::Hyphence(format!(
+                    "unknown metadata prefix {:?}",
+                    other as char
+                )));
             }
         }
     }
@@ -107,7 +110,9 @@ pub fn parse(raw: &[u8]) -> Result<HyphenceDoc> {
     let rest = &text[pos..];
     if !rest.is_empty() {
         if rest[0] != b'\n' {
-            return Err(Error::Hyphence("body present without blank-line separator".into()));
+            return Err(Error::Hyphence(
+                "body present without blank-line separator".into(),
+            ));
         }
         doc.body = rest[1..].to_vec();
     }
