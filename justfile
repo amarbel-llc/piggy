@@ -95,10 +95,12 @@ test-go-markl:
 # not reach it. These recipes give it a paved build/test path and are wired
 # into the build/test aggregates so the pre-merge `just` hook exercises it,
 # mirroring the go/markl satellite-module treatment above.
+# Cargo-build the standalone piggy-pigpen crate (see the note above).
 [group('build')]
 build-pigpen:
     cd crates/piggy-pigpen && cargo build
 
+# Cargo-test the standalone piggy-pigpen crate (see build-pigpen above).
 [group('post-build')]
 test-pigpen:
     cd crates/piggy-pigpen && cargo test
