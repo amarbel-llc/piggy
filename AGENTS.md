@@ -14,7 +14,7 @@ Piggy is a passwordstore.org fork that replaces GPG encryption with PIV smart ca
 
 ```sh
 just build              # Build nix package (nix build --show-trace)
-just test               # Full suite: test-bats-default + test-bats-conformance + test-rust + test-go-markl
+just test               # Full suite: test-bats-default + test-bats-conformance + test-rust + test-go-markl + test-pigpen
 just test-bats-default  # Sandboxed bats lane via nix build .#bats-default
 just codemod-fmt        # Format nix + shell + rust via conformist (= nix fmt)
 just clean              # Remove build artifacts
