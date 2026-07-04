@@ -664,6 +664,14 @@
           # `conformist-pre-commit`. `nix build .#conformist-pre-commit` dogfoods
           # it (forces the codegen eval + facade lane to resolve).
           conformist-pre-commit = conformistCodegenEval.config.build.preCommit;
+          # Its merge-repair sibling from the SAME codegen eval, on the
+          # devShell PATH below as `conformist-repair` (sweatfile
+          # [hooks].repair): heals bump-commit codegen drift (dewey facades)
+          # at merge time with the post-bump drivers — the pre-commit hook's
+          # store-pinned driver predates the very bump it would need to heal
+          # (eng tier-B convergence, proven on madder; eng's fallback wrapper
+          # is severed from child repos and would otherwise skip).
+          conformist-repair = conformistCodegenEval.config.build.repair;
           # The impure-lane config (eng git-state checks + the facade CHECK),
           # consumed by `just lint-worktree` via `nix build
           # .#conformist-impure-config`.
@@ -711,6 +719,9 @@
               # command). `nix fmt` uses the wrapper from `formatter` above.
               conformist.packages.${system}.default
               conformistCodegenEval.config.build.preCommit
+              # Its merge-repair sibling, on PATH as `conformist-repair` for
+              # spinclass's [hooks].repair (see packages.conformist-repair).
+              conformistCodegenEval.config.build.repair
               pkgs.scdoc
               # Go toolchain for the go/ module (piggy-agent-conformance
               # + piggy-test-sshd): `go build`/`vet`/`gofmt` for fast
