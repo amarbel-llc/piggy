@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Minimal hyphence framing (madder RFC 0001). Only the subset pigpen
@@ -111,7 +112,14 @@ func parseHyphence(raw []byte) (*hyphenceDoc, error) {
 		prefix := content[0]
 		switch prefix {
 		case '#', '-', '@', '!':
-			doc.meta = append(doc.meta, metaLine{prefix: prefix, body: content[2:]})
+			body := content[2:]
+			// Reject non-UTF-8 metadata bodies (symmetric with the Rust impl,
+			// which also rejects rather than lossily decoding); valid pigpen
+			// content — markl IDs, blech32, text — is always UTF-8.
+			if !utf8.ValidString(body) {
+				return nil, errors.New("pigpen: metadata line body is not valid UTF-8")
+			}
+			doc.meta = append(doc.meta, metaLine{prefix: prefix, body: body})
 		default:
 			return nil, fmt.Errorf("%w: %q", errUnknownPrefix, prefix)
 		}

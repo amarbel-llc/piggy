@@ -90,10 +90,17 @@ pub fn parse(raw: &[u8]) -> Result<HyphenceDoc> {
         }
         let prefix = content[0];
         match prefix {
-            b'#' | b'-' | b'@' | b'!' => doc.meta.push(MetaLine {
-                prefix,
-                body: String::from_utf8_lossy(&content[2..]).into_owned(),
-            }),
+            b'#' | b'-' | b'@' | b'!' => {
+                // Reject non-UTF-8 metadata bodies rather than lossily
+                // replacing invalid bytes: the Go impl keeps raw bytes, so a
+                // lossy decode here would silently diverge cross-language.
+                // Valid pigpen content (markl IDs, blech32, text) is always
+                // UTF-8.
+                let body = std::str::from_utf8(&content[2..])
+                    .map_err(|_| Error::Hyphence("metadata line body is not valid UTF-8".into()))?
+                    .to_owned();
+                doc.meta.push(MetaLine { prefix, body });
+            }
             other => {
                 return Err(Error::Hyphence(format!(
                     "unknown metadata prefix {:?}",

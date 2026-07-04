@@ -243,6 +243,13 @@ hyphence framing, the following rules are normative:
   input rather than emit it, since an embedded newline would break the
   metadata framing and silently corrupt the document on re-parse.
 
+- **UTF-8 only.** Every metadata line body MUST be valid UTF-8. A reader MUST
+  reject a metadata line whose body is not valid UTF-8 rather than lossily
+  decoding it, so all implementations agree on the same input (a reader that
+  keeps raw bytes and one that replaces invalid bytes with U+FFFD would
+  otherwise diverge, including in the §4.6 header MAC). Valid pigpen content —
+  markl IDs, blech32 blobs, and human text — is always UTF-8.
+
 Comments are excluded from recipient-set identity (§5, reusing RFC 0003
 §"Equality").
 

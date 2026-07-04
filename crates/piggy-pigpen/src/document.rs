@@ -64,13 +64,16 @@ impl Document {
                 "at least one recipient is required".into(),
             ));
         }
-        let file_key = crypto::random_file_key();
+        // Wrap in Zeroizing so the file key is scrubbed from memory when it
+        // drops — including on any early `?` return below — matching the Go
+        // impl's `defer zero(fileKey)`.
+        let file_key = zeroize::Zeroizing::new(crypto::random_file_key());
 
         let mut recs = Vec::with_capacity(recipients.len());
         for id in recipients {
             let wrap = match id.format() {
-                FormatId::PivyEcdhP256Pub => crypto::wrap_p256(&file_key, id.data())?,
-                FormatId::AgeX25519Pub => crypto::wrap_x25519(&file_key, id.data())?,
+                FormatId::PivyEcdhP256Pub => crypto::wrap_p256(&file_key[..], id.data())?,
+                FormatId::AgeX25519Pub => crypto::wrap_x25519(&file_key[..], id.data())?,
                 other => return Err(Error::UnsupportedFormat(format!("{other:?}"))),
             };
             recs.push(Recipient {
@@ -80,7 +83,7 @@ impl Document {
             });
         }
 
-        let payload = crypto::seal_payload(&file_key, plaintext)?;
+        let payload = crypto::seal_payload(&file_key[..], plaintext)?;
         let mut doc = Document {
             description: None,
             recipients: recs,
@@ -88,7 +91,7 @@ impl Document {
             mac: None,
         };
         let canon = doc.canonical_header()?;
-        doc.mac = Some(crypto::header_mac(&file_key, &canon).to_vec());
+        doc.mac = Some(crypto::header_mac(&file_key[..], &canon).to_vec());
         Ok(doc)
     }
 
@@ -515,5 +518,71 @@ mod tests {
             wrap: None,
         }]);
         assert!(matches!(doc.to_bytes(), Err(Error::Malformed(_))));
+    }
+
+    #[test]
+    fn non_utf8_metadata_rejected() {
+        // A non-UTF-8 metadata body must be rejected, not lossily decoded, so
+        // the Rust and Go parsers agree on the same input (#210).
+        let raw = b"---\n# \xff\xfe not utf8\n! pigpen-v1\n---\n";
+        assert!(Document::parse(raw).is_err());
+    }
+
+    // --- cross-language interop vectors (piggy#210) ----------------------
+    //
+    // These byte-exact wire vectors are SHARED with the Go impl's
+    // pigpen_test.go (identical hex — keep the two copies in lockstep).
+    // INTEROP_SECRET is a fixed x25519 recipient; SEALED_BY_RUST and
+    // SEALED_BY_GO are the same plaintext sealed to it by each impl (they
+    // differ only in their ephemeral keys); RECIPIENT_SET is a payload-less
+    // set that both impls serialize byte-identically. Each impl opens BOTH
+    // sealed vectors, proving mutual read/decrypt compatibility. Regenerate
+    // after a wire-format change with a throwaway test that panics with
+    // hex::encode(...) (see this file's git history / #210).
+    const INTEROP_SECRET: &str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    const INTEROP_PLAINTEXT: &[u8] = b"pigpen cross-language interop vector";
+    const SEALED_BY_RUST: &str = "2d2d2d0a2d2070696767792d726563697069656e742d7631406167655f7832353531395f7075622d7137336865307135797a6675336436346d736433703672766b736e72776a6b3364323539386d67746d6c717439777264723337713076646d6565203c2070696770656e2d777261702d76314070696770656e5f777261705f7832353531392d6339776d35336d61706c656b3970717036746e63307a71787333646c636a77336e6c64336436376d7965763573796b616e676332797a6a65353577646b6e36793936656d3763386b36787a3632736368673976797a6b773766617233757566306373366a3637677570656e397a0a212070696770656e2d76314070696770656e5f6865616465725f6d61632d673567656b6a347038653430656c346b6c377a6679746734753767687334736b6468716e333332727a37733578307265633571733771666430720a2d2d2d0a0ac7f53412ca8bc1b9f172e5f324bf00cd58cd1e0abde0f3f63e8645efcdefc224406b9b225588ba8f25ddac4c4b674156f4fb241ca70c8a94282f6c7bdcda5129190b460a";
+    const SEALED_BY_GO: &str = "2d2d2d0a2d2070696767792d726563697069656e742d7631406167655f7832353531395f7075622d7137336865307135797a6675336436346d736433703672766b736e72776a6b3364323539386d67746d6c717439777264723337713076646d6565203c2070696770656e2d777261702d76314070696770656e5f777261705f7832353531392d34673772716e67776e30386b6368306c787a7732397074797435636d72757339787968767839756530386573396463656433736d6479713879783061656761677a377a7a767a74323034333779343366707a7a7077633767356a35393267713965366d6e7936676161773735670a212070696770656e2d76314070696770656e5f6865616465725f6d61632d6c687a686b7639757165336a737534366b7764717874346737343974676d6d647272737867666737756835716b38676773657a737268676832750a2d2d2d0a0a53f7272c5a9f2895feb7b1992c5c51b8bfe1b06b422e934a43a6ed153cf1524631a96dbed8493519836e1fe8748afa9e9afe18eef52d869f00be1e0c9ad051f05df3aae4";
+    const RECIPIENT_SET: &str = "2d2d2d0a232073686172656420696e7465726f7020766563746f720a2d2070696767792d726563697069656e742d7631406167655f7832353531395f7075622d7137336865307135797a6675336436346d736433703672766b736e72776a6b3364323539386d67746d6c717439777264723337713076646d6565202023206c6170746f70203c206261636b75700a212070696770656e2d76310a2d2d2d0a";
+
+    fn interop_identity() -> X25519Identity {
+        let secret = hex::decode(INTEROP_SECRET).unwrap();
+        let sec: [u8; 32] = secret.clone().try_into().unwrap();
+        let sk = x25519_dalek::StaticSecret::from(sec);
+        let public = x25519_dalek::PublicKey::from(&sk).as_bytes().to_vec();
+        X25519Identity { public, secret }
+    }
+
+    #[test]
+    fn interop_opens_both_impls_sealed_vectors() {
+        let idents = [interop_identity()];
+        for (label, hexv) in [("rust", SEALED_BY_RUST), ("go", SEALED_BY_GO)] {
+            let wire = hex::decode(hexv).unwrap();
+            let doc = Document::parse(&wire).unwrap();
+            let got = doc
+                .open(None, &idents)
+                .unwrap_or_else(|e| panic!("opening {label}-sealed vector: {e:?}"));
+            assert_eq!(
+                got, INTEROP_PLAINTEXT,
+                "plaintext from {label}-sealed vector"
+            );
+        }
+    }
+
+    #[test]
+    fn interop_recipient_set_vector_matches() {
+        let wire = hex::decode(RECIPIENT_SET).unwrap();
+        let doc = Document::parse(&wire).unwrap();
+        assert_eq!(doc.recipients.len(), 1);
+        assert_eq!(doc.description.as_deref(), Some("shared interop vector"));
+        assert_eq!(
+            doc.recipients[0].comment.as_deref(),
+            Some("laptop < backup")
+        );
+        // Re-serialization is byte-identical to the shared vector — the exact
+        // bytes the Go impl produces (verified equal when the vector was
+        // captured), so the deterministic recipient-set face round-trips
+        // identically across implementations.
+        assert_eq!(hex::encode(doc.to_bytes().unwrap()), RECIPIENT_SET);
     }
 }

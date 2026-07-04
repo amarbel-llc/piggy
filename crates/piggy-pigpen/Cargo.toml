@@ -20,8 +20,13 @@ description = "Prototype of the pigpen encrypted-document format (piggy RFC 0008
 
 [features]
 default = []
-# `wasm` drops the OsRng/getrandom-native assumption; a wasm host must
-# enable getrandom's "js" backend (see docs/plans/2026-06-24-pigpen-wasm.md).
+# `wasm` is a RESERVED placeholder for the future wasm-bindgen JS-adapter gate
+# described in docs/plans/2026-06-24-pigpen-wasm.md. It currently gates NO code
+# (nothing reads `#[cfg(feature = "wasm")]`) — wasm32 builds already work
+# without it, because the getrandom "js" backend is pulled in unconditionally
+# by the `cfg(target_arch = "wasm32")` dependency below, not by this feature.
+# Passing `--features wasm` today is a harmless no-op; the plan's build recipes
+# keep it so the flag is stable once the adapter lands. Tracked in #210.
 wasm = []
 
 [dependencies]
@@ -34,6 +39,7 @@ sha2 = "0.10"
 hmac = "0.12"
 rand_core = { version = "0.6", features = ["getrandom"] }
 thiserror = "2"
+zeroize = "1"
 
 # On wasm32, getrandom needs its "js" backend so OsRng works in the
 # browser/Node host (see docs/plans/2026-06-24-pigpen-wasm.md).
