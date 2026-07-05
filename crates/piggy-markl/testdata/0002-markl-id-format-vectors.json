@@ -125,6 +125,20 @@
       "encoded": "dodder-object-digest-v2@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6"
     },
     {
+      "name": "purpose/dodder-object-digest-v3/blake2b256",
+      "purpose": "dodder-object-digest-v3",
+      "format": "blake2b256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "dodder-object-digest-v3@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400"
+    },
+    {
+      "name": "purpose/dodder-object-digest-v3/sha256",
+      "purpose": "dodder-object-digest-v3",
+      "format": "sha256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "dodder-object-digest-v3@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6"
+    },
+    {
       "name": "purpose/dodder-object-sig-v2/ecdsa_p256_sig",
       "purpose": "dodder-object-sig-v2",
       "format": "ecdsa_p256_sig",
@@ -137,6 +151,27 @@
       "format": "ed25519_sig",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
       "encoded": "dodder-object-sig-v2@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cy4lu83"
+    },
+    {
+      "name": "purpose/dodder-object-sig-v3/ecdsa_p256_sig",
+      "purpose": "dodder-object-sig-v3",
+      "format": "ecdsa_p256_sig",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "dodder-object-sig-v3@ecdsa_p256_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cywvqw8"
+    },
+    {
+      "name": "purpose/dodder-object-sig-v3/ed25519_sig",
+      "purpose": "dodder-object-sig-v3",
+      "format": "ed25519_sig",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "dodder-object-sig-v3@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cy4lu83"
+    },
+    {
+      "name": "purpose/dodder-object-mother-sig-v3/ed25519_sig",
+      "purpose": "dodder-object-mother-sig-v3",
+      "format": "ed25519_sig",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "dodder-object-mother-sig-v3@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cy4lu83"
     },
     {
       "name": "purpose/dodder-repo-public_key-v1/ecdsa_p256_pub",
@@ -214,6 +249,13 @@
       "format": "ecdsa_p256_sig",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
       "encoded": "papi-doc-sig-v1@ecdsa_p256_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cywvqw8"
+    },
+    {
+      "name": "purpose/example-unregistered-purpose-v1/sha256",
+      "purpose": "example-unregistered-purpose-v1",
+      "format": "sha256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "example-unregistered-purpose-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6"
     }
   ],
   "invalid": [

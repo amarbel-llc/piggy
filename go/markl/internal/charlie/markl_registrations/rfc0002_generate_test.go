@@ -134,6 +134,20 @@ func buildRFC0002Fixture(t *testing.T) rfc0002Fixture {
 		}
 	}
 
+	// One vector bearing a purpose absent from every registry, pinning
+	// RFC §6.6's opaque-carry rule: decoders MUST round-trip unknown
+	// purposes rather than reject them (madder#255). The purpose id is
+	// lexically valid per §2.1 but deliberately never registered.
+	fixture.Vectors = append(
+		fixture.Vectors,
+		makePurposeVector(
+			t,
+			"example-unregistered-purpose-v1",
+			markl.FormatIdHashSha256,
+			sequencePayload(32),
+		),
+	)
+
 	// Invalid vectors. Each derives from a known-good vector by a
 	// single targeted mutation, so the failure category is unambiguous.
 	fixture.Invalid = buildInvalidVectors(t)

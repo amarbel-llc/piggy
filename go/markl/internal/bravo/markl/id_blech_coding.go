@@ -88,7 +88,15 @@ func validatePurposeAndFormatId(purposeId string, formatId string) (err error) {
 		return err
 	}
 
-	purpose := GetPurpose(purposeId)
+	// Unknown purposes are carried opaquely (madder#255): decode surfaces
+	// need only the format to route bytes, and downstream consumers mint
+	// purposes this binary has no registration for. The compatibility
+	// check applies only to registered purposes; semantic lookups
+	// (GetPurpose, GetRelated) stay strict.
+	purpose, registered := purposes[purposeId]
+	if !registered {
+		return err
+	}
 
 	if _, ok := purpose.formatIds[formatId]; !ok {
 		err = errors.Errorf("format id %q not supported for purpose %q", formatId, purposeId)

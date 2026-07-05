@@ -19,16 +19,19 @@ const (
 	// Object Digests
 	PurposeObjectDigestV1             = "dodder-object-digest-sha256-v1"
 	PurposeObjectDigestV2             = "dodder-object-digest-v2"
+	PurposeObjectDigestV3             = "dodder-object-digest-v3"
 	PurposeV5MetadataDigestWithoutTai = "dodder-object-metadata-digest-without_tai-v1"
 
 	// Object Mother Sigs
 	PurposeObjectMotherSigV1 = "dodder-object-mother-sig-v1"
 	PurposeObjectMotherSigV2 = "dodder-object-mother-sig-v2"
+	PurposeObjectMotherSigV3 = "dodder-object-mother-sig-v3"
 
 	// Object Sigs
 	PurposeObjectSigV0 = "dodder-repo-sig-v1"
 	PurposeObjectSigV1 = "dodder-object-sig-v1"
 	PurposeObjectSigV2 = "dodder-object-sig-v2"
+	PurposeObjectSigV3 = "dodder-object-sig-v3"
 
 	// Request Auth
 	PurposeRequestAuthResponseV1  = "dodder-request_auth-response-v1"

@@ -3,19 +3,22 @@
 //! Mirrors `go/internal/bravo/markl/purposes.go` plus the
 //! `validatePurposeAndFormatId` check from `id_blech_coding.go`.
 //! Prototype scope: only the purposes piggy uses or expects to see in
-//! the wild are registered. The dodder-* purposes are scaffolded so
-//! a `piggy-ids` file mistakenly carrying a dodder purpose fails
-//! cleanly (and so we have a place to add them when madder hands off
-//! its registry).
+//! the wild are enumerated; anything else parses as `Other` and is
+//! carried opaquely at decode (madder#255, RFC 0002 §6.6). The
+//! enumerated dodder-* purposes keep strict (purpose, format)
+//! validation; a `piggy-ids` file carrying a non-piggy purpose is
+//! still rejected at the piggy-ids layer regardless.
 
 use thiserror::Error;
 
 use crate::format::FormatId;
 
 /// Purpose ID values that piggy understands. Other purposes parse as
-/// `Other(String)` so future / unrecognised purposes don't bring the
-/// codec down — but the `validate_format` call still returns
-/// `Incompatible` since piggy can't reason about them.
+/// `Other(String)` and are carried opaquely through decode/encode
+/// (madder#255, RFC 0002 §6.6) — `Id::new` skips the compatibility
+/// check for them. `validate_format` itself remains a strict semantic
+/// predicate: it still returns `Incompatible` for `Other`, since piggy
+/// can't reason about formats for purposes it didn't enumerate.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PurposeId {
     /// `piggy-recipient-v1` — piggy 2.x recipient pubkey. **Reserved
@@ -116,7 +119,10 @@ impl PurposeId {
     /// Verify that `format` is one of the formats this purpose
     /// constrains itself to. For `Other`, conservatively rejects
     /// every format — piggy doesn't know the registry's rules for
-    /// purposes it didn't enumerate.
+    /// purposes it didn't enumerate. Decode surfaces (`Id::new`,
+    /// `Id::parse`) deliberately skip this check for `Other` so
+    /// unknown purposes round-trip opaquely (madder#255, RFC 0002
+    /// §6.6); this predicate answers the semantic question only.
     pub fn validate_format(&self, format: FormatId) -> Result<(), Incompatible> {
         let ok = match self {
             PurposeId::PiggyRecipientV1 => {

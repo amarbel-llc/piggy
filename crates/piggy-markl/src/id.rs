@@ -77,8 +77,16 @@ impl Id {
                 actual: data.len(),
             });
         }
+        // Unknown purposes are carried opaquely (madder#255, RFC 0002
+        // §6.6): decode surfaces need only the format to route bytes,
+        // and downstream consumers mint purposes this crate has no
+        // variant for. The compatibility check applies only to
+        // enumerated purposes; `validate_format` itself stays a strict
+        // semantic predicate (still rejects everything for `Other`).
         if let Some(p) = &purpose {
-            p.validate_format(format)?;
+            if !matches!(p, PurposeId::Other(_)) {
+                p.validate_format(format)?;
+            }
         }
         Ok(Self {
             purpose,
@@ -221,16 +229,22 @@ mod tests {
     }
 
     #[test]
-    fn purpose_carrying_unknown_string_parses_but_rejects_validation() {
+    fn purpose_carrying_unknown_string_round_trips_opaquely() {
+        // madder#255 / RFC 0002 §6.6: an id whose purpose has no
+        // registration must decode and round-trip with the purpose
+        // carried opaquely. (Pre-#255 this crate rejected the parse
+        // with Incompatible.)
         let payload = pivy_pubkey_payload();
-        // Build a canonical (RFC 0002) wire string textually:
-        // "future-purpose-v0@" prepended to blech32(pivy_ecdh_p256_pub,
-        // payload). Assert parse → Id::new → validate_format → Other
-        // rejects.
         let body = blech32::encode("pivy_ecdh_p256_pub", &payload).unwrap();
         let wire = format!("future-purpose-v0@{body}");
-        let err = Id::parse(&wire).unwrap_err();
-        assert!(matches!(err, ParseError::Incompatible(_)));
+        let parsed = Id::parse(&wire).unwrap();
+        assert_eq!(
+            parsed.purpose(),
+            Some(&PurposeId::Other("future-purpose-v0".to_string()))
+        );
+        assert_eq!(parsed.format(), FormatId::PivyEcdhP256Pub);
+        assert_eq!(parsed.data(), payload.as_slice());
+        assert_eq!(parsed.to_wire(), wire);
     }
 
     #[test]

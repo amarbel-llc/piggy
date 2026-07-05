@@ -184,6 +184,13 @@
       "format": "pivy_ecdh_p256_pub",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
       "encoded": "piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu"
+    },
+    {
+      "name": "purpose/example-unregistered-purpose-v1/sha256",
+      "purpose": "example-unregistered-purpose-v1",
+      "format": "sha256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "example-unregistered-purpose-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6"
     }
   ],
   "invalid": [

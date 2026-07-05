@@ -89,6 +89,50 @@ build-go-markl:
 test-go-markl:
     cd go/markl && go test -tags test ./...
 
+# EXPLORE (piggy#183 sync dev-loop) — parity-diff go/markl's 1:1-mapped core
+# files against a copy of madder's go/internal tree (pass its path), with
+# madder→piggy import paths normalized away. Files whose split is deliberate
+# (format families → charlie/agent/age per the 2026-06-20 ownership-inversion
+# design doc) are listed for manual review, not diffed. Exits non-zero when
+# any mapped pair differs or a counterpart is missing.
+[group('explore')]
+explore-markl-parity-diff MADDER_INTERNAL:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    theirs_root="{{MADDER_INTERNAL}}"
+    ours_root="go/markl/internal"
+    out=".tmp/markl-parity-diff.txt"
+    mkdir -p .tmp
+    exec 3>&1
+    exec >"$out" 2>&1
+    norm() { sed -e 's|github.com/amarbel-llc/madder/go/internal|github.com/amarbel-llc/piggy/go/markl/internal|g'; }
+    rc=0
+    for ours in "$ours_root"/0/domain_interfaces/*.go \
+                "$ours_root"/alfa/blech32/*.go \
+                "$ours_root"/bravo/markl/*.go; do
+      rel="${ours#"$ours_root"/}"
+      theirs="$theirs_root/$rel"
+      if [[ ! -f "$theirs" ]]; then
+        echo "=== PIGGY-ONLY: $rel"
+        rc=1
+        continue
+      fi
+      if ! diff -u --label "madder/$rel (normalized)" --label "piggy/$rel" \
+           <(norm <"$theirs") "$ours"; then
+        rc=1
+      fi
+    done
+    echo "=== madder files with no same-path piggy counterpart (split or unported):"
+    for theirs in "$theirs_root"/0/domain_interfaces/*.go \
+                  "$theirs_root"/alfa/blech32/*.go \
+                  "$theirs_root"/bravo/markl/*.go \
+                  "$theirs_root"/charlie/markl_registrations/*.go; do
+      rel="${theirs#"$theirs_root"/}"
+      [[ -f "$ours_root/$rel" ]] || echo "  $rel"
+    done
+    echo "wrote $out (rc=$rc)" >&3
+    exit "$rc"
+
 # piggy-pigpen (RFC 0008/0009 prototype): a pure-RustCrypto, wasm-buildable
 # crate INTENTIONALLY excluded from the cargo workspace (root Cargo.toml
 # `exclude`), so `build-rust`/`test-rust` (which operate on the workspace) do

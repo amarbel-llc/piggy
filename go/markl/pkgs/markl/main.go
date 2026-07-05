@@ -252,15 +252,18 @@ const PurposeMadderPubKeyV1 = internal.PurposeMadderPubKeyV1
 // Object Digests
 const PurposeObjectDigestV1 = internal.PurposeObjectDigestV1
 const PurposeObjectDigestV2 = internal.PurposeObjectDigestV2
+const PurposeObjectDigestV3 = internal.PurposeObjectDigestV3
 
 // Object Mother Sigs
 const PurposeObjectMotherSigV1 = internal.PurposeObjectMotherSigV1
 const PurposeObjectMotherSigV2 = internal.PurposeObjectMotherSigV2
+const PurposeObjectMotherSigV3 = internal.PurposeObjectMotherSigV3
 
 // Object Sigs
 const PurposeObjectSigV0 = internal.PurposeObjectSigV0
 const PurposeObjectSigV1 = internal.PurposeObjectSigV1
 const PurposeObjectSigV2 = internal.PurposeObjectSigV2
+const PurposeObjectSigV3 = internal.PurposeObjectSigV3
 
 // Papi signature purposes (jointly owned with amarbel-llc/papi; RFC
 // 0002 §6.1, RFC-0001 §9–§10). Both carry a slot-9A ECDSA-P256
