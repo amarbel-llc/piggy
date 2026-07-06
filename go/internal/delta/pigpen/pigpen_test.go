@@ -8,7 +8,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/amarbel-llc/piggy/go/pkgs/markl"
+	"github.com/amarbel-llc/piggy/go/internal/bravo/markl"
 )
 
 // --- cross-language interop vectors (piggy#210) --------------------------

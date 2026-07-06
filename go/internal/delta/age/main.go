@@ -18,10 +18,12 @@
 // per docs/plans/2026-06-20-markl-id-ownership-inversion.md.
 package age
 
+//go:generate dagnabit export
+
 // Blank-import the native registrations so the age_x25519_sec stub this
 // package swaps over is present before our init() runs (Go runs an
 // imported package's init() before the importer's). Without it
 // SwapFormat would fail with "no format registered to swap".
 import (
-	_ "github.com/amarbel-llc/piggy/go/pkgs/markl_registrations"
+	_ "github.com/amarbel-llc/piggy/go/internal/charlie/markl_registrations"
 )

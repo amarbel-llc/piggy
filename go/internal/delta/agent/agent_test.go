@@ -4,7 +4,7 @@ import (
 	"math/big"
 	"testing"
 
-	markl "github.com/amarbel-llc/piggy/go/pkgs/markl"
+	markl "github.com/amarbel-llc/piggy/go/internal/bravo/markl"
 
 	"golang.org/x/crypto/ssh"
 )

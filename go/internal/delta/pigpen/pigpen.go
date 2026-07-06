@@ -1,5 +1,7 @@
 package pigpen
 
+//go:generate dagnabit export
+
 import (
 	"bytes"
 	"crypto/hmac"
@@ -8,12 +10,12 @@ import (
 	"io"
 	"strings"
 
-	"github.com/amarbel-llc/piggy/go/pkgs/blech32"
-	"github.com/amarbel-llc/piggy/go/pkgs/markl"
+	"github.com/amarbel-llc/piggy/go/internal/alfa/blech32"
+	"github.com/amarbel-llc/piggy/go/internal/bravo/markl"
 
 	// Blank-import the native registrations so pivy_ecdh_p256_pub and
 	// age_x25519_pub are present before we build/parse recipient IDs.
-	_ "github.com/amarbel-llc/piggy/go/pkgs/markl_registrations"
+	_ "github.com/amarbel-llc/piggy/go/internal/charlie/markl_registrations"
 )
 
 const (

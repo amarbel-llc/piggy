@@ -5,7 +5,7 @@ import (
 	"crypto/ecdsa"
 	"os"
 
-	markl "github.com/amarbel-llc/piggy/go/pkgs/markl"
+	markl "github.com/amarbel-llc/piggy/go/internal/bravo/markl"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/pivy"
 

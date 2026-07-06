@@ -6,8 +6,8 @@ import (
 	"io"
 	"sync"
 
-	domain_interfaces "github.com/amarbel-llc/piggy/go/pkgs/domain_interfaces"
-	markl "github.com/amarbel-llc/piggy/go/pkgs/markl"
+	domain_interfaces "github.com/amarbel-llc/piggy/go/internal/0/domain_interfaces"
+	markl "github.com/amarbel-llc/piggy/go/internal/bravo/markl"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
 )
 

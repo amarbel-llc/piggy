@@ -109,8 +109,11 @@ Layout (dagnabit `internal/<layer>/<pkg>` → `pkgs/<pkg>` facades):
 - `internal/alfa/blech32` — the split-HRP blech32 codec.
 - `internal/bravo/markl` — the **pure framework**: `Id` codec, the registry *mechanism* (`RegisterFormat`/`SwapFormat`/`GetFormatOrError`), the type + vocabulary constants, error sentinels. Installs no concrete format except the hash family.
 - `internal/charlie/markl_registrations` — piggy's **native registrations** (crypto, the four erroring stubs, piggy's purposes) + the RFC-0002 vector generator/replay. **Opt-in: blank-import to fire `init()`.**
-- `agent/` — the heavy ssh/pivy signer-discovery layer; swaps real impls over the ssh/ecdh stubs. Off the dep-light core's import path.
-- `age/` — the age x25519 encryption layer; swaps the real Generate/GetIOWrapper over the `age_x25519_sec` stub.
+- `internal/delta/agent` (facade `pkgs/agent`) — the heavy ssh/pivy signer-discovery layer; swaps real impls over the ssh/ecdh stubs via `markl.SwapFormat`. Off the dep-light core's import path (importing it pulls `x/crypto/ssh` + `dewey/pivy`).
+- `internal/delta/age` (facade `pkgs/age`) — the age x25519 encryption layer; swaps the real Generate/GetIOWrapper over the `age_x25519_sec` stub.
+- `internal/delta/pigpen` (facade `pkgs/pigpen`) — the RFC 0008 pigpen encrypted-document + recipient-set codec (pure crypto over the registry).
+
+All three `delta` packages import the internal layers directly (not the `pkgs/` facades) and carry `//go:generate dagnabit export`; their facades are what external consumers (madder) import.
 
 **Gate**: `build-go` / `test-go` are wired into the `build`/`test` aggregates, and facade drift is gated by conformist's `dewey-facade-export` lane (purse-first#163): REPAIRED at commit time by the `conformist-pre-commit` hook and CHECKED at the merge gate by `just lint-worktree` (in the `lint` aggregate the pre-merge `just` hook runs). Per the #183/#188 ruling the *library* has no `buildGoModule` gate — it is a consumed library, gated by the dagnabit facade check (run through conformist). See `flake.nix`'s `conformistFacadeModule` / the three conformist evals, and `conformist.nix`.
 

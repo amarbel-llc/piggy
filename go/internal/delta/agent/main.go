@@ -28,10 +28,12 @@
 // directly to calling the exported markl.SwapFormat seam.
 package agent
 
+//go:generate dagnabit export
+
 // Blank-import the native registrations so the stubs this package swaps
 // over are present in the registry before our init() runs (Go runs an
 // imported package's init() before the importer's). Without it
 // SwapFormat would fail with "no format registered to swap".
 import (
-	_ "github.com/amarbel-llc/piggy/go/pkgs/markl_registrations"
+	_ "github.com/amarbel-llc/piggy/go/internal/charlie/markl_registrations"
 )
