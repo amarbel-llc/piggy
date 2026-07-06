@@ -4,14 +4,14 @@
 # choose the formatters and the repo-specific tweaks.
 #
 # This is piggy's move off treefmt-nix onto conformist (the migration the
-# go/markl block's comment used to defer). Formatters: nixfmt (RFC 166),
+# go/ block's comment used to defer). Formatters: nixfmt (RFC 166),
 # rustfmt, and shfmt at 2-space indent. treefmt's shfmt ran plain `-i 2`;
 # conformist's shfmt defaults to `-s -ci`. We keep `-ci` (case-indent — the eng
 # house style, conformist#52) ON, and switch `-s` (simplify) OFF to stay close
 # to the retired treefmt behavior. The one-time `-ci` reflow of the existing
 # shell/bats tree lands in the migration commit.
-# Go is deliberately NOT formatted here — go/markl's hand-written sources are
-# gofmt'd by `just codemod-fmt-go-markl`, and its pkgs/ facades are formatted by the
+# Go is deliberately NOT formatted here — go/'s hand-written sources are
+# gofmt'd by `just codemod-fmt-go`, and its pkgs/ facades are formatted by the
 # dagnabit facade lane (flake.nix conformistFacadeModule), not by a conformist
 # Go formatter. `nix fmt` runs the generated wrapper; `just lint-fmt` runs the
 # sandboxed `checks.formatting` derivation against the same generated config.

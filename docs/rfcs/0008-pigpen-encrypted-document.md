@@ -10,7 +10,7 @@ provenance: |
   recipient model of the piggy-box ebox (RFC 0002), unifying both under
   markl IDs (RFC 0003 / madder RFC 0002). A payload-less pigpen document
   subsumes the `piggy-ids` recipient file (RFC 0003). Prototypes land in
-  Go (`go/markl/pigpen`) and Rust (`crates/piggy-pigpen`), both shaped so
+  Go (`go/internal/delta/pigpen`) and Rust (`crates/piggy-pigpen`), both shaped so
   a WASM build is a first-class output. Tracks the "pigpen" umbrella.
 ---
 
@@ -51,7 +51,7 @@ of `piggy-ids` and is intended to subsume it.
 ## Status and Provenance
 
 Draft. This RFC scopes the format and pins the wire model; the
-reference prototypes (`go/markl/pigpen`, `crates/piggy-pigpen`)
+reference prototypes (`go/internal/delta/pigpen`, `crates/piggy-pigpen`)
 accompany it but are explicitly marked **prototype** and are not yet on
 any user-facing dispatch path. Nothing in piggy reads or writes
 `pigpen-v1` documents in production until a follow-up cutover RFC
@@ -379,7 +379,7 @@ depends on `FK`; this matches age's header-authentication ordering.
 ## 5. markl Registrations
 
 `pigpen-v1` introduces the following markl formats and purposes. They
-MUST be registered in both the Go (`go/markl`) and Rust
+MUST be registered in both the Go (`go/`) and Rust
 (`crates/piggy-markl`) registries; the cross-domain RFC-0002 fixture is
 unaffected (these are piggy-native, like `piggy-recipient-v1`).
 
@@ -471,7 +471,7 @@ which constrains the crypto dependency choices:
 - **Dependency constraint (Go).** The Go prototype uses only
   `crypto/ecdh`, `crypto/hkdf`, `crypto/hmac`, `crypto/sha256` (stdlib)
   and `golang.org/x/crypto/chacha20poly1305`, all of which build under
-  `GOOS=js GOARCH=wasm` and tinygo. It imports the dep-light `go/markl`
+  `GOOS=js GOARCH=wasm` and tinygo. It imports the dep-light `go/`
   core only (not the `agent`/`age` heavy sub-packages).
 
 See `docs/plans/2026-06-24-pigpen-wasm.md` for the concrete build
@@ -536,7 +536,7 @@ A conforming `pigpen-v1` implementation MUST:
 A normative test-vector file (analogous to RFC 0002 Appendix A and the
 hyphence `rfc_vectors.txt`) is **deferred to the cutover RFC**; the
 prototypes ship round-trip and known-answer unit tests in the interim
-(`go/markl/pigpen/*_test.go`, `crates/piggy-pigpen/src/**` `#[test]`s).
+(`go/internal/delta/pigpen/*_test.go`, `crates/piggy-pigpen/src/**` `#[test]`s).
 
 ## Compatibility
 
@@ -551,7 +551,7 @@ emits or consumes `pigpen-v1` in production at this revision. The
 - a `piggy-ids ⇄ pigpen` converter and migration story;
 - the normative test-vector set and its CI drift gate;
 - the markl registrations of §5 promoted from the prototype registry
-  shims into `go/markl` and `crates/piggy-markl` proper.
+  shims into `go/` and `crates/piggy-markl` proper.
 
 The hyphence dependency raises a **layering** question recorded here for
 the cutover: the canonical hyphence implementation lives in *madder*,
@@ -584,4 +584,4 @@ factoring.
   pigpen reuses (the agent-ECDH-oracle decrypt path).
 - `docs/plans/2026-06-24-pigpen-wasm.md` — WASM build & host-oracle
   sketch.
-- `go/markl/pigpen/`, `crates/piggy-pigpen/` — reference prototypes.
+- `go/internal/delta/pigpen/`, `crates/piggy-pigpen/` — reference prototypes.

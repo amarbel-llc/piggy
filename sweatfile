@@ -17,7 +17,7 @@
 # merge instead of waiting for post-merge CI to flag it.
 pre-merge = "just"
 
-# Per-commit repair (conformist#47/#51): regenerate-and-stage go/markl's
+# Per-commit repair (conformist#47/#51): regenerate-and-stage go/'s
 # dagnabit pkgs/ facades (and format the index-staged content) at authoring
 # time, so facade drift never reaches the merge gate. Names
 # `conformist-pre-commit` — the CONFIG-SPECIFIC, TOOLCHAIN-HERMETIC wrapper

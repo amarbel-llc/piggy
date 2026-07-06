@@ -39,4 +39,4 @@ cargo build --manifest-path crates/piggy-pigpen/Cargo.toml --target wasm32-unkno
 Card-bound P-256 decryption is abstracted behind the `EcdhOracle` trait,
 so a wasm host supplies the scalar multiplication (piggy-agent's
 `ecdh@joyent.com`) without the module linking any card transport. The
-sibling Go prototype lives at `go/markl/pigpen/`.
+sibling Go prototype lives at `go/internal/delta/pigpen/`.

@@ -54,7 +54,7 @@ turns a JS callback `(selfId: string, epk: Uint8Array) => Uint8Array`
 into an `EcdhOracle`. The page wires that callback to piggy-agent over a
 native-messaging host, a WebUSB/WebAuthn-PIV bridge, or a remote signer.
 
-## Go (`go/markl/pigpen`) — partial WASM today
+## Go (`go/internal/delta/pigpen`) — partial WASM today
 
 The pigpen crypto + hyphence framing core compiles cleanly to **both**
 `GOOS=js` and `GOOS=wasip1`:
@@ -65,7 +65,7 @@ GOOS=wasip1 GOARCH=wasm go build ./...   # crypto.go + hyphence.go: OK
 ```
 
 …but the *full* package does not, because the markl Id codec it uses for
-recipient IDs (`go/markl/pkgs/markl`) transitively imports
+recipient IDs (`go/pkgs/markl`) transitively imports
 `purse-first/libs/dewey`, which is not WASM-portable:
 
 - `GOOS=js`: `dewey/internal/bravo/errors` references `syscall.SIGHUP`

@@ -1,5 +1,13 @@
 # markl-id ownership inversion — piggy as the canonical registry + Go library
 
+> **Update (2026-07-05):** the module was subsequently promoted from `go/markl`
+> → `go/` (module `github.com/amarbel-llc/piggy/go`); the `agent`/`age`/`pigpen`
+> sub-packages were relayered into `internal/delta/*` + `pkgs/*` facades, and the
+> standalone `conformance` test module was absorbed into `go/cmd/`. This doc
+> records the original `go/markl` design and its paths are historical — see the
+> **go/ module** section of `AGENTS.md` for the current layout + the
+> flake-input-go_mod producer (piggy#183).
+
 - **Date**: 2026-06-20
 - **Status**: core built & merged to master (#183); `agent`/`age`
   sub-packages + RFC-0002 vector generator in progress. The as-built

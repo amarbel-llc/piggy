@@ -33,7 +33,7 @@ phase:
    `convert-ids`/`migrate`) plus pigpen-awareness in the existing `pass`
    verbs and the `recipients` family — including the **cheap-add /
    re-key-on-remove** asymmetry.
-4. **Promote the markl registrations** of RFC 0008 §5 into `go/markl` and
+4. **Promote the markl registrations** of RFC 0008 §5 into `go/` and
    `crates/piggy-markl` proper, with conformance vectors.
 5. **Promote the hyphence framing** out of both prototypes into a
    dependency-light, RFC-0001-conforming, **WASM-clean** library piggy
@@ -198,7 +198,7 @@ RFC 0003 form until the default flips. No new config file is introduced.
 RFC 0008 §5's formats and purposes move from prototype shims into the
 registries proper:
 
-- **Go (`go/markl`)** — add to `internal/charlie/markl_registrations`:
+- **Go (`go/`)** — add to `internal/charlie/markl_registrations`:
   `RegisterFormat` for `pigpen_wrap_p256` (65 B), `pigpen_wrap_x25519`
   (64 B), `pigpen_header_mac` (32 B); `RegisterPurpose` for
   `pigpen-wrap-v1` and `pigpen-doc-v1` with their accepted-format sets.
@@ -208,7 +208,7 @@ registries proper:
 - **Rust (`crates/piggy-markl`)** — add the three `FormatId` variants
   (with `size()`/`as_str()`/`parse()`), the two `PurposeId` variants, and
   their `accepts()` rows.
-- The prototypes (`go/markl/pigpen`, `crates/piggy-pigpen`) drop their
+- The prototypes (`go/internal/delta/pigpen`, `crates/piggy-pigpen`) drop their
   blech32-direct shims and build the wrap/MAC IDs through the real
   `markl.Id` / `Id` codec, gaining `(purpose, format)` validation for
   free.
@@ -228,7 +228,7 @@ The prototypes carry a deliberately-minimal framing (`hyphence.rs`,
   encoder, and the lenient `AllowMissingSeparator` mode. It MUST pass
   madder's normative `rfc_vectors.txt` (vendored or fetched as a fixture)
   so piggy's framing is provably the same wire format, not a fork.
-- **A Go sibling** (`go/markl/hyphence` or `go/hyphence`) with the same
+- **A Go sibling** (`go/internal/delta/hyphence` or `go/hyphence`) with the same
   conformance bar.
 
 Why piggy-owned rather than importing madder's: the `dewey → piggy →
@@ -254,7 +254,7 @@ Appendix A model.**
 - A `pigpen_vectors.txt` (hyphence-vector style: name, input-b64,
   outcome, expected-b64) covers parse/round-trip/rejection cases
   (mixed-state, `@`-with-body, MAC-mismatch, unknown format).
-- Both `crates/piggy-pigpen` and `go/markl/pigpen` replay the full set.
+- Both `crates/piggy-pigpen` and `go/internal/delta/pigpen` replay the full set.
 - CI fails on any drift between the RFC appendix and the replay modules
   (the same gate RFC 0002 has against `piv_box.rs::tests::rfc0002_vectors`).
 
