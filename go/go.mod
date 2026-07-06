@@ -9,10 +9,13 @@ go 1.26
 // `just test-go` = `go test -tags test`, hence the go-cmp indirect).
 // The markl core (ported under #183) adds more dewey/pkgs. piggy sits
 // above dewey in the dewey -> piggy -> madder layering, so the dep is by
-// design.
-require github.com/amarbel-llc/purse-first/libs/dewey v0.3.2
-
+// design. dewey is bridged via flake-input-go_mod (go/gomod.nix
+// goFlakeInputs), so it MUST live in a require BLOCK: igloo's parseGoMod
+// mishandles a standalone `require x v` line (the form `go mod tidy`
+// emits when a comment is attached to a single require), yielding
+// "expected a set but found a string" at buildGoApplication eval.
 require (
+	github.com/amarbel-llc/purse-first/libs/dewey v0.3.2
 	golang.org/x/crypto v0.50.0
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
 )

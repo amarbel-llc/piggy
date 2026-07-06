@@ -547,7 +547,7 @@ func main() {
 
 	client := agent.NewClient(conn)
 
-	fmt.Println("Running Go conformance tests...\n")
+	fmt.Print("Running Go conformance tests...\n\n")
 	keys := testList(client)
 	testSign(client, keys, hardware)
 	testQuery(client)

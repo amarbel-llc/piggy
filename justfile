@@ -27,6 +27,11 @@ build-nix:
     # catch flake.nix / vendorHash regressions at the merge gate rather
     # than only when `just debug-piggy-test-sshd` or the Phase D bats run.
     nix build .#piggy-test-sshd --no-link --show-trace
+    # And piggy-agent-conformance: a buildGoApplication that self-consumes
+    # go-pkgs-test and runs `go vet -tags test ./...` over the WHOLE go/
+    # module in checkPhase, so a source-filter regression or a stale
+    # go/gomod2nix.toml fails the merge gate here (piggy#183).
+    nix build .#piggy-agent-conformance --no-link --show-trace
 
 # Cargo-build the workspace; on Linux with no ARGS, also build fibby with
 # --features hardware-proxy so pcsc-sys's link-time pkg-config runs at the gate.
@@ -76,6 +81,17 @@ build-rust-release:
 [group('build')]
 update-go:
     cd go && go mod tidy
+
+# Regenerate go/gomod2nix.toml from go/go.mod|go.sum after a dep change (run
+# right after `update-go`). gomod2nix is on the devShell PATH; `nix run
+# .#gomod2nix` is the reload-independent fallback. NOT wired into an aggregate:
+# buildGoApplication is the freshness GATE (a stale toml fails the
+# piggy-agent-conformance / piggy-test-sshd builds in build-nix), so this is
+# the manual REPAIR. The conformist subdir freshness lane is deferred to
+# conformist#79 (the stock gomod2nix linter is tree-root-only).
+[group('maintenance')]
+build-gomod2nix:
+    cd go && gomod2nix
 
 # Compile the go/ module (`go build ./...`). Wired into the `build`
 # aggregate so the pre-merge `just` hook exercises it.

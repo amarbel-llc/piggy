@@ -142,6 +142,21 @@
         };
         pkgs-master = import nixpkgs-master { inherit system; };
 
+        # gomod.nix is the producer half of the flake-input-go_mod protocol
+        # (amarbel-llc/nixpkgs RFC 0001): mkGoPkgs publishes go-pkgs /
+        # go-pkgs-test so madder/dodder/cutting-garden bridge
+        # github.com/amarbel-llc/piggy/go as a flake input (flake.lock-only
+        # bumps) instead of a go.mod pseudo-version. The producer src is scoped
+        # to the go/ subdir, so downstream bridges with NO subPath. goFlakeInputs
+        # (the dewey bridge) is threaded into the two buildGoApplication binaries
+        # below so dewey resolves during the self-consume build. See go/gomod.nix.
+        gomod = import ./go/gomod.nix {
+          inherit pkgs purse-first system;
+          src = self + "/go";
+        };
+        inherit (gomod) goFlakeInputs;
+        inherit (gomod.goPkgs) go-pkgs go-pkgs-test;
+
         # Software PIV smart card for tests. Only built on Linux — vsmartcard
         # is marked broken on darwin upstream.
         virtualPiv = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
@@ -445,23 +460,40 @@
           };
         };
 
-        piggy-agent-conformance = pkgs.buildGoModule {
+        # The two Go test binaries piggy's bats lanes need, now built from the
+        # unified go/ module (github.com/amarbel-llc/piggy/go) via
+        # buildGoApplication self-consuming the go-pkgs-test producer output
+        # (rich-acacia's canonical self-consume, RFC 0001 § Self-consumption): a
+        # source-filter regression OR a stale go/gomod2nix.toml fails the build
+        # HERE, in piggy's gate, rather than in a downstream consumer's. Building
+        # from the unified module is why the #183/#188 "no buildGoModule for the
+        # LIBRARY" ruling still holds — the library is gated by the dagnabit
+        # facade check; these are BINARIES, always built, now from one module.
+        # goFlakeInputs bridges dewey so it resolves hermetically.
+        piggy-agent-conformance = pkgs.buildGoApplication {
           pname = "piggy-agent-conformance";
           version = piggyVersion;
 
-          src = pkgs.lib.fileset.toSource {
-            root = ./conformance;
-            fileset = pkgs.lib.fileset.unions [
-              ./conformance/go.mod
-              ./conformance/go.sum
-              ./conformance/main.go
-            ];
-          };
+          src = go-pkgs-test;
+          pwd = go-pkgs-test;
+          modules = ./go/gomod2nix.toml;
+          inherit goFlakeInputs;
 
-          vendorHash = "sha256-P8Y1OaDAgNbfGA99vNeXlfOuQqpMhHPebxYceLgZew0=";
+          subPackages = [ "cmd/piggy-agent-conformance" ];
+          go = pkgs-master.go_1_26;
+          GOTOOLCHAIN = "local";
 
-          postInstall = ''
-            mv $out/bin/conformance $out/bin/piggy-agent-conformance
+          # buildGoApplication's stock goCheckHook tests only subPackages (cmd/,
+          # no _test.go), so the whole-module registry packages would never be
+          # exercised from the filtered tree. Override checkPhase with the blessed
+          # self-consume floor: `go vet -tags test ./...` type-checks EVERY
+          # package (incl. _test.go under the test tag) against go-pkgs-test, so a
+          # dropped source file fails here. vet (not test): no network / no card
+          # in the nix sandbox.
+          checkPhase = ''
+            runHook preCheck
+            go vet -tags test ./...
+            runHook postCheck
           '';
 
           meta = with pkgs.lib; {
@@ -472,31 +504,23 @@
           };
         };
 
-        # Go test-only SSH server for the hardware-free SSH-over-fibby
-        # bats lane (piggy#135 Phase A). Mirrors madder's RFC-0001
-        # test-subprocess handshake and embeds golang.org/x/crypto/ssh —
-        # already vendored for piggy-agent-conformance, so the vendorHash
-        # is shared (go.mod/go.sum are unchanged; only a new subPackage
-        # is built). Named after its cmd/ dir, so no postInstall rename.
-        piggy-test-sshd = pkgs.buildGoModule {
+        # Go test-only SSH server for the hardware-free SSH-over-fibby bats lane
+        # (piggy#135 Phase A). Same unified-module buildGoApplication shape as
+        # piggy-agent-conformance; build-only (its cmd/ import graph is the
+        # validation — the whole-module vet self-consume rides on the primary
+        # binary above). Named after its cmd/ dir, so no postInstall rename.
+        piggy-test-sshd = pkgs.buildGoApplication {
           pname = "piggy-test-sshd";
           version = piggyVersion;
 
-          src = pkgs.lib.fileset.toSource {
-            root = ./conformance;
-            fileset = pkgs.lib.fileset.unions [
-              ./conformance/go.mod
-              ./conformance/go.sum
-              ./conformance/cmd/piggy-test-sshd/main.go
-            ];
-          };
-
-          # Distinct from piggy-agent-conformance's vendorHash: this
-          # subPackage's import set differs, so buildGoModule's vendor
-          # dir (and its hash) differs even though go.mod/go.sum match.
-          vendorHash = "sha256-+TACCNntEPB3do5qjBqWHNiCf4DF0mPNb5dekR9cut4=";
+          src = go-pkgs-test;
+          pwd = go-pkgs-test;
+          modules = ./go/gomod2nix.toml;
+          inherit goFlakeInputs;
 
           subPackages = [ "cmd/piggy-test-sshd" ];
+          go = pkgs-master.go_1_26;
+          GOTOOLCHAIN = "local";
 
           meta = with pkgs.lib; {
             description = "Go-based test-only SSH server for piggy's SSH-over-fibby bats lane";
@@ -681,6 +705,20 @@
           # consumed by `just lint-worktree` via `nix build
           # .#conformist-impure-config`.
           conformist-impure-config = conformistImpureEval.config.build.configFile;
+
+          # go-pkgs / go-pkgs-test: the flake-input-go_mod producer outputs
+          # (filtered go/ source trees) that let downstream repos
+          # (madder/dodder/cutting-garden) bridge piggy's go/ module as a flake
+          # input via goFlakeInputs, instead of a go.mod pseudo-version (RFC
+          # 0001). Consumers bridge `github.com/amarbel-llc/piggy/go` = go-pkgs
+          # with NO subPath (the producer src is already scoped to go/). See
+          # go/gomod.nix.
+          inherit go-pkgs go-pkgs-test;
+
+          # The gomod2nix CLI (from piggy's pinned igloo), exposed so
+          # `just build-gomod2nix` can regenerate go/gomod2nix.toml hermetically
+          # (`nix run .#gomod2nix`) without depending on a devShell reload.
+          gomod2nix = pkgs.gomod2nix;
         }
         // batsLib.batsLaneOutputs
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
@@ -743,6 +781,13 @@
               # copy stays on PATH for ad-hoc `dagnabit export` and installs
               # dagnabit(1). See #183 and the go/ module.
               purse-first.packages.${system}.dagnabit
+              # gomod2nix CLI (from the igloo overlay, same one paired with
+              # buildGoApplication): `just build-gomod2nix` (= `cd go &&
+              # gomod2nix`) regenerates go/gomod2nix.toml from go.mod/go.sum
+              # after a dep change. buildGoApplication is the freshness gate (a
+              # stale toml fails the binary builds); conformist subdir lint is
+              # deferred to conformist#79.
+              pkgs.gomod2nix
               # gum drives terminal UI logging in the maint group recipes
               # (`bump-version`, `tag`, `release`). See eng-versioning(7)
               # "JUSTFILE RELEASE RECIPES".
