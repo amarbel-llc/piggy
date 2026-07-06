@@ -7,7 +7,7 @@ lint: lint-fmt lint-rust lint-worktree
 # --- build ---
 
 [group('build')]
-build: build-nix build-rust build-go-markl build-pigpen
+build: build-nix build-rust build-go build-pigpen
 
 # Build the default piggy nix package, plus the .#fibby and .#piggy-test-sshd
 # packages that aren't transitive deps of .#default, so flake.nix regressions
@@ -55,14 +55,14 @@ build-release: build-rust-release
 build-rust-release:
     cargo build --release
 
-# go/markl module (#183): the registry/codec Go library that becomes the
-# canonical markl-id source madder will depend on (inverting today's
-# Rust-port-of-madder relationship). build-go-markl + test-go-markl are wired
+# go/ module (#183): the registry/codec Go library (module
+# github.com/amarbel-llc/piggy/go) that madder depends on (inverting today's
+# Rust-port-of-madder relationship). build-go + test-go are wired
 # into the build/test aggregates so the pre-merge `just` hook exercises the
 # module. Per the maintainer ruling (#183/#188) the nix-level gate is the
-# dagnabit export facade check, NOT a buildGoModule derivation — go/markl is a
-# consumed library with no piggy-shipped binary, so there is nothing for
-# buildGoModule to produce.
+# dagnabit export facade check, NOT a buildGoModule derivation — the go/
+# library is consumed, not a piggy-shipped binary (the two cmd/ binaries
+# build via buildGoApplication; see flake.nix).
 #
 # The facade check/repair now runs through conformist's dewey-facade-export
 # lane (the conformist migration the old comment here deferred): drift is
@@ -71,74 +71,30 @@ build-rust-release:
 # (in the `lint` aggregate). The standalone `codemod-facades` / `lint-facades`
 # recipes were retired in favor of those lanes; `nix run …#conform`-style ad-hoc
 # `dagnabit export` is still possible (bare dagnabit is on the devShell PATH).
-# Refresh go/markl's go.mod/go.sum (`go mod tidy`). Run after adding or
+# Refresh the go/ module's go.mod/go.sum (`go mod tidy`). Run after adding or
 # dropping an import in the module.
 [group('build')]
-update-go-markl:
-    cd go/markl && go mod tidy
+update-go:
+    cd go && go mod tidy
 
-# Compile the go/markl module (`go build ./...`). Wired into the `build`
+# Compile the go/ module (`go build ./...`). Wired into the `build`
 # aggregate so the pre-merge `just` hook exercises it.
 [group('build')]
-build-go-markl:
-    cd go/markl && go build ./...
+build-go:
+    cd go && go build ./...
 
 # `-tags test` activates dewey's test_ui harness (dewey/pkgs/test_ui is behind
 # //go:build test, mirroring madder's own `go test -tags test` convention).
 [group('post-build')]
-test-go-markl:
-    cd go/markl && go test -tags test ./...
-
-# EXPLORE (piggy#183 sync dev-loop) — parity-diff go/markl's 1:1-mapped core
-# files against a copy of madder's go/internal tree (pass its path), with
-# madder→piggy import paths normalized away. Files whose split is deliberate
-# (format families → charlie/agent/age per the 2026-06-20 ownership-inversion
-# design doc) are listed for manual review, not diffed. Exits non-zero when
-# any mapped pair differs or a counterpart is missing.
-[group('explore')]
-explore-markl-parity-diff MADDER_INTERNAL:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    theirs_root="{{MADDER_INTERNAL}}"
-    ours_root="go/markl/internal"
-    out=".tmp/markl-parity-diff.txt"
-    mkdir -p .tmp
-    exec 3>&1
-    exec >"$out" 2>&1
-    norm() { sed -e 's|github.com/amarbel-llc/madder/go/internal|github.com/amarbel-llc/piggy/go/markl/internal|g'; }
-    rc=0
-    for ours in "$ours_root"/0/domain_interfaces/*.go \
-                "$ours_root"/alfa/blech32/*.go \
-                "$ours_root"/bravo/markl/*.go; do
-      rel="${ours#"$ours_root"/}"
-      theirs="$theirs_root/$rel"
-      if [[ ! -f "$theirs" ]]; then
-        echo "=== PIGGY-ONLY: $rel"
-        rc=1
-        continue
-      fi
-      if ! diff -u --label "madder/$rel (normalized)" --label "piggy/$rel" \
-           <(norm <"$theirs") "$ours"; then
-        rc=1
-      fi
-    done
-    echo "=== madder files with no same-path piggy counterpart (split or unported):"
-    for theirs in "$theirs_root"/0/domain_interfaces/*.go \
-                  "$theirs_root"/alfa/blech32/*.go \
-                  "$theirs_root"/bravo/markl/*.go \
-                  "$theirs_root"/charlie/markl_registrations/*.go; do
-      rel="${theirs#"$theirs_root"/}"
-      [[ -f "$ours_root/$rel" ]] || echo "  $rel"
-    done
-    echo "wrote $out (rc=$rc)" >&3
-    exit "$rc"
+test-go:
+    cd go && go test -tags test ./...
 
 # piggy-pigpen (RFC 0008/0009 prototype): a pure-RustCrypto, wasm-buildable
 # crate INTENTIONALLY excluded from the cargo workspace (root Cargo.toml
 # `exclude`), so `build-rust`/`test-rust` (which operate on the workspace) do
 # not reach it. These recipes give it a paved build/test path and are wired
 # into the build/test aggregates so the pre-merge `just` hook exercises it,
-# mirroring the go/markl satellite-module treatment above.
+# mirroring the go/ satellite-module treatment above.
 # Cargo-build the standalone piggy-pigpen crate (see the note above).
 [group('build')]
 build-pigpen:
@@ -149,7 +105,7 @@ build-pigpen:
 test-pigpen:
     cd crates/piggy-pigpen && cargo test
 
-# Regenerate the go/markl pkgs/ facades in place — the apply-mode inverse of
+# Regenerate the go/ module's pkgs/ facades in place — the apply-mode inverse of
 # `just lint-worktree`'s facade CHECK, and the codemod sibling of
 # `codemod-rfc0002-fixture` (both regenerate committed artifacts). Runs
 # conformist's dewey-facade-export lane off the SAME impure config as the CHECK
@@ -166,7 +122,7 @@ test-pigpen:
 # lint-worktree`, in the `lint` aggregate. This recipe rewrites the facades in
 # place; `git add` them yourself. Re-added after the conformist migration
 # retired the standalone facade recipes and left no paved repair path. See the
-# go/markl block above and flake.nix conformistFacadeModule.
+# go/ block above and flake.nix conformistFacadeModule.
 [group('codemod')]
 codemod-facades:
     #!/usr/bin/env bash
@@ -175,25 +131,25 @@ codemod-facades:
     conformist --config-file "$cfg" --tree-root .
 
 # Regenerate the piggy-scoped RFC 0002 conformance fixture under
-# go/markl/internal/charlie/markl_registrations/testdata/. Run after changing a
+# go/internal/charlie/markl_registrations/testdata/. Run after changing a
 # registered format or purpose. The committed JSON is the canonical artifact;
-# test-go-markl's TestRFC0002VectorsRoundTrip verifies every entry on every run.
+# test-go's TestRFC0002VectorsRoundTrip verifies every entry on every run.
 # Scope is piggy-only (piggy purposes + every registered format incl. the #86
 # ssh formats); cross-domain fixture assembly is the #187 RFC. Mirrors madder's
 # codemod-rfc0002-fixture. #183 (#9).
 [group('codemod')]
 codemod-rfc0002-fixture:
-    cd go/markl && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
+    cd go && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
 
-# gofmt the hand-written go/markl sources: the internal/ core + the public
+# gofmt the hand-written go/ sources: the internal/ core + the public
 # sub-packages (agent, age, pigpen). The pkgs/ facades are EXCLUDED: they are
 # formatted by dagnabit's own conformist pass (the dewey-facade-export lane), so
 # reformatting them with plain gofmt would risk drift against the facade CHECK
 # (`just lint-worktree`). conformist's `nix fmt` does not cover Go, so this
-# recipe is the canonical go/markl formatter for the hand-written sources.
+# recipe is the canonical go/ formatter for the hand-written sources.
 [group('codemod')]
-codemod-fmt-go-markl:
-    cd go/markl && gofmt -w internal agent age pigpen
+codemod-fmt-go:
+    cd go && gofmt -w internal agent age pigpen
 
 # Run the nix-built piggy package (nix run . --), forwarding ARGS.
 run-nix *ARGS:
@@ -202,7 +158,7 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: test-bats-default test-bats-conformance test-rust test-go-markl test-pigpen _test-conformance-linux-only
+test: test-bats-default test-bats-conformance test-rust test-go test-pigpen _test-conformance-linux-only
 
 [group('post-build')]
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module
@@ -1505,12 +1461,12 @@ debug-conformance-run-hw: build-rust
 # --- format / lint ---
 
 [group('codemod')]
-codemod: codemod-fmt codemod-fmt-go-markl codemod-rfc0002-fixture codemod-facades
+codemod: codemod-fmt codemod-fmt-go codemod-rfc0002-fixture codemod-facades
 
 # Format the tree in place via `nix fmt`, which runs the conformist wrapper
 # (formatter.${system}) — nixfmt + shfmt + rustfmt under one CLI. See
 # conformist.nix for the program config. (Go is NOT covered here; use
-# codemod-fmt-go-markl for go/markl hand-written sources.)
+# codemod-fmt-go for go/ hand-written sources.)
 [group('codemod')]
 codemod-fmt:
     nix fmt
@@ -1547,7 +1503,7 @@ lint-fmt:
     nix build ".#checks.${system}.formatting" --no-link --print-build-logs
 
 # Impure lane: the eng-convention checks that need the live worktree (git
-# remotes / default branch / sweatfile / agents-md) PLUS the go/markl facade
+# remotes / default branch / sweatfile / agents-md) PLUS the go/ facade
 # drift CHECK (conformist's dewey-facade-export). This is the merge-gate safety
 # net for facade drift — it runs in the `lint` aggregate, so the pre-merge
 # `just` hook fails on committed drift even if the `conformist-pre-commit`
@@ -2318,7 +2274,7 @@ clean-rust:
 #
 # MULTI-ARTIFACT RELEASE (mirrors purse-first; eng-versioning(7)): one
 # PIGGY_VERSION covers every artifact in this repo, so piggy and the
-# go/markl Go module always release in lockstep at the same version.
+# go/ Go module always release in lockstep at the same version.
 # `tag` materializes the whole tag set from that single version (see
 # release_tag_prefixes below).
 #
@@ -2330,12 +2286,12 @@ clean-rust:
 # The release tag prefixes, in order. The bare "v" tag is primary
 # (piggy's repo-root Rust/C package + the GitHub release); the
 # path-prefixed entries are the sub-directory Go modules the Go module
-# proxy needs to resolve a versioned `go get` (so `go/markl/v<sem>`
-# resolves `github.com/amarbel-llc/piggy/go/markl@v<sem>`, which madder
-# pins). The `go/` conformance module is intentionally absent: it's a
+# proxy needs to resolve a versioned `go get` (so `go/v<sem>`
+# resolves `github.com/amarbel-llc/piggy/go@v<sem>`, which madder
+# pins). The `conformance/` module is intentionally absent: it's a
 # vendored test binary nobody `go get`s by version. Add a prefix here
 # when a new sub-directory module must be independently consumable.
-release_tag_prefixes := "v go/markl/v"
+release_tag_prefixes := "v go/v"
 
 # Rewrite the PIGGY_VERSION line in version.env. Touches no other
 # file — committing is `release`'s job. Usage: just bump-version 0.1.1
@@ -2345,8 +2301,8 @@ bump-version new_version:
 
 # Sign + push the full release tag set named after the current
 # version.env: the bare v<sem> plus each release_tag_prefixes entry
-# (v<sem>, go/markl/v<sem>), all at the single PIGGY_VERSION so piggy and
-# the go/markl module tag in lockstep. The whole set is created locally
+# (v<sem>, go/v<sem>), all at the single PIGGY_VERSION so piggy and
+# the go/ module tag in lockstep. The whole set is created locally
 # first, then pushed — a mid-set failure (signing, a pre-existing tag)
 # leaves only local tags to delete, with nothing pushed to roll back.
 # Usage: just tag "release v0.1.1"
@@ -2383,7 +2339,7 @@ tag message="":
 # at one PIGGY_VERSION. Generates a repo-wide auto-changelog (commits
 # since the previous primary v* tag) BEFORE bumping so the bump commit
 # doesn't appear in its own changelog, then bumps version.env, commits,
-# signs+pushes the v<sem> + go/markl/v<sem> tag set, and creates a GitHub
+# signs+pushes the v<sem> + go/v<sem> tag set, and creates a GitHub
 # release (pointed at the primary v<sem>) whose notes are the changelog
 # plus the sibling sub-module tags. Usage: just release 0.1.1
 [group('maintenance')]
@@ -2398,13 +2354,13 @@ release new_version:
     fi
 
     # Match only the PRIMARY version tags (v<digit>…); the path-prefixed
-    # sub-module tags (go/markl/v…) sort separately and must not bound the
+    # sub-module tags (go/v…) sort separately and must not bound the
     # changelog range.
     prev=$(git tag --sort=-v:refname -l "v*" | grep -E '^v[0-9]' | head -1 || true)
     header="release v{{new_version}}"
     # Enumerated in the tag annotation + GitHub release notes; `tag` creates
     # these from release_tag_prefixes, the release points at the primary.
-    siblings=$'\n\nTags: go/markl/v{{new_version}}'
+    siblings=$'\n\nTags: go/v{{new_version}}'
     if [[ -n "$prev" ]]; then
         summary=$(git log --format='- %s' "$prev"..HEAD)
         if [[ -n "$summary" ]]; then

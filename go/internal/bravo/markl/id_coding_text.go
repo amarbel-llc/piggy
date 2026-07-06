@@ -1,0 +1,116 @@
+package markl
+
+import (
+	"bytes"
+	"fmt"
+
+	"github.com/amarbel-llc/piggy/go/internal/alfa/blech32"
+	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
+)
+
+// MarshalText writes the RFC 0002 §3 wire form
+// `[purpose@]<blech32(format, data)>`. The blech32 checksum binds to
+// (format, data) only; the purpose, when present, is prepended
+// textually after blech32 encoding so the same digest under different
+// purposes shares a byte-identical blech32 body.
+func (id Id) MarshalText() (bites []byte, err error) {
+	if id.format == nil {
+		return bites, err
+	}
+
+	if bites, err = blech32.Encode(id.format.GetMarklFormatId(), id.data); err != nil {
+		err = errors.Wrap(err)
+		return bites, err
+	}
+
+	if purpose := id.GetPurposeId(); purpose != "" {
+		bites = []byte(fmt.Sprintf("%s@%s", purpose, string(bites)))
+	}
+
+	return bites, err
+}
+
+// UnmarshalText parses the RFC 0002 §4 wire form. The purpose, when
+// present, is split off textually before blech32 decoding so the
+// checksum verifies against HRP=format only.
+func (id *Id) UnmarshalText(bites []byte) (err error) {
+	if len(bites) == 0 {
+		id.Reset()
+		return err
+	}
+
+	body := bites
+
+	if at := bytes.IndexByte(bites, '@'); at >= 0 {
+		purpose := string(bites[:at])
+		body = bites[at+1:]
+
+		if err = id.SetPurposeId(purpose); err != nil {
+			err = errors.Wrapf(err, "Raw: %q", string(bites))
+			return err
+		}
+	}
+
+	var formatId string
+	var data []byte
+
+	if formatId, data, err = blech32.Decode(body); err != nil {
+		if purpose := id.GetPurposeId(); purpose != "" &&
+			errors.Is(err, blech32.ErrInvalidChecksum) {
+			if legacy, ok := buildLegacyCombinedHRPError(
+				purpose, bites, body,
+			); ok {
+				return legacy
+			}
+		}
+		err = errors.Wrapf(err, "Raw: %q", string(bites))
+		return err
+	}
+
+	if err = id.SetMarklId(formatId, data); err != nil {
+		err = errors.Wrapf(err, "Raw: %q", string(bites))
+		return err
+	}
+
+	return err
+}
+
+// buildLegacyCombinedHRPError returns a populated
+// ErrLegacyCombinedHRPWireForm when `body` verifies under the legacy
+// combined `<purpose>@<format>` HRP. The `bites` argument carries the
+// full original input (including the purpose prefix) for the Raw
+// field; `body` is the post-`@` section that DecodeWithHRPOverride
+// inspects.
+func buildLegacyCombinedHRPError(
+	purpose string,
+	bites []byte,
+	body []byte,
+) (ErrLegacyCombinedHRPWireForm, bool) {
+	sep := bytes.LastIndexByte(body, '-')
+	if sep <= 0 {
+		return ErrLegacyCombinedHRPWireForm{}, false
+	}
+
+	combinedHRP := purpose + "@" + string(body[:sep])
+
+	innerHRP, data, ok := blech32.DecodeWithHRPOverride(combinedHRP, body)
+	if !ok {
+		return ErrLegacyCombinedHRPWireForm{}, false
+	}
+
+	// Canonical split-HRP form re-encodes (innerHRP, data); only the
+	// trailing 6-char checksum differs from the legacy body, so
+	// surface just that suffix for splice-style migration callers.
+	canonical, encErr := blech32.Encode(innerHRP, data)
+	if encErr != nil || len(canonical) < 6 {
+		return ErrLegacyCombinedHRPWireForm{}, false
+	}
+
+	return ErrLegacyCombinedHRPWireForm{
+		Purpose:          purpose,
+		FormatId:         innerHRP,
+		Data:             data,
+		SplitHRPChecksum: string(canonical[len(canonical)-6:]),
+		Raw:              string(bites),
+	}, true
+}

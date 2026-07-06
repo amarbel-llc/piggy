@@ -14,7 +14,7 @@
     };
 
     # purse-first provides `dagnabit` (cmd/dagnabit), the code-org +
-    # export-facade generator used by go/markl: each `internal/` package
+    # export-facade generator used by the go/ module: each `internal/` package
     # marked `//go:generate dagnabit export` gets a `pkgs/` facade so
     # consumers (eventually madder) import a stable public API instead of
     # internal/ (#183). On the devShell PATH; the nix package also installs
@@ -450,11 +450,11 @@
           version = piggyVersion;
 
           src = pkgs.lib.fileset.toSource {
-            root = ./go;
+            root = ./conformance;
             fileset = pkgs.lib.fileset.unions [
-              ./go/go.mod
-              ./go/go.sum
-              ./go/main.go
+              ./conformance/go.mod
+              ./conformance/go.sum
+              ./conformance/main.go
             ];
           };
 
@@ -483,11 +483,11 @@
           version = piggyVersion;
 
           src = pkgs.lib.fileset.toSource {
-            root = ./go;
+            root = ./conformance;
             fileset = pkgs.lib.fileset.unions [
-              ./go/go.mod
-              ./go/go.sum
-              ./go/cmd/piggy-test-sshd/main.go
+              ./conformance/go.mod
+              ./conformance/go.sum
+              ./conformance/cmd/piggy-test-sshd/main.go
             ];
           };
 
@@ -560,7 +560,7 @@
         #
         # It also carries the dewey-facade-export drift CHECK as the merge-gate
         # safety net: `just lint-worktree` is in the `lint` aggregate the
-        # pre-merge `just` hook runs, so committed go/markl facade drift fails
+        # pre-merge `just` hook runs, so committed go/ facade drift fails
         # the merge even if the pre-commit auto-repair hook was bypassed. This
         # replaces the old standalone `lint-facades` recipe
         # (`dagnabit export --check`). The pre-commit lane (conformistCodegenEval)
@@ -595,8 +595,8 @@
           {
             linters.dewey-facade-export.enable = true;
             # piggy's dewey-layout module root (holds internal/ + pkgs/).
-            linters.dewey-facade-export.deweyDir = "go/markl";
-            # go/markl uses `//go:generate dagnabit export` directives, not
+            linters.dewey-facade-export.deweyDir = "go";
+            # go/ uses `//go:generate dagnabit export` directives, not
             # `--library`.
             linters.dewey-facade-export.library = false;
             # Pinned package ⇒ hermetic, PATH-independent dagnabit.
@@ -622,7 +622,7 @@
         # repair lane — but deliberately NOT presets.eng (its convention linters
         # stay at the merge/worktree gate, not commit time).
         # build.preCommit from THIS eval is the sweatfile [hooks].pre-commit
-        # hook, so a commit auto-formats and regenerates-and-stages go/markl
+        # hook, so a commit auto-formats and regenerates-and-stages go/
         # facade drift, and nothing else.
         conformistCodegenEval = conformist.lib.evalModule pkgs {
           imports = [
@@ -735,13 +735,13 @@
               # buildGoModule (which uses its own pkgs.go); this is the
               # same toolchain, exposed on the devShell PATH.
               pkgs.go
-              # dagnabit (from purse-first): generates go/markl's pkgs/
+              # dagnabit (from purse-first): generates the go/ module's pkgs/
               # export facades from its internal/ packages. The facade
               # check/repair now runs through conformist's
               # dewey-facade-export lane (pre-commit REPAIR + lint-worktree
               # CHECK), which invokes a store-pinned dagnabit; this bare
               # copy stays on PATH for ad-hoc `dagnabit export` and installs
-              # dagnabit(1). See #183 and the go/markl module.
+              # dagnabit(1). See #183 and the go/ module.
               purse-first.packages.${system}.dagnabit
               # gum drives terminal UI logging in the maint group recipes
               # (`bump-version`, `tag`, `release`). See eng-versioning(7)

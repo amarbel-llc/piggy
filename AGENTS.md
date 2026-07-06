@@ -99,9 +99,9 @@ Command surface:
 - `docs/rfcs/0006-management-interaction-protocol.md` — the `Frontend`/interaction-seam contract behind `card init` and `manage`'s interactive methods.
 - `docs/rfcs/0007-management-command-protocol.md` — the `piggy manage` JSON-RPC command surface.
 
-## go/markl module (piggy#183)
+## go/ module (piggy#183)
 
-`go/markl` (module `github.com/amarbel-llc/piggy/go/markl`) is piggy's canonical markl-id (purpose/format registry + Id codec) Go library — inverting the historic relationship where `crates/piggy-markl` was a port of madder's registry. madder consumes this module as an external dep (`dewey → piggy → madder` layering). Design: `docs/plans/2026-06-20-markl-id-ownership-inversion.md`; status: piggy#188; umbrella: piggy#183.
+`go/` (module `github.com/amarbel-llc/piggy/go`) is piggy's canonical markl-id (purpose/format registry + Id codec) Go library — inverting the historic relationship where `crates/piggy-markl` was a port of madder's registry. madder consumes this module as an external dep (`dewey → piggy → madder` layering). Design: `docs/plans/2026-06-20-markl-id-ownership-inversion.md`; status: piggy#188; umbrella: piggy#183.
 
 Layout (dagnabit `internal/<layer>/<pkg>` → `pkgs/<pkg>` facades):
 
@@ -112,17 +112,17 @@ Layout (dagnabit `internal/<layer>/<pkg>` → `pkgs/<pkg>` facades):
 - `agent/` — the heavy ssh/pivy signer-discovery layer; swaps real impls over the ssh/ecdh stubs. Off the dep-light core's import path.
 - `age/` — the age x25519 encryption layer; swaps the real Generate/GetIOWrapper over the `age_x25519_sec` stub.
 
-**Gate**: `build-go-markl` / `test-go-markl` are wired into the `build`/`test` aggregates, and facade drift is gated by conformist's `dewey-facade-export` lane (purse-first#163): REPAIRED at commit time by the `conformist-pre-commit` hook and CHECKED at the merge gate by `just lint-worktree` (in the `lint` aggregate the pre-merge `just` hook runs). Per the #183/#188 ruling there is no `buildGoModule` derivation — go/markl is a consumed library with no piggy-shipped binary; the nix-level gate is the dagnabit facade check, now run through conformist rather than the retired standalone recipes. See `flake.nix`'s `conformistFacadeModule` / the three conformist evals, and `conformist.nix`.
+**Gate**: `build-go` / `test-go` are wired into the `build`/`test` aggregates, and facade drift is gated by conformist's `dewey-facade-export` lane (purse-first#163): REPAIRED at commit time by the `conformist-pre-commit` hook and CHECKED at the merge gate by `just lint-worktree` (in the `lint` aggregate the pre-merge `just` hook runs). Per the #183/#188 ruling the *library* has no `buildGoModule` gate — it is a consumed library, gated by the dagnabit facade check (run through conformist). See `flake.nix`'s `conformistFacadeModule` / the three conformist evals, and `conformist.nix`.
 
-Recipes: `build-go-markl`, `test-go-markl`, `update-go-markl`, `codemod-fmt-go-markl`, `codemod-rfc0002-fixture`. (Facade regen/check moved to the conformist lanes; the standalone `codemod-facades`/`lint-facades` recipes were retired.)
+Recipes: `build-go`, `test-go`, `update-go`, `codemod-fmt-go`, `codemod-rfc0002-fixture`. (Facade regen/check moved to the conformist lanes; the standalone `codemod-facades`/`lint-facades` recipes were retired.)
 
 ## Code Conventions
 
 - Bash: `set -o pipefail`, `[[ ]]` conditionals
 - Functions: `cmd_*` for user-facing commands, lowercase_with_underscores for helpers
-- Formatting is driven by **conformist** (treefmt's successor; config in `conformist.nix` + `conformist.lib.presets.eng`): shell `shfmt -i 2 -ci`, nix `nixfmt` (RFC 166), rust `rustfmt`. Go is NOT covered by `nix fmt` — use `just codemod-fmt-go-markl` for go/markl's hand-written sources; the `pkgs/` facades are formatted by the dewey-facade-export lane.
+- Formatting is driven by **conformist** (treefmt's successor; config in `conformist.nix` + `conformist.lib.presets.eng`): shell `shfmt -i 2 -ci`, nix `nixfmt` (RFC 166), rust `rustfmt`. Go is NOT covered by `nix fmt` — use `just codemod-fmt-go` for go/'s hand-written sources; the `pkgs/` facades are formatted by the dewey-facade-export lane.
 - **Always format and check via `just codemod-fmt` (= `nix fmt`); never run `cargo fmt` / `rustfmt` / `shfmt` / `nixfmt` bare.** The bare tools use stock defaults that diverge from conformist's pinned config. `cargo fmt --check` is especially deceptive — it flags unrelated, already-clean files. For a non-mutating check, run `just lint-fmt` (the sandboxed `checks.formatting` gate) or `just codemod-fmt` on a clean tree and inspect `git status`.
-- go/markl dagnabit facade drift is auto-repaired at commit time by the `conformist-pre-commit` hook (sweatfile `[hooks].pre-commit`) and checked at the merge gate by `just lint-worktree` (in the `lint` aggregate). The old `codemod-facades`/`lint-facades` recipes were retired — see the go/markl section and `flake.nix`'s `conformistFacadeModule`.
+- go/ dagnabit facade drift is auto-repaired at commit time by the `conformist-pre-commit` hook (sweatfile `[hooks].pre-commit`) and checked at the merge gate by `just lint-worktree` (in the `lint` aggregate). The old `codemod-facades`/`lint-facades` recipes were retired — see the go/ section and `flake.nix`'s `conformistFacadeModule`.
 
 ### Test-fixture ebox part names
 
