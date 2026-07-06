@@ -83,14 +83,15 @@ update-go:
     cd go && go mod tidy
 
 # Regenerate go/gomod2nix.toml from go/go.mod|go.sum after a dep change (run
-# right after `update-go`). gomod2nix is on the devShell PATH; `nix run
-# .#gomod2nix` is the reload-independent fallback. NOT wired into an aggregate:
-# buildGoApplication is the freshness GATE (a stale toml fails the
-# piggy-agent-conformance / piggy-test-sshd builds in build-nix), so this is
-# the manual REPAIR. The conformist subdir freshness lane is deferred to
-# conformist#79 (the stock gomod2nix linter is tree-root-only).
+# right after `update-go`, the sibling lockfile update). gomod2nix is on the
+# devShell PATH; `nix run .#gomod2nix` is the reload-independent fallback. A
+# maintenance leaf (not a `build`-verb aggregate member): buildGoApplication is
+# the freshness GATE (a stale toml fails the piggy-agent-conformance /
+# piggy-test-sshd builds in build-nix), so this is the manual REPAIR. The
+# conformist subdir freshness lane is deferred to conformist#79 (the stock
+# gomod2nix linter is tree-root-only).
 [group('maintenance')]
-build-gomod2nix:
+update-gomod2nix:
     cd go && gomod2nix
 
 # Compile the go/ module (`go build ./...`). Wired into the `build`
