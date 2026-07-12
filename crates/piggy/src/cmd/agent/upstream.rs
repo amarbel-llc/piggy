@@ -1,4 +1,4 @@
-//! Upstream SSH-agent proxying for `piggy agent` (piggy#215 step 1).
+//! Upstream SSH-agent proxying for `piggy agent` (piggy#215).
 //!
 //! Ported from amarbel-llc/ssh-agent-mux `src/lib.rs` (the identity-merge
 //! and pubkey→socket routing core), adapted to the crates.io
@@ -8,9 +8,10 @@
 //! multiplexer; piggy carries this port so the agent can serve native
 //! PIV keys and proxy everything else on one `SSH_AUTH_SOCK`.
 //!
-//! Scope here is deliberately step 1 of the #215 umbrella: identity
-//! listing and sign routing. Extension forwarding, lock/unlock fan-out,
-//! and `add_identity` routing are step 2.
+//! Covers #215 steps 1 + 2: identity listing, sign routing, extension
+//! forwarding (query union, best-effort fan-out, first-success
+//! forwarding), lock/unlock fan-out, and `add_identity` routing to the
+//! `--add-new-keys-to` upstream.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,7 +22,7 @@ use ssh_agent_lib::{
     agent::Session,
     client::Client,
     error::AgentError,
-    proto::{Identity, SignRequest},
+    proto::{AddIdentity, AddIdentityConstrained, Extension, Identity, SignRequest},
 };
 use ssh_key::{Signature, public::KeyData};
 use tokio::net::UnixStream;
@@ -85,11 +86,16 @@ pub fn parse_upstream_specs(specs: &[String]) -> Result<Vec<Upstream>, String> {
 /// `timeout`; a dead or slow upstream degrades to "no keys from that
 /// upstream" on listing and an error on signing — it never wedges the
 /// agent or the other upstreams.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct UpstreamPool {
     upstreams: Vec<Upstream>,
     timeout: Duration,
     known_keys: Arc<Mutex<HashMap<KeyData, usize>>>,
+    /// Index of the upstream `add_identity` requests are routed to
+    /// (`--add-new-keys-to`). `None` refuses adds — piggy's native keys
+    /// live on the card, so without a designated software agent there
+    /// is nowhere for an added key to go.
+    add_new_keys_to: Option<usize>,
 }
 
 impl UpstreamPool {
@@ -98,6 +104,22 @@ impl UpstreamPool {
             upstreams,
             timeout,
             known_keys: Arc::new(Mutex::new(HashMap::new())),
+            add_new_keys_to: None,
+        }
+    }
+
+    /// Designate the upstream that receives `add_identity` requests
+    /// (`--add-new-keys-to NAME`). Errors when `name` matches no
+    /// configured upstream — a startup error, not a runtime one.
+    pub fn with_add_new_keys_to(mut self, name: &str) -> Result<Self, String> {
+        match self.upstreams.iter().position(|u| u.name == name) {
+            Some(idx) => {
+                self.add_new_keys_to = Some(idx);
+                Ok(self)
+            }
+            None => Err(format!(
+                "--add-new-keys-to {name:?} matches no --upstream name"
+            )),
         }
     }
 
@@ -201,6 +223,177 @@ impl UpstreamPool {
                 )
             })?
     }
+
+    /// Union of the extension names the upstreams advertise, gathered by
+    /// forwarding the client's `query` request to each. Per-upstream
+    /// degrade: an unreachable upstream or an unparseable response just
+    /// contributes no names. May contain duplicates across upstreams —
+    /// the caller merges into its own name list with a contains-check.
+    pub async fn query_extension_names(&self, request: &Extension) -> Vec<String> {
+        let mut names = Vec::new();
+        for upstream in &self.upstreams {
+            let response = match self.extension_on(upstream, request.clone()).await {
+                Ok(Some(ext)) => ext,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::debug!(upstream = %upstream.name, "query skipped: {e}");
+                    continue;
+                }
+            };
+            match response.parse_message::<ssh_agent_lib::proto::extension::QueryResponse>() {
+                Ok(Some(qr)) => names.extend(qr.extensions),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(upstream = %upstream.name, "unparseable query response: {e}");
+                }
+            }
+        }
+        names
+    }
+
+    /// Forward an extension request to each upstream in configured
+    /// order; the first successful response wins. Any per-upstream
+    /// error (unsupported, unreachable, timeout) tries the next;
+    /// exhaustion returns the generic agent failure, matching what a
+    /// no-upstream agent answers for an unknown extension.
+    pub async fn forward_extension(
+        &self,
+        request: Extension,
+    ) -> Result<Option<Extension>, AgentError> {
+        for upstream in &self.upstreams {
+            match self.extension_on(upstream, request.clone()).await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    tracing::debug!(
+                        upstream = %upstream.name,
+                        extension = %request.name,
+                        "extension not served here: {e}"
+                    );
+                }
+            }
+        }
+        Err(AgentError::Failure)
+    }
+
+    /// Best-effort fan-out of an extension to every upstream
+    /// (session-bind: constraint-enforcing software agents should see
+    /// the binding). Failures are logged, never propagated — piggy's
+    /// native acceptance is the authoritative answer.
+    pub async fn fan_out_extension(&self, request: &Extension) {
+        for upstream in &self.upstreams {
+            if let Err(e) = self.extension_on(upstream, request.clone()).await {
+                tracing::debug!(
+                    upstream = %upstream.name,
+                    extension = %request.name,
+                    "fan-out skipped: {e}"
+                );
+            }
+        }
+    }
+
+    /// Best-effort lock fan-out. Failures are logged, never propagated:
+    /// a dead upstream's keys are unservable anyway, and the native
+    /// lock (PIN drop) already succeeded.
+    pub async fn lock_all(&self, key: &str) {
+        for upstream in &self.upstreams {
+            if let Err(e) = self.lock_on(upstream, key.to_string(), true).await {
+                tracing::warn!(upstream = %upstream.name, "lock fan-out failed: {e}");
+            }
+        }
+    }
+
+    /// Best-effort unlock fan-out; mirrors [`UpstreamPool::lock_all`].
+    /// Note the payload reaches every upstream — identical to today's
+    /// deployment, where the mux forwards `ssh-add -X` to all upstreams.
+    pub async fn unlock_all(&self, key: &str) {
+        for upstream in &self.upstreams {
+            if let Err(e) = self.lock_on(upstream, key.to_string(), false).await {
+                tracing::warn!(upstream = %upstream.name, "unlock fan-out failed: {e}");
+            }
+        }
+    }
+
+    /// Route an `add_identity` to the `--add-new-keys-to` upstream. The
+    /// added key is NOT cached into the routing map — the next listing
+    /// (or a sign-miss refresh) picks it up.
+    pub async fn add_identity(&self, identity: AddIdentity) -> Result<(), AgentError> {
+        let upstream = self.add_target()?;
+        tracing::debug!(upstream = %upstream.name, "routing add_identity to upstream");
+        let mut client = self.connect(upstream).await?;
+        timeout(self.timeout, client.add_identity(identity))
+            .await
+            .map_err(|_| {
+                AgentError::Other(
+                    format!("upstream {}: add_identity timed out", upstream.name).into(),
+                )
+            })?
+    }
+
+    /// Constrained variant of [`UpstreamPool::add_identity`]; the
+    /// constraints are forwarded verbatim (the upstream enforces them).
+    pub async fn add_identity_constrained(
+        &self,
+        identity: AddIdentityConstrained,
+    ) -> Result<(), AgentError> {
+        let upstream = self.add_target()?;
+        tracing::debug!(upstream = %upstream.name, "routing add_identity_constrained to upstream");
+        let mut client = self.connect(upstream).await?;
+        timeout(self.timeout, client.add_identity_constrained(identity))
+            .await
+            .map_err(|_| {
+                AgentError::Other(
+                    format!(
+                        "upstream {}: add_identity_constrained timed out",
+                        upstream.name
+                    )
+                    .into(),
+                )
+            })?
+    }
+
+    fn add_target(&self) -> Result<&Upstream, AgentError> {
+        self.add_new_keys_to
+            .map(|idx| &self.upstreams[idx])
+            .ok_or_else(|| {
+                AgentError::Other(
+                    "no --add-new-keys-to upstream configured; refusing to add a key".into(),
+                )
+            })
+    }
+
+    /// One timeout-bounded extension round-trip against one upstream.
+    async fn extension_on(
+        &self,
+        upstream: &Upstream,
+        request: Extension,
+    ) -> Result<Option<Extension>, AgentError> {
+        let mut client = self.connect(upstream).await?;
+        timeout(self.timeout, client.extension(request))
+            .await
+            .map_err(|_| {
+                AgentError::Other(format!("upstream {}: extension timed out", upstream.name).into())
+            })?
+    }
+
+    /// One timeout-bounded lock (`locked` = true) or unlock round-trip.
+    async fn lock_on(
+        &self,
+        upstream: &Upstream,
+        key: String,
+        locked: bool,
+    ) -> Result<(), AgentError> {
+        let mut client = self.connect(upstream).await?;
+        let fut = async {
+            if locked {
+                client.lock(key).await
+            } else {
+                client.unlock(key).await
+            }
+        };
+        timeout(self.timeout, fut).await.map_err(|_| {
+            AgentError::Other(format!("upstream {}: lock/unlock timed out", upstream.name).into())
+        })?
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +410,12 @@ pub(super) mod test_support {
     pub struct StubUpstream {
         pub identities: Vec<Identity>,
         pub signature: Signature,
+        /// Extension names this stub advertises via `query` and serves
+        /// (echoed back); anything else errors like an unsupporting agent.
+        pub extensions: Vec<String>,
+        /// Observable call log ("ext:<name>", "lock:<key>", …), shared
+        /// across per-connection clones so tests can assert fan-out.
+        pub events: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl StubUpstream {
@@ -224,7 +423,18 @@ pub(super) mod test_support {
             Self {
                 identities,
                 signature: canned_signature(),
+                extensions: Vec::new(),
+                events: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
+        }
+
+        pub fn with_extensions(mut self, names: &[&str]) -> Self {
+            self.extensions = names.iter().map(|s| s.to_string()).collect();
+            self
+        }
+
+        fn record(&self, event: String) {
+            self.events.lock().expect("stub events lock").push(event);
         }
     }
 
@@ -241,7 +451,51 @@ pub(super) mod test_support {
         }
 
         async fn sign(&mut self, _request: SignRequest) -> Result<Signature, AgentError> {
+            self.record("sign".into());
             Ok(self.signature.clone())
+        }
+
+        async fn extension(&mut self, request: Extension) -> Result<Option<Extension>, AgentError> {
+            self.record(format!("ext:{}", request.name));
+            if request.name == "query" {
+                let qr = ssh_agent_lib::proto::extension::QueryResponse {
+                    extensions: self.extensions.clone(),
+                };
+                return Ok(Some(Extension::new_message(qr)?));
+            }
+            if self.extensions.iter().any(|n| n == request.name.as_str()) {
+                return Ok(Some(Extension {
+                    name: request.name,
+                    details: b"stub-echo".to_vec().into(),
+                }));
+            }
+            Err(AgentError::Failure)
+        }
+
+        async fn lock(&mut self, key: String) -> Result<(), AgentError> {
+            self.record(format!("lock:{key}"));
+            Ok(())
+        }
+
+        async fn unlock(&mut self, key: String) -> Result<(), AgentError> {
+            self.record(format!("unlock:{key}"));
+            Ok(())
+        }
+
+        async fn add_identity(&mut self, _identity: AddIdentity) -> Result<(), AgentError> {
+            self.record("add_identity".into());
+            Ok(())
+        }
+
+        async fn add_identity_constrained(
+            &mut self,
+            identity: AddIdentityConstrained,
+        ) -> Result<(), AgentError> {
+            self.record(format!(
+                "add_identity_constrained:{}",
+                identity.constraints.len()
+            ));
+            Ok(())
         }
     }
 
@@ -260,6 +514,17 @@ pub(super) mod test_support {
         Identity {
             pubkey: KeyData::Ed25519(ssh_key::public::Ed25519PublicKey([seed; 32])),
             comment: comment.to_string(),
+        }
+    }
+
+    /// A syntactically valid Ed25519 add_identity request (fixed seed).
+    pub fn test_add_identity() -> AddIdentity {
+        let keypair = ssh_key::private::Ed25519Keypair::from_seed(&[7u8; 32]);
+        AddIdentity {
+            credential: ssh_agent_lib::proto::Credential::Key {
+                privkey: ssh_key::private::KeypairData::Ed25519(keypair),
+                comment: "test-add".into(),
+            },
         }
     }
 }
@@ -403,5 +668,132 @@ mod tests {
             format!("{err}").contains("no upstream agent holds"),
             "unexpected error: {err}"
         );
+    }
+
+    // -------- extension forwarding (#215 step 2) --------
+
+    fn query_request() -> Extension {
+        Extension {
+            name: "query".into(),
+            details: Vec::new().into(),
+        }
+    }
+
+    fn named_request(name: &str) -> Extension {
+        Extension {
+            name: name.into(),
+            details: Vec::new().into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn query_names_unions_across_upstreams() {
+        let a = StubUpstream::new(vec![]).with_extensions(&["foo@example", "bar@example"]);
+        let b = StubUpstream::new(vec![]).with_extensions(&["bar@example", "baz@example"]);
+        let pool = pool_of(vec![("a", spawn_stub("qa", a)), ("b", spawn_stub("qb", b))]);
+
+        let names = pool.query_extension_names(&query_request()).await;
+        for want in ["foo@example", "bar@example", "baz@example"] {
+            assert!(names.iter().any(|n| n == want), "missing {want}: {names:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_extension_first_supporting_upstream_wins() {
+        // First upstream does NOT support the extension (errors); the
+        // second does. The forward must skip to the second.
+        let a = StubUpstream::new(vec![]);
+        let b = StubUpstream::new(vec![]).with_extensions(&["special@example"]);
+        let a_events = a.events.clone();
+        let pool = pool_of(vec![("a", spawn_stub("fa", a)), ("b", spawn_stub("fb", b))]);
+
+        let resp = pool
+            .forward_extension(named_request("special@example"))
+            .await
+            .unwrap()
+            .expect("echo response");
+        assert_eq!(resp.name.as_str(), "special@example");
+        // The first upstream was actually tried (and refused).
+        assert!(
+            a_events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e == "ext:special@example"),
+            "first upstream never saw the request"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_extension_exhaustion_is_failure() {
+        let a = StubUpstream::new(vec![]);
+        let pool = pool_of(vec![("a", spawn_stub("fx", a))]);
+        let err = pool
+            .forward_extension(named_request("unsupported@example"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentError::Failure), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn lock_unlock_fan_out_to_every_upstream() {
+        let a = StubUpstream::new(vec![]);
+        let b = StubUpstream::new(vec![]);
+        let (a_events, b_events) = (a.events.clone(), b.events.clone());
+        let pool = pool_of(vec![("a", spawn_stub("la", a)), ("b", spawn_stub("lb", b))]);
+
+        pool.unlock_all("sekrit").await;
+        pool.lock_all("sekrit").await;
+
+        for events in [a_events, b_events] {
+            let events = events.lock().unwrap();
+            assert!(events.iter().any(|e| e == "unlock:sekrit"), "{events:?}");
+            assert!(events.iter().any(|e| e == "lock:sekrit"), "{events:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn add_identity_routes_only_to_designated_upstream() {
+        let a = StubUpstream::new(vec![]);
+        let b = StubUpstream::new(vec![]);
+        let (a_events, b_events) = (a.events.clone(), b.events.clone());
+        let pool = pool_of(vec![("a", spawn_stub("aa", a)), ("b", spawn_stub("ab", b))])
+            .with_add_new_keys_to("b")
+            .unwrap();
+
+        pool.add_identity(test_add_identity()).await.unwrap();
+
+        assert!(
+            !a_events.lock().unwrap().iter().any(|e| e == "add_identity"),
+            "non-designated upstream received the add"
+        );
+        assert!(
+            b_events.lock().unwrap().iter().any(|e| e == "add_identity"),
+            "designated upstream never received the add"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_identity_without_target_refuses() {
+        let a = StubUpstream::new(vec![]);
+        let pool = pool_of(vec![("a", spawn_stub("ar", a))]);
+        let err = pool.add_identity(test_add_identity()).await.unwrap_err();
+        assert!(
+            format!("{err}").contains("no --add-new-keys-to"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn with_add_new_keys_to_rejects_unknown_name() {
+        let pool = UpstreamPool::new(
+            vec![Upstream {
+                name: "a".into(),
+                path: PathBuf::from("/tmp/a.sock"),
+            }],
+            Duration::from_secs(1),
+        );
+        let err = pool.with_add_new_keys_to("nope").unwrap_err();
+        assert!(err.contains("matches no --upstream name"), "{err}");
     }
 }

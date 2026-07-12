@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use ssh_agent_lib::{
     agent::Session,
     error::AgentError,
-    proto::{Extension, Identity, SignRequest, signature},
+    proto::{AddIdentity, AddIdentityConstrained, Extension, Identity, SignRequest, signature},
 };
 use ssh_key::{Algorithm, PublicKey, Signature, public::KeyData};
 
@@ -230,6 +230,31 @@ impl Session for PiggyAgent {
         crate::stats::agent_op(&op, crate::stats::outcome_of(&res), start.elapsed());
         res
     }
+
+    async fn add_identity(&mut self, identity: AddIdentity) -> Result<(), AgentError> {
+        let start = std::time::Instant::now();
+        let res = self.add_identity_inner(identity).await;
+        crate::stats::agent_op(
+            "add_identity",
+            crate::stats::outcome_of(&res),
+            start.elapsed(),
+        );
+        res
+    }
+
+    async fn add_identity_constrained(
+        &mut self,
+        identity: AddIdentityConstrained,
+    ) -> Result<(), AgentError> {
+        let start = std::time::Instant::now();
+        let res = self.add_identity_constrained_inner(identity).await;
+        crate::stats::agent_op(
+            "add_identity_constrained",
+            crate::stats::outcome_of(&res),
+            start.elapsed(),
+        );
+        res
+    }
 }
 
 impl PiggyAgent {
@@ -319,16 +344,48 @@ impl PiggyAgent {
         }
     }
 
-    async fn lock_inner(&mut self, _key: String) -> Result<(), AgentError> {
-        let mut pin = self.pin.lock().await;
-        *pin = None;
+    async fn lock_inner(&mut self, key: String) -> Result<(), AgentError> {
+        {
+            let mut pin = self.pin.lock().await;
+            *pin = None;
+        }
+        // piggy#215: best-effort fan-out so upstream agents lock too —
+        // the same reach `ssh-add -x` had through the mux. A dead
+        // upstream's keys are unservable anyway, so its failure never
+        // fails the native lock.
+        if !self.upstreams.is_empty() {
+            self.upstreams.lock_all(&key).await;
+        }
         Ok(())
     }
 
     async fn unlock_inner(&mut self, key: String) -> Result<(), AgentError> {
-        let mut pin = self.pin.lock().await;
-        *pin = Some(key);
+        {
+            let mut pin = self.pin.lock().await;
+            *pin = Some(key.clone());
+        }
+        // piggy#215: mirror of lock_inner's fan-out. The payload (for
+        // piggy, the PIN) reaches every upstream — identical to today's
+        // mux, which forwards `ssh-add -X` to all upstreams.
+        if !self.upstreams.is_empty() {
+            self.upstreams.unlock_all(&key).await;
+        }
         Ok(())
+    }
+
+    async fn add_identity_inner(&mut self, identity: AddIdentity) -> Result<(), AgentError> {
+        // piggy#215: piggy's native keys live on the card, so an added
+        // software key can only go to the --add-new-keys-to upstream;
+        // without one configured, refuse (the pool errors identically
+        // when it has no target).
+        self.upstreams.add_identity(identity).await
+    }
+
+    async fn add_identity_constrained_inner(
+        &mut self,
+        identity: AddIdentityConstrained,
+    ) -> Result<(), AgentError> {
+        self.upstreams.add_identity_constrained(identity).await
     }
 
     async fn extension_inner(
@@ -337,16 +394,30 @@ impl PiggyAgent {
     ) -> Result<Option<Extension>, AgentError> {
         match extension.name.as_str() {
             "query" => {
-                let supported: &[&str] = &[
+                let mut supported: Vec<String> = [
                     "query",
                     "session-bind@openssh.com",
                     "pin-status@joyent.com",
                     "ecdh@joyent.com",
                     "ecdh-rebox@joyent.com",
                     "ykpiv-attest@joyent.com",
-                ];
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+                // piggy#215: union in the names the upstreams advertise,
+                // after the native names and without duplicates. The
+                // flat length-prefixed encoding below is unchanged —
+                // it's what pivy's query parser expects (#119/#123).
+                if !self.upstreams.is_empty() {
+                    for name in self.upstreams.query_extension_names(&extension).await {
+                        if !supported.contains(&name) {
+                            supported.push(name);
+                        }
+                    }
+                }
                 let mut buf = Vec::new();
-                for name in supported {
+                for name in &supported {
                     let bytes = name.as_bytes();
                     buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
                     buf.extend_from_slice(bytes);
@@ -356,7 +427,15 @@ impl PiggyAgent {
                     details: buf.into(),
                 }))
             }
-            "session-bind@openssh.com" => Ok(None),
+            "session-bind@openssh.com" => {
+                // Accept natively (unchanged) and best-effort fan out so
+                // constraint-enforcing upstream agents see the binding;
+                // upstream failures never fail the accept (#215).
+                if !self.upstreams.is_empty() {
+                    self.upstreams.fan_out_extension(&extension).await;
+                }
+                Ok(None)
+            }
             "pin-status@joyent.com" => {
                 let pin_guard = self.pin.lock().await;
                 let has_pin: u8 = if pin_guard.is_some() { 1 } else { 0 };
@@ -382,6 +461,10 @@ impl PiggyAgent {
                 self.handle_attest(&extension.details.clone().into_bytes())
                     .await
             }
+            // piggy#215: an extension piggy doesn't serve natively is
+            // forwarded to the upstreams (first success wins); without
+            // upstreams, refuse exactly as before.
+            _ if !self.upstreams.is_empty() => self.upstreams.forward_extension(extension).await,
             _ => Err(AgentError::from(
                 ssh_agent_lib::proto::ProtoError::UnsupportedCommand { command: 27 },
             )),
@@ -1778,6 +1861,148 @@ mod tests {
             .unwrap_err();
         assert!(
             format!("{err}").contains("no upstream agent holds"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // -------- Session impl: extension/lock/add proxying (#215 step 2) --------
+
+    fn ext_request(name: &str) -> Extension {
+        Extension {
+            name: name.into(),
+            details: Vec::new().into(),
+        }
+    }
+
+    /// Decode piggy's flat query response (u32-length-prefixed names).
+    fn decode_flat_query_names(details: &[u8]) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut pos = 0usize;
+        while pos + 4 <= details.len() {
+            let len = u32::from_be_bytes(details[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            names.push(String::from_utf8(details[pos..pos + len].to_vec()).unwrap());
+            pos += len;
+        }
+        names
+    }
+
+    #[tokio::test]
+    async fn query_unions_upstream_names_after_native() {
+        let stub = upstream_stub::StubUpstream::new(vec![])
+            .with_extensions(&["special@example", "ecdh@joyent.com"]);
+        let path = upstream_stub::spawn_stub("sess-query", stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+
+        let resp = agent
+            .extension(ext_request("query"))
+            .await
+            .unwrap()
+            .expect("query response");
+        let names = decode_flat_query_names(&resp.details.clone().into_bytes());
+        assert_eq!(names[0], "query", "native names stay first");
+        assert!(names.iter().any(|n| n == "special@example"), "{names:?}");
+        // Advertised both natively and upstream: exactly once.
+        assert_eq!(
+            names.iter().filter(|n| *n == "ecdh@joyent.com").count(),
+            1,
+            "{names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_extension_forwarded_to_upstream() {
+        let stub = upstream_stub::StubUpstream::new(vec![]).with_extensions(&["special@example"]);
+        let path = upstream_stub::spawn_stub("sess-fwd", stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+
+        let resp = agent
+            .extension(ext_request("special@example"))
+            .await
+            .unwrap()
+            .expect("forwarded response");
+        assert_eq!(resp.name.as_str(), "special@example");
+        assert_eq!(resp.details.clone().into_bytes(), b"stub-echo".to_vec());
+    }
+
+    #[tokio::test]
+    async fn session_bind_accepts_natively_and_fans_out() {
+        let stub = upstream_stub::StubUpstream::new(vec![]);
+        let events = stub.events.clone();
+        let path = upstream_stub::spawn_stub("sess-bind", stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+
+        let resp = agent
+            .extension(ext_request("session-bind@openssh.com"))
+            .await
+            .unwrap();
+        assert!(resp.is_none(), "native accept unchanged");
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e == "ext:session-bind@openssh.com"),
+            "binding never reached the upstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_unlock_manage_pin_and_fan_out() {
+        let stub = upstream_stub::StubUpstream::new(vec![]);
+        let events = stub.events.clone();
+        let path = upstream_stub::spawn_stub("sess-lock", stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+
+        agent.unlock("123456".to_string()).await.unwrap();
+        assert!(agent.pin_handle().lock().await.is_some(), "PIN cached");
+        agent.lock(String::new()).await.unwrap();
+        assert!(agent.pin_handle().lock().await.is_none(), "PIN dropped");
+
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|e| e == "unlock:123456"), "{events:?}");
+        assert!(events.iter().any(|e| e == "lock:"), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn add_identity_routes_to_designated_upstream() {
+        let stub = upstream_stub::StubUpstream::new(vec![]);
+        let events = stub.events.clone();
+        let path = upstream_stub::spawn_stub("sess-add", stub);
+        let pool = UpstreamPool::new(
+            vec![Upstream {
+                name: "soft".into(),
+                path,
+            }],
+            std::time::Duration::from_secs(5),
+        )
+        .with_add_new_keys_to("soft")
+        .unwrap();
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool);
+
+        agent
+            .add_identity(upstream_stub::test_add_identity())
+            .await
+            .unwrap();
+        assert!(
+            events.lock().unwrap().iter().any(|e| e == "add_identity"),
+            "designated upstream never received the add"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_identity_without_target_refuses() {
+        // Upstreams configured but no --add-new-keys-to: refuse.
+        let stub = upstream_stub::StubUpstream::new(vec![]);
+        let path = upstream_stub::spawn_stub("sess-add-no", stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+
+        let err = agent
+            .add_identity(upstream_stub::test_add_identity())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("no --add-new-keys-to"),
             "unexpected error: {err}"
         );
     }

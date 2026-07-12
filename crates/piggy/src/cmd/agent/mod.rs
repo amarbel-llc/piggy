@@ -18,7 +18,7 @@ mod session;
 mod upstream;
 
 use session::{CachedKey, PiggyAgent};
-use upstream::{Upstream, UpstreamPool, parse_upstream_specs};
+use upstream::{UpstreamPool, parse_upstream_specs};
 
 /// Clap arguments for `piggy agent`.
 #[derive(Parser, Debug)]
@@ -80,6 +80,12 @@ pub struct AgentArgs {
     /// Per-upstream request timeout in seconds (connect/list/sign)
     #[arg(long = "agent-timeout", value_name = "SECONDS", default_value_t = 5)]
     pub agent_timeout: u64,
+
+    /// Route add_identity (ssh-add) requests to this named --upstream;
+    /// without it, adds are refused (piggy's native keys live on the
+    /// card — an added software key needs a software agent to go to)
+    #[arg(long = "add-new-keys-to", value_name = "NAME", requires = "upstream")]
+    pub add_new_keys_to: Option<String>,
 
     /// Command to execute with agent env set
     #[arg(trailing_var_arg = true)]
@@ -164,13 +170,37 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         None => None,
     };
 
-    // Parse the upstream proxy specs (piggy#215). Malformed specs and
-    // duplicate names are startup errors, not runtime degradation.
+    // Build the upstream proxy pool (piggy#215). Malformed specs,
+    // duplicate names, and an unresolvable --add-new-keys-to are
+    // startup errors, not runtime degradation.
     let upstreams = match parse_upstream_specs(&cli.upstream) {
         Ok(ups) => ups,
         Err(e) => {
             eprintln!("piggy agent: {e}");
             return 1;
+        }
+    };
+    let upstream_pool: Option<UpstreamPool> = if upstreams.is_empty() {
+        None
+    } else {
+        tracing::info!(
+            upstreams = %upstreams
+                .iter()
+                .map(|u| u.name.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            "proxying upstream agents"
+        );
+        let pool = UpstreamPool::new(upstreams, std::time::Duration::from_secs(cli.agent_timeout));
+        match cli.add_new_keys_to.as_deref() {
+            Some(name) => match pool.with_add_new_keys_to(name) {
+                Ok(pool) => Some(pool),
+                Err(e) => {
+                    eprintln!("piggy agent: {e}");
+                    return 1;
+                }
+            },
+            None => Some(pool),
         }
     };
 
@@ -215,7 +245,13 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         }
     };
 
-    match rt.block_on(run_async(cli, cached_keys, primary_guid, config, upstreams)) {
+    match rt.block_on(run_async(
+        cli,
+        cached_keys,
+        primary_guid,
+        config,
+        upstream_pool,
+    )) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("piggy agent: {}", e);
@@ -333,7 +369,7 @@ async fn run_async(
     cached_keys: Vec<CachedKey>,
     primary_guid: Option<piggy_piv::Guid>,
     config: KeyLoadConfig,
-    upstreams: Vec<Upstream>,
+    upstream_pool: Option<UpstreamPool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Determine socket path
     let socket_path = match cli.socket {
@@ -378,21 +414,9 @@ async fn run_async(
     // piggy#215: with --upstream flags, proxy the named agents for keys
     // piggy does not serve natively. Without them the pool stays empty
     // and the agent behaves exactly as before.
-    let agent = if upstreams.is_empty() {
-        agent
-    } else {
-        tracing::info!(
-            upstreams = %upstreams
-                .iter()
-                .map(|u| u.name.as_str())
-                .collect::<Vec<_>>()
-                .join(","),
-            "proxying upstream agents"
-        );
-        agent.with_upstream_pool(UpstreamPool::new(
-            upstreams,
-            std::time::Duration::from_secs(cli.agent_timeout),
-        ))
+    let agent = match upstream_pool {
+        Some(pool) => agent.with_upstream_pool(pool),
+        None => agent,
     };
 
     // Spawn the card-presence probe loop (piggy#59): polls the primary card
@@ -543,5 +567,24 @@ mod tests {
         let cli = AgentArgs::try_parse_from(["piggy agent", "-A"]).unwrap();
         assert!(cli.upstream.is_empty());
         assert_eq!(cli.agent_timeout, 5);
+        assert!(cli.add_new_keys_to.is_none());
+    }
+
+    #[test]
+    fn agent_args_add_new_keys_to_requires_an_upstream() {
+        let err = AgentArgs::try_parse_from(["piggy agent", "--add-new-keys-to", "soft"]);
+        assert!(
+            err.is_err(),
+            "--add-new-keys-to without --upstream must be rejected"
+        );
+        let ok = AgentArgs::try_parse_from([
+            "piggy agent",
+            "--upstream",
+            "soft=/tmp/s.sock",
+            "--add-new-keys-to",
+            "soft",
+        ])
+        .unwrap();
+        assert_eq!(ok.add_new_keys_to.as_deref(), Some("soft"));
     }
 }
