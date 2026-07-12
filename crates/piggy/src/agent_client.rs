@@ -197,6 +197,47 @@ pub fn probe_extensions(socket_path: &Path, timeout: Duration) -> Result<Vec<Str
     })
 }
 
+/// Send the `upstream-status@piggy` extension (piggy#215 step 5) and
+/// parse the JSON payload of per-upstream reachability the agent
+/// self-reports. Same fresh-connection/timeout shell as
+/// [`probe_identities`]. Only meaningful after the `query` probe showed
+/// the agent advertises the extension (it answers it only when
+/// upstreams are configured).
+pub fn probe_upstream_status(
+    socket_path: &Path,
+    timeout: Duration,
+) -> Result<Vec<crate::cmd::agent::upstream::UpstreamStatus>, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+
+    let socket_path = socket_path.to_path_buf();
+
+    runtime.block_on(async move {
+        tokio::time::timeout(timeout, async {
+            let stream = UnixStream::connect(&socket_path)
+                .await
+                .map_err(|e| format!("connect {}: {e}", socket_path.display()))?;
+            let mut client = Client::new(stream);
+            let response = client
+                .extension(Extension {
+                    name: crate::cmd::agent::upstream::UPSTREAM_STATUS_EXT.into(),
+                    details: Vec::new().into(),
+                })
+                .await
+                .map_err(|e| format!("upstream-status extension: {e}"))?;
+            let ext = response.ok_or_else(|| {
+                "agent answered upstream-status with plain SUCCESS (no payload)".to_string()
+            })?;
+            serde_json::from_slice(ext.details.as_ref())
+                .map_err(|e| format!("unparseable upstream-status payload: {e}"))
+        })
+        .await
+        .map_err(|_| format!("timeout after {timeout:?}"))?
+    })
+}
+
 /// Fixed nonce the sign-test probe asks the agent to sign. Its content is
 /// irrelevant — the probe only cares whether the agent produces a signature
 /// at all — but a recognizable, non-secret marker keeps it obvious in any

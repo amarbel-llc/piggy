@@ -8,10 +8,11 @@
 //! multiplexer; piggy carries this port so the agent can serve native
 //! PIV keys and proxy everything else on one `SSH_AUTH_SOCK`.
 //!
-//! Covers #215 steps 1 + 2: identity listing, sign routing, extension
-//! forwarding (query union, best-effort fan-out, first-success
-//! forwarding), lock/unlock fan-out, and `add_identity` routing to the
-//! `--add-new-keys-to` upstream.
+//! Covers #215 steps 1, 2, and 5: identity listing, sign routing,
+//! extension forwarding (query union, best-effort fan-out,
+//! first-success forwarding), lock/unlock fan-out, `add_identity`
+//! routing to the `--add-new-keys-to` upstream, and the
+//! `upstream-status@piggy` self-report `piggy health` reads.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,8 +30,27 @@ use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+/// The piggy-private extension `piggy health` uses to ask a running
+/// agent about its upstreams (piggy#215 step 5). Implemented ONLY by
+/// piggy; the upstreams themselves are probed with plain
+/// `request_identities`, so they need nothing. Advertised in `query`
+/// (and answered) only when upstreams are configured — its absence
+/// tells health there is nothing to check. Response payload: a JSON
+/// array of [`UpstreamStatus`].
+pub const UPSTREAM_STATUS_EXT: &str = "upstream-status@piggy";
+
+/// One upstream's health as self-reported by the agent (the
+/// [`UPSTREAM_STATUS_EXT`] payload element).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UpstreamStatus {
+    pub name: String,
+    pub reachable: bool,
+    /// Identities the upstream served on the probe; 0 when unreachable.
+    pub keys: usize,
+}
+
 /// One configured upstream agent (`--upstream NAME=PATH`). The name is a
-/// human handle for logs (and, later, `piggy health` check points); the
+/// human handle for logs (and `piggy health` check points); the
 /// socket path is the routing target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Upstream {
@@ -359,6 +379,29 @@ impl UpstreamPool {
                     "no --add-new-keys-to upstream configured; refusing to add a key".into(),
                 )
             })
+    }
+
+    /// Probe every upstream with a plain `request_identities` and
+    /// report reachability + key count (the [`UPSTREAM_STATUS_EXT`]
+    /// payload). Read-only, PIN-free, never errors — an unreachable
+    /// upstream reports `reachable: false`.
+    pub async fn status(&self) -> Vec<UpstreamStatus> {
+        let mut out = Vec::with_capacity(self.upstreams.len());
+        for upstream in &self.upstreams {
+            let keys = match self.connect(upstream).await {
+                Ok(mut client) => match timeout(self.timeout, client.request_identities()).await {
+                    Ok(Ok(ids)) => Some(ids.len()),
+                    Ok(Err(_)) | Err(_) => None,
+                },
+                Err(_) => None,
+            };
+            out.push(UpstreamStatus {
+                name: upstream.name.clone(),
+                reachable: keys.is_some(),
+                keys: keys.unwrap_or(0),
+            });
+        }
+        out
     }
 
     /// One timeout-bounded extension round-trip against one upstream.
@@ -785,6 +828,31 @@ mod tests {
         assert!(
             format!("{err}").contains("no --add-new-keys-to"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_reports_reachable_and_dead_upstreams_in_order() {
+        let live = StubUpstream::new(vec![upstream_identity(0xE1, "k")]);
+        let live_path = spawn_stub("st", live);
+        let dead = PathBuf::from("/tmp/pgup-nonexistent.sock");
+        let pool = pool_of(vec![("live", live_path), ("dead", dead)]);
+
+        let st = pool.status().await;
+        assert_eq!(
+            st,
+            vec![
+                UpstreamStatus {
+                    name: "live".into(),
+                    reachable: true,
+                    keys: 1,
+                },
+                UpstreamStatus {
+                    name: "dead".into(),
+                    reachable: false,
+                    keys: 0,
+                },
+            ]
         );
     }
 

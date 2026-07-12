@@ -405,11 +405,15 @@ impl PiggyAgent {
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
-                // piggy#215: union in the names the upstreams advertise,
-                // after the native names and without duplicates. The
-                // flat length-prefixed encoding below is unchanged —
-                // it's what pivy's query parser expects (#119/#123).
+                // piggy#215: with upstreams configured, advertise the
+                // self-reporting status extension (piggy health's probe
+                // target — its absence means "nothing to check") and
+                // union in the names the upstreams advertise, after the
+                // native names and without duplicates. The flat
+                // length-prefixed encoding below is unchanged — it's
+                // what pivy's query parser expects (#119/#123).
                 if !self.upstreams.is_empty() {
+                    supported.push(super::upstream::UPSTREAM_STATUS_EXT.to_string());
                     for name in self.upstreams.query_extension_names(&extension).await {
                         if !supported.contains(&name) {
                             supported.push(name);
@@ -460,6 +464,19 @@ impl PiggyAgent {
             "ykpiv-attest@joyent.com" => {
                 self.handle_attest(&extension.details.clone().into_bytes())
                     .await
+            }
+            // piggy#215 step 5: self-report per-upstream reachability
+            // for `piggy health`. Only answered when upstreams are
+            // configured — otherwise it falls through to the refusal
+            // below, exactly like any other unknown name.
+            n if n == super::upstream::UPSTREAM_STATUS_EXT && !self.upstreams.is_empty() => {
+                let statuses = self.upstreams.status().await;
+                let json = serde_json::to_vec(&statuses)
+                    .map_err(|e| AgentError::Other(format!("upstream-status: {e}").into()))?;
+                Ok(Some(Extension {
+                    name: super::upstream::UPSTREAM_STATUS_EXT.into(),
+                    details: json.into(),
+                }))
             }
             // piggy#215: an extension piggy doesn't serve natively is
             // forwarded to the upstreams (first success wins); without
@@ -1988,6 +2005,50 @@ mod tests {
             events.lock().unwrap().iter().any(|e| e == "add_identity"),
             "designated upstream never received the add"
         );
+    }
+
+    #[tokio::test]
+    async fn upstream_status_extension_advertised_and_answers() {
+        let stub =
+            upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(0x21, "k1")]);
+        let path = upstream_stub::spawn_stub("sess-status", stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+
+        // Advertised in query only because upstreams are configured...
+        let resp = agent
+            .extension(ext_request("query"))
+            .await
+            .unwrap()
+            .expect("query response");
+        let names = decode_flat_query_names(&resp.details.clone().into_bytes());
+        assert!(
+            names.iter().any(|n| n == "upstream-status@piggy"),
+            "{names:?}"
+        );
+
+        // ...and answered with a JSON payload naming the upstream.
+        let resp = agent
+            .extension(ext_request("upstream-status@piggy"))
+            .await
+            .unwrap()
+            .expect("status payload");
+        let statuses: Vec<crate::cmd::agent::upstream::UpstreamStatus> =
+            serde_json::from_slice(&resp.details.clone().into_bytes()).unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].name, "stub");
+        assert!(statuses[0].reachable);
+        assert_eq!(statuses[0].keys, 1);
+    }
+
+    #[tokio::test]
+    async fn upstream_status_extension_refused_without_upstreams() {
+        // Without upstreams the name is neither advertised nor served —
+        // same refusal as any unknown extension.
+        let mut agent = PiggyAgent::new(Vec::new());
+        agent
+            .extension(ext_request("upstream-status@piggy"))
+            .await
+            .unwrap_err();
     }
 
     #[tokio::test]

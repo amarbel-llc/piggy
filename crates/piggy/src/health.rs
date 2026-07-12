@@ -47,7 +47,9 @@ pub enum Status {
 }
 
 pub struct CheckResult {
-    pub name: &'static str,
+    /// `String` (not `&'static str`) because the piggy#215 upstream
+    /// points carry the upstream's configured name.
+    pub name: String,
     pub status: Status,
     /// Rendered as the YAML diagnostic block (TAP) / diagnostics map
     /// (ndjson). Failures always carry diags; passes only under -v.
@@ -104,6 +106,11 @@ pub struct Probes {
     pub agent: Option<Result<Vec<String>, String>>,
     /// Ok(extension names from the `query` extension); Err = query failed.
     pub extensions: Option<Result<Vec<String>, String>>,
+    /// piggy#215 step 5: the agent's self-reported per-upstream status.
+    /// `None` = not probed (query failed/skipped, or the agent doesn't
+    /// advertise `upstream-status@piggy` — i.e. no upstreams
+    /// configured); `Some(Err)` = advertised but the probe failed.
+    pub upstreams: Option<Result<Vec<piggy::cmd::agent::upstream::UpstreamStatus>, String>>,
     pub pcsc: PcscProbe,
     pub cards: Option<Vec<CardInfo>>,
 }
@@ -419,7 +426,7 @@ fn probe_cards() -> (PcscProbe, Option<Vec<CardInfo>>) {
 pub fn gather() -> Probes {
     let service = probe_service();
     let socket = resolve_socket();
-    let (agent, extensions) = match &socket {
+    let (agent, extensions, upstreams) = match &socket {
         SocketProbe::Resolved {
             path,
             is_socket: true,
@@ -431,9 +438,25 @@ pub fn gather() -> Probes {
             } else {
                 None
             };
-            (Some(ids), exts)
+            // piggy#215 step 5: the status extension is advertised only
+            // by an agent with upstreams configured; absence means
+            // "nothing to check", not a failure.
+            let ups = match &exts {
+                Some(Ok(names))
+                    if names
+                        .iter()
+                        .any(|n| n == piggy::cmd::agent::upstream::UPSTREAM_STATUS_EXT) =>
+                {
+                    Some(piggy::agent_client::probe_upstream_status(
+                        path,
+                        PROBE_TIMEOUT,
+                    ))
+                }
+                _ => None,
+            };
+            (Some(ids), exts, ups)
         }
-        _ => (None, None),
+        _ => (None, None, None),
     };
     let (pcsc, cards) = probe_cards();
     Probes {
@@ -441,6 +464,7 @@ pub fn gather() -> Probes {
         socket,
         agent,
         extensions,
+        upstreams,
         pcsc,
         cards,
     }
@@ -666,16 +690,16 @@ fn render_into(
             .collect();
         match &r.status {
             Status::Pass if verbose && !diags.is_empty() => {
-                rep.ok_diag(r.name, &diags)?;
+                rep.ok_diag(&r.name, &diags)?;
             }
             Status::Pass => {
-                rep.ok(r.name)?;
+                rep.ok(&r.name)?;
             }
             Status::Fail => {
-                rep.not_ok_diag(r.name, &diags)?;
+                rep.not_ok_diag(&r.name, &diags)?;
             }
             Status::Skip(reason) => {
-                rep.skip(r.name, reason)?;
+                rep.skip(&r.name, reason)?;
             }
         }
     }
@@ -697,21 +721,24 @@ fn socket_skip_reason(socket: &SocketProbe) -> String {
     }
 }
 
-/// Derive the fixed 9-point plan from probe outcomes. Pure: no IO — the
+/// Derive the check plan from probe outcomes. Pure: no IO — the BASE
 /// plan is always 9 points in the documented order, with SKIP cascades
-/// when a prerequisite probe failed or was not attempted.
+/// when a prerequisite probe failed or was not attempted. An agent that
+/// advertises `upstream-status@piggy` (piggy#215: it has `--upstream`
+/// proxying configured) appends one point per upstream after the base
+/// nine; agents without upstreams keep the exact 9-point plan.
 pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     let mut out = Vec::with_capacity(9);
 
     // 1 — service
     out.push(match &probes.service {
         ServiceProbe::NotAvailable(why) => CheckResult {
-            name: SERVICE_POINT_NAME,
+            name: SERVICE_POINT_NAME.into(),
             status: Status::Skip(why.clone()),
             diags: vec![],
         },
         ServiceProbe::UnitNotFound => CheckResult {
-            name: SERVICE_POINT_NAME,
+            name: SERVICE_POINT_NAME.into(),
             status: Status::Skip("no piggy-agent service unit installed".into()),
             diags: vec![],
         },
@@ -721,7 +748,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
             sub_state,
             exec_main_status,
         } => CheckResult {
-            name: SERVICE_POINT_NAME,
+            name: SERVICE_POINT_NAME.into(),
             status: if active_state == "active" {
                 Status::Pass
             } else {
@@ -740,7 +767,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     match &probes.socket {
         SocketProbe::Unresolved => {
             out.push(CheckResult {
-                name: "agent: socket resolved",
+                name: "agent: socket resolved".into(),
                 status: Status::Fail,
                 diags: vec![(
                     "error".into(),
@@ -748,7 +775,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
                 )],
             });
             out.push(CheckResult {
-                name: "agent: socket exists",
+                name: "agent: socket exists".into(),
                 status: Status::Skip("socket unresolved".into()),
                 diags: vec![],
             });
@@ -760,7 +787,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
             stat_detail,
         } => {
             out.push(CheckResult {
-                name: "agent: socket resolved",
+                name: "agent: socket resolved".into(),
                 status: Status::Pass,
                 diags: vec![
                     ("source".into(), (*source).into()),
@@ -768,7 +795,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
                 ],
             });
             out.push(CheckResult {
-                name: "agent: socket exists",
+                name: "agent: socket exists".into(),
                 status: if *is_socket {
                     Status::Pass
                 } else {
@@ -782,19 +809,19 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     // 4 — agent answers request_identities
     out.push(match &probes.agent {
         None => CheckResult {
-            name: "agent: answers request_identities",
+            name: "agent: answers request_identities".into(),
             status: Status::Skip(socket_skip_reason(&probes.socket)),
             diags: vec![],
         },
         Some(Err(e)) => CheckResult {
-            name: "agent: answers request_identities",
+            name: "agent: answers request_identities".into(),
             status: Status::Fail,
             diags: vec![("error".into(), e.clone())],
         },
         // NOTE: identities: 0 still passes here — point 9 owns the
         // cross-referenced verdict (zero-identities semantics, design doc).
         Some(Ok(ids)) => CheckResult {
-            name: "agent: answers request_identities",
+            name: "agent: answers request_identities".into(),
             status: Status::Pass,
             diags: vec![("identities".into(), ids.len().to_string())],
         },
@@ -811,7 +838,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
         // panic on any input, so it falls back to "agent did not
         // answer".
         None => CheckResult {
-            name: "agent: advertises ecdh extension",
+            name: "agent: advertises ecdh extension".into(),
             status: Status::Skip(match &probes.agent {
                 None => socket_skip_reason(&probes.socket),
                 Some(_) => "agent did not answer".into(),
@@ -823,12 +850,12 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
         // catch). The error text carries the unsupported-vs-failed
         // detail under the file-consistent "error" key.
         Some(Err(e)) => CheckResult {
-            name: "agent: advertises ecdh extension",
+            name: "agent: advertises ecdh extension".into(),
             status: Status::Fail,
             diags: vec![("error".into(), e.clone())],
         },
         Some(Ok(names)) => CheckResult {
-            name: "agent: advertises ecdh extension",
+            name: "agent: advertises ecdh extension".into(),
             status: if names.iter().any(|n| n == ECDH_EXT) {
                 Status::Pass
             } else {
@@ -841,12 +868,12 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     // 6 — pcsc daemon reachable
     out.push(match &probes.pcsc {
         PcscProbe::Ok => CheckResult {
-            name: "pcsc: daemon reachable",
+            name: "pcsc: daemon reachable".into(),
             status: Status::Pass,
             diags: vec![],
         },
         PcscProbe::Error(e) => CheckResult {
-            name: "pcsc: daemon reachable",
+            name: "pcsc: daemon reachable".into(),
             status: Status::Fail,
             diags: vec![("error".into(), e.clone())],
         },
@@ -855,17 +882,17 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     // 7 — card attached
     out.push(match &probes.cards {
         None => CheckResult {
-            name: "card: PIV card attached",
+            name: "card: PIV card attached".into(),
             status: Status::Skip("pcscd unreachable".into()),
             diags: vec![],
         },
         Some(cards) if cards.is_empty() => CheckResult {
-            name: "card: PIV card attached",
+            name: "card: PIV card attached".into(),
             status: Status::Fail,
             diags: vec![("cards".into(), "0".into())],
         },
         Some(cards) => CheckResult {
-            name: "card: PIV card attached",
+            name: "card: PIV card attached".into(),
             status: Status::Pass,
             diags: cards
                 .iter()
@@ -882,17 +909,17 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     // 8 — slot 9D populated on any attached card
     out.push(match &probes.cards {
         None => CheckResult {
-            name: "card: key-management slot 9D populated",
+            name: "card: key-management slot 9D populated".into(),
             status: Status::Skip("pcscd unreachable".into()),
             diags: vec![],
         },
         Some(cards) if cards.is_empty() => CheckResult {
-            name: "card: key-management slot 9D populated",
+            name: "card: key-management slot 9D populated".into(),
             status: Status::Skip("no card attached".into()),
             diags: vec![],
         },
         Some(cards) => CheckResult {
-            name: "card: key-management slot 9D populated",
+            name: "card: key-management slot 9D populated".into(),
             status: if cards.iter().any(|c| c.slot_9d_populated) {
                 Status::Pass
             } else {
@@ -923,7 +950,7 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
         (Some(Ok(ids)), true) => {
             if ids.is_empty() {
                 CheckResult {
-                    name: "agent serves attached card",
+                    name: "agent serves attached card".into(),
                     status: Status::Fail,
                     diags: vec![(
                         "hint".into(),
@@ -932,18 +959,44 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
                 }
             } else {
                 CheckResult {
-                    name: "agent serves attached card",
+                    name: "agent serves attached card".into(),
                     status: Status::Pass,
                     diags: vec![("identities".into(), ids.len().to_string())],
                 }
             }
         }
         _ => CheckResult {
-            name: "agent serves attached card",
+            name: "agent serves attached card".into(),
             status: Status::Skip("agent or card data unavailable".into()),
             diags: vec![],
         },
     });
+
+    // 10.. — piggy#215 step 5: one point per proxied upstream, from the
+    // agent's own upstream-status@piggy self-report. Present only when
+    // the agent advertises the extension (= has upstreams configured);
+    // the base 9-point plan is unchanged for every other agent.
+    match &probes.upstreams {
+        None => {}
+        Some(Err(e)) => out.push(CheckResult {
+            name: "agent: upstream status answers".into(),
+            status: Status::Fail,
+            diags: vec![("error".into(), e.clone())],
+        }),
+        Some(Ok(statuses)) => {
+            for s in statuses {
+                out.push(CheckResult {
+                    name: format!("agent: upstream {} answers", s.name),
+                    status: if s.reachable {
+                        Status::Pass
+                    } else {
+                        Status::Fail
+                    },
+                    diags: vec![("keys".into(), s.keys.to_string())],
+                });
+            }
+        }
+    }
 
     out
 }
@@ -993,6 +1046,7 @@ mod tests {
             socket: SocketProbe::Unresolved,
             agent: None,
             extensions: None,
+            upstreams: None,
             pcsc: PcscProbe::Error("PC/SC unavailable".into()),
             cards: None,
         }
@@ -1016,6 +1070,7 @@ mod tests {
             },
             agent: Some(Ok(vec!["card-a".into(), "card-b".into(), "card-c".into()])),
             extensions: Some(Ok(vec![ECDH_EXT.into(), "other-ext".into()])),
+            upstreams: None,
             pcsc: PcscProbe::Ok,
             cards: Some(vec![CardInfo {
                 reader: "Yubico YubiKey CCID 00 00".into(),
@@ -1032,13 +1087,56 @@ mod tests {
             .map(|(_, v)| v.as_str())
     }
 
-    /// The plan is always 9 points, in the fixed documented order,
-    /// regardless of probe outcomes.
+    /// piggy#215: the upstream self-report appends one point per
+    /// upstream after the base nine — Pass with a keys diag when
+    /// reachable, Fail when not, in report order.
+    #[test]
+    fn upstream_points_append_after_base_nine() {
+        use piggy::cmd::agent::upstream::UpstreamStatus;
+        let mut probes = healthy_probes();
+        probes.upstreams = Some(Ok(vec![
+            UpstreamStatus {
+                name: "soft".into(),
+                reachable: true,
+                keys: 2,
+            },
+            UpstreamStatus {
+                name: "launchd".into(),
+                reachable: false,
+                keys: 0,
+            },
+        ]));
+        let results = evaluate(&probes);
+        assert_eq!(results.len(), 11);
+        assert_eq!(results[9].name, "agent: upstream soft answers");
+        assert!(matches!(results[9].status, Status::Pass));
+        assert_eq!(diag(&results[9], "keys"), Some("2"));
+        assert_eq!(results[10].name, "agent: upstream launchd answers");
+        assert!(matches!(results[10].status, Status::Fail));
+    }
+
+    /// piggy#215: an advertised-but-failed status probe is one failing
+    /// point — the agent claims upstreams but won't report on them.
+    #[test]
+    fn upstream_status_probe_error_is_single_fail_point() {
+        let mut probes = healthy_probes();
+        probes.upstreams = Some(Err("timeout after 2s".into()));
+        let results = evaluate(&probes);
+        assert_eq!(results.len(), 10);
+        assert_eq!(results[9].name, "agent: upstream status answers");
+        assert!(matches!(results[9].status, Status::Fail));
+        assert_eq!(diag(&results[9], "error"), Some("timeout after 2s"));
+    }
+
+    /// The BASE plan is always 9 points, in the fixed documented order,
+    /// regardless of probe outcomes. Upstream points (piggy#215) append
+    /// after these 9 only when the agent self-reports upstreams — see
+    /// the upstream_* tests below.
     #[test]
     fn evaluate_always_yields_nine_points_in_order() {
         let results = evaluate(&empty_probes());
         assert_eq!(results.len(), 9);
-        let names: Vec<&str> = results.iter().map(|r| r.name).collect();
+        let names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(
             names,
             vec![
@@ -1504,7 +1602,7 @@ mod tests {
     fn sink_fixture() -> Vec<CheckResult> {
         vec![
             CheckResult {
-                name: "agent: socket resolved",
+                name: "agent: socket resolved".into(),
                 status: Status::Pass,
                 diags: vec![
                     ("source".into(), "PIGGY_AUTH_SOCK".into()),
@@ -1512,12 +1610,12 @@ mod tests {
                 ],
             },
             CheckResult {
-                name: "agent: answers request_identities",
+                name: "agent: answers request_identities".into(),
                 status: Status::Fail,
                 diags: vec![("error".into(), "connection refused".into())],
             },
             CheckResult {
-                name: "card: key-management slot 9D populated",
+                name: "card: key-management slot 9D populated".into(),
                 status: Status::Skip("no card attached".into()),
                 diags: vec![],
             },

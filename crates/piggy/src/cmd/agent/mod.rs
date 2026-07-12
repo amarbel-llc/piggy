@@ -15,7 +15,9 @@ use tokio::sync::Mutex;
 mod cak;
 mod card;
 mod session;
-mod upstream;
+// pub: `agent_client::probe_upstream_status` (the `piggy health` side)
+// shares the UPSTREAM_STATUS_EXT name + UpstreamStatus payload type.
+pub mod upstream;
 
 use session::{CachedKey, PiggyAgent};
 use upstream::{UpstreamPool, parse_upstream_specs};

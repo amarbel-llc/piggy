@@ -305,6 +305,36 @@ function add_identity_routes_to_designated_upstream { # @test
   }
 }
 
+# piggy#215 step 5: `piggy health` gains per-upstream points from the
+# agent's upstream-status@piggy self-report. Fibby is seeded 9A+9D+CHUID
+# so every card point can pass; the run must exit 0 with a passing
+# point for the proxied upstream.
+function health_reports_upstream_point { # @test
+  spawn_fibby --seed-rfc6979-slot-9a-cert --seed-rfc5903-slot-9d-cert --seed-chuid
+  _spawn_soft_agent_with_key
+  _spawn_rust_agent_with_upstream
+
+  PIGGY_AUTH_SOCK="$AGENT_SOCK" PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    run "$PIGGY_BIN" health --format ndjson
+  [[ $status -eq 0 ]] || {
+    echo "piggy health exited $status" >&2
+    printf '%s\n' "$output" >&2
+    tail -40 "$AGENT_LOG" >&2 || true
+    tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+  local line
+  line=$(printf '%s\n' "$output" | grep 'agent: upstream soft answers') || {
+    echo "no upstream point in health output" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  [[ $line == *'"ok":true'* ]] || {
+    echo "upstream point present but not ok: $line" >&2
+    return 1
+  }
+}
+
 # Without --add-new-keys-to, adds are refused and nothing reaches the
 # upstream.
 function add_identity_without_target_is_refused { # @test
