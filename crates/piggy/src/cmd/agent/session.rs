@@ -43,6 +43,18 @@ pub struct PiggyAgent {
     /// Serializes on-demand askpass prompts so a burst of concurrent ops
     /// that all need the PIN forks at most one dialog (piggy#58).
     prompt_lock: Arc<Mutex<()>>,
+    /// Serializes the card section (PCSC connect → SELECT/CHUID → txn →
+    /// VERIFY → sign/ECDH → teardown) across concurrent requests
+    /// (piggy#213). Each handler opens its own connection and ends its
+    /// PIN-verified session with a card reset, so without this an N-wide
+    /// request burst races: one request's teardown/reset lands between
+    /// another's VERIFY and its crypto op, and the loser is actively
+    /// refused ("agent refused operation") instead of queued. tokio's
+    /// Mutex is FIFO, so a burst completes serially in arrival order —
+    /// the in-process analogue of the C agent's card-txn queue (#110).
+    /// PIN prompts stay OUTSIDE this lock (a human at an askpass dialog
+    /// must not stall the whole card queue; see `ensure_pin`).
+    card_lock: Arc<Mutex<()>>,
 }
 
 /// A PIN acquired for a card op, plus whether it came from an on-demand
@@ -58,6 +70,7 @@ impl PiggyAgent {
             keys: Arc::new(Mutex::new(keys)),
             pin: Arc::new(Mutex::new(None)),
             prompt_lock: Arc::new(Mutex::new(())),
+            card_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -237,6 +250,9 @@ impl PiggyAgent {
                 None
             };
 
+            // One request on the card at a time (piggy#213); dropped at the
+            // end of the loop body, so a wrong-PIN re-prompt runs unlocked.
+            let _card_guard = self.card_lock.lock().await;
             let mut token = reconnect_to_token(&key.guid)?;
             // The session drops at end of scope: ResetCard if a PIN was
             // verified, LeaveCard for the 9E no-PIN path.
@@ -380,6 +396,8 @@ impl PiggyAgent {
                     None
                 };
 
+                // One request on the card at a time (piggy#213).
+                let _card_guard = self.card_lock.lock().await;
                 let mut token = reconnect_to_token(&key.guid)?;
                 let mut session = token
                     .begin_pin_session()
@@ -431,6 +449,8 @@ impl PiggyAgent {
             .await
             .map_err(|_| AgentError::Other("attest: key not found".into()))?;
 
+        // One request on the card at a time (piggy#213).
+        let _card_guard = self.card_lock.lock().await;
         let token = reconnect_to_token(&key.guid)?;
 
         let attest_cert = token
@@ -518,6 +538,8 @@ impl PiggyAgent {
                     None
                 };
 
+                // One request on the card at a time (piggy#213).
+                let _card_guard = self.card_lock.lock().await;
                 let mut token = reconnect_to_token(&key.guid)?;
                 let mut session = token
                     .begin_pin_session()
