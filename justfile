@@ -181,7 +181,7 @@ test: test-bats-default test-bats-conformance test-rust test-go test-pigpen _tes
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-age-plugin-piggy
+_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-upstream test-bats-conformance-age-plugin-piggy
 
 [macos]
 _test-conformance-linux-only:
@@ -582,6 +582,27 @@ test-bats-conformance-agent-concurrent-sign:
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_agent_concurrent_sign_fibby.bats
+
+# piggy#215 step 3: `piggy agent --upstream` end to end — fibby-backed
+# native 9A keys AND a proxied stock OpenSSH ssh-agent on one socket.
+# Merged listing order, native vs routed signs, a mixed concurrent
+# burst, dead-upstream degradation, and add_identity routing/refusal.
+# [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect
+# is a no-op on macOS).
+[group('post-build')]
+[linux]
+test-bats-conformance-agent-upstream:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    # PIGGY satisfies the parent common.bash loader without a cargo build;
+    # the test itself drives PIGGY_BIN only.
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_agent_upstream_fibby.bats
 
 # Fibby-backed end-to-end gate for `age-plugin-piggy`: derive the age
 # recipient/identity from fib's slot-9D key (`generate`), encrypt a secret with
