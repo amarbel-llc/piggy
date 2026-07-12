@@ -499,11 +499,15 @@ pub(super) mod test_support {
         }
     }
 
-    /// Serve `stub` on a fresh socket under the test tmpdir; returns the
-    /// socket path. The listener task lives until the test's runtime is
-    /// dropped; the socket file is left for the tmpdir to reap.
+    /// Serve `stub` on a fresh socket under `/tmp` — deliberately NOT
+    /// the honored TMPDIR: in this repo that lives inside the worktree,
+    /// and a leftover socket file there breaks any later
+    /// `builtins.getFlake`-style path copy of the tree (nix cannot
+    /// store socket files). `/tmp` also keeps the path under AF_UNIX's
+    /// sun_path limit. Returns the socket path; the listener task lives
+    /// until the test runtime drops.
     pub fn spawn_stub(tag: &str, stub: StubUpstream) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("pgup{}-{tag}.sock", std::process::id()));
+        let path = PathBuf::from("/tmp").join(format!("pgup{}-{tag}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).expect("bind stub upstream socket");
         tokio::spawn(ssh_agent_lib::agent::listen(listener, stub));
@@ -623,7 +627,7 @@ mod tests {
     async fn list_identities_skips_dead_upstream_keeps_live_one() {
         let stub = StubUpstream::new(vec![upstream_identity(0xB1, "live-key")]);
         let live = spawn_stub("degrade", stub);
-        let dead = std::env::temp_dir().join("pgup-nonexistent.sock");
+        let dead = PathBuf::from("/tmp/pgup-nonexistent.sock");
 
         // Dead upstream FIRST: its failure must not mask the live one.
         let pool = pool_of(vec![("dead", dead), ("live", live)]);

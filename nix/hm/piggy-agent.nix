@@ -78,7 +78,28 @@ let
               instanceCfg.slots
             ]
         )
+        # Upstream proxying (piggy#215): --agent-timeout and
+        # --add-new-keys-to are static values, escaped normally. The
+        # --upstream specs themselves are NOT here — their socket paths
+        # may carry $HOME/$XDG_STATE_HOME references that need runtime
+        # bash expansion, so they're emitted unescaped in launcherText
+        # (same treatment as the -a socket arg; see #63).
+        ++ (lib.optionals (instanceCfg.agentTimeout != null) [
+          "--agent-timeout"
+          (toString instanceCfg.agentTimeout)
+        ])
+        ++ (lib.optionals (instanceCfg.addNewKeysTo != null) [
+          "--add-new-keys-to"
+          instanceCfg.addNewKeysTo
+        ])
         ++ instanceCfg.extraArgs;
+
+      # `--upstream name="<path>"`: the path sits in double quotes so
+      # bash expands env references at runtime; the name is pinned to a
+      # safe charset by assertion.
+      upstreamArgsText = lib.concatMapStrings (
+        u: ''--upstream ${u.name}="${u.socketPath}"''
+      ) instanceCfg.upstreams;
 
       # Single shared launcher script for both Linux and Darwin. Handles
       # XDG_STATE_HOME default, socket-dir creation, stale-socket cleanup,
@@ -108,7 +129,7 @@ let
         export SSH_AUTH_SOCK="$SOCK"
         exec ${binPath} ${
           lib.escapeShellArgs (preArgs ++ foregroundArgs)
-        } -a "$SOCK" ${lib.escapeShellArgs nonSocketArgs}
+        } -a "$SOCK" ${lib.escapeShellArgs nonSocketArgs}${upstreamArgsText}
       '';
 
       launcher = pkgs.writeShellScript "${name}-launch" launcherText;
@@ -184,6 +205,31 @@ let
 
   hasInstances = cfg.instances != { };
 
+  # One `--upstream NAME=SOCKET_PATH` entry (piggy#215). Shared by the
+  # top-level option and the per-instance submodule.
+  upstreamType = types.submodule {
+    options = {
+      name = mkOption {
+        type = types.str;
+        example = "launchd";
+        description = ''
+          Upstream name: a log label, the `addNewKeysTo` handle, and
+          (later) a `piggy health` check point. Must match
+          `[A-Za-z0-9_-]+` and be unique within the instance.
+        '';
+      };
+      socketPath = mkOption {
+        type = types.str;
+        example = "$HOME/.local/state/ssh/launchd-agent.sock";
+        description = ''
+          The upstream agent's UNIX socket. `$HOME`-style references
+          are expanded by bash at service start (same mechanism as
+          {option}`socketPath`); literal double quotes are rejected.
+        '';
+      };
+    };
+  };
+
   # Snapshot of the top-level instance options, used to synthesize a
   # single `piggy-agent` entry when `cfg.instances` is empty.
   topLevelInstanceCfg = {
@@ -198,6 +244,9 @@ let
       notifySend
       logFile
       extraArgs
+      upstreams
+      addNewKeysTo
+      agentTimeout
       ;
   };
 
@@ -214,7 +263,10 @@ let
     || cfg.confirm != null
     || cfg.notifySend != null
     || cfg.logFile != null
-    || cfg.extraArgs != [ ];
+    || cfg.extraArgs != [ ]
+    || cfg.upstreams != [ ]
+    || cfg.addNewKeysTo != null
+    || cfg.agentTimeout != null;
 
   # Map of effective unit-name → per-instance config. Single-instance
   # mode synthesizes one entry named `piggy-agent` from the top-level
@@ -246,6 +298,33 @@ let
       {
         assertion = builtins.match "^(all|[0-9a-fA-F]{2}(,[0-9a-fA-F]{2})*)$" ic.slots != null;
         message = "services.piggy-agent: `slots` must be \"all\" or a comma-separated list of two-hex-char slot IDs, e.g. \"9a\", \"9a,9e\" (instance ${unitName}).";
+      }
+      # Upstream proxying (piggy#215) is a Rust-agent feature; the C
+      # pivy-agent has no --upstream surface.
+      {
+        assertion = ic.upstreams == [ ] || isRustAgent;
+        message = "services.piggy-agent: `upstreams` requires the Rust agent (package pname \"piggy\"), not the C pivy-agent (instance ${unitName}).";
+      }
+      # Names become log labels and land unescaped in the launcher's
+      # `--upstream name="path"` fragment — pin them to a safe charset.
+      {
+        assertion = lib.all (u: builtins.match "^[A-Za-z0-9_-]+$" u.name != null) ic.upstreams;
+        message = "services.piggy-agent: upstream names must match [A-Za-z0-9_-]+ (instance ${unitName}).";
+      }
+      {
+        assertion = lib.length (lib.unique (map (u: u.name) ic.upstreams)) == lib.length ic.upstreams;
+        message = "services.piggy-agent: upstream names must be unique (instance ${unitName}).";
+      }
+      # The socket path is interpolated inside double quotes in the
+      # launcher so bash can expand $HOME-style references; a literal
+      # double quote would break out of the argument.
+      {
+        assertion = lib.all (u: !lib.hasInfix "\"" u.socketPath) ic.upstreams;
+        message = "services.piggy-agent: upstream socketPath must not contain double quotes (instance ${unitName}).";
+      }
+      {
+        assertion = ic.addNewKeysTo == null || lib.any (u: u.name == ic.addNewKeysTo) ic.upstreams;
+        message = "services.piggy-agent: `addNewKeysTo` must name an entry in `upstreams` (instance ${unitName}).";
       }
     ]) effectiveInstances
   );
@@ -423,6 +502,43 @@ in
       '';
     };
 
+    upstreams = mkOption {
+      type = types.listOf upstreamType;
+      default = [ ];
+      example = lib.literalExpression ''
+        [ { name = "launchd"; socketPath = "$HOME/.local/state/ssh/launchd-agent.sock"; } ]
+      '';
+      description = ''
+        Upstream SSH agents the piggy agent proxies (piggy#215):
+        their keys are offered after piggy's native PIV keys and
+        requests for them are routed to the owning upstream, so
+        piggy's socket can serve as the single `SSH_AUTH_SOCK`
+        without an ssh-agent-mux in front. Rust agent only.
+      '';
+    };
+
+    addNewKeysTo = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "launchd";
+      description = ''
+        Name of the {option}`upstreams` entry that receives
+        `ssh-add` (add_identity) requests. Without it, adds are
+        refused — piggy's native keys live on the card, so an added
+        software key needs a designated software agent.
+      '';
+    };
+
+    agentTimeout = mkOption {
+      type = types.nullOr types.ints.unsigned;
+      default = null;
+      example = 5;
+      description = ''
+        Per-upstream request timeout in seconds (`--agent-timeout`).
+        `null` uses the binary's default (5).
+      '';
+    };
+
     _launcherTexts = mkOption {
       type = types.attrsOf types.str;
       internal = true;
@@ -508,6 +624,21 @@ in
               default = [ ];
               description = "Extra agent argv per instance.";
             };
+            upstreams = mkOption {
+              type = types.listOf upstreamType;
+              default = [ ];
+              description = "Upstream agents proxied by this instance (piggy#215).";
+            };
+            addNewKeysTo = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "Upstream (by name) receiving add_identity requests.";
+            };
+            agentTimeout = mkOption {
+              type = types.nullOr types.ints.unsigned;
+              default = null;
+              description = "Per-upstream request timeout in seconds.";
+            };
           };
         }
       );
@@ -538,7 +669,8 @@ in
         message =
           "services.piggy-agent: top-level options "
           + "(`guid`/`allCards`/`cak`/`slots`/`socketPath`/`askpass`"
-          + "/`logFile`/`extraArgs`) are forbidden when `instances` "
+          + "/`logFile`/`extraArgs`/`upstreams`/`addNewKeysTo`"
+          + "/`agentTimeout`) are forbidden when `instances` "
           + "is non-empty. Move them into `instances.<name>` "
           + "entries.";
       }

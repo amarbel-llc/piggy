@@ -789,6 +789,130 @@ let
           };
         };
     }
+    {
+      # piggy#215: upstream proxying options emit the Rust flags. The
+      # --upstream fragment keeps its socket path in double quotes (so
+      # bash expands $HOME at runtime, same mechanism as -a "$SOCK");
+      # --add-new-keys-to and --agent-timeout ride escapeShellArgs.
+      name = "rust-agent-upstreams-emit-flags";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "soft";
+            socketPath = "$HOME/.local/state/ssh/launchd-agent.sock";
+          }
+        ];
+        services.piggy-agent.addNewKeysTo = "soft";
+        services.piggy-agent.agentTimeout = 7;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          hasUpstream = lib.hasInfix "--upstream soft=\"$HOME/.local/state/ssh/launchd-agent.sock\"" text;
+          hasAddTo = lib.hasInfix "--add-new-keys-to soft" text;
+          hasTimeout = lib.hasInfix "--agent-timeout 7" text;
+        in
+        {
+          ok = tripped == [ ] && hasUpstream && hasAddTo && hasTimeout;
+          got = {
+            inherit
+              tripped
+              text
+              hasUpstream
+              hasAddTo
+              hasTimeout
+              ;
+          };
+        };
+    }
+    {
+      # piggy#215: the C pivy-agent has no --upstream surface; asking
+      # for upstreams with the C escape-hatch package is a config error.
+      name = "c-agent-with-upstreams-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = pkgs.hello.overrideAttrs (_: {
+          pname = "pivy";
+        });
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "soft";
+            socketPath = "/tmp/s.sock";
+          }
+        ];
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          hasExpected = lib.any (m: lib.hasInfix "requires the Rust agent" m) tripped;
+        in
+        {
+          ok = hasExpected;
+          got = tripped;
+        };
+    }
+    {
+      # piggy#215: addNewKeysTo must name a configured upstream.
+      name = "add-new-keys-to-unknown-upstream-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "soft";
+            socketPath = "/tmp/s.sock";
+          }
+        ];
+        services.piggy-agent.addNewKeysTo = "nope";
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          hasExpected = lib.any (m: lib.hasInfix "must name an entry in `upstreams`" m) tripped;
+        in
+        {
+          ok = hasExpected;
+          got = tripped;
+        };
+    }
+    {
+      # piggy#215: duplicate upstream names are a config error.
+      name = "duplicate-upstream-names-trip-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "soft";
+            socketPath = "/tmp/a.sock";
+          }
+          {
+            name = "soft";
+            socketPath = "/tmp/b.sock";
+          }
+        ];
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          hasExpected = lib.any (m: lib.hasInfix "upstream names must be unique" m) tripped;
+        in
+        {
+          ok = hasExpected;
+          got = tripped;
+        };
+    }
   ];
 
   results = map (c: {
