@@ -18,6 +18,8 @@ use piggy_box::piv_box::{EcCurve, PivBox};
 use piggy_piv::{Guid, PivAlgorithm, PivContext, PivError};
 use zeroize::{Zeroize, Zeroizing};
 
+use super::upstream::UpstreamPool;
+
 /// Extra PIN prompts after the first one, on `PinIncorrect`, within a single
 /// agent request — matching the C pivy-agent's one-retry behaviour (initial
 /// attempt + one retry = 2 card PIN attempts max). Kept low because every
@@ -55,6 +57,12 @@ pub struct PiggyAgent {
     /// PIN prompts stay OUTSIDE this lock (a human at an askpass dialog
     /// must not stall the whole card queue; see `ensure_pin`).
     card_lock: Arc<Mutex<()>>,
+    /// Upstream agents proxied for keys piggy does not serve natively
+    /// (piggy#215, `--upstream`): their identities are offered after the
+    /// native PIV keys, and sign requests for them are routed to the
+    /// owning upstream. Empty without `--upstream`, making every proxy
+    /// path a no-op (pre-#215 behavior).
+    upstreams: UpstreamPool,
 }
 
 /// A PIN acquired for a card op, plus whether it came from an on-demand
@@ -71,7 +79,14 @@ impl PiggyAgent {
             pin: Arc::new(Mutex::new(None)),
             prompt_lock: Arc::new(Mutex::new(())),
             card_lock: Arc::new(Mutex::new(())),
+            upstreams: UpstreamPool::empty(),
         }
+    }
+
+    /// Configure the upstream proxy pool (piggy#215, `--upstream`).
+    pub fn with_upstream_pool(mut self, pool: UpstreamPool) -> Self {
+        self.upstreams = pool;
+        self
     }
 
     pub fn pin_handle(&self) -> Arc<Mutex<Option<String>>> {
@@ -219,19 +234,44 @@ impl Session for PiggyAgent {
 
 impl PiggyAgent {
     async fn request_identities_inner(&mut self) -> Result<Vec<Identity>, AgentError> {
-        let keys = self.keys.lock().await;
-        let identities = keys
-            .iter()
-            .map(|k| Identity {
-                pubkey: k.public_key.clone(),
-                comment: k.comment.clone(),
-            })
-            .collect();
+        let mut identities: Vec<Identity> = {
+            let keys = self.keys.lock().await;
+            keys.iter()
+                .map(|k| Identity {
+                    pubkey: k.public_key.clone(),
+                    comment: k.comment.clone(),
+                })
+                .collect()
+        };
+        // piggy#215: offer upstream keys AFTER the native PIV keys (ssh
+        // tries identities in offer order, and native keys must win). A
+        // pubkey served both natively and by an upstream is offered once,
+        // as the native entry.
+        if !self.upstreams.is_empty() {
+            for id in self.upstreams.list_identities().await {
+                if identities.iter().any(|n| n.pubkey == id.pubkey) {
+                    continue;
+                }
+                identities.push(id);
+            }
+        }
         Ok(identities)
     }
 
     async fn sign_inner(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
-        let key = self.find_cached_key(&request.pubkey).await?;
+        let key = match self.find_cached_key(&request.pubkey).await {
+            Ok(key) => key,
+            // piggy#215: not a native key — with upstreams configured,
+            // route the request to the upstream that owns it. Proxied
+            // signs deliberately bypass `card_lock`: they never touch
+            // the card, so they must not queue behind it.
+            Err(e) => {
+                if self.upstreams.is_empty() {
+                    return Err(e);
+                }
+                return self.upstreams.sign(request).await;
+            }
+        };
 
         // Prepare data for signing (independent of the card session).
         let sign_data = prepare_sign_data(key.algorithm, &request.data, request.flags)?;
@@ -1647,6 +1687,99 @@ mod tests {
         let second = agent.request_identities().await.unwrap();
         assert_eq!(first.len(), second.len());
         assert_eq!(first[0].pubkey, second[0].pubkey);
+    }
+
+    // -------- Session impl: upstream proxying (piggy#215) --------
+
+    use crate::cmd::agent::upstream::{Upstream, UpstreamPool, test_support as upstream_stub};
+
+    fn pool_for(path: std::path::PathBuf) -> UpstreamPool {
+        UpstreamPool::new(
+            vec![Upstream {
+                name: "stub".into(),
+                path,
+            }],
+            std::time::Duration::from_secs(5),
+        )
+    }
+
+    #[tokio::test]
+    async fn request_identities_offers_upstream_keys_after_native() {
+        let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+            0x77, "soft-key",
+        )]);
+        let path = upstream_stub::spawn_stub("sess-merge", stub);
+        let mut agent =
+            PiggyAgent::new(vec![cached_ed25519(0x11, 0x9A)]).with_upstream_pool(pool_for(path));
+
+        let ids = agent.request_identities().await.unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].pubkey, ed25519_key_data(0x11), "native key first");
+        assert_eq!(ids[1].comment, "soft-key");
+    }
+
+    #[tokio::test]
+    async fn request_identities_dedupes_key_served_both_natively_and_upstream() {
+        // The upstream serves the SAME pubkey piggy serves natively (seed
+        // 0x11); it must be offered exactly once, as the native entry.
+        let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+            0x11, "shadowed",
+        )]);
+        let path = upstream_stub::spawn_stub("sess-dedupe", stub);
+        let native = cached_ed25519(0x11, 0x9A);
+        let native_comment = native.comment.clone();
+        let mut agent = PiggyAgent::new(vec![native]).with_upstream_pool(pool_for(path));
+
+        let ids = agent.request_identities().await.unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].comment, native_comment, "native entry wins");
+    }
+
+    #[tokio::test]
+    async fn sign_routes_non_native_key_to_upstream() {
+        let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+            0x77, "soft-key",
+        )]);
+        let path = upstream_stub::spawn_stub("sess-sign", stub);
+        let mut agent =
+            PiggyAgent::new(vec![cached_ed25519(0x11, 0x9A)]).with_upstream_pool(pool_for(path));
+
+        let sig = agent
+            .sign(SignRequest {
+                pubkey: ed25519_key_data(0x77),
+                data: b"payload".to_vec(),
+                flags: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            sig,
+            upstream_stub::canned_signature(),
+            "signature must come from the stub upstream, not the native path"
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_key_held_nowhere_errors_even_with_upstreams() {
+        let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+            0x77, "soft-key",
+        )]);
+        let path = upstream_stub::spawn_stub("sess-nowhere", stub);
+        let mut agent =
+            PiggyAgent::new(vec![cached_ed25519(0x11, 0x9A)]).with_upstream_pool(pool_for(path));
+
+        let err = agent
+            .sign(SignRequest {
+                pubkey: ed25519_key_data(0xEE),
+                data: b"payload".to_vec(),
+                flags: 0,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("no upstream agent holds"),
+            "unexpected error: {err}"
+        );
     }
 
     // -------- Session impl: sign (pre-PCSC branch) --------
