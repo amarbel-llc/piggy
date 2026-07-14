@@ -4,12 +4,12 @@
     # The bats lane builder (`batsLane`) is sourced directly from
     # `amarbel-llc/bats` below — not from `pkgs.testers.batsLane`, which
     # the bats flake no longer ships through this overlay.
-    igloo.url = "github:amarbel-llc/igloo";
+    igloo.url = "git+https://code.linenisgreat.com/igloo.git";
     nixpkgs-master.url = "github:NixOS/nixpkgs/567a49d1913ce81ac6e9582e3553dd90a955875f";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
 
     bats = {
-      url = "github:amarbel-llc/bats";
+      url = "git+https://code.linenisgreat.com/bats.git";
       inputs.igloo.follows = "igloo";
     };
 
@@ -24,7 +24,7 @@
     # Follows piggy's shared inputs to collapse the lock, and follows the
     # top-level `conformist` so the lock keeps ONE conformist node.
     purse-first = {
-      url = "github:amarbel-llc/purse-first";
+      url = "git+https://code.linenisgreat.com/purse-first.git";
       inputs.igloo.follows = "igloo";
       inputs.nixpkgs-master.follows = "nixpkgs-master";
       inputs.utils.follows = "utils";
@@ -38,7 +38,7 @@
     # CHECK lane (lint-worktree), and the per-commit facade REPAIR hook
     # (conformist-pre-commit). Replaces the retired treefmt-nix.
     conformist = {
-      url = "github:amarbel-llc/conformist";
+      url = "git+https://code.linenisgreat.com/conformist.git";
       inputs.igloo.follows = "igloo";
       inputs.nixpkgs-master.follows = "nixpkgs-master";
       inputs.utils.follows = "utils";
