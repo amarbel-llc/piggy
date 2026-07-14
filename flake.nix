@@ -24,7 +24,7 @@
     # Follows piggy's shared inputs to collapse the lock, and follows the
     # top-level `conformist` so the lock keeps ONE conformist node.
     purse-first = {
-      url = "git+https://code.linenisgreat.com/purse-first.git";
+      url = "git+https://github.com/amarbel-llc/purse-first.git";
       inputs.igloo.follows = "igloo";
       inputs.nixpkgs-master.follows = "nixpkgs-master";
       inputs.utils.follows = "utils";
