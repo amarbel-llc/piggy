@@ -4,7 +4,7 @@
     # The bats lane builder (`batsLane`) is sourced directly from
     # `amarbel-llc/bats` below — not from `pkgs.testers.batsLane`, which
     # the bats flake no longer ships through this overlay.
-    igloo.url = "git+https://code.linenisgreat.com/igloo.git";
+    igloo.url = "git+https://github.com/amarbel-llc/igloo.git";
     nixpkgs-master.url = "github:NixOS/nixpkgs/567a49d1913ce81ac6e9582e3553dd90a955875f";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
 
@@ -38,7 +38,7 @@
     # CHECK lane (lint-worktree), and the per-commit facade REPAIR hook
     # (conformist-pre-commit). Replaces the retired treefmt-nix.
     conformist = {
-      url = "git+https://code.linenisgreat.com/conformist.git";
+      url = "git+https://github.com/amarbel-llc/conformist.git";
       inputs.igloo.follows = "igloo";
       inputs.nixpkgs-master.follows = "nixpkgs-master";
       inputs.utils.follows = "utils";

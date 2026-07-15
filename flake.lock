@@ -14,11 +14,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1784038869,
-        "narHash": "sha256-tXWylXtCnosOyuwFvRKlDOUql9GBX6CkD056B2lGc64=",
+        "lastModified": 1784112118,
+        "narHash": "sha256-dOT85Uw1WGoZRMs+SrmbVHJAuO4tUobhgxXTc/aHbhM=",
         "ref": "refs/heads/master",
-        "rev": "5a5ed04052e2525080e474a3d2dabbea4367d2af",
-        "revCount": 2072,
+        "rev": "cdaa14ca559917f61566f3f0eb8f3dd7ddb477c9",
+        "revCount": 2073,
         "type": "git",
         "url": "https://code.linenisgreat.com/bats.git"
       },
@@ -73,17 +73,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1784038233,
-        "narHash": "sha256-S/zksNggY2sHwNWQUJ7zqATCXnWSClhDt4LYdsPv+lg=",
+        "lastModified": 1784111484,
+        "narHash": "sha256-ZXTFMIipgpc3WI4NRQe6pR0OJjw8RlB4mTU52s7/GCw=",
         "ref": "refs/heads/master",
-        "rev": "ffaed59c883667056c2f5fa9a3f0d3077e89347d",
-        "revCount": 154,
+        "rev": "2099b7b546aa25709146736d2adaac4f374fb711",
+        "revCount": 155,
         "type": "git",
-        "url": "https://code.linenisgreat.com/conformist.git"
+        "url": "https://github.com/amarbel-llc/conformist.git"
       },
       "original": {
         "type": "git",
-        "url": "https://code.linenisgreat.com/conformist.git"
+        "url": "https://github.com/amarbel-llc/conformist.git"
       }
     },
     "flake-parts": {
@@ -152,11 +152,11 @@
         "rev": "e04bba9f87552e4161ebec00c528361316d36d3c",
         "revCount": 73,
         "type": "git",
-        "url": "https://code.linenisgreat.com/igloo.git"
+        "url": "https://github.com/amarbel-llc/igloo.git"
       },
       "original": {
         "type": "git",
-        "url": "https://code.linenisgreat.com/igloo.git"
+        "url": "https://github.com/amarbel-llc/igloo.git"
       }
     },
     "jcardsim": {
@@ -240,11 +240,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1784038924,
-        "narHash": "sha256-bTvaCStMprg1aoCVTBjRP2mWrkPOxtAlSPjazZMqUVU=",
+        "lastModified": 1784112175,
+        "narHash": "sha256-BRgNv1GBjG5eEYms97T5wtmdoGQEImEDFoEqPq3Xp4g=",
         "ref": "refs/heads/master",
-        "rev": "7e15e981e7494ce0286a7cb279bbda083f726b19",
-        "revCount": 1002,
+        "rev": "4d3361cbfd0828b34b77d5eea622b0a721b3fdfb",
+        "revCount": 1003,
         "type": "git",
         "url": "https://github.com/amarbel-llc/purse-first.git"
       },
