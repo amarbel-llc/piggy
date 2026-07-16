@@ -3,7 +3,7 @@ status: draft
 date: 2026-06-24
 provenance: |
   Scopes a new piggy-owned encrypted-document format, "pigpen", that is
-  a hyphence document (madder RFC 0001) carrying a markl-ID recipient
+  a hyphence document (hyphence RFC 0001) carrying a markl-ID recipient
   set in its metadata section and an optional ciphertext payload in its
   body. The design combines the file-key indirection, STREAM payload,
   and header-MAC of the age v1 format with the PIV/P-256 hardware
@@ -21,7 +21,7 @@ provenance: |
 This RFC specifies **pigpen**, a piggy-owned document format for
 encrypting a payload to a set of recipients and, in its degenerate
 payload-less form, for declaring a recipient set. A pigpen document is a
-**hyphence document** (madder [RFC 0001](https://github.com/amarbel-llc/madder/blob/main/docs/rfcs/0001-hyphence.md))
+**hyphence document** ([RFC 0001](https://code.linenisgreat.com/hyphence/src/branch/master/docs/rfcs/0001-hyphence.md))
 with the type identifier `pigpen-v1`. Its metadata section carries the
 recipient set as **markl IDs** ([RFC 0003](0003-piggy-ids-file-format.md),
 madder RFC 0002); its body carries the ciphertext, either inline or as
@@ -59,7 +59,7 @@ promotes it (see [Compatibility](#compatibility)).
 
 The normative referents are:
 
-- madder RFC 0001 — the hyphence envelope this format is framed in.
+- hyphence RFC 0001 — the hyphence envelope this format is framed in.
 - madder RFC 0002 / piggy RFC 0003 — the markl ID wire format every
   recipient line, wrapped key, MAC, and digest is encoded in.
 - piggy RFC 0002 — the ebox ECDH box whose P-256 wrap construction
@@ -103,10 +103,10 @@ Pigpen collapses these into one versioned hyphence type:
 
 ### 2.1 Hyphence framing
 
-A pigpen document is a hyphence document per madder RFC 0001. It uses
+A pigpen document is a hyphence document per hyphence RFC 0001. It uses
 **only** the existing hyphence metadata prefixes — `!`, `@`, `#`, `-`,
 `<`, `%` — and adds no new wire-format prefix. (Adding a prefix would be
-a hyphence wire change requiring a madder RFC; pigpen deliberately
+a hyphence wire change requiring a hyphence RFC; pigpen deliberately
 avoids that.) The pigpen-specific structure lives entirely in *how the
 existing lines are populated*, which is the latitude RFC 0001 §"Out of
 scope" grants the type identified by the `!` line.
@@ -568,7 +568,7 @@ factoring.
 
 ### Normative
 
-- madder RFC 0001 — Hyphence (the document envelope)
+- hyphence RFC 0001 — Hyphence (the document envelope)
 - madder RFC 0002 / piggy RFC 0003 — Markl ID format & `piggy-ids`
 - piggy RFC 0002 — PIV ECDH Box (the P-256 wrap construction)
 - piggy RFC 0004 — age recipients in piggy (the X25519 family)
