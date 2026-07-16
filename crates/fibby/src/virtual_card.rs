@@ -644,6 +644,10 @@ impl VirtualCard {
             RFC6979_SLOT_9A_CERT_OBJECT.to_vec(),
         );
         self.seed_slot_9a_priv(RFC6979_A2_5_PRIV);
+        // A 9A-only card is only reachable if clients see an *initialized*
+        // card; without a CHUID, pivy-piv's read_chuid errors and the card
+        // isn't enumerable (piggy#192). Mirrors seed_rfc5903_slot_9d_cert.
+        self.seed_chuid();
     }
 
     /// Install the canonical fibby slot 9D test cert under PIV tag
@@ -2777,6 +2781,17 @@ mod tests {
             "seeded slot 9A can sign -> 9000"
         );
         assert_eq!(sig[0], 0x7C, "sign response is a GA template");
+
+        // It also installs a CHUID so clients see an initialized card with
+        // a GUID (else pivy-piv's read_chuid errors and a 9A-only card
+        // isn't enumerable — piggy#192). Mirrors seed_rfc5903_slot_9d_cert.
+        let chuid = c.transmit(&get_data_apdu(TAG_CHUID)).unwrap();
+        assert_eq!(chuid[0], 0x53, "GET DATA returns the 53-wrapped CHUID");
+        assert_eq!(
+            &chuid[chuid.len() - 2..],
+            &[0x90, 0x00],
+            "CHUID read -> 9000"
+        );
     }
 
     // -- GA ECDSA (slot 9E, Card Authentication, PIN-never) tests --------
