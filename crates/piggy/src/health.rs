@@ -90,11 +90,22 @@ pub enum PcscProbe {
     Error(String),
 }
 
+/// Outcome of reading a card's slot 9D cert object (point 8). Distinguishes
+/// a genuinely empty slot from an I/O-level read failure (transport error,
+/// card yanked mid-read) — piggy#160: both used to collapse to `false`,
+/// rendering a misleading "9D empty" verdict for what was really a
+/// transport problem.
+pub enum SlotProbe {
+    Populated,
+    Empty,
+    Error(String),
+}
+
 /// One attached card's identity-relevant facts (points 7–8).
 pub struct CardInfo {
     pub reader: String,
     pub guid: String,
-    pub slot_9d_populated: bool,
+    pub slot_9d: SlotProbe,
 }
 
 /// Everything `evaluate` needs. `None` = probe not attempted because a
@@ -389,9 +400,10 @@ fn file_type_name(ft: std::fs::FileType) -> &'static str {
 /// bare GET DATA on the slot's cert object
 /// (`crates/piggy-piv/src/token.rs::PivToken::read_slot`, no
 /// `verify_pin` on its path; cert objects are free-read per NIST SP
-/// 800-73). An empty or unreadable 9D returns
-/// `Err(PivError::SlotEmpty(0x9d))`, which maps to
-/// `slot_9d_populated: false`.
+/// 800-73). An empty 9D returns `Err(PivError::SlotEmpty(0x9d))`, which
+/// maps to [`SlotProbe::Empty`]. Any other `read_slot` error (transport
+/// failure, card yanked mid-read) maps to [`SlotProbe::Error`] rather than
+/// being collapsed into "empty" (piggy#160).
 ///
 /// Context establishment and enumeration failures both collapse to
 /// `PcscProbe::Error` with `cards: None` — evaluate renders point 6
@@ -412,7 +424,11 @@ fn probe_cards() -> (PcscProbe, Option<Vec<CardInfo>>) {
             // Full uppercase hex, matching how the rest of the
             // codebase renders guids user-facing (Guid::to_hex).
             guid: t.guid().to_hex(),
-            slot_9d_populated: t.read_slot(0x9d).is_ok(),
+            slot_9d: match t.read_slot(0x9d) {
+                Ok(_) => SlotProbe::Populated,
+                Err(piggy_piv::PivError::SlotEmpty(_)) => SlotProbe::Empty,
+                Err(e) => SlotProbe::Error(e.to_string()),
+            },
         })
         .collect();
     (PcscProbe::Ok, Some(cards))
@@ -894,12 +910,18 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
         Some(cards) => CheckResult {
             name: "card: PIV card attached".into(),
             status: Status::Pass,
+            // Per-card key suffixes (piggy#159): a static "reader"/"guid"
+            // key repeated per card collapses in the ndjson diag map
+            // (only the last card survives) and renders duplicate YAML
+            // keys on the TAP side. Single-card output (the common case)
+            // is unaffected in shape, just now suffixed "_0".
             diags: cards
                 .iter()
-                .flat_map(|c| {
+                .enumerate()
+                .flat_map(|(i, c)| {
                     [
-                        ("reader".to_string(), c.reader.clone()),
-                        ("guid".to_string(), c.guid.clone()),
+                        (format!("reader_{i}"), c.reader.clone()),
+                        (format!("guid_{i}"), c.guid.clone()),
                     ]
                 })
                 .collect(),
@@ -920,20 +942,28 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
         },
         Some(cards) => CheckResult {
             name: "card: key-management slot 9D populated".into(),
-            status: if cards.iter().any(|c| c.slot_9d_populated) {
+            status: if cards
+                .iter()
+                .any(|c| matches!(c.slot_9d, SlotProbe::Populated))
+            {
                 Status::Pass
             } else {
                 Status::Fail
             },
+            // Keyed by guid (unique per card, so this pattern doesn't
+            // need the reader/guid-style index suffix from point 7) with
+            // a value that distinguishes a genuine empty slot from an
+            // I/O read error (piggy#160) rather than collapsing both to
+            // "9D empty".
             diags: cards
                 .iter()
                 .map(|c| {
                     (
                         c.guid.clone(),
-                        if c.slot_9d_populated {
-                            "9D populated".to_string()
-                        } else {
-                            "9D empty".to_string()
+                        match &c.slot_9d {
+                            SlotProbe::Populated => "9D populated".to_string(),
+                            SlotProbe::Empty => "9D empty".to_string(),
+                            SlotProbe::Error(e) => format!("9D read error: {e}"),
                         },
                     )
                 })
@@ -942,10 +972,11 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     });
 
     // 9 — cross-check: agent identity count vs attached provisioned card
-    let provisioned_card = probes
-        .cards
-        .as_ref()
-        .is_some_and(|cards| cards.iter().any(|c| c.slot_9d_populated));
+    let provisioned_card = probes.cards.as_ref().is_some_and(|cards| {
+        cards
+            .iter()
+            .any(|c| matches!(c.slot_9d, SlotProbe::Populated))
+    });
     out.push(match (&probes.agent, provisioned_card) {
         (Some(Ok(ids)), true) => {
             if ids.is_empty() {
@@ -1075,7 +1106,7 @@ mod tests {
             cards: Some(vec![CardInfo {
                 reader: "Yubico YubiKey CCID 00 00".into(),
                 guid: "DEADBEEFDEADBEEF".into(),
-                slot_9d_populated: true,
+                slot_9d: SlotProbe::Populated,
             }]),
         }
     }
@@ -1185,6 +1216,74 @@ mod tests {
             );
         }
         assert_eq!(exit_code(&results), 0);
+    }
+
+    /// piggy#159: with ≥2 attached cards, point 7's per-card diag keys
+    /// must be unique (`reader_0`/`guid_0`, `reader_1`/`guid_1`, ...) —
+    /// a repeated static "reader"/"guid" key collapses in the ndjson
+    /// diag map (only the last card survives) and renders duplicate
+    /// YAML keys on the TAP side.
+    #[test]
+    fn multi_card_point_7_diags_have_unique_keys() {
+        let mut probes = healthy_probes();
+        probes.cards = Some(vec![
+            CardInfo {
+                reader: "Yubico YubiKey CCID 00 00".into(),
+                guid: "AAAA".into(),
+                slot_9d: SlotProbe::Populated,
+            },
+            CardInfo {
+                reader: "Yubico YubiKey CCID 01 00".into(),
+                guid: "BBBB".into(),
+                slot_9d: SlotProbe::Populated,
+            },
+        ]);
+        let results = evaluate(&probes);
+        let keys: Vec<&str> = results[6].diags.iter().map(|(k, _)| k.as_str()).collect();
+        let mut unique_keys = keys.clone();
+        unique_keys.sort();
+        unique_keys.dedup();
+        assert_eq!(
+            keys.len(),
+            unique_keys.len(),
+            "point 7 diag keys must be unique across cards, got: {keys:?}"
+        );
+        assert_eq!(
+            diag(&results[6], "reader_0"),
+            Some("Yubico YubiKey CCID 00 00")
+        );
+        assert_eq!(diag(&results[6], "guid_0"), Some("AAAA"));
+        assert_eq!(
+            diag(&results[6], "reader_1"),
+            Some("Yubico YubiKey CCID 01 00")
+        );
+        assert_eq!(diag(&results[6], "guid_1"), Some("BBBB"));
+    }
+
+    /// piggy#160: a slot-9D read error (transport failure, card yanked
+    /// mid-read) must render distinctly from a genuinely empty slot —
+    /// point 8 still fails (nothing confirmed populated) but the diag
+    /// says "9D read error: ..." rather than the misleading "9D empty",
+    /// and point 9's provisioned-card cross-check does not treat the
+    /// errored card as provisioned.
+    #[test]
+    fn slot_9d_read_error_renders_distinctly_from_empty() {
+        let mut probes = healthy_probes();
+        probes.cards = Some(vec![CardInfo {
+            reader: "Yubico YubiKey CCID 00 00".into(),
+            guid: "DEADBEEFDEADBEEF".into(),
+            slot_9d: SlotProbe::Error("pcsc transport error".into()),
+        }]);
+        probes.agent = Some(Ok(vec!["card-a".into()]));
+        let results = evaluate(&probes);
+        assert!(matches!(results[7].status, Status::Fail));
+        assert_eq!(
+            diag(&results[7], "DEADBEEFDEADBEEF"),
+            Some("9D read error: pcsc transport error")
+        );
+        // Not provisioned, so point 9 SKIPs rather than treating the
+        // errored read as a confirmed key-management slot.
+        assert!(matches!(results[8].status, Status::Skip(_)));
     }
 
     /// Matrix row 2: agent answers with zero identities while a
