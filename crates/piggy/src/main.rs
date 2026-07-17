@@ -52,6 +52,7 @@ mod health;
 mod init;
 mod insert;
 mod internal_clipboard_restore;
+mod pigpen_pointer;
 mod platform;
 mod recipients;
 mod reencrypt;

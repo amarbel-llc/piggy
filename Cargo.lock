@@ -420,6 +420,7 @@ dependencies = [
  "fiat-crypto",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -766,8 +767,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1334,6 +1337,7 @@ dependencies = [
  "piggy-box",
  "piggy-ids",
  "piggy-markl",
+ "piggy-pigpen",
  "piggy-piv",
  "rand 0.8.5",
  "serde",
@@ -1389,6 +1393,23 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "piggy-pigpen"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "getrandom 0.2.17",
+ "hkdf",
+ "hmac",
+ "p256",
+ "piggy-markl",
+ "rand_core 0.6.4",
+ "sha2",
+ "thiserror",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -2544,6 +2565,18 @@ dependencies = [
  "data-encoding",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.6.4",
+ "serde",
+ "zeroize",
 ]
 
 [[package]]
