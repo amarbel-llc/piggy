@@ -151,12 +151,30 @@ mod tests {
 
     #[test]
     fn recipient_set_pigpen_converts_to_rfc0003_cache_file() {
+        // resolve_piggy_ids_path's pigpen-conversion branch writes its
+        // cache file under cache_path_for()'s $XDG_CACHE_HOME (falling
+        // back to $HOME/.cache). Point that at a writable per-test
+        // tempdir so the test never depends on the ambient $HOME/.cache
+        // being writable — it isn't in the nix build sandbox, where
+        // $HOME is the deliberately-unwritable /homeless-shelter and
+        // $XDG_CACHE_HOME is unset (piggy#216). Same save/restore +
+        // env_lock() pattern as crypt.rs's PIGGY_IDS_PATH tests.
+        let _guard = env_lock();
         let dir = tempdir();
         let ids = dir.join("piggy-ids");
         // A minimal payload-less pigpen document, no recipients — proves
         // the sniff + conversion path without needing a real markl ID.
         std::fs::write(&ids, "---\n! pigpen-v1\n---\n").unwrap();
-        let resolved = resolve_piggy_ids_path(&ids).unwrap();
+
+        let saved_cache_home = std::env::var_os("XDG_CACHE_HOME");
+        std::env::set_var("XDG_CACHE_HOME", dir.join("cache"));
+        let resolved = resolve_piggy_ids_path(&ids);
+        match saved_cache_home {
+            Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+            None => std::env::remove_var("XDG_CACHE_HOME"),
+        }
+        let resolved = resolved.unwrap();
+
         assert_ne!(
             resolved, ids,
             "a pigpen doc must produce a distinct cache path"
@@ -192,10 +210,25 @@ mod tests {
 
     #[test]
     fn mutation_refused_for_pigpen_recipient_set() {
+        // Same XDG_CACHE_HOME isolation as
+        // recipient_set_pigpen_converts_to_rfc0003_cache_file:
+        // resolve_piggy_ids_path_for_mutation calls resolve_piggy_ids_path
+        // internally, which writes a cache file for a pigpen doc before
+        // the mutation check runs. See piggy#216.
+        let _guard = env_lock();
         let dir = tempdir();
         let ids = dir.join("piggy-ids");
         std::fs::write(&ids, "---\n! pigpen-v1\n---\n").unwrap();
-        let err = resolve_piggy_ids_path_for_mutation(&ids).unwrap_err();
+
+        let saved_cache_home = std::env::var_os("XDG_CACHE_HOME");
+        std::env::set_var("XDG_CACHE_HOME", dir.join("cache"));
+        let err = resolve_piggy_ids_path_for_mutation(&ids);
+        match saved_cache_home {
+            Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+            None => std::env::remove_var("XDG_CACHE_HOME"),
+        }
+
+        let err = err.unwrap_err();
         assert!(err.contains("cannot mutate"), "got: {err}");
     }
 
