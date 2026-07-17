@@ -269,6 +269,13 @@ pub struct Pointer {
 
 impl Pointer {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        // A newline embedded in kind/locator would break the single-line
+        // metadata framing (RFC 0001) — reject at serialization time,
+        // mirroring Document::build's guard on description/comment.
+        // locator in particular will eventually carry externally-supplied
+        // strings (Task 7's resolver dispatch).
+        reject_control("kind", &self.kind)?;
+        reject_control("locator", &self.locator)?;
         let h = HyphenceDoc {
             meta: vec![
                 MetaLine {
@@ -310,6 +317,16 @@ impl Pointer {
                 kind = Some(v);
             } else if let Some(v) = parse_quoted_kv(&l.body, "locator") {
                 locator = Some(v);
+            } else {
+                // RFC 0008 §2.2: a pigpen-pointer-v1 document carrying a `-`
+                // line that isn't a recognized kind/locator tag — e.g. an
+                // actual recipient line — is a mixed-state document and
+                // MUST be rejected. Mirrors Document::validate()'s
+                // equivalent check for its own two faces.
+                return Err(Error::Malformed(format!(
+                    "unexpected '-' line in {POINTER_TYPE_TAG} document: {:?}",
+                    l.body
+                )));
             }
         }
         let kind = kind.ok_or_else(|| Error::Malformed("pointer missing kind tag".into()))?;
@@ -692,5 +709,26 @@ mod tests {
     fn pointer_parse_rejects_missing_locator() {
         let raw = b"---\n- kind=\"papi-http\"\n! pigpen-pointer-v1\n---\n";
         assert!(Pointer::parse(raw).is_err());
+    }
+
+    #[test]
+    fn pointer_parse_rejects_mixed_state_with_recipient_line() {
+        // RFC 0008 §2.2: a pigpen-pointer-v1 document carrying a `-`
+        // recipient line (alongside otherwise-valid kind/locator tags) is
+        // malformed and MUST be rejected — mirrors Document::validate()'s
+        // equivalent mixed-state check for its own two faces.
+        let raw = b"---\n- kind=\"papi-http\"\n- locator=\"https://example.com\"\n- piggy-recipient-v1@age_x25519_pub-q73he0q5yzfu3d64msd3p6rvksnrwjk3d2598mgtmlqt9wrdr37q0vdmee\n! pigpen-pointer-v1\n---\n";
+        assert!(Pointer::parse(raw).is_err());
+    }
+
+    #[test]
+    fn pointer_newline_in_locator_rejected() {
+        // A newline would break the single-line metadata framing, same as
+        // Document's comment/description guard (#2).
+        let ptr = Pointer {
+            kind: "papi-http".into(),
+            locator: "https://example.com/\nevil".into(),
+        };
+        assert!(matches!(ptr.to_bytes(), Err(Error::Malformed(_))));
     }
 }
