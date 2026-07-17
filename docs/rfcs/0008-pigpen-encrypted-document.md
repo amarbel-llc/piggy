@@ -124,18 +124,21 @@ scope" grants the type identified by the `!` line.
 <ciphertext bytes>                        (hyphence body; XOR with the '@' line)
 ```
 
-### 2.2 The two faces of a pigpen document
+### 2.2 The three faces of a pigpen document
 
 | Face | Metadata | Body / `@` | Equivalent to |
 |------|----------|------------|---------------|
 | **Recipient set** | `-` recipient lines, **no** `<` wrap locks; `! pigpen-v1` with **no** MAC lock | absent | a `piggy-ids` file (RFC 0003) |
 | **Sealed document** | `-` recipient lines **each** with a `<` wrap lock; `! pigpen-v1@<mac>` | inline ciphertext body **or** `@` ciphertext blob | an `.ebox` (RFC 0002) |
+| **Pointer** | `- kind="<resolver-kind>"` and `- locator="<opaque>"` tags, **no** recipient lines; `! pigpen-pointer-v1` | absent | new — no RFC 0003 equivalent (RFC 0010) |
 
 A reader distinguishes the two faces structurally: a document whose
 recipient lines carry wrap locks and whose type line carries a MAC lock
 is sealed; one with neither is a recipient set. A document that mixes
 the two states (some recipients wrapped, some not; a body but no MAC;
 etc.) is malformed and MUST be rejected.
+
+A pointer is disambiguated by its distinct type string (`pigpen-pointer-v1`, not `pigpen-v1`) rather than structurally, since it carries no recipient lines to key off. A document whose type is `pigpen-pointer-v1` but which carries `-` recipient lines (or vice versa) is malformed and MUST be rejected. See RFC 0010 for the pointer face's resolution semantics.
 
 ### 2.3 Recipient lines
 
@@ -515,6 +518,14 @@ The same recipient as a payload-less recipient set (a drop-in for a
 ! pigpen-v1
 ---
 ```
+
+A pointer face, naming a resolver by kind and opaque locator:
+
+    ---
+    - kind="papi-http"
+    - locator="https://example.com"
+    ! pigpen-pointer-v1
+    ---
 
 ## 10. Conformance
 
