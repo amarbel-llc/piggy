@@ -103,19 +103,30 @@ fn recipient_set_doc_to_rfc0003_cache(
 /// content is resolver/pigpen-backed: RFC 0009's payload-less pigpen
 /// face has no write-back format defined yet, and a pointer face's
 /// recipient set lives at the remote source, so local mutation would be
-/// meaningless (piggy#216). Detected by comparing the resolved path
-/// against the input: [`resolve_piggy_ids_path`]'s RFC 0003 passthrough
-/// case is the only one that returns the input path unchanged.
+/// meaningless (piggy#216).
+///
+/// Refuses on a cheap **local** sniff of the raw bytes (RFC 0009 §3.2's
+/// same `---\n`-prefix check `resolve_piggy_ids_path` uses), BEFORE ever
+/// calling `resolve_piggy_ids_path` — deliberately not "call the full
+/// resolver-invoking path and compare the result against the input".
+/// For a pointer face that comparison would only be knowable after
+/// `resolve_piggy_ids_path` had already spawned `pigpen-resolver-<kind>`
+/// (potentially a network round-trip per RFC 0010 §3) and written a
+/// cache file, just to immediately discard both and refuse — real cost
+/// paid on every mutation call site for content that was always going
+/// to be rejected. `resolve_piggy_ids_path` is only reached for content
+/// that passes the local sniff, where it's a pure, cheap passthrough.
 pub(crate) fn resolve_piggy_ids_path_for_mutation(piggy_ids: &Path) -> Result<PathBuf, String> {
-    let resolved = resolve_piggy_ids_path(piggy_ids)?;
-    if resolved != piggy_ids {
+    let raw =
+        std::fs::read(piggy_ids).map_err(|e| format!("reading {}: {e}", piggy_ids.display()))?;
+    if raw.starts_with(b"---\n") {
         return Err(format!(
             "{}: cannot mutate a resolver/pigpen-backed piggy-ids in place \
              (recipients add/remove/sync requires plain RFC 0003 piggy-ids content)",
             piggy_ids.display()
         ));
     }
-    Ok(resolved)
+    resolve_piggy_ids_path(piggy_ids)
 }
 
 /// `$XDG_CACHE_HOME/piggy/<hash-of-piggy_ids-path>.piggy-ids` — never
@@ -296,26 +307,55 @@ mod tests {
 
     #[test]
     fn mutation_refused_for_pigpen_recipient_set() {
-        // Same XDG_CACHE_HOME isolation as
-        // recipient_set_pigpen_converts_to_rfc0003_cache_file:
-        // resolve_piggy_ids_path_for_mutation calls resolve_piggy_ids_path
-        // internally, which writes a cache file for a pigpen doc before
-        // the mutation check runs. See piggy#216.
-        let _guard = env_lock();
+        // resolve_piggy_ids_path_for_mutation refuses on a cheap local
+        // `---\n`-prefix sniff, before ever calling
+        // resolve_piggy_ids_path — so unlike
+        // recipient_set_pigpen_converts_to_rfc0003_cache_file (which
+        // exercises resolve_piggy_ids_path directly and does write a
+        // cache file), no XDG_CACHE_HOME isolation is needed here: this
+        // path never touches the cache. See piggy#216.
         let dir = tempdir();
         let ids = dir.join("piggy-ids");
         std::fs::write(&ids, "---\n! pigpen-v1\n---\n").unwrap();
 
-        let saved_cache_home = std::env::var_os("XDG_CACHE_HOME");
-        std::env::set_var("XDG_CACHE_HOME", dir.join("cache"));
-        let err = resolve_piggy_ids_path_for_mutation(&ids);
-        match saved_cache_home {
-            Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
-            None => std::env::remove_var("XDG_CACHE_HOME"),
-        }
-
-        let err = err.unwrap_err();
+        let err = resolve_piggy_ids_path_for_mutation(&ids).unwrap_err();
         assert!(err.contains("cannot mutate"), "got: {err}");
+    }
+
+    #[test]
+    fn mutation_refused_for_pointer_face_without_invoking_resolver() {
+        // Regression test: resolve_piggy_ids_path_for_mutation used to
+        // call the FULL resolve_piggy_ids_path (which, since piggy#216
+        // Task 8, actually spawns pigpen-resolver-<kind> for a pointer
+        // face — potentially a network round-trip per RFC 0010 §3) and
+        // only afterward compared the result against the input to
+        // decide whether to refuse. That meant every mutation call site
+        // (recipients add/remove/sync) paid for a real resolver
+        // invocation against pointer-backed content just to immediately
+        // discard it and refuse. The fix short-circuits on a cheap
+        // local sniff before ever calling resolve_piggy_ids_path.
+        //
+        // Proof: name a resolver kind that does NOT exist on PATH. If
+        // the refusal is genuinely local/pre-resolver, the error is the
+        // "cannot mutate" message. If the bug regresses (resolver
+        // invocation happens first), the error instead comes from
+        // invoke_resolver's "not found on PATH" / "resolving pointer"
+        // path. No env_lock/PATH/XDG_CACHE_HOME isolation needed here —
+        // that's the point: a correct implementation touches neither.
+        let dir = tempdir();
+        let ids = dir.join("piggy-ids");
+        std::fs::write(
+            &ids,
+            "---\n- kind=\"mutation-test-nonexistent-kind\"\n- locator=\"unused\"\n! pigpen-pointer-v1\n---\n",
+        )
+        .unwrap();
+        let err = resolve_piggy_ids_path_for_mutation(&ids).unwrap_err();
+        assert!(err.contains("cannot mutate"), "got: {err}");
+        assert!(
+            !err.contains("resolving pointer") && !err.contains("not found on PATH"),
+            "resolver must never be invoked when refusing mutation on a \
+             pointer-backed piggy-ids; got: {err}"
+        );
     }
 
     #[test]
