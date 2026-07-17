@@ -628,6 +628,125 @@ git commit -m "feat(piggy): route piggy-ids reads through the pigpen sniff (pigg
 
 ---
 
+## Task 6.5: Refuse mutation on resolver/pigpen-backed piggy-ids
+
+**Added post-hoc (2026-07-17), during Task 6's code-quality review.** The
+reviewer traced a real gap: for a pigpen-formatted (non-RFC-0003)
+`piggy-ids`, `resolve_piggy_ids_path` returns a distinct cache-file path
+under `$XDG_CACHE_HOME/piggy/`. `recipients add`/`add_all_attached`/
+`remove`/`sync`'s file form subsequently *write* to whatever path they
+resolved to persist a recipient change. For a pigpen/pointer-backed
+`piggy-ids` that write lands on the throwaway cache file, not the
+source — worse, `commit_and_reencrypt`'s `find_inner_git_dir` walk
+starts from that cache path, immediately falls outside `store_root`,
+and short-circuits: no git commit, `reencrypt::run` walks an empty
+cache directory and finds nothing to do, and the command **reports
+success** while nothing was actually persisted or re-encrypted. Silent
+success on a recipient-management operation is the worst failure mode
+here, and this becomes reachable the moment Task 7/8 make pointer-backed
+stores usable — so it's fixed now rather than deferred.
+
+User decision: hard-refuse mutation on resolver/pigpen-backed
+`piggy-ids`, rather than attempt a write-back path (a pointer's
+recipient set lives at the remote source, and RFC 0009 defines no
+pigpen write-back format yet — refusing matches the design's existing
+"piggy has zero authority over a resolved recipient set" framing).
+
+**Promotion criteria:** N/A.
+
+**Files:**
+- Modify: `crates/piggy/src/pigpen_pointer.rs`
+- Modify: `crates/piggy/src/recipients.rs` (the 4 write-path call sites:
+  `add`, `add_all_attached`, `remove`, `sync`'s `<file>` form — NOT
+  `list`, which stays read-only)
+
+**Step 1: Write the failing test**
+
+Add to `pigpen_pointer.rs`'s `tests` module:
+
+```rust
+#[test]
+fn mutation_allowed_for_rfc0003_passthrough() {
+    let dir = tempdir();
+    let ids = dir.join("piggy-ids");
+    std::fs::write(&ids, "piggy-recipient-v1@age_x25519_pub-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n").unwrap();
+    let resolved = resolve_piggy_ids_path_for_mutation(&ids).unwrap();
+    assert_eq!(resolved, ids);
+}
+
+#[test]
+fn mutation_refused_for_pigpen_recipient_set() {
+    let dir = tempdir();
+    let ids = dir.join("piggy-ids");
+    std::fs::write(&ids, "---\n! pigpen-v1\n---\n").unwrap();
+    let err = resolve_piggy_ids_path_for_mutation(&ids).unwrap_err();
+    assert!(err.contains("cannot mutate"), "got: {err}");
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `just test-rust -p piggy pigpen_pointer::mutation`
+
+Expected: FAIL — `resolve_piggy_ids_path_for_mutation` doesn't exist yet.
+
+**Step 3: Write the minimal implementation**
+
+Add to `pigpen_pointer.rs`:
+
+```rust
+/// Like [`resolve_piggy_ids_path`], but for callers that intend to WRITE
+/// to the returned path to persist a change to the `piggy-ids` content
+/// itself (`recipients add`/`remove`/`sync`). Refuses — rather than
+/// silently redirecting a write to a throwaway cache file — when the
+/// content is resolver/pigpen-backed: RFC 0009's payload-less pigpen
+/// face has no write-back format defined yet, and a pointer face's
+/// recipient set lives at the remote source, so local mutation would be
+/// meaningless (piggy#216). Detected by comparing the resolved path
+/// against the input: [`resolve_piggy_ids_path`]'s RFC 0003 passthrough
+/// case is the only one that returns the input path unchanged.
+pub(crate) fn resolve_piggy_ids_path_for_mutation(piggy_ids: &Path) -> Result<PathBuf, String> {
+    let resolved = resolve_piggy_ids_path(piggy_ids)?;
+    if resolved != piggy_ids {
+        return Err(format!(
+            "{}: cannot mutate a resolver/pigpen-backed piggy-ids in place \
+             (recipients add/remove/sync requires plain RFC 0003 piggy-ids content)",
+            piggy_ids.display()
+        ));
+    }
+    Ok(resolved)
+}
+```
+
+**Step 4: Run test to verify it passes**
+
+Run the same command as Step 2. Expected: PASS, 2 new tests.
+
+**Step 5: Swap the 4 write-path call sites**
+
+In `crates/piggy/src/recipients.rs`, at the `add`, `add_all_attached`,
+`remove`, and `sync`'s `<file>`-form call sites (the ones that
+subsequently write to the resolved path — NOT `list`, which only reads),
+change `.and_then(|p| pigpen_pointer::resolve_piggy_ids_path(&p))` to
+`.and_then(|p| pigpen_pointer::resolve_piggy_ids_path_for_mutation(&p))`.
+
+**Step 6: Run the full crate test suite**
+
+Run: `just test-rust -p piggy`
+
+Expected: all tests PASS — every existing test uses RFC 0003 fixtures,
+which `resolve_piggy_ids_path_for_mutation` passes through identically
+to the plain resolver, so no existing behavior changes.
+
+**Step 7: Commit**
+
+```bash
+git add crates/piggy/src/pigpen_pointer.rs crates/piggy/src/recipients.rs
+git commit -m "fix(piggy): refuse mutation on resolver/pigpen-backed piggy-ids (piggy#216)"
+```
+
+---
+
 ## Task 7: Resolver discovery + invocation
 
 **Promotion criteria:** N/A.
