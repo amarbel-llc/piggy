@@ -111,16 +111,26 @@ secret MUST NOT exist as both simultaneously (the migrator deletes the
 
 **Decision: keep the filename `piggy-ids`** (preserving the established
 walk-up lookup `store.rs::find_piggy_ids`), but allow its *content* to be
-**either**:
+**one of the following forms**:
 
 - the RFC 0003 line format (legacy), or
-- a **payload-less pigpen document** (canonical going forward).
+- a **payload-less pigpen document** (canonical going forward), or
+- a **pigpen pointer** (RFC 0008 §2.2, RFC 0010), resolved into a
+  payload-less pigpen document before use.
 
 A reader disambiguates by a one-byte sniff: a `piggy-ids` whose first
 bytes are the hyphence opening boundary `---\n` is parsed as a
 payload-less pigpen document; otherwise it is parsed as RFC 0003 lines.
 The sniff is unambiguous — an RFC 0003 file's first non-blank line is a
 `#` comment or a markl ID, never `---`.
+
+A third shape is a **pointer** (RFC 0008 §2.2, RFC 0010): still sniffed by
+the same `---\n` opening-boundary check as the payload-less pigpen case,
+then disambiguated from a recipient-set document by its type line
+(`pigpen-pointer-v1` vs `pigpen-v1`). A pointer resolves — via RFC 0010's
+plugin dispatch — into an in-memory recipient-set document before any
+downstream consumer sees it; nothing below the sniff point is
+pointer-aware.
 
 Rationale for not renaming to `recipients.pigpen`: the walk-up name is
 load-bearing across the store, the home-manager module, and user muscle
