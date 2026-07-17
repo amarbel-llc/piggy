@@ -2329,7 +2329,7 @@ clean-rust:
 # Three recipes per eng-versioning(7). `version.env` is the single
 # source of truth: `bump-version` is a pure mutation, `tag` reads the
 # current value and pushes the signed tag SET, `release` orchestrates
-# the whole flow (changelog → bump → commit → tag set → gh release).
+# the whole flow (changelog → bump → commit → tag set → fj release).
 # `version.env` is also read by `flake.nix` at eval time and by
 # `crates/piggy/build.rs` at compile time.
 #
@@ -2345,7 +2345,7 @@ clean-rust:
 # onto `maintenance` is tracked at amarbel-llc/eng#122.
 
 # The release tag prefixes, in order. The bare "v" tag is primary
-# (piggy's repo-root Rust/C package + the GitHub release); the
+# (piggy's repo-root Rust/C package + the Forgejo release); the
 # path-prefixed entries are the sub-directory Go modules the Go module
 # proxy needs to resolve a versioned `go get` (so `go/v<sem>`
 # resolves `github.com/amarbel-llc/piggy/go@v<sem>`, which madder
@@ -2400,7 +2400,7 @@ tag message="":
 # at one PIGGY_VERSION. Generates a repo-wide auto-changelog (commits
 # since the previous primary v* tag) BEFORE bumping so the bump commit
 # doesn't appear in its own changelog, then bumps version.env, commits,
-# signs+pushes the v<sem> + go/v<sem> tag set, and creates a GitHub
+# signs+pushes the v<sem> + go/v<sem> tag set, and creates a Forgejo
 # release (pointed at the primary v<sem>) whose notes are the changelog
 # plus the sibling sub-module tags. Usage: just release 0.1.1
 [group('maintenance')]
@@ -2419,7 +2419,7 @@ release new_version:
     # changelog range.
     prev=$(git tag --sort=-v:refname -l "v*" | grep -E '^v[0-9]' | head -1 || true)
     header="release v{{new_version}}"
-    # Enumerated in the tag annotation + GitHub release notes; `tag` creates
+    # Enumerated in the tag annotation + Forgejo release notes; `tag` creates
     # these from release_tag_prefixes, the release points at the primary.
     siblings=$'\n\nTags: go/v{{new_version}}'
     if [[ -n "$prev" ]]; then
@@ -2439,7 +2439,7 @@ release new_version:
 
     just tag "$msg"
 
-    gh release create "v{{new_version}}" --title "$header" --notes "$msg"
+    fj release create "$header" --tag "v{{new_version}}" --body "$msg"
 
 # Factory-reset a YubiKey 4 throwaway so its PIV applet is wiped and the
 # CHUID GUID rolls. DESTRUCTIVE — the recipe refuses to run unless the
