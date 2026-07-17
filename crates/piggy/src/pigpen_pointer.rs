@@ -92,9 +92,40 @@ fn cache_path_for(piggy_ids: &Path) -> Result<PathBuf, String> {
         .join(format!("{:016x}.piggy-ids", hasher.finish())))
 }
 
+/// RFC 0010: PATH-discover `pigpen-resolver-<kind>` and run
+/// `resolve <locator>`, returning its stdout on success (exit 0) or an
+/// error folding in its stderr on failure. Mirrors the age-plugin-*
+/// PATH-discovery convention already used by `age-plugin-piggy`.
+fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
+    let binary = format!("pigpen-resolver-{kind}");
+    let output = std::process::Command::new(&binary)
+        .arg("resolve")
+        .arg(locator)
+        .output()
+        .map_err(|e| format!("{binary} not found on PATH: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{binary} resolve {locator} exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mutex-protected env mutation helper. Same pattern as
+    /// `crypt.rs::env_lock()` — tests run on multiple threads by
+    /// default, and `PATH` is process-global. Without this, two tests
+    /// that both mutate `PATH` race with each other. See #132.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     fn tempdir() -> PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -166,5 +197,82 @@ mod tests {
         std::fs::write(&ids, "---\n! pigpen-v1\n---\n").unwrap();
         let err = resolve_piggy_ids_path_for_mutation(&ids).unwrap_err();
         assert!(err.contains("cannot mutate"), "got: {err}");
+    }
+
+    #[test]
+    fn resolver_not_on_path_produces_named_error() {
+        let _guard = env_lock();
+        let err = invoke_resolver("nonexistent-test-kind", "whatever").unwrap_err();
+        assert!(
+            err.contains("pigpen-resolver-nonexistent-test-kind"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolver_success_returns_stdout_bytes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = env_lock();
+        let dir = tempdir();
+        let resolver = dir.join("pigpen-resolver-echo-test");
+        std::fs::write(
+            &resolver,
+            b"#!/bin/sh\nprintf -- '---\\n! pigpen-v1\\n---\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let saved_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                dir.display(),
+                saved_path
+                    .as_ref()
+                    .map_or_else(String::new, |p| p.to_string_lossy().into_owned())
+            ),
+        );
+        let out = invoke_resolver("echo-test", "ignored-locator");
+        match saved_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert_eq!(out.unwrap(), b"---\n! pigpen-v1\n---\n".to_vec());
+    }
+
+    #[test]
+    fn resolver_nonzero_exit_surfaces_stderr() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = env_lock();
+        let dir = tempdir();
+        let resolver = dir.join("pigpen-resolver-fail-test");
+        std::fs::write(
+            &resolver,
+            b"#!/bin/sh\necho 'papi unreachable' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let saved_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                dir.display(),
+                saved_path
+                    .as_ref()
+                    .map_or_else(String::new, |p| p.to_string_lossy().into_owned())
+            ),
+        );
+        let err = invoke_resolver("fail-test", "whatever");
+        match saved_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let err = err.unwrap_err();
+        assert!(err.contains("papi unreachable"), "got: {err}");
     }
 }
