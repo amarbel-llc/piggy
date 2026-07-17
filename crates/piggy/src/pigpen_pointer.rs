@@ -55,6 +55,28 @@ pub(crate) fn resolve_piggy_ids_path(piggy_ids: &Path) -> Result<PathBuf, String
     Ok(cache_path)
 }
 
+/// Like [`resolve_piggy_ids_path`], but for callers that intend to WRITE
+/// to the returned path to persist a change to the `piggy-ids` content
+/// itself (`recipients add`/`remove`/`sync`). Refuses — rather than
+/// silently redirecting a write to a throwaway cache file — when the
+/// content is resolver/pigpen-backed: RFC 0009's payload-less pigpen
+/// face has no write-back format defined yet, and a pointer face's
+/// recipient set lives at the remote source, so local mutation would be
+/// meaningless (piggy#216). Detected by comparing the resolved path
+/// against the input: [`resolve_piggy_ids_path`]'s RFC 0003 passthrough
+/// case is the only one that returns the input path unchanged.
+pub(crate) fn resolve_piggy_ids_path_for_mutation(piggy_ids: &Path) -> Result<PathBuf, String> {
+    let resolved = resolve_piggy_ids_path(piggy_ids)?;
+    if resolved != piggy_ids {
+        return Err(format!(
+            "{}: cannot mutate a resolver/pigpen-backed piggy-ids in place \
+             (recipients add/remove/sync requires plain RFC 0003 piggy-ids content)",
+            piggy_ids.display()
+        ));
+    }
+    Ok(resolved)
+}
+
 /// `$XDG_CACHE_HOME/piggy/<hash-of-piggy_ids-path>.piggy-ids` — never
 /// inside the store itself (the store is typically git-synced).
 fn cache_path_for(piggy_ids: &Path) -> Result<PathBuf, String> {
@@ -126,5 +148,23 @@ mod tests {
         .unwrap();
         let err = resolve_piggy_ids_path(&ids).unwrap_err();
         assert!(err.contains("pointer"), "got: {err}");
+    }
+
+    #[test]
+    fn mutation_allowed_for_rfc0003_passthrough() {
+        let dir = tempdir();
+        let ids = dir.join("piggy-ids");
+        std::fs::write(&ids, "piggy-recipient-v1@age_x25519_pub-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n").unwrap();
+        let resolved = resolve_piggy_ids_path_for_mutation(&ids).unwrap();
+        assert_eq!(resolved, ids);
+    }
+
+    #[test]
+    fn mutation_refused_for_pigpen_recipient_set() {
+        let dir = tempdir();
+        let ids = dir.join("piggy-ids");
+        std::fs::write(&ids, "---\n! pigpen-v1\n---\n").unwrap();
+        let err = resolve_piggy_ids_path_for_mutation(&ids).unwrap_err();
+        assert!(err.contains("cannot mutate"), "got: {err}");
     }
 }

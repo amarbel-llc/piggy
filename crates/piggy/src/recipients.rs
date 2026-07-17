@@ -105,7 +105,7 @@ pub fn add(args: &[String]) -> i32 {
 
     let root = store_root();
     let piggy_ids = match find_piggy_ids(&root, &parsed.subfolder)
-        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path_for_mutation(&p))
     {
         Ok(p) => p,
         Err(msg) => {
@@ -166,7 +166,7 @@ fn add_all_attached(
 ) -> i32 {
     let root = store_root();
     let piggy_ids = match find_piggy_ids(&root, subfolder)
-        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path_for_mutation(&p))
     {
         Ok(p) => p,
         Err(msg) => {
@@ -324,7 +324,7 @@ pub fn remove(args: &[String]) -> i32 {
 
     let root = store_root();
     let piggy_ids = match find_piggy_ids(&root, &parsed.subfolder)
-        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path_for_mutation(&p))
     {
         Ok(p) => p,
         Err(msg) => {
@@ -421,7 +421,7 @@ pub fn sync(args: &[String]) -> i32 {
     }
 
     let piggy_ids = match find_piggy_ids(&root, &parsed.subfolder)
-        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path_for_mutation(&p))
     {
         Ok(p) => p,
         Err(msg) => {
