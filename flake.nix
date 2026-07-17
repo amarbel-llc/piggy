@@ -73,6 +73,7 @@
     bats.inputs.nixpkgs-master.follows = "nixpkgs-master";
     igloo.inputs.nixpkgs-master.follows = "nixpkgs-master";
     bats.inputs.utils.follows = "utils";
+    bats.inputs.conformist.follows = "conformist";
   };
 
   outputs =
