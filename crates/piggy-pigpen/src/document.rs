@@ -7,6 +7,7 @@ use crate::hyphence::{HyphenceDoc, MetaLine};
 use crate::{Error, Result};
 
 const TYPE_TAG: &str = "pigpen-v1";
+const POINTER_TYPE_TAG: &str = "pigpen-pointer-v1";
 const HRP_WRAP_P256: &str = "pigpen_wrap_p256";
 const HRP_WRAP_X25519: &str = "pigpen_wrap_x25519";
 const HRP_HEADER_MAC: &str = "pigpen_header_mac";
@@ -255,6 +256,76 @@ impl Document {
         }
         Ok(())
     }
+}
+
+/// A pigpen pointer face (RFC 0008 §2.2, RFC 0010): names a resolver
+/// by opaque `kind` + `locator` rather than carrying recipients
+/// directly. `locator` is never interpreted by this crate — it is
+/// handed verbatim to whatever invokes the resolver.
+pub struct Pointer {
+    pub kind: String,
+    pub locator: String,
+}
+
+impl Pointer {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let h = HyphenceDoc {
+            meta: vec![
+                MetaLine {
+                    prefix: b'-',
+                    body: format!("kind=\"{}\"", self.kind),
+                },
+                MetaLine {
+                    prefix: b'-',
+                    body: format!("locator=\"{}\"", self.locator),
+                },
+                MetaLine {
+                    prefix: b'!',
+                    body: POINTER_TYPE_TAG.to_string(),
+                },
+            ],
+            body: Vec::new(),
+        };
+        h.marshal()
+    }
+
+    pub fn parse(raw: &[u8]) -> Result<Pointer> {
+        let h = crate::hyphence::parse(raw)?;
+        let is_pointer = h
+            .meta
+            .iter()
+            .any(|l| l.prefix == b'!' && l.body == POINTER_TYPE_TAG);
+        if !is_pointer {
+            return Err(Error::Malformed(format!(
+                "not a {POINTER_TYPE_TAG} document"
+            )));
+        }
+        let mut kind = None;
+        let mut locator = None;
+        for l in &h.meta {
+            if l.prefix != b'-' {
+                continue;
+            }
+            if let Some(v) = parse_quoted_kv(&l.body, "kind") {
+                kind = Some(v);
+            } else if let Some(v) = parse_quoted_kv(&l.body, "locator") {
+                locator = Some(v);
+            }
+        }
+        let kind = kind.ok_or_else(|| Error::Malformed("pointer missing kind tag".into()))?;
+        let locator =
+            locator.ok_or_else(|| Error::Malformed("pointer missing locator tag".into()))?;
+        Ok(Pointer { kind, locator })
+    }
+}
+
+/// Parse a `key="value"` tag body, e.g. `kind="papi-http"` with
+/// `key = "kind"` returns `Some("papi-http")`. Returns `None` if the
+/// prefix or quoting doesn't match — callers try each key in turn.
+fn parse_quoted_kv(body: &str, key: &str) -> Option<String> {
+    let rest = body.strip_prefix(key)?.strip_prefix('=')?;
+    let inner = rest.strip_prefix('"')?.strip_suffix('"')?;
+    Some(inner.to_string())
 }
 
 fn encode_wrap(format: FormatId, blob: &[u8]) -> Result<String> {
@@ -584,5 +655,42 @@ mod tests {
         // captured), so the deterministic recipient-set face round-trips
         // identically across implementations.
         assert_eq!(hex::encode(doc.to_bytes().unwrap()), RECIPIENT_SET);
+    }
+
+    #[test]
+    fn pointer_round_trips_kind_and_locator() {
+        let ptr = Pointer {
+            kind: "papi-http".into(),
+            locator: "https://example.com".into(),
+        };
+        let bytes = ptr.to_bytes().unwrap();
+        let parsed = Pointer::parse(&bytes).unwrap();
+        assert_eq!(parsed.kind, "papi-http");
+        assert_eq!(parsed.locator, "https://example.com");
+    }
+
+    #[test]
+    fn pointer_wire_shape_matches_rfc0008() {
+        let ptr = Pointer {
+            kind: "papi-http".into(),
+            locator: "https://example.com".into(),
+        };
+        let bytes = ptr.to_bytes().unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "---\n- kind=\"papi-http\"\n- locator=\"https://example.com\"\n! pigpen-pointer-v1\n---\n"
+        );
+    }
+
+    #[test]
+    fn pointer_parse_rejects_recipient_set_type() {
+        let raw = b"---\n! pigpen-v1\n---\n";
+        assert!(Pointer::parse(raw).is_err());
+    }
+
+    #[test]
+    fn pointer_parse_rejects_missing_locator() {
+        let raw = b"---\n- kind=\"papi-http\"\n! pigpen-pointer-v1\n---\n";
+        assert!(Pointer::parse(raw).is_err());
     }
 }
