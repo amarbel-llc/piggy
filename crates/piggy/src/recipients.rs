@@ -43,7 +43,9 @@ pub fn list(args: &[String]) -> i32 {
     };
 
     let root = store_root();
-    let ids_path = match find_piggy_ids(&root, &subfolder) {
+    let ids_path = match find_piggy_ids(&root, &subfolder)
+        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+    {
         Ok(p) => p,
         Err(msg) => {
             eprintln!("piggy pass recipients list: {msg}");
@@ -102,7 +104,9 @@ pub fn add(args: &[String]) -> i32 {
     }
 
     let root = store_root();
-    let piggy_ids = match find_piggy_ids(&root, &parsed.subfolder) {
+    let piggy_ids = match find_piggy_ids(&root, &parsed.subfolder)
+        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+    {
         Ok(p) => p,
         Err(msg) => {
             eprintln!("Error: {msg}");
@@ -161,7 +165,9 @@ fn add_all_attached(
     socket: Option<&Path>,
 ) -> i32 {
     let root = store_root();
-    let piggy_ids = match find_piggy_ids(&root, subfolder) {
+    let piggy_ids = match find_piggy_ids(&root, subfolder)
+        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+    {
         Ok(p) => p,
         Err(msg) => {
             eprintln!("Error: {msg}");
@@ -317,7 +323,9 @@ pub fn remove(args: &[String]) -> i32 {
     }
 
     let root = store_root();
-    let piggy_ids = match find_piggy_ids(&root, &parsed.subfolder) {
+    let piggy_ids = match find_piggy_ids(&root, &parsed.subfolder)
+        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+    {
         Ok(p) => p,
         Err(msg) => {
             eprintln!("Error: {msg}");
@@ -412,7 +420,9 @@ pub fn sync(args: &[String]) -> i32 {
         return 1;
     }
 
-    let piggy_ids = match find_piggy_ids(&root, &parsed.subfolder) {
+    let piggy_ids = match find_piggy_ids(&root, &parsed.subfolder)
+        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+    {
         Ok(p) => p,
         Err(msg) => {
             eprintln!("Error: {msg}");

@@ -69,7 +69,9 @@ pub fn run(args: &[String]) -> i32 {
     // `.`, which we pass through as empty so `find_piggy_ids` walks
     // from the store root.
     let subfolder = path_parent_for_search(&opts.path);
-    let piggy_ids = match find_piggy_ids(&root, &subfolder) {
+    let piggy_ids = match find_piggy_ids(&root, &subfolder)
+        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+    {
         Ok(p) => p,
         Err(msg) => {
             eprintln!("Error: {msg}");

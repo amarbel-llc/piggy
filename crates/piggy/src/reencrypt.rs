@@ -125,7 +125,9 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
             .unwrap_or(passfile_dir)
             .to_string_lossy()
             .into_owned();
-        let piggy_ids = match find_piggy_ids(&store, &subfolder) {
+        let piggy_ids = match find_piggy_ids(&store, &subfolder)
+            .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
+        {
             Ok(p) => p,
             Err(err) => {
                 let _ = tap.not_ok(n, &display, &err);

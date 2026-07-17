@@ -58,7 +58,8 @@ fn run_inner(args: &[String]) -> Result<i32, String> {
         Some(p) => PathBuf::from(p),
         None => {
             let store = store_root();
-            find_piggy_ids(&store, "")?
+            find_piggy_ids(&store, "")
+                .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))?
         }
     };
 
