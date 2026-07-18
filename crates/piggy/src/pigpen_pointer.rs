@@ -80,6 +80,12 @@ fn recipient_set_doc_to_rfc0003_cache(
     let recipients: Result<Vec<piggy_ids::Recipient>, String> = doc
         .recipients
         .into_iter()
+        // Skip unrecognized-purpose lines (e.g. papi self-sig) — they are
+        // valid pigpen tags but have no RFC 0003 representation and must not
+        // be passed to Recipient::new's strict whitelist (RFC 0002 §6.6 /
+        // madder#255: unknown purposes are carried opaquely by the parser,
+        // not rejected, so they reach here and must be filtered out).
+        .filter(|r| !matches!(r.id.purpose(), Some(piggy_markl::PurposeId::Other(_))))
         .map(|r| {
             piggy_ids::Recipient::new(r.id, r.comment)
                 .map_err(|e| format!("converting recipient: {e}"))
@@ -272,6 +278,66 @@ mod tests {
         assert_eq!(
             rendered, "",
             "zero recipients renders to an empty RFC 0003 file"
+        );
+    }
+
+    #[test]
+    fn unknown_purpose_line_silently_filtered_in_rfc0003_conversion() {
+        // A pigpen recipient-set doc may carry unrecognized-purpose `-` lines
+        // (e.g. `papi-pigpen-self-sig-v1@ecdsa_p256_sig-<blech32>` from papi's
+        // self-signed pigpen format). These are valid pigpen tags but have no
+        // RFC 0003 representation. recipient_set_doc_to_rfc0003_cache must skip
+        // them rather than passing them to Recipient::new's strict whitelist.
+        use piggy_markl::{FormatId, Id, PurposeId};
+        let _guard = env_lock();
+        let dir = tempdir();
+        let ids = dir.join("piggy-ids");
+
+        // Build a recipient-set doc: one valid age recipient + one self-sig tag.
+        let known_id = Id::new(
+            Some(PurposeId::PiggyRecipientV1),
+            FormatId::AgeX25519Pub,
+            vec![1u8; 32],
+        )
+        .unwrap();
+        let sig_id = Id::new(
+            Some(PurposeId::Other("papi-pigpen-self-sig-v1".to_string())),
+            FormatId::EcdsaP256Sig,
+            vec![0u8; 64],
+        )
+        .unwrap();
+        let doc = piggy_pigpen::Document::new_recipient_set(vec![
+            piggy_pigpen::Recipient {
+                id: known_id.clone(),
+                comment: None,
+                wrap: None,
+            },
+            piggy_pigpen::Recipient {
+                id: sig_id,
+                comment: None,
+                wrap: None,
+            },
+        ]);
+        std::fs::write(&ids, doc.to_bytes().unwrap()).unwrap();
+
+        let saved_cache_home = std::env::var_os("XDG_CACHE_HOME");
+        std::env::set_var("XDG_CACHE_HOME", dir.join("cache"));
+        let resolved = resolve_piggy_ids_path(&ids);
+        match saved_cache_home {
+            Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+            None => std::env::remove_var("XDG_CACHE_HOME"),
+        }
+        let resolved = resolved.unwrap();
+
+        let rendered = std::fs::read_to_string(&resolved).unwrap();
+        // Only the known recipient should appear; the self-sig line is absent.
+        assert!(
+            rendered.contains(&known_id.to_wire()),
+            "known recipient missing from RFC 0003 output: {rendered}"
+        );
+        assert!(
+            !rendered.contains("papi-pigpen-self-sig-v1"),
+            "self-sig tag must not appear in RFC 0003 output: {rendered}"
         );
     }
 
