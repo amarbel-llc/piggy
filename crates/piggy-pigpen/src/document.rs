@@ -675,6 +675,48 @@ mod tests {
     }
 
     #[test]
+    fn unrecognized_purpose_dash_line_tolerated() {
+        // Interop case (papi self-signed pigpen doc): a `-` line whose markl
+        // purpose piggy doesn't register — e.g. `papi-pigpen-self-sig-v1` paired
+        // with the known `ecdsa_p256_sig` format — MUST NOT fail parse.
+        // Unknown purposes are carried opaquely per RFC 0002 §6.6 / madder#255.
+        let (pub_, _) = new_x25519();
+        let known_id = recipient_id(FormatId::AgeX25519Pub, pub_).unwrap();
+        // 64 zero-bytes: valid EcdsaP256Sig payload length; content is arbitrary
+        // for this structural test (real papi signatures are non-zero).
+        let sig_id = Id::new(
+            Some(PurposeId::Other("papi-pigpen-self-sig-v1".to_string())),
+            FormatId::EcdsaP256Sig,
+            vec![0u8; 64],
+        )
+        .unwrap();
+        let doc = Document::new_recipient_set(vec![
+            Recipient {
+                id: known_id,
+                comment: None,
+                wrap: None,
+            },
+            Recipient {
+                id: sig_id,
+                comment: None,
+                wrap: None,
+            },
+        ]);
+        let wire = doc.to_bytes().unwrap();
+        // Parse must succeed and preserve both lines.
+        let parsed = Document::parse(&wire).unwrap();
+        assert_eq!(parsed.recipients.len(), 2);
+        assert!(!parsed.sealed());
+        // The unknown-purpose line round-trips with its purpose and format intact.
+        let sig_rec = &parsed.recipients[1];
+        assert_eq!(
+            sig_rec.id.purpose(),
+            Some(&PurposeId::Other("papi-pigpen-self-sig-v1".to_string()))
+        );
+        assert_eq!(sig_rec.id.format(), FormatId::EcdsaP256Sig);
+    }
+
+    #[test]
     fn pointer_round_trips_kind_and_locator() {
         let ptr = Pointer {
             kind: "papi-http".into(),

@@ -171,6 +171,19 @@ re-keying, and are consumed only by `piggy ssh-copy-id`. This preserves
 RFC 0003's "one file answers both 'who can decrypt' and 'who may log
 in'" property.
 
+**Unrecognized-purpose `-` lines.** A `-` line whose markl ID carries a
+purpose not listed in the table above MUST be tolerated by a reader and
+passed through opaquely; it MUST NOT cause a parse error. Such a line is
+**not** an encryption recipient and MUST carry no wrap lock. This is the
+hyphence-idiomatic extension point: per RFC 0002 §6.6 (madder#255), an
+unrecognized purpose degrades to an opaque tag-as-string rather than a
+decode error. An unknown markl **format** (not purpose) MUST still be
+rejected, since the format governs the byte layout and a decoder cannot
+interpret data of unknown shape. An example use case is a self-signature
+line added by a third party (e.g. `papi-pigpen-self-sig-v1@ecdsa_p256_sig-<blech32>`);
+pigpen passes it through without interpretation, and the consuming party
+verifies its purpose-specific semantics independently.
+
 ### 2.4 Wrap locks (sealed mode)
 
 In sealed mode, each *encryption* recipient line carries a hyphence
@@ -539,7 +552,9 @@ A conforming `pigpen-v1` implementation MUST:
   strings, the STREAM nonce layout, the all-zero wrap nonce, and the
   MAC-after-unwrap ordering.
 - Reject mixed-state documents (§2.2), `@`-with-body documents
-  (RFC 0001), unknown formats/purposes, and MAC mismatches.
+  (RFC 0001), unknown markl **format** IDs, and MAC mismatches. An
+  unrecognized markl **purpose** on a `-` line MUST be tolerated and
+  carried opaquely (§2.3, RFC 0002 §6.6).
 - Round-trip: a payload-less pigpen MUST carry exactly the recipient-set
   information of the equivalent `piggy-ids` file and convert losslessly
   to and from it.
