@@ -274,7 +274,11 @@ test-bats-conformance-protocol: build-rust
   # The binary is exposed as piggy.tests.conformance (see passthru in
   # flake.nix). nix caches aggressively, so repeat invocations are free.
   out=$(nix build .#piggy.tests.conformance --no-link --print-out-paths)
+  # TMPDIR=/tmp: sidesteps the fence bridge-socket sun_path overflow
+  # under a long session $TMPDIR — see test-bats-conformance above and
+  # linenisgreat/bats#37.
   CONFORMANCE_BIN="$out/bin/piggy-agent-conformance" \
+    TMPDIR=/tmp \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding \
     --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
 
@@ -325,6 +329,7 @@ test-bats-conformance-box-agentless-fibby: build-rust
     SSH_ASKPASS_REQUIRE=force \
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
+    TMPDIR=/tmp \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
 
@@ -379,6 +384,7 @@ test-bats-conformance-interop-fibby: build-rust
     SSH_ASKPASS_REQUIRE=force \
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
+    TMPDIR=/tmp \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_interop.bats \
     zz-tests_bats/conformance/piggy_box_decrypt_interop.bats
@@ -422,6 +428,7 @@ test-bats-conformance-recipients-add-attached-fibby: build-rust
     SSH_ASKPASS_REQUIRE=force \
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
+    TMPDIR=/tmp \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_recipients_add_attached.bats
 
@@ -493,6 +500,7 @@ test-bats-conformance-show-batch-fibby: build-rust
     SSH_ASKPASS_REQUIRE=force \
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
+    TMPDIR=/tmp \
     BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_pass_show_batch_hardware.bats
 
