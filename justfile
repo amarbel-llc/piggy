@@ -241,7 +241,20 @@ test-bats-conformance: build-rust
   # tty tests that need a real terminal. They run unsandboxed below
   # instead. Tracked at piggy#167 (fence-profile fix is upstream:
   # amarbel-llc/igloo + Use-Tusk/fence).
-  env "${fibby_env[@]}" BATS_TEST_TIMEOUT=30 \
+  #
+  # TMPDIR=/tmp: fence's Linux network policy is enforced via socat
+  # bridges to AF_UNIX sockets under $TMPDIR/nix-shell.XXXXXX/. When
+  # $TMPDIR is a long path — as it is under a spinclass session
+  # worktree's per-session scratch dir (<repo>/.worktrees/<name>/.tmp) —
+  # the full socket path can reach the kernel's 108-byte sockaddr_un
+  # sun_path limit, silently truncating or dropping the socket file
+  # while fence polls for the untruncated path, hanging until
+  # "failed to initialize Linux bridge: timeout waiting for bridge
+  # sockets to be created". Forcing a short TMPDIR here sidesteps it;
+  # the real fix belongs upstream in fence. Root-caused and tracked at
+  # linenisgreat/bats#37. Mirrors the same sun_path-short discipline
+  # this repo's fibby PCSC loopback already applies (see flake.nix).
+  env "${fibby_env[@]}" TMPDIR=/tmp BATS_TEST_TIMEOUT=30 \
     bats --jobs {{ num_cpus() }} --filter-tags '!pty' --tap zz-tests_bats/conformance/*.bats
   # The pty-tagged tests need a real /dev/ptmx, which fence blocks — run
   # them outside the sandbox (the same escape the pcscd/hardware lanes
