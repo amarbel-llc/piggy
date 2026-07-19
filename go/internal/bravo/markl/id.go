@@ -86,10 +86,8 @@ func (id Id) GetPurposeId() string {
 // general/opaque identifiers (a hyphence type name, an object id such as
 // `one/uno`, a typed-edge field name), which get no further validation.
 func (id *Id) SetPurposeId(value string) error {
-	if value != "" {
-		if err := validatePurposeCharset(value); err != nil {
-			return err
-		}
+	if err := validatePurposeCharset(value); err != nil {
+		return err
 	}
 
 	id.purposeId = value
@@ -334,7 +332,7 @@ func (id *Id) Reset() {
 func (id *Id) ResetWithPurpose(purpose string) {
 	id.format = nil
 	id.data = id.data[:0]
-	id.purposeId = purpose
+	errors.PanicIfError(id.SetPurposeId(purpose))
 }
 
 func (id *Id) ResetWith(src Id) {

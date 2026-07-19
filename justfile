@@ -332,7 +332,7 @@ test-bats-conformance-box-agentless-fibby: build-rust
     SSH_ASKPASS_REQUIRE=force \
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
-    TMPDIR=/tmp \
+    {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
 
@@ -387,7 +387,7 @@ test-bats-conformance-interop-fibby: build-rust
     SSH_ASKPASS_REQUIRE=force \
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
-    TMPDIR=/tmp \
+    {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_interop.bats \
     zz-tests_bats/conformance/piggy_box_decrypt_interop.bats
@@ -431,7 +431,7 @@ test-bats-conformance-recipients-add-attached-fibby: build-rust
     SSH_ASKPASS_REQUIRE=force \
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
-    TMPDIR=/tmp \
+    {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_recipients_add_attached.bats
 
@@ -503,7 +503,7 @@ test-bats-conformance-show-batch-fibby: build-rust
     SSH_ASKPASS_REQUIRE=force \
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
-    TMPDIR=/tmp \
+    {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_pass_show_batch_hardware.bats
 
