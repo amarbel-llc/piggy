@@ -61,7 +61,7 @@ build-rust-release:
     cargo build --release
 
 # go/ module (#183): the registry/codec Go library (module
-# github.com/amarbel-llc/piggy/go) that madder depends on (inverting today's
+# code.linenisgreat.com/piggy/go) that madder depends on (inverting today's
 # Rust-port-of-madder relationship). build-go + test-go are wired
 # into the build/test aggregates so the pre-merge `just` hook exercises the
 # module. Per the maintainer ruling (#183/#188) the nix-level gate is the
@@ -2409,7 +2409,7 @@ clean-rust:
 # (piggy's repo-root Rust/C package + the Forgejo release); the
 # path-prefixed entries are the sub-directory Go modules the Go module
 # proxy needs to resolve a versioned `go get` (so `go/v<sem>`
-# resolves `github.com/amarbel-llc/piggy/go@v<sem>`, which madder
+# resolves `code.linenisgreat.com/piggy/go@v<sem>`, which madder
 # pins). The `conformance/` module is intentionally absent: it's a
 # vendored test binary nobody `go get`s by version. Add a prefix here
 # when a new sub-directory module must be independently consumable.

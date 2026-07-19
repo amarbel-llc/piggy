@@ -3,8 +3,8 @@
 package markl
 
 import (
-	internal "github.com/amarbel-llc/piggy/go/internal/bravo/markl"
-	domaininterfaces "github.com/amarbel-llc/piggy/go/pkgs/domain_interfaces"
+	internal "code.linenisgreat.com/piggy/go/internal/bravo/markl"
+	domaininterfaces "code.linenisgreat.com/piggy/go/pkgs/domain_interfaces"
 	interfaces "github.com/amarbel-llc/purse-first/libs/dewey/pkgs/interfaces"
 	constraints "golang.org/x/exp/constraints"
 )

@@ -1,7 +1,7 @@
 # markl-id ownership inversion — piggy as the canonical registry + Go library
 
 > **Update (2026-07-05):** the module was subsequently promoted from `go/markl`
-> → `go/` (module `github.com/amarbel-llc/piggy/go`); the `agent`/`age`/`pigpen`
+> → `go/` (module `code.linenisgreat.com/piggy/go`); the `agent`/`age`/`pigpen`
 > sub-packages were relayered into `internal/delta/*` + `pkgs/*` facades, and the
 > standalone `conformance` test module was absorbed into `go/cmd/`. This doc
 > records the original `go/markl` design and its paths are historical — see the
@@ -104,7 +104,7 @@ canonical core must **split the pure codec/registry from the signer/agent
 layer**. Proposed split:
 
 - **`go/markl/` — the canonical core** (own `go.mod`, module path
-  `github.com/amarbel-llc/piggy/go/markl`). Pure: the `Id` type, text/binary
+  `code.linenisgreat.com/piggy/go/markl`). Pure: the `Id` type, text/binary
   /blech32 coding (split-HRP), format families, the purpose/format registries
   + `RegisterPurpose`/`RegisterFormat` + the `SwapFormat` swap hook (see the
   boundary section). Carries a broad-but-light dewey dep and is free of the
@@ -282,7 +282,7 @@ core skeleton lands.
 
 madder repoints from owning the registry to depending on it:
 
-- Add the `github.com/amarbel-llc/piggy/go/markl` dependency (`go.mod` +
+- Add the `code.linenisgreat.com/piggy/go/markl` dependency (`go.mod` +
   `gomod2nix.toml`).
 - **Migration mechanism — a thin re-export shim.** Rather than rewrite the
   ~dozens of direct `internal/bravo/markl` importers in one big-bang change,

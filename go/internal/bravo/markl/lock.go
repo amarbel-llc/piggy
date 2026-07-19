@@ -1,7 +1,7 @@
 package markl
 
 import (
-	"github.com/amarbel-llc/piggy/go/internal/0/domain_interfaces"
+	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/interfaces"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/values"
 )

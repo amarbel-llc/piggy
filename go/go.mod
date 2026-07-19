@@ -1,4 +1,4 @@
-module github.com/amarbel-llc/piggy/go
+module code.linenisgreat.com/piggy/go
 
 go 1.26
 

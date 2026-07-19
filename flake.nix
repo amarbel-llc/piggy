@@ -173,7 +173,7 @@
         # gomod.nix is the producer half of the flake-input-go_mod protocol
         # (amarbel-llc/nixpkgs RFC 0001): mkGoPkgs publishes go-pkgs /
         # go-pkgs-test so madder/dodder/cutting-garden bridge
-        # github.com/amarbel-llc/piggy/go as a flake input (flake.lock-only
+        # code.linenisgreat.com/piggy/go as a flake input (flake.lock-only
         # bumps) instead of a go.mod pseudo-version. The producer src is scoped
         # to the go/ subdir, so downstream bridges with NO subPath. goFlakeInputs
         # (the dewey bridge) is threaded into the two buildGoApplication binaries
@@ -489,7 +489,7 @@
         };
 
         # The two Go test binaries piggy's bats lanes need, now built from the
-        # unified go/ module (github.com/amarbel-llc/piggy/go) via
+        # unified go/ module (code.linenisgreat.com/piggy/go) via
         # buildGoApplication self-consuming the go-pkgs-test producer output
         # (rich-acacia's canonical self-consume, RFC 0001 § Self-consumption): a
         # source-filter regression OR a stale go/gomod2nix.toml fails the build
@@ -743,7 +743,7 @@
           # (filtered go/ source trees) that let downstream repos
           # (madder/dodder/cutting-garden) bridge piggy's go/ module as a flake
           # input via goFlakeInputs, instead of a go.mod pseudo-version (RFC
-          # 0001). Consumers bridge `github.com/amarbel-llc/piggy/go` = go-pkgs
+          # 0001). Consumers bridge `code.linenisgreat.com/piggy/go` = go-pkgs
           # with NO subPath (the producer src is already scoped to go/). See
           # go/gomod.nix.
           inherit go-pkgs go-pkgs-test;

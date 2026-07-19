@@ -2,7 +2,7 @@
 # flake-input-go_mod protocol (amarbel-llc/nixpkgs RFC 0001):
 #
 #   - producer: mkGoPkgs publishes go-pkgs / go-pkgs-test so downstream repos
-#     (madder, dodder, cutting-garden) can bridge github.com/amarbel-llc/piggy/go
+#     (madder, dodder, cutting-garden) can bridge code.linenisgreat.com/piggy/go
 #     as a flake input instead of pinning a go.mod pseudo-version. The caller
 #     scopes src to the go/ subdir (piggy is polyglot: a Rust workspace + this
 #     Go module), so downstream bridges with NO subPath. This is the normative

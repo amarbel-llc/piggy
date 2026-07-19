@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/amarbel-llc/piggy/go/internal/0/domain_interfaces"
+	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
 )
 
 type ErrUnsupportedIdFormat string

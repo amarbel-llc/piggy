@@ -3,12 +3,12 @@ package markl_registrations_test
 import (
 	"testing"
 
-	markl "github.com/amarbel-llc/piggy/go/internal/bravo/markl"
+	markl "code.linenisgreat.com/piggy/go/internal/bravo/markl"
 
 	// Blank-importing markl_registrations fires its init(), installing
 	// piggy's native formats + purposes into the framework registry. This
 	// IS the activation contract (ADR 0006): a consumer opts in by import.
-	_ "github.com/amarbel-llc/piggy/go/internal/charlie/markl_registrations"
+	_ "code.linenisgreat.com/piggy/go/internal/charlie/markl_registrations"
 )
 
 func TestPiggyFormatsInstalled(t *testing.T) {

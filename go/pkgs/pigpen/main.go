@@ -2,7 +2,7 @@
 
 package pigpen
 
-import internal "github.com/amarbel-llc/piggy/go/internal/delta/pigpen"
+import internal "code.linenisgreat.com/piggy/go/internal/delta/pigpen"
 
 // Document is the in-memory model of a pigpen-v1 document.
 type Document = internal.Document

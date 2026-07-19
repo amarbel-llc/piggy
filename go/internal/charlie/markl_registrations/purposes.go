@@ -1,7 +1,7 @@
 package markl_registrations
 
 import (
-	markl "github.com/amarbel-llc/piggy/go/internal/bravo/markl"
+	markl "code.linenisgreat.com/piggy/go/internal/bravo/markl"
 )
 
 // Piggy's own canonical purpose registrations. Per piggy#183 (the markl-id

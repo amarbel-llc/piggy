@@ -5,7 +5,7 @@ package markl_registrations
 import (
 	"crypto/ed25519"
 
-	markl "github.com/amarbel-llc/piggy/go/internal/bravo/markl"
+	markl "code.linenisgreat.com/piggy/go/internal/bravo/markl"
 )
 
 // init installs piggy's native FORMAT registrations into the framework

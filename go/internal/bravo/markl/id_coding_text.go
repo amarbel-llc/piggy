@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/amarbel-llc/piggy/go/internal/alfa/blech32"
+	"code.linenisgreat.com/piggy/go/internal/alfa/blech32"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
 )
 

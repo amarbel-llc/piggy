@@ -8,8 +8,8 @@ import (
 	"io"
 	"math/big"
 
-	"github.com/amarbel-llc/piggy/go/internal/0/domain_interfaces"
-	markl "github.com/amarbel-llc/piggy/go/internal/bravo/markl"
+	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
+	markl "code.linenisgreat.com/piggy/go/internal/bravo/markl"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
 )
 

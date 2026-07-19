@@ -3,7 +3,7 @@
 package domain_interfaces
 
 import (
-	internal "github.com/amarbel-llc/piggy/go/internal/0/domain_interfaces"
+	internal "code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
 	interfaces "github.com/amarbel-llc/purse-first/libs/dewey/pkgs/interfaces"
 )
 

@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/amarbel-llc/piggy/go/internal/0/domain_interfaces"
-	"github.com/amarbel-llc/piggy/go/internal/alfa/blech32"
+	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
+	"code.linenisgreat.com/piggy/go/internal/alfa/blech32"
 	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
 )
 

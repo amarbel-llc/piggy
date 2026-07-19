@@ -2,7 +2,7 @@
 
 package markl_registrations
 
-import internal "github.com/amarbel-llc/piggy/go/internal/charlie/markl_registrations"
+import internal "code.linenisgreat.com/piggy/go/internal/charlie/markl_registrations"
 
 // AllPurposes is the ordered list of piggy's own purpose registrations.
 // Order is deterministic but consumers must not depend on it — registration

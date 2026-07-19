@@ -2,7 +2,7 @@
 
 package blech32
 
-import internal "github.com/amarbel-llc/piggy/go/internal/alfa/blech32"
+import internal "code.linenisgreat.com/piggy/go/internal/alfa/blech32"
 
 // TODO make generic
 type Value = internal.Value

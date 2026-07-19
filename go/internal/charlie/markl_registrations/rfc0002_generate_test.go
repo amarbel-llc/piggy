@@ -28,9 +28,9 @@ import (
 	"sort"
 	"testing"
 
-	blech32 "github.com/amarbel-llc/piggy/go/internal/alfa/blech32"
-	markl "github.com/amarbel-llc/piggy/go/internal/bravo/markl"
-	markl_registrations "github.com/amarbel-llc/piggy/go/internal/charlie/markl_registrations"
+	blech32 "code.linenisgreat.com/piggy/go/internal/alfa/blech32"
+	markl "code.linenisgreat.com/piggy/go/internal/bravo/markl"
+	markl_registrations "code.linenisgreat.com/piggy/go/internal/charlie/markl_registrations"
 )
 
 // rfc0002StablePurposes lists exactly the purpose IDs piggy registers

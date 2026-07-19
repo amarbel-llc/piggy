@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	markl "github.com/amarbel-llc/piggy/go/internal/bravo/markl"
-	_ "github.com/amarbel-llc/piggy/go/internal/charlie/markl_registrations"
+	markl "code.linenisgreat.com/piggy/go/internal/bravo/markl"
+	_ "code.linenisgreat.com/piggy/go/internal/charlie/markl_registrations"
 )
 
 // TestRFC0002VectorsRoundTrip pins the wire format claimed normatively

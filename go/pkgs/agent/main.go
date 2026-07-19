@@ -2,7 +2,7 @@
 
 package agent
 
-import internal "github.com/amarbel-llc/piggy/go/internal/delta/agent"
+import internal "code.linenisgreat.com/piggy/go/internal/delta/agent"
 
 // DiscoveredKey is one agent-resident key surfaced by the Discover*
 // helpers: its markl Id (stamped under the appropriate format) plus the

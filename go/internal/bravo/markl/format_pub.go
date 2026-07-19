@@ -1,6 +1,6 @@
 package markl
 
-import "github.com/amarbel-llc/piggy/go/internal/0/domain_interfaces"
+import "code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
 
 type (
 	FuncFormatPubVerify func(pubkey, message, sig domain_interfaces.MarklId) error

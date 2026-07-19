@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/amarbel-llc/piggy/go/internal/bravo/markl"
+	"code.linenisgreat.com/piggy/go/internal/bravo/markl"
 )
 
 // buildHyphence renders the Document into the framing-level view. When

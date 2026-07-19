@@ -2,7 +2,7 @@
 
 package age
 
-import internal "github.com/amarbel-llc/piggy/go/internal/delta/age"
+import internal "code.linenisgreat.com/piggy/go/internal/delta/age"
 
 // AgeX25519Generate mints a fresh age x25519 identity and returns its
 // raw 32-byte secret scalar (the bech32 AGE-SECRET-KEY- payload).
