@@ -175,7 +175,7 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: test-bats-default test-bats-conformance test-rust test-go test-pigpen _test-conformance-linux-only
+test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-rust test-go test-pigpen _test-conformance-linux-only
 
 [group('post-build')]
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module
@@ -923,6 +923,43 @@ validate-box:
 [group('pre-build')]
 validate-piggy:
     cargo check -p piggy
+
+# Validate go/internal/bravo/markl/marklid.peg (the markl-id text-form
+# grammar, piggy#220) is well-formed under langlang. Mirrors cutting-
+# garden's validate-grammar recipe (docs/rfcs/0014-trellis.peg), but
+# via the langlang flake input (flake.nix `.#langlang`) rather than a
+# hardcoded sibling-checkout path — langlang ships its own flake with a
+# buildGoApplication `packages.default`, so there's no reason not to
+# consume it hermetically from the start. Well-formedness only — does
+# NOT check that real markl-id strings parse via the intended
+# production (see test-grammar-vectors for that; hyphence#9's
+# "zero-power trap" lesson).
+[group('pre-build')]
+validate-grammar:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    langlang_bin=$(nix build .#langlang --no-link --print-out-paths)/bin/langlang
+    peg="{{ justfile_directory() }}/go/internal/bravo/markl/marklid.peg"
+    "$langlang_bin" -grammar "$peg" -grammar-ast -disable-builtins -disable-spaces >/dev/null
+    gum log --level info "validate-grammar: ok ($peg parses under langlang)"
+
+# Cross-check the RFC 0002 conformance fixture (the same vectors the
+# Go/Rust reference decoders round-trip) against marklid.peg via
+# langlang -input (piggy#220, hyphence#9's "zero-power trap" lesson):
+# validate-grammar alone only checks the .peg is well-formed, never
+# that real markl-id strings parse under it via the intended
+# production. Resolves the langlang binary via the flake input and
+# points LANGLANG_BIN at it for
+# go/internal/charlie/markl_registrations/grammar_vectors_test.go,
+# which skips gracefully outside this recipe (plain `just test-go`
+# still passes without LANGLANG_BIN set).
+[group('post-build')]
+test-grammar-vectors:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    langlang_bin=$(nix build .#langlang --no-link --print-out-paths)/bin/langlang
+    cd go && LANGLANG_BIN="$langlang_bin" go test -tags test \
+      ./internal/charlie/markl_registrations/... -run TestGrammarVectors -v
 
 # --- debug ---
 

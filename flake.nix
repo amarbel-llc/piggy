@@ -13,6 +13,22 @@
       inputs.igloo.follows = "igloo";
     };
 
+    # langlang: the PEG-grammar parser/validator tool behind piggy#220's
+    # marklid.peg conformance gate (mirroring cutting-garden's
+    # docs/rfcs/0014-trellis.peg + hyphence's hyphence-content.peg
+    # precedents). No public mirror on code.linenisgreat.com — SSH-auth
+    # GitHub fetch (the user's forwarded SSH agent), same pattern as
+    # posh's `mephisto` private-repo input. `packages.${system}.default`
+    # is the `langlang` CLI (buildGoApplication over cmd/langlang),
+    # exposed below as `.#langlang`.
+    langlang = {
+      url = "git+ssh://git@github.com/amarbel-llc/langlang";
+      inputs.igloo.follows = "igloo";
+      inputs.nixpkgs-master.follows = "nixpkgs-master";
+      inputs.utils.follows = "utils";
+      inputs.bats.follows = "bats";
+    };
+
     # purse-first provides `dagnabit` (cmd/dagnabit), the code-org +
     # export-facade generator used by the go/ module: each `internal/` package
     # marked `//go:generate dagnabit export` gets a `pkgs/` facade so
@@ -83,6 +99,7 @@
       nixpkgs-master,
       utils,
       bats,
+      langlang,
       purse-first,
       conformist,
       jcardsim,
@@ -678,6 +695,11 @@
           # plugin. See zz-tests_bats/conformance/age_plugin_piggy_fibby.bats
           # and the test-bats-conformance-age-plugin-piggy recipe.
           age = pkgs.age;
+          # The langlang PEG grammar parser/validator (piggy#220), the
+          # `just validate-grammar` / `just test-grammar-vectors` gates
+          # for go/internal/bravo/markl/marklid.peg. `nix build
+          # .#langlang` gets the CLI under `result/bin/langlang`.
+          langlang = langlang.packages.${system}.default;
           # Standalone fibby binary. On Linux this carries the
           # `hardware-proxy` feature; on darwin it's VirtualCard-only
           # (vsmartcard upstream is broken on darwin). Consumed by

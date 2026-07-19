@@ -1,0 +1,75 @@
+// marklid.peg — normative grammar for the markl-id text form (madder
+// RFC 0002 "Markl ID Format")
+//
+// SYNC OBLIGATION: this grammar MUST remain in sync with madder's RFC
+// 0002 (docs/rfcs/0002-markl-id-format.md) — specifically §2
+// (Structure), §2.1 (ABNF Grammar), and §3 (Blech32 Encoding). If RFC
+// 0002 amends those sections (as it did for the purpose-charset
+// expansion, madder#270 / piggy#219), update this file to match.
+//
+// Notation: Ford PEG, authored langlang-compatible (cutting-garden FDR
+// 0022): // comments only, explicit spacing, no automatic space
+// insertion. markl-id has NO whitespace anywhere in its wire form
+// (RFC 0002 §2.1, §2.2) — validate with BOTH -disable-builtins AND
+// -disable-spaces (hyphence#7 dialect-gap finding: -disable-builtins
+// alone only drops the injected Spacing/EOL/EOF rule DEFINITIONS; the
+// separate whitespace-injector pass, gated by -disable-spaces, still
+// auto-inserts Spacing calls between sequence items unless both flags
+// are given).
+//
+// Scope: structural (context-free) shape only. Does NOT and per PEG
+// CANNOT encode: blech32 checksum validity (§3.3, a BCH computation),
+// case uniformity across format+data (§3.5), payload-size-matches-
+// format (§5, a registry lookup), or purpose/format compatibility
+// (§6.1, a registry lookup). Those stay the Go/Rust reference
+// decoders' job (go/internal/bravo/markl, crates/piggy-markl) — a
+// grammar-valid string can still be semantically rejected downstream;
+// that's expected, matching 0014-trellis.peg's own "groundness is
+// semantic, not grammar" precedent.
+
+MarklId      <- ((Purpose '@')? FormatData)? EOF
+
+// purpose (RFC 0002 §2.1): 1*purpose-char, any Unicode code point
+// except '@' (the join rune) and whitespace. '/' is explicitly legal
+// — general/opaque identifiers (madder#270, piggy#219), e.g.
+// `one/uno@blake2b256-...`.
+Purpose      <- PurposeChar+
+PurposeChar  <- !'@' !Space .
+
+FormatData   <- Format '-' Data
+
+// format = 1*( ALPHA / DIGIT / "_" ), RFC 0002 §2.1.
+Format       <- FormatChar+
+FormatChar   <- [a-zA-Z0-9_]
+
+// data: >=7 chars (1+ payload + 6-char checksum) from the 32-char
+// bech32 alphabet, either case (uniformity is semantic — see Scope).
+Data         <- DataChar DataChar DataChar DataChar DataChar DataChar DataChar DataChar*
+DataChar     <- [qpzry9x8gf2tvdw0s3jn54khce6mua7lQPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]
+
+Space        <- [ \t\r\n]
+EOF          <- !.
+
+// ---- conformance vectors (each MUST parse under MarklId) ----------
+//
+//   (empty string)
+//     — the null-state text form (RFC 0002 §2)
+//   blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — a bare digest, no purpose
+//   dodder-blob-digest-sha256-v1@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — a registered purpose (RFC 0002 §6.1); this grammar treats it
+//       identically to a general one — registration is a semantic,
+//       not structural, distinction (RFC 0002 §6)
+//   one/uno@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — a general/unregistered, `/`-bearing purpose (piggy#219)
+//   md@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — a short general purpose
+//
+// ---- rejected shapes (each MUST NOT parse under MarklId) ----------
+//
+//   blake2b256
+//     — missing "-data" (no separator)
+//   my thing@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — whitespace in purpose (piggy#219)
+//   dodder-blob-digest-sha256-v1@blake2b256-9bt3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — 'b' is outside the blech32 alphabet (charset violation in data)
