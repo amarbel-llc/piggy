@@ -79,7 +79,19 @@ func (id Id) GetPurposeId() string {
 	return id.purposeId
 }
 
+// SetPurposeId sets the Id's purpose. value MUST satisfy RFC 0002 §2.1's
+// purpose-char grammar (no `@`, no whitespace) — the sole structural
+// constraint shared by both purpose classes (piggy#219): registered
+// purposes (format-constrained via validatePurposeAndFormatId) and
+// general/opaque identifiers (a hyphence type name, an object id such as
+// `one/uno`, a typed-edge field name), which get no further validation.
 func (id *Id) SetPurposeId(value string) error {
+	if value != "" {
+		if err := validatePurposeCharset(value); err != nil {
+			return err
+		}
+	}
+
 	id.purposeId = value
 	return nil
 }

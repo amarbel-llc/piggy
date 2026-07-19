@@ -2,6 +2,7 @@ package markl
 
 import (
 	"fmt"
+	"unicode"
 )
 
 // purposes currently treated as formats
@@ -85,6 +86,26 @@ const (
 // markl.RegisterPurpose without forking this package. See ADR 0006.
 
 var purposes = map[string]Purpose{}
+
+// validatePurposeCharset enforces RFC 0002 §2.1's `purpose-char` grammar:
+// a purpose admits any Unicode code point except the literal `@` (the
+// purpose/digest join rune) and whitespace (a bare markl-id text form has
+// no quoting mechanism to represent it, per §2.2). This is the sole
+// structural constraint shared by every purpose — registered or general
+// (piggy#219); registered purposes additionally get the narrower
+// `system-domain-role-version` naming convention enforced at
+// registration time (RegisterPurpose callers), and their compatible-format
+// constraint (validatePurposeAndFormatId). General/unregistered purposes
+// get no further validation beyond this charset.
+func validatePurposeCharset(purposeId string) error {
+	for _, r := range purposeId {
+		if r == '@' || unicode.IsSpace(r) {
+			return ErrInvalidPurposeCharset{PurposeId: purposeId, Rune: r}
+		}
+	}
+
+	return nil
+}
 
 type Purpose struct {
 	id        string

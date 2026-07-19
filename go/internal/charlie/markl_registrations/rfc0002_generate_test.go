@@ -148,6 +148,29 @@ func buildRFC0002Fixture(t *testing.T) rfc0002Fixture {
 		),
 	)
 
+	// General-identifier purposes (piggy#219, RFC 0002 §2.1 general
+	// class): unregistered, opaque identifiers from a consumer's own type
+	// system — including the `/`-bearing object-id shape hyphence RFC
+	// 0003 spells as `one/uno@<digest>` (an object pinned to a version)
+	// and the bare short shape `md@<digest>` (a type pinned to its
+	// definition). Neither is registered here; both must round-trip
+	// opaquely exactly like example-unregistered-purpose-v1 above.
+	fixture.Vectors = append(
+		fixture.Vectors,
+		makePurposeVector(
+			t,
+			"one/uno",
+			markl.FormatIdHashBlake2b256,
+			sequencePayload(32),
+		),
+		makePurposeVector(
+			t,
+			"md",
+			markl.FormatIdHashBlake2b256,
+			sequencePayload(32),
+		),
+	)
+
 	// Invalid vectors. Each derives from a known-good vector by a
 	// single targeted mutation, so the failure category is unambiguous.
 	fixture.Invalid = buildInvalidVectors(t)
@@ -355,6 +378,20 @@ func buildInvalidVectors(t *testing.T) []rfc0002InvalidVector {
 			Name:    "incompatible_purpose_format",
 			Encoded: bad,
 			Error:   "IncompatiblePurposeAndFormat",
+		})
+	}
+
+	// Invalid purpose charset: a purpose containing whitespace has no
+	// bare-text-form spelling (RFC 0002 §2.1 purpose-char excludes
+	// whitespace; §2.2 — markl's own text form has no quoting
+	// mechanism). Embedding grammars that need such a purpose (trellis,
+	// hyphence) quote it on their own side before it ever reaches markl.
+	{
+		bad := "my thing@" + string(good)
+		out = append(out, rfc0002InvalidVector{
+			Name:    "purpose_contains_whitespace",
+			Encoded: bad,
+			Error:   "InvalidPurposeCharset",
 		})
 	}
 

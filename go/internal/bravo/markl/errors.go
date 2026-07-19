@@ -9,6 +9,36 @@ import (
 	"golang.org/x/exp/constraints"
 )
 
+// ErrInvalidPurposeCharset signals that a purpose id contains a code
+// point the RFC 0002 §2.1 `purpose-char` grammar excludes: the literal
+// `@` (reserved as the purpose/digest join rune, piggy#219) or any
+// Unicode whitespace code point (a purpose containing whitespace has no
+// bare-text-form spelling — see RFC 0002 §2.2). Beyond those two
+// exclusions the charset is open — general identifiers (piggy#219),
+// including `/` (e.g. `one/uno`), are legal.
+type ErrInvalidPurposeCharset struct {
+	PurposeId string
+	Rune      rune
+}
+
+func (err ErrInvalidPurposeCharset) Error() string {
+	return fmt.Sprintf(
+		"invalid purpose id %q: contains %q, but a purpose must not contain %q or whitespace",
+		err.PurposeId,
+		err.Rune,
+		'@',
+	)
+}
+
+func (err ErrInvalidPurposeCharset) Is(target error) bool {
+	_, ok := target.(ErrInvalidPurposeCharset)
+	return ok
+}
+
+func (err ErrInvalidPurposeCharset) GetErrorType() pkgErrDisamb {
+	return pkgErrDisamb{}
+}
+
 type (
 	pkgErrDisamb struct{}
 	pkgError     = errors.Typed[pkgErrDisamb]

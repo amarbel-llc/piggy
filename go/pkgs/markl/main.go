@@ -10,6 +10,15 @@ import (
 )
 
 type ErrFormatOperationNotSupported = internal.ErrFormatOperationNotSupported
+
+// ErrInvalidPurposeCharset signals that a purpose id contains a code
+// point the RFC 0002 §2.1 `purpose-char` grammar excludes: the literal
+// `@` (reserved as the purpose/digest join rune, piggy#219) or any
+// Unicode whitespace code point (a purpose containing whitespace has no
+// bare-text-form spelling — see RFC 0002 §2.2). Beyond those two
+// exclusions the charset is open — general identifiers (piggy#219),
+// including `/` (e.g. `one/uno`), are legal.
+type ErrInvalidPurposeCharset = internal.ErrInvalidPurposeCharset
 type ErrIsNull = internal.ErrIsNull
 
 // ErrLegacyCombinedHRPWireForm signals that a markl-id wire string
