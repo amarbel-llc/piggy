@@ -119,41 +119,6 @@
         "url": "https://code.linenisgreat.com/conformist/archive/master.tar.gz"
       }
     },
-    "conformist_2": {
-      "inputs": {
-        "igloo": [
-          "langlang",
-          "tap",
-          "purse-first",
-          "igloo"
-        ],
-        "nixpkgs-master": [
-          "langlang",
-          "tap",
-          "purse-first",
-          "nixpkgs-master"
-        ],
-        "utils": [
-          "langlang",
-          "tap",
-          "purse-first",
-          "utils"
-        ]
-      },
-      "locked": {
-        "lastModified": 1783342603,
-        "narHash": "sha256-ZSOyWgX4fI1GlA4UmFwFagyomsmF8X1hgxki8TKFtEY=",
-        "owner": "amarbel-llc",
-        "repo": "conformist",
-        "rev": "ef129f0c9a763f45330187a900a9cd245c424e6e",
-        "type": "github"
-      },
-      "original": {
-        "owner": "amarbel-llc",
-        "repo": "conformist",
-        "type": "github"
-      }
-    },
     "crane": {
       "locked": {
         "lastModified": 1783203018,
@@ -356,44 +321,6 @@
     },
     "purse-first": {
       "inputs": {
-        "conformist": "conformist_2",
-        "gomod2nix": [
-          "langlang",
-          "tap",
-          "gomod2nix"
-        ],
-        "igloo": [
-          "langlang",
-          "tap",
-          "igloo"
-        ],
-        "nixpkgs-master": [
-          "langlang",
-          "tap",
-          "nixpkgs-master"
-        ],
-        "utils": [
-          "langlang",
-          "tap",
-          "utils"
-        ]
-      },
-      "locked": {
-        "lastModified": 1783343297,
-        "narHash": "sha256-MwE8Ckg+c4iLhlY+86w7i/N/OraA7ttjDniBj/DbYQY=",
-        "owner": "amarbel-llc",
-        "repo": "purse-first",
-        "rev": "0f5efdafee1c5cc81aba3239b3918994d432835e",
-        "type": "github"
-      },
-      "original": {
-        "owner": "amarbel-llc",
-        "repo": "purse-first",
-        "type": "github"
-      }
-    },
-    "purse-first_2": {
-      "inputs": {
         "conformist": [
           "conformist"
         ],
@@ -429,7 +356,7 @@
         "nixpkgs-master": "nixpkgs-master",
         "oracle-javacard-sdks": "oracle-javacard-sdks",
         "pivapplet": "pivapplet",
-        "purse-first": "purse-first_2",
+        "purse-first": "purse-first",
         "utils": "utils"
       }
     },
@@ -483,7 +410,9 @@
           "langlang",
           "nixpkgs-master"
         ],
-        "purse-first": "purse-first",
+        "purse-first": [
+          "purse-first"
+        ],
         "rust-overlay": "rust-overlay",
         "treefmt-nix": "treefmt-nix_2",
         "utils": [

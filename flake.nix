@@ -90,6 +90,17 @@
     igloo.inputs.nixpkgs-master.follows = "nixpkgs-master";
     bats.inputs.utils.follows = "utils";
     bats.inputs.conformist.follows = "conformist";
+    # langlang's own `tap` input transitively depends on purse-first too
+    # (the dagnabit provider our own facade-export tooling uses). Without
+    # this follow, `nix flake lock` resolves langlang/tap/purse-first as
+    # an INDEPENDENT node — and nix's flake-lock node-naming collision
+    # handling reassigns which node the plain "purse-first" name (and
+    # so piggy's own `purse-first` input parameter) binds to, silently
+    # swapping which dagnabit build piggy's own facade-export tooling
+    # runs. Collapse it to piggy's own purse-first, same "one node"
+    # discipline purse-first's own inputs.conformist.follows already
+    # applies above.
+    langlang.inputs.tap.inputs.purse-first.follows = "purse-first";
   };
 
   outputs =
