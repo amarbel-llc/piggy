@@ -214,6 +214,25 @@ test-bats-default:
 test-bats-piggy-local: build-rust
   BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/t*.bats
 
+# TMPDIR override sidestepping the fence bridge-socket sun_path
+# overflow under a long session $TMPDIR: fence's Linux network policy
+# is enforced via socat bridges to AF_UNIX sockets under
+# $TMPDIR/nix-shell.XXXXXX/. When $TMPDIR is a long path — as it is
+# under a spinclass session worktree's per-session scratch dir
+# (<repo>/.worktrees/<name>/.tmp) — the full socket path can reach the
+# kernel's 108-byte sockaddr_un sun_path limit, silently truncating or
+# dropping the socket file while fence polls for the untruncated path,
+# hanging until "failed to initialize Linux bridge: timeout waiting
+# for bridge sockets to be created". Forcing a short TMPDIR sidesteps
+# it; the real fix belongs upstream in fence. Root-caused and tracked
+# at linenisgreat/bats#37. Mirrors the same sun_path-short discipline
+# this repo's fibby PCSC loopback already applies (see flake.nix).
+# Linux-only: Darwin's fence sandbox uses sandbox-exec/Seatbelt
+# instead and never hits this Linux-only socat bridge. Shared across
+# every fence-sandboxed bats recipe below rather than duplicated per
+# recipe; interpolates to an empty string (no-op) on Darwin.
+fence-tmpdir-linux := if os() == "linux" { "TMPDIR=/tmp" } else { "" }
+
 # Run the conformance bats glob outside the sandbox: the non-pty tests under
 # batman (with fibby/pivy redirect on Linux) plus the pty-tagged tests
 # unsandboxed (fence blocks /dev/ptmx).
@@ -230,16 +249,10 @@ test-bats-conformance: build-rust
   # tests still skip here: they gate on PIVY_AGENT/PIGGY_BIN, left unset so
   # they run only via their dedicated [linux] recipes.
   fibby_env=()
-  tmpdir_env=()
   if [[ "$(uname -s)" == Linux ]]; then
     pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     fibby_env=(PIVY_TOOL="$pivy_out/bin/pivy-tool" FIBBY_BIN="$fibby_out/bin/fibby")
-    # fence's network-policy bridge (socat over AF_UNIX sockets under
-    # $TMPDIR/nix-shell.XXXXXX/) is Linux-only — see the note below.
-    # Darwin's fence sandbox uses sandbox-exec/Seatbelt instead and
-    # doesn't hit this, so scope the override to Linux.
-    tmpdir_env=(TMPDIR=/tmp)
   fi
   # The fenced (batman) glob excludes `pty`-tagged tests: fence (the
   # third-party Use-Tusk/fence sandbox) denies PTY allocation
@@ -247,21 +260,7 @@ test-bats-conformance: build-rust
   # tty tests that need a real terminal. They run unsandboxed below
   # instead. Tracked at piggy#167 (fence-profile fix is upstream:
   # amarbel-llc/igloo + Use-Tusk/fence).
-  #
-  # TMPDIR=/tmp (Linux only, see tmpdir_env above): fence's Linux
-  # network policy is enforced via socat bridges to AF_UNIX sockets
-  # under $TMPDIR/nix-shell.XXXXXX/. When $TMPDIR is a long path — as
-  # it is under a spinclass session worktree's per-session scratch dir
-  # (<repo>/.worktrees/<name>/.tmp) — the full socket path can reach
-  # the kernel's 108-byte sockaddr_un sun_path limit, silently
-  # truncating or dropping the socket file while fence polls for the
-  # untruncated path, hanging until "failed to initialize Linux
-  # bridge: timeout waiting for bridge sockets to be created". Forcing
-  # a short TMPDIR here sidesteps it; the real fix belongs upstream in
-  # fence. Root-caused and tracked at linenisgreat/bats#37. Mirrors the
-  # same sun_path-short discipline this repo's fibby PCSC loopback
-  # already applies (see flake.nix).
-  env "${fibby_env[@]}" "${tmpdir_env[@]}" BATS_TEST_TIMEOUT=30 \
+  env "${fibby_env[@]}" {{ fence-tmpdir-linux }} BATS_TEST_TIMEOUT=30 \
     bats --jobs {{ num_cpus() }} --filter-tags '!pty' --tap zz-tests_bats/conformance/*.bats
   # The pty-tagged tests need a real /dev/ptmx, which fence blocks — run
   # them outside the sandbox (the same escape the pcscd/hardware lanes
@@ -281,15 +280,7 @@ test-bats-conformance-protocol: build-rust
   # The binary is exposed as piggy.tests.conformance (see passthru in
   # flake.nix). nix caches aggressively, so repeat invocations are free.
   out=$(nix build .#piggy.tests.conformance --no-link --print-out-paths)
-  # TMPDIR=/tmp (Linux only): sidesteps the fence bridge-socket
-  # sun_path overflow under a long session $TMPDIR — see
-  # test-bats-conformance above and linenisgreat/bats#37. Darwin's
-  # fence sandbox doesn't use this Linux-only socat bridge. Routed
-  # through `env` (not a bash assignment prefix) since the array is
-  # conditionally empty.
-  tmpdir_env=()
-  [[ "$(uname -s)" == Linux ]] && tmpdir_env=(TMPDIR=/tmp)
-  env "${tmpdir_env[@]}" \
+  env {{ fence-tmpdir-linux }} \
     CONFORMANCE_BIN="$out/bin/piggy-agent-conformance" \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding \
     --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
