@@ -41,9 +41,19 @@ in
   # inference (src = self + "/go") otherwise yields just "go"
   # (amarbel-llc/nixpkgs#49). goFlakeInputs is threaded so both outputs carry
   # passthru.goFlakeInputs for depth-1 consumer inheritance.
+  #
+  # extras: marklid.peg (piggy#220) is a non-.go file embedded via
+  # //go:embed (go/internal/bravo/markl/marklid_grammar.go) — mkGoPkgs's
+  # default filter only keeps *.go/module files, so without this the
+  # go:embed directive fails at build time in any nix-built consumer of
+  # go-pkgs/go-pkgs-test (piggy-agent-conformance here; any downstream
+  # bridge consumer too) with "pattern marklid.peg: no matching files
+  # found", even though a plain `go build`/`go test` outside nix's
+  # source-filtered tree never notices.
   goPkgs = pkgs.mkGoPkgs {
     inherit src goFlakeInputs;
     name = "piggy-go";
+    extras = [ ".*\\.peg" ];
   };
   inherit goFlakeInputs;
 }
