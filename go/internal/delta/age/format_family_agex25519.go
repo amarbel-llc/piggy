@@ -7,10 +7,10 @@ import (
 
 	domain_interfaces "code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
 	markl "code.linenisgreat.com/piggy/go/internal/bravo/markl"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/age"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/bech32"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/interfaces"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/age"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/bech32"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/errors"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/interfaces"
 )
 
 // AgeX25519Generate mints a fresh age x25519 identity and returns its

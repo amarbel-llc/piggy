@@ -10,7 +10,7 @@
 #     scoping).
 #
 #   - consumer bridge: goFlakeInputs routes go/'s own
-#     github.com/amarbel-llc/purse-first/libs/dewey require onto purse-first's
+#     code.linenisgreat.com/purse-first/libs/dewey require onto purse-first's
 #     go-pkgs output, attached as passthru.goFlakeInputs so a downstream
 #     consumer inherits piggy's dewey bridge at depth-1 (RFC 0001 §
 #     Multi-producer closures). purse-first's go-pkgs is the whole workspace, so
@@ -28,7 +28,7 @@
 }:
 let
   goFlakeInputs = {
-    "github.com/amarbel-llc/purse-first/libs/dewey" = {
+    "code.linenisgreat.com/purse-first/libs/dewey" = {
       src = purse-first.packages.${system}.go-pkgs;
       subPath = "libs/dewey";
     };

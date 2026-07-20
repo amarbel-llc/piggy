@@ -11,11 +11,11 @@ import (
 	"strings"
 
 	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/files"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/interfaces"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/pool"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/ui"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/errors"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/files"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/interfaces"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/pool"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/ui"
 )
 
 func SetHexStringFromAbsolutePath(

@@ -5,9 +5,9 @@ import (
 	"io"
 
 	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/interfaces"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/ohio"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/errors"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/interfaces"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/ohio"
 )
 
 func (id *Id) GeneratePrivateKey(

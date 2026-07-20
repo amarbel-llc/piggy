@@ -2,7 +2,7 @@ package blech32
 
 import (
 	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/errors"
 )
 
 // TODO make generic

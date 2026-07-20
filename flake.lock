@@ -336,10 +336,10 @@
         ]
       },
       "locked": {
-        "lastModified": 1784252946,
-        "narHash": "sha256-35xJhvv+ZBZ/LHOB11m/5FMkgBoiEndLIHinxdqMLFo=",
+        "lastModified": 1784561670,
+        "narHash": "sha256-rCmYppRS2JEBbAXFnHg54I9ecY9AO94ruFgdUvdYd7U=",
         "type": "tarball",
-        "url": "https://code.linenisgreat.com/purse-first/archive/d5312da3d7350824951db0baabb3b34ec6caa13a.tar.gz"
+        "url": "https://code.linenisgreat.com/purse-first/archive/20f89c28ebf95f9ed6bab2f13101d7af8d27cb03.tar.gz"
       },
       "original": {
         "type": "tarball",

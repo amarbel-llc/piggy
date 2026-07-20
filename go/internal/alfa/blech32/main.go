@@ -32,7 +32,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/unicorn"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/unicorn"
 )
 
 const separator = '-'

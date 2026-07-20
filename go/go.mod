@@ -15,7 +15,7 @@ go 1.26
 // emits when a comment is attached to a single require), yielding
 // "expected a set but found a string" at buildGoApplication eval.
 require (
-	github.com/amarbel-llc/purse-first/libs/dewey v0.3.2
+	code.linenisgreat.com/purse-first/libs/dewey v0.5.0
 	golang.org/x/crypto v0.50.0
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
 )

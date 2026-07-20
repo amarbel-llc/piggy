@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/test_ui"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/test_ui"
 )
 
 func TestBlech32(t1 *testing.T) {

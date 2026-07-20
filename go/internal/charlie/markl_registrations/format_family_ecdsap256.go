@@ -10,7 +10,7 @@ import (
 
 	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
 	markl "code.linenisgreat.com/piggy/go/internal/bravo/markl"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/errors"
 )
 
 func EcdsaP256Verify(pub, message, sig domain_interfaces.MarklId) (err error) {

@@ -2,8 +2,8 @@ package markl
 
 import (
 	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/interfaces"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/values"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/interfaces"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/values"
 )
 
 type Lock[

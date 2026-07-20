@@ -10,8 +10,8 @@ import (
 
 	domain_interfaces "code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
 	markl "code.linenisgreat.com/piggy/go/internal/bravo/markl"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/errors"
-	"github.com/amarbel-llc/purse-first/libs/dewey/pkgs/pivy"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/errors"
+	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/pivy"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
