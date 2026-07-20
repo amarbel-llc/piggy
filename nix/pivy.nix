@@ -278,7 +278,7 @@ pkgs.stdenv.mkDerivation {
     # vendors pivy under vendor/pivy/ as the canonical source. The
     # homepage points at piggy where issues are tracked.
     description = "PIV tools for YubiKey and similar hardware tokens (vendored under piggy/vendor/pivy)";
-    homepage = "https://github.com/amarbel-llc/piggy";
+    homepage = "https://code.linenisgreat.com/piggy";
     license = licenses.mpl20;
     platforms = platforms.linux ++ platforms.darwin;
   };

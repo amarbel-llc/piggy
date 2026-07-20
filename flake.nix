@@ -290,7 +290,7 @@
 
           meta = with pkgs.lib; {
             description = "Piggy rust workspace (piggy CLI + piggy-piv library)";
-            homepage = "https://github.com/amarbel-llc/piggy";
+            homepage = "https://code.linenisgreat.com/piggy";
             license = licenses.mpl20;
             platforms = platforms.linux ++ platforms.darwin;
           };
@@ -369,7 +369,7 @@
 
           meta = with pkgs.lib; {
             description = "Pure-Rust virtual PIV card speaking the pcsc-lite client protocol directly";
-            homepage = "https://github.com/amarbel-llc/piggy";
+            homepage = "https://code.linenisgreat.com/piggy";
             license = licenses.mpl20;
             mainProgram = "fibby";
             platforms = platforms.linux ++ platforms.darwin;
@@ -526,7 +526,7 @@
 
           meta = with pkgs.lib; {
             description = "Go-based SSH agent conformance tests for piggy";
-            homepage = "https://github.com/amarbel-llc/piggy";
+            homepage = "https://code.linenisgreat.com/piggy";
             license = licenses.mpl20;
             platforms = platforms.linux ++ platforms.darwin;
           };
@@ -552,7 +552,7 @@
 
           meta = with pkgs.lib; {
             description = "Go-based test-only SSH server for piggy's SSH-over-fibby bats lane";
-            homepage = "https://github.com/amarbel-llc/piggy";
+            homepage = "https://code.linenisgreat.com/piggy";
             license = licenses.mpl20;
             platforms = platforms.linux ++ platforms.darwin;
           };

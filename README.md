@@ -20,7 +20,7 @@ nix profile install github:amarbel-llc/piggy
 For development:
 
 ```sh
-git clone https://github.com/amarbel-llc/piggy
+git clone https://code.linenisgreat.com/piggy
 cd piggy
 nix develop
 just build
@@ -42,7 +42,7 @@ See the manpages in `doc/` for the full command reference and the `PIGGY_*` envi
 
 The pass-style handlers and `piggy box` (`stream encrypt`/`decrypt`, `tpl create`/`show`) are implemented natively in Rust under `crates/piggy/src/`; box decrypt carries a direct-PCSC ECDH oracle, so it unseals against a local card with no agent (#57). The C `pivy-*` family is shelled to for the `tool`/`ca`/`luks`/`zfs` passthroughs, the `agent`, and any `box` subcommand the Rust impl doesn't handle (e.g. `tpl edit`).
 
-A more complete walkthrough is tracked at [#25](https://github.com/amarbel-llc/piggy/issues/25).
+A more complete walkthrough is tracked at [#25](https://code.linenisgreat.com/piggy/issues/25).
 
 ## History
 

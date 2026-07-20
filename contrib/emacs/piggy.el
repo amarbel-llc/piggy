@@ -5,7 +5,7 @@
 ;; Author: Svend Sorensen <svend@svends.net>
 ;; Maintainer: Tino Calancha <tino.calancha@gmail.com>
 ;; Version: 0.1.0
-;; URL: https://github.com/amarbel-llc/piggy
+;; URL: https://code.linenisgreat.com/piggy
 ;; Package-Requires: ((emacs "26.1") (with-editor "2.5.11"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Keywords: tools piggy password pivy

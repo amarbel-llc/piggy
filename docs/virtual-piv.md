@@ -103,7 +103,7 @@ Default credentials on a fresh PivApplet:
   consuming real-card PIN retries.
 - **Conformance oracle development** — both the C `pivy-tool` side and
   the Rust `piggy tool` side (when it lands, see roadmap
-  [issue #3](https://github.com/amarbel-llc/piggy/issues/3)) can be run
+  [issue #3](https://code.linenisgreat.com/piggy/issues/3)) can be run
   against fib to validate argv-parse and functional behavior without
   hardware.
 - **Local debugging of crypto paths** — jCardSim prints full APDUs on
