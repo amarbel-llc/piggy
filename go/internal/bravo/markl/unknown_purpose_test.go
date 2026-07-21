@@ -251,6 +251,102 @@ func TestPurposeWithEscapedQuoteAndAtSign_RoundTrips(t *testing.T) {
 	}
 }
 
+// piggy#223: ResetWithPurpose and ResetWithMarklId route their purpose
+// through errors.PanicIfError(SetPurposeId(...)), so before the
+// madder#273 work they could panic on a purpose the value-level
+// validator rejected — an ordinary error on an external MarklId turned
+// into a crash, because these two entry points have no error return to
+// hand it back through.
+//
+// That failure mode is now unreachable: RFC 0011 constrains no purpose
+// VALUE (every constraint lives in the spelling, §2.1), so SetPurposeId
+// cannot fail and PanicIfError has nothing to fire on. Pinned with the
+// two shapes that formerly panicked — whitespace, and `@`, which was
+// banned outright until piggy#227.
+func TestResetPaths_DoNotPanicOnFormerlyInvalidPurposes(t *testing.T) {
+	payload := make([]byte, 32)
+
+	for _, purpose := range []string{"my thing", "a@b", "café/naïve", ""} {
+		purpose := purpose
+
+		t.Run(purpose, func(t *testing.T) {
+			// ResetWithPurpose: the simpler of the two paths.
+			var viaReset Id
+			viaReset.ResetWithPurpose(purpose)
+
+			if got := viaReset.GetPurposeId(); got != purpose {
+				t.Errorf("ResetWithPurpose: got %q, want %q", got, purpose)
+			}
+
+			// ResetWithMarklId: takes the purpose off a source MarklId,
+			// which is the "external MarklId" shape #223 describes.
+			var src Id
+			if err := src.SetMarklId(FormatIdHashSha256, payload); err != nil {
+				t.Fatalf("SetMarklId: %v", err)
+			}
+
+			if err := src.SetPurposeId(purpose); err != nil {
+				t.Fatalf("SetPurposeId(%q): %v", purpose, err)
+			}
+
+			var dst Id
+			dst.ResetWithMarklId(&src)
+
+			if got := dst.GetPurposeId(); got != purpose {
+				t.Errorf("ResetWithMarklId: got %q, want %q", got, purpose)
+			}
+		})
+	}
+}
+
+// piggy#221: Set used to accept a leading `@` — an empty purpose slot —
+// while String/MarshalText never re-emitted one, so `@<digest>` decoded
+// but did not round-trip.
+//
+// The asymmetry is resolved in the rejecting direction: splitPurposeSlot
+// hands an empty slot to unquotePurpose, which refuses it. An empty
+// purpose is not a purpose; a purposeless markl ID omits the slot AND
+// the `@` (§2), which is exactly what the marshallers emit.
+//
+// Note the legacy dodder box_format prefix is unaffected —
+// SetMarklIdWithFormatBlech32 strips its leading `@` before calling Set,
+// as its own comment records.
+func TestSet_RejectsLeadingAtSign(t *testing.T) {
+	payload := make([]byte, 32)
+
+	var good Id
+	if err := good.SetMarklId(FormatIdHashSha256, payload); err != nil {
+		t.Fatalf("SetMarklId: %v", err)
+	}
+
+	encoded, err := good.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText: %v", err)
+	}
+
+	bad := "@" + string(encoded)
+
+	var viaSet Id
+	if err := viaSet.Set(bad); err == nil {
+		t.Errorf("Set(%q) should error on an empty purpose slot, got nil", bad)
+	}
+
+	var viaUnmarshal Id
+	if err := viaUnmarshal.UnmarshalText([]byte(bad)); err == nil {
+		t.Errorf("UnmarshalText(%q) should error, got nil", bad)
+	}
+
+	// The purposeless form — no slot, no `@` — is what round-trips.
+	var plain Id
+	if err := plain.Set(string(encoded)); err != nil {
+		t.Fatalf("Set(%q): %v", string(encoded), err)
+	}
+
+	if got := plain.GetPurposeId(); got != "" {
+		t.Errorf("purposeless id should have empty purpose, got %q", got)
+	}
+}
+
 // A BARE `@` is still rejected: it is outside §2.1's inclusion set, so
 // the first `@` in an unquoted slot is the join and everything before it
 // must be bare-expressible. `a@b@<digest>` therefore fails rather than
