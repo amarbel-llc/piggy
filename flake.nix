@@ -22,7 +22,7 @@
     # is the `langlang` CLI (buildGoApplication over cmd/langlang),
     # exposed below as `.#langlang`.
     langlang = {
-      url = "git+ssh://git@github.com/amarbel-llc/langlang";
+      url = "https://code.linenisgreat.com/langlang/archive/master.tar.gz";
       inputs.igloo.follows = "igloo";
       inputs.nixpkgs-master.follows = "nixpkgs-master";
       inputs.utils.follows = "utils";
@@ -101,6 +101,8 @@
     # discipline purse-first's own inputs.conformist.follows already
     # applies above.
     langlang.inputs.tap.inputs.purse-first.follows = "purse-first";
+    langlang.inputs.conformist.follows = "conformist";
+    langlang.inputs.tap.inputs.gomod2nix.follows = "purse-first/gomod2nix";
   };
 
   outputs =
