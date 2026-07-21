@@ -143,6 +143,61 @@ func TestBlech32(t1 *testing.T) {
 	}
 }
 
+// TestDecodeDataOnly_RejectsUppercase pins that RFC 0011 §3.5's
+// lowercase-only rule (madder#273 ruling 6) reaches the data-only decode
+// path too, not just DecodeString/Decode.
+//
+// This exists because piggy#224 was filed on a misreading of
+// TestBlech32DataOnly below: that test's vectors are raw PAYLOAD bytes
+// handed to EncodeDataOnly, not blech32 strings, so `2UEL5L` there is
+// six bytes of content and says nothing about the case rule. Nothing
+// actually covered the encoded form on this path — hence this test.
+func TestDecodeDataOnly_RejectsUppercase(t *testing.T) {
+	encoded, err := EncodeDataOnly([]byte{0x00, 0x01, 0x02, 0x03})
+	if err != nil {
+		t.Fatalf("EncodeDataOnly: %v", err)
+	}
+
+	if _, err := DecodeDataOnly(encoded); err != nil {
+		t.Fatalf("lowercase form should decode: %v", err)
+	}
+
+	upper := bytes.ToUpper(encoded)
+
+	if _, err := DecodeDataOnly(upper); err == nil {
+		t.Errorf(
+			"DecodeDataOnly(%q) should reject uppercase, got nil",
+			string(upper),
+		)
+	}
+}
+
+// TestDecodeDataOnly_DoesNotMutateInput pins the non-mutation contract
+// the *WithHRPOverride helpers already assert for themselves. decode
+// used to call unicorn.ToLower on the caller's slice in place; that was
+// a side effect on memory the caller still owns, and dead besides once
+// uppercase became a rejection rather than something to normalise.
+func TestDecodeDataOnly_DoesNotMutateInput(t *testing.T) {
+	encoded, err := EncodeDataOnly([]byte{0x00, 0x01, 0x02, 0x03})
+	if err != nil {
+		t.Fatalf("EncodeDataOnly: %v", err)
+	}
+
+	before := append([]byte(nil), encoded...)
+
+	if _, err := DecodeDataOnly(encoded); err != nil {
+		t.Fatalf("DecodeDataOnly: %v", err)
+	}
+
+	if !bytes.Equal(before, encoded) {
+		t.Errorf(
+			"DecodeDataOnly mutated its input: %q -> %q",
+			string(before),
+			string(encoded),
+		)
+	}
+}
+
 func TestBlech32DataOnly(t1 *testing.T) {
 	// t1.Skip()
 	t := test_ui.T{T: t1}

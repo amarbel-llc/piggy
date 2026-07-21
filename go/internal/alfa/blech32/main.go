@@ -345,7 +345,10 @@ func DecodeString(input string) (hrp string, data []byte, err error) {
 		return hrp, data, err
 	}
 
-	input = strings.ToLower(input)
+	// No ToLower here: validateCaseString above already rejected any
+	// uppercase input (RFC 0011 §3.5), so by this point the string is
+	// lowercase by construction. The normalising call this replaced was
+	// dead once ruling 6 landed.
 
 	for p, c := range input[pos+1:] {
 		d := strings.IndexRune(charsetString, c)
@@ -395,8 +398,12 @@ func Decode(bites []byte) (hrp string, data []byte, err error) {
 	return hrp, data, err
 }
 
-// Decode decodes a Blech32 string. If the string is uppercase, the HRP
-// will be uppercase.
+// DecodeDataOnly decodes the data portion of a blech32 string — the
+// payload plus its 6-character checksum, with no HRP. The checksum is
+// verified against an empty HRP.
+//
+// Like every decode path it is lowercase-only (RFC 0011 §3.5) and does
+// NOT mutate bites.
 func DecodeDataOnly(bites []byte) (data []byte, err error) {
 	if data, err = decode("", bites); err != nil {
 		return data, err
@@ -405,14 +412,20 @@ func DecodeDataOnly(bites []byte) (data []byte, err error) {
 	return data, err
 }
 
-// Decode decodes a Blech32 string. If the string is uppercase, the HRP
-// will be uppercase.
+// decode is the shared data-portion decoder behind Decode and
+// DecodeDataOnly.
+//
+// It does NOT mutate bites. It previously called unicorn.ToLower on the
+// caller's slice in place, which was both a caller-visible side effect
+// on an input the caller still owns — the *WithHRPOverride helpers
+// carry explicit DoesNotMutateBody tests, so non-mutation is an
+// established contract in this package — and, since ruling 6, dead:
+// validateCase rejects any uppercase input, so there is never anything
+// left to lower.
 func decode(hrp string, bites []byte) (data []byte, err error) {
 	if err = validateCase(bites); err != nil {
 		return data, err
 	}
-
-	unicorn.ToLower(bites)
 
 	for p, c := range bites {
 		// TODO make more performance with a lookup map

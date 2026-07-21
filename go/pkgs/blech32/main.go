@@ -11,8 +11,12 @@ type Value = internal.Value
 // will be uppercase.
 var Decode = internal.Decode
 
-// Decode decodes a Blech32 string. If the string is uppercase, the HRP
-// will be uppercase.
+// DecodeDataOnly decodes the data portion of a blech32 string — the
+// payload plus its 6-character checksum, with no HRP. The checksum is
+// verified against an empty HRP.
+//
+// Like every decode path it is lowercase-only (RFC 0011 §3.5) and does
+// NOT mutate bites.
 var DecodeDataOnly = internal.DecodeDataOnly
 
 // DecodeString decodes a Blech32 string. If the string is uppercase, the HRP

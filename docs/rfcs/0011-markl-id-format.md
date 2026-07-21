@@ -377,10 +377,12 @@ split the body on its single `-`, and MUST reject a body containing
 more than one `-`.
 
 The evidence for the narrowing: every format ID in the ecosystem uses
-`_`, never `-`, as its intra-word separator. Across piggy (twelve:
-the `ed25519_*` family, the `ecdsa_p256_*` family, the `ssh_*` family,
-`pivy_ecdh_p256_pub`, and `blake2b256`), madder (`blake2b256`,
-`sha256`), and dodder (which defines no formats of its own), not one
+`_`, never `-`, as its intra-word separator. Across piggy (the sixteen
+of §5 — the `ed25519_*` family, the `ecdsa_p256_*` family, the `ssh_*`
+family, `pivy_ecdh_p256_pub`, `sha256`, `blake2b256`, and `nonce`, the
+last three carrying no intra-word separator at all), madder
+(`blake2b256`, `sha256`), and dodder (which defines no formats of its
+own), not one
 format ID contains a hyphen. §2.1's `format` production has never
 admitted one. A blech32 body in the currently shipping form therefore
 contains exactly one `-`, always, and the last-`-` rule was scanning
@@ -599,6 +601,8 @@ payload does not equal the registered size for the named format. *(test:
 | `age_x25519_sec`     | 32           | age X25519 secret key                        |
 | `pivy_ecdh_p256_pub` | 33           | PIV ECDH P-256 compressed public key (SEC 1) |
 | `ssh_ecdsa_nistp256_pub` | 33       | SSH-suitable ECDSA P-256 public key, SEC1-compressed |
+| `ssh_ed25519_pub`    | 32           | SSH-suitable Ed25519 public key               |
+| `ssh_ecdsa_nistp384_pub` | 49       | SSH-suitable ECDSA P-384 public key, SEC1-compressed |
 | `nonce`              | 32           | Random nonce                                 |
 
 The `*_ssh` formats carry a bare public-key payload (32 or 33 bytes);
