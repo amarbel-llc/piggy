@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"slices"
-	"strings"
 
 	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
 	"code.linenisgreat.com/piggy/go/internal/alfa/blech32"
@@ -82,17 +81,18 @@ func (id Id) GetPurposeId() string {
 	return id.purposeId
 }
 
-// SetPurposeId sets the Id's purpose. value MUST satisfy RFC 0002 §2.1's
-// purpose-char grammar (no `@`, no whitespace) — the sole structural
-// constraint shared by both purpose classes (piggy#219): registered
-// purposes (format-constrained via validatePurposeAndFormatId) and
-// general/opaque identifiers (a hyphence type name, an object id such as
-// `one/uno`, a typed-edge field name), which get no further validation.
+// SetPurposeId sets the Id's purpose from a VALUE — not a wire slot.
+//
+// RFC 0011 constrains no purpose value: any rune sequence is a legal
+// purpose, because the quoted spelling (§2.1) can carry anything the
+// bare inclusion set cannot, `@` included (piggy#227). The spelling is
+// decided at marshal time by spellPurpose, so nothing is rejected here.
+//
+// Callers holding WIRE bytes — a slot parsed out of a markl-id text
+// form, bare or quoted — want SetPurposeFromWireSlot instead, which
+// unquotes first. Passing wire bytes here would store the quote
+// characters as part of the value.
 func (id *Id) SetPurposeId(value string) error {
-	if err := validatePurposeCharset(value); err != nil {
-		return err
-	}
-
 	id.purposeId = value
 	return nil
 }
@@ -149,7 +149,7 @@ func (id *Id) Set(value string) (err error) {
 		return err
 	}
 
-	purpose, body, hasPurpose := strings.Cut(value, "@")
+	purpose, body, hasPurpose := splitPurposeSlot(value)
 
 	if hasPurpose {
 		if err = id.setWithPurpose(purpose, body); err != nil {
@@ -167,10 +167,9 @@ func (id *Id) Set(value string) (err error) {
 }
 
 func (id *Id) setWithPurpose(purpose, body string) (err error) {
-	// Splitting on the first '@' before unquoting is safe precisely
-	// because §2.2 forbids '@' inside a purpose under any circumstance,
-	// quoted or not — so the first '@' is always the join. If that ban
-	// is ever relaxed, this split has to become quote-aware first.
+	// The caller located the join with splitPurposeSlot, which is
+	// quote-aware: §2.2 permits a QUOTED purpose to contain '@'
+	// (piggy#227), so the join is not simply the first one.
 	if err = id.SetPurposeFromWireSlot(purpose); err != nil {
 		err = errors.Wrap(err)
 		return err

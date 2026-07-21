@@ -150,13 +150,129 @@ func TestSetMarklId_ShortGeneralIdentifierPurpose(t *testing.T) {
 	}
 }
 
-// A purpose MUST NOT contain the literal `@`, registered or not — it is
-// markl's own purpose/digest join rune (RFC 0002 §2.1, §4 step 1), never
-// content. This holds regardless of registration status: the constraint
-// is structural, not a registry policy.
-func TestSetPurposeId_RejectsAtSign(t *testing.T) {
-	if err := (&Id{}).SetPurposeId("a@b"); err == nil {
-		t.Error(`SetPurposeId("a@b") should error, got nil`)
+// A purpose containing `@` is LEGAL and round-trips through the quoted
+// spelling (RFC 0011 §2.2, piggy#227).
+//
+// This inverts the pre-2026-07-21 rule, which banned `@` in a purpose
+// "under any circumstance, quoted or not" (the superseded
+// TestSetPurposeId_RejectsAtSign, replaced by this test). The ban was
+// dropped because quoting IS the escape mechanism, and one that cannot
+// carry the rune most in need of escaping is not doing its job. `@`
+// remains impossible in the BARE form — it is outside §2.1's inclusion
+// set — so the restriction lives entirely in the unquoted spelling.
+//
+// The round-trip is the real assertion here: it only passes if the
+// decoder locates the join with a quote-aware scan. A first-`@` split
+// would slice the purpose in half and leave `b"@blake2b256-...` as the
+// body, which is not a decodable digest.
+func TestPurposeContainingAtSign_RoundTripsQuoted(t *testing.T) {
+	payload := make([]byte, 32)
+
+	var id Id
+	if err := id.SetMarklId(FormatIdHashSha256, payload); err != nil {
+		t.Fatalf("SetMarklId: %v", err)
+	}
+
+	if err := id.SetPurposeId("a@b"); err != nil {
+		t.Fatalf(`SetPurposeId("a@b"): %v`, err)
+	}
+
+	encoded, err := id.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText: %v", err)
+	}
+
+	if !strings.HasPrefix(string(encoded), `"a@b"@`) {
+		t.Errorf(
+			"a purpose containing @ must be spelled quoted, got %q",
+			string(encoded),
+		)
+	}
+
+	var decoded Id
+	if err := decoded.UnmarshalText(encoded); err != nil {
+		t.Fatalf("UnmarshalText(%q): %v", string(encoded), err)
+	}
+
+	if got := decoded.GetPurposeId(); got != "a@b" {
+		t.Errorf("purpose round-trip: got %q, want %q", got, "a@b")
+	}
+
+	// Id.Set is the second wire-parse path and must agree.
+	var viaSet Id
+	if err := viaSet.Set(string(encoded)); err != nil {
+		t.Fatalf("Set(%q): %v", string(encoded), err)
+	}
+
+	if got := viaSet.GetPurposeId(); got != "a@b" {
+		t.Errorf("Set purpose round-trip: got %q, want %q", got, "a@b")
+	}
+}
+
+// The join scanner must honour backslash escapes when locating the
+// closing quote. A purpose containing BOTH a quote character and `@`
+// exercises the case where a naive scanner stops at the escaped quote
+// and then reads the wrong `@` as the join.
+//
+// `a"@b` spells as `"a\"@b"`, so the closing quote is the SEVENTH
+// character and the join the eighth — a scanner that treats the escaped
+// `\"` as the terminator would take the `@` at index 4 instead and hand
+// blech32 a body of `b"@sha256-...`.
+func TestPurposeWithEscapedQuoteAndAtSign_RoundTrips(t *testing.T) {
+	const purpose = `a"@b`
+
+	payload := make([]byte, 32)
+
+	var id Id
+	if err := id.SetMarklId(FormatIdHashSha256, payload); err != nil {
+		t.Fatalf("SetMarklId: %v", err)
+	}
+
+	if err := id.SetPurposeId(purpose); err != nil {
+		t.Fatalf("SetPurposeId(%q): %v", purpose, err)
+	}
+
+	encoded, err := id.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText: %v", err)
+	}
+
+	if !strings.HasPrefix(string(encoded), `"a\"@b"@`) {
+		t.Errorf("unexpected spelling: got %q", string(encoded))
+	}
+
+	var decoded Id
+	if err := decoded.UnmarshalText(encoded); err != nil {
+		t.Fatalf("UnmarshalText(%q): %v", string(encoded), err)
+	}
+
+	if got := decoded.GetPurposeId(); got != purpose {
+		t.Errorf("purpose round-trip: got %q, want %q", got, purpose)
+	}
+}
+
+// A BARE `@` is still rejected: it is outside §2.1's inclusion set, so
+// the first `@` in an unquoted slot is the join and everything before it
+// must be bare-expressible. `a@b@<digest>` therefore fails rather than
+// quietly reading `a` as the purpose.
+func TestBarePurposeContainingAtSign_Rejected(t *testing.T) {
+	payload := make([]byte, 32)
+
+	var good Id
+	if err := good.SetMarklId(FormatIdHashSha256, payload); err != nil {
+		t.Fatalf("SetMarklId: %v", err)
+	}
+
+	encoded, err := good.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText: %v", err)
+	}
+
+	bad := "a@b@" + string(encoded)
+
+	var decoded Id
+	if err := decoded.UnmarshalText([]byte(bad)); err == nil {
+		t.Errorf("UnmarshalText(%q) should error, got nil", bad)
 	}
 }
 

@@ -33,6 +33,56 @@ const (
 	purposeQuoteSingle = '\''
 )
 
+// splitPurposeSlot splits a markl-id wire string into its purpose slot
+// and the body that follows the `@` join, quote-aware.
+//
+// A first-`@` split is NOT sufficient. RFC 0011 §2.2 permits a quoted
+// purpose to contain `@` (madder#273 follow-up, piggy#227): quoting is
+// the escape mechanism, so the rune most in need of escaping is exactly
+// the one it must be able to carry. `"a@b"@blake2b256-...` therefore has
+// its join at the SECOND `@`, and a naive Cut would slice the purpose in
+// half. The bare form still cannot contain `@` at all — it is outside
+// §2.1's `[a-zA-Z0-9_/-]` inclusion set — so the restriction lives
+// entirely in the unquoted spelling.
+//
+// When value does not begin with a quote rune, the first `@` is the
+// join, exactly as before. When it does, the closing quote is located
+// honouring backslash escapes and the join must immediately follow it.
+//
+// A slot that opens with a quote but never resolves is returned whole,
+// with hasPurpose true, so unquotePurpose reports it as unterminated
+// rather than letting a mangled body reach the blech32 decoder and fail
+// there with a misleading checksum or separator error.
+func splitPurposeSlot(value string) (slot, body string, hasPurpose bool) {
+	if value == "" {
+		return "", value, false
+	}
+
+	quote := value[0]
+
+	if quote != purposeQuoteDouble && quote != purposeQuoteSingle {
+		return strings.Cut(value, "@")
+	}
+
+	for i := 1; i < len(value); i++ {
+		switch value[i] {
+		case '\\':
+			// Skip the escaped byte so an escaped quote does not read
+			// as the terminator.
+			i++
+
+		case quote:
+			if i+1 < len(value) && value[i+1] == '@' {
+				return value[:i+1], value[i+2:], true
+			}
+
+			return value, "", true
+		}
+	}
+
+	return value, "", true
+}
+
 // spellPurpose renders a purpose VALUE as its canonical wire spelling:
 // bare when the bare production can express it, quoted otherwise.
 // Callers hold the value; this decides only how it is written.

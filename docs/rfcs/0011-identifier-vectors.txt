@@ -190,25 +190,33 @@ reject	"mismatched'
 reject	'mismatched"
 reject	"
 
-# ---- the unconditional @ ban (§2.2) --------------------------------
+# ---- `@`: barred bare, carried quoted (§2.2) -----------------------
 #
-# A bare `@` cannot appear: it is markl's own purpose/digest join, so a
-# bare slot containing one is not a purpose at all — the first `@` ends
-# the slot.
+# A bare `@` cannot appear: it is outside the §2.1 inclusion set, and it
+# is markl's own purpose/digest join, so the first `@` in an unquoted
+# slot ends the slot rather than becoming content.
 reject	a@b
 reject	@
 reject	a@
 
-# Inside quotes the String production admits `@` structurally, so a
-# GRAMMAR parses it. A decoder still refuses it: §2.2 bans `@` in a
-# purpose under any circumstance, quoted or not, because admitting it
-# would reintroduce the ambiguity the first-`@` decode rule (§4 step 1)
-# exists to avoid.
+# Quoted, `@` is legal content and the slot carries it (piggy#227).
+# Quoting is an escape mechanism, and one that could not carry the rune
+# most in need of escaping would not be doing its job. §2.2 formerly
+# banned `@` "under any circumstance, quoted or not"; that ban was a
+# pre-narrowing artifact -- once the bare charset became an inclusion
+# set, `@` was already impossible unquoted, so the ban's only remaining
+# effect was to forbid the one spelling that resolves the ambiguity.
 #
-# NOTE: 0014-trellis.peg's MarklTerm comment asserts the opposite —
-# that a purpose containing `@` is spelled by quoting it. madder#273
-# rules on neither, so this corpus follows §2.2's existing normative
-# MUST. If §2.2 is relaxed, these three move to `parse`.
-parse-invalid	"a@b"
-parse-invalid	'a@b'
-parse-invalid	"@"
+# Consumers MUST locate the join with a quote-aware scan, not the first
+# `@`: in `"a@b"@blake2b256-...` the join is the SECOND one. This is the
+# single most likely place for a downstream implementation to diverge,
+# which is why all three spellings are pinned here.
+#
+# 0014-trellis.peg's MarklTerm comment already said exactly this; the
+# two specs now agree.
+parse	"a@b"
+parse	'a@b'
+parse	"@"
+parse	"a@b@c"
+parse	"@leading"
+parse	"trailing@"

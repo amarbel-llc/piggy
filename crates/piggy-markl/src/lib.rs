@@ -31,7 +31,7 @@ pub use format::{FormatId, UnknownFormat};
 pub use id::{Id, ParseError};
 pub use purpose::{
     Incompatible, PurposeError, PurposeId, purpose_is_bare_expressible, quote_purpose,
-    spell_purpose, unquote_purpose, validate_purpose_charset,
+    spell_purpose, split_purpose_slot, unquote_purpose,
 };
 
 #[cfg(test)]

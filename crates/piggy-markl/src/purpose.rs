@@ -78,13 +78,6 @@ pub struct Incompatible {
 /// Purpose-slot violations of RFC 0011 §2.1 / §2.2.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PurposeError {
-    /// A purpose VALUE containing the literal `@`, banned under any
-    /// circumstance — quoted or not — because `@` is markl's own
-    /// purpose/digest join (§2.2).
-    #[error(
-        "invalid purpose id {purpose:?}: contains '@', which a purpose must not contain under any circumstance, quoted or not"
-    )]
-    ContainsAt { purpose: String },
     /// A BARE purpose slot outside §2.1's ASCII inclusion set
     /// `[a-zA-Z0-9_/-]`. Not a dead end: such a purpose is still legal,
     /// it just has to be spelled with the quoted alternative (ruling 2).
@@ -142,23 +135,83 @@ pub fn purpose_is_bare_expressible(purpose_id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '/' || c == '-')
 }
 
-/// Enforce the one constraint RFC 0011 places on a purpose VALUE
-/// regardless of how it is spelled: it MUST NOT contain the literal
-/// `@` (§2.2). `@` is markl's own purpose/digest join, and admitting it
-/// — even inside quotes — would reintroduce the ambiguity the
-/// first-`@` decode rule exists to avoid.
+// RFC 0011 places NO charset constraint on a purpose VALUE. Every
+// constraint lives in the SPELLING instead: a bare slot must satisfy
+// §2.1's `[a-zA-Z0-9_/-]` inclusion set (`purpose_is_bare_expressible`),
+// and anything outside it is carried by the quoted form, which can
+// express any rune sequence at all — whitespace, punctuation, non-ASCII,
+// and (since piggy#227) `@` itself.
+//
+// That last one used to be the exception. §2.2 banned `@` in a purpose
+// "under any circumstance, quoted or not", on the grounds that it is
+// markl's own purpose/digest join. The ban was dropped because quoting
+// is precisely an escape mechanism, and a mechanism that cannot carry
+// the one rune most in need of escaping is not doing its job. It was
+// also a pre-narrowing artifact: once ruling 1 made the bare production
+// an inclusion set, `@` was already impossible unquoted, so the ban's
+// only remaining effect was to forbid the spelling that *resolves* the
+// ambiguity. The bare form still excludes `@` by construction, and the
+// decoders locate the join with the quote-aware `split_purpose_slot`
+// rather than the first `@`.
+//
+// Consequently there is no `validate_purpose_charset` (removed in
+// piggy#227, mirroring Go's `validatePurposeCharset`). Enumerated
+// purposes still get their compatible-format constraint via
+// `PurposeId::validate_format`; general/unregistered purposes get no
+// value-level validation at all.
+
+/// Split a markl-id wire string into its purpose slot and the body
+/// that follows the `@` join, quote-aware. Mirrors Go's
+/// `splitPurposeSlot`.
 ///
-/// Everything else is permitted at the VALUE level, because ruling 2's
-/// quoted alternative can spell it: whitespace, punctuation outside the
-/// bare inclusion set, and non-ASCII all round-trip through the quoted
-/// form.
-pub fn validate_purpose_charset(purpose_id: &str) -> Result<(), PurposeError> {
-    if purpose_id.contains('@') {
-        return Err(PurposeError::ContainsAt {
-            purpose: purpose_id.to_string(),
-        });
+/// A first-`@` split is NOT sufficient. RFC 0011 §2.2 permits a quoted
+/// purpose to contain `@` (madder#273 follow-up, piggy#227): quoting is
+/// the escape mechanism, so the rune most in need of escaping is
+/// exactly the one it must be able to carry. `"a@b"@blake2b256-...`
+/// therefore has its join at the SECOND `@`, and a naive first-`@`
+/// split would slice the purpose in half. The bare form still cannot
+/// contain `@` at all — it is outside §2.1's `[a-zA-Z0-9_/-]` inclusion
+/// set — so the restriction lives entirely in the unquoted spelling.
+///
+/// When `value` does not begin with a quote character, the first `@` is
+/// the join, exactly as before. When it does, the closing quote is
+/// located honouring backslash escapes and the join must immediately
+/// follow it.
+///
+/// A slot that opens with a quote but never resolves is returned whole
+/// (with `Some`), so `unquote_purpose` reports it as unterminated
+/// rather than letting a mangled body reach the blech32 decoder and
+/// fail there with a misleading checksum or separator error.
+pub fn split_purpose_slot(value: &str) -> (Option<&str>, &str) {
+    let Some(quote) = value.chars().next() else {
+        return (None, value);
+    };
+
+    if quote != PURPOSE_QUOTE_DOUBLE && quote != PURPOSE_QUOTE_SINGLE {
+        return match value.find('@') {
+            Some(i) => (Some(&value[..i]), &value[i + 1..]),
+            None => (None, value),
+        };
     }
-    Ok(())
+
+    let mut chars = value.char_indices();
+    chars.next(); // the opening quote
+
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            // Skip the escaped character so an escaped quote does not
+            // read as the terminator.
+            chars.next();
+        } else if c == quote {
+            let after_quote = i + c.len_utf8();
+            if value[after_quote..].starts_with('@') {
+                return (Some(&value[..after_quote]), &value[after_quote + 1..]);
+            }
+            return (Some(value), "");
+        }
+    }
+
+    (Some(value), "")
 }
 
 /// Render a purpose VALUE as its canonical wire spelling: bare when the
@@ -497,16 +550,26 @@ mod tests {
         }
     }
 
+    /// REPLACES `validate_purpose_charset_bans_only_at` (piggy#227),
+    /// which asserted that `validate_purpose_charset("a@b")` returned
+    /// `PurposeError::ContainsAt`. There is no value-level charset gate
+    /// any more: every constraint lives in the spelling, so the
+    /// assertion is now that `@` reaches the wire through the quoted
+    /// form and is refused only in a bare slot.
     #[test]
-    fn validate_purpose_charset_bans_only_at() {
-        // Everything but '@' is a legal purpose VALUE — it is simply
-        // spelled quoted when the bare production can't express it.
-        for ok in ["my thing", "café/naïve", "a.b", "a;b"] {
-            assert!(validate_purpose_charset(ok).is_ok(), "{ok:?}");
+    fn purpose_value_has_no_charset_constraint() {
+        for value in ["my thing", "café/naïve", "a.b", "a;b", "a@b", "@"] {
+            let spelled = spell_purpose(value);
+            assert_eq!(
+                unquote_purpose(&spelled).unwrap(),
+                value,
+                "{value:?} should round-trip through its canonical spelling ({spelled:?})"
+            );
         }
+        // The bare spelling of an `@`-bearing purpose is still refused.
         assert!(matches!(
-            validate_purpose_charset("a@b"),
-            Err(PurposeError::ContainsAt { .. })
+            unquote_purpose("a@b"),
+            Err(PurposeError::InvalidBarePurpose { ch: Some('@'), .. })
         ));
     }
 
@@ -517,6 +580,53 @@ mod tests {
         assert_eq!(spell_purpose("café/naïve"), "\"café/naïve\"");
         // An empty value is not bare-expressible, so it spells as "".
         assert_eq!(spell_purpose(""), "\"\"");
+        // piggy#227: `@` is outside the bare inclusion set, so a purpose
+        // carrying one already quotes automatically — `spell_purpose`
+        // needed no change when the §2.2 ban was lifted.
+        assert_eq!(spell_purpose("a@b"), "\"a@b\"");
+        assert_eq!(spell_purpose("a@b@c"), "\"a@b@c\"");
+        assert_eq!(spell_purpose("@"), "\"@\"");
+    }
+
+    /// The quote-aware join scanner (piggy#227). Mirrors Go's
+    /// `splitPurposeSlot`.
+    #[test]
+    fn split_purpose_slot_is_quote_aware() {
+        // Unquoted: the first `@` is the join, exactly as before.
+        assert_eq!(
+            split_purpose_slot("piggy-recipient-v1@sha256-abc"),
+            (Some("piggy-recipient-v1"), "sha256-abc")
+        );
+        assert_eq!(split_purpose_slot("sha256-abc"), (None, "sha256-abc"));
+        assert_eq!(split_purpose_slot(""), (None, ""));
+
+        // Quoted: the join is the `@` immediately after the CLOSING
+        // quote, not the first `@` in the string.
+        assert_eq!(
+            split_purpose_slot("\"a@b\"@sha256-abc"),
+            (Some("\"a@b\""), "sha256-abc")
+        );
+        assert_eq!(
+            split_purpose_slot("\"a@b@c\"@sha256-abc"),
+            (Some("\"a@b@c\""), "sha256-abc")
+        );
+        assert_eq!(
+            split_purpose_slot("'a@b'@sha256-abc"),
+            (Some("'a@b'"), "sha256-abc")
+        );
+
+        // Escapes are honoured when locating the close: the `\"` is
+        // interior, so the terminator is the final quote.
+        assert_eq!(
+            split_purpose_slot("\"a\\\"@b\"@sha256-abc"),
+            (Some("\"a\\\"@b\""), "sha256-abc")
+        );
+
+        // A slot that opens with a quote but never resolves is returned
+        // WHOLE, so unquote_purpose reports "unterminated" rather than
+        // handing a mangled body to the blech32 decoder.
+        assert_eq!(split_purpose_slot("\"a@b"), (Some("\"a@b"), ""));
+        assert_eq!(split_purpose_slot("\"a\"b"), (Some("\"a\"b"), ""));
     }
 
     #[test]

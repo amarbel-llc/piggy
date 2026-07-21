@@ -133,34 +133,27 @@ func purposeRuneIsBareExpressible(r rune) bool {
 	}
 }
 
-// validatePurposeCharset enforces the one constraint RFC 0011 places on
-// a purpose VALUE regardless of how it is spelled: it MUST NOT contain
-// the literal '@' (§2.2). '@' is markl's own purpose/digest join, and
-// admitting it — even inside quotes — would reintroduce the ambiguity
-// the first-'@' decode rule (§4 step 1) exists to avoid.
+// RFC 0011 places NO charset constraint on a purpose VALUE. Every
+// constraint lives in the SPELLING instead: a bare slot must satisfy
+// §2.1's `[a-zA-Z0-9_/-]` inclusion set (purposeIsBareExpressible), and
+// anything outside it is carried by the quoted form, which can express
+// any rune sequence at all — whitespace, punctuation, non-ASCII, and
+// (since piggy#227) `@` itself.
 //
-// Everything else is permitted at the VALUE level, because ruling 2's
-// quoted alternative can spell it: whitespace, punctuation outside the
-// bare inclusion set, and non-ASCII all round-trip through the quoted
-// form. That is the deliberate trade recorded in RFC 0011 §2.1 — the
-// bare charset narrowed and REVOKED madder#270's bare-Unicode
-// pinnability, and quoting is what answers #270's concern instead:
-// `"café/naïve"@blake2b256-...` still pins a Unicode-named object.
+// That last one used to be the exception. §2.2 banned `@` in a purpose
+// "under any circumstance, quoted or not", on the grounds that it is
+// markl's own purpose/digest join. The ban was dropped because quoting
+// is precisely an escape mechanism, and a mechanism that cannot carry
+// the one rune most in need of escaping is not doing its job. The bare
+// form still excludes `@` by construction, so the restriction now lives
+// entirely in the unquoted spelling, and the decoders locate the join
+// with the quote-aware splitPurposeSlot rather than the first `@`.
 //
-// Registered purposes additionally get the narrower
-// `system-domain-role-version` naming convention enforced at
-// registration time (RegisterPurpose callers), and their
-// compatible-format constraint (validatePurposeAndFormatId).
-// General/unregistered purposes get no further validation.
-func validatePurposeCharset(purposeId string) error {
-	for _, r := range purposeId {
-		if r == '@' {
-			return ErrInvalidPurposeCharset{PurposeId: purposeId, Rune: r}
-		}
-	}
-
-	return nil
-}
+// Consequently there is no validatePurposeCharset. Registered purposes
+// still get the narrower `system-domain-role-version` naming convention
+// enforced at registration time (RegisterPurpose callers) and their
+// compatible-format constraint (validatePurposeAndFormatId);
+// general/unregistered purposes get no value-level validation at all.
 
 type Purpose struct {
 	id        string

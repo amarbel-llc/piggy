@@ -140,8 +140,16 @@ EOF            <- !.
 //   "café/naïve"@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
 //     — how a Unicode-named object is pinned now that the bare form is
 //       ASCII-closed (RFC 0011 §2.1; supersedes madder#270)
+//   "a@b"@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — a quoted purpose carrying '@' (RFC 0011 §2.2, piggy#227).
+//       Quoting is the escape mechanism, so it must be able to carry
+//       the rune most in need of escaping; the bare form still excludes
+//       '@' entirely. NOTE the join here is the SECOND '@' — decoders
+//       MUST locate it with a quote-aware scan, never with the first
+//       '@'. 0014-trellis.peg's MarklTerm comment has always said this;
+//       the two specs now agree.
 //
-// ---- parses here, REJECTED at validation (RFC 0011 §2.3, §2.2) -----
+// ---- parses here, REJECTED at validation (RFC 0011 §2.3) ----------
 //
 //   md@"blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd"
 //     — a quoted digest slot. Structurally admitted as an extension
@@ -149,22 +157,6 @@ EOF            <- !.
 //       a concrete meaning is specified. A grammar gate asserting this
 //       string PARSES is asserting the extension point exists, NOT that
 //       the id is usable.
-//   "a@b"@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
-//     — a quoted purpose containing '@'. The String production admits
-//       it structurally (it admits any rune between the quotes), but
-//       RFC 0011 §2.2 says a purpose MUST NOT contain '@' under any
-//       circumstance, quoted or not — '@' is markl's own join. So this
-//       is refused at validation, same bucket as the quoted digest.
-//
-//       NOTE: 0014-trellis.peg's MarklTerm comment asserts the
-//       opposite ("Purposes containing `@` are spelled by quoting the
-//       purpose (`\"a@b\"@fmt-x`)"). madder#273 rules on neither, so
-//       this file follows §2.2's existing normative MUST rather than
-//       trellis's comment. Keeping the ban is also what lets the
-//       reference decoders keep splitting on the first '@' and unquote
-//       afterwards, instead of needing a quote-aware scan to find the
-//       join. If §2.2 is later relaxed, this vector moves up into the
-//       MUST-parse block and the decoders' split becomes quote-aware.
 //
 // ---- rejected shapes (each MUST NOT parse under MarklId) ----------
 //

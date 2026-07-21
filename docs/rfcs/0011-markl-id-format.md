@@ -195,8 +195,9 @@ registered purposes of §6.1 are full of it); it is unambiguous because
 the purpose is delimited by `@`, not by `-`, and because the blech32
 body that follows contains exactly one `-` (§3.2).
 
-A purpose MUST NOT contain the literal `@` code point under any
-circumstance, quoted or not — see §2.2.
+A purpose MUST NOT contain the literal `@` code point in its **bare**
+form — `@` is outside `ident-char`, and it is markl's own purpose/digest
+join. A **quoted** purpose MAY contain it; see §2.2.
 
 *(test: pending. The purpose-charset narrowing is specified here ahead
 of its conformance corpus; §7.3 defines the corpus that will pin it. The
@@ -254,18 +255,49 @@ defined by the embedding grammar, not by this RFC; markl only requires
 that whatever mechanism is chosen quotes the purpose slot in isolation,
 leaving the digest slot bare.
 
-A purpose MUST NOT contain the literal `@` character under any
-circumstance, quoted or not: `@` is markl's own purpose/digest separator
-(§4 step 1), and admitting it inside a quoted purpose would reintroduce
-the ambiguity the split-HRP checksum rule (§3.3) and the first-`@`
-decode rule (§4) exist to avoid. An embedding grammar that needs a
-literal `@` as a purpose's *semantic* content — not as markl's join —
-has no representation in a markl ID's purpose slot and MUST encode that
-value some other way in its own grammar.
+A **bare** purpose MUST NOT contain the literal `@` character: it is
+outside §2.1's `ident-char` set, and it is markl's own purpose/digest
+join, so the first `@` in an unquoted slot ends the slot rather than
+becoming content.
+
+A **quoted** purpose MAY contain `@`, and `"a@b"@blake2b256-…` is a
+well-formed markl ID whose purpose is the three-character value `a@b`.
+Decoders MUST therefore locate the join with a **quote-aware scan** —
+when the slot opens with a quote rune, find its matching close honouring
+escapes, and expect the join immediately after — and MUST NOT split on
+the first `@`. In the example above the join is the *second* `@`. This
+is the most likely point of divergence for an independent
+implementation, so §7.3's corpus pins every spelling of it.
+
+This **supersedes** the pre-2026-07-21 rule, which banned `@` in a
+purpose "under any circumstance, quoted or not" on the grounds that
+admitting it would reintroduce the ambiguity the first-`@` decode rule
+exists to avoid. That reasoning does not survive §2.1's narrowing. Two
+things changed. First, the bare charset became an *inclusion* set, so
+`@` is already impossible unquoted by construction — leaving the ban's
+only remaining effect to forbid the quoted spelling, which is precisely
+the spelling that *resolves* the ambiguity rather than creating it.
+Second, the old rule also cited the split-HRP checksum rule (§3.3);
+that citation was simply wrong. §3.3 makes the HRP the format alone and
+excludes the purpose from the checksum entirely, so whether a purpose
+contains `@` cannot affect it. The ambiguity §3.3 guards against is
+combined `<purpose>@<format>` HRPs (§9.1), a different concern.
+
+The deeper reason is consistency with §2.1's own bargain. Ruling 1
+narrowed the bare charset and ruling 2 added quoting *so that nothing
+lost expressiveness* — that is the trade that answers madder#270's
+pinnability requirement. Quoting is an escape mechanism; an escape
+mechanism that cannot carry the one character most in need of escaping
+is not discharging that bargain. An embedding grammar whose identifiers
+can contain `@` — trellis's can, via its own `String` production — must
+be able to pin such an object, and now can.
 
 *(Ruled 2026-07-18: linenisgreat/hyphence#6, linenisgreat/piggy#219,
 cutting-garden `docs/rfcs/0014-trellis.peg` `MarklTerm` production.
-Amended 2026-07-20: linenisgreat/madder#273.)*
+Amended 2026-07-20: linenisgreat/madder#273. Amended 2026-07-21:
+linenisgreat/piggy#227, resolving this section's disagreement with
+`0014-trellis.peg`'s `MarklTerm` comment in trellis's favour — the two
+specs now agree.)*
 
 ### 2.3. Quoting on the Digest Slot
 
@@ -448,9 +480,27 @@ subject to the data-portion-minimum of 7 characters (1+ payload byte +
 
 Given an input string `S`:
 
-1. Locate the *first* `@` in `S`. If present, split into `purpose`
-   (before `@`) and `body` (after). Otherwise, set `purpose = ""` and
-   `body = S`.
+1. Locate the purpose/digest join in `S`, **quote-aware** (§2.2):
+
+   a. If `S` begins with a quote rune (`"` or `'`), scan forward for the
+      matching closing quote, honouring backslash escapes so an escaped
+      quote does not terminate the slot. The join is the `@` immediately
+      following that closing quote. If the slot does not close, or the
+      character after it is not `@`, fail with `UnterminatedQuotedPurpose`.
+
+   b. Otherwise the join is the *first* `@` in `S`.
+
+   If a join was found, split into `purpose-slot` (before it) and `body`
+   (after). Otherwise set `purpose-slot = ""` and `body = S`.
+
+   Splitting on the first `@` unconditionally is **non-conformant**: a
+   quoted purpose may contain `@` (§2.2), and `"a@b"@blake2b256-…` would
+   be sliced in half, leaving a `body` that is not a decodable digest.
+
+1b. Unquote `purpose-slot` into `purpose`. A slot that opens with a quote
+   is unescaped per §2.1's `quoted-string`; a slot that does not MUST
+   satisfy `ident-char`, failing with `InvalidPurposeCharset` otherwise.
+   The unquoted `purpose` is subject to no further charset constraint.
 2. Validate `body` contains no uppercase characters per §3.5. If it
    does, fail with `MixedCase` (retained as the error name for
    continuity; the condition it now covers is any uppercase, not only

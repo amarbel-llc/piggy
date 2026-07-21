@@ -9,10 +9,11 @@
 //! where `format-data` is a blech32 string with HRP=`format` (the
 //! purpose, when present, is **textually prepended** as `purpose@`
 //! after blech32 encoding — the checksum binds to `(format, data)`
-//! only). Splitting the optional purpose off uses the **first** `@`
-//! in the input (matching Go's `strings.Cut`); since the purpose-id
-//! lexical rule disallows `@`, "first" and "last" coincide for valid
-//! inputs.
+//! only). Splitting the optional purpose off is **quote-aware**
+//! (`split_purpose_slot`, mirroring Go's `splitPurposeSlot`): a bare
+//! slot joins at the first `@`, but a quoted slot may contain `@`
+//! (RFC 0011 §2.2 as amended by piggy#227), so `"a@b"@fmt-data`
+//! joins at the SECOND `@`.
 //!
 //! The split-HRP rule was restored by amarbel-llc/madder#159 after
 //! the brief combined-HRP form (madder#150 / commit 8dc78c7) broke
@@ -29,7 +30,7 @@ use thiserror::Error;
 use crate::blech32;
 use crate::format::{FormatId, UnknownFormat};
 use crate::purpose::{
-    Incompatible, PurposeError, PurposeId, spell_purpose, unquote_purpose, validate_purpose_charset,
+    Incompatible, PurposeError, PurposeId, spell_purpose, split_purpose_slot, unquote_purpose,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -87,12 +88,15 @@ impl Id {
         // variant for. The compatibility check applies only to
         // enumerated purposes; `validate_format` itself stays a strict
         // semantic predicate (still rejects everything for `Other`).
+        // There is deliberately NO value-level charset gate here
+        // (piggy#227 removed the `@` ban that used to live at this
+        // point, mirroring Go's dropped `validatePurposeCharset`). RFC
+        // 0011 constrains only the SPELLING: a bare slot must satisfy
+        // §2.1's inclusion set — enforced on the wire path by
+        // `unquote_purpose` — while the quoted form can carry any rune
+        // sequence, `@` included. Any purpose VALUE is therefore legal
+        // here; `to_wire`'s `spell_purpose` decides how it is written.
         if let Some(p) = &purpose {
-            // VALUE-level charset gate (RFC 0011 §2.2): bans only `@`.
-            // Mirrors Go's `Id.SetPurposeId`, and is the third of the
-            // three purpose entry points alongside `Id::parse`'s
-            // wire-slot unquoting and `to_wire`'s spelling.
-            validate_purpose_charset(p.as_str())?;
             if !matches!(p, PurposeId::Other(_)) {
                 p.validate_format(format)?;
             }
@@ -135,29 +139,36 @@ impl Id {
         }
     }
 
-    /// Parse a wire-form markl ID per RFC 0002 §4. Splits on the
-    /// first `@` *textually* to recover the purpose, then
-    /// blech32-decodes the body with HRP=`format`. Mirrors madder's
-    /// `Set` after madder#159.
+    /// Parse a wire-form markl ID per RFC 0002 §4. Recovers the
+    /// purpose slot with a quote-aware scan, then blech32-decodes the
+    /// body with HRP=`format`. Mirrors madder's `Set` after
+    /// madder#159.
     pub fn parse(s: &str) -> Result<Self, ParseError> {
-        // Splitting on the FIRST `@` before unquoting is deliberate:
-        // RFC 0011 §2.2 bans `@` inside a purpose under any
-        // circumstance, quoted or not, so the first `@` is always the
-        // join. If that ban is ever relaxed, this split has to become
-        // quote-aware first.
-        let (purpose_slot, body) = match s.find('@') {
-            Some(i) => (Some(&s[..i]), &s[i + 1..]),
-            None => (None, s),
-        };
-        let (format_str, data) = blech32::decode(body)?;
+        // The join is located by `split_purpose_slot`, NOT by the first
+        // `@` (piggy#227). RFC 0011 §2.2 now permits a quoted purpose
+        // to contain `@` — quoting is the escape mechanism, and one
+        // that cannot carry the rune most in need of escaping is not
+        // doing its job — so in `"a@b"@fmt-data` the join is the SECOND
+        // `@` and a first-`@` split would slice the purpose in half. A
+        // BARE slot still cannot contain `@` (it is outside §2.1's
+        // inclusion set), which `unquote_purpose` enforces below.
+        let (purpose_slot, body) = split_purpose_slot(s);
+        // Unquote BEFORE decoding the body, matching Go's `Set` /
+        // `UnmarshalText` ordering. An unterminated quoted slot is
+        // returned whole by `split_purpose_slot` with an empty body, so
+        // this ordering is what reports it as "unterminated quoted
+        // purpose" instead of letting the empty body reach blech32 and
+        // fail there with a misleading separator error.
+        //
         // `unquote_purpose` enforces the bare inclusion set on an
-        // unquoted slot and unescapes a quoted one; `Id::new` then
-        // validates the resulting VALUE. Both steps are required —
-        // the value validator bans only `@`, so it alone would let a
-        // bare `my thing` through.
+        // unquoted slot and unescapes a quoted one. It is the only
+        // validation the purpose gets: the value itself is
+        // unconstrained (piggy#227), so every rule lives in the
+        // spelling this step checks.
         let purpose = purpose_slot
             .map(|slot| unquote_purpose(slot).map(|value| PurposeId::parse(&value)))
             .transpose()?;
+        let (format_str, data) = blech32::decode(body)?;
         let format = FormatId::parse(&format_str)?;
 
         Self::new(purpose, format, data)
@@ -273,11 +284,11 @@ mod tests {
     }
 
     #[test]
-    fn purpose_split_uses_first_at_in_input() {
-        // RFC 0002 §4 splits the input on the first `@` textually
-        // (before blech32-decoding the body). Since the purpose-id
-        // lexical rule excludes `@`, in practice there's only one —
-        // but document the parse rule.
+    fn purpose_split_uses_first_at_in_bare_slot() {
+        // A BARE purpose slot joins at the first `@` textually (before
+        // blech32-decoding the body), because `@` is outside §2.1's
+        // inclusion set and so cannot appear unquoted. The quoted case
+        // is covered by `quoted_purpose_containing_at_round_trips`.
         let payload = pivy_pubkey_payload();
         let body = blech32::encode("pivy_ecdh_p256_pub", &payload).unwrap();
         let wire = format!("piggy-recipient-v1@{body}");
@@ -422,20 +433,117 @@ mod tests {
         );
     }
 
-    /// RFC 0011 §2.2: `@` is banned in a purpose VALUE under any
-    /// circumstance, so a quoted slot carrying one is refused after
-    /// unquoting even though the first-`@` split already took the
-    /// leading fragment.
+    /// REPLACES `purpose_value_containing_at_rejected_at_construction`
+    /// (piggy#227), which asserted that `Id::new` refused a purpose
+    /// value of `a@b` with `PurposeError::ContainsAt`.
+    ///
+    /// RFC 0011 §2.2's blanket `@` ban is gone: quoting is an escape
+    /// mechanism, and one that cannot carry the character most in need
+    /// of escaping is not doing its job. The ban was also a
+    /// pre-narrowing artifact — once the bare production became an
+    /// inclusion set, `@` was already impossible unquoted, so the ban's
+    /// only remaining effect was to forbid the spelling that *resolves*
+    /// the ambiguity.
+    ///
+    /// The round-trip is the real assertion: it only passes if the
+    /// decoder locates the join with a quote-aware scan. A first-`@`
+    /// split would slice the purpose in half and leave `b"@sha256-...`
+    /// as the body, which is not a decodable digest.
     #[test]
-    fn purpose_value_containing_at_rejected_at_construction() {
-        let err = Id::new(
+    fn quoted_purpose_containing_at_round_trips() {
+        let id = Id::new(
             Some(PurposeId::Other("a@b".to_string())),
             FormatId::Sha256,
             vec![0u8; 32],
         )
-        .unwrap_err();
+        .unwrap();
+        let wire = id.to_wire();
         assert!(
-            matches!(err, ParseError::Purpose(PurposeError::ContainsAt { .. })),
+            wire.starts_with("\"a@b\"@sha256-"),
+            "a purpose containing @ must be spelled quoted, got {wire}"
+        );
+        let parsed = Id::parse(&wire).unwrap();
+        assert_eq!(parsed.purpose(), Some(&PurposeId::Other("a@b".to_string())));
+        assert_eq!(parsed.to_wire(), wire);
+    }
+
+    /// Multiple interior `@`s are no harder: the scanner terminates on
+    /// the closing quote, not on any `@` (piggy#227).
+    #[test]
+    fn quoted_purpose_with_multiple_ats_round_trips() {
+        for value in ["a@b@c", "@"] {
+            let id = Id::new(
+                Some(PurposeId::Other(value.to_string())),
+                FormatId::Sha256,
+                vec![0u8; 32],
+            )
+            .unwrap();
+            let wire = id.to_wire();
+            assert!(
+                wire.starts_with(&format!("\"{value}\"@sha256-")),
+                "expected a quoted purpose slot, got {wire}"
+            );
+            let parsed = Id::parse(&wire).unwrap();
+            assert_eq!(
+                parsed.purpose(),
+                Some(&PurposeId::Other(value.to_string())),
+                "round-trip failed for {value:?} (wire {wire})"
+            );
+        }
+    }
+
+    /// The scanner honours backslash escapes when locating the closing
+    /// quote, so an escaped quote next to an `@` does not terminate the
+    /// slot early (piggy#227).
+    #[test]
+    fn quoted_purpose_with_escaped_quote_and_at_round_trips() {
+        let value = "a\"@b";
+        let id = Id::new(
+            Some(PurposeId::Other(value.to_string())),
+            FormatId::Sha256,
+            vec![0u8; 32],
+        )
+        .unwrap();
+        let wire = id.to_wire();
+        assert!(
+            wire.starts_with("\"a\\\"@b\"@sha256-"),
+            "expected the interior quote escaped, got {wire}"
+        );
+        let parsed = Id::parse(&wire).unwrap();
+        assert_eq!(
+            parsed.purpose(),
+            Some(&PurposeId::Other(value.to_string())),
+            "got wire {wire}"
+        );
+    }
+
+    /// A BARE `@` is still rejected: it is outside §2.1's inclusion
+    /// set, so the first `@` in an unquoted slot is the join and
+    /// everything before it must be bare-expressible. `a@b@<digest>`
+    /// therefore fails rather than quietly reading `a` as the purpose.
+    #[test]
+    fn bare_purpose_containing_at_rejected_at_parse() {
+        let body = blech32::encode("sha256", &[0u8; 32]).unwrap();
+        let err = Id::parse(&format!("a@b@{body}")).unwrap_err();
+        // The join is the FIRST `@` here (the slot does not open with a
+        // quote), so the purpose is the bare-legal `a` and the body is
+        // the undecodable `b@sha256-…`.
+        assert!(matches!(err, ParseError::Blech32(_)), "got: {err:?}");
+    }
+
+    /// A slot that opens with a quote but never closes is reported as
+    /// unterminated, not as a downstream blech32 checksum/separator
+    /// error — `split_purpose_slot` returns it whole so `unquote_purpose`
+    /// gets to name the real problem (piggy#227).
+    #[test]
+    fn unterminated_quoted_purpose_names_itself_at_parse() {
+        let body = blech32::encode("sha256", &[0u8; 32]).unwrap();
+        let err = Id::parse(&format!("\"a@b@{body}")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ParseError::Purpose(PurposeError::UnterminatedQuoted { .. })
+            ),
             "got: {err:?}"
         );
     }

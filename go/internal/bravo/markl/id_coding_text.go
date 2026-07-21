@@ -46,18 +46,19 @@ func (id *Id) UnmarshalText(bites []byte) (err error) {
 
 	body := bites
 
-	if at := bytes.IndexByte(bites, '@'); at >= 0 {
-		// The slot is bare or quoted (RFC 0011 §2.1, madder#273 rulings
-		// 1 and 2); SetPurposeFromWireSlot is the chokepoint that
-		// unquotes and validates as one step. This is a second
-		// wire-parse path alongside Id.Set — going through the
-		// chokepoint is what keeps the two from drifting.
-		if err = id.SetPurposeFromWireSlot(string(bites[:at])); err != nil {
+	// splitPurposeSlot is quote-aware: §2.2 permits a QUOTED purpose to
+	// contain '@' (piggy#227), so the join is not simply the first one
+	// and a bytes.IndexByte scan would slice `"a@b"@fmt-data` in half.
+	// SetPurposeFromWireSlot is then the chokepoint that unquotes and
+	// validates as one step. This is a second wire-parse path alongside
+	// Id.Set — sharing both helpers is what keeps the two from drifting.
+	if slot, rest, hasPurpose := splitPurposeSlot(string(bites)); hasPurpose {
+		if err = id.SetPurposeFromWireSlot(slot); err != nil {
 			err = errors.Wrapf(err, "Raw: %q", string(bites))
 			return err
 		}
 
-		body = bites[at+1:]
+		body = []byte(rest)
 	}
 
 	var formatId string
