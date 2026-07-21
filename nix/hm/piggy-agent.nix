@@ -96,8 +96,11 @@ let
 
       # `--upstream name="<path>"`: the path sits in double quotes so
       # bash expands env references at runtime; the name is pinned to a
-      # safe charset by assertion.
-      upstreamArgsText = lib.concatMapStrings (
+      # safe charset by assertion. Joined with explicit spaces — both
+      # between entries and (in `launcherText`) against the preceding
+      # `nonSocketArgs` group — after piggy#229 found `concatMapStrings`
+      # gluing flag groups together with no word boundary at all.
+      upstreamArgsText = lib.concatMapStringsSep " " (
         u: ''--upstream ${u.name}="${u.socketPath}"''
       ) instanceCfg.upstreams;
 
@@ -129,7 +132,7 @@ let
         export SSH_AUTH_SOCK="$SOCK"
         exec ${binPath} ${
           lib.escapeShellArgs (preArgs ++ foregroundArgs)
-        } -a "$SOCK" ${lib.escapeShellArgs nonSocketArgs}${upstreamArgsText}
+        } -a "$SOCK" ${lib.escapeShellArgs nonSocketArgs} ${upstreamArgsText}
       '';
 
       launcher = pkgs.writeShellScript "${name}-launch" launcherText;

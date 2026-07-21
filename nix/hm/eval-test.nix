@@ -831,6 +831,97 @@ let
         };
     }
     {
+      # Regression for piggy#229: `nonSocketArgs` (escaped via
+      # `lib.escapeShellArgs`) and `upstreamArgsText` used to be
+      # concatenated with no separator, so when `addNewKeysTo` (the
+      # last entry in `nonSocketArgs`) landed immediately before a
+      # non-empty `upstreamArgsText`, the rendered exec line glued
+      # them into one token, e.g. `--add-new-keys-to soft--upstream
+      # soft="...".` clap then parsed `soft--upstream` as the literal
+      # value of `--add-new-keys-to` and never saw a real `--upstream`
+      # flag, so the agent refused to start (`--add-new-keys-to`
+      # `requires = "upstream"`). This case pins a real word-boundary
+      # (space) between the two flag groups.
+      name = "add-new-keys-to-and-upstreams-have-separator";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "soft";
+            socketPath = "$HOME/.local/state/ssh/launchd-agent.sock";
+          }
+        ];
+        services.piggy-agent.addNewKeysTo = "soft";
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          # The exact glued failure mode from #229: the value of
+          # `--add-new-keys-to` runs straight into the next `--upstream`
+          # flag with no space.
+          noGluedFlag = !(lib.hasInfix "soft--upstream" text);
+          hasSeparatedFlags = lib.hasInfix "--add-new-keys-to soft --upstream" text;
+        in
+        {
+          ok = tripped == [ ] && noGluedFlag && hasSeparatedFlags;
+          got = {
+            inherit
+              tripped
+              text
+              noGluedFlag
+              hasSeparatedFlags
+              ;
+          };
+        };
+    }
+    {
+      # Regression for piggy#229 (multi-upstream half): `upstreamArgsText`
+      # used to join entries via `lib.concatMapStrings`, which has no
+      # separator between entries either — so two upstreams would glue
+      # into `--upstream a="..."--upstream b="..."`. The fix moved this
+      # to `lib.concatMapStringsSep " "`; this case pins a real space
+      # between two joined `--upstream` entries.
+      name = "multiple-upstreams-have-separator-between-entries";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "alpha";
+            socketPath = "/tmp/alpha.sock";
+          }
+          {
+            name = "beta";
+            socketPath = "/tmp/beta.sock";
+          }
+        ];
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          noGluedEntries = !(lib.hasInfix "\"--upstream" text);
+          hasSeparatedEntries = lib.hasInfix ''--upstream alpha="/tmp/alpha.sock" --upstream beta="/tmp/beta.sock"'' text;
+        in
+        {
+          ok = tripped == [ ] && noGluedEntries && hasSeparatedEntries;
+          got = {
+            inherit
+              tripped
+              text
+              noGluedEntries
+              hasSeparatedEntries
+              ;
+          };
+        };
+    }
+    {
       # piggy#215: the C pivy-agent has no --upstream surface; asking
       # for upstreams with the C escape-hatch package is a config error.
       name = "c-agent-with-upstreams-trips-assertion";
