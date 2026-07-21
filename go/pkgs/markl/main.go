@@ -11,13 +11,21 @@ import (
 
 type ErrFormatOperationNotSupported = internal.ErrFormatOperationNotSupported
 
-// ErrInvalidPurposeCharset signals that a purpose id contains a code
-// point the RFC 0002 §2.1 `purpose-char` grammar excludes: the literal
-// `@` (reserved as the purpose/digest join rune, piggy#219) or any
-// Unicode whitespace code point (a purpose containing whitespace has no
-// bare-text-form spelling — see RFC 0002 §2.2). Beyond those two
-// exclusions the charset is open — general identifiers (piggy#219),
-// including `/` (e.g. `one/uno`), are legal.
+// ErrInvalidPurposeCharset signals one of two RFC 0011 §2.1/§2.2
+// violations:
+//
+//   - a purpose VALUE containing the literal `@`, which is banned under
+//     any circumstance, quoted or not, because `@` is markl's own
+//     purpose/digest join (§2.2); or
+//   - a BARE purpose slot containing a code point outside §2.1's ASCII
+//     inclusion set [a-zA-Z0-9_/-].
+//
+// The second case is not a dead end: such a purpose is still legal, it
+// just has to be spelled with the quoted alternative (ruling 2), e.g.
+// `"my thing"@blake2b256-...` or `"café/naïve"@blake2b256-...`. The
+// charset NARROWED on 2026-07-20 (linenisgreat/madder#273 ruling 1)
+// from the former open "anything but `@` and whitespace"; quoting is
+// what preserves reachability for everything the narrowing excluded.
 type ErrInvalidPurposeCharset = internal.ErrInvalidPurposeCharset
 type ErrIsNull = internal.ErrIsNull
 
@@ -57,6 +65,11 @@ type ErrLegacyCombinedHRPWireForm = internal.ErrLegacyCombinedHRPWireForm
 type ErrNotEqual = internal.ErrNotEqual
 type ErrNotEqualBytes = internal.ErrNotEqualBytes
 type ErrUnsupportedIdFormat = internal.ErrUnsupportedIdFormat
+
+// ErrUnterminatedQuotedPurpose signals a purpose slot that opens with a
+// quote rune but does not close with the matching one (RFC 0011 §2.1's
+// `quoted-string`).
+type ErrUnterminatedQuotedPurpose = internal.ErrUnterminatedQuotedPurpose
 type Format = internal.Format
 type FormatHash = internal.FormatHash
 type FormatId = internal.FormatId

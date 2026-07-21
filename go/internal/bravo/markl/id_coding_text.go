@@ -24,7 +24,12 @@ func (id Id) MarshalText() (bites []byte, err error) {
 	}
 
 	if purpose := id.GetPurposeId(); purpose != "" {
-		bites = []byte(fmt.Sprintf("%s@%s", purpose, string(bites)))
+		// spellPurpose quotes when the value falls outside RFC 0011
+		// §2.1's bare inclusion set (madder#273 rulings 1 and 2). This
+		// is a second marshal path alongside Id.StringWithFormat; both
+		// must spell the slot the same way or a value would round-trip
+		// through one and not the other.
+		bites = []byte(fmt.Sprintf("%s@%s", spellPurpose(purpose), string(bites)))
 	}
 
 	return bites, err
@@ -42,13 +47,17 @@ func (id *Id) UnmarshalText(bites []byte) (err error) {
 	body := bites
 
 	if at := bytes.IndexByte(bites, '@'); at >= 0 {
-		purpose := string(bites[:at])
-		body = bites[at+1:]
-
-		if err = id.SetPurposeId(purpose); err != nil {
+		// The slot is bare or quoted (RFC 0011 §2.1, madder#273 rulings
+		// 1 and 2); SetPurposeFromWireSlot is the chokepoint that
+		// unquotes and validates as one step. This is a second
+		// wire-parse path alongside Id.Set — going through the
+		// chokepoint is what keeps the two from drifting.
+		if err = id.SetPurposeFromWireSlot(string(bites[:at])); err != nil {
 			err = errors.Wrapf(err, "Raw: %q", string(bites))
 			return err
 		}
+
+		body = bites[at+1:]
 	}
 
 	var formatId string

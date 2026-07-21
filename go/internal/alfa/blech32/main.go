@@ -158,9 +158,7 @@ func encode(hrp string, data []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	var lower bool
-
-	if lower, err = validateCaseString(hrp); err != nil {
+	if err = validateCaseString(hrp); err != nil {
 		return nil, err
 	}
 
@@ -181,11 +179,7 @@ func encode(hrp string, data []byte) ([]byte, error) {
 		ret.WriteByte(charsetString[p])
 	}
 
-	if lower {
-		return ret.Bytes(), nil
-	}
-
-	return bytes.ToUpper(ret.Bytes()), nil
+	return ret.Bytes(), nil
 }
 
 func EncodeHRPAsData(hrp string, data []byte) ([]byte, error) {
@@ -194,11 +188,9 @@ func EncodeHRPAsData(hrp string, data []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	var lower bool
-
 	hrpBytes := []byte(hrp)
 
-	if lower, err = validateCase(hrpBytes); err != nil {
+	if err = validateCase(hrpBytes); err != nil {
 		return nil, err
 	}
 
@@ -223,16 +215,31 @@ func EncodeHRPAsData(hrp string, data []byte) ([]byte, error) {
 		ret.WriteByte(charsetString[p])
 	}
 
-	if lower {
-		return ret.Bytes(), nil
-	}
-
-	return bytes.ToUpper(ret.Bytes()), nil
+	return ret.Bytes(), nil
 }
 
+// validateHRP enforces RFC 0011 §3's HRP charset: [a-zA-Z0-9_].
+//
+// NARROWED 2026-07-20 (linenisgreat/madder#273 ruling 8) from printable
+// ASCII 33–126. The narrowing is what makes the separator unambiguous:
+// blech32 is bech32 with the HRP/data separator changed from `1` to
+// `-`, and that swap only works if `-` cannot itself occur in an HRP.
+// Under the old printable-ASCII rule it could, which is why the decoder
+// had to guess by taking the LAST `-`. With the HRP charset excluding
+// `-`, a well-formed blech32 string contains exactly one separator and
+// the split is determined rather than guessed (see ruling 9 and
+// validateSeparatorPosition's callers).
+//
+// Evidence that this costs nothing: every format-id across piggy,
+// madder, and dodder uses `_` as its word separator, never `-`.
 func validateHRP(hrp string) (err error) {
 	for p, c := range hrp {
-		if c < 33 || c > 126 {
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '_':
+		default:
 			return errInvalidHRPCharacter{pos: p, char: c}
 		}
 	}
@@ -240,35 +247,51 @@ func validateHRP(hrp string) (err error) {
 	return err
 }
 
-func validateCaseString(s string) (lower bool, err error) {
+// validateCaseString enforces RFC 0011 §3.5: lowercase only.
+//
+// Formerly this accepted all-lower OR all-upper and returned which one
+// it saw, mirroring bech32; the encoders used that to decide whether to
+// upper-case their output. Ruling 6 narrowed the rule to lowercase, so
+// mixed case and all-uppercase are now BOTH rejections — the first
+// still as ErrMixedCase (a distinct malformation worth naming), the
+// second as ErrUppercase.
+//
+// That left the `lower` result always true on success and the encoders'
+// bytes.ToUpper branches unreachable, so both were removed rather than
+// left as dead alternatives that imply an upper-case form still exists.
+func validateCaseString(s string) error {
 	toLower := strings.ToLower(s)
 	toUpper := strings.ToUpper(s)
 
-	if toLower != s && toUpper != s {
-		err = ErrMixedCase
-		return lower, err
-	} else {
-		lower = toLower == s
+	switch {
+	case toLower != s && toUpper != s:
+		return ErrMixedCase
+
+	case toLower != s:
+		return ErrUppercase
 	}
 
-	return lower, err
+	return nil
 }
 
-func validateCase(bites []byte) (lower bool, err error) {
+// validateCase is validateCaseString's byte-slice twin; see its note for
+// the ruling-6 narrowing.
+func validateCase(bites []byte) error {
 	lowerCount, _, upperCount := unicorn.CountCase(bites)
 
 	if lowerCount != 0 && upperCount != 0 {
-		err = fmt.Errorf(
+		return fmt.Errorf(
 			"mixed case: lower: %d, upper: %d",
 			lowerCount,
 			upperCount,
 		)
-		return lower, err
 	}
 
-	lower = upperCount == 0
+	if upperCount != 0 {
+		return ErrUppercase
+	}
 
-	return lower, err
+	return nil
 }
 
 type bytesOrString interface {
@@ -298,11 +321,19 @@ func validateSeparatorPosition[INPUT bytesOrString](
 // will be
 // uppercase.
 func DecodeString(input string) (hrp string, data []byte, err error) {
-	if _, err = validateCaseString(input); err != nil {
+	if err = validateCaseString(input); err != nil {
 		return hrp, data, err
 	}
 
-	pos := strings.LastIndex(input, "-")
+	// Single-separator split (RFC 0011 §3.2, madder#273 ruling 9).
+	// Formerly strings.LastIndex: with the HRP charset narrowed to
+	// [a-zA-Z0-9_] a well-formed string has exactly one `-`, so a
+	// second one is a malformed input to REJECT rather than a
+	// still-decodable string to guess at. Taking the last `-` would
+	// silently accept `a-b-<data>` by treating `a-b` as the HRP —
+	// which validateHRP now rejects anyway, but only after the split
+	// has already committed to the wrong boundary.
+	pos := strings.Index(input, "-")
 
 	if err = validateSeparatorPosition(input, pos); err != nil {
 		return hrp, data, err
@@ -342,11 +373,13 @@ func Decode(bites []byte) (hrp string, data []byte, err error) {
 	// Per BIP173 / blech32 §case-rules: the whole input — HRP and
 	// data together — MUST be uniformly cased. DecodeString already
 	// enforces this on its string input; do the same here on bytes.
-	if _, err = validateCase(bites); err != nil {
+	if err = validateCase(bites); err != nil {
 		return hrp, data, err
 	}
 
-	pos := bytes.LastIndex(bites, []byte("-"))
+	// Single-separator split — see DecodeString's note (RFC 0011 §3.2,
+	// madder#273 ruling 9).
+	pos := bytes.Index(bites, []byte("-"))
 
 	if err = validateSeparatorPosition(bites, pos); err != nil {
 		return hrp, data, err
@@ -375,7 +408,7 @@ func DecodeDataOnly(bites []byte) (data []byte, err error) {
 // Decode decodes a Blech32 string. If the string is uppercase, the HRP
 // will be uppercase.
 func decode(hrp string, bites []byte) (data []byte, err error) {
-	if _, err = validateCase(bites); err != nil {
+	if err = validateCase(bites); err != nil {
 		return data, err
 	}
 

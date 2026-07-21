@@ -1,75 +1,184 @@
-// marklid.peg — normative grammar for the markl-id text form (madder
-// RFC 0002 "Markl ID Format")
+// marklid.peg — normative grammar for the markl-id text form (RFC 0011
+// "Markl ID Format")
 //
-// SYNC OBLIGATION: this grammar MUST remain in sync with madder's RFC
-// 0002 (docs/rfcs/0002-markl-id-format.md) — specifically §2
-// (Structure), §2.1 (ABNF Grammar), and §3 (Blech32 Encoding). If RFC
-// 0002 amends those sections (as it did for the purpose-charset
-// expansion, madder#270 / piggy#219), update this file to match.
+// SYNC OBLIGATION: this grammar MUST remain in sync with this
+// repository's RFC 0011 (docs/rfcs/0011-markl-id-format.md) —
+// specifically §2 (Structure), §2.1 (ABNF Grammar), §2.3 (Quoted
+// Digest Slot), and §3 (Blech32 Encoding). If RFC 0011 amends those
+// sections, update this file to match.
+//
+// RFC 0011 was formerly madder RFC 0002; it moved here to complete the
+// piggy#183 markl-ownership inversion, and was renumbered only because
+// piggy's 0002 slot already holds the PIV-ECDH box format. Its internal
+// section numbers are unchanged, so citations of "RFC 0002 §2.1" still
+// land on the right text. The spec is now IN THIS REPOSITORY, upstream
+// of its own implementation — an earlier version of this comment sent
+// readers downstream to madder, and that misdirection caused a real
+// sequencing error (linenisgreat/madder#273).
 //
 // Notation: Ford PEG, authored langlang-compatible (cutting-garden FDR
 // 0022): // comments only, explicit spacing, no automatic space
-// insertion. markl-id has NO whitespace anywhere in its wire form
-// (RFC 0002 §2.1, §2.2) — validate with BOTH -disable-builtins AND
-// -disable-spaces (hyphence#7 dialect-gap finding: -disable-builtins
-// alone only drops the injected Spacing/EOL/EOF rule DEFINITIONS; the
-// separate whitespace-injector pass, gated by -disable-spaces, still
-// auto-inserts Spacing calls between sequence items unless both flags
-// are given).
+// insertion. Validate with BOTH -disable-builtins AND -disable-spaces
+// (hyphence#7 dialect-gap finding: -disable-builtins alone only drops
+// the injected Spacing/EOL/EOF rule DEFINITIONS; the separate
+// whitespace-injector pass, gated by -disable-spaces, still auto-
+// inserts Spacing calls between sequence items unless both flags are
+// given).
+//
+// Whitespace: a markl-id's BARE form has no whitespace anywhere (RFC
+// 0011 §2.1, §2.2). Whitespace can appear only INSIDE a quoted slot
+// (`"my thing"@blake2b256-...`), never between the slots and never
+// around the '@' or '-' joins. That is why no rule below calls a
+// Spacing production.
 //
 // Scope: structural (context-free) shape only. Does NOT and per PEG
-// CANNOT encode: blech32 checksum validity (§3.3, a BCH computation),
-// case uniformity across format+data (§3.5), payload-size-matches-
-// format (§5, a registry lookup), or purpose/format compatibility
-// (§6.1, a registry lookup). Those stay the Go/Rust reference
-// decoders' job (go/internal/bravo/markl, crates/piggy-markl) — a
-// grammar-valid string can still be semantically rejected downstream;
-// that's expected, matching 0014-trellis.peg's own "groundness is
-// semantic, not grammar" precedent.
+// CANNOT encode: blech32 checksum validity (§3.3, a BCH computation —
+// see §4.1), payload-size-matches-format (§5, a registry lookup),
+// purpose/format compatibility (§6.1, a registry lookup), or the
+// rejection of a quoted digest slot (§2.3, a validation-time refusal of
+// a shape this grammar deliberately admits). Those stay the Go/Rust
+// reference decoders' job (go/internal/bravo/markl, crates/piggy-markl)
+// — a grammar-valid string can still be semantically rejected
+// downstream; that's expected, matching 0014-trellis.peg's own
+// "groundness is semantic, not grammar" precedent.
 
-MarklId      <- ((Purpose '@')? FormatData)? EOF
+MarklId        <- ((Purpose '@')? FormatData)? EOF
 
-// purpose (RFC 0002 §2.1): 1*purpose-char, any Unicode code point
-// except '@' (the join rune) and whitespace. '/' is explicitly legal
-// — general/opaque identifiers (madder#270, piggy#219), e.g.
-// `one/uno@blake2b256-...`.
-Purpose      <- PurposeChar+
-PurposeChar  <- !'@' !Space .
+// purpose (RFC 0011 §2.1): an ASCII-inclusion identifier, or a quoted
+// String for anything outside it. NARROWED 2026-07-20
+// (linenisgreat/madder#273 ruling 1) from the former "any Unicode code
+// point except '@' and whitespace", which superseded in turn the
+// earlier system-domain-role-version convention (madder#270,
+// piggy#219).
+//
+// The inclusion list is deliberate, not a transcription of trellis's
+// Ident: trellis's IdentRune is EXCLUSION-style (any rune that is not
+// Reserved and not whitespace), and adopting it would have narrowed
+// piggy by only the ~16 reserved characters rather than by the amount
+// asked for. Inclusion also makes both slots ASCII-inclusion (Format is
+// already [a-zA-Z0-9_]) and keeps a bare markl-id safe to paste into
+// shell, URL, and log contexts, where a bare '(', ';', or '&' is a
+// hazard.
+//
+// CONSEQUENCE (RFC 0011 §2.1): this REVOKES madder#270's bare-Unicode-
+// pinnability. A purpose spells a pinned object's id, so a Unicode- or
+// punctuation-named object is no longer bare-pinnable — it is pinned
+// QUOTED: `"café/naïve"@blake2b256-...`. The quoted alternative answers
+// #270's concern rather than ignoring it.
+//
+// Purpose ⊂ trellis Ident: every string matching PurposeBare is a valid
+// trellis identifier, but not conversely. RFC 0011 §7.4's divergence
+// register asserts that SUBSET invariant, not equality.
+Purpose        <- PurposeBare / String
+PurposeBare    <- PurposeChar+
 
-FormatData   <- Format '-' Data
+// '-' is written LAST so it is a literal hyphen, not a range endpoint.
+PurposeChar    <- [a-zA-Z0-9_/-]
 
-// format = 1*( ALPHA / DIGIT / "_" ), RFC 0002 §2.1.
-Format       <- FormatChar+
-FormatChar   <- [a-zA-Z0-9_]
+// format-data (RFC 0011 §2.1, §2.3): the bare two-slot digest form, or
+// a quoted String. The quoted alternative is an EXTENSION POINT — it
+// PARSES into a dedicated value and is REFUSED at validation until a
+// concrete meaning is specified (§2.3, ruling 11). This mirrors
+// trellis's own precedent for `~=` and the typed closure `-[p]->>`:
+// the shape parses, validation says no. Admitting it here costs
+// nothing, because every form usable TODAY still goes through
+// FormatDataBare and keeps that production's structural guarantees.
+FormatData     <- FormatDataBare / String
+
+// The two-slot structure is retained deliberately (ruling 3). A generic
+// bare token was rejected: this structure is the ONLY thing rejecting
+// `blake2b256` (no data at all), `blake2b256-9bt3...` ('b' outside the
+// blech32 alphabet), and truncated payloads.
+FormatDataBare <- Format '-' Data
+
+// format = 1*( ALPHA / DIGIT / "_" ), RFC 0011 §2.1. Structurally open,
+// semantically registered (ruling 4): any such token PARSES, and the
+// registry decides validity at decode time. Registering a new format
+// therefore never touches this grammar and never forces a downstream
+// re-import.
+Format         <- FormatChar+
+FormatChar     <- [a-zA-Z0-9_]
 
 // data: >=7 chars (1+ payload + 6-char checksum) from the 32-char
-// bech32 alphabet, either case (uniformity is semantic — see Scope).
-Data         <- DataChar DataChar DataChar DataChar DataChar DataChar DataChar DataChar*
-DataChar     <- [qpzry9x8gf2tvdw0s3jn54khce6mua7lQPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]
+// blech32 alphabet, LOWERCASE ONLY (RFC 0011 §3.5, ruling 6). This
+// narrows bech32's all-lower-or-all-upper rule: bech32 permits
+// uppercase to enable QR alphanumeric mode, but that mode's charset
+// (0-9, A-Z, space, $%*+-./:) has no lowercase, no '@', and no '_', so
+// a markl-id can never be QR-alphanumeric-encoded regardless of payload
+// case. The uppercase allowance buys markl-ids nothing.
+Data           <- DataChar DataChar DataChar DataChar DataChar DataChar DataChar DataChar*
+DataChar       <- [qpzry9x8gf2tvdw0s3jn54khce6mua7l]
 
-Space        <- [ \t\r\n]
-EOF          <- !.
+// Doddish quoting rules, matching 0014-trellis.peg's String verbatim:
+// double or single quotes; backslash escapes \n \t \r \a \b \f \v, \"
+// and \\ round-trip; unknown escapes pass the following character
+// through unchanged. Quoting is permitted on BOTH slots (ruling 2).
+String         <- '"' (!'"' Char)* '"'
+                / "'" (!"'" Char)* "'"
+Char           <- '\\' . / .
+
+EOF            <- !.
 
 // ---- conformance vectors (each MUST parse under MarklId) ----------
 //
 //   (empty string)
-//     — the null-state text form (RFC 0002 §2)
+//     — the null-state text form (RFC 0011 §2)
 //   blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
 //     — a bare digest, no purpose
 //   dodder-blob-digest-sha256-v1@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
-//     — a registered purpose (RFC 0002 §6.1); this grammar treats it
+//     — a registered purpose (RFC 0011 §6.1); this grammar treats it
 //       identically to a general one — registration is a semantic,
-//       not structural, distinction (RFC 0002 §6)
+//       not structural, distinction (RFC 0011 §6)
 //   one/uno@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
 //     — a general/unregistered, `/`-bearing purpose (piggy#219)
 //   md@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
 //     — a short general purpose
+//   "my thing"@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — a quoted purpose carrying whitespace, which the bare form
+//       cannot spell (ruling 2). The digest slot stays OUTSIDE the
+//       quoting, structurally intact (RFC 0011 §2.2)
+//   "café/naïve"@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — how a Unicode-named object is pinned now that the bare form is
+//       ASCII-closed (RFC 0011 §2.1; supersedes madder#270)
+//
+// ---- parses here, REJECTED at validation (RFC 0011 §2.3, §2.2) -----
+//
+//   md@"blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd"
+//     — a quoted digest slot. Structurally admitted as an extension
+//       point (ruling 11); the reference decoders MUST refuse it until
+//       a concrete meaning is specified. A grammar gate asserting this
+//       string PARSES is asserting the extension point exists, NOT that
+//       the id is usable.
+//   "a@b"@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — a quoted purpose containing '@'. The String production admits
+//       it structurally (it admits any rune between the quotes), but
+//       RFC 0011 §2.2 says a purpose MUST NOT contain '@' under any
+//       circumstance, quoted or not — '@' is markl's own join. So this
+//       is refused at validation, same bucket as the quoted digest.
+//
+//       NOTE: 0014-trellis.peg's MarklTerm comment asserts the
+//       opposite ("Purposes containing `@` are spelled by quoting the
+//       purpose (`\"a@b\"@fmt-x`)"). madder#273 rules on neither, so
+//       this file follows §2.2's existing normative MUST rather than
+//       trellis's comment. Keeping the ban is also what lets the
+//       reference decoders keep splitting on the first '@' and unquote
+//       afterwards, instead of needing a quote-aware scan to find the
+//       join. If §2.2 is later relaxed, this vector moves up into the
+//       MUST-parse block and the decoders' split becomes quote-aware.
 //
 // ---- rejected shapes (each MUST NOT parse under MarklId) ----------
 //
 //   blake2b256
 //     — missing "-data" (no separator)
 //   my thing@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
-//     — whitespace in purpose (piggy#219)
+//     — whitespace in a BARE purpose; spell it "my thing"@... instead
+//   café@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — non-ASCII in a bare purpose (madder#273 ruling 1); spell it
+//       "café"@... instead
+//   a.b@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
+//     — '.' is outside the bare purpose charset, though it IS a legal
+//       trellis IdentRune; this is the Purpose ⊂ Ident gap in action
 //   dodder-blob-digest-sha256-v1@blake2b256-9bt3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd
 //     — 'b' is outside the blech32 alphabet (charset violation in data)
+//   BLAKE2B256-9FT3M74L5T2PPWJRVFG3WP380JQJ2ZFRM6ZEVXQX34SDETHVEY0S5VM9GD
+//     — uppercase data; lowercase only (RFC 0011 §3.5, ruling 6)

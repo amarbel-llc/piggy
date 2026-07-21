@@ -20,7 +20,7 @@ import (
 //
 // The function does not mutate `body`.
 func VerifyChecksumWithHRPOverride(hrp string, body []byte) bool {
-	if _, err := validateCase(body); err != nil {
+	if err := validateCase(body); err != nil {
 		return false
 	}
 

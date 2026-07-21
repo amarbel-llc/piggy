@@ -2,7 +2,6 @@ package markl
 
 import (
 	"fmt"
-	"unicode"
 )
 
 // purposes currently treated as formats
@@ -87,19 +86,75 @@ const (
 
 var purposes = map[string]Purpose{}
 
-// validatePurposeCharset enforces RFC 0002 §2.1's `purpose-char` grammar:
-// a purpose admits any Unicode code point except the literal `@` (the
-// purpose/digest join rune) and whitespace (a bare markl-id text form has
-// no quoting mechanism to represent it, per §2.2). This is the sole
-// structural constraint shared by every purpose — registered or general
-// (piggy#219); registered purposes additionally get the narrower
+// purposeIsBareExpressible reports whether purposeId can be written in
+// RFC 0011 §2.1's BARE `purpose` production — the ASCII inclusion set
+// [a-zA-Z0-9_/-]. A purpose that is not bare-expressible is still a
+// legal purpose; it is simply spelled with the quoted alternative
+// (`"my thing"@blake2b256-...`), which is what the marshallers use.
+//
+// NARROWED 2026-07-20 (linenisgreat/madder#273 ruling 1) from the
+// former "any Unicode code point except '@' and whitespace". The
+// inclusion list is deliberate and is NOT a transcription of trellis's
+// Ident: trellis's IdentRune is exclusion-style (any rune that is not
+// Reserved and not whitespace), and adopting it would have narrowed
+// this by only the ~16 reserved characters rather than by the amount
+// asked for. Inclusion also keeps a bare markl-id safe to paste into
+// shell, URL, and log contexts where a bare '(', ';', or '&' is a
+// hazard. Consequence: Purpose ⊂ trellis Ident (RFC 0011 §7.4).
+func purposeIsBareExpressible(purposeId string) bool {
+	if purposeId == "" {
+		return false
+	}
+
+	for _, r := range purposeId {
+		if !purposeRuneIsBareExpressible(r) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// purposeRuneIsBareExpressible is the per-rune half of RFC 0011 §2.1's
+// bare `ident-char`. Split out so error reporting can locate the first
+// offending rune without allocating a one-rune string per candidate.
+func purposeRuneIsBareExpressible(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z':
+		return true
+	case r >= 'A' && r <= 'Z':
+		return true
+	case r >= '0' && r <= '9':
+		return true
+	case r == '_' || r == '/' || r == '-':
+		return true
+	default:
+		return false
+	}
+}
+
+// validatePurposeCharset enforces the one constraint RFC 0011 places on
+// a purpose VALUE regardless of how it is spelled: it MUST NOT contain
+// the literal '@' (§2.2). '@' is markl's own purpose/digest join, and
+// admitting it — even inside quotes — would reintroduce the ambiguity
+// the first-'@' decode rule (§4 step 1) exists to avoid.
+//
+// Everything else is permitted at the VALUE level, because ruling 2's
+// quoted alternative can spell it: whitespace, punctuation outside the
+// bare inclusion set, and non-ASCII all round-trip through the quoted
+// form. That is the deliberate trade recorded in RFC 0011 §2.1 — the
+// bare charset narrowed and REVOKED madder#270's bare-Unicode
+// pinnability, and quoting is what answers #270's concern instead:
+// `"café/naïve"@blake2b256-...` still pins a Unicode-named object.
+//
+// Registered purposes additionally get the narrower
 // `system-domain-role-version` naming convention enforced at
-// registration time (RegisterPurpose callers), and their compatible-format
-// constraint (validatePurposeAndFormatId). General/unregistered purposes
-// get no further validation beyond this charset.
+// registration time (RegisterPurpose callers), and their
+// compatible-format constraint (validatePurposeAndFormatId).
+// General/unregistered purposes get no further validation.
 func validatePurposeCharset(purposeId string) error {
 	for _, r := range purposeId {
-		if r == '@' || unicode.IsSpace(r) {
+		if r == '@' {
 			return ErrInvalidPurposeCharset{PurposeId: purposeId, Rune: r}
 		}
 	}

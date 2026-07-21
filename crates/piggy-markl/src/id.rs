@@ -28,7 +28,9 @@ use thiserror::Error;
 
 use crate::blech32;
 use crate::format::{FormatId, UnknownFormat};
-use crate::purpose::{Incompatible, PurposeId};
+use crate::purpose::{
+    Incompatible, PurposeError, PurposeId, spell_purpose, unquote_purpose, validate_purpose_charset,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Id {
@@ -51,6 +53,8 @@ pub enum ParseError {
     },
     #[error("incompatible purpose/format: {0}")]
     Incompatible(#[from] Incompatible),
+    #[error("invalid purpose: {0}")]
+    Purpose(#[from] PurposeError),
 }
 
 impl From<UnknownFormat> for ParseError {
@@ -84,6 +88,11 @@ impl Id {
         // enumerated purposes; `validate_format` itself stays a strict
         // semantic predicate (still rejects everything for `Other`).
         if let Some(p) = &purpose {
+            // VALUE-level charset gate (RFC 0011 §2.2): bans only `@`.
+            // Mirrors Go's `Id.SetPurposeId`, and is the third of the
+            // three purpose entry points alongside `Id::parse`'s
+            // wire-slot unquoting and `to_wire`'s spelling.
+            validate_purpose_charset(p.as_str())?;
             if !matches!(p, PurposeId::Other(_)) {
                 p.validate_format(format)?;
             }
@@ -117,7 +126,11 @@ impl Id {
         let body = blech32::encode(self.format.as_str(), &self.data)
             .expect("encode of validated payload cannot fail");
         match &self.purpose {
-            Some(p) => format!("{}@{}", p.as_str(), body),
+            // `spell_purpose` quotes when the value falls outside RFC
+            // 0011 §2.1's bare inclusion set (madder#273 rulings 1 and
+            // 2); the digest slot is never quoted (§2.2), so it is
+            // concatenated as-is.
+            Some(p) => format!("{}@{}", spell_purpose(p.as_str()), body),
             None => body,
         }
     }
@@ -127,12 +140,24 @@ impl Id {
     /// blech32-decodes the body with HRP=`format`. Mirrors madder's
     /// `Set` after madder#159.
     pub fn parse(s: &str) -> Result<Self, ParseError> {
-        let (purpose_str, body) = match s.find('@') {
+        // Splitting on the FIRST `@` before unquoting is deliberate:
+        // RFC 0011 §2.2 bans `@` inside a purpose under any
+        // circumstance, quoted or not, so the first `@` is always the
+        // join. If that ban is ever relaxed, this split has to become
+        // quote-aware first.
+        let (purpose_slot, body) = match s.find('@') {
             Some(i) => (Some(&s[..i]), &s[i + 1..]),
             None => (None, s),
         };
         let (format_str, data) = blech32::decode(body)?;
-        let purpose = purpose_str.map(PurposeId::parse);
+        // `unquote_purpose` enforces the bare inclusion set on an
+        // unquoted slot and unescapes a quoted one; `Id::new` then
+        // validates the resulting VALUE. Both steps are required —
+        // the value validator bans only `@`, so it alone would let a
+        // bare `my thing` through.
+        let purpose = purpose_slot
+            .map(|slot| unquote_purpose(slot).map(|value| PurposeId::parse(&value)))
+            .transpose()?;
         let format = FormatId::parse(&format_str)?;
 
         Self::new(purpose, format, data)
@@ -275,9 +300,10 @@ mod tests {
 
     #[test]
     fn parse_rejects_double_dash_attachedc_with_clear_error() {
-        // Regression: `--all-attachedc` typo. Behavior depends on rfind
-        // semantics; lock whatever the current variant is so a future
-        // refactor doesn't silently change user-visible error.
+        // Regression: `--all-attachedc` typo. Behavior depends on the
+        // separator-split rule (first `-` since madder#273 ruling 9);
+        // lock whatever the current variant is so a future refactor
+        // doesn't silently change the user-visible error.
         let err = Id::parse("--all-attachedc").unwrap_err();
         assert!(matches!(err, ParseError::Blech32(_)), "got: {err:?}");
     }
@@ -285,9 +311,10 @@ mod tests {
     #[test]
     fn parse_rejects_purpose_only_no_at() {
         // "piggy-recipient-v1" without `@<body>`: falls through to bare
-        // blech32 decode. HRP becomes "piggy" (everything before the LAST
-        // '-' is "piggy-recipient", but rfind picks the LAST one, so HRP
-        // is "piggy-recipient" and body is "v1"). Body too short.
+        // blech32 decode. Since madder#273 ruling 9 the split takes the
+        // FIRST '-', so the HRP is "piggy" and the data portion is
+        // "recipient-v1" — which carries characters outside the blech32
+        // alphabet (and a second separator).
         let err = Id::parse("piggy-recipient-v1").unwrap_err();
         assert!(matches!(err, ParseError::Blech32(_)), "got: {err:?}");
     }
@@ -315,6 +342,127 @@ mod tests {
         let err = Id::parse("piggy-recipient-v1@-foo").unwrap_err();
         assert!(
             matches!(err, ParseError::Blech32(blech32::Error::EmptyHrp)),
+            "got: {err:?}"
+        );
+    }
+
+    /// madder#273 ruling 2: a purpose the bare production cannot spell
+    /// is written quoted, and survives a wire round-trip.
+    #[test]
+    fn quoted_purpose_with_whitespace_round_trips() {
+        let id = Id::new(
+            Some(PurposeId::Other("my thing".to_string())),
+            FormatId::Sha256,
+            vec![0u8; 32],
+        )
+        .unwrap();
+        let wire = id.to_wire();
+        assert!(
+            wire.starts_with("\"my thing\"@sha256-"),
+            "expected a quoted purpose slot, got {wire}"
+        );
+        let parsed = Id::parse(&wire).unwrap();
+        assert_eq!(
+            parsed.purpose(),
+            Some(&PurposeId::Other("my thing".to_string()))
+        );
+        assert_eq!(parsed.to_wire(), wire);
+    }
+
+    /// RFC 0011 §2.1: the bare charset is ASCII-closed, so a
+    /// Unicode-named object is pinned QUOTED rather than not at all
+    /// (this is what answers madder#270 after ruling 1 revoked
+    /// bare-Unicode pinnability).
+    #[test]
+    fn quoted_non_ascii_purpose_round_trips() {
+        let id = Id::new(
+            Some(PurposeId::Other("café/naïve".to_string())),
+            FormatId::Sha256,
+            vec![0u8; 32],
+        )
+        .unwrap();
+        let wire = id.to_wire();
+        assert!(
+            wire.starts_with("\"café/naïve\"@sha256-"),
+            "expected a quoted purpose slot, got {wire}"
+        );
+        let parsed = Id::parse(&wire).unwrap();
+        assert_eq!(
+            parsed.purpose(),
+            Some(&PurposeId::Other("café/naïve".to_string()))
+        );
+    }
+
+    /// The same value spelled BARE on the wire is a rejection — this is
+    /// where ruling 1's narrowing bites on the decode path.
+    #[test]
+    fn bare_non_ascii_purpose_rejected_at_parse() {
+        let body = blech32::encode("sha256", &[0u8; 32]).unwrap();
+        let err = Id::parse(&format!("café@{body}")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ParseError::Purpose(PurposeError::InvalidBarePurpose { ch: Some('é'), .. })
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// Whitespace in a bare slot is the same rejection.
+    #[test]
+    fn bare_whitespace_purpose_rejected_at_parse() {
+        let body = blech32::encode("sha256", &[0u8; 32]).unwrap();
+        let err = Id::parse(&format!("my thing@{body}")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ParseError::Purpose(PurposeError::InvalidBarePurpose { ch: Some(' '), .. })
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// RFC 0011 §2.2: `@` is banned in a purpose VALUE under any
+    /// circumstance, so a quoted slot carrying one is refused after
+    /// unquoting even though the first-`@` split already took the
+    /// leading fragment.
+    #[test]
+    fn purpose_value_containing_at_rejected_at_construction() {
+        let err = Id::new(
+            Some(PurposeId::Other("a@b".to_string())),
+            FormatId::Sha256,
+            vec![0u8; 32],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ParseError::Purpose(PurposeError::ContainsAt { .. })),
+            "got: {err:?}"
+        );
+    }
+
+    /// RFC 0011 §3.5 (ruling 6): uppercase is a rejection, not an
+    /// alternate spelling.
+    #[test]
+    fn uppercase_wire_form_rejected_at_parse() {
+        let body = blech32::encode("sha256", &[0u8; 32]).unwrap();
+        let err = Id::parse(&body.to_ascii_uppercase()).unwrap_err();
+        assert!(
+            matches!(err, ParseError::Blech32(blech32::Error::Uppercase)),
+            "got: {err:?}"
+        );
+    }
+
+    /// madder#273 ruling 9: exactly one separator. The first-separator
+    /// split leaves a second `-` inside the data portion, where it is
+    /// outside the blech32 alphabet.
+    #[test]
+    fn two_separator_body_rejected_at_parse() {
+        let err = Id::parse("sha256-qpzry9x-qpzry9x").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ParseError::Blech32(blech32::Error::InvalidCharacterInData { char: '-', .. })
+            ),
             "got: {err:?}"
         );
     }

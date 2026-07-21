@@ -29,7 +29,10 @@ pub mod purpose;
 
 pub use format::{FormatId, UnknownFormat};
 pub use id::{Id, ParseError};
-pub use purpose::{Incompatible, PurposeId};
+pub use purpose::{
+    Incompatible, PurposeError, PurposeId, purpose_is_bare_expressible, quote_purpose,
+    spell_purpose, unquote_purpose, validate_purpose_charset,
+};
 
 #[cfg(test)]
 mod proptest_round_trips {

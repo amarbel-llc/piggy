@@ -50,6 +50,19 @@ var ErrEmptyHRP = internal.ErrEmptyHRP
 var ErrInvalidChecksum = internal.ErrInvalidChecksum
 var ErrMixedCase = internal.ErrMixedCase
 var ErrSeparatorMissing = internal.ErrSeparatorMissing
+
+// ErrUppercase signals an all-uppercase input. RFC 0011 §3.5
+// (linenisgreat/madder#273 ruling 6) narrows bech32's
+// all-lower-or-all-upper rule to LOWERCASE ONLY, so uppercase is now
+// its own rejection rather than an accepted alternate spelling.
+//
+// Rationale worth keeping: bech32 permits uppercase to enable QR
+// alphanumeric mode, but that mode's charset (0-9, A-Z, space,
+// $%*+-./:) has no lowercase, no `@`, and no `_` — so a markl-id can
+// never be QR-alphanumeric-encoded regardless of payload case. The
+// uppercase allowance buys markl-ids nothing, and costs one spelling
+// per identifier.
+var ErrUppercase = internal.ErrUppercase
 var MakeValue = internal.MakeValue
 var MakeValueWithExpectedHRP = internal.MakeValueWithExpectedHRP
 

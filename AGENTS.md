@@ -96,6 +96,8 @@ Command surface:
 
 - `docs/rfcs/0002-piv-ecdh-box.md` — normative wire-format spec for `piggy-box` (forked from pivy RFC 0002, owned by piggy). Appendix A pins three bit-exact wire vectors replayed by `crates/piggy-box/src/piv_box.rs::tests::rfc0002_vectors`; drift between spec and test is a CI failure.
 - `docs/rfcs/0003` — the `piggy-ids` recipient-file format (incl. the 9A SSH-auth line type).
+- `docs/rfcs/0011-markl-id-format.md` — the normative markl-id wire format. **Formerly madder RFC 0002**, moved here to complete the piggy#183 ownership inversion and renumbered only because piggy's 0002 slot was already taken by the PIV-ECDH box spec. Internal section numbers are unchanged, so existing "RFC 0002 §2.1" citations still resolve. `go/internal/bravo/markl/marklid.peg` carries a SYNC OBLIGATION to §2/§2.1/§2.3/§3. madder's copy still needs removing or redirecting in a downstream pass.
+- `docs/rfcs/0011-identifier-vectors.txt` — the §7.3 identifier conformance-vector corpus: purpose slots paired with `parse`/`reject`/`parse-invalid` verdicts. Run here by `TestIdentifierVectors`; downstream grammars (trellis foremost) run the **same file** against their own identifier production, and any mismatch not recorded in §7.4's divergence register fails a gate. The invariant is containment — markl `purpose` ⊂ trellis `Ident` — not equality.
 - `docs/rfcs/0006-management-interaction-protocol.md` — the `Frontend`/interaction-seam contract behind `card init` and `manage`'s interactive methods.
 - `docs/rfcs/0007-management-command-protocol.md` — the `piggy manage` JSON-RPC command surface.
 
@@ -107,7 +109,7 @@ Layout (dagnabit `internal/<layer>/<pkg>` → `pkgs/<pkg>` facades):
 
 - `internal/0/domain_interfaces` — the markl-id interfaces.
 - `internal/alfa/blech32` — the split-HRP blech32 codec.
-- `internal/bravo/markl` — the **pure framework**: `Id` codec, the registry *mechanism* (`RegisterFormat`/`SwapFormat`/`GetFormatOrError`), the type + vocabulary constants, error sentinels. Installs no concrete format except the hash family.
+- `internal/bravo/markl` — the **pure framework**: `Id` codec, the registry *mechanism* (`RegisterFormat`/`SwapFormat`/`GetFormatOrError`), the type + vocabulary constants, error sentinels, and the purpose-slot quoting codec (`purpose_quoting.go` — bare/quoted spelling per RFC 0011 §2.1). Installs no concrete format except the hash family. Also home to `marklid.peg`, the normative grammar.
 - `internal/charlie/markl_registrations` — piggy's **native registrations** (crypto, the four erroring stubs, piggy's purposes) + the RFC-0002 vector generator/replay. **Opt-in: blank-import to fire `init()`.**
 - `internal/delta/agent` (facade `pkgs/agent`) — the heavy ssh/pivy signer-discovery layer; swaps real impls over the ssh/ecdh stubs via `markl.SwapFormat`. Off the dep-light core's import path (importing it pulls `x/crypto/ssh` + `dewey/pivy`).
 - `internal/delta/age` (facade `pkgs/age`) — the age x25519 encryption layer; swaps the real Generate/GetIOWrapper over the `age_x25519_sec` stub.
@@ -122,6 +124,10 @@ All three `delta` packages import the internal layers directly (not the `pkgs/` 
 **Gate**: `build-go` / `test-go` (compile + `go test -tags test`) are wired into `build`/`test`. The two `cmd/` binaries build via **`buildGoApplication` self-consuming `go-pkgs-test`** (`modules = ./go/gomod2nix.toml`, dewey `goFlakeInputs` threaded); `piggy-agent-conformance`'s `checkPhase` runs `go vet -tags test ./...` over the whole module, so a source-filter regression OR a stale `gomod2nix.toml` fails the gate in piggy (both binaries are built in `build-nix`). Facade drift is gated by conformist's `dewey-facade-export` lane (REPAIR at pre-commit, CHECK at `just lint-worktree`). Per #183/#188 the *library* has no `buildGoModule` gate — it's gated by the dagnabit facade check; the `buildGoApplication` derivations build the *binaries* (always built) and double as the producer self-consume. gomod2nix subdir freshness lint is deferred (conformist#79).
 
 Recipes: `build-go`, `test-go`, `update-go`, `update-gomod2nix`, `codemod-fmt-go`, `codemod-rfc0002-fixture`. (Facade regen/check moved to the conformist lanes; the standalone `codemod-facades`/`lint-facades` recipes were retired.)
+
+**Grammar gates**: `validate-grammar` checks `marklid.peg` is well-formed under langlang; `test-grammar-vectors` runs **two** corpora against it via `langlang -input` — the RFC 0011 conformance fixture (whole markl-ids, `TestGrammarVectors`) and the §7.3 identifier corpus (purpose slots, `TestIdentifierVectors`). The recipe's `-run` alternation must be extended when adding a third, or the new test silently never runs.
+
+**Known-broken**: `codemod-fmt-go` runs `gofmt -w internal agent age pigpen`, but `agent`/`age`/`pigpen` are not paths at `go/`'s root (they live under `internal/delta/` and `pkgs/`), so the recipe formats `internal` and then exits 2.
 
 ## Code Conventions
 

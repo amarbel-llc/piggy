@@ -15,7 +15,13 @@ use thiserror::Error;
 /// ambiguous `1`, `b`, `i`, `o`.
 const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
-/// Separator — last `-` in the string is the HRP/data divider.
+/// Separator — the **first** `-` in the string is the HRP/data divider.
+///
+/// Single-separator split (RFC 0011 §3.2, linenisgreat/madder#273 ruling
+/// 9). Formerly the LAST `-`: with the HRP charset narrowed to
+/// `[a-zA-Z0-9_]` (ruling 8) a well-formed string has exactly one `-`,
+/// so a second one is a malformed input to REJECT rather than a still-
+/// decodable string to guess at.
 pub const SEPARATOR: char = '-';
 
 /// BIP173 generator polynomial (also used by BIP350 bech32m, but we
@@ -34,8 +40,19 @@ pub enum Error {
     EmptyHrp,
     #[error("HRP contains invalid character at position {pos}: {char:?}")]
     InvalidHrpCharacter { pos: usize, char: char },
-    #[error("string is mixed-case (must be uniformly upper or lower)")]
+    #[error("string is mixed-case (markl-ids are lowercase only)")]
     MixedCase,
+    /// All-uppercase input. RFC 0011 §3.5 (linenisgreat/madder#273
+    /// ruling 6) narrows bech32's all-lower-or-all-upper rule to
+    /// LOWERCASE ONLY, so uppercase is now its own rejection rather
+    /// than an accepted alternate spelling. bech32 permits uppercase
+    /// to enable QR alphanumeric mode, but that mode's charset (0-9,
+    /// A-Z, space, `$%*+-./:`) has no lowercase, no `@`, and no `_` —
+    /// a markl-id can never be QR-alphanumeric-encoded regardless of
+    /// payload case, so the allowance buys nothing and costs one extra
+    /// spelling per identifier.
+    #[error("uppercase: markl-ids are lowercase only")]
+    Uppercase,
     #[error("separator '{}' missing from input", SEPARATOR)]
     SeparatorMissing,
     #[error("data portion too short: need >= {expected}, got {actual}")]
@@ -53,13 +70,6 @@ pub enum Error {
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
-
-/// Whether the encoded output should use lower or upper case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Case {
-    Lower,
-    Upper,
-}
 
 /// BCH polymod over the given 5-bit values. Returns the residue.
 fn polymod(values: &[u8]) -> u32 {
@@ -149,7 +159,14 @@ fn convert_bits(data: &[u8], from_bits: u32, to_bits: u32, pad: bool) -> Result<
     Ok(out)
 }
 
-fn classify_case(s: &str) -> Result<Case> {
+/// Enforce RFC 0011 §3.5: lowercase only.
+///
+/// Formerly this classified the input as all-lower OR all-upper and let
+/// the caller mirror that case in its output, matching bech32. Ruling 6
+/// narrowed that to lowercase, so mixed case and all-uppercase are now
+/// BOTH rejections — the first still as `MixedCase` (a distinct
+/// malformation worth naming), the second as `Uppercase`.
+fn validate_case(s: &str) -> Result<()> {
     let mut has_lower = false;
     let mut has_upper = false;
     for c in s.chars() {
@@ -163,15 +180,29 @@ fn classify_case(s: &str) -> Result<Case> {
         }
     }
     if has_upper {
-        Ok(Case::Upper)
-    } else {
-        Ok(Case::Lower)
+        return Err(Error::Uppercase);
     }
+    Ok(())
 }
 
+/// Enforce RFC 0011 §3's HRP charset: `[a-zA-Z0-9_]`.
+///
+/// NARROWED (linenisgreat/madder#273 ruling 8) from printable ASCII
+/// 33–126. The narrowing is what makes the separator unambiguous:
+/// blech32 is bech32 with the HRP/data separator changed from `1` to
+/// `-`, and that swap only works if `-` cannot itself occur in an HRP.
+/// Under the old printable-ASCII rule it could, which is why the decoder
+/// had to guess by taking the LAST `-`; see `SEPARATOR` and ruling 9.
+///
+/// Evidence the narrowing costs nothing: every format-id across piggy,
+/// madder, and dodder uses `_` as its word separator, never `-`.
+///
+/// `A-Z` is admitted here (mirroring the Go reference) even though
+/// `validate_case` independently rejects uppercase — the charset rule
+/// and the case rule are separate constraints with separate errors.
 fn validate_hrp(hrp: &str) -> Result<()> {
     for (pos, c) in hrp.char_indices() {
-        if (c as u32) < 33 || (c as u32) > 126 {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
             return Err(Error::InvalidHrpCharacter { pos, char: c });
         }
     }
@@ -179,21 +210,20 @@ fn validate_hrp(hrp: &str) -> Result<()> {
 }
 
 /// Encode `data` (8-bit bytes) under the human-readable part `hrp`.
-/// HRP case dictates output case (lowercase HRP → lowercase output).
+/// Output is always lowercase (RFC 0011 §3.5); an uppercase `hrp` is a
+/// rejection, not a request for uppercase output.
 pub fn encode(hrp: &str, data: &[u8]) -> Result<String> {
     if hrp.is_empty() {
         return Err(Error::EmptyHrp);
     }
     validate_hrp(hrp)?;
-    let case = classify_case(hrp)?;
+    validate_case(hrp)?;
 
-    // Pre-convert data and HRP to lower for the checksum calculation.
-    let hrp_lower: String = hrp.chars().map(|c| c.to_ascii_lowercase()).collect();
     let values_5bit = convert_bits(data, 8, 5, true)?;
-    let checksum = create_checksum(&hrp_lower, &values_5bit);
+    let checksum = create_checksum(hrp, &values_5bit);
 
-    let mut out = String::with_capacity(hrp_lower.len() + 1 + values_5bit.len() + CHECKSUM_LEN);
-    out.push_str(&hrp_lower);
+    let mut out = String::with_capacity(hrp.len() + 1 + values_5bit.len() + CHECKSUM_LEN);
+    out.push_str(hrp);
     out.push(SEPARATOR);
     for &v in &values_5bit {
         out.push(CHARSET[v as usize] as char);
@@ -202,18 +232,19 @@ pub fn encode(hrp: &str, data: &[u8]) -> Result<String> {
         out.push(CHARSET[v as usize] as char);
     }
 
-    Ok(match case {
-        Case::Lower => out,
-        Case::Upper => out.to_ascii_uppercase(),
-    })
+    Ok(out)
 }
 
 /// Decode a blech32 string. Returns `(hrp, data)` where `data` is the
-/// raw 8-bit payload (without the checksum). HRP case is preserved.
+/// raw 8-bit payload (without the checksum). Input must be lowercase.
 pub fn decode(input: &str) -> Result<(String, Vec<u8>)> {
-    let _case = classify_case(input)?;
+    validate_case(input)?;
 
-    let pos = input.rfind(SEPARATOR).ok_or(Error::SeparatorMissing)?;
+    // First separator, not last — see `SEPARATOR`. Taking the last `-`
+    // would silently accept `a-b-<data>` by treating `a-b` as the HRP;
+    // `validate_hrp` now rejects that anyway, but only after the split
+    // has already committed to the wrong boundary.
+    let pos = input.find(SEPARATOR).ok_or(Error::SeparatorMissing)?;
     if pos < 1 {
         return Err(Error::EmptyHrp);
     }
@@ -228,12 +259,10 @@ pub fn decode(input: &str) -> Result<(String, Vec<u8>)> {
     let hrp = &input[..pos];
     validate_hrp(hrp)?;
 
-    // For checksum verification, both HRP and data must be in lowercase.
-    let hrp_lower: String = hrp.chars().map(|c| c.to_ascii_lowercase()).collect();
-    let data_lower = data_str.to_ascii_lowercase();
-
-    let mut data_5bit = Vec::with_capacity(data_lower.len());
-    for (p, c) in data_lower.char_indices() {
+    // `validate_case` already guaranteed the whole input is lowercase,
+    // so HRP and data go into the checksum verbatim.
+    let mut data_5bit = Vec::with_capacity(data_str.len());
+    for (p, c) in data_str.char_indices() {
         let idx =
             CHARSET
                 .iter()
@@ -245,7 +274,7 @@ pub fn decode(input: &str) -> Result<(String, Vec<u8>)> {
         data_5bit.push(idx as u8);
     }
 
-    if !verify_checksum(&hrp_lower, &data_5bit) {
+    if !verify_checksum(hrp, &data_5bit) {
         return Err(Error::InvalidChecksum);
     }
 
@@ -301,8 +330,8 @@ mod tests {
     #[test]
     fn missing_separator_rejected() {
         assert_eq!(decode("noseparator").unwrap_err(), Error::SeparatorMissing);
-        // Also cover the all-charset case to confirm rfind, not something else,
-        // is the source of the rejection.
+        // Also cover the all-charset case to confirm the separator search,
+        // not something else, is the source of the rejection.
         assert_eq!(decode("abc").unwrap_err(), Error::SeparatorMissing);
     }
 
@@ -334,30 +363,30 @@ mod tests {
     }
 
     #[test]
-    fn upper_case_round_trips_to_upper_case_output() {
-        let payload = b"abc";
-        let encoded = encode("TEST", payload).unwrap();
-        // The classify_case rule says: HRP case dictates output case.
-        // Upper-case HRP → upper-case output.
-        assert!(
-            encoded.chars().all(|c| !c.is_ascii_lowercase()),
-            "expected upper-case output, got {encoded}"
+    fn upper_case_rejected_on_encode_and_decode() {
+        // REVERSED by RFC 0011 §3.5 (linenisgreat/madder#273 ruling 6).
+        // This test used to be `upper_case_round_trips_to_upper_case_output`
+        // and asserted that an upper-case HRP produced upper-case output
+        // which decoded back to the upper-case HRP (bech32's
+        // all-lower-or-all-upper rule). Uppercase is now its own rejection.
+        assert_eq!(encode("TEST", b"abc").unwrap_err(), Error::Uppercase);
+        let lower = encode("test", b"abc").unwrap();
+        assert_eq!(
+            decode(&lower.to_ascii_uppercase()).unwrap_err(),
+            Error::Uppercase
         );
-        let (hrp, data) = decode(&encoded).unwrap();
-        assert_eq!(hrp, "TEST");
-        assert_eq!(data, payload);
     }
 
     #[test]
     fn empty_input_is_separator_missing() {
-        // Truly empty: rfind returns None.
+        // Truly empty: no separator to find.
         let err = decode("").unwrap_err();
         assert_eq!(err, Error::SeparatorMissing);
     }
 
     #[test]
     fn separator_only_is_empty_hrp() {
-        // "-" — rfind returns Some(0), HRP is empty.
+        // "-" — the separator is at index 0, so the HRP is empty.
         let err = decode("-").unwrap_err();
         assert_eq!(err, Error::EmptyHrp);
     }
@@ -373,23 +402,40 @@ mod tests {
     }
 
     #[test]
-    fn double_dash_hrp_resolves_to_invalid_checksum() {
+    fn double_dash_hrp_resolves_to_empty_hrp() {
         // `--all-attachedc` is the exact regression input from a piggy
-        // pass recipients add typo. rfind picks the LAST '-' (between
-        // "--all" and "attachedc"), so the HRP is the non-empty "--all"
-        // — passes validate_hrp (ASCII 33-126 admits '-'). The data
-        // portion "attachedc" passes charset (every char in the bech32
-        // alphabet) and length checks. Failure surfaces at checksum
-        // verification.
+        // pass recipients add typo.
         //
-        // Forward hazard: if a future change tightens validate_hrp to
-        // forbid leading '-' in HRPs, this test will break with
-        // InvalidHrpCharacter at the leading dash instead. That's a
-        // user-visible behavior shift worth catching loudly.
-        assert_eq!(
-            decode("--all-attachedc").unwrap_err(),
-            Error::InvalidChecksum,
+        // REVERSED by madder#273 rulings 8 and 9. This test used to be
+        // `double_dash_hrp_resolves_to_invalid_checksum` and asserted
+        // InvalidChecksum: rfind picked the LAST '-', making the HRP the
+        // non-empty "--all", which the old printable-ASCII 33-126
+        // validate_hrp admitted, so failure only surfaced at checksum
+        // verification. The forward hazard that comment flagged has now
+        // happened: the first-separator split puts the boundary at index
+        // 0, so this is an empty HRP.
+        assert_eq!(decode("--all-attachedc").unwrap_err(), Error::EmptyHrp);
+    }
+
+    #[test]
+    fn second_separator_in_data_portion_rejected() {
+        // madder#273 ruling 9: a well-formed blech32 string has exactly
+        // one '-'. The first-separator split leaves any further '-' in
+        // the data portion, where it is outside the blech32 alphabet.
+        let err = decode("a-qpzry9x-qpzry9x").unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidCharacterInData { char: '-', .. }),
+            "expected the second separator to be rejected as data, got {err:?}"
         );
+    }
+
+    #[test]
+    fn hrp_charset_narrowed_to_alnum_underscore() {
+        // madder#273 ruling 8: HRP is [a-zA-Z0-9_]. Under the former
+        // printable-ASCII 33-126 rule '.' was an acceptable HRP char.
+        let err = encode("a.b", b"abc").unwrap_err();
+        assert_eq!(err, Error::InvalidHrpCharacter { pos: 1, char: '.' });
+        assert!(encode("a_b9", b"abc").is_ok());
     }
 
     #[test]

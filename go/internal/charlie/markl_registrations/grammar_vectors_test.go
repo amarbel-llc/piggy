@@ -14,17 +14,25 @@ import (
 
 // structurallyInvalidVectors are the fixture's invalid-vector names this
 // grammar CAN judge on its own. A pure PEG grammar has no way to check
-// blech32 checksum validity, case uniformity, payload-size-per-format,
-// or purpose/format registry compatibility (all semantic, RFC 0002
-// §3.3/§3.5/§5/§6.1 — see marklid.peg's own Scope note), so only the
-// structural failure categories go here. Everything else in
-// fixture.Invalid is asserted to still PARSE (proving the grammar
-// doesn't over-reject), with its actual invalidity left to the Go/Rust
-// reference decoders.
+// blech32 checksum validity, payload-size-per-format, or purpose/format
+// registry compatibility (all semantic, RFC 0011 §3.3/§5/§6.1 — see
+// marklid.peg's own Scope note), so only the structural failure
+// categories go here. Everything else in fixture.Invalid is asserted to
+// still PARSE (proving the grammar doesn't over-reject), with its actual
+// invalidity left to the Go/Rust reference decoders.
+//
+// mixed_case moved here on 2026-07-20 (linenisgreat/madder#273 ruling 6,
+// RFC 0011 §3.5). Case uniformity used to be a semantic check, because
+// DataChar admitted both cases and only the decoders enforced the
+// all-one-case rule. Lowercase-only makes case a STRUCTURAL property:
+// an uppercase data portion no longer matches DataChar, so the grammar
+// now rejects mixed_case on its own and asserting it still parses would
+// be asserting the narrowing never happened.
 var structurallyInvalidVectors = map[string]bool{
 	"missing_separator":           true,
 	"charset_violation":           true,
 	"purpose_contains_whitespace": true,
+	"mixed_case":                  true,
 }
 
 // langlangStartRule is marklid.peg's start (first) rule. langlang's

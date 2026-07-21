@@ -94,7 +94,9 @@ func TestVerifyChecksumWithHRPOverride_RejectsCharsetViolation(t *testing.T) {
 // non-mutation contract — callers reuse the body slice for error
 // reporting and expect it unchanged.
 func TestVerifyChecksumWithHRPOverride_DoesNotMutateBody(t *testing.T) {
-	const combinedHRP = "TEST-PURPOSE-V1@BLAKE2B256"
+	// Lowercased 2026-07-20 — see the sibling note in
+	// decode_with_hrp_override_test.go (RFC 0011 §3.5, ruling 6).
+	const combinedHRP = "test-purpose-v1@blake2b256"
 
 	payload := bytes.Repeat([]byte{0x01}, 32)
 

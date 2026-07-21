@@ -943,23 +943,37 @@ validate-grammar:
     "$langlang_bin" -grammar "$peg" -grammar-ast -disable-builtins -disable-spaces >/dev/null
     gum log --level info "validate-grammar: ok ($peg parses under langlang)"
 
-# Cross-check the RFC 0002 conformance fixture (the same vectors the
-# Go/Rust reference decoders round-trip) against marklid.peg via
-# langlang -input (piggy#220, hyphence#9's "zero-power trap" lesson):
+# Cross-check both vector corpora against marklid.peg via langlang
+# -input (piggy#220, hyphence#9's "zero-power trap" lesson):
 # validate-grammar alone only checks the .peg is well-formed, never
 # that real markl-id strings parse under it via the intended
-# production. Resolves the langlang binary via the flake input and
-# points LANGLANG_BIN at it for
-# go/internal/charlie/markl_registrations/grammar_vectors_test.go,
-# which skips gracefully outside this recipe (plain `just test-go`
-# still passes without LANGLANG_BIN set).
+# production. Two corpora, two test functions:
+#
+#   TestGrammarVectors    — the RFC 0011 conformance fixture (the same
+#                           vectors the Go/Rust reference decoders
+#                           round-trip), whole markl IDs.
+#   TestIdentifierVectors — RFC 0011 §7.3's identifier corpus
+#                           (docs/rfcs/0011-identifier-vectors.txt),
+#                           purpose slots only. This is the piggy half
+#                           of madder#273 ruling 13's drift guard;
+#                           downstream grammars run the same file.
+#
+# Keep the -run alternation in sync when adding a third: `-run
+# TestGrammarVectors` alone silently skips anything not matching that
+# prefix, which is exactly how the identifier corpus shipped unrun on
+# its first pass.
+#
+# Resolves the langlang binary via the flake input and points
+# LANGLANG_BIN at it; both tests skip gracefully outside this recipe
+# (plain `just test-go` still passes without LANGLANG_BIN set).
 [group('post-build')]
 test-grammar-vectors:
     #!/usr/bin/env bash
     set -euo pipefail
     langlang_bin=$(nix build .#langlang --no-link --print-out-paths)/bin/langlang
     cd go && LANGLANG_BIN="$langlang_bin" go test -tags test \
-      ./internal/charlie/markl_registrations/... -run TestGrammarVectors -v
+      ./internal/charlie/markl_registrations/... \
+      -run 'TestGrammarVectors|TestIdentifierVectors' -v
 
 # --- debug ---
 

@@ -1,0 +1,214 @@
+# RFC 0011 §7.3 — identifier conformance-vector corpus
+#
+# Scope: the PURPOSE SLOT of a markl ID (RFC 0011 §2.1's `purpose`
+# production) — not the digest slot, not the checksum, not the registry.
+#
+# Why this file exists (RFC 0011 §7.4, linenisgreat/madder#273 ruling
+# 13): piggy owns "what a markl purpose may contain" and trellis owns
+# "what a trellis identifier may contain". Those are deliberately
+# separate definitions, so they can drift apart silently. The mitigation
+# is DETECTION, not coupling: piggy publishes this corpus, downstream
+# grammars run the SAME lines against their own identifier production,
+# and any verdict mismatch not recorded in §7.4's divergence register
+# fails a gate the moment it appears.
+#
+# FORMAT
+#
+#   Blank lines and lines beginning with `#` are ignored.
+#   Every other line is exactly:
+#
+#       <verdict> <TAB> <slot>
+#
+#   <slot> is the exact bytes of the purpose slot as they appear in a
+#   markl ID, INCLUDING the quote characters when the slot is quoted.
+#   It runs to end-of-line; no vector ends in whitespace, and no vector
+#   contains a literal tab.
+#
+# VERDICTS
+#
+#   parse          A well-formed purpose under §2.1, and valid.
+#   reject         Not well-formed under §2.1. A conformant grammar
+#                  MUST fail to parse it.
+#   parse-invalid  Well-formed under §2.1 — a conformant grammar MUST
+#                  parse it — but refused by a decoder at validation
+#                  time (§2.2, §2.3). A consumer testing only a GRAMMAR
+#                  treats this exactly like `parse`; a consumer testing
+#                  a full decoder expects the parse to succeed and the
+#                  validation to fail.
+#
+#   The third verdict exists because grammar-validity and
+#   decoder-validity are genuinely different questions here, and
+#   collapsing them would make this corpus unrunnable against a bare
+#   grammar — which is its whole purpose.
+#
+# In piggy this corpus is executed against go/internal/bravo/markl/
+# marklid.peg by TestIdentifierVectors (go/internal/charlie/
+# markl_registrations/identifier_vectors_test.go), via
+# `just test-grammar-vectors`.
+
+# ---- bare idents: each admitted rune class (§2.1 ident-char) --------
+
+parse	a
+parse	abc
+parse	ABC
+parse	0
+parse	9
+parse	a0
+parse	0a
+parse	a-b
+parse	a_b
+parse	a/b
+parse	-
+parse	_
+parse	/
+parse	a-b_c/d
+parse	AZaz09_-/
+parse	--a--
+parse	a//b
+
+# ---- registered-purpose spellings (§6.1) ---------------------------
+
+parse	dodder-blob-digest-sha256-v1
+parse	dodder-object-digest-v2
+parse	dodder-repo-private_key-v1
+parse	piggy-piv_auth-v1
+parse	piggy-piv_card_auth-v1
+parse	piggy-recipient-v1
+parse	papi-doc-sig-v1
+
+# ---- object-id-shaped and general purposes -------------------------
+
+parse	one/uno
+parse	md
+parse	task/other
+parse	example-unregistered-purpose-v1
+
+# ---- quoted escape hatch: strings needing it (§2.1, ruling 2) ------
+#
+# These are exactly the shapes ruling 1's ASCII-inclusion narrowing
+# removed from the bare form. Quoting is what keeps them reachable —
+# this is the trade that supersedes madder#270's bare-Unicode
+# pinnability.
+
+parse	"my thing"
+parse	"a b c"
+parse	"café"
+parse	"café/naïve"
+parse	"日本語"
+parse	"a.b"
+parse	"a+b"
+parse	"a:b"
+parse	"a(b)"
+parse	"a,b"
+parse	"a=b"
+parse	"a[b]"
+parse	"a*b"
+parse	"a#b"
+parse	"a$b"
+parse	"a%b"
+parse	"a~b"
+parse	"a^b"
+parse	"a<b>c"
+parse	"a!b"
+parse	"one/uno"
+parse	"already-bare-expressible"
+parse	""
+
+# ---- quoted: single quotes and escapes -----------------------------
+
+parse	'my thing'
+parse	'a"b'
+parse	"a'b"
+parse	"a\"b"
+parse	"a\\b"
+parse	"a\nb"
+parse	"a\tb"
+parse	"a\rb"
+parse	"a\ab"
+parse	"a\bb"
+parse	"a\fb"
+parse	"a\vb"
+
+# An unknown escape passes the following character through unchanged
+# (the Doddish rule, matching 0014-trellis.peg's Char production), so
+# it is well-formed rather than an error.
+parse	"a\qb"
+parse	"a\ b"
+
+# ---- bare: outside the ASCII inclusion set (ruling 1) --------------
+#
+# Every one of these was a LEGAL bare purpose before 2026-07-20 under
+# the open "anything but @ and whitespace" charset. They are the
+# narrowing's teeth. Each has a quoted counterpart above.
+
+reject	my thing
+reject	café
+reject	naïve
+reject	日本語
+reject	a.b
+reject	a+b
+reject	a:b
+reject	a(b)
+reject	a,b
+reject	a=b
+reject	a[b]
+reject	a*b
+reject	a#b
+reject	a$b
+reject	a%b
+reject	a~b
+reject	a^b
+reject	a<b>c
+reject	a!b
+reject	a;b
+reject	a&b
+reject	a|b
+reject	a?b
+reject	a'b
+reject	a"b
+reject	a`b
+reject	a\b
+
+# ---- structural rejections -----------------------------------------
+
+# Empty is not a purpose; a purposeless markl ID omits the slot and the
+# `@` entirely rather than writing an empty one.
+reject	
+
+# Whitespace-only, and leading/trailing whitespace around an otherwise
+# bare ident: the bare form admits no whitespace at all.
+reject	 
+reject	a 
+reject	 a
+
+# ---- malformed quoting ---------------------------------------------
+
+reject	"unterminated
+reject	unterminated"
+reject	'unterminated
+reject	"mismatched'
+reject	'mismatched"
+reject	"
+
+# ---- the unconditional @ ban (§2.2) --------------------------------
+#
+# A bare `@` cannot appear: it is markl's own purpose/digest join, so a
+# bare slot containing one is not a purpose at all — the first `@` ends
+# the slot.
+reject	a@b
+reject	@
+reject	a@
+
+# Inside quotes the String production admits `@` structurally, so a
+# GRAMMAR parses it. A decoder still refuses it: §2.2 bans `@` in a
+# purpose under any circumstance, quoted or not, because admitting it
+# would reintroduce the ambiguity the first-`@` decode rule (§4 step 1)
+# exists to avoid.
+#
+# NOTE: 0014-trellis.peg's MarklTerm comment asserts the opposite —
+# that a purpose containing `@` is spelled by quoting it. madder#273
+# rules on neither, so this corpus follows §2.2's existing normative
+# MUST. If §2.2 is relaxed, these three move to `parse`.
+parse-invalid	"a@b"
+parse-invalid	'a@b'
+parse-invalid	"@"

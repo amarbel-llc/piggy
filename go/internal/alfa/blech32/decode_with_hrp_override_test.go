@@ -155,7 +155,12 @@ func TestDecodeWithHRPOverride_RejectsCharsetViolation(t *testing.T) {
 // non-mutation contract — callers reuse the body slice for error
 // reporting and expect it unchanged.
 func TestDecodeWithHRPOverride_DoesNotMutateBody(t *testing.T) {
-	const combinedHRP = "TEST-PURPOSE-V1@BLAKE2B256"
+	// Lowercased 2026-07-20: RFC 0011 §3.5 (madder#273 ruling 6) makes
+	// markl-ids lowercase-only, so Encode now rejects an uppercase HRP.
+	// The combined `<purpose>@<format>` shape is the point of this test
+	// and is unchanged — that is the §9.1 legacy form this helper exists
+	// to repair out-of-band.
+	const combinedHRP = "test-purpose-v1@blake2b256"
 
 	payload := bytes.Repeat([]byte{0x01}, 32)
 

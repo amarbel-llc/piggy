@@ -35,8 +35,16 @@ func TestBlech32(t1 *testing.T) {
 	}
 
 	tests := []testCase{
-		{"A-2UEL5L", true}, // empty
-		{"a-2uel5l", true},
+		// Uppercase is REJECTED as of 2026-07-20 (RFC 0011 §3.5,
+		// madder#273 ruling 6). This vector is bech32's own
+		// all-uppercase spelling and used to be valid; lowercase-only
+		// narrows bech32's all-lower-or-all-upper rule, because the QR
+		// alphanumeric mode that motivates bech32's uppercase allowance
+		// can never encode a markl-id anyway (its charset has no
+		// lowercase, no '@', no '_'). Kept as a rejection vector rather
+		// than deleted, so the narrowing stays pinned.
+		{"A-2UEL5L", false},
+		{"a-2uel5l", true}, // empty
 		{
 			"an83characterlonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio-tt5tgs",
 			true,

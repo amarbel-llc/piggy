@@ -3,6 +3,7 @@
 package markl
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -159,20 +160,56 @@ func TestSetPurposeId_RejectsAtSign(t *testing.T) {
 	}
 }
 
-// A purpose MUST NOT contain whitespace: markl's bare text form has no
-// quoting mechanism (RFC 0002 §2.2), so a purpose value containing a
-// space cannot round-trip through it. Embedding grammars (trellis,
-// hyphence) that need to carry such a value quote the purpose slot on
-// their own side before it ever reaches markl.
-func TestSetPurposeId_RejectsWhitespace(t *testing.T) {
-	if err := (&Id{}).SetPurposeId("my thing"); err == nil {
-		t.Error(`SetPurposeId("my thing") should error, got nil`)
+// A purpose value containing whitespace is LEGAL and round-trips
+// through the quoted spelling (RFC 0011 §2.1, madder#273 ruling 2).
+//
+// This inverts the pre-2026-07-20 behaviour. Formerly markl's text form
+// had no quoting mechanism at all, so a space-bearing purpose had no
+// spelling and SetPurposeId rejected it outright (the superseded
+// TestSetPurposeId_RejectsWhitespace, replaced by this test). Ruling 1
+// narrowed the BARE charset to [a-zA-Z0-9_/-] and ruling 2 added the
+// quoted alternative, which is what keeps such values reachable: the
+// value validator now bans only '@' (§2.2), and the marshaller decides
+// the spelling.
+func TestSetPurposeId_AcceptsWhitespaceAndSpellsItQuoted(t *testing.T) {
+	payload := make([]byte, 32)
+
+	var id Id
+	if err := id.SetMarklId(FormatIdHashSha256, payload); err != nil {
+		t.Fatalf("SetMarklId: %v", err)
+	}
+
+	if err := id.SetPurposeId("my thing"); err != nil {
+		t.Fatalf(`SetPurposeId("my thing"): %v`, err)
+	}
+
+	encoded, err := id.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText: %v", err)
+	}
+
+	if !strings.HasPrefix(string(encoded), `"my thing"@`) {
+		t.Errorf(
+			"a purpose outside the bare charset must be spelled quoted, got %q",
+			string(encoded),
+		)
+	}
+
+	var decoded Id
+	if err := decoded.UnmarshalText(encoded); err != nil {
+		t.Fatalf("UnmarshalText(%q): %v", string(encoded), err)
+	}
+
+	if got := decoded.GetPurposeId(); got != "my thing" {
+		t.Errorf("purpose round-trip: got %q, want %q", got, "my thing")
 	}
 }
 
-// The whitespace rejection applies uniformly through the text-form
-// decoder too, not just the direct SetPurposeId API: a wire string whose
-// purpose slot contains a space must fail to decode.
+// A purpose outside the bare charset MUST NOT be spelled bare. The
+// quoted form above is the only spelling; an unquoted slot containing a
+// space is a decode error, so ruling 1's narrowing has teeth on the
+// wire-parse path and not merely in the marshaller's choice of
+// spelling.
 func TestId_UnmarshalText_RejectsWhitespaceInPurpose(t *testing.T) {
 	payload := make([]byte, 32)
 

@@ -26,7 +26,7 @@ import (
 func DecodeWithHRPOverride(
 	hrp string, body []byte,
 ) (innerHRP string, data []byte, ok bool) {
-	if _, err := validateCase(body); err != nil {
+	if err := validateCase(body); err != nil {
 		return "", nil, false
 	}
 

@@ -9,25 +9,65 @@ import (
 	"golang.org/x/exp/constraints"
 )
 
-// ErrInvalidPurposeCharset signals that a purpose id contains a code
-// point the RFC 0002 §2.1 `purpose-char` grammar excludes: the literal
-// `@` (reserved as the purpose/digest join rune, piggy#219) or any
-// Unicode whitespace code point (a purpose containing whitespace has no
-// bare-text-form spelling — see RFC 0002 §2.2). Beyond those two
-// exclusions the charset is open — general identifiers (piggy#219),
-// including `/` (e.g. `one/uno`), are legal.
+// ErrInvalidPurposeCharset signals one of two RFC 0011 §2.1/§2.2
+// violations:
+//
+//   - a purpose VALUE containing the literal `@`, which is banned under
+//     any circumstance, quoted or not, because `@` is markl's own
+//     purpose/digest join (§2.2); or
+//   - a BARE purpose slot containing a code point outside §2.1's ASCII
+//     inclusion set [a-zA-Z0-9_/-].
+//
+// The second case is not a dead end: such a purpose is still legal, it
+// just has to be spelled with the quoted alternative (ruling 2), e.g.
+// `"my thing"@blake2b256-...` or `"café/naïve"@blake2b256-...`. The
+// charset NARROWED on 2026-07-20 (linenisgreat/madder#273 ruling 1)
+// from the former open "anything but `@` and whitespace"; quoting is
+// what preserves reachability for everything the narrowing excluded.
 type ErrInvalidPurposeCharset struct {
 	PurposeId string
 	Rune      rune
 }
 
 func (err ErrInvalidPurposeCharset) Error() string {
+	if err.Rune == '@' {
+		return fmt.Sprintf(
+			"invalid purpose id %q: contains %q, which a purpose must not contain under any circumstance, quoted or not",
+			err.PurposeId,
+			err.Rune,
+		)
+	}
+
 	return fmt.Sprintf(
-		"invalid purpose id %q: contains %q, but a purpose must not contain %q or whitespace",
+		"invalid bare purpose %q: contains %q, which is outside the bare charset [a-zA-Z0-9_/-]; spell it quoted instead, e.g. %q",
 		err.PurposeId,
 		err.Rune,
-		'@',
+		quotePurpose(err.PurposeId),
 	)
+}
+
+// ErrUnterminatedQuotedPurpose signals a purpose slot that opens with a
+// quote rune but does not close with the matching one (RFC 0011 §2.1's
+// `quoted-string`).
+type ErrUnterminatedQuotedPurpose struct {
+	PurposeId string
+}
+
+func (err ErrUnterminatedQuotedPurpose) Error() string {
+	return fmt.Sprintf(
+		"unterminated quoted purpose %q: opens with %q but does not close with it",
+		err.PurposeId,
+		rune(err.PurposeId[0]),
+	)
+}
+
+func (err ErrUnterminatedQuotedPurpose) Is(target error) bool {
+	_, ok := target.(ErrUnterminatedQuotedPurpose)
+	return ok
+}
+
+func (err ErrUnterminatedQuotedPurpose) GetErrorType() pkgErrDisamb {
+	return pkgErrDisamb{}
 }
 
 func (err ErrInvalidPurposeCharset) Is(target error) bool {

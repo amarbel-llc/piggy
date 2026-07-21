@@ -69,7 +69,10 @@ func (id Id) StringWithFormat() string {
 	bitesString := string(bites)
 
 	if id.purposeId != "" {
-		return fmt.Sprintf("%s@%s", id.purposeId, bitesString)
+		// spellPurpose quotes when the value falls outside RFC 0011
+		// §2.1's bare inclusion set; the digest slot is never quoted
+		// (§2.2), so it is concatenated as-is.
+		return fmt.Sprintf("%s@%s", spellPurpose(id.purposeId), bitesString)
 	}
 
 	return bitesString
@@ -164,7 +167,11 @@ func (id *Id) Set(value string) (err error) {
 }
 
 func (id *Id) setWithPurpose(purpose, body string) (err error) {
-	if err = id.SetPurposeId(purpose); err != nil {
+	// Splitting on the first '@' before unquoting is safe precisely
+	// because §2.2 forbids '@' inside a purpose under any circumstance,
+	// quoted or not — so the first '@' is always the join. If that ban
+	// is ever relaxed, this split has to become quote-aware first.
+	if err = id.SetPurposeFromWireSlot(purpose); err != nil {
 		err = errors.Wrap(err)
 		return err
 	}
