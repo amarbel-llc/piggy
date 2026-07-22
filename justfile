@@ -166,7 +166,11 @@ codemod-rfc0002-fixture:
 # recipe is the canonical go/ formatter for the hand-written sources.
 [group('codemod')]
 codemod-fmt-go:
-    cd go && gofmt -w internal agent age pigpen
+    # `internal` + `cmd` are the hand-written roots. The former arg list
+    # (`internal agent age pigpen`) predated the dagnabit re-layout that
+    # moved those three under internal/delta/ — gofmt formatted
+    # `internal` and then exited 2 on the stale paths (piggy#226).
+    cd go && gofmt -w internal cmd
 
 # Run the nix-built piggy package (nix run . --), forwarding ARGS.
 run-nix *ARGS:

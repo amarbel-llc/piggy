@@ -127,7 +127,7 @@ Recipes: `build-go`, `test-go`, `update-go`, `update-gomod2nix`, `codemod-fmt-go
 
 **Grammar gates**: `validate-grammar` checks `marklid.peg` is well-formed under langlang; `test-grammar-vectors` runs **two** corpora against it via `langlang -input` — the RFC 0011 conformance fixture (whole markl-ids, `TestGrammarVectors`) and the §7.3 identifier corpus (purpose slots, `TestIdentifierVectors`). The recipe's `-run` alternation must be extended when adding a third, or the new test silently never runs.
 
-**Known-broken**: `codemod-fmt-go` runs `gofmt -w internal agent age pigpen`, but `agent`/`age`/`pigpen` are not paths at `go/`'s root (they live under `internal/delta/` and `pkgs/`), so the recipe formats `internal` and then exits 2.
+**Terminology** (piggy#234, salvaged from the dead #184 rename): **markl-id** is the ID *type* (`[purpose@]format-data`, RFC 0011); a **`piggy-ids` file** is a store's recipients file — a file *of* markl-ids, one per line per RFC 0003 (including the non-encryption 9A SSH-auth line type); the **`piggy-ids` crate/binary** is named after the file it manages, not the ID type. The `markl` name is permanent — the markl→piggy-id rename was closed won't-do (#184).
 
 ## Code Conventions
 

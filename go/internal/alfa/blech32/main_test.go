@@ -20,6 +20,7 @@ package blech32
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -140,6 +141,23 @@ func TestBlech32(t1 *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+// TestSeparatorErrors_DistinguishEmptyHRPFromMissing pins RFC 0011 §4
+// step 3's two separator categories (piggy#228): a missing `-` is
+// SeparatorMissing; a LEADING `-` is EmptyHrp — the separator is there,
+// the format identifier is not, and the two malformations point a
+// reader at different defects. Go formerly returned SeparatorMissing
+// for both, diverging from Rust, whose distinction was pinned by a
+// real piggy-ids typo incident; Rust's behaviour is now normative.
+func TestSeparatorErrors_DistinguishEmptyHRPFromMissing(t *testing.T) {
+	if _, _, err := DecodeString("pzry9x0s0muk"); !errors.Is(err, ErrSeparatorMissing) {
+		t.Errorf("no separator: want ErrSeparatorMissing, got %v", err)
+	}
+
+	if _, _, err := DecodeString("-pzry9x0s0muk"); !errors.Is(err, ErrEmptyHRP) {
+		t.Errorf("leading separator: want ErrEmptyHRP, got %v", err)
 	}
 }
 

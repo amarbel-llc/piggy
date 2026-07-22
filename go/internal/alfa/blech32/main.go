@@ -300,12 +300,25 @@ type bytesOrString interface {
 
 const dataPortionMinWidth = 7
 
+// validateSeparatorPosition distinguishes a MISSING separator (pos < 0)
+// from a separator in the first position (pos == 0), which means the
+// HRP is EMPTY — a different malformation deserving a different error
+// (RFC 0011 §4 step 3; piggy#228).
+//
+// Formerly both returned ErrSeparatorMissing (`pos < 1`), diverging
+// from the Rust decoder, which has distinguished EmptyHrp since a real
+// piggy-ids typo incident pinned the value of the distinction: a
+// leading `-` means "you lost your HRP", and reporting it as "no
+// separator" sends the reader hunting for the wrong defect. The Rust
+// behaviour was adopted as normative and Go converged.
 func validateSeparatorPosition[INPUT bytesOrString](
 	input INPUT,
 	pos int,
 ) error {
-	if pos < 1 {
+	if pos < 0 {
 		return ErrSeparatorMissing
+	} else if pos == 0 {
+		return ErrEmptyHRP
 	} else if pos+dataPortionMinWidth > len(input) {
 		return errDataPortionTooShort{
 			expected: dataPortionMinWidth,

@@ -96,6 +96,25 @@ was changed from bech32's `1` (§3.2), and why the 2026-07-20 amendment
 narrowed the charset rules rather than widening them: every rune that
 can appear in a markl ID is a rune a reader has to disambiguate.
 
+### 1.1. Terminology: markl-id vs `piggy-ids`
+
+Three near-identical names denote three different things, pinned here
+once (piggy#234; the markl-id → piggy-id rename that would have made
+this worse was closed won't-do as piggy#184):
+
+- **markl-id** — the ID *type* this RFC specifies: `[purpose@]format-data`.
+- **`piggy-ids` file** — a store's recipients file (RFC 0003). The
+  relationship is containment: a `piggy-ids` file is a file *of*
+  markl-ids, one per line per RFC 0003's line grammar, including its
+  non-encryption 9A SSH-auth line type.
+- **`piggy-ids` crate/binary** — the helper that reads and writes those
+  files. It is named after the *file* it manages, not the ID type.
+
+The `markl` name is permanent ecosystem vocabulary: it is deliberately
+neutral (these IDs are dodder's digests, madder's blob URIs, and
+trellis's terms, not piggy-branded values), collision-free, and greps to
+exactly one concept in every consuming repository.
+
 ## 2. Structure
 
 A markl ID has the text form:
@@ -508,8 +527,20 @@ Given an input string `S`:
    continuity; the condition it now covers is any uppercase, not only
    mixed case).
 3. Locate the `-` in `body`. If absent, fail with `SeparatorMissing`.
-   If `body` contains more than one `-`, fail with `SeparatorMissing`
-   — the body is not a well-formed blech32 string (§3.2).
+   If the `-` is `body`'s **first** character, fail with `EmptyHrp` —
+   the separator is present but the HRP is empty, a different
+   malformation deserving a different name: a leading `-` means the
+   format identifier was lost, and reporting it as a missing separator
+   sends the reader hunting for the wrong defect. If `body` contains
+   more than one `-`, fail with `SeparatorMissing` — the body is not a
+   well-formed blech32 string (§3.2).
+
+   (`EmptyHrp` was pinned as normative on 2026-07-22, piggy#228. The
+   two reference decoders had diverged: Rust distinguished it — a
+   distinction whose diagnostic value was established by a real
+   piggy-ids typo incident — while Go folded it into
+   `SeparatorMissing`. Go converged; folding the categories together
+   destroys information, splitting them adds it.)
 4. Split `body` into `hrp` (before the `-`) and `data` (after). The
    `hrp` is `formatId`; it MUST match `[a-zA-Z0-9_]+` (§3.2), which
    implies it contains neither `@` nor `-`.
