@@ -1113,6 +1113,52 @@ That asymmetry is the thing to watch: a future divergence in entry 1's
 direction is routine, while one in entry 2's direction warrants
 re-examining whether the shape-only import (§2.2) still holds.
 
+### 7.5. Producer Conformance (the producer-gate pattern)
+
+A markl-id **producer** — any system that mints ids rather than merely
+decoding them (papi's key-material receipts are the first external
+adopter) — SHOULD gate its own output with the three artifacts this
+repository exports, layered to cover what each can and cannot check:
+
+1. **Structural**: every produced id parses under `marklid.peg` (staged
+   hermetically from the flake output `marklid-grammar`; see below).
+   This catches shape errors — charset, casing, separator placement,
+   quoting — but per §4.1 a grammar structurally cannot verify a
+   checksum.
+2. **Semantic**: every produced id round-trips through a reference
+   decoder (the Go module `go/pkgs/markl`, or `crates/piggy-markl`),
+   which verifies the blech32 checksum (§3.3, §4 step 7), payload size
+   against the registry (§5), and purpose/format compatibility (§6.1).
+   The decoder is the only layer that proves the id *decodes to what
+   was encoded*, which is the property a producer actually owes its
+   consumers.
+3. **Vectors**: the producer's identifier handling replays the §7.3
+   corpus (flake output `markl-identifier-vectors`) so its notion of a
+   valid purpose cannot drift from this specification's between
+   releases.
+
+The division of labour is the point: the grammar is cheap and runs
+anywhere langlang runs, the decoder is authoritative but needs a
+language binding, and the corpus pins the boundary cases neither would
+exercise on realistic data. A producer that runs only layer 1 has not
+verified its checksums; one that runs only layer 2 has no gate against
+emitting ids its own tooling happens to accept but this grammar
+rejects.
+
+**Consumption is by staging, not vendoring.** This repository's flake
+exports `marklid-grammar` (the peg) and `markl-identifier-vectors` (the
+§7.3 corpus) as store paths, following the pattern papi established for
+hyphence's grammar. Downstream grammars additionally `@import` named
+rules from the peg (langlang syntax); the importable rule names —
+`String`, `Char`, `FormatData`, `Format`, `Data`, `PurposeBare`,
+`PurposeChar` — are a **frozen contract**, gated in-repo by
+`TestGrammarImportSurface`: renaming or restructuring any of them is a
+breaking change for every importer, by design and by test. (Ownership
+note: `String`/`Char` originated as a copy of trellis's quoting
+productions; under the 2026-07-22 grammar-composition ruling that
+relationship inverted — piggy is the single home and trellis imports
+them. One grammar unit, one home, composed via `@import`.)
+
 ## 8. Security Considerations
 
 1. **Checksum is detection-only.** The 6-character BCH checksum

@@ -713,6 +713,23 @@
           # for go/internal/bravo/markl/marklid.peg. `nix build
           # .#langlang` gets the CLI under `result/bin/langlang`.
           langlang = langlang.packages.${system}.default;
+          # The normative markl-id grammar and the RFC 0011 §7.3
+          # identifier conformance corpus, exported as store paths so
+          # downstream repos (cutting-garden/trellis, hyphence, papi)
+          # stage them hermetically at validation time instead of
+          # vendoring copies (piggy#236; the pattern papi established
+          # for hyphence-content.peg). piggy is the root of the
+          # upstream→downstream langlang @import chain, and these two
+          # files ARE its export surface: the peg's named rules are a
+          # frozen contract (see TestGrammarImportSurface), the corpus
+          # is the drift guard downstream identifier grammars replay
+          # (RFC 0011 §7.4).
+          marklid-grammar = pkgs.runCommandLocal "marklid.peg" { } ''
+            cp ${self}/go/internal/bravo/markl/marklid.peg "$out"
+          '';
+          markl-identifier-vectors = pkgs.runCommandLocal "0011-identifier-vectors.txt" { } ''
+            cp ${self}/docs/rfcs/0011-identifier-vectors.txt "$out"
+          '';
           # Standalone fibby binary. On Linux this carries the
           # `hardware-proxy` feature; on darwin it's VirtualCard-only
           # (vsmartcard upstream is broken on darwin). Consumed by

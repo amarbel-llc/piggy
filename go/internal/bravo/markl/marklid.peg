@@ -31,6 +31,20 @@
 // around the '@' or '-' joins. That is why no rule below calls a
 // Spacing production.
 //
+// EXPORT SURFACE (piggy#236): this file is the ROOT of the ecosystem's
+// grammar-composition chain (piggy → trellis → hyphence; papi consumes
+// validators). Downstream grammars stage it via the flake output
+// `.#marklid-grammar` and `@import` named rules individually. The
+// following rule names are therefore a FROZEN CONTRACT — renaming or
+// restructuring any of them is a breaking change for downstream
+// importers, and TestGrammarImportSurface (markl_registrations) is the
+// gate that says so:
+//
+//   String, Char             — the quoting productions (owned here;
+//                              trellis imports and drops its copy)
+//   FormatData, Format, Data — the digest-slot productions
+//   PurposeBare, PurposeChar — the bare purpose production
+//
 // Scope: structural (context-free) shape only. Does NOT and per PEG
 // CANNOT encode: blech32 checksum validity (§3.3, a BCH computation —
 // see §4.1), payload-size-matches-format (§5, a registry lookup),
@@ -109,10 +123,19 @@ FormatChar     <- [a-zA-Z0-9_]
 Data           <- DataChar DataChar DataChar DataChar DataChar DataChar DataChar DataChar*
 DataChar       <- [qpzry9x8gf2tvdw0s3jn54khce6mua7l]
 
-// Doddish quoting rules, matching 0014-trellis.peg's String verbatim:
-// double or single quotes; backslash escapes \n \t \r \a \b \f \v, \"
-// and \\ round-trip; unknown escapes pass the following character
-// through unchanged. Quoting is permitted on BOTH slots (ruling 2).
+// Doddish quoting rules: double or single quotes; backslash escapes
+// \n \t \r \a \b \f \v, \" and \\ round-trip; unknown escapes pass the
+// following character through unchanged. Quoting is permitted on BOTH
+// slots (ruling 2).
+//
+// PIGGY OWNS String/Char (piggy#236, grammar-composition ruling
+// 2026-07-22: every grammar unit gets exactly one home, composed
+// upstream→downstream via langlang @import). These productions
+// originated as a copy of 0014-trellis.peg's String — that relationship
+// is now INVERTED: trellis imports them from this file and drops its
+// local copy. The rules stay semantically "Doddish quoting" (dodder's
+// shipping scanner discipline); what changed is which file is the
+// definition and which is the import.
 String         <- '"' (!'"' Char)* '"'
                 / "'" (!"'" Char)* "'"
 Char           <- '\\' . / .
