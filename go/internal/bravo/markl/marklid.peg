@@ -43,6 +43,10 @@
 //   String, Char             — the quoting productions (owned here;
 //                              trellis imports and drops its copy)
 //   FormatData, Format, Data — the digest-slot productions
+//   DataChar                 — the blech32 alphabet primitive (see the
+//                              rule itself for why the bare char class
+//                              and not a composed length-agnostic
+//                              production)
 //   PurposeBare, PurposeChar — the bare purpose production
 //
 // Scope: structural (context-free) shape only. Does NOT and per PEG
@@ -121,6 +125,22 @@ FormatChar     <- [a-zA-Z0-9_]
 // a markl-id can never be QR-alphanumeric-encoded regardless of payload
 // case. The uppercase allowance buys markl-ids nothing.
 Data           <- DataChar DataChar DataChar DataChar DataChar DataChar DataChar DataChar*
+
+// DataChar is EXPORTED as a bare primitive (piggy#237). A downstream
+// that must admit ABBREVIATED digests — trellis, whose
+// `blake2b256-9ft3x` is a legal prefix of a full digest — composes
+// `Format '-' DataChar+` and so keeps the charset strict (junk like
+// `blake2b256-9bt3` still fails at parse time, 'b' being outside the
+// alphabet) while owning its own length policy.
+//
+// That composition is deliberately NOT also offered here as a named
+// production (e.g. `FormatDataShape <- Format '-' DataChar+`). piggy
+// itself would never call such a rule, and a frozen export with no
+// in-repo consumer has nothing keeping it honest as the grammar
+// evolves. Length is per-consumer policy — `Data`'s >=7 is piggy's,
+// `DataChar+` is trellis's — and RFC 0011 §4.1 already assigns length
+// to the decoder/evaluator layer rather than the grammar. The ALPHABET
+// is the shared truth, so the alphabet is what gets exported.
 DataChar       <- [qpzry9x8gf2tvdw0s3jn54khce6mua7l]
 
 // Doddish quoting rules: double or single quotes; backslash escapes

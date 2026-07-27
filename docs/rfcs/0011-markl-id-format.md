@@ -1151,13 +1151,29 @@ exports `marklid-grammar` (the peg) and `markl-identifier-vectors` (the
 hyphence's grammar. Downstream grammars additionally `@import` named
 rules from the peg (langlang syntax); the importable rule names —
 `String`, `Char`, `FormatData`, `Format`, `Data`, `PurposeBare`,
-`PurposeChar` — are a **frozen contract**, gated in-repo by
+`PurposeChar`, `DataChar` — are a **frozen contract**, gated in-repo by
 `TestGrammarImportSurface`: renaming or restructuring any of them is a
-breaking change for every importer, by design and by test. (Ownership
-note: `String`/`Char` originated as a copy of trellis's quoting
-productions; under the 2026-07-22 grammar-composition ruling that
-relationship inverted — piggy is the single home and trellis imports
-them. One grammar unit, one home, composed via `@import`.)
+breaking change for every importer, by design and by test. Extending
+the list is the non-breaking direction. (Ownership note: `String`/`Char`
+originated as a copy of trellis's quoting productions; under the
+2026-07-22 grammar-composition ruling that relationship inverted —
+piggy is the single home and trellis imports them. One grammar unit,
+one home, composed via `@import`.)
+
+**Primitives are exported; length policies are not.** `DataChar` — the
+peg's spelling of §2.1's `charset-char`, the bare blech32 alphabet — is
+exported so an importer that must admit **abbreviated** digests can
+compose a length-agnostic `Format '-' DataChar+`, keeping the charset
+strict while owning its own length rule. A composed production of that
+shape is deliberately *not* offered here. §4.1 already assigns length
+to the decoder/evaluator layer rather than the grammar, which makes
+length a per-consumer policy (§2.1's `data = 7*charset-char` is *this*
+format's policy), and a frozen export with no in-repo consumer has
+nothing keeping it honest as the grammar evolves. The alphabet is the
+shared truth, so the alphabet is what is exported. Importers remain
+free to compose stricter or looser shapes over these primitives; an id
+that parses under such a composition is still subject to §4's decode
+procedure in full.
 
 ## 8. Security Considerations
 

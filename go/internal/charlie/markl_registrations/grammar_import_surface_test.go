@@ -32,6 +32,7 @@ var importSurfaceRules = []string{
 	"Data",
 	"PurposeBare",
 	"PurposeChar",
+	"DataChar",
 }
 
 // TestGrammarImportSurface asserts langlang can @import each contract
@@ -166,6 +167,56 @@ func TestGrammarImportSurface(t *testing.T) {
 			`"a@b"@blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd`,
 		)
 	})
+
+	// DataChar's reason for being exported (piggy#237), exercised as
+	// the downstream actually composes it: `Format '-' DataChar+`, the
+	// length-agnostic digest trellis needs so an ABBREVIATED digest
+	// stays grammatically legal.
+	//
+	// The rejection case is the load-bearing one. Importability alone
+	// is zero-power for a char class — an import of some rule matching
+	// anything would pass the per-rule check above and parse both
+	// positive vectors here. Only `blake2b256-9bt3` failing proves the
+	// imported rule carries the blech32 CHARSET, which is the whole
+	// property being exported.
+	t.Run("length_agnostic_digest_composition", func(t *testing.T) {
+		grammar := writeGrammar(
+			t,
+			"import_digest_shape.peg",
+			"@import Format, DataChar from \"./marklid.peg\"\n\n"+
+				"Digest <- Format '-' DataChar+ !.\n",
+		)
+
+		// A full digest — marklid.peg's own conformance vector.
+		assertParsesUnderNamedGrammar(
+			t,
+			langlangBin,
+			grammar,
+			"Digest",
+			"blake2b256-9ft3m74l5t2ppwjrvfg3wp380jqj2zfrm6zevxqx34sdethvey0s5vm9gd",
+		)
+
+		// A prefix of it, which piggy's own `Data` (>=7) admits too but
+		// which trellis needs at arbitrary length. Length stays the
+		// importer's semantic concern (RFC 0011 §4.1).
+		assertParsesUnderNamedGrammar(
+			t,
+			langlangBin,
+			grammar,
+			"Digest",
+			"blake2b256-9ft3x",
+		)
+
+		// Charset still enforced: 'b' is outside the blech32 alphabet,
+		// so this is junk, not an abbreviation.
+		assertRejectedUnderNamedGrammar(
+			t,
+			langlangBin,
+			grammar,
+			"Digest",
+			"blake2b256-9bt3",
+		)
+	})
 }
 
 // assertGrammarWellFormed runs langlang's grammar-ast pass (the same
@@ -236,6 +287,29 @@ func assertParsesUnderNamedGrammar(
 			content,
 			filepath.Base(grammarPath),
 			cmdErr,
+			trimmed,
+		)
+	}
+}
+
+// assertRejectedUnderNamedGrammar is assertParsesUnderNamedGrammar's
+// negative counterpart. -input mode exits zero even on a parse failure
+// (the shared harness's standing caveat), so rejection is read off the
+// output exactly as the positive helper reads success, negated.
+func assertRejectedUnderNamedGrammar(
+	t *testing.T,
+	langlangBin, grammarPath, startRule, content string,
+) {
+	t.Helper()
+
+	trimmed, cmdErr := runLanglang(t, langlangBin, grammarPath, content)
+	if cmdErr == nil &&
+		strings.HasPrefix(trimmed, startRule) &&
+		!langlangFailurePattern.MatchString(trimmed) {
+		t.Errorf(
+			"content %q parsed under %s but should have been rejected:\n%s",
+			content,
+			filepath.Base(grammarPath),
 			trimmed,
 		)
 	}
