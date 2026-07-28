@@ -12,6 +12,8 @@ build: build-nix build-rust build-go build-pigpen
 # Build the default piggy nix package, plus the .#fibby and .#piggy-test-sshd
 # packages that aren't transitive deps of .#default, so flake.nix regressions
 # in those surface at the merge gate.
+#
+# build the default piggy nix package plus .#fibby, .#piggy-test-sshd, and .#piggy-agent-conformance
 [group('build')]
 build-nix:
     nix build --show-trace
@@ -35,6 +37,8 @@ build-nix:
 
 # Cargo-build the workspace; on Linux with no ARGS, also build fibby with
 # --features hardware-proxy so pcsc-sys's link-time pkg-config runs at the gate.
+#
+# cargo-build the workspace, forwarding ARGS
 [group('build')]
 build-rust *ARGS:
     #!/usr/bin/env bash
@@ -78,6 +82,8 @@ build-rust-release:
 # `dagnabit export` is still possible (bare dagnabit is on the devShell PATH).
 # Refresh the go/ module's go.mod/go.sum (`go mod tidy`). Run after adding or
 # dropping an import in the module.
+#
+# refresh the go/ module's go.mod and go.sum
 [group('build')]
 update-go:
     cd go && go mod tidy
@@ -90,18 +96,24 @@ update-go:
 # piggy-test-sshd builds in build-nix), so this is the manual REPAIR. The
 # conformist subdir freshness lane is deferred to conformist#79 (the stock
 # gomod2nix linter is tree-root-only).
+#
+# regenerate go/gomod2nix.toml from go/go.mod and go.sum
 [group('maintenance')]
 update-gomod2nix:
     cd go && gomod2nix
 
 # Compile the go/ module (`go build ./...`). Wired into the `build`
 # aggregate so the pre-merge `just` hook exercises it.
+#
+# compile the go/ module
 [group('build')]
 build-go:
     cd go && go build ./...
 
 # `-tags test` activates dewey's test_ui harness (dewey/pkgs/test_ui is behind
 # //go:build test, mirroring madder's own `go test -tags test` convention).
+#
+# run the go/ module's test suite
 [group('post-build')]
 test-go:
     cd go && go test -tags test ./...
@@ -112,12 +124,13 @@ test-go:
 # not reach it. These recipes give it a paved build/test path and are wired
 # into the build/test aggregates so the pre-merge `just` hook exercises it,
 # mirroring the go/ satellite-module treatment above.
-# Cargo-build the standalone piggy-pigpen crate (see the note above).
+#
+# build the standalone piggy-pigpen crate, which the workspace excludes
 [group('build')]
 build-pigpen:
     cd crates/piggy-pigpen && cargo build
 
-# Cargo-test the standalone piggy-pigpen crate (see build-pigpen above).
+# test the standalone piggy-pigpen crate, which the workspace excludes
 [group('post-build')]
 test-pigpen:
     cd crates/piggy-pigpen && cargo test
@@ -140,6 +153,8 @@ test-pigpen:
 # place; `git add` them yourself. Re-added after the conformist migration
 # retired the standalone facade recipes and left no paved repair path. See the
 # go/ block above and flake.nix conformistFacadeModule.
+#
+# regenerate the go/ module's pkgs/ facades in place
 [group('codemod')]
 codemod-facades:
     #!/usr/bin/env bash
@@ -154,6 +169,8 @@ codemod-facades:
 # Scope is piggy-only (piggy purposes + every registered format incl. the #86
 # ssh formats); cross-domain fixture assembly is the #187 RFC. Mirrors madder's
 # codemod-rfc0002-fixture. #183 (#9).
+#
+# regenerate the piggy-scoped RFC 0002 conformance fixture
 [group('codemod')]
 codemod-rfc0002-fixture:
     cd go && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
@@ -164,6 +181,8 @@ codemod-rfc0002-fixture:
 # reformatting them with plain gofmt would risk drift against the facade CHECK
 # (`just lint-worktree`). conformist's `nix fmt` does not cover Go, so this
 # recipe is the canonical go/ formatter for the hand-written sources.
+#
+# gofmt the hand-written go/ sources
 [group('codemod')]
 codemod-fmt-go:
     # `internal` + `cmd` are the hand-written roots. The former arg list
@@ -202,6 +221,8 @@ _test-fibby-manual:
 # tag convention. This replaces the previous `test-bats-piggy` recipe
 # as the authoritative gate for the core suite; the bare-`bats`
 # fallback lives at `test-bats-piggy-local` for fast iteration.
+#
+# run the sandboxed bats lane via nix build .#bats-default
 [group('post-build')]
 test-bats-default:
     nix build .#bats-default --no-link --print-build-logs
@@ -214,6 +235,8 @@ test-bats-default:
 # rust → bash dispatch path is exercised; `build-rust` is a hard
 # prerequisite — `zz-tests_bats/common.bash` aborts if
 # `target/debug/piggy` is missing.
+#
+# re-run the default bats files outside the sandbox against target/debug/piggy
 [group('post-build')]
 test-bats-piggy-local: build-rust
   BATS_TEST_TIMEOUT=30 bats --jobs {{num_cpus()}} --tap zz-tests_bats/t*.bats
@@ -240,6 +263,8 @@ fence-tmpdir-linux := if os() == "linux" { "TMPDIR=/tmp" } else { "" }
 # Run the conformance bats glob outside the sandbox: the non-pty tests under
 # batman (with fibby/pivy redirect on Linux) plus the pty-tagged tests
 # unsandboxed (fence blocks /dev/ptmx).
+#
+# run the conformance bats glob outside the sandbox
 [group('post-build')]
 test-bats-conformance: build-rust
   #!/usr/bin/env bash
@@ -275,6 +300,8 @@ test-bats-conformance: build-rust
 
 # Run the SSH-agent wire-protocol conformance bats against a freshly built
 # piggy-agent-conformance binary (the .#piggy.tests.conformance package).
+#
+# run the SSH-agent wire-protocol conformance bats
 [group('post-build')]
 test-bats-conformance-protocol: build-rust
   #!/usr/bin/env bash
@@ -297,6 +324,8 @@ test-bats-conformance-protocol: build-rust
 # `piggy box stream decrypt` with no agent -> Rust CardEcdhOracle -> fibby's
 # 9D ECDH (piggy#57). Pure-Rust card-under-test, no Java/jcardsim/hardware, so
 # it runs in the default `just test` lane unlike the fib interop recipe.
+#
+# run the fibby-backed agentless box decrypt bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-box-agentless-fibby: build-rust
@@ -350,6 +379,8 @@ test-bats-conformance-box-agentless-fibby: build-rust
 #     stream decrypt` against fibby's 9D ECDH (VERIFY PIN + GENERAL AUTHENTICATE).
 # Proves the C pivy-box ↔ fibby path, the last box lane still pinned to fib.
 # Pure-Rust card-under-test, no Java/jcardsim/hardware.
+#
+# run the fibby-backed pivy-box interop bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-interop-fibby: build-rust
@@ -405,6 +436,8 @@ test-bats-conformance-interop-fibby: build-rust
 # recipient case is a no-op. The RSA-9D "unsupported" case was dropped (fibby
 # is P-256-only; that path is unit-tested — see the bats file's note).
 # Pure-Rust card-under-test, no Java/jcardsim/hardware.
+#
+# run the fibby-backed recipients add --all-attached bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-recipients-add-attached-fibby: build-rust
@@ -446,6 +479,8 @@ test-bats-conformance-recipients-add-attached-fibby: build-rust
 # 9D (which also installs the canonical CHUID/GUID). PIN-free, no agent.
 # [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect
 # is a no-op on macOS's PCSC.framework).
+#
+# run the fibby-backed piggy pass init bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-init-fibby:
@@ -471,6 +506,8 @@ test-bats-conformance-init-fibby:
 # *recipient* (a valid off-card P-256 point), so single-card fibby suffices.
 # The SIGINT bail-out case is a Rust unit test (#176), not part of this lane.
 # Pure-Rust card-under-test, no Java/jcardsim/hardware.
+#
+# run the fibby-backed pass show-batch bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-show-batch-fibby: build-rust
@@ -522,6 +559,8 @@ test-bats-conformance-show-batch-fibby: build-rust
 # than the workspace's target/debug/. This is the same pattern as the
 # hardware lane recipes and matches what production users would run;
 # the cached store paths are free on repeat invocations.
+#
+# run the fibby + pivy-agent smoke bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-fibby-pivy-agent-smoke:
@@ -549,6 +588,8 @@ test-bats-conformance-fibby-pivy-agent-smoke:
 # (.#default) bypasses common.bash's mock crypto (see the smoke recipe);
 # .#piggy-test-sshd is the Go fixture server (#135 Phase A/B). The
 # `just debug-ssh-decrypt-via-fibby` recipe is the non-bats scaffold.
+#
+# run the fibby-backed SSH-forwarded decrypt bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-piggy-ssh-via-fibby:
@@ -574,6 +615,8 @@ test-bats-conformance-piggy-ssh-via-fibby:
 # the CI gate for the #58 prompt-on-demand work. [linux]-only like the
 # other fibby lanes (fibby's PCSCLITE_CSOCK_NAME redirect is ignored by
 # macOS's PCSC.framework).
+#
+# run the fibby-backed prompt-on-demand PIN entry bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-agent-pin-on-demand:
@@ -596,6 +639,8 @@ test-bats-conformance-agent-pin-on-demand:
 # pivy-agent baseline (the C agent serializes at pcscd's txn lock and is
 # tracked separately by piggy#110). [linux]-only like the other fibby
 # lanes (PCSCLITE_CSOCK_NAME redirect is a no-op on macOS).
+#
+# run the fibby-backed concurrent SSH sign burst bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-agent-concurrent-sign:
@@ -617,6 +662,8 @@ test-bats-conformance-agent-concurrent-sign:
 # burst, dead-upstream degradation, and add_identity routing/refusal.
 # [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect
 # is a no-op on macOS).
+#
+# run the fibby-backed piggy agent --upstream bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-agent-upstream:
@@ -638,6 +685,8 @@ test-bats-conformance-agent-upstream:
 # with on-demand PIN. Confirms on real card-side crypto the X-coordinate
 # assumption the Rust unit tests pin only in software. Serves the
 # age-plugin-piggy dev loop (Phase 2).
+#
+# run the fibby-backed age-plugin-piggy bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-age-plugin-piggy:
@@ -660,6 +709,8 @@ test-bats-conformance-age-plugin-piggy:
 # crypto + the DER framing (the fibby DER confirmation from the papi#15
 # co-design). sign-bytes is agentless, so no pivy-agent is needed. [linux]-only
 # like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect is a no-op on macOS).
+#
+# run the fibby-backed piggy sign-bytes bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-sign-bytes-fibby:
@@ -681,6 +732,8 @@ test-bats-conformance-sign-bytes-fibby:
 # `piggy sign-bytes` and `piggy pass show-batch` must fall back to the agent
 # instead of failing. Drives the agent's on-demand PIN via the test askpass.
 # [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect).
+#
+# run the fibby-backed agentless-host fallback bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-agentless-fallback-fibby:
@@ -697,6 +750,8 @@ test-bats-conformance-agentless-fallback-fibby:
 # yk5 fibby card presents as uninitialized (no CHUID); assert `piggy list`
 # surfaces it as a card-level `uninitialized` ndjson record with serial, and that
 # a seeded card is NOT mislabelled. Agentless; [linux]-only like the fibby lanes.
+#
+# run the fibby-backed piggy list blank-card discovery bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-list-blank-fibby:
@@ -716,6 +771,8 @@ test-bats-conformance-list-blank-fibby:
 # list` then shows the card provisioned (CHUID GUID + 9D recipient). [linux]-
 # only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect is a no-op on
 # macOS's PCSC.framework).
+#
+# run the fibby-backed piggy card init bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-card-init-fibby:
@@ -737,6 +794,8 @@ test-bats-conformance-card-init-fibby:
 # a real slot-9A sign_bytes whose DER output openssl verifies, and card.list.
 # [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect is a
 # no-op on macOS's PCSC.framework).
+#
+# run the fibby-backed piggy manage --jsonrpc bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-manage-fibby:
@@ -758,6 +817,8 @@ test-bats-conformance-manage-fibby:
 # mock crypto so the re-encrypt produces real fresh ciphertext. No hardware.
 # [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect is a
 # no-op on macOS's PCSC.framework).
+#
+# run the fibby-backed recipients sync bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-recipients-sync-fibby:
@@ -779,6 +840,8 @@ test-bats-conformance-recipients-sync-fibby:
 # card's recipient in piggy-ids. Mock-mode coverage (the [?] degrade path) lives
 # in t0020-show.bats. [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME
 # redirect is a no-op on macOS's PCSC.framework).
+#
+# run the fibby-backed piggy pass show -r recipients bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-pass-ls-recipients-fibby:
@@ -799,6 +862,8 @@ test-bats-conformance-pass-ls-recipients-fibby:
 # piggy#107 (piggy#105 step 3) state-machine plumbing doesn't break
 # the simple identity-listing case. Opt-in — not part of the default
 # `just test` lane. Requires a real card plugged in.
+#
+# run the C pivy-agent hardware bats lane against a plugged-in PIV card
 [group('post-build')]
 test-bats-conformance-pivy-agent-hardware: build-rust
     #!/usr/bin/env bash
@@ -824,6 +889,8 @@ test-bats-conformance-pivy-agent-hardware: build-rust
 
 # Run the given bats FILES outside the sandbox against target/debug/piggy —
 # the fast single-file iteration path.
+#
+# run the given bats FILES outside the sandbox
 [group('post-build')]
 test-bats-file *FILES: build-rust
     BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
@@ -837,6 +904,8 @@ test-rust *ARGS:
 # Evaluates the module against synthetic configs and verifies the option
 # schema, both platform code paths, and every assertion. Reports
 # pass/fail per case.
+#
+# smoke-test the services.piggy-agent home-manager module
 [group('post-build')]
 test-nix-hm-module:
   #!/usr/bin/env bash
@@ -866,6 +935,8 @@ test-nix-hm-module:
 # FIBBY socket (not the system pcscd) and supply the PIN via the agent
 # unlock protocol; card-unlock reads it from the test askpass. fibby's PIN
 # is 123456. Pure-Rust card-under-test, no Java/jcardsim/hardware.
+#
+# run the Rust card-integration tests against fibby
 [group('post-build')]
 [linux]
 test-rust-integration-fibby: build-rust
@@ -912,18 +983,24 @@ validate: validate-box validate-piggy validate-rust
 # (hard failure on type errors), distinct from the `lint-rust` clippy
 # opinion pass. `validate-rust` covers the whole workspace; the
 # per-crate variants are faster iteration subsets.
+#
+# cargo check the workspace, forwarding ARGS
 [group('pre-build')]
 validate-rust *ARGS:
     cargo check {{ARGS}}
 
 # `cargo check` the piggy-box crate only — a fast per-crate type-eval subset of
 # validate-rust.
+#
+# cargo check the piggy-box crate only
 [group('pre-build')]
 validate-box:
     cargo check -p piggy-box
 
 # `cargo check` the piggy crate only — a fast per-crate type-eval subset of
 # validate-rust.
+#
+# cargo check the piggy crate only
 [group('pre-build')]
 validate-piggy:
     cargo check -p piggy
@@ -938,6 +1015,8 @@ validate-piggy:
 # NOT check that real markl-id strings parse via the intended
 # production (see test-grammar-vectors for that; hyphence#9's
 # "zero-power trap" lesson).
+#
+# check that marklid.peg is well-formed under langlang
 [group('pre-build')]
 validate-grammar:
     #!/usr/bin/env bash
@@ -975,6 +1054,8 @@ validate-grammar:
 # Resolves the langlang binary via the flake input and points
 # LANGLANG_BIN at it; all three tests skip gracefully outside this
 # recipe (plain `just test-go` still passes without LANGLANG_BIN set).
+#
+# cross-check both vector corpora against marklid.peg via langlang
 [group('post-build')]
 test-grammar-vectors:
     #!/usr/bin/env bash
@@ -990,6 +1071,8 @@ test-grammar-vectors:
 # against the same fib template. Used to diagnose #29 wire-format issues.
 # Only runs the encrypt paths — decrypt is intentionally omitted because it
 # would prompt for a PIN on /dev/tty and consume PIV retries on fib's slot.
+#
+# compare Rust-piggy and C-pivy stream encrypt byte layouts on one fib template
 [group('debug')]
 debug-interop-stream-bytes: build-rust
   #!/usr/bin/env bash
@@ -1020,6 +1103,8 @@ debug-interop-stream-bytes: build-rust
 # PIN. Diagnoses "card present but cannot decrypt" — if no recipient matches
 # an attached card's pubkey, the box was encrypted to a different recipient
 # set. Usage: just debug-ebox-recipients ~/.local/share/piggy/foo.ebox …
+#
+# dump the recipient pubkeys baked into the given EBOXES
 [group('debug')]
 debug-ebox-recipients *EBOXES:
     cargo run -q -p piggy-box --example dump-recipients -- {{EBOXES}}
@@ -1030,6 +1115,8 @@ debug-ebox-recipients *EBOXES:
 # `pivy-tool list`. If the card appears, the framework DOES honor the var
 # (darwin-fibby is trivial); if it reports no readers / no card, the var is
 # ignored (fibby needs a different interpose on darwin). Pure probe, no PIN.
+#
+# probe whether macOS's PCSC.framework honors PCSCLITE_CSOCK_NAME
 [group('explore')]
 explore-darwin-fibby-csock: build-rust
     #!/usr/bin/env bash
@@ -1059,6 +1146,8 @@ explore-darwin-fibby-csock: build-rust
 # If it builds, the bundle is one nix build away; if it fails, we learn the
 # real blocker cheaply. Uses NIXPKGS_ALLOW_BROKEN + --impure to bypass the
 # broken assertion.
+#
+# attempt a nixpkgs vsmartcard-vpcd build on darwin with the broken flag overridden
 [group('explore')]
 explore-darwin-vpcd-build:
     #!/usr/bin/env bash
@@ -1074,6 +1163,8 @@ explore-darwin-vpcd-build:
 # derivation to add `-undefined dynamic_lookup` (the standard darwin
 # loadable-bundle flag) and drop the broken gate, then rebuild. If it links and
 # emits ifd-vpcd.bundle, this is both a buildable path AND a nixpkgs-unbreak PR.
+#
+# build vsmartcard-vpcd on darwin patched with -undefined dynamic_lookup
 [group('explore')]
 explore-darwin-vpcd-build-patched:
     #!/usr/bin/env bash
@@ -1103,6 +1194,8 @@ explore-darwin-vpcd-build-patched:
 # (--allow-local-binding) covers local binding but leaves CWD read-only,
 # which breaks load-fib. Explores are not part of the CI gate so the
 # broader trust is fine.
+#
+# run the given exploratory bats FILES outside the sandbox
 [group('explore')]
 explore-bats *FILES: build-rust
   BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
@@ -1110,6 +1203,8 @@ explore-bats *FILES: build-rust
 # Run the Go conformance binary against a freshly-started piggy agent and
 # print per-test PASS/FAIL/SKIP lines. Useful for eyeballing which subtests
 # pass without bats swallowing the output.
+#
+# run the Go conformance binary against a freshly-started piggy agent
 [group('debug')]
 debug-conformance-run: build-rust
     #!/usr/bin/env bash
@@ -1129,6 +1224,8 @@ debug-conformance-run: build-rust
 # down" when piggy can't reach pcscd but pivy-tool can.
 # Try piggy agent -i under PCSCLITE_CSOCK_NAME override to see if it's a
 # socket-path disagreement between piggy's libpcsclite and the running daemon.
+#
+# run piggy agent -i against each candidate PCSCLITE_CSOCK_NAME socket
 [group('debug')]
 debug-pcsclite-csock-override: build-rust
     #!/usr/bin/env bash
@@ -1142,6 +1239,8 @@ debug-pcsclite-csock-override: build-rust
 
 # Trace openat() during piggy agent -i vs pivy-tool list — reveals which
 # libpcsclite.so.1 is loaded and which pcscd socket is connected.
+#
+# trace openat() during piggy agent -i vs pivy-tool list
 [group('debug')]
 debug-pcsclite-opens: build-rust
     #!/usr/bin/env bash
@@ -1156,6 +1255,8 @@ debug-pcsclite-opens: build-rust
 
 # Report which libpcsclite each PIV client (piggy/pivy-tool/pcscd) links and
 # embeds — diagnoses "smart card resource manager has shut down" linkage skew.
+#
+# report which libpcsclite each PIV client links and embeds
 [group('debug')]
 debug-pcsclite-linkage:
     #!/usr/bin/env bash
@@ -1176,6 +1277,8 @@ debug-pcsclite-linkage:
 # to the card or consume PIN retries. Serves the fibby hardware-proxy
 # validation dev-loop (does the right card show up before we wire fibby
 # to it?) and any other recipe that depends on a real card being present.
+#
+# survey the PCSC state: pcscd, sockets, readers, card ATR, and USB devices
 [group('debug')]
 debug-pcsc-env:
     #!/usr/bin/env bash
@@ -1209,6 +1312,8 @@ debug-pcsc-env:
 # Read-only: reports the cap, current allocation, and which processes
 # hold ptys open (aggregated by command and by PID so a leaker shows as
 # many identical rows). Serves the askpass conformance dev-loop.
+#
+# survey PTY usage and report which processes hold ptys open
 [group('debug')]
 debug-pty-holders:
     #!/usr/bin/env bash
@@ -1236,6 +1341,8 @@ debug-pty-holders:
 # instrumented `pass` command against a throwaway local UDP listener and
 # printing the captured statsd datagram. No card needed. Serves the
 # stats-me wiring dev-loop.
+#
+# verify stats-me telemetry by capturing piggy's statsd datagrams
 [group('debug')]
 debug-stats-me-roundtrip: build-rust
     #!/usr/bin/env bash
@@ -1303,6 +1410,8 @@ debug-stats-me-roundtrip: build-rust
 #                                 the tmp dir. Output file is named
 #                                 wire-<UTC timestamp>-<pid>.log. Default:
 #                                 unset (trace is ephemeral).
+#
+# run CLIENT_CMD against fibby in hardware-proxy mode and dump the wire trace
 [group('debug')]
 debug-fibby-proxy *CLIENT_CMD:
     #!/usr/bin/env bash
@@ -1393,6 +1502,8 @@ debug-fibby-proxy *CLIENT_CMD:
 # Then:
 #   just debug-fibby-roundtrip
 # Expected tail of output: `=== ROUND-TRIP OK ===` and `client exit: 0`.
+#
+# run a pivy-box encrypt/decrypt round-trip against the inserted card via fibby
 [group('debug')]
 debug-fibby-roundtrip:
     just debug-fibby-proxy bash zz-tests_bats/helpers/fibby-roundtrip.sh
@@ -1406,6 +1517,8 @@ debug-fibby-roundtrip:
 #
 # Bootstrap as for debug-fibby-roundtrip. Build deps:
 #   just build-rust   # debug piggy + piggy-ids on target/debug/
+#
+# run a piggy pass init/insert/show round-trip against the inserted card via fibby
 [group('debug')]
 debug-fibby-piggy-roundtrip: build-rust
     just debug-fibby-proxy bash zz-tests_bats/helpers/fibby-piggy-roundtrip.sh
@@ -1417,6 +1530,8 @@ debug-fibby-piggy-roundtrip: build-rust
 # a real YubiKey is inserted; the captured trace is the canonical
 # input for the future per-APDU fixture set that VirtualCard's step-5
 # tests will replay/diff against.
+#
+# run debug-fibby-roundtrip, keeping the wire log under the yubikey fixtures dir
 [group('debug')]
 debug-fibby-roundtrip-capture:
     FIBBY_KEEP_LOGS=crates/fibby/tests/fixtures/captures/yubikey \
@@ -1427,6 +1542,8 @@ debug-fibby-roundtrip-capture:
 # RFC 6979 §A.2.5 scalar imported at slot 9D (see debug-yk-throwaway-
 # import-rfc6979) stay segregated from the existing generated-key
 # fixtures. Serves the fibby #134 byte-deterministic ECDH replay dev-loop.
+#
+# run debug-fibby-roundtrip, keeping the wire log under the test-vector fixtures dir
 [group('debug')]
 debug-fibby-roundtrip-capture-test-vector:
     FIBBY_KEEP_LOGS=crates/fibby/tests/fixtures/captures/yubikey/test-vector \
@@ -1458,6 +1575,8 @@ debug-fibby-roundtrip-via-fib: build-rust load-fib
 # Usage:
 #   just debug-fibby-proxy-via-fib pivy-tool list
 #   just debug-fibby-proxy-via-fib pivy-tool -K default init
+#
+# run CLIENT_CMD against fibby backed by fib
 [group('debug')]
 debug-fibby-proxy-via-fib *CLIENT_CMD: build-rust load-fib
     FIBBY_BACKEND_PCSCD=/tmp/piggy-fib-ipc/pcscd.comm \
@@ -1475,6 +1594,8 @@ debug-fibby-proxy-via-fib *CLIENT_CMD: build-rust load-fib
 # available". That's what pivy-agent saw on Nov 14 2026 when home-manager
 # pointed SSH_ASKPASS/SSH_CONFIRM at this script and signing failed with
 # "agent refused operation".
+#
+# reproduce the launchd environment pivy-agent invokes piggy-askpass.sh under
 [group('debug')]
 debug-askpass-launchd-env: build-nix
     #!/usr/bin/env bash
@@ -1522,6 +1643,8 @@ debug-askpass-launchd-env: build-nix
 # socket feeds the glob source, and a stub systemctl feeds the import source.
 # Mirrors the four `reattach_*` cases in conformance/piggy_askpass.bats for
 # environments where bats isn't on PATH. See amarbel-llc/piggy#179.
+#
+# prove contrib/piggy-askpass.sh re-derives WAYLAND_DISPLAY from the live session
 [group('debug')]
 debug-askpass-reattach:
     #!/usr/bin/env bash
@@ -1587,6 +1710,8 @@ debug-askpass-reattach:
 
 # Like debug-conformance-run, but with --hardware. Prompts for the card PIN
 # via `ssh-add -X` so the sign test can actually execute against the card.
+#
+# run the Go conformance binary with --hardware against a real card
 [group('debug')]
 debug-conformance-run-hw: build-rust
     #!/usr/bin/env bash
@@ -1612,12 +1737,16 @@ codemod: codemod-fmt codemod-fmt-go codemod-rfc0002-fixture codemod-facades
 # (formatter.${system}) — nixfmt + shfmt + rustfmt under one CLI. See
 # conformist.nix for the program config. (Go is NOT covered here; use
 # codemod-fmt-go for go/ hand-written sources.)
+#
+# format the tree in place via nix fmt
 [group('codemod')]
 codemod-fmt:
     nix fmt
 
 # Clippy the workspace with warnings-as-errors; on Linux also clippy fibby
 # with --features hardware-proxy so wet-env-path regressions fail the gate.
+#
+# clippy the workspace with warnings-as-errors
 [group('pre-build')]
 lint-rust:
     #!/usr/bin/env bash
@@ -1640,6 +1769,8 @@ lint-rust:
 # file-based linters against a /nix/store snapshot of the source tree
 # and fails if anything would change. Does NOT modify files in the
 # worktree -- the modifying counterpart is `codemod-fmt`.
+#
+# check formatting via the sandboxed checks.formatting derivation
 [group('pre-build')]
 lint-fmt:
     #!/usr/bin/env bash
@@ -1654,6 +1785,8 @@ lint-fmt:
 # `just` hook fails on committed drift even if the `conformist-pre-commit`
 # repair hook was bypassed. The pre-commit hook does the REPAIR; this does the
 # CHECK (same dewey-facade-export module, two lanes — see flake.nix).
+#
+# run the impure eng-convention checks plus the go/ facade drift CHECK
 [group('pre-build')]
 lint-worktree:
     #!/usr/bin/env bash
@@ -1676,6 +1809,8 @@ lint-worktree:
 # Start a private pcscd + PivApplet pair. After this returns, run
 # `eval $(cat .fib/env)` in your shell; then `pivy-tool list` etc. will
 # see "Virtual PCD piggy fib" as the reader.
+#
+# start a private pcscd + PivApplet pair (fib)
 [group('operational')]
 load-fib:
     #!/usr/bin/env bash
@@ -1775,6 +1910,8 @@ clean-fib:
 # moment because hardware-proxy needs libpcsclite — flake.nix gates it
 # on isLinux). Use the dev-loop alternative `debug-fibby-proxy` if you
 # need fast iteration off `./target/debug/fibby` instead.
+#
+# bring up the standalone fibby server in hardware-proxy mode
 [group('operational')]
 load-fibby:
     #!/usr/bin/env bash
@@ -1893,6 +2030,8 @@ verify-fib:
 # Trace pivy-tool vs opensc-tool against a running fib stack.
 # Fib must already be up (just load-fib). Used to investigate #20
 # (pivy-tool list empty despite opensc-tool seeing the virtual card).
+#
+# trace pivy-tool vs opensc-tool against a running fib stack
 [group('debug')]
 debug-fib-pivy-trace:
     #!/usr/bin/env bash
@@ -1929,6 +2068,8 @@ debug-fib-pivy-trace:
 # replaces buildMavenPackage's FOD so the nix build never fetches from
 # Maven Central (eliminates hash drift). Maven is pure Java — works on
 # any platform regardless of fib/vsmartcard Linux constraints.
+#
+# capture the jcardsim Maven dependency closure into nix/jcardsim-m2/
 [group('debug')]
 debug-capture-jcardsim-m2:
     #!/usr/bin/env bash
@@ -2002,6 +2143,8 @@ debug-capture-jcardsim-m2:
 # Run pivy-tool bats tests against the nix-built pivy (not the devshell's).
 # Validates that changes to vendor/pivy/src/ are picked up by the actual
 # build artifact. Used to verify #23 (-K default fix).
+#
+# run the pivy-tool bats tests against the nix-built pivy
 [group('explore')]
 explore-pivy-tool-bats: build-nix
     #!/usr/bin/env bash
@@ -2019,6 +2162,8 @@ explore-pivy-tool-bats: build-nix
 # query does not touch the card. Used to investigate piggy#119 where
 # pivy's piv_box_open_agent() fails parsing the query response through
 # ssh-agent-mux at vendor/pivy/src/piv.c:7014.
+#
+# send a pivy-shaped query extension request to an agent socket and dump the response
 [group('explore')]
 explore-trace-agent-query sock="":
     #!/usr/bin/env bash
@@ -2114,6 +2259,8 @@ explore-trace-agent-query sock="":
 # askpass count is supplementary (a nonzero count means pivy-box fell back to a
 # direct-card unlock because the agent ecdh path failed; the agent's own PIN
 # prompt is rendered by piggy-agent and is NOT counted here).
+#
+# verify the ssh-agent-mux ecdh decrypt fix end-to-end against the real card
 [group('explore')]
 [linux]
 explore-verify-auth-sock-cache piggy_auth_sock=env_var_or_default("PIGGY_AUTH_SOCK", "") ssh_auth_sock=env_var_or_default("SSH_AUTH_SOCK", ""):
@@ -2217,6 +2364,8 @@ explore-verify-auth-sock-cache piggy_auth_sock=env_var_or_default("PIGGY_AUTH_SO
 # the Rust #56 PinSession code runs on real hardware (it has only seen fib).
 # Pins to the throwaway via PIGGY_TEST_CARD_GUID so a co-resident prod card is
 # never selected; one fail-fast PIN check first. NEVER pass your prod PIN.
+#
+# run the Rust card-unlock integration test against a real throwaway card
 [group('explore')]
 [linux]
 explore-rust-card-unlock-hw guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456": build-rust
@@ -2248,6 +2397,8 @@ explore-rust-card-unlock-hw guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456"
 # 0xF8 vendor INS. No PIN, no sign, no retry consumption. Use this to
 # confirm which physical card is the throwaway vs prod (by GUID/serial)
 # before running hardware recipes like explore-rust-card-unlock-hw.
+#
+# enumerate every PIV card visible to pcscd with its GUID, slots, and serial
 [group('debug')]
 [linux]
 debug-list-piv-cards:
@@ -2268,6 +2419,8 @@ debug-list-piv-cards:
 # DIAGNOSTIC (piggy#56) — hold an SCardBeginTransaction lock on the card at
 # <guid> for <secs>s via the piggy-piv hold_lock example, so a co-resident
 # client must block on the lock. Read-only (no PIN). Kill/Ctrl-C to release.
+#
+# hold an SCardBeginTransaction lock on the card at guid for secs seconds
 [group('debug')]
 [linux]
 debug-hold-card-lock guid="5DA19C98257243EFCD29BE3AE91EA7F8" secs="3600":
@@ -2278,6 +2431,8 @@ debug-hold-card-lock guid="5DA19C98257243EFCD29BE3AE91EA7F8" secs="3600":
 # completes. Confirms the contender actually exercises the card (a low/zero
 # count would mean the "race" tests had no real reset contention). HARDWARE;
 # verifies the PIN repeatedly (correct PIN does not decrement the counter).
+#
+# run the piggy-piv reset-loop example for secs seconds and count the cycles
 [group('debug')]
 [linux]
 debug-reset-loop guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456" secs="5":
@@ -2293,6 +2448,8 @@ debug-reset-loop guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456" secs="5":
 # pivy-agent). Instant success despite the held lock means the clients are
 # NOT sharing the card (deeper isolation; the race test was hollow).
 # HARDWARE; the lock-hold is read-only, the ecdh probe verifies the PIN once.
+#
+# probe whether a held card lock blocks a co-resident pivy-tool ecdh
 [group('debug')]
 [linux]
 debug-lock-contention-probe guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456": build-rust
@@ -2354,6 +2511,8 @@ debug-lock-contention-probe guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456"
 # fib. Used to settle issue #11 (X25519 ECDH) — see findings on the
 # issue. Bring fib up with `just load-fib` first; this recipe fails fast
 # if it isn't running rather than managing the lifecycle.
+#
+# probe PivApplet under fib for X25519 / Ed25519 support
 [group('explore')]
 explore-x25519-pivapplet:
     #!/usr/bin/env bash
@@ -2440,6 +2599,8 @@ release_tag_prefixes := "v go/v"
 
 # Rewrite the PIGGY_VERSION line in version.env. Touches no other
 # file — committing is `release`'s job. Usage: just bump-version 0.1.1
+#
+# rewrite the PIGGY_VERSION line in version.env
 [group('maintenance')]
 bump-version new_version:
     sed -E -i "s/^(export PIGGY_VERSION)=.*/\1={{new_version}}/" version.env
@@ -2451,6 +2612,8 @@ bump-version new_version:
 # first, then pushed — a mid-set failure (signing, a pre-existing tag)
 # leaves only local tags to delete, with nothing pushed to roll back.
 # Usage: just tag "release v0.1.1"
+#
+# sign and push the full release tag set for the current version.env
 [group('maintenance')]
 [positional-arguments]
 tag message="":
@@ -2487,6 +2650,8 @@ tag message="":
 # signs+pushes the v<sem> + go/v<sem> tag set, and creates a Forgejo
 # release (pointed at the primary v<sem>) whose notes are the changelog
 # plus the sibling sub-module tags. Usage: just release 0.1.1
+#
+# cut a release: changelog, version bump, commit, tag set, and Forgejo release
 [group('maintenance')]
 release new_version:
     #!/usr/bin/env bash
@@ -2531,6 +2696,8 @@ release new_version:
 # primary is not blocked/reset). Sequence: 3 wrong PIN attempts to block
 # PIN → 3 wrong PUK attempts to block PUK → --action=reset → re-probe
 # status. Serves the fibby #134 test-vector capture dev-loop.
+#
+# factory-reset a throwaway YubiKey 4's PIV applet
 [group('debug')]
 debug-yk-throwaway-reset:
     #!/usr/bin/env bash
@@ -2573,6 +2740,8 @@ debug-yk-throwaway-reset:
 # to be at factory mgmt-key (auto on freshly-reset card). Same 4.x
 # firmware safety as debug-yk-throwaway-reset. Serves the fibby #134
 # test-vector capture dev-loop.
+#
+# import the RFC 6979 test-vector key into slot 9D of a throwaway YubiKey 4
 [group('debug')]
 debug-yk-throwaway-import-rfc6979:
     #!/usr/bin/env bash
@@ -2616,6 +2785,8 @@ debug-yk-throwaway-import-rfc6979:
 # the production wire surface and avoids stale target/debug artifacts.
 # The CI gate for this same probe lives at
 # `test-bats-conformance-fibby-pivy-agent-smoke`.
+#
+# smoke-probe pivy-agent against a virtual fibby with ssh-add -L
 [group('debug')]
 debug-fibby-pivy-agent-smoke:
     #!/usr/bin/env bash
@@ -2710,6 +2881,8 @@ debug-fibby-pivy-agent-smoke:
 # batman/sandcastle wrapper can't create namespaces (piggy#136 /
 # amarbel-llc/bats#31). Supplies the VirtualCard default PIN
 # non-interactively. Exits non-zero on any failure. No hardware.
+#
+# drive a slot-9A agent-sign and verify round-trip against fibby
 [group('debug')]
 debug-fibby-slot-9a-sign:
     #!/usr/bin/env bash
@@ -2789,6 +2962,8 @@ debug-fibby-slot-9a-sign:
 # propagate, and (B) connect with agent forwarding (`ssh -A`) and assert
 # the remote side sees the forwarded key via `ssh-add -l`. No fibby yet —
 # that's Phase D. Exits non-zero on any failure. No hardware.
+#
+# smoke-test piggy-test-sshd's remote exec and agent-forwarding paths
 [group('debug')]
 debug-piggy-test-sshd:
     #!/usr/bin/env bash
@@ -2916,6 +3091,8 @@ debug-piggy-test-sshd:
 # #138's 3-axis bisection: C rebox client + on-demand agent unlock +
 # fibby. Exits 0 if the decrypt round-trips, non-zero (reproducing #138)
 # otherwise.
+#
+# reproduce the agent rebox decrypt against fibby's virtual slot 9D
 [group('debug')]
 debug-ssh-via-fibby GDB="":
     #!/usr/bin/env bash
@@ -3053,6 +3230,8 @@ debug-ssh-via-fibby GDB="":
 # pivy-agent ↔ fibby (not a direct path). No hardware. Exits 0 iff the
 # remote decrypt round-trips. This is the debug-recipe scaffold for the
 # Phase D bats lane (conformance/piggy_ssh_via_fibby.bats).
+#
+# run an end-to-end SSH-forwarded piggy pass show decrypt over fibby
 [group('debug')]
 debug-ssh-decrypt-via-fibby:
     #!/usr/bin/env bash
@@ -3184,6 +3363,8 @@ debug-ssh-decrypt-via-fibby:
 # FIBBY_SLOT_9C_TEST_PRIV / FIBBY_SLOT_9C_CERT_OBJECT. The cert's ECDSA sig
 # uses a random k, so re-running re-pins the const — only do so deliberately.
 # Cross-check the printed pubkey is distinct from the 9A/9D points.
+#
+# regenerate fibby's slot-9C test key and cert
 [group('debug')]
 debug-fibby-gen-slot-9c-cert:
     #!/usr/bin/env bash
@@ -3243,6 +3424,8 @@ debug-fibby-gen-slot-9c-cert:
 # `ssh-keygen -Y sign -U` + verify round-trip — proving the slot-9C ECDSA sign
 # path works end-to-end through pivy-agent. Supplies the VirtualCard PIN
 # non-interactively. Exits non-zero on any failure. No hardware.
+#
+# drive a slot-9C agent-sign and verify round-trip against fibby
 [group('debug')]
 debug-fibby-slot-9c-sign:
     #!/usr/bin/env bash
@@ -3320,6 +3503,8 @@ debug-fibby-slot-9c-sign:
 # with just a CHUID (initialized, empty slots), then runs `pivy-tool -K default
 # -a eccp256 generate 9a` (SELECT + mgmt-key auth + GENERATE) and asserts it
 # prints a public key. Exits non-zero on failure. No hardware.
+#
+# drive pivy-tool generate against fibby to check the GENERATE ASYMMETRIC wire format
 [group('debug')]
 debug-fibby-generate:
     #!/usr/bin/env bash
@@ -3377,6 +3562,8 @@ debug-fibby-generate:
 # `launchctl print` output rather than guessed. Read-only: print +
 # list only, no load/unload. Serves the piggy-health darwin-service
 # design loop.
+#
+# dump the launchd state of the piggy-agent service
 [macos]
 [group('explore')]
 explore-launchd-piggy-agent label="piggy-agent":
@@ -3396,6 +3583,8 @@ explore-launchd-piggy-agent label="piggy-agent":
 # macOS launchd service probe (point 1) can be eyeballed end-to-end.
 # `-v` forces diags onto passing points; `--format tap` keeps output
 # deterministic regardless of tty. Serves the piggy-health verify loop.
+#
+# run piggy health -v --format tap against the live local agent and cards
 [group('explore')]
 explore-piggy-health *ARGS:
     cargo run -q -p piggy -- health -v --format tap {{ARGS}}
