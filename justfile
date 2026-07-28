@@ -59,7 +59,7 @@ build-rust *ARGS:
 [group('build')]
 build-release: build-rust-release
 
-# Cargo-build the workspace in release mode (cargo build --release).
+# cargo-build the workspace in release mode (cargo build --release)
 [group('build')]
 build-rust-release:
     cargo build --release
@@ -191,7 +191,7 @@ codemod-fmt-go:
     # `internal` and then exited 2 on the stale paths (piggy#226).
     cd go && gofmt -w internal cmd
 
-# Run the nix-built piggy package (nix run . --), forwarding ARGS.
+# run the nix-built piggy package (nix run . --), forwarding ARGS
 run-nix *ARGS:
     nix run . -- {{ARGS}}
 
@@ -895,7 +895,7 @@ test-bats-conformance-pivy-agent-hardware: build-rust
 test-bats-file *FILES: build-rust
     BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
 
-# Run the Rust test suite (cargo test), forwarding ARGS.
+# run the Rust test suite (cargo test), forwarding ARGS
 [group('post-build')]
 test-rust *ARGS:
     cargo test {{ARGS}}
@@ -1561,6 +1561,8 @@ debug-fibby-roundtrip-capture-test-vector:
 #   just debug-fibby-proxy-via-fib pivy-tool -P 123456 -K default -a eccp256 generate 9d
 #
 # The captured trace lands under crates/fibby/tests/fixtures/captures/fib/.
+#
+# run debug-fibby-roundtrip against fib instead of a real YubiKey
 [group('debug')]
 debug-fibby-roundtrip-via-fib: build-rust load-fib
     FIBBY_BACKEND_PCSCD=/tmp/piggy-fib-ipc/pcscd.comm \
@@ -1880,7 +1882,7 @@ load-fib:
     EOF
     echo "fib: up — eval \$(cat .fib/env) to connect"
 
-# Tear down the private pcscd + fib pair.
+# tear down the private pcscd + fib pair
 [group('operational')]
 clean-fib:
     #!/usr/bin/env bash
@@ -1959,7 +1961,7 @@ load-fibby:
     EOF
     echo "fibby: up — eval \$(cat .fibby/env) to connect"
 
-# Tear down the standalone fibby server brought up by `load-fibby`.
+# tear down the standalone fibby server brought up by `load-fibby`
 [group('operational')]
 clean-fibby:
     #!/usr/bin/env bash
@@ -1972,7 +1974,7 @@ clean-fibby:
     rmdir /tmp/piggy-fibby-ipc 2>/dev/null || true
     echo "fibby: down"
 
-# Open a subshell with fib up and the env preloaded; tears down on exit.
+# open a subshell with fib up and the env preloaded; tears down on exit
 [group('operational')]
 run-fib-shell:
     #!/usr/bin/env bash
@@ -1985,7 +1987,7 @@ run-fib-shell:
 [group('post-build')]
 verify: verify-fib
 
-# Smoke test: bring up fib, verify pivy-tool sees the virtual card, tear down.
+# smoke test: bring up fib, verify pivy-tool sees the virtual card, tear down
 [group('post-build')]
 verify-fib:
     #!/usr/bin/env bash
@@ -2549,7 +2551,7 @@ explore-x25519-pivapplet:
 [group('maintenance')]
 update: update-nix
 
-# Update flake.lock to the latest inputs (nix flake update).
+# update flake.lock to the latest inputs (nix flake update)
 [group('maintenance')]
 update-nix:
     nix flake update
@@ -2557,12 +2559,12 @@ update-nix:
 [group('maintenance')]
 clean: clean-build clean-rust
 
-# Remove the nix build result symlink (rm -rf result).
+# remove the nix build result symlink (rm -rf result)
 [group('maintenance')]
 clean-build:
     rm -rf result
 
-# Remove the cargo build artifacts (cargo clean).
+# remove the cargo build artifacts (cargo clean)
 [group('maintenance')]
 clean-rust:
     cargo clean
