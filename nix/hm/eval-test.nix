@@ -1004,6 +1004,126 @@ let
           got = tripped;
         };
     }
+
+    # --- resolvedSocketPath / resolvedSocketPaths ---
+
+    {
+      # With null socketPath the module synthesises the absolute XDG-default
+      # path at eval time (homeDirectory/.local/state/piggy/<unit>.sock).
+      name = "single-instance-resolved-socket-path-default";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+      };
+      check =
+        result:
+        let
+          resolved = result.config.services.piggy-agent.resolvedSocketPath;
+          homeDir = result.config.home.homeDirectory;
+        in
+        {
+          ok =
+            resolved != null
+            && lib.hasPrefix homeDir resolved
+            && lib.hasSuffix "piggy/piggy-agent.sock" resolved
+            && !(lib.hasInfix "$" resolved);
+          got = { inherit resolved homeDir; };
+        };
+    }
+
+    {
+      # $HOME in an explicit socketPath is substituted with homeDirectory.
+      name = "single-instance-resolved-socket-path-substitutes-home";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.socketPath = "$HOME/.local/state/ssh/pivy-agent.sock";
+      };
+      check =
+        result:
+        let
+          resolved = result.config.services.piggy-agent.resolvedSocketPath;
+          homeDir = result.config.home.homeDirectory;
+        in
+        {
+          ok = resolved == "${homeDir}/.local/state/ssh/pivy-agent.sock" && !(lib.hasInfix "$" resolved);
+          got = { inherit resolved homeDir; };
+        };
+    }
+
+    {
+      # $XDG_STATE_HOME in an explicit socketPath is substituted with the XDG
+      # spec default (homeDirectory/.local/state).
+      name = "single-instance-resolved-socket-path-substitutes-xdg-state-home";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.socketPath = "$XDG_STATE_HOME/piggy/myagent.sock";
+      };
+      check =
+        result:
+        let
+          resolved = result.config.services.piggy-agent.resolvedSocketPath;
+          homeDir = result.config.home.homeDirectory;
+        in
+        {
+          ok = resolved == "${homeDir}/.local/state/piggy/myagent.sock" && !(lib.hasInfix "$" resolved);
+          got = { inherit resolved homeDir; };
+        };
+    }
+
+    {
+      # An already-absolute socketPath passes through unchanged.
+      name = "single-instance-resolved-socket-path-absolute-passthrough";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+        services.piggy-agent.socketPath = "/run/user/1000/piggy-agent.sock";
+      };
+      check =
+        result:
+        let
+          resolved = result.config.services.piggy-agent.resolvedSocketPath;
+        in
+        {
+          ok = resolved == "/run/user/1000/piggy-agent.sock";
+          got = { inherit resolved; };
+        };
+    }
+
+    {
+      # resolvedSocketPath is null in multi-instance mode; resolvedSocketPaths
+      # covers all instances keyed by unit name.
+      name = "multi-instance-resolved-socket-paths-populated";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.instances = {
+          default = {
+            guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+          };
+          work = {
+            allCards = true;
+          };
+        };
+      };
+      check =
+        result:
+        let
+          resolved = result.config.services.piggy-agent.resolvedSocketPath;
+          paths = result.config.services.piggy-agent.resolvedSocketPaths;
+          homeDir = result.config.home.homeDirectory;
+        in
+        {
+          ok =
+            resolved == null
+            && paths ? "piggy-agent-default"
+            && paths ? "piggy-agent-work"
+            && lib.hasPrefix homeDir paths."piggy-agent-default"
+            && !(lib.hasInfix "$" paths."piggy-agent-default")
+            && !(lib.hasInfix "$" paths."piggy-agent-work");
+          got = { inherit resolved paths homeDir; };
+        };
+    }
   ];
 
   results = map (c: {

@@ -283,6 +283,31 @@ let
 
   builtInstances = lib.mapAttrs mkInstance effectiveInstances;
 
+  # Compute the nix-eval-resolved absolute socket path for an instance.
+  # Substitutes $HOME and $XDG_STATE_HOME at eval time using the XDG spec
+  # default (homeDirectory/.local/state) since XDG_STATE_HOME is a runtime
+  # env var with no nix-eval value. Callers with a non-default XDG_STATE_HOME
+  # must set socketPath to an absolute path explicitly.
+  resolveSocketPathForEval =
+    name: instanceCfg:
+    if instanceCfg.socketPath == null then
+      "${config.home.homeDirectory}/.local/state/piggy/${name}.sock"
+    else
+      lib.replaceStrings
+        [
+          "\${XDG_STATE_HOME:-$HOME/.local/state}"
+          "$XDG_STATE_HOME"
+          "$HOME"
+        ]
+        [
+          "${config.home.homeDirectory}/.local/state"
+          "${config.home.homeDirectory}/.local/state"
+          config.home.homeDirectory
+        ]
+        instanceCfg.socketPath;
+
+  resolvedSocketPathsMap = lib.mapAttrs resolveSocketPathForEval effectiveInstances;
+
   # Per-instance assertions: mutex (`guid` xor `allCards`),
   # required-card, and `slots` format. The instance-name suffix in
   # the message is what lets users find the offending entry when
@@ -663,6 +688,43 @@ in
         snippets the module emits (added in a later commit).
       '';
     };
+
+    resolvedSocketPath = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = ''
+        Nix-eval-resolved absolute socket path for the agent socket.
+        Available in single-instance mode only; `null` when
+        {option}`instances` is non-empty (use
+        {option}`resolvedSocketPaths` instead).
+
+        Substitution rules applied to {option}`socketPath` (or the
+        module default when `socketPath` is `null`):
+        - `$HOME` → `config.home.homeDirectory`
+        - `$XDG_STATE_HOME` → `<homeDirectory>/.local/state` — the
+          XDG spec default. If `$XDG_STATE_HOME` is non-default on
+          this host, set {option}`socketPath` to an absolute path so
+          this output tracks the actual socket location.
+        - Absolute paths are returned unchanged.
+
+        Intended for consumers that write the path into contexts that
+        do not bash-expand variables (e.g. a systemd `ExecStart`
+        field or a TOML config file).
+      '';
+    };
+
+    resolvedSocketPaths = mkOption {
+      type = types.attrsOf types.str;
+      default = { };
+      description = ''
+        Nix-eval-resolved absolute socket paths for all agent
+        instances, keyed by systemd/launchd unit name. In
+        single-instance mode contains one entry (`"piggy-agent"`);
+        in multi-instance mode one entry per {option}`instances` key
+        (`"piggy-agent-<key>"`). See {option}`resolvedSocketPath`
+        for the substitution rules.
+      '';
+    };
   };
 
   config = mkIf cfg.enable {
@@ -680,6 +742,12 @@ in
     ];
 
     services.piggy-agent._launcherTexts = lib.mapAttrs (_: built: built.launcherText) builtInstances;
+
+    services.piggy-agent.resolvedSocketPath = lib.mkIf (
+      !hasInstances
+    ) resolvedSocketPathsMap.piggy-agent;
+
+    services.piggy-agent.resolvedSocketPaths = resolvedSocketPathsMap;
 
     systemd.user.services = mkIf pkgs.stdenv.isLinux (
       lib.mapAttrs (_: built: built.linuxService) builtInstances
