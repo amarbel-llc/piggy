@@ -107,11 +107,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1782949081,
-        "narHash": "sha256-vp6Y/Grm98ESt6ceOkWiHWyZRDV3J1RID4w+6NWK9yA=",
+        "lastModified": 1785627969,
+        "narHash": "sha256-4dtXQk/NMePegK/nWp5NSeuZKLATItOq61lpEvmXqGw=",
         "owner": "hercules-ci",
         "repo": "flake-parts",
-        "rev": "17c9d6cdfc60c64f4ee8d306f9bc0b4ccb51481e",
+        "rev": "427bf4bd9435fdf21321c8cc628c24efc14c0f7a",
         "type": "github"
       },
       "original": {
@@ -154,11 +154,11 @@
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1785433795,
-        "narHash": "sha256-UznGsJ8AjUEmQ+uxnqQG7bZQFGinDTrg0Hw+GMRLv6A=",
-        "rev": "f1605f03483962d46fe278ae178910ad87bd80c4",
+        "lastModified": 1786115281,
+        "narHash": "sha256-OVq4SR28B+HQxv/qbYfvIzSA+NSqXvksRczlem6fs0g=",
+        "rev": "20e7e8ed20603f6a48bbf3620cea53e1ffe068cb",
         "type": "tarball",
-        "url": "https://code.linenisgreat.com/igloo/archive/f1605f03483962d46fe278ae178910ad87bd80c4.tar.gz"
+        "url": "https://code.linenisgreat.com/igloo/archive/20e7e8ed20603f6a48bbf3620cea53e1ffe068cb.tar.gz"
       },
       "original": {
         "type": "tarball",
@@ -201,11 +201,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1785453937,
-        "narHash": "sha256-jU4k4de3+nG7z+UAzLGUnLmkqwVgZIWDsKWl+pRPZKY=",
-        "rev": "8371903fe1c371323edc139c858706d1dfb84a52",
+        "lastModified": 1786115367,
+        "narHash": "sha256-BnioDJAFB+FUEx4JxLOL5kvEv0eJufEKmzbTTaZ96H4=",
+        "rev": "132b01bacd55b77b1637c873fca6757d5361f8b6",
         "type": "tarball",
-        "url": "https://code.linenisgreat.com/langlang/archive/8371903fe1c371323edc139c858706d1dfb84a52.tar.gz"
+        "url": "https://code.linenisgreat.com/langlang/archive/132b01bacd55b77b1637c873fca6757d5361f8b6.tar.gz"
       },
       "original": {
         "type": "tarball",
@@ -277,11 +277,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1785435919,
-        "narHash": "sha256-gUBohjZ/dt3W+PuczGXf8Kftsfr0ugcymmCozAoUlT4=",
-        "rev": "dace7345b4130c2688a3d477434bf1df58183435",
+        "lastModified": 1785787547,
+        "narHash": "sha256-ywiWP9EUqiYyCj4OLPmtIi8b49URKi9hAY3FOPhbm3k=",
+        "rev": "e463e94c79d4a79606290443f959a0945a1cde14",
         "type": "tarball",
-        "url": "https://code.linenisgreat.com/purse-first/archive/dace7345b4130c2688a3d477434bf1df58183435.tar.gz"
+        "url": "https://code.linenisgreat.com/purse-first/archive/e463e94c79d4a79606290443f959a0945a1cde14.tar.gz"
       },
       "original": {
         "type": "tarball",
@@ -373,11 +373,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1785437131,
-        "narHash": "sha256-mkw1FxVj+cvJ0zuVWmBt0swlS34YLo/wc5rC+IMCSU8=",
-        "rev": "c82af9cb0180c7ed46cfb7031a0a680d3730bcb7",
+        "lastModified": 1785457462,
+        "narHash": "sha256-nweNp3BqoZDsn7DqMs2I40/E4sIgZBeK1rozJt4osBc=",
+        "rev": "b31bbd9fac9024176aece51e07f989e8f8e0628e",
         "type": "tarball",
-        "url": "https://code.linenisgreat.com/tap/archive/c82af9cb0180c7ed46cfb7031a0a680d3730bcb7.tar.gz"
+        "url": "https://code.linenisgreat.com/tap/archive/b31bbd9fac9024176aece51e07f989e8f8e0628e.tar.gz"
       },
       "original": {
         "type": "tarball",
@@ -392,11 +392,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1785360170,
-        "narHash": "sha256-XE1lKgQ3eIO3E7zWryqcRsax+mYXod/5RHBn4YaR9YE=",
+        "lastModified": 1785945821,
+        "narHash": "sha256-NLSyTCW4K4ofhNBllt3omPasm6QpralXH1DBZOc91Dw=",
         "owner": "numtide",
         "repo": "treefmt-nix",
-        "rev": "d1187f8bc71fb8aab02395869ec3f5c1920f75c0",
+        "rev": "ae7910970dddc408fe6ab1c8e4b277bb21d72dc0",
         "type": "github"
       },
       "original": {
