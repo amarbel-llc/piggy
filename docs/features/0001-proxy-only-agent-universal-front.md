@@ -8,6 +8,21 @@ promotion-criteria: >
   remote use with no reports of a shell losing its agent after a
   connection drop, no tuning-lever change, and `piggy health` green on
   every remote host in its steady state.
+
+  SOAK BEGUN 2026-08-23: the eng cutover landed on eng master 3d2052a1
+  (listen-socket variant — the mux listens on the retired fish-rendezvous
+  path ssh_client-agent.sock, upstreams posh + the RemoteForward'd piggy),
+  default-on, rolling out per is-ssh-host at each host's next build-home.
+  Two verifications owned by eng's canary (results pending): (1) the
+  MUX-targeted `piggy health` is green — the bare invocation goes RED via
+  PIGGY_AUTH_SOCK, now documented in eng-ssh(7) TROUBLESHOOTING and here
+  under "The `piggy health` targeting"; use
+  `env -u PIGGY_AUTH_SOCK SSH_AUTH_SOCK=$HOME/.local/state/ssh/ssh_client-agent.sock piggy health`;
+  and (2) SSH_AUTH_SOCK resolves to the mux front for BOTH login and
+  non-login shells (the non-login case is the one to watch, since eng's
+  shell-init override of posh's spawn-env export — decision 1 below — only
+  re-applies where the session-vars file is sourced). health point 1
+  reports the mux's own unit once hosts pick up piggy#162.
 ---
 
 # Proxy-only `piggy agent`: one agent front on every host
