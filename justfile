@@ -175,6 +175,15 @@ codemod-facades:
 codemod-rfc0002-fixture:
     cd go && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
 
+# Render docs/diagrams/*.puml to SVG in place via plantuml (on PATH). The
+# .puml is the source of truth; the .svg beside it is generated and
+# committed so readers (and cross-session peers) can view it without
+# plantuml. Re-run after editing any diagram. Serves the design-doc loop
+# (piggy FDR 0001's SSH-agent topology, eng#295).
+[group('codemod')]
+codemod-diagrams:
+    plantuml -tsvg docs/diagrams/*.puml
+
 # gofmt the hand-written go/ sources: the internal/ core + the public
 # sub-packages (agent, age, pigpen). The pkgs/ facades are EXCLUDED: they are
 # formatted by dagnabit's own conformist pass (the dewey-facade-export lane), so
@@ -1755,7 +1764,7 @@ debug-conformance-run-hw: build-rust
 # --- format / lint ---
 
 [group('codemod')]
-codemod: codemod-fmt codemod-fmt-go codemod-rfc0002-fixture codemod-facades
+codemod: codemod-fmt codemod-fmt-go codemod-rfc0002-fixture codemod-facades codemod-diagrams
 
 # Format the tree in place via `nix fmt`, which runs the conformist wrapper
 # (formatter.${system}) — nixfmt + shfmt + rustfmt under one CLI. See

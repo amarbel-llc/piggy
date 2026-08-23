@@ -174,6 +174,7 @@ on fibby, none in the proxy), and health.
 
 ## More Information
 
+- `docs/diagrams/ssh-agent-topology.puml` (rendered `.svg` beside it, `just codemod-diagrams`) — the post-cutover topology: the three ways the workstation agent reaches an is-ssh-host (only the two fixed-path ones are mux upstreams), and the two open cross-repo decisions (SSH_AUTH_SOCK ownership vs posh's per-session export; the `piggy health` targeting invocation for this record's soak criterion).
 - amarbel-llc/eng#295 — the bug and its shell-scoped interim; reframed by this record.
 - piggy#215 — the ssh-agent-mux absorb this builds on (`--upstream`, timeouts, `upstream-status@piggy`).
 - posh#103 / posh FDR 0014 (`docs/features/0014-stable-forwarded-agent-endpoint.md`) — the "host-global rendezvous, a host facility any tool can share" this is a concrete implementation of.

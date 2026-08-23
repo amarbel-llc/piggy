@@ -1,0 +1,81 @@
+@startuml ssh-agent-topology
+' SSH-agent topology after the eng#295 proxy-only cutover (Linux).
+' Companion to piggy FDR 0001 (docs/features/0001-proxy-only-agent-universal-front.md),
+' eng#295, and posh FDR 0014 (posh docs/features/0014-stable-forwarded-agent-endpoint.md).
+'
+' Regenerate the rendered image with:  plantuml -tsvg docs/diagrams/ssh-agent-topology.puml
+' The .puml is the source of truth; the .svg beside it is generated.
+
+title SSH-agent topology — post eng#295 proxy-only cutover (Linux)
+
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam nodeBorderColor #666
+skinparam rectangle {
+  BorderColor #444
+  roundCorner 8
+}
+skinparam note {
+  BackgroundColor #FFFDF0
+  BorderColor #B8A100
+}
+
+node "Workstation — the only host with a PIV card" as ws {
+  card "YubiKey\nPIV slot 9A / 9D" as yk
+  rectangle "**piggy-agent.sock**\n= SSH_AUTH_SOCK\ncard-backed; the sole agent\n(Linux mux retired, piggy#215)" as pa #E9FBE9
+  yk -down-> pa : PCSC
+}
+
+node "is-ssh-host — no card; agent arrives forwarded" as host {
+  rectangle "**proxy-only piggy-agent**\nlistens: ssh_client-agent.sock\n= host SSH_AUTH_SOCK\n(setSshAuthSock, --proxy-only)" as mux #E8F0FF
+
+  rectangle "#3 posh endpoint\n$XDG_RUNTIME_DIR/posh/agent/sock\nfixed path; survives posh\nreconnect / roam" as posh #EFEAFB
+  rectangle "#2 RemoteForward'd piggy\n~/.local/state/ssh/piggy-agent.sock\n= PIGGY_AUTH_SOCK\nfixed path; per-connection" as fwd #EFEAFB
+  rectangle "#1 sshd ForwardAgent\n~/.ssh/agent/s.*.sshd.*\nPATH VARIES; per-connection" as sshd #FFECEC
+
+  mux -down-> posh : upstream\n(degrade)
+  mux -down-> fwd  : upstream\n(degrade)
+}
+
+' How the workstation agent reaches the host, by access path.
+pa -down-> posh : `posh ssh host`\n(posh mux endpoint)
+pa -down-> fwd  : `ssh host`\n(eng RemoteForward)
+pa .down.> sshd : `ssh host`\n(OpenSSH ForwardAgent)
+
+note right of sshd
+  **eng#295 lived here.**
+  The fish first-wins rendezvous
+  latched onto this socket — path
+  varies and it dies with the TCP
+  connection. The proxy-only mux
+  NEVER lists it, so the latch is
+  **structurally impossible**.
+end note
+
+note bottom of mux
+  Upstreams are **complementary by access path**
+  (#3 when reached via posh, #2 on plain `ssh host`)
+  and **redundant in keys** (both resolve to the
+  workstation's piggy). Degrade serves whichever is
+  live; first-wins dedup lists the shared key once.
+  This is posh#103's host-global rendezvous.
+end note
+
+legend bottom
+  == Open decisions for the cutover ==
+  **1 — SSH_AUTH_SOCK ownership (eng <-> posh, two repos).**
+  posh#161 (landed) makes posh **sessions** self-export
+  SSH_AUTH_SOCK = the posh endpoint; eng sets it = the mux
+  host-globally. Both set it in a posh session — precedence
+  is env-order today. Decide: mux as sole front (posh stops
+  self-exporting on eng hosts), or posh keeps its direct
+  export and the mux covers only non-posh sessions.
+
+  **2 — `piggy health` targeting.** health prefers
+  PIGGY_AUTH_SOCK, so a bare run probes #2 (card-backed),
+  not the mux. Define the mux-targeting invocation
+  (env -u PIGGY_AUTH_SOCK SSH_AUTH_SOCK=...ssh_client-agent.sock)
+  as the FDR 0001 soak criterion.
+endlegend
+
+@enduml
