@@ -45,6 +45,16 @@ let
         else
           "\${XDG_STATE_HOME:-$HOME/.local/state}/piggy/${name}.sock";
 
+      # The service unit / launchd label this instance runs under, for the
+      # agent's `--service-name` self-report (piggy#162) so `piggy health`
+      # probes the right unit. On Linux the systemd user unit is
+      # `<name>.service`; on Darwin home-manager's launchd module prefixes
+      # the label with `org.nix-community.home.`. A given home-manager eval
+      # is single-platform, so pick from stdenv here. In single-instance
+      # mode this equals health's default (`piggy-agent.service`) — emitting
+      # it is harmless there and essential for multi-instance units.
+      serviceName = if pkgs.stdenv.isDarwin then "org.nix-community.home.${name}" else "${name}.service";
+
       # Args other than the socket path. These get routed through
       # `lib.escapeShellArgs` so user-supplied strings (guid, cak,
       # extraArgs) can't break the exec line. The socket arg is
@@ -95,6 +105,13 @@ let
         # Proxy-only role (eng#295): no card, upstreams only. Rust agent
         # only; the assertions below pin the card flags to unset.
         ++ lib.optional instanceCfg.proxyOnly "--proxy-only"
+        # Service self-report (piggy#162): so `piggy health` probes this
+        # instance's actual unit. Rust agent only (the C pivy-agent has no
+        # such flag).
+        ++ lib.optionals isRustAgent [
+          "--service-name"
+          serviceName
+        ]
         ++ instanceCfg.extraArgs;
 
       # The exec line's argv, ONE word per list element, joined exactly

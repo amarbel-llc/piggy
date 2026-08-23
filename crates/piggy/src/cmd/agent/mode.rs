@@ -23,4 +23,15 @@ pub struct AgentMode {
     pub native_keys: usize,
     /// Number of configured `--upstream` agents (0 = none).
     pub upstreams: usize,
+    /// The service unit / launchd label this agent runs under, as told to
+    /// it via `--service-name` (piggy#162). `piggy health` probes THIS
+    /// unit for its point-1 service check instead of hardcoding
+    /// `piggy-agent.service`, so multi-instance units
+    /// (`piggy-agent-<name>.service`) and non-home-manager labels report
+    /// correctly. `None` (older agent, or no `--service-name`) → health
+    /// falls back to the platform default, exactly as before.
+    /// `#[serde(default)]` keeps the payload forward/backward compatible
+    /// across agent/health version skew.
+    #[serde(default)]
+    pub service: Option<String>,
 }

@@ -29,6 +29,19 @@ pub const SERVICE_POINT_NAME: &str = "service: piggy-agent launchd agent active"
 #[cfg(not(target_os = "macos"))]
 pub const SERVICE_POINT_NAME: &str = "service: piggy-agent.service active";
 
+/// Default unit/label probed for point 1 when the agent does not
+/// self-report a `--service-name` (piggy#162), matching the pre-#162
+/// hardcoded values. On macOS this is home-manager's launchd label — its
+/// launchd module prefixes every agent label with `org.nix-community.home.`
+/// (the systemd side keeps the bare `piggy-agent` name); a manual
+/// non-home-manager setup under a different label reports UnitNotFound →
+/// SKIP, the correct graceful degradation. A `--service-name` from the
+/// agent overrides this on either platform.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_SERVICE_UNIT: &str = "org.nix-community.home.piggy-agent";
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_SERVICE_UNIT: &str = "piggy-agent.service";
+
 /// Output format for `piggy health`, parsed straight from `--format`
 /// (this is the clap `ValueEnum`; main.rs uses it directly rather than
 /// mapping through a duplicate enum). `Auto` switches on whether stdout
@@ -183,12 +196,12 @@ fn parse_systemctl_show(stdout: &str) -> ServiceProbe {
 /// unusable (e.g. "Failed to connect to bus" on a session without a
 /// user manager, which lands on stderr with a non-zero exit).
 #[cfg(target_os = "linux")]
-fn probe_service() -> ServiceProbe {
+fn probe_service(unit: &str) -> ServiceProbe {
     let output = match std::process::Command::new("systemctl")
         .args([
             "--user",
             "show",
-            "piggy-agent.service",
+            unit,
             "--property=LoadState,ActiveState,SubState,ExecMainStatus",
         ])
         .output()
@@ -230,15 +243,6 @@ fn enrich_unparseable_with_exit(
     }
 }
 
-/// The launchd label home-manager assigns piggy-agent on macOS. The
-/// `org.nix-community.home.` prefix is added by home-manager's launchd
-/// module to every agent label (the systemd side keeps the bare
-/// `piggy-agent` name); see nix/hm/piggy-agent.nix. A non-home-manager
-/// launchd setup using a different label is reported as UnitNotFound →
-/// SKIP, which is the correct graceful-degradation for a manual setup.
-#[cfg(target_os = "macos")]
-const LAUNCHD_LABEL: &str = "org.nix-community.home.piggy-agent";
-
 /// Probe the piggy-agent launchd job via `launchctl print
 /// gui/<uid>/<label>` (the per-GUI-session domain home-manager loads
 /// user agents into). Thin IO shim over [`parse_launchctl_print`]: a
@@ -247,9 +251,9 @@ const LAUNCHD_LABEL: &str = "org.nix-community.home.piggy-agent";
 /// which decides UnitNotFound (label absent) vs Unit (present) vs
 /// NotAvailable (launchctl errored some other way).
 #[cfg(target_os = "macos")]
-fn probe_service() -> ServiceProbe {
+fn probe_service(unit: &str) -> ServiceProbe {
     let uid = unsafe { libc::getuid() };
-    let target = format!("gui/{uid}/{LAUNCHD_LABEL}");
+    let target = format!("gui/{uid}/{unit}");
     let output = match std::process::Command::new("launchctl")
         .args(["print", &target])
         .output()
@@ -341,7 +345,7 @@ fn parse_launchctl_print(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn probe_service() -> ServiceProbe {
+fn probe_service(_unit: &str) -> ServiceProbe {
     ServiceProbe::NotAvailable("service check is unsupported on this OS".into())
 }
 
@@ -446,7 +450,6 @@ fn probe_cards() -> (PcscProbe, Option<Vec<CardInfo>>) {
 /// only when `request_identities` got an answer. Card probing is
 /// independent of the agent-side chain.
 pub fn gather() -> Probes {
-    let service = probe_service();
     let socket = resolve_socket();
     let (agent, extensions, upstreams, mode) = match &socket {
         SocketProbe::Resolved {
@@ -484,6 +487,12 @@ pub fn gather() -> Probes {
         }
         _ => (None, None, None, None),
     };
+    // piggy#162: probe the service AFTER the agent-mode self-report, so we
+    // probe the unit the agent says it runs under (`--service-name`)
+    // rather than hardcoding `piggy-agent.service`. Absent report → the
+    // platform default. Ordering here is free: `evaluate` emits the points
+    // in a fixed order regardless of probe order.
+    let service = probe_service(&service_unit(&mode));
     let (pcsc, cards) = probe_cards();
     Probes {
         service,
@@ -494,6 +503,20 @@ pub fn gather() -> Probes {
         mode,
         pcsc,
         cards,
+    }
+}
+
+/// The service unit / launchd label to probe for point 1: the agent's
+/// self-reported `--service-name` (piggy#162) when present, else the
+/// platform default. A `Some(Err)`/`None` mode report (older agent,
+/// failed probe) falls back to the default, exactly as before #162.
+fn service_unit(mode: &Option<Result<piggy::cmd::agent::mode::AgentMode, String>>) -> String {
+    match mode {
+        Some(Ok(m)) => m
+            .service
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SERVICE_UNIT.to_string()),
+        _ => DEFAULT_SERVICE_UNIT.to_string(),
     }
 }
 
@@ -1231,6 +1254,7 @@ mod tests {
             proxy_only: true,
             native_keys: 0,
             upstreams: 2,
+            service: None,
         }));
         probes.pcsc = PcscProbe::Error("PC/SC unavailable".into());
         probes.cards = None;
@@ -1348,9 +1372,37 @@ mod tests {
             proxy_only: false,
             native_keys: 0,
             upstreams: 0,
+            service: None,
         }));
         let results = evaluate(&probes);
         assert!(matches!(results[5].status, Status::Fail));
+    }
+
+    /// piggy#162: `service_unit` uses the agent's self-reported
+    /// `--service-name` when present, and falls back to the platform
+    /// default on absence, a failed probe, or a report that carries no
+    /// service name.
+    #[test]
+    fn service_unit_prefers_self_report_then_falls_back() {
+        use piggy::cmd::agent::mode::AgentMode;
+        let with_service = |s: Option<&str>| {
+            Some(Ok(AgentMode {
+                proxy_only: false,
+                native_keys: 1,
+                upstreams: 0,
+                service: s.map(str::to_string),
+            }))
+        };
+        assert_eq!(
+            service_unit(&with_service(Some("piggy-agent-work.service"))),
+            "piggy-agent-work.service"
+        );
+        assert_eq!(service_unit(&with_service(None)), DEFAULT_SERVICE_UNIT);
+        assert_eq!(service_unit(&None), DEFAULT_SERVICE_UNIT);
+        assert_eq!(
+            service_unit(&Some(Err("timeout".to_string()))),
+            DEFAULT_SERVICE_UNIT
+        );
     }
 
     /// The BASE plan is always 9 points, in the fixed documented order,

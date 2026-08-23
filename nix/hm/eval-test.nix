@@ -861,10 +861,14 @@ let
           tripped = trippedMessages result;
           text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
           # The exact glued failure mode from #229: the value of
-          # `--add-new-keys-to` runs straight into the next `--upstream`
-          # flag with no space.
-          noGluedFlag = !(lib.hasInfix "soft--upstream" text);
-          hasSeparatedFlags = lib.hasInfix "--add-new-keys-to soft --upstream" text;
+          # `--add-new-keys-to` runs straight into the next flag with no
+          # space. (piggy#162 inserted `--service-name` between
+          # `--add-new-keys-to` and `--upstream`, so assert the boundary
+          # space directly rather than their former adjacency.)
+          noGluedFlag = !(lib.hasInfix "soft--upstream" text) && !(lib.hasInfix "soft--service-name" text);
+          hasSeparatedFlags =
+            lib.hasInfix "--add-new-keys-to soft " text
+            && lib.hasInfix " --upstream soft=\"$HOME/.local/state/ssh/launchd-agent.sock\"" text;
         in
         {
           ok = tripped == [ ] && noGluedFlag && hasSeparatedFlags;
@@ -1164,9 +1168,58 @@ let
             tripped == [ ]
             && lib.hasInfix "--proxy-only" proxyText
             && !(lib.hasInfix "--proxy-only" cardText)
-            && lib.hasInfix " -A" cardText;
+            && lib.hasInfix " -A" cardText
+            # piggy#162: each instance self-reports its OWN unit name.
+            && lib.hasInfix "--service-name piggy-agent-proxy.service" proxyText
+            && lib.hasInfix "--service-name piggy-agent-card.service" cardText;
           got = {
             inherit tripped proxyText cardText;
+          };
+        };
+    }
+    {
+      # piggy#162: the Rust agent self-reports its unit so `piggy health`
+      # probes the right one. Single-instance emits the default unit name
+      # (equals health's fallback, but explicit); the C pivy-agent must
+      # NOT get the flag (it has no --service-name).
+      name = "rust-agent-emits-service-name-c-agent-does-not";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+        in
+        {
+          ok = tripped == [ ] && lib.hasInfix "--service-name piggy-agent.service" text;
+          got = {
+            inherit tripped text;
+          };
+        };
+    }
+    {
+      name = "c-agent-omits-service-name";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = pkgs.hello.overrideAttrs (_: {
+          pname = "pivy";
+        });
+        services.piggy-agent.allCards = true;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+        in
+        {
+          ok = tripped == [ ] && !(lib.hasInfix "--service-name" text);
+          got = {
+            inherit tripped text;
           };
         };
     }

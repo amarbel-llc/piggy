@@ -71,6 +71,11 @@ pub struct PiggyAgent {
     /// request paths don't branch on it (an empty native key set
     /// already routes everything upstream).
     proxy_only: bool,
+    /// `--service-name` (piggy#162): the service unit / launchd label this
+    /// agent runs under, relayed in the `agent-mode@piggy` self-report so
+    /// `piggy health` probes the right unit. `None` = not told; health
+    /// falls back to the platform default.
+    service_name: Option<String>,
 }
 
 /// A PIN acquired for a card op, plus whether it came from an on-demand
@@ -89,6 +94,7 @@ impl PiggyAgent {
             card_lock: Arc::new(Mutex::new(())),
             upstreams: UpstreamPool::empty(),
             proxy_only: false,
+            service_name: None,
         }
     }
 
@@ -102,6 +108,14 @@ impl PiggyAgent {
     /// `agent-mode@piggy` self-report.
     pub fn with_proxy_only(mut self, proxy_only: bool) -> Self {
         self.proxy_only = proxy_only;
+        self
+    }
+
+    /// Set the service unit / launchd label this agent runs under
+    /// (`--service-name`, piggy#162), relayed in the `agent-mode@piggy`
+    /// self-report so `piggy health` probes the right unit.
+    pub fn with_service_name(mut self, service: Option<String>) -> Self {
+        self.service_name = service;
         self
     }
 
@@ -526,6 +540,7 @@ impl PiggyAgent {
                     proxy_only: self.proxy_only,
                     native_keys: self.keys.lock().await.len(),
                     upstreams: self.upstreams.len(),
+                    service: self.service_name.clone(),
                 };
                 let json = serde_json::to_vec(&mode)
                     .map_err(|e| AgentError::Other(format!("agent-mode: {e}").into()))?;
@@ -2142,7 +2157,8 @@ mod tests {
     async fn agent_mode_extension_reports_role() {
         use crate::cmd::agent::mode::{AGENT_MODE_EXT, AgentMode};
 
-        // Card-backed, no upstreams: advertised, proxy_only=false.
+        // Card-backed, no upstreams, no --service-name: advertised,
+        // proxy_only=false, service=None (health falls back to default).
         let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9A)]);
         let resp = agent
             .extension(ext_request("query"))
@@ -2162,15 +2178,17 @@ mod tests {
             AgentMode {
                 proxy_only: false,
                 native_keys: 1,
-                upstreams: 0
+                upstreams: 0,
+                service: None,
             }
         );
 
-        // Proxy-only with one upstream.
+        // Proxy-only with one upstream and a --service-name (piggy#162).
         let path = upstream_stub::spawn_stub("sess-mode", upstream_stub::StubUpstream::new(vec![]));
         let mut agent = PiggyAgent::new(Vec::new())
             .with_upstream_pool(pool_for(path))
-            .with_proxy_only(true);
+            .with_proxy_only(true)
+            .with_service_name(Some("piggy-agent-proxy.service".into()));
         let resp = agent
             .extension(ext_request(AGENT_MODE_EXT))
             .await
@@ -2182,7 +2200,8 @@ mod tests {
             AgentMode {
                 proxy_only: true,
                 native_keys: 0,
-                upstreams: 1
+                upstreams: 1,
+                service: Some("piggy-agent-proxy.service".into()),
             }
         );
     }

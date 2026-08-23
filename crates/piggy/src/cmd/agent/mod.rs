@@ -106,6 +106,15 @@ pub struct AgentArgs {
     )]
     pub proxy_only: bool,
 
+    /// Service unit / launchd label this agent runs under, relayed in the
+    /// `agent-mode@piggy` self-report so `piggy health` probes the right
+    /// unit instead of hardcoding `piggy-agent.service` (piggy#162). The
+    /// home-manager module emits the platform-appropriate value (systemd
+    /// unit on Linux, launchd label on macOS). Unset → health uses the
+    /// platform default.
+    #[arg(long = "service-name", value_name = "UNIT")]
+    pub service_name: Option<String>,
+
     /// Command to execute with agent env set
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -437,7 +446,9 @@ async fn run_async(
     }
 
     let listener = bind_reclaiming_stale(&socket_path)?;
-    let agent = PiggyAgent::new(cached_keys).with_proxy_only(cli.proxy_only);
+    let agent = PiggyAgent::new(cached_keys)
+        .with_proxy_only(cli.proxy_only)
+        .with_service_name(cli.service_name.clone());
     // piggy#215: with --upstream flags, proxy the named agents for keys
     // piggy does not serve natively. Without them the pool stays empty
     // and the agent behaves exactly as before.
