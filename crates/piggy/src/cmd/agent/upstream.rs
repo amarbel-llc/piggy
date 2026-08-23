@@ -175,38 +175,22 @@ impl UpstreamPool {
     /// socket, timeout, protocol error) are logged and skipped so one
     /// dead upstream cannot hide another's keys — this method never
     /// errors, it degrades to fewer identities.
+    ///
+    /// The upstreams are probed IN PARALLEL and the routing map is swapped
+    /// in only afterwards, so (a) the listing costs the slowest upstream,
+    /// not the sum — a hung backing no longer adds its full timeout to
+    /// every `ssh` on the box — and (b) the map's lock is never held across
+    /// upstream IO, so concurrent clients' listings don't serialize behind
+    /// one slow upstream (the #105 severity-amplifier shape, which this
+    /// pool briefly reintroduced).
     pub async fn list_identities(&self) -> Vec<Identity> {
-        let mut known_keys = self.known_keys.lock().await;
-        self.refresh_identities(&mut known_keys).await
-    }
-
-    async fn refresh_identities(&self, known_keys: &mut HashMap<KeyData, usize>) -> Vec<Identity> {
-        known_keys.clear();
+        let listed = self.list_all_upstreams().await;
+        let mut known_keys: HashMap<KeyData, usize> = HashMap::new();
         let mut identities = Vec::new();
-        for (idx, upstream) in self.upstreams.iter().enumerate() {
-            let mut client = match self.connect(upstream).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(upstream = %upstream.name, "skipping unreachable upstream: {e}");
-                    continue;
-                }
+        for (idx, upstream_ids) in listed.into_iter().enumerate() {
+            let Some(upstream_ids) = upstream_ids else {
+                continue;
             };
-            let upstream_ids = match timeout(self.timeout, client.request_identities()).await {
-                Ok(Ok(ids)) => ids,
-                Ok(Err(e)) => {
-                    tracing::warn!(upstream = %upstream.name, "request_identities failed: {e}");
-                    continue;
-                }
-                Err(_) => {
-                    tracing::warn!(upstream = %upstream.name, "request_identities timed out");
-                    continue;
-                }
-            };
-            tracing::debug!(
-                upstream = %upstream.name,
-                keys = upstream_ids.len(),
-                "listed upstream identities"
-            );
             // A key served by more than one upstream (the proxy-only
             // role's posh + RemoteForward'd backings both forward the
             // same workstation agent, FDR 0001) is offered ONCE and
@@ -222,29 +206,99 @@ impl UpstreamPool {
                 identities.push(id);
             }
         }
+        *self.known_keys.lock().await = known_keys;
         identities
+    }
+
+    /// `request_identities` against every upstream concurrently, each
+    /// bounded by `timeout`. Result is in configured-upstream order;
+    /// `None` = that upstream was unreachable / failed / timed out
+    /// (logged). Shared by the listing and the `status()` self-report.
+    async fn list_all_upstreams(&self) -> Vec<Option<Vec<Identity>>> {
+        self.for_each_upstream_parallel(|pool, upstream| async move {
+            pool.list_one_upstream(&upstream).await
+        })
+        .await
+        .into_iter()
+        .map(Option::flatten)
+        .collect()
+    }
+
+    /// Run `f` against every upstream CONCURRENTLY (one task each; `f`
+    /// is responsible for its own per-call timeout via `connect` /
+    /// `timeout`) and return the results in configured-upstream order.
+    /// `None` = the task itself failed (panicked/cancelled), which is
+    /// logged; per-upstream IO failures are `f`'s to represent. This is
+    /// what keeps every multi-upstream operation — listing, status,
+    /// query union, the best-effort fan-outs — at the cost of the
+    /// slowest upstream rather than the sum.
+    async fn for_each_upstream_parallel<T, Fut>(
+        &self,
+        f: impl Fn(UpstreamPool, Upstream) -> Fut,
+    ) -> Vec<Option<T>>
+    where
+        Fut: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let mut tasks = tokio::task::JoinSet::new();
+        for (idx, upstream) in self.upstreams.iter().cloned().enumerate() {
+            let fut = f(self.clone(), upstream);
+            tasks.spawn(async move { (idx, fut.await) });
+        }
+        let mut out: Vec<Option<T>> = (0..self.upstreams.len()).map(|_| None).collect();
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((idx, v)) => out[idx] = Some(v),
+                Err(e) => tracing::warn!("upstream task failed: {e}"),
+            }
+        }
+        out
+    }
+
+    async fn list_one_upstream(&self, upstream: &Upstream) -> Option<Vec<Identity>> {
+        let mut client = match self.connect(upstream).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(upstream = %upstream.name, "skipping unreachable upstream: {e}");
+                return None;
+            }
+        };
+        match timeout(self.timeout, client.request_identities()).await {
+            Ok(Ok(ids)) => {
+                tracing::debug!(
+                    upstream = %upstream.name,
+                    keys = ids.len(),
+                    "listed upstream identities"
+                );
+                Some(ids)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(upstream = %upstream.name, "request_identities failed: {e}");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(upstream = %upstream.name, "request_identities timed out");
+                None
+            }
+        }
     }
 
     /// Route a sign request to the upstream that owns `request.pubkey`.
     /// On a routing-map miss the identities are refreshed once (the key
-    /// may have appeared since the last listing) before giving up.
+    /// may have appeared since the last listing) before giving up. The
+    /// map lock is only ever held for the lookups, never across IO.
     pub async fn sign(&self, request: SignRequest) -> Result<Signature, AgentError> {
-        let upstream = {
-            let mut known_keys = self.known_keys.lock().await;
-            let idx = match known_keys.get(&request.pubkey) {
-                Some(idx) => Some(*idx),
-                None => {
-                    self.refresh_identities(&mut known_keys).await;
-                    known_keys.get(&request.pubkey).copied()
-                }
-            };
-            match idx {
-                Some(idx) => self.upstreams[idx].clone(),
-                None => {
-                    return Err(AgentError::Other(
-                        "no upstream agent holds the requested key".into(),
-                    ));
-                }
+        let mut idx = self.known_keys.lock().await.get(&request.pubkey).copied();
+        if idx.is_none() {
+            self.list_identities().await;
+            idx = self.known_keys.lock().await.get(&request.pubkey).copied();
+        }
+        let upstream = match idx {
+            Some(idx) => self.upstreams[idx].clone(),
+            None => {
+                return Err(AgentError::Other(
+                    "no upstream agent holds the requested key".into(),
+                ));
             }
         };
 
@@ -265,25 +319,33 @@ impl UpstreamPool {
     /// contributes no names. May contain duplicates across upstreams —
     /// the caller merges into its own name list with a contains-check.
     pub async fn query_extension_names(&self, request: &Extension) -> Vec<String> {
-        let mut names = Vec::new();
-        for upstream in &self.upstreams {
-            let response = match self.extension_on(upstream, request.clone()).await {
-                Ok(Some(ext)) => ext,
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::debug!(upstream = %upstream.name, "query skipped: {e}");
-                    continue;
-                }
-            };
-            match response.parse_message::<ssh_agent_lib::proto::extension::QueryResponse>() {
-                Ok(Some(qr)) => names.extend(qr.extensions),
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::debug!(upstream = %upstream.name, "unparseable query response: {e}");
+        let request = request.clone();
+        self.for_each_upstream_parallel(move |pool, upstream| {
+            let request = request.clone();
+            async move {
+                let response = match pool.extension_on(&upstream, request).await {
+                    Ok(Some(ext)) => ext,
+                    Ok(None) => return Vec::new(),
+                    Err(e) => {
+                        tracing::debug!(upstream = %upstream.name, "query skipped: {e}");
+                        return Vec::new();
+                    }
+                };
+                match response.parse_message::<ssh_agent_lib::proto::extension::QueryResponse>() {
+                    Ok(Some(qr)) => qr.extensions,
+                    Ok(None) => Vec::new(),
+                    Err(e) => {
+                        tracing::debug!(upstream = %upstream.name, "unparseable query response: {e}");
+                        Vec::new()
+                    }
                 }
             }
-        }
-        names
+        })
+        .await
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect()
     }
 
     /// Forward an extension request to each upstream in configured
@@ -315,37 +377,48 @@ impl UpstreamPool {
     /// the binding). Failures are logged, never propagated — piggy's
     /// native acceptance is the authoritative answer.
     pub async fn fan_out_extension(&self, request: &Extension) {
-        for upstream in &self.upstreams {
-            if let Err(e) = self.extension_on(upstream, request.clone()).await {
-                tracing::debug!(
-                    upstream = %upstream.name,
-                    extension = %request.name,
-                    "fan-out skipped: {e}"
-                );
+        let request = request.clone();
+        self.for_each_upstream_parallel(move |pool, upstream| {
+            let request = request.clone();
+            async move {
+                if let Err(e) = pool.extension_on(&upstream, request.clone()).await {
+                    tracing::debug!(
+                        upstream = %upstream.name,
+                        extension = %request.name,
+                        "fan-out skipped: {e}"
+                    );
+                }
             }
-        }
+        })
+        .await;
     }
 
     /// Best-effort lock fan-out. Failures are logged, never propagated:
     /// a dead upstream's keys are unservable anyway, and the native
     /// lock (PIN drop) already succeeded.
     pub async fn lock_all(&self, key: &str) {
-        for upstream in &self.upstreams {
-            if let Err(e) = self.lock_on(upstream, key.to_string(), true).await {
-                tracing::warn!(upstream = %upstream.name, "lock fan-out failed: {e}");
-            }
-        }
+        self.lock_fan_out(key, true).await;
     }
 
     /// Best-effort unlock fan-out; mirrors [`UpstreamPool::lock_all`].
     /// Note the payload reaches every upstream — identical to today's
     /// deployment, where the mux forwards `ssh-add -X` to all upstreams.
     pub async fn unlock_all(&self, key: &str) {
-        for upstream in &self.upstreams {
-            if let Err(e) = self.lock_on(upstream, key.to_string(), false).await {
-                tracing::warn!(upstream = %upstream.name, "unlock fan-out failed: {e}");
+        self.lock_fan_out(key, false).await;
+    }
+
+    async fn lock_fan_out(&self, key: &str, locked: bool) {
+        let key = key.to_string();
+        self.for_each_upstream_parallel(move |pool, upstream| {
+            let key = key.clone();
+            async move {
+                if let Err(e) = pool.lock_on(&upstream, key, locked).await {
+                    let op = if locked { "lock" } else { "unlock" };
+                    tracing::warn!(upstream = %upstream.name, "{op} fan-out failed: {e}");
+                }
             }
-        }
+        })
+        .await;
     }
 
     /// Route an `add_identity` to the `--add-new-keys-to` upstream. The
@@ -401,22 +474,16 @@ impl UpstreamPool {
     /// payload). Read-only, PIN-free, never errors — an unreachable
     /// upstream reports `reachable: false`.
     pub async fn status(&self) -> Vec<UpstreamStatus> {
-        let mut out = Vec::with_capacity(self.upstreams.len());
-        for upstream in &self.upstreams {
-            let keys = match self.connect(upstream).await {
-                Ok(mut client) => match timeout(self.timeout, client.request_identities()).await {
-                    Ok(Ok(ids)) => Some(ids.len()),
-                    Ok(Err(_)) | Err(_) => None,
-                },
-                Err(_) => None,
-            };
-            out.push(UpstreamStatus {
+        self.list_all_upstreams()
+            .await
+            .into_iter()
+            .zip(&self.upstreams)
+            .map(|(ids, upstream)| UpstreamStatus {
                 name: upstream.name.clone(),
-                reachable: keys.is_some(),
-                keys: keys.unwrap_or(0),
-            });
-        }
-        out
+                reachable: ids.is_some(),
+                keys: ids.map_or(0, |ids| ids.len()),
+            })
+            .collect()
     }
 
     /// One timeout-bounded extension round-trip against one upstream.
@@ -474,6 +541,10 @@ pub(super) mod test_support {
         /// Observable call log ("ext:<name>", "lock:<key>", …), shared
         /// across per-connection clones so tests can assert fan-out.
         pub events: Arc<std::sync::Mutex<Vec<String>>>,
+        /// A wedged agent: accepts the connection but never answers
+        /// `request_identities` (the hung-not-dead upstream the pool's
+        /// timeout exists for).
+        pub hang_identities: bool,
     }
 
     impl StubUpstream {
@@ -483,11 +554,17 @@ pub(super) mod test_support {
                 signature: canned_signature(),
                 extensions: Vec::new(),
                 events: Arc::new(std::sync::Mutex::new(Vec::new())),
+                hang_identities: false,
             }
         }
 
         pub fn with_extensions(mut self, names: &[&str]) -> Self {
             self.extensions = names.iter().map(|s| s.to_string()).collect();
+            self
+        }
+
+        pub fn hanging(mut self) -> Self {
+            self.hang_identities = true;
             self
         }
 
@@ -505,6 +582,9 @@ pub(super) mod test_support {
     #[ssh_agent_lib::async_trait]
     impl Session for StubUpstream {
         async fn request_identities(&mut self) -> Result<Vec<Identity>, AgentError> {
+            if self.hang_identities {
+                std::future::pending::<()>().await;
+            }
             Ok(self.identities.clone())
         }
 
@@ -692,6 +772,56 @@ mod tests {
         let ids = pool.list_identities().await;
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0].comment, "live-key");
+    }
+
+    /// Two HUNG upstreams (accept, never answer) listed before a live one:
+    /// the listing must still surface the live key, and must cost about
+    /// ONE timeout, not one per hung upstream — the upstreams are probed
+    /// in parallel. Also pins that `status()` reports the hung ones as
+    /// unreachable. Real-time test (no paused clock): the timeout is
+    /// 300 ms, so a sequential probe would take ≥ 600 ms.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn listing_costs_slowest_upstream_not_the_sum() {
+        let hung1 = spawn_stub("hang1", StubUpstream::new(vec![]).hanging());
+        let hung2 = spawn_stub("hang2", StubUpstream::new(vec![]).hanging());
+        let live = spawn_stub(
+            "hang-live",
+            StubUpstream::new(vec![upstream_identity(0xF1, "live-key")]),
+        );
+        let pool = UpstreamPool::new(
+            vec![
+                Upstream {
+                    name: "hung1".into(),
+                    path: hung1,
+                },
+                Upstream {
+                    name: "hung2".into(),
+                    path: hung2,
+                },
+                Upstream {
+                    name: "live".into(),
+                    path: live,
+                },
+            ],
+            Duration::from_millis(300),
+        );
+
+        let started = std::time::Instant::now();
+        let ids = pool.list_identities().await;
+        let elapsed = started.elapsed();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].comment, "live-key");
+        assert!(
+            elapsed < Duration::from_millis(550),
+            "listing took {elapsed:?}: upstreams are being probed sequentially"
+        );
+
+        let statuses = pool.status().await;
+        assert_eq!(
+            statuses.iter().map(|s| s.reachable).collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
+        assert_eq!(statuses[2].keys, 1);
     }
 
     /// FDR 0001: two backings serving the SAME key (posh + the
