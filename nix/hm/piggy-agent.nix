@@ -92,6 +92,9 @@ let
           "--add-new-keys-to"
           instanceCfg.addNewKeysTo
         ])
+        # Proxy-only role (eng#295): no card, upstreams only. Rust agent
+        # only; the assertions below pin the card flags to unset.
+        ++ lib.optional instanceCfg.proxyOnly "--proxy-only"
         ++ instanceCfg.extraArgs;
 
       # `--upstream name="<path>"`: the path sits in double quotes so
@@ -250,6 +253,7 @@ let
       upstreams
       addNewKeysTo
       agentTimeout
+      proxyOnly
       ;
   };
 
@@ -269,7 +273,8 @@ let
     || cfg.extraArgs != [ ]
     || cfg.upstreams != [ ]
     || cfg.addNewKeysTo != null
-    || cfg.agentTimeout != null;
+    || cfg.agentTimeout != null
+    || cfg.proxyOnly;
 
   # Map of effective unit-name → per-instance config. Single-instance
   # mode synthesizes one entry named `piggy-agent` from the top-level
@@ -319,9 +324,28 @@ let
         assertion = ic.guid == null || !ic.allCards;
         message = "services.piggy-agent: `guid` and `allCards` are mutually exclusive (instance ${unitName}).";
       }
+      # Card selection is required — UNLESS this is a proxy-only instance
+      # (eng#295), which by definition has no card to select.
       {
-        assertion = ic.guid != null || ic.allCards;
-        message = "services.piggy-agent: one of `guid` or `allCards` must be set (instance ${unitName}).";
+        assertion = ic.proxyOnly || ic.guid != null || ic.allCards;
+        message = "services.piggy-agent: one of `guid` or `allCards` must be set, or `proxyOnly = true` (instance ${unitName}).";
+      }
+      # Proxy-only (eng#295): a Rust-agent feature that needs at least
+      # one upstream to proxy to, and forbids every card-selection
+      # option (`guid`/`allCards`/`cak`/`slots`) — the binary rejects
+      # those flag combinations, so catch them at eval time.
+      {
+        assertion = !ic.proxyOnly || isRustAgent;
+        message = "services.piggy-agent: `proxyOnly` requires the Rust agent (package pname \"piggy\"), not the C pivy-agent (instance ${unitName}).";
+      }
+      {
+        assertion = !ic.proxyOnly || ic.upstreams != [ ];
+        message = "services.piggy-agent: `proxyOnly = true` requires at least one entry in `upstreams` — a proxy with nothing to proxy to serves no keys (instance ${unitName}).";
+      }
+      {
+        assertion =
+          !ic.proxyOnly || (ic.guid == null && !ic.allCards && ic.cak == null && ic.slots == "all");
+        message = "services.piggy-agent: `proxyOnly = true` is incompatible with the card-selection options `guid`/`allCards`/`cak`/`slots` — a proxy-only agent serves no card (instance ${unitName}).";
       }
       {
         assertion = builtins.match "^(all|[0-9a-fA-F]{2}(,[0-9a-fA-F]{2})*)$" ic.slots != null;
@@ -567,6 +591,27 @@ in
       '';
     };
 
+    proxyOnly = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Run this agent in proxy-only mode (`--proxy-only`, eng#295):
+        it serves NO native PIV keys — never opens PCSC, spawns no
+        card probe/recovery loop — and proxies everything to
+        {option}`upstreams`. This is the remote-host role: on a
+        cardless is-ssh-host, one stable piggy-agent socket fronts
+        the forwarded, card-backed agents (e.g. the RemoteForward'd
+        workstation agent and posh's stable endpoint), and the
+        upstream timeout/degrade selection picks whichever backing
+        is live — so a shell's `SSH_AUTH_SOCK` never has to chase a
+        per-connection sshd socket.
+
+        Requires the Rust agent and at least one {option}`upstreams`
+        entry; replaces the `guid`/`allCards` requirement and is
+        incompatible with `guid`, `allCards`, `cak`, and `slots`.
+      '';
+    };
+
     _launcherTexts = mkOption {
       type = types.attrsOf types.str;
       internal = true;
@@ -667,6 +712,11 @@ in
               default = null;
               description = "Per-upstream request timeout in seconds.";
             };
+            proxyOnly = mkOption {
+              type = types.bool;
+              default = false;
+              description = "Proxy-only (no card, upstreams only) for this instance (eng#295).";
+            };
           };
         }
       );
@@ -735,7 +785,7 @@ in
           "services.piggy-agent: top-level options "
           + "(`guid`/`allCards`/`cak`/`slots`/`socketPath`/`askpass`"
           + "/`logFile`/`extraArgs`/`upstreams`/`addNewKeysTo`"
-          + "/`agentTimeout`) are forbidden when `instances` "
+          + "/`agentTimeout`/`proxyOnly`) are forbidden when `instances` "
           + "is non-empty. Move them into `instances.<name>` "
           + "entries.";
       }

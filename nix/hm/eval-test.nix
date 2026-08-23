@@ -1005,6 +1005,172 @@ let
         };
     }
 
+    # --- proxyOnly (eng#295: the cardless remote-host role) ---
+
+    {
+      # The remote-host shape: no guid/allCards, proxyOnly + upstreams.
+      # Must pass every assertion and emit `--proxy-only` with NO card
+      # flags on the exec line.
+      name = "proxy-only-with-upstreams-emits-flag-and-no-card-flags";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.proxyOnly = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "posh";
+            socketPath = "$XDG_RUNTIME_DIR/posh/agent/sock";
+          }
+          {
+            name = "fwd";
+            socketPath = "$HOME/.local/state/ssh/piggy-agent.sock";
+          }
+        ];
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          hasProxyOnly = lib.hasInfix "--proxy-only" text;
+          hasUpstreams =
+            lib.hasInfix "--upstream posh=\"$XDG_RUNTIME_DIR/posh/agent/sock\"" text
+            && lib.hasInfix "--upstream fwd=\"$HOME/.local/state/ssh/piggy-agent.sock\"" text;
+          noCardFlags =
+            !(lib.hasInfix " -A" text) && !(lib.hasInfix " -g" text) && !(lib.hasInfix " -K" text);
+          launcher = forceLauncher result;
+        in
+        {
+          ok = tripped == [ ] && hasProxyOnly && hasUpstreams && noCardFlags && launcher != null;
+          got = {
+            inherit
+              tripped
+              text
+              hasProxyOnly
+              hasUpstreams
+              noCardFlags
+              ;
+          };
+        };
+    }
+    {
+      # proxyOnly with nothing to proxy to is a config error, not a
+      # silently key-less agent.
+      name = "proxy-only-without-upstreams-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.proxyOnly = true;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          hasExpected = lib.any (m: lib.hasInfix "requires at least one entry in `upstreams`" m) tripped;
+        in
+        {
+          ok = hasExpected;
+          got = tripped;
+        };
+    }
+    {
+      # proxyOnly + a card-selection option is a config error (the
+      # binary rejects the flag combination; catch it at eval time).
+      name = "proxy-only-with-all-cards-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.proxyOnly = true;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "fwd";
+            socketPath = "/tmp/f.sock";
+          }
+        ];
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          hasExpected = lib.any (m: lib.hasInfix "incompatible with the card-selection options" m) tripped;
+        in
+        {
+          ok = hasExpected;
+          got = tripped;
+        };
+    }
+    {
+      # proxyOnly is a Rust-agent feature; the C pivy-agent has no
+      # --proxy-only (nor --upstream) surface.
+      name = "c-agent-with-proxy-only-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = pkgs.hello.overrideAttrs (_: {
+          pname = "pivy";
+        });
+        services.piggy-agent.proxyOnly = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "fwd";
+            socketPath = "/tmp/f.sock";
+          }
+        ];
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          hasExpected = lib.any (m: lib.hasInfix "`proxyOnly` requires the Rust agent" m) tripped;
+        in
+        {
+          ok = hasExpected;
+          got = tripped;
+        };
+    }
+    {
+      # Per-instance proxyOnly: a multi-instance map can mix a card-backed
+      # instance with a proxy-only one; each instance's launcher gets its
+      # own flags.
+      name = "multi-instance-proxy-only-instance-emits-flag";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.instances = {
+          card = {
+            allCards = true;
+          };
+          proxy = {
+            proxyOnly = true;
+            upstreams = [
+              {
+                name = "fwd";
+                socketPath = "/tmp/f.sock";
+              }
+            ];
+          };
+        };
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          texts = result.config.services.piggy-agent._launcherTexts;
+          proxyText = texts."piggy-agent-proxy" or "";
+          cardText = texts."piggy-agent-card" or "";
+        in
+        {
+          ok =
+            tripped == [ ]
+            && lib.hasInfix "--proxy-only" proxyText
+            && !(lib.hasInfix "--proxy-only" cardText)
+            && lib.hasInfix " -A" cardText;
+          got = {
+            inherit tripped proxyText cardText;
+          };
+        };
+    }
+
     # --- resolvedSocketPath / resolvedSocketPaths ---
 
     {
