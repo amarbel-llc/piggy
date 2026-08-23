@@ -154,6 +154,11 @@ impl UpstreamPool {
         self.upstreams.is_empty()
     }
 
+    /// Number of configured upstreams (the `agent-mode@piggy` report).
+    pub fn len(&self) -> usize {
+        self.upstreams.len()
+    }
+
     /// Connect to one upstream socket, timeout-bounded.
     async fn connect(&self, upstream: &Upstream) -> Result<Client<UnixStream>, AgentError> {
         let stream = timeout(self.timeout, UnixStream::connect(&upstream.path))

@@ -63,6 +63,11 @@ pub struct PiggyAgent {
     /// owning upstream. Empty without `--upstream`, making every proxy
     /// path a no-op (pre-#215 behavior).
     upstreams: UpstreamPool,
+    /// `--proxy-only` (eng#295): this agent serves no card by design.
+    /// Only consulted by the `agent-mode@piggy` self-report — the
+    /// request paths don't branch on it (an empty native key set
+    /// already routes everything upstream).
+    proxy_only: bool,
 }
 
 /// A PIN acquired for a card op, plus whether it came from an on-demand
@@ -80,12 +85,20 @@ impl PiggyAgent {
             prompt_lock: Arc::new(Mutex::new(())),
             card_lock: Arc::new(Mutex::new(())),
             upstreams: UpstreamPool::empty(),
+            proxy_only: false,
         }
     }
 
     /// Configure the upstream proxy pool (piggy#215, `--upstream`).
     pub fn with_upstream_pool(mut self, pool: UpstreamPool) -> Self {
         self.upstreams = pool;
+        self
+    }
+
+    /// Mark this agent proxy-only (`--proxy-only`, eng#295) for the
+    /// `agent-mode@piggy` self-report.
+    pub fn with_proxy_only(mut self, proxy_only: bool) -> Self {
+        self.proxy_only = proxy_only;
         self
     }
 
@@ -401,6 +414,9 @@ impl PiggyAgent {
                     "ecdh@joyent.com",
                     "ecdh-rebox@joyent.com",
                     "ykpiv-attest@joyent.com",
+                    // eng#295: the role self-report `piggy health` reads.
+                    // Always advertised — every Rust agent has a mode.
+                    super::mode::AGENT_MODE_EXT,
                 ]
                 .iter()
                 .map(|s| s.to_string())
@@ -481,6 +497,21 @@ impl PiggyAgent {
                     }
                     Err(NativeExtError::KeyNotNative(msg)) => Err(AgentError::Other(msg.into())),
                 }
+            }
+            // eng#295: self-report the agent's role so `piggy health` can
+            // shape its plan (a proxy-only agent has no card to check).
+            n if n == super::mode::AGENT_MODE_EXT => {
+                let mode = super::mode::AgentMode {
+                    proxy_only: self.proxy_only,
+                    native_keys: self.keys.lock().await.len(),
+                    upstreams: self.upstreams.len(),
+                };
+                let json = serde_json::to_vec(&mode)
+                    .map_err(|e| AgentError::Other(format!("agent-mode: {e}").into()))?;
+                Ok(Some(Extension {
+                    name: super::mode::AGENT_MODE_EXT.into(),
+                    details: json.into(),
+                }))
             }
             // piggy#215 step 5: self-report per-upstream reachability
             // for `piggy health`. Only answered when upstreams are
@@ -2081,6 +2112,58 @@ mod tests {
         assert_eq!(statuses[0].name, "stub");
         assert!(statuses[0].reachable);
         assert_eq!(statuses[0].keys, 1);
+    }
+
+    /// eng#295: every agent advertises and answers `agent-mode@piggy`;
+    /// the payload reflects `--proxy-only`, the live native key count,
+    /// and the upstream count.
+    #[tokio::test]
+    async fn agent_mode_extension_reports_role() {
+        use crate::cmd::agent::mode::{AGENT_MODE_EXT, AgentMode};
+
+        // Card-backed, no upstreams: advertised, proxy_only=false.
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9A)]);
+        let resp = agent
+            .extension(ext_request("query"))
+            .await
+            .unwrap()
+            .expect("query response");
+        let names = decode_flat_query_names(&resp.details.clone().into_bytes());
+        assert!(names.iter().any(|n| n == AGENT_MODE_EXT), "{names:?}");
+        let resp = agent
+            .extension(ext_request(AGENT_MODE_EXT))
+            .await
+            .unwrap()
+            .expect("mode payload");
+        let mode: AgentMode = serde_json::from_slice(&resp.details.clone().into_bytes()).unwrap();
+        assert_eq!(
+            mode,
+            AgentMode {
+                proxy_only: false,
+                native_keys: 1,
+                upstreams: 0
+            }
+        );
+
+        // Proxy-only with one upstream.
+        let path = upstream_stub::spawn_stub("sess-mode", upstream_stub::StubUpstream::new(vec![]));
+        let mut agent = PiggyAgent::new(Vec::new())
+            .with_upstream_pool(pool_for(path))
+            .with_proxy_only(true);
+        let resp = agent
+            .extension(ext_request(AGENT_MODE_EXT))
+            .await
+            .unwrap()
+            .expect("mode payload");
+        let mode: AgentMode = serde_json::from_slice(&resp.details.clone().into_bytes()).unwrap();
+        assert_eq!(
+            mode,
+            AgentMode {
+                proxy_only: true,
+                native_keys: 0,
+                upstreams: 1
+            }
+        );
     }
 
     #[tokio::test]

@@ -335,6 +335,146 @@ function health_reports_upstream_point { # @test
   }
 }
 
+# eng#295 — the remote-host role. A PROXY-ONLY `piggy agent` (no card;
+# PCSC deliberately unreachable) fronts the fibby-backed card agent as
+# upstream "fwd", behind a dead upstream listed FIRST (a stable-but-down
+# backing, like a RemoteForward'd socket whose connection dropped). The
+# stack:
+#
+#   fibby <- pcsc -> piggy agent -A            (the "workstation" agent)
+#                      ^ upstream fwd
+#   piggy agent --proxy-only --upstream dead=… --upstream fwd=…  <- clients
+#
+# Gates: the proxy lists the card's 9A key; `piggy pass show` routed at the
+# proxy decrypts — the ecdh-rebox native-miss forwards to the card agent
+# (which prompts the PIN on demand); `piggy health` against the proxy exits
+# 0 with the local-card points SKIPped and the dead alternative backing
+# SKIPped (one backing is live).
+function proxy_only_agent_fronts_forwarded_card_agent { # @test
+  spawn_fibby --seed-rfc6979-slot-9a-cert --seed-rfc5903-slot-9d-cert --seed-chuid
+
+  # The card-backed agent (no upstreams of its own).
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent -A -a "$AGENT_SOCK" \
+    >"$AGENT_LOG" 2>&1 &
+  AGENT_PID=$!
+  local _
+  for _ in $(seq 1 50); do
+    [[ -S $AGENT_SOCK ]] && break
+    sleep 0.1
+  done
+  [[ -S $AGENT_SOCK ]] || {
+    echo "card agent socket never appeared" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+
+  # The proxy-only agent. PCSCLITE_CSOCK_NAME points nowhere: a
+  # proxy-only agent must never open PCSC, and if it did, it would fail
+  # loudly here rather than silently borrow fibby.
+  local proxy_sock="$WORKDIR/p.sock" proxy_log="$WORKDIR/proxy.log"
+  PCSCLITE_CSOCK_NAME="$WORKDIR/no-such-pcscd" "$PIGGY_BIN" agent --proxy-only \
+    --upstream "dead=$WORKDIR/dead.sock" --upstream "fwd=$AGENT_SOCK" \
+    -a "$proxy_sock" >"$proxy_log" 2>&1 &
+  SOFT_PID=$! # reuse the teardown slot
+  for _ in $(seq 1 50); do
+    [[ -S $proxy_sock ]] && break
+    sleep 0.1
+  done
+  [[ -S $proxy_sock ]] || {
+    echo "proxy-only agent socket never appeared" >&2
+    cat "$proxy_log" >&2 || true
+    return 1
+  }
+
+  # 1. Listing through the proxy shows the card's key (served by fwd).
+  SSH_AUTH_SOCK="$proxy_sock" run ssh-add -L
+  [[ $status -eq 0 ]] || {
+    echo "ssh-add -L exited $status against the proxy-only agent" >&2
+    cat "$proxy_log" >&2 || true
+    return 1
+  }
+  printf '%s\n' "$output" | grep -q '^ecdsa-sha2-nistp256 ' || {
+    echo "proxy-only listing lacks the forwarded 9A key" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+
+  # 2. Decrypt through the proxy: init/insert talk to fibby directly
+  # (offline encrypt); `pass show` is routed at the PROXY, whose
+  # ecdh-rebox native-miss must forward to the card agent.
+  local store="$WORKDIR/store" secret="proxied-decrypt-secret"
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_STORE_DIR="$store" \
+    run "$PIGGY_BIN" pass init
+  [[ $status -eq 0 ]] || {
+    echo "piggy pass init exited $status" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  printf '%s\n' "$secret" | PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    PIGGY_STORE_DIR="$store" "$PIGGY_BIN" pass insert -e foo/bar
+  [[ -f "$store/foo/bar.ebox" ]] || {
+    echo "piggy pass insert produced no ebox" >&2
+    return 1
+  }
+  PIGGY_AUTH_SOCK="$proxy_sock" PIGGY_STORE_DIR="$store" \
+    run "$PIGGY_BIN" pass show foo/bar
+  [[ $status -eq 0 ]] || {
+    echo "piggy pass show via the proxy-only agent exited $status" >&2
+    printf '%s\n' "$output" >&2
+    echo "--- proxy log ---" >&2
+    cat "$proxy_log" >&2 || true
+    echo "--- card agent log ---" >&2
+    tail -60 "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  printf '%s\n' "$output" | grep -Fxq "$secret" || {
+    echo "proxied decrypt output missing the secret line" >&2
+    printf 'got:\n%s\n' "$output" >&2
+    return 1
+  }
+  # The ECDH ran on the CARD agent (fibby), not anywhere in the proxy.
+  grep -q "GA ECDH 9D -> 9000" "$FIBBY_LOG" || {
+    echo "no slot-9D GA ECDH in fibby trace — where did the decrypt happen?" >&2
+    tail -80 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+  ! grep -qi "PCSC" "$proxy_log" || {
+    echo "proxy-only agent touched PCSC:" >&2
+    grep -i "PCSC" "$proxy_log" >&2
+    return 1
+  }
+
+  # 3. Health against the proxy: exit 0; local-card points SKIP with the
+  # proxy-only reason; fwd ok; dead SKIPs (an alternative backing is live).
+  PIGGY_AUTH_SOCK="$proxy_sock" PCSCLITE_CSOCK_NAME="$WORKDIR/no-such-pcscd" \
+    run "$PIGGY_BIN" health --format ndjson
+  [[ $status -eq 0 ]] || {
+    echo "piggy health against the proxy-only agent exited $status" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  local line
+  line=$(printf '%s\n' "$output" | grep '"pcsc: daemon reachable"') || {
+    echo "no pcsc point in health output" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  [[ $line == *'proxy-only'* ]] || {
+    echo "pcsc point not SKIPped with the proxy-only reason: $line" >&2
+    return 1
+  }
+  line=$(printf '%s\n' "$output" | grep 'agent: upstream fwd answers')
+  [[ $line == *'"ok":true'* ]] || {
+    echo "fwd upstream point not ok: $line" >&2
+    return 1
+  }
+  line=$(printf '%s\n' "$output" | grep 'agent: upstream dead answers')
+  [[ $line == *'other upstream'* ]] || {
+    echo "dead upstream point not SKIPped as an alternative backing: $line" >&2
+    return 1
+  }
+}
+
 # Without --add-new-keys-to, adds are refused and nothing reaches the
 # upstream.
 function add_identity_without_target_is_refused { # @test

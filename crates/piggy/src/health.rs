@@ -122,6 +122,12 @@ pub struct Probes {
     /// advertise `upstream-status@piggy` — i.e. no upstreams
     /// configured); `Some(Err)` = advertised but the probe failed.
     pub upstreams: Option<Result<Vec<piggy::cmd::agent::upstream::UpstreamStatus>, String>>,
+    /// eng#295: the agent's `agent-mode@piggy` role self-report. `None` =
+    /// not probed (query failed/skipped, or an older agent that doesn't
+    /// advertise it — treated as card-backed); `Some(Err)` = advertised
+    /// but the probe failed (also treated as card-backed: health never
+    /// hides a card failure on a guess).
+    pub mode: Option<Result<piggy::cmd::agent::mode::AgentMode, String>>,
     pub pcsc: PcscProbe,
     pub cards: Option<Vec<CardInfo>>,
 }
@@ -442,7 +448,7 @@ fn probe_cards() -> (PcscProbe, Option<Vec<CardInfo>>) {
 pub fn gather() -> Probes {
     let service = probe_service();
     let socket = resolve_socket();
-    let (agent, extensions, upstreams) = match &socket {
+    let (agent, extensions, upstreams, mode) = match &socket {
         SocketProbe::Resolved {
             path,
             is_socket: true,
@@ -454,25 +460,29 @@ pub fn gather() -> Probes {
             } else {
                 None
             };
+            let advertises =
+                |ext: &str| matches!(&exts, Some(Ok(names)) if names.iter().any(|n| n == ext));
             // piggy#215 step 5: the status extension is advertised only
             // by an agent with upstreams configured; absence means
             // "nothing to check", not a failure.
-            let ups = match &exts {
-                Some(Ok(names))
-                    if names
-                        .iter()
-                        .any(|n| n == piggy::cmd::agent::upstream::UPSTREAM_STATUS_EXT) =>
-                {
-                    Some(piggy::agent_client::probe_upstream_status(
-                        path,
-                        PROBE_TIMEOUT,
-                    ))
-                }
-                _ => None,
+            let ups = if advertises(piggy::cmd::agent::upstream::UPSTREAM_STATUS_EXT) {
+                Some(piggy::agent_client::probe_upstream_status(
+                    path,
+                    PROBE_TIMEOUT,
+                ))
+            } else {
+                None
             };
-            (Some(ids), exts, ups)
+            // eng#295: the role self-report. Absent on agents predating
+            // it (= card-backed, the only role that existed).
+            let mode = if advertises(piggy::cmd::agent::mode::AGENT_MODE_EXT) {
+                Some(piggy::agent_client::probe_agent_mode(path, PROBE_TIMEOUT))
+            } else {
+                None
+            };
+            (Some(ids), exts, ups, mode)
         }
-        _ => (None, None, None),
+        _ => (None, None, None, None),
     };
     let (pcsc, cards) = probe_cards();
     Probes {
@@ -481,6 +491,7 @@ pub fn gather() -> Probes {
         agent,
         extensions,
         upstreams,
+        mode,
         pcsc,
         cards,
     }
@@ -881,6 +892,30 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
         },
     });
 
+    // eng#295: a proxy-only agent (per its own `agent-mode@piggy`
+    // self-report) serves no card by design — it fronts forwarded
+    // card-backed agents on a host that typically has no pcscd at all.
+    // Points 6–9 are about the LOCAL card path, so on such a host they
+    // SKIP (with the reason) rather than fail; the plan shape and point
+    // names are unchanged. Anything short of a positive proxy-only
+    // report (older agent, probe failure) keeps the card-backed plan —
+    // health never hides a card failure on a guess.
+    let proxy_only = matches!(&probes.mode, Some(Ok(m)) if m.proxy_only);
+    const PROXY_ONLY_SKIP: &str = "proxy-only agent: no local card expected";
+    let skip_proxy_only = |name: &str| CheckResult {
+        name: name.into(),
+        status: Status::Skip(PROXY_ONLY_SKIP.into()),
+        diags: vec![],
+    };
+    if proxy_only {
+        out.push(skip_proxy_only("pcsc: daemon reachable"));
+        out.push(skip_proxy_only("card: PIV card attached"));
+        out.push(skip_proxy_only("card: key-management slot 9D populated"));
+        out.push(skip_proxy_only("agent serves attached card"));
+        push_upstream_points(&mut out, probes, true);
+        return out;
+    }
+
     // 6 — pcsc daemon reachable
     out.push(match &probes.pcsc {
         PcscProbe::Ok => CheckResult {
@@ -1003,10 +1038,26 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
         },
     });
 
-    // 10.. — piggy#215 step 5: one point per proxied upstream, from the
-    // agent's own upstream-status@piggy self-report. Present only when
-    // the agent advertises the extension (= has upstreams configured);
-    // the base 9-point plan is unchanged for every other agent.
+    push_upstream_points(&mut out, probes, false);
+    out
+}
+
+/// 10.. — piggy#215 step 5: one point per proxied upstream, from the
+/// agent's own upstream-status@piggy self-report. Present only when
+/// the agent advertises the extension (= has upstreams configured);
+/// the base 9-point plan is unchanged for every other agent.
+///
+/// Role-dependent verdict for an UNREACHABLE upstream (eng#295):
+/// - card-backed agent (`proxy_only == false`): upstreams are additive
+///   (launchd's keys on top of the card's) — a dead one is a real loss,
+///   so it FAILs, as it always has.
+/// - proxy-only agent: the upstreams are the stable *alternative*
+///   backings (posh's endpoint vs the RemoteForward'd socket) and by
+///   design usually only one is live — that is exactly what the mux's
+///   degrade selection is for. So a dead upstream SKIPs (with the reason)
+///   while at least one other is reachable, and FAILs only when none is:
+///   a proxy with nothing live behind it serves no keys.
+fn push_upstream_points(out: &mut Vec<CheckResult>, probes: &Probes, proxy_only: bool) {
     match &probes.upstreams {
         None => {}
         Some(Err(e)) => out.push(CheckResult {
@@ -1015,21 +1066,25 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
             diags: vec![("error".into(), e.clone())],
         }),
         Some(Ok(statuses)) => {
+            let live = statuses.iter().filter(|s| s.reachable).count();
             for s in statuses {
+                let status = if s.reachable {
+                    Status::Pass
+                } else if proxy_only && live > 0 {
+                    Status::Skip(format!(
+                        "unreachable; {live} other upstream(s) live (proxy-only backings are alternatives)"
+                    ))
+                } else {
+                    Status::Fail
+                };
                 out.push(CheckResult {
                     name: format!("agent: upstream {} answers", s.name),
-                    status: if s.reachable {
-                        Status::Pass
-                    } else {
-                        Status::Fail
-                    },
+                    status,
                     diags: vec![("keys".into(), s.keys.to_string())],
                 });
             }
         }
     }
-
-    out
 }
 
 #[cfg(test)]
@@ -1078,6 +1133,7 @@ mod tests {
             agent: None,
             extensions: None,
             upstreams: None,
+            mode: None,
             pcsc: PcscProbe::Error("PC/SC unavailable".into()),
             cards: None,
         }
@@ -1102,6 +1158,7 @@ mod tests {
             agent: Some(Ok(vec!["card-a".into(), "card-b".into(), "card-c".into()])),
             extensions: Some(Ok(vec![ECDH_EXT.into(), "other-ext".into()])),
             upstreams: None,
+            mode: None,
             pcsc: PcscProbe::Ok,
             cards: Some(vec![CardInfo {
                 reader: "Yubico YubiKey CCID 00 00".into(),
@@ -1157,6 +1214,143 @@ mod tests {
         assert_eq!(results[9].name, "agent: upstream status answers");
         assert!(matches!(results[9].status, Status::Fail));
         assert_eq!(diag(&results[9], "error"), Some("timeout after 2s"));
+    }
+
+    /// eng#295: the remote-host shape — a proxy-only agent on a host
+    /// with no pcscd and no card. Points 1–5 evaluate as usual; the four
+    /// local-card points (6–9) SKIP with the proxy-only reason instead of
+    /// failing; the plan stays 9 points in order; upstream points still
+    /// append; and the run exits 0.
+    #[test]
+    fn proxy_only_agent_skips_card_points_and_keeps_plan_shape() {
+        use piggy::cmd::agent::mode::AgentMode;
+        use piggy::cmd::agent::upstream::UpstreamStatus;
+        let mut probes = healthy_probes();
+        probes.agent = Some(Ok(vec!["fwd-key".into()]));
+        probes.mode = Some(Ok(AgentMode {
+            proxy_only: true,
+            native_keys: 0,
+            upstreams: 2,
+        }));
+        probes.pcsc = PcscProbe::Error("PC/SC unavailable".into());
+        probes.cards = None;
+        probes.upstreams = Some(Ok(vec![
+            UpstreamStatus {
+                name: "posh".into(),
+                reachable: true,
+                keys: 1,
+            },
+            UpstreamStatus {
+                name: "fwd".into(),
+                reachable: false,
+                keys: 0,
+            },
+        ]));
+        let results = evaluate(&probes);
+        assert_eq!(results.len(), 11);
+        let names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            &names[5..9],
+            &[
+                "pcsc: daemon reachable",
+                "card: PIV card attached",
+                "card: key-management slot 9D populated",
+                "agent serves attached card",
+            ]
+        );
+        for r in &results[5..9] {
+            match &r.status {
+                Status::Skip(reason) => {
+                    assert!(reason.contains("proxy-only"), "{}: {reason}", r.name)
+                }
+                _ => panic!("{}: expected SKIP on a proxy-only agent", r.name),
+            }
+        }
+        assert!(
+            matches!(results[4].status, Status::Pass),
+            "ecdh still advertised"
+        );
+        assert_eq!(results[9].name, "agent: upstream posh answers");
+        assert!(matches!(results[9].status, Status::Pass));
+        // The proxy-only backings are alternatives: with posh live, the
+        // dead fwd SKIPs rather than fails — and the whole run exits 0.
+        assert_eq!(results[10].name, "agent: upstream fwd answers");
+        assert!(
+            matches!(&results[10].status, Status::Skip(r) if r.contains("1 other upstream")),
+            "dead alternative backing must SKIP while another is live"
+        );
+        assert_eq!(exit_code(&results), 0);
+
+        // With NO live backing the proxy serves nothing: every upstream
+        // point FAILs and the run exits 1.
+        probes.upstreams = Some(Ok(vec![
+            UpstreamStatus {
+                name: "posh".into(),
+                reachable: false,
+                keys: 0,
+            },
+            UpstreamStatus {
+                name: "fwd".into(),
+                reachable: false,
+                keys: 0,
+            },
+        ]));
+        let results = evaluate(&probes);
+        assert!(matches!(results[9].status, Status::Fail));
+        assert!(matches!(results[10].status, Status::Fail));
+        assert_eq!(exit_code(&results), 1);
+    }
+
+    /// eng#295: the alternative-backings leniency is proxy-only. On a
+    /// card-backed agent upstreams are additive, so a dead one FAILs even
+    /// when another is live (the pre-existing piggy#215 verdict).
+    #[test]
+    fn card_backed_agent_dead_upstream_still_fails_when_another_is_live() {
+        use piggy::cmd::agent::upstream::UpstreamStatus;
+        let mut probes = healthy_probes();
+        probes.upstreams = Some(Ok(vec![
+            UpstreamStatus {
+                name: "soft".into(),
+                reachable: true,
+                keys: 2,
+            },
+            UpstreamStatus {
+                name: "launchd".into(),
+                reachable: false,
+                keys: 0,
+            },
+        ]));
+        let results = evaluate(&probes);
+        assert!(matches!(results[10].status, Status::Fail));
+        assert_eq!(exit_code(&results), 1);
+    }
+
+    /// eng#295: a cardless host WITHOUT a positive proxy-only report
+    /// (older agent, or the mode probe failed) keeps the card-backed plan
+    /// — the pcsc point fails as before. Health never hides a card
+    /// failure on a guess.
+    #[test]
+    fn cardless_host_without_proxy_only_report_still_fails_card_points() {
+        let mut probes = healthy_probes();
+        probes.pcsc = PcscProbe::Error("PC/SC unavailable".into());
+        probes.cards = None;
+        for mode in [None, Some(Err("timeout".to_string()))] {
+            probes.mode = mode;
+            let results = evaluate(&probes);
+            assert_eq!(results.len(), 9);
+            assert!(
+                matches!(results[5].status, Status::Fail),
+                "pcsc point must fail"
+            );
+        }
+        // And a card-backed agent's self-report (proxy_only: false) changes nothing either.
+        probes.mode = Some(Ok(piggy::cmd::agent::mode::AgentMode {
+            proxy_only: false,
+            native_keys: 0,
+            upstreams: 0,
+        }));
+        let results = evaluate(&probes);
+        assert!(matches!(results[5].status, Status::Fail));
     }
 
     /// The BASE plan is always 9 points, in the fixed documented order,

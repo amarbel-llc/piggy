@@ -14,6 +14,9 @@ use tokio::sync::Mutex;
 
 mod cak;
 mod card;
+// pub: `agent_client::probe_agent_mode` (the `piggy health` side) shares
+// the AGENT_MODE_EXT name + AgentMode payload type.
+pub mod mode;
 mod session;
 // pub: `agent_client::probe_upstream_status` (the `piggy health` side)
 // shares the UPSTREAM_STATUS_EXT name + UpstreamStatus payload type.
@@ -433,7 +436,7 @@ async fn run_async(
     }
 
     let listener = bind_reclaiming_stale(&socket_path)?;
-    let agent = PiggyAgent::new(cached_keys);
+    let agent = PiggyAgent::new(cached_keys).with_proxy_only(cli.proxy_only);
     // piggy#215: with --upstream flags, proxy the named agents for keys
     // piggy does not serve natively. Without them the pool stays empty
     // and the agent behaves exactly as before.

@@ -207,6 +207,37 @@ pub fn probe_upstream_status(
     socket_path: &Path,
     timeout: Duration,
 ) -> Result<Vec<crate::cmd::agent::upstream::UpstreamStatus>, String> {
+    probe_json_extension(
+        socket_path,
+        timeout,
+        crate::cmd::agent::upstream::UPSTREAM_STATUS_EXT,
+    )
+}
+
+/// Send the `agent-mode@piggy` extension (eng#295) and parse the agent's
+/// role self-report. Only meaningful after the `query` probe showed the
+/// agent advertises it (agents predating the extension don't — health
+/// then assumes the card-backed role).
+pub fn probe_agent_mode(
+    socket_path: &Path,
+    timeout: Duration,
+) -> Result<crate::cmd::agent::mode::AgentMode, String> {
+    probe_json_extension(
+        socket_path,
+        timeout,
+        crate::cmd::agent::mode::AGENT_MODE_EXT,
+    )
+}
+
+/// Shared shell for piggy's self-report extensions: send `name` with an
+/// empty payload over a fresh timeout-bounded connection and decode the
+/// JSON response body as `T`. A plain SUCCESS (no extension payload) is
+/// an error — every self-report carries a body.
+fn probe_json_extension<T: serde::de::DeserializeOwned>(
+    socket_path: &Path,
+    timeout: Duration,
+    name: &'static str,
+) -> Result<T, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -222,16 +253,15 @@ pub fn probe_upstream_status(
             let mut client = Client::new(stream);
             let response = client
                 .extension(Extension {
-                    name: crate::cmd::agent::upstream::UPSTREAM_STATUS_EXT.into(),
+                    name: name.into(),
                     details: Vec::new().into(),
                 })
                 .await
-                .map_err(|e| format!("upstream-status extension: {e}"))?;
-            let ext = response.ok_or_else(|| {
-                "agent answered upstream-status with plain SUCCESS (no payload)".to_string()
-            })?;
+                .map_err(|e| format!("{name} extension: {e}"))?;
+            let ext = response
+                .ok_or_else(|| format!("agent answered {name} with plain SUCCESS (no payload)"))?;
             serde_json::from_slice(ext.details.as_ref())
-                .map_err(|e| format!("unparseable upstream-status payload: {e}"))
+                .map_err(|e| format!("unparseable {name} payload: {e}"))
         })
         .await
         .map_err(|_| format!("timeout after {timeout:?}"))?
