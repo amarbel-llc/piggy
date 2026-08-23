@@ -17,6 +17,7 @@ mod card;
 // pub: `agent_client::probe_agent_mode` (the `piggy health` side) shares
 // the AGENT_MODE_EXT name + AgentMode payload type.
 pub mod mode;
+mod pins;
 mod session;
 // pub: `agent_client::probe_upstream_status` (the `piggy health` side)
 // shares the UPSTREAM_STATUS_EXT name + UpstreamStatus payload type.
@@ -573,7 +574,7 @@ fn bind_reclaiming_stale(path: &str) -> std::io::Result<UnixListener> {
 /// card-present-at-startup path and the piggy#175 post-recovery handoff.
 fn spawn_probe_loop(
     guid: piggy_piv::Guid,
-    pin_handle: Arc<Mutex<Option<String>>>,
+    pin_handle: Arc<Mutex<pins::PinCache>>,
     card_lock: Arc<Mutex<()>>,
     cak: Option<ssh_key::public::KeyData>,
 ) {

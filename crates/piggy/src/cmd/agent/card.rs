@@ -10,6 +10,7 @@ use tokio::time::{Duration, interval};
 
 use piggy_piv::{Guid, PivContext};
 
+use super::pins::PinCache;
 use super::session::CachedKey;
 
 const PROBE_INTERVAL: Duration = Duration::from_secs(60);
@@ -33,7 +34,7 @@ pub(crate) const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 /// identical to the original single-function implementation: every
 /// `PROBE_INTERVAL`, the card is enumerated and the PIN is cleared after
 /// `PROBE_FAIL_LIMIT` consecutive failures.
-pub async fn probe_loop(guid: Guid, pin: Arc<Mutex<Option<String>>>, card_lock: Arc<Mutex<()>>) {
+pub async fn probe_loop(guid: Guid, pin: Arc<Mutex<PinCache>>, card_lock: Arc<Mutex<()>>) {
     probe_loop_with(
         guid,
         pin,
@@ -52,7 +53,7 @@ pub async fn probe_loop(guid: Guid, pin: Arc<Mutex<Option<String>>>, card_lock: 
 /// consecutive failures, matching the C pivy-agent's per-probe `auth_cak`.
 pub async fn probe_loop_cak(
     guid: Guid,
-    pin: Arc<Mutex<Option<String>>>,
+    pin: Arc<Mutex<PinCache>>,
     card_lock: Arc<Mutex<()>>,
     cak: ssh_key::public::KeyData,
 ) {
@@ -96,7 +97,7 @@ fn default_card_probe(guid: &Guid) -> bool {
 /// wedged card op can never starve the loop.
 pub async fn probe_loop_with<F>(
     guid: Guid,
-    pin: Arc<Mutex<Option<String>>>,
+    pin: Arc<Mutex<PinCache>>,
     card_lock: Arc<Mutex<()>>,
     mut probe: F,
     interval_duration: Duration,
@@ -125,10 +126,11 @@ pub async fn probe_loop_with<F>(
         } else {
             failures += 1;
             if failures >= fail_limit {
-                let mut pin_guard = pin.lock().await;
-                if pin_guard.is_some() {
+                // piggy#177: forget THIS card's PIN (plus the unverified
+                // `ssh-add -X` offer); another attached card's verified
+                // PIN survives its sibling's removal.
+                if pin.lock().await.forget_card(&guid) {
                     tracing::warn!("card unavailable after {} probes, forgetting PIN", failures);
-                    *pin_guard = None;
                     // stats-me: `piggy.agent.pin_cleared` counter (no duration
                     // dimension) — the probe loop dropped a cached PIN.
                     crate::stats::agent_op(
@@ -252,6 +254,18 @@ mod tests {
         Guid::from_hex("995E171383029CDA0D9CDBDBAD580813").unwrap()
     }
 
+    /// A cache holding one verified PIN for `guid` (piggy#177: the probe
+    /// loop clears per-card, so the tests seed and assert per-card).
+    fn pin_cache_with(guid: &Guid, pin: &str) -> Arc<Mutex<PinCache>> {
+        let mut cache = PinCache::new();
+        cache.cache_verified(guid, pin);
+        Arc::new(Mutex::new(cache))
+    }
+
+    async fn verified(pin: &Arc<Mutex<PinCache>>, guid: &Guid) -> Option<String> {
+        pin.lock().await.verified_for(guid)
+    }
+
     /// Spawn `probe_loop_with`, drive the paused clock until the probe
     /// has been called at least `target_probes` times, and return the
     /// loop's JoinHandle (caller aborts it).
@@ -266,7 +280,7 @@ mod tests {
     /// clock is advanced — a floor against silent no-op loops.
     async fn run_until_n_probes<F>(
         guid: Guid,
-        pin: Arc<Mutex<Option<String>>>,
+        pin: Arc<Mutex<PinCache>>,
         probe: F,
         interval_dur: Duration,
         fail_limit: u32,
@@ -306,8 +320,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn probe_loop_clears_pin_after_fail_limit() {
-        let pin = Arc::new(Mutex::new(Some("1234".to_string())));
         let guid = sample_guid();
+        let pin = pin_cache_with(&guid, "1234");
         let counter = Arc::new(AtomicU32::new(0));
         let fail_limit: u32 = 3;
         let counter_cl = counter.clone();
@@ -317,7 +331,7 @@ mod tests {
         };
 
         let handle = run_until_n_probes(
-            guid,
+            guid.clone(),
             pin.clone(),
             probe,
             Duration::from_millis(10),
@@ -328,7 +342,44 @@ mod tests {
         .await;
 
         // After fail_limit consecutive failures the PIN must be cleared.
-        assert_eq!(*pin.lock().await, None);
+        assert_eq!(verified(&pin, &guid).await, None);
+        handle.abort();
+    }
+
+    /// piggy#177: clearing is per-card — the probed card's disappearance
+    /// drops ITS verified PIN (and the unverified `ssh-add -X` offer),
+    /// while a sibling card's verified PIN survives.
+    #[tokio::test(start_paused = true)]
+    async fn probe_loop_clear_leaves_sibling_cards_pin() {
+        let guid = sample_guid();
+        let sibling = Guid::from_hex("00112233445566778899AABBCCDDEEFF").unwrap();
+        let pin = pin_cache_with(&guid, "1234");
+        pin.lock().await.cache_verified(&sibling, "5678");
+        let counter = Arc::new(AtomicU32::new(0));
+        let fail_limit: u32 = 3;
+        let counter_cl = counter.clone();
+        let probe = move |_g: &Guid| {
+            counter_cl.fetch_add(1, Ordering::SeqCst);
+            false
+        };
+
+        let handle = run_until_n_probes(
+            guid.clone(),
+            pin.clone(),
+            probe,
+            Duration::from_millis(10),
+            fail_limit,
+            counter,
+            fail_limit,
+        )
+        .await;
+
+        assert_eq!(verified(&pin, &guid).await, None, "probed card's PIN kept");
+        assert_eq!(
+            verified(&pin, &sibling).await.as_deref(),
+            Some("5678"),
+            "sibling card's PIN dropped by its sibling's removal"
+        );
         handle.abort();
     }
 
@@ -340,8 +391,8 @@ mod tests {
     /// absent card still clears the PIN after `fail_limit` ticks.
     #[tokio::test(start_paused = true)]
     async fn probe_loop_skips_card_and_counts_present_while_request_holds_lock() {
-        let pin = Arc::new(Mutex::new(Some("1234".to_string())));
         let guid = sample_guid();
+        let pin = pin_cache_with(&guid, "1234");
         let counter = Arc::new(AtomicU32::new(0));
         let counter_cl = counter.clone();
         let probe = move |_g: &Guid| {
@@ -357,9 +408,10 @@ mod tests {
 
         let lock_for_loop = card_lock.clone();
         let pin_for_loop = pin.clone();
+        let guid_for_loop = guid.clone();
         let handle = tokio::spawn(async move {
             probe_loop_with(
-                guid,
+                guid_for_loop,
                 pin_for_loop,
                 lock_for_loop,
                 probe,
@@ -386,8 +438,8 @@ mod tests {
             "probe touched the card while a request held the lock"
         );
         assert_eq!(
-            *pin.lock().await,
-            Some("1234".to_string()),
+            verified(&pin, &guid).await.as_deref(),
+            Some("1234"),
             "PIN dropped while card busy"
         );
 
@@ -405,7 +457,7 @@ mod tests {
             "probing did not resume"
         );
         assert_eq!(
-            *pin.lock().await,
+            verified(&pin, &guid).await,
             None,
             "absent card must still clear the PIN after the lock frees"
         );
@@ -416,8 +468,8 @@ mod tests {
     /// fewer tick, the PIN must still be present. Pins the boundary.
     #[tokio::test(start_paused = true)]
     async fn probe_loop_keeps_pin_just_below_fail_limit() {
-        let pin = Arc::new(Mutex::new(Some("1234".to_string())));
         let guid = sample_guid();
+        let pin = pin_cache_with(&guid, "1234");
         let counter = Arc::new(AtomicU32::new(0));
         let fail_limit: u32 = 3;
         let counter_cl = counter.clone();
@@ -427,7 +479,7 @@ mod tests {
         };
 
         let handle = run_until_n_probes(
-            guid,
+            guid.clone(),
             pin.clone(),
             probe,
             Duration::from_millis(10),
@@ -437,14 +489,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(*pin.lock().await, Some("1234".to_string()));
+        assert_eq!(verified(&pin, &guid).await.as_deref(), Some("1234"));
         handle.abort();
     }
 
     #[tokio::test(start_paused = true)]
     async fn probe_loop_keeps_pin_while_card_present() {
-        let pin = Arc::new(Mutex::new(Some("hunter2".to_string())));
         let guid = sample_guid();
+        let pin = pin_cache_with(&guid, "hunter2");
         let counter = Arc::new(AtomicU32::new(0));
         let fail_limit: u32 = 3;
         let counter_cl = counter.clone();
@@ -456,7 +508,7 @@ mod tests {
         // Run for 2× fail_limit ticks — even if the counter logic were
         // broken, we'd see any spurious clear here.
         let handle = run_until_n_probes(
-            guid,
+            guid.clone(),
             pin.clone(),
             probe,
             Duration::from_millis(10),
@@ -466,7 +518,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(*pin.lock().await, Some("hunter2".to_string()));
+        assert_eq!(verified(&pin, &guid).await.as_deref(), Some("hunter2"));
         handle.abort();
     }
 
@@ -475,8 +527,8 @@ mod tests {
         // Pattern: fail, fail, succeed, fail, fail -- should NOT clear
         // the pin because the success resets the counter and we never
         // reach fail_limit=3 consecutive failures.
-        let pin = Arc::new(Mutex::new(Some("stable".to_string())));
         let guid = sample_guid();
+        let pin = pin_cache_with(&guid, "stable");
         let counter = Arc::new(AtomicU32::new(0));
         let fail_limit: u32 = 3;
         let counter_cl = counter.clone();
@@ -489,7 +541,7 @@ mod tests {
         // 6 ticks: fail, fail, succeed, fail, fail, succeed.
         // Longest consecutive failure run is 2, below fail_limit.
         let handle = run_until_n_probes(
-            guid,
+            guid.clone(),
             pin.clone(),
             probe,
             Duration::from_millis(10),
@@ -502,15 +554,15 @@ mod tests {
         // PIN must survive, AND the counter must prove the loop actually
         // ran 6+ times (no vacuous pass).
         assert!(counter.load(Ordering::SeqCst) >= 6);
-        assert_eq!(*pin.lock().await, Some("stable".to_string()));
+        assert_eq!(verified(&pin, &guid).await.as_deref(), Some("stable"));
         handle.abort();
     }
 
     #[tokio::test(start_paused = true)]
     async fn probe_loop_no_op_when_pin_already_empty() {
-        // If the PIN is None and the card is absent, the loop must
-        // still run cleanly and leave the PIN as None.
-        let pin: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        // If the cache is empty and the card is absent, the loop must
+        // still run cleanly and leave the cache empty.
+        let pin = Arc::new(Mutex::new(PinCache::new()));
         let guid = sample_guid();
         let counter = Arc::new(AtomicU32::new(0));
         let fail_limit: u32 = 3;
@@ -521,7 +573,7 @@ mod tests {
         };
 
         let handle = run_until_n_probes(
-            guid,
+            guid.clone(),
             pin.clone(),
             probe,
             Duration::from_millis(10),
@@ -531,7 +583,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(*pin.lock().await, None);
+        assert!(!pin.lock().await.has_any());
         handle.abort();
     }
 
@@ -541,7 +593,7 @@ mod tests {
     /// cleared). Collect GUIDs from both success and failure probes.
     #[tokio::test(start_paused = true)]
     async fn probe_loop_passes_correct_guid_to_probe_on_every_call() {
-        let pin = Arc::new(Mutex::new(None));
+        let pin = Arc::new(Mutex::new(PinCache::new()));
         let guid = sample_guid();
         let counter = Arc::new(AtomicU32::new(0));
         let fail_limit: u32 = 3;
