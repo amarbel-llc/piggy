@@ -97,15 +97,30 @@ let
         ++ lib.optional instanceCfg.proxyOnly "--proxy-only"
         ++ instanceCfg.extraArgs;
 
-      # `--upstream name="<path>"`: the path sits in double quotes so
-      # bash expands env references at runtime; the name is pinned to a
-      # safe charset by assertion. Joined with explicit spaces — both
-      # between entries and (in `launcherText`) against the preceding
-      # `nonSocketArgs` group — after piggy#229 found `concatMapStrings`
-      # gluing flag groups together with no word boundary at all.
-      upstreamArgsText = lib.concatMapStringsSep " " (
-        u: ''--upstream ${u.name}="${u.socketPath}"''
-      ) instanceCfg.upstreams;
+      # The exec line's argv, ONE word per list element, joined exactly
+      # once below (piggy#230: the old code concatenated several
+      # separately-joined fragments, each with its own separator
+      # discipline, and piggy#229 was the resulting glued-tokens bug).
+      # Two classes of word:
+      #   - escaped: routed through `lib.escapeShellArg` (single-quoted),
+      #     so user-supplied strings (guid, cak, extraArgs) can't break
+      #     the exec line;
+      #   - bash-expanded: `-a "$SOCK"` and `--upstream name="<path>"`
+      #     sit in double quotes UNescaped, so bash expands `$HOME` /
+      #     `$XDG_STATE_HOME` references at runtime (#63). Upstream names
+      #     are pinned to a safe charset and paths to no-double-quote by
+      #     assertion, so these are the only two unescaped classes.
+      execWords =
+        map lib.escapeShellArg (preArgs ++ foregroundArgs)
+        ++ [
+          "-a"
+          ''"$SOCK"''
+        ]
+        ++ map lib.escapeShellArg nonSocketArgs
+        ++ lib.concatMap (u: [
+          "--upstream"
+          ''${u.name}="${u.socketPath}"''
+        ]) instanceCfg.upstreams;
 
       # Single shared launcher script for both Linux and Darwin. Handles
       # XDG_STATE_HOME default, socket-dir creation, stale-socket cleanup,
@@ -119,12 +134,6 @@ let
       # set on the systemd Service.Environment / launchd
       # EnvironmentVariables instead so they're inspectable in
       # eval-test.
-      #
-      # The exec line writes `-a "$SOCK"` directly instead of routing
-      # the socket through `lib.escapeShellArgs` — escapeShellArgs
-      # single-quotes every argument, which would prevent bash from
-      # expanding `$XDG_STATE_HOME` / `$HOME` and leave the agent to
-      # bind(2) the literal string `$HOME/.local/state/...`. See #63.
       launcherText = ''
         set -eu
         : "''${HOME:?HOME must be set}"
@@ -133,9 +142,7 @@ let
         mkdir -p -m 0700 "$(dirname "$SOCK")"
         rm -f "$SOCK"
         export SSH_AUTH_SOCK="$SOCK"
-        exec ${binPath} ${
-          lib.escapeShellArgs (preArgs ++ foregroundArgs)
-        } -a "$SOCK" ${lib.escapeShellArgs nonSocketArgs} ${upstreamArgsText}
+        exec ${binPath} ${lib.concatStringsSep " " execWords}
       '';
 
       launcher = pkgs.writeShellScript "${name}-launch" launcherText;
