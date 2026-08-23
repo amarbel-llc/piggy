@@ -207,10 +207,20 @@ impl UpstreamPool {
                 keys = upstream_ids.len(),
                 "listed upstream identities"
             );
-            for id in &upstream_ids {
+            // A key served by more than one upstream (the proxy-only
+            // role's posh + RemoteForward'd backings both forward the
+            // same workstation agent, FDR 0001) is offered ONCE and
+            // routed to the FIRST upstream that listed it — the same
+            // first-wins order the listing has, so a sign goes where the
+            // offered identity came from. (It used to be listed twice and
+            // routed last-wins.)
+            for id in upstream_ids {
+                if known_keys.contains_key(&id.pubkey) {
+                    continue;
+                }
                 known_keys.insert(id.pubkey.clone(), idx);
+                identities.push(id);
             }
-            identities.extend(upstream_ids);
         }
         identities
     }
@@ -682,6 +692,37 @@ mod tests {
         let ids = pool.list_identities().await;
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0].comment, "live-key");
+    }
+
+    /// FDR 0001: two backings serving the SAME key (posh + the
+    /// RemoteForward'd socket both forward one workstation agent) — the
+    /// key is offered once and a sign for it is routed to the FIRST
+    /// upstream that listed it, consistent with the listing order.
+    #[tokio::test]
+    async fn same_key_on_two_upstreams_listed_once_and_routed_first_wins() {
+        let first = StubUpstream::new(vec![upstream_identity(0xE1, "shared-key")]);
+        let first_events = first.events.clone();
+        let second = StubUpstream::new(vec![upstream_identity(0xE1, "shared-key")]);
+        let second_events = second.events.clone();
+        let p1 = spawn_stub("dup-first", first);
+        let p2 = spawn_stub("dup-second", second);
+        let pool = pool_of(vec![("first", p1), ("second", p2)]);
+
+        let ids = pool.list_identities().await;
+        assert_eq!(ids.len(), 1, "shared key must be offered once: {ids:?}");
+
+        pool.sign(SignRequest {
+            pubkey: upstream_identity(0xE1, "shared-key").pubkey,
+            data: b"payload".to_vec(),
+            flags: 0,
+        })
+        .await
+        .unwrap();
+        assert!(first_events.lock().unwrap().iter().any(|e| e == "sign"));
+        assert!(
+            !second_events.lock().unwrap().iter().any(|e| e == "sign"),
+            "sign must route to the first-listed upstream, not last-wins"
+        );
     }
 
     #[tokio::test]

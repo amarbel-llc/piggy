@@ -149,11 +149,14 @@ on fibby, none in the proxy), and health.
   per-connection sshd socket would reintroduce exactly the eng#295
   failure. The path varies per connection anyway, so the module can't
   express it — by design.
-- **No cross-upstream dedup of identical keys in routing.** When two
-  backings serve the same key (posh and `fwd` both forward the same
-  workstation agent), listing offers it once (first-wins) but the sign
-  routing map is last-wins. Both hold the key, so requests succeed; the
-  inconsistency is cosmetic and tracked as part of the mux review.
+- **Identical keys on several backings are first-wins.** When posh and
+  `fwd` both forward the same workstation agent, the key is offered once
+  and a request for it goes to the first-listed *live* upstream; the
+  others are reached only when that one is down at listing time (the
+  routing map is rebuilt on every listing and on a sign miss). A `sign`
+  has no per-request failover to a second holder of the same key;
+  forwarded card extensions (`ecdh-rebox` etc.) do try each upstream in
+  order, so a `pass show` survives one backing dying mid-session.
 - **Forwarded card extensions inherit the upstream's PIN flow.** A
   proxied `ecdh-rebox` is answered by the card-backed agent at the far
   end, which prompts for the PIN via *its* askpass — the proxy has no
