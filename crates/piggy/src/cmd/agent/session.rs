@@ -106,6 +106,13 @@ impl PiggyAgent {
         self.pin.clone()
     }
 
+    /// Shared handle to the #213 card lock, so the background probe and
+    /// recovery loops can `try_lock` it around their own card access and
+    /// never race an in-flight request (piggy#214).
+    pub fn card_lock_handle(&self) -> Arc<Mutex<()>> {
+        self.card_lock.clone()
+    }
+
     /// Shared handle to the agent's served key set. The identity/sign handlers
     /// read this live, so writing into it (e.g. from the piggy#175 recovery
     /// loop) makes the agent serve the new keys without a restart.

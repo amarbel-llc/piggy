@@ -451,8 +451,11 @@ async fn run_async(
     // its PIN shortly after the card is removed. This is piggy-specific — the
     // C pivy-agent has its own card-presence handling with different timing.
     let pin_handle = agent.pin_handle();
+    // piggy#214: both loops take the #213 card lock (try_lock) around their
+    // own card access, so a probe tick never races an in-flight request.
+    let card_lock = agent.card_lock_handle();
     match primary_guid {
-        Some(guid) => spawn_probe_loop(guid, pin_handle, config.cak.clone()),
+        Some(guid) => spawn_probe_loop(guid, pin_handle, card_lock, config.cak.clone()),
         // Proxy-only: no card is expected to ever appear, so neither the
         // presence probe nor the #175 recovery loop has anything to do.
         None if cli.proxy_only => {}
@@ -471,6 +474,7 @@ async fn run_async(
             tokio::spawn(async move {
                 let guid = card::recovery_loop_with(
                     keys_handle,
+                    card_lock.clone(),
                     move || load_cached_keys_from_cards(&config),
                     // piggy#179: confirm the recovered GUID round-trips through
                     // the sign-path's own reconnect helper before adopting its
@@ -484,7 +488,7 @@ async fn run_async(
                     card::RECOVERY_INTERVAL,
                 )
                 .await;
-                spawn_probe_loop(guid, pin_handle, cak_for_probe);
+                spawn_probe_loop(guid, pin_handle, card_lock, cak_for_probe);
             });
         }
     }
@@ -570,6 +574,7 @@ fn bind_reclaiming_stale(path: &str) -> std::io::Result<UnixListener> {
 fn spawn_probe_loop(
     guid: piggy_piv::Guid,
     pin_handle: Arc<Mutex<Option<String>>>,
+    card_lock: Arc<Mutex<()>>,
     cak: Option<ssh_key::public::KeyData>,
 ) {
     match cak {
@@ -577,11 +582,11 @@ fn spawn_probe_loop(
             // CAK mode (piggy#143): the probe also re-runs the slot-9E
             // challenge each tick, so a mid-session card swap clears the PIN.
             tracing::info!(guid = %guid.short_id(), "spawning CAK-reauthenticating card probe loop");
-            tokio::spawn(card::probe_loop_cak(guid, pin_handle, cak));
+            tokio::spawn(card::probe_loop_cak(guid, pin_handle, card_lock, cak));
         }
         None => {
             tracing::info!(guid = %guid.short_id(), "spawning card-presence probe loop");
-            tokio::spawn(card::probe_loop(guid, pin_handle));
+            tokio::spawn(card::probe_loop(guid, pin_handle, card_lock));
         }
     }
 }

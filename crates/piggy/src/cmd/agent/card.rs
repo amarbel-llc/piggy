@@ -33,10 +33,11 @@ pub(crate) const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 /// identical to the original single-function implementation: every
 /// `PROBE_INTERVAL`, the card is enumerated and the PIN is cleared after
 /// `PROBE_FAIL_LIMIT` consecutive failures.
-pub async fn probe_loop(guid: Guid, pin: Arc<Mutex<Option<String>>>) {
+pub async fn probe_loop(guid: Guid, pin: Arc<Mutex<Option<String>>>, card_lock: Arc<Mutex<()>>) {
     probe_loop_with(
         guid,
         pin,
+        card_lock,
         default_card_probe,
         PROBE_INTERVAL,
         PROBE_FAIL_LIMIT,
@@ -52,11 +53,13 @@ pub async fn probe_loop(guid: Guid, pin: Arc<Mutex<Option<String>>>) {
 pub async fn probe_loop_cak(
     guid: Guid,
     pin: Arc<Mutex<Option<String>>>,
+    card_lock: Arc<Mutex<()>>,
     cak: ssh_key::public::KeyData,
 ) {
     probe_loop_with(
         guid,
         pin,
+        card_lock,
         move |g| default_card_probe(g) && super::cak::authenticate(g, &cak),
         PROBE_INTERVAL,
         PROBE_FAIL_LIMIT,
@@ -80,9 +83,21 @@ fn default_card_probe(guid: &Guid) -> bool {
 /// Generic probe loop parameterised on the card-presence detector and
 /// timing knobs. Exposed primarily for unit testing; production callers
 /// should use [`probe_loop`].
+///
+/// `card_lock` is the agent's request-serializing card lock (piggy#213).
+/// Each tick the probe `try_lock`s it (piggy#214): if a request holds it,
+/// the card is demonstrably reachable and in use right now, so the tick
+/// counts it PRESENT without touching PCSC — a probe landing mid-request
+/// used to be able to perturb that request's card session, and a probe
+/// colliding with a held transaction could fail spuriously and count
+/// toward `fail_limit` ("busy" was indistinguishable from "absent"). When
+/// the lock is free the probe runs under it, so no request starts on the
+/// card while the probe is enumerating. `try_lock` (not `lock`) so a
+/// wedged card op can never starve the loop.
 pub async fn probe_loop_with<F>(
     guid: Guid,
     pin: Arc<Mutex<Option<String>>>,
+    card_lock: Arc<Mutex<()>>,
     mut probe: F,
     interval_duration: Duration,
     fail_limit: u32,
@@ -95,7 +110,15 @@ pub async fn probe_loop_with<F>(
     loop {
         interval.tick().await;
 
-        let card_present = probe(&guid);
+        let card_present = match card_lock.try_lock() {
+            Ok(_card_guard) => probe(&guid),
+            Err(_) => {
+                tracing::debug!(
+                    "card busy with a request; counting it present this tick (piggy#214)"
+                );
+                true
+            }
+        };
 
         if card_present {
             failures = 0;
@@ -151,8 +174,14 @@ pub async fn probe_loop_with<F>(
 /// Generic over `load`/`verify` for unit testing; the production caller passes
 /// closures over `super::load_cached_keys_from_cards` and
 /// `super::session::reconnect_to_token`.
+///
+/// `card_lock` (piggy#214): the tick's enumeration + reconnect probe run
+/// under the agent's card lock, `try_lock`ed — a held lock means a request
+/// is on the card (only possible once keys are served, i.e. rarely here),
+/// and the tick is simply skipped rather than racing it.
 pub async fn recovery_loop_with<F, V>(
     keys: Arc<Mutex<Vec<CachedKey>>>,
+    card_lock: Arc<Mutex<()>>,
     mut load: F,
     mut verify: V,
     interval_duration: Duration,
@@ -165,6 +194,11 @@ where
 
     loop {
         interval.tick().await;
+
+        let Ok(_card_guard) = card_lock.try_lock() else {
+            tracing::debug!("card busy with a request; skipping this recovery tick (piggy#214)");
+            continue;
+        };
 
         let (loaded, guid) = load();
         let Some(guid) = guid else { continue };
@@ -243,8 +277,9 @@ mod tests {
         F: FnMut(&Guid) -> bool + Send + 'static,
     {
         assert!(target_probes >= 1, "need at least 1 probe");
+        let card_lock = Arc::new(Mutex::new(()));
         let handle = tokio::spawn(async move {
-            probe_loop_with(guid, pin, probe, interval_dur, fail_limit).await;
+            probe_loop_with(guid, pin, card_lock, probe, interval_dur, fail_limit).await;
         });
 
         // Yield so the spawned task reaches its first tick.await and the
@@ -294,6 +329,86 @@ mod tests {
 
         // After fail_limit consecutive failures the PIN must be cleared.
         assert_eq!(*pin.lock().await, None);
+        handle.abort();
+    }
+
+    /// piggy#214: while a request holds the card lock, a probe tick must
+    /// NOT touch the card (the detector is never called) and must count
+    /// the card present — so a burst of requests spanning several ticks
+    /// can never accumulate "failures" and drop the PIN out from under
+    /// them. Once the lock is released, probing resumes and a genuinely
+    /// absent card still clears the PIN after `fail_limit` ticks.
+    #[tokio::test(start_paused = true)]
+    async fn probe_loop_skips_card_and_counts_present_while_request_holds_lock() {
+        let pin = Arc::new(Mutex::new(Some("1234".to_string())));
+        let guid = sample_guid();
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_cl = counter.clone();
+        let probe = move |_g: &Guid| {
+            counter_cl.fetch_add(1, Ordering::SeqCst);
+            false // card "absent" whenever actually probed
+        };
+        let card_lock = Arc::new(Mutex::new(()));
+        let interval_dur = Duration::from_millis(10);
+        let fail_limit: u32 = 3;
+
+        // A request is on the card for the next several ticks.
+        let held = card_lock.clone().lock_owned().await;
+
+        let lock_for_loop = card_lock.clone();
+        let pin_for_loop = pin.clone();
+        let handle = tokio::spawn(async move {
+            probe_loop_with(
+                guid,
+                pin_for_loop,
+                lock_for_loop,
+                probe,
+                interval_dur,
+                fail_limit,
+            )
+            .await;
+        });
+
+        // First (immediate) tick + 2 × fail_limit more: well past the point
+        // where an absent card would have cleared the PIN.
+        for _ in 0..4 {
+            yield_now().await;
+        }
+        for _ in 0..(2 * fail_limit) {
+            tokio::time::advance(interval_dur).await;
+            for _ in 0..4 {
+                yield_now().await;
+            }
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "probe touched the card while a request held the lock"
+        );
+        assert_eq!(
+            *pin.lock().await,
+            Some("1234".to_string()),
+            "PIN dropped while card busy"
+        );
+
+        // Request finishes; the next fail_limit ticks probe for real and,
+        // the card being absent, clear the PIN.
+        drop(held);
+        for _ in 0..fail_limit {
+            tokio::time::advance(interval_dur).await;
+            for _ in 0..4 {
+                yield_now().await;
+            }
+        }
+        assert!(
+            counter.load(Ordering::SeqCst) >= fail_limit,
+            "probing did not resume"
+        );
+        assert_eq!(
+            *pin.lock().await,
+            None,
+            "absent card must still clear the PIN after the lock frees"
+        );
         handle.abort();
     }
 
@@ -480,6 +595,61 @@ mod tests {
         }
     }
 
+    /// piggy#214: a recovery tick never enumerates while a request holds
+    /// the card lock (it skips the tick), and resumes — adopting keys —
+    /// once the lock is released.
+    #[tokio::test(start_paused = true)]
+    async fn recovery_loop_skips_ticks_while_request_holds_lock() {
+        let keys: Arc<Mutex<Vec<CachedKey>>> = Arc::new(Mutex::new(Vec::new()));
+        let guid = sample_guid();
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_cl = counter.clone();
+        let guid_cl = guid.clone();
+        let load = move || {
+            counter_cl.fetch_add(1, Ordering::SeqCst);
+            (vec![cached_test_key(&guid_cl)], Some(guid_cl.clone()))
+        };
+        let card_lock = Arc::new(Mutex::new(()));
+        let held = card_lock.clone().lock_owned().await;
+
+        let keys_cl = keys.clone();
+        let lock_for_loop = card_lock.clone();
+        let handle = tokio::spawn(async move {
+            recovery_loop_with(
+                keys_cl,
+                lock_for_loop,
+                load,
+                |_g: &Guid| Ok(()),
+                Duration::from_millis(10),
+            )
+            .await
+        });
+
+        // Several ticks while the lock is held: load must never run.
+        for _ in 0..4 {
+            yield_now().await;
+        }
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_millis(10)).await;
+            for _ in 0..4 {
+                yield_now().await;
+            }
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "recovery enumerated while card busy"
+        );
+        assert!(keys.lock().await.is_empty());
+
+        // Lock released: the next tick loads and adopts.
+        drop(held);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let recovered = handle.await.unwrap();
+        assert_eq!(recovered.to_hex(), guid.to_hex());
+        assert_eq!(keys.lock().await.len(), 1);
+    }
+
     /// Issue #175: an agent that starts with 0 keys (transient PCSC failure)
     /// must keep retrying and adopt keys into its shared vec once the card
     /// becomes reachable, returning the recovered GUID so the caller can hand
@@ -505,7 +675,14 @@ mod tests {
         // The recovered card reconnects through the sign-path helper.
         let verify = |_g: &Guid| Ok(());
         let handle = tokio::spawn(async move {
-            recovery_loop_with(keys_cl, load, verify, Duration::from_millis(10)).await
+            recovery_loop_with(
+                keys_cl,
+                Arc::new(Mutex::new(())),
+                load,
+                verify,
+                Duration::from_millis(10),
+            )
+            .await
         });
 
         // First tick fires immediately (load #1 = fail). Advancing two more
@@ -543,7 +720,14 @@ mod tests {
         // verify is never reached while load stays empty.
         let verify = |_g: &Guid| Ok(());
         let handle = tokio::spawn(async move {
-            recovery_loop_with(keys_cl, load, verify, Duration::from_millis(10)).await
+            recovery_loop_with(
+                keys_cl,
+                Arc::new(Mutex::new(())),
+                load,
+                verify,
+                Duration::from_millis(10),
+            )
+            .await
         });
 
         for _ in 0..4 {
@@ -588,7 +772,14 @@ mod tests {
 
         let keys_cl = keys.clone();
         let handle = tokio::spawn(async move {
-            recovery_loop_with(keys_cl, load, verify, Duration::from_millis(10)).await
+            recovery_loop_with(
+                keys_cl,
+                Arc::new(Mutex::new(())),
+                load,
+                verify,
+                Duration::from_millis(10),
+            )
+            .await
         });
 
         for _ in 0..4 {
