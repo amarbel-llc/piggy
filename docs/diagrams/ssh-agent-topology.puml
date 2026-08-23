@@ -62,16 +62,17 @@ note bottom of mux
 end note
 
 legend bottom
-  == Open decisions for the cutover ==
-  **1 — SSH_AUTH_SOCK ownership (eng <-> posh, two repos).**
-  posh#161 (landed) makes posh **sessions** self-export
-  SSH_AUTH_SOCK = the posh endpoint; eng sets it = the mux
-  host-globally. Both set it in a posh session — precedence
-  is env-order today. Decide: mux as sole front (posh stops
-  self-exporting on eng hosts), or posh keeps its direct
-  export and the mux covers only non-posh sessions.
+  == Cutover decisions ==
+  **1 — SSH_AUTH_SOCK ownership (eng <-> posh) — RESOLVED 2026-08-23.**
+  posh keeps its per-session export UNCONDITIONAL (posh stays
+  eng-agnostic); eng's shell-init SSH_AUTH_SOCK (mux) runs AFTER
+  the posh session's spawn env and overrides it. So the mux is
+  the **sole front** on eng hosts, posh sessions included (they
+  gain the degrade-select over posh + fwd); posh's direct export
+  is the unmanaged-host fallback. posh FDR 0014 documents it.
+  (eng confirms the shell-init override fires per posh-session shell.)
 
-  **2 — `piggy health` targeting.** health prefers
+  **2 — `piggy health` targeting — OPEN.** health prefers
   PIGGY_AUTH_SOCK, so a bare run probes #2 (card-backed),
   not the mux. Define the mux-targeting invocation
   (env -u PIGGY_AUTH_SOCK SSH_AUTH_SOCK=...ssh_client-agent.sock)
