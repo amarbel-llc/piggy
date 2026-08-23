@@ -453,17 +453,34 @@ impl PiggyAgent {
                     details: vec![has_pin, has_card].into(),
                 }))
             }
-            "ecdh@joyent.com" => {
-                self.handle_ecdh(&extension.details.clone().into_bytes())
-                    .await
-            }
-            "ecdh-rebox@joyent.com" => {
-                self.handle_ecdh_rebox(&extension.details.clone().into_bytes())
-                    .await
-            }
-            "ykpiv-attest@joyent.com" => {
-                self.handle_attest(&extension.details.clone().into_bytes())
-                    .await
+            // The three piggy-native card extensions. Served natively when
+            // the requested card key is in the cached set; when it is NOT
+            // (a native miss) and upstreams are configured, the request is
+            // forwarded to them first-success-wins — the same fallthrough
+            // `sign` has for non-native keys. This is what lets a
+            // proxy-only `piggy agent` (no card, upstreams only — the
+            // remote-host role) front a forwarded card-backed agent for
+            // `piggy pass show` decrypts (eng#295). Without upstreams the
+            // miss is the refusal it always was.
+            "ecdh@joyent.com" | "ecdh-rebox@joyent.com" | "ykpiv-attest@joyent.com" => {
+                let details = extension.details.clone().into_bytes();
+                let native = match extension.name.as_str() {
+                    "ecdh@joyent.com" => self.handle_ecdh(&details).await,
+                    "ecdh-rebox@joyent.com" => self.handle_ecdh_rebox(&details).await,
+                    _ => self.handle_attest(&details).await,
+                };
+                match native {
+                    Ok(resp) => Ok(resp),
+                    Err(NativeExtError::Agent(e)) => Err(e),
+                    Err(NativeExtError::KeyNotNative(_)) if !self.upstreams.is_empty() => {
+                        tracing::debug!(
+                            extension = %extension.name,
+                            "card key not served natively; forwarding to upstreams"
+                        );
+                        self.upstreams.forward_extension(extension).await
+                    }
+                    Err(NativeExtError::KeyNotNative(msg)) => Err(AgentError::Other(msg.into())),
+                }
             }
             // piggy#215 step 5: self-report per-upstream reachability
             // for `piggy health`. Only answered when upstreams are
@@ -489,13 +506,32 @@ impl PiggyAgent {
     }
 }
 
+/// Failure of a piggy-native card extension (`ecdh`, `ecdh-rebox`,
+/// `ykpiv-attest`), split so `extension_inner` can tell a *native miss* —
+/// the requested card key is simply not one this agent serves, which with
+/// upstreams configured means "forward it" — from a genuine error in a
+/// request the agent does own (malformed payload, card failure, wrong
+/// PIN), which must never be retried against an upstream.
+enum NativeExtError {
+    /// The card key is not in the native cached set. Carries the message
+    /// surfaced when there is no upstream to forward to.
+    KeyNotNative(&'static str),
+    Agent(AgentError),
+}
+
+impl From<AgentError> for NativeExtError {
+    fn from(e: AgentError) -> Self {
+        NativeExtError::Agent(e)
+    }
+}
+
 impl PiggyAgent {
     async fn find_cached_key(&self, pubkey: &KeyData) -> Result<CachedKey, AgentError> {
         let keys = self.keys.lock().await;
         Self::find_key(&keys, pubkey).ok_or_else(|| AgentError::Other("key not found".into()))
     }
 
-    async fn handle_ecdh(&mut self, details: &[u8]) -> Result<Option<Extension>, AgentError> {
+    async fn handle_ecdh(&mut self, details: &[u8]) -> Result<Option<Extension>, NativeExtError> {
         let inner = read_ssh_string(details, 0)
             .map_err(|e| AgentError::Other(e.into()))?
             .0;
@@ -512,7 +548,7 @@ impl PiggyAgent {
         let key = self
             .find_cached_key(card_pubkey.key_data())
             .await
-            .map_err(|_| AgentError::Other("ecdh: key not found".into()))?;
+            .map_err(|_| NativeExtError::KeyNotNative("ecdh: key not found"))?;
 
         let ec_point = extract_ec_point_from_ssh_blob(partner_blob)
             .map_err(|e| AgentError::Other(e.into()))?;
@@ -520,7 +556,7 @@ impl PiggyAgent {
         match key.algorithm {
             PivAlgorithm::EcP256 | PivAlgorithm::EcP384 => {}
             _ => {
-                return Err(AgentError::Other("ecdh: key is not an EC key".into()));
+                return Err(AgentError::Other("ecdh: key is not an EC key".into()).into());
             }
         }
 
@@ -551,7 +587,7 @@ impl PiggyAgent {
                             self.forget_pin().await;
                             continue;
                         }
-                        Err(e) => return Err(AgentError::Other(e.to_string().into())),
+                        Err(e) => return Err(AgentError::Other(e.to_string().into()).into()),
                     }
                 }
 
@@ -572,7 +608,7 @@ impl PiggyAgent {
         }))
     }
 
-    async fn handle_attest(&mut self, details: &[u8]) -> Result<Option<Extension>, AgentError> {
+    async fn handle_attest(&mut self, details: &[u8]) -> Result<Option<Extension>, NativeExtError> {
         let inner = read_ssh_string(details, 0)
             .map_err(|e| AgentError::Other(e.into()))?
             .0;
@@ -587,7 +623,7 @@ impl PiggyAgent {
         let key = self
             .find_cached_key(card_pubkey.key_data())
             .await
-            .map_err(|_| AgentError::Other("attest: key not found".into()))?;
+            .map_err(|_| NativeExtError::KeyNotNative("attest: key not found"))?;
 
         // One request on the card at a time (piggy#213).
         let _card_guard = self.card_lock.lock().await;
@@ -616,7 +652,10 @@ impl PiggyAgent {
         }))
     }
 
-    async fn handle_ecdh_rebox(&mut self, details: &[u8]) -> Result<Option<Extension>, AgentError> {
+    async fn handle_ecdh_rebox(
+        &mut self,
+        details: &[u8],
+    ) -> Result<Option<Extension>, NativeExtError> {
         let inner = read_ssh_string(details, 0)
             .map_err(|e| AgentError::Other(e.into()))?
             .0;
@@ -635,7 +674,8 @@ impl PiggyAgent {
         if flags != 0 {
             return Err(AgentError::Other(
                 format!("ecdh-rebox: unsupported flags {flags:#x}").into(),
-            ));
+            )
+            .into());
         }
 
         let mut piv_box = PivBox::from_bytes(boxbuf)
@@ -647,20 +687,23 @@ impl PiggyAgent {
         // equality) — the same pubkey-matching the agentless card_oracle and
         // `handle_ecdh` use. Without this the agent can't decrypt guidless
         // piggy boxes (piggy#58).
-        let (key, box_slot) = match piv_box.guid_slot.as_ref() {
-            Some((box_guid, slot)) => {
-                let key = self.find_key_by_guid(box_guid).await.ok_or_else(|| {
-                    AgentError::Other("ecdh-rebox: no matching key for GUID".into())
-                })?;
-                (key, *slot)
-            }
-            None => self
-                .find_key_by_recipient_pubkey(&piv_box.recipient_pubkey)
-                .await
-                .ok_or_else(|| {
-                    AgentError::Other("ecdh-rebox: no agent key matches the box recipient".into())
-                })?,
-        };
+        // Either miss is a *native* miss (`KeyNotNative`): the box may well
+        // be for a key an upstream serves, so `extension_inner` forwards it.
+        let (key, box_slot) =
+            match piv_box.guid_slot.as_ref() {
+                Some((box_guid, slot)) => {
+                    let key = self.find_key_by_guid(box_guid).await.ok_or(
+                        NativeExtError::KeyNotNative("ecdh-rebox: no matching key for GUID"),
+                    )?;
+                    (key, *slot)
+                }
+                None => self
+                    .find_key_by_recipient_pubkey(&piv_box.recipient_pubkey)
+                    .await
+                    .ok_or(NativeExtError::KeyNotNative(
+                        "ecdh-rebox: no agent key matches the box recipient",
+                    ))?,
+            };
 
         let ec_point = decompress_ec_point(&piv_box.ephemeral_pubkey, piv_box.curve)?;
 
@@ -693,7 +736,7 @@ impl PiggyAgent {
                             self.forget_pin().await;
                             continue;
                         }
-                        Err(e) => return Err(AgentError::Other(e.to_string().into())),
+                        Err(e) => return Err(AgentError::Other(e.to_string().into()).into()),
                     }
                 }
 
@@ -2065,6 +2108,152 @@ mod tests {
         assert!(
             format!("{err}").contains("no --add-new-keys-to"),
             "unexpected error: {err}"
+        );
+    }
+
+    // -------- Session impl: native card extensions, native-miss fallthrough --------
+    //
+    // The proxy-only role (eng#295): an agent with NO native keys fronting
+    // a card-backed upstream must forward ecdh / ecdh-rebox / attest for
+    // keys it doesn't serve, and still refuse them without upstreams.
+    // None of these touch PCSC: the native miss short-circuits before any
+    // card access, so they run in environments without PCSC.
+
+    fn ssh_string(payload: &[u8]) -> Vec<u8> {
+        let mut v = (payload.len() as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(payload);
+        v
+    }
+
+    /// A well-formed `ecdh@joyent.com` request whose card key (seed 0x77,
+    /// Ed25519 — parseable, but not a key this agent serves) is a native
+    /// miss. The partner blob is never reached on the miss path.
+    fn ecdh_request_for_foreign_key() -> Extension {
+        let card_key: PublicKey = ed25519_key_data(0x77).into();
+        let mut inner = ssh_string(&card_key.to_bytes().unwrap());
+        inner.extend(ssh_string(b"partner"));
+        inner.extend(0u32.to_be_bytes());
+        Extension {
+            name: "ecdh@joyent.com".into(),
+            details: ssh_string(&inner).into(),
+        }
+    }
+
+    fn attest_request_for_foreign_key() -> Extension {
+        let card_key: PublicKey = ed25519_key_data(0x77).into();
+        let mut inner = ssh_string(&card_key.to_bytes().unwrap());
+        inner.extend(0u32.to_be_bytes());
+        Extension {
+            name: "ykpiv-attest@joyent.com".into(),
+            details: ssh_string(&inner).into(),
+        }
+    }
+
+    /// A well-formed guidless `ecdh-rebox@joyent.com` request for a box
+    /// sealed to a throwaway P-256 recipient no agent key matches.
+    fn rebox_request_for_foreign_recipient() -> Extension {
+        use openssl::ec::{EcGroup, EcKey};
+        use openssl::nid::Nid;
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let recipient = EcKey::generate(&group).unwrap();
+        let recipient_pub = EcKey::from_public_key(&group, recipient.public_key()).unwrap();
+        let mut piv_box = PivBox::new(EcCurve::NistP256);
+        piv_box.set_data(b"secret");
+        piv_box.seal_offline(&recipient_pub).unwrap();
+
+        let mut inner = ssh_string(&piv_box.to_bytes().unwrap());
+        inner.extend(ssh_string(b"")); // no target GUID
+        inner.push(0x9D); // slot_id
+        inner.extend(ssh_string(b"partner"));
+        inner.extend(0u32.to_be_bytes());
+        Extension {
+            name: "ecdh-rebox@joyent.com".into(),
+            details: ssh_string(&inner).into(),
+        }
+    }
+
+    async fn assert_forwarded(tag: &str, request: Extension) {
+        let name = request.name.clone();
+        let stub = upstream_stub::StubUpstream::new(vec![]).with_extensions(&[name.as_str()]);
+        let events = stub.events.clone();
+        let path = upstream_stub::spawn_stub(tag, stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+
+        let resp = agent
+            .extension(request)
+            .await
+            .unwrap()
+            .expect("forwarded response");
+        assert_eq!(resp.name, name);
+        assert_eq!(resp.details.clone().into_bytes(), b"stub-echo");
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| *e == format!("ext:{name}")),
+            "upstream never saw the forwarded {name}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ecdh_native_miss_forwards_to_upstream() {
+        assert_forwarded("ecdh-fwd", ecdh_request_for_foreign_key()).await;
+    }
+
+    #[tokio::test]
+    async fn attest_native_miss_forwards_to_upstream() {
+        assert_forwarded("attest-fwd", attest_request_for_foreign_key()).await;
+    }
+
+    #[tokio::test]
+    async fn ecdh_rebox_native_miss_forwards_to_upstream() {
+        assert_forwarded("rebox-fwd", rebox_request_for_foreign_recipient()).await;
+    }
+
+    #[tokio::test]
+    async fn ecdh_native_miss_without_upstreams_refuses() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        let err = agent
+            .extension(ecdh_request_for_foreign_key())
+            .await
+            .unwrap_err();
+        assert_agent_error_other_eq(&err, "ecdh: key not found");
+    }
+
+    #[tokio::test]
+    async fn ecdh_rebox_native_miss_without_upstreams_refuses() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        let err = agent
+            .extension(rebox_request_for_foreign_recipient())
+            .await
+            .unwrap_err();
+        assert_agent_error_other_eq(&err, "ecdh-rebox: no agent key matches the box recipient");
+    }
+
+    #[tokio::test]
+    async fn ecdh_malformed_request_is_not_forwarded() {
+        // A genuine error in a request the agent owns (truncated payload)
+        // must surface as that error, never be retried against an upstream.
+        let stub = upstream_stub::StubUpstream::new(vec![]).with_extensions(&["ecdh@joyent.com"]);
+        let events = stub.events.clone();
+        let path = upstream_stub::spawn_stub("ecdh-malformed", stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+
+        agent
+            .extension(Extension {
+                name: "ecdh@joyent.com".into(),
+                details: vec![0x00, 0x00].into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e == "ext:ecdh@joyent.com"),
+            "malformed ecdh request was forwarded upstream"
         );
     }
 

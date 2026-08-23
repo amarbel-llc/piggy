@@ -89,6 +89,19 @@ pub struct AgentArgs {
     #[arg(long = "add-new-keys-to", value_name = "NAME", requires = "upstream")]
     pub add_new_keys_to: Option<String>,
 
+    /// Proxy-only mode: serve NO native PIV keys — never touch PCSC, no
+    /// card probe/recovery loops — and proxy everything to the
+    /// --upstream agents. The remote-host role (eng#295): one stable
+    /// piggy-agent socket fronting the forwarded, card-backed agents.
+    /// Requires at least one --upstream; card-selection flags are
+    /// meaningless here and rejected.
+    #[arg(
+        long = "proxy-only",
+        requires = "upstream",
+        conflicts_with_all = ["guid", "all_cards", "cak", "slot_spec", "info"]
+    )]
+    pub proxy_only: bool,
+
     /// Command to execute with agent env set
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -215,7 +228,15 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         cak,
     };
 
-    let (cached_keys, primary_guid) = load_cached_keys_from_cards(&config);
+    // Proxy-only (eng#295): skip PIV enumeration entirely — no PCSC
+    // context is ever opened, so a cardless host (no pcscd at all) starts
+    // silently instead of warning every recovery tick.
+    let (cached_keys, primary_guid) = if cli.proxy_only {
+        tracing::info!("proxy-only: serving no native PIV keys; proxying upstreams only");
+        (Vec::new(), None)
+    } else {
+        load_cached_keys_from_cards(&config)
+    };
 
     if cli.info {
         if cached_keys.is_empty() {
@@ -411,7 +432,7 @@ async fn run_async(
         println!("echo Agent pid {};", std::process::id());
     }
 
-    let listener = UnixListener::bind(&socket_path)?;
+    let listener = bind_reclaiming_stale(&socket_path)?;
     let agent = PiggyAgent::new(cached_keys);
     // piggy#215: with --upstream flags, proxy the named agents for keys
     // piggy does not serve natively. Without them the pool stays empty
@@ -429,6 +450,9 @@ async fn run_async(
     let pin_handle = agent.pin_handle();
     match primary_guid {
         Some(guid) => spawn_probe_loop(guid, pin_handle, config.cak.clone()),
+        // Proxy-only: no card is expected to ever appear, so neither the
+        // presence probe nor the #175 recovery loop has anything to do.
+        None if cli.proxy_only => {}
         None => {
             // piggy#175: 0 keys at startup almost always means a *transient*
             // PCSC failure (a polkit-gated, socket-activated pcscd that denied
@@ -480,10 +504,28 @@ async fn run_async(
         std::process::exit(status.code().unwrap_or(1));
     }
 
-    // Clean up socket on exit
+    // Clean up the socket on exit — on SIGINT (interactive ^C) AND on
+    // SIGTERM (what `systemctl stop` / launchd send). Without the SIGTERM
+    // half a service stop left the socket file behind, so the next start
+    // EADDRINUSEd unless a launcher unlinked it first; the agent now owns
+    // its own stale-socket cleanup (the ssh-agent-mux#8 parity piggy#215
+    // asked for).
     let socket_path_clone = socket_path.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
+        let mut sigterm =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("cannot install SIGTERM handler: {e}");
+                    tokio::signal::ctrl_c().await.ok();
+                    let _ = std::fs::remove_file(&socket_path_clone);
+                    std::process::exit(0);
+                }
+            };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
         let _ = std::fs::remove_file(&socket_path_clone);
         std::process::exit(0);
     });
@@ -491,6 +533,32 @@ async fn run_async(
     listen(listener, agent).await?;
 
     Ok(())
+}
+
+/// Bind the agent socket, reclaiming a *stale* socket file first: a
+/// leftover file at `path` that nothing accepts on (connect →
+/// `ConnectionRefused`, the signature of a dead listener's orphaned inode)
+/// is unlinked and re-bound. A file a live agent is serving is NOT
+/// clobbered — that surfaces as the `AddrInUse` it always was, so two
+/// agents can't silently fight over one path. The ssh-agent-mux#8 parity
+/// piggy#215 asked for; it also makes the agent self-sufficient under a
+/// supervisor that doesn't pre-clean (the HM launcher's `rm -f` stays as
+/// belt-and-braces).
+fn bind_reclaiming_stale(path: &str) -> std::io::Result<UnixListener> {
+    match UnixListener::bind(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            match std::os::unix::net::UnixStream::connect(path) {
+                Ok(_) => Err(e),
+                Err(ce) if ce.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    tracing::warn!(path, "reclaiming stale agent socket (nothing listening)");
+                    std::fs::remove_file(path)?;
+                    UnixListener::bind(path)
+                }
+                Err(_) => Err(e),
+            }
+        }
+        other => other,
+    }
 }
 
 /// Spawn the card-presence PIN-clearing probe loop for `guid`, choosing the
@@ -570,6 +638,86 @@ mod tests {
         assert!(cli.upstream.is_empty());
         assert_eq!(cli.agent_timeout, 5);
         assert!(cli.add_new_keys_to.is_none());
+    }
+
+    /// `--proxy-only` (eng#295): needs an upstream, and rejects every
+    /// card-selection flag — there is no card to select.
+    #[test]
+    fn agent_args_proxy_only_requires_upstream_and_rejects_card_flags() {
+        assert!(
+            AgentArgs::try_parse_from(["piggy agent", "--proxy-only"]).is_err(),
+            "--proxy-only without --upstream must be rejected"
+        );
+        let ok = AgentArgs::try_parse_from([
+            "piggy agent",
+            "--proxy-only",
+            "--upstream",
+            "fwd=/tmp/f.sock",
+        ])
+        .unwrap();
+        assert!(ok.proxy_only);
+        for card_flag in [
+            ["-A", ""],
+            ["-g", "ABCD"],
+            ["-S", "9a"],
+            ["-K", "ecdsa-sha2-nistp256 AAAA"],
+            ["-i", ""],
+        ] {
+            let mut argv = vec![
+                "piggy agent",
+                "--proxy-only",
+                "--upstream",
+                "fwd=/tmp/f.sock",
+                card_flag[0],
+            ];
+            if !card_flag[1].is_empty() {
+                argv.push(card_flag[1]);
+            }
+            assert!(
+                AgentArgs::try_parse_from(&argv).is_err(),
+                "--proxy-only must conflict with {}",
+                card_flag[0]
+            );
+        }
+    }
+
+    /// Sockets for these tests live under `/tmp`, NOT the honored TMPDIR
+    /// (inside the worktree — a leftover socket file there breaks later
+    /// `builtins.getFlake` path copies; see upstream::test_support).
+    fn scratch_socket_path(tag: &str) -> String {
+        let p = format!("/tmp/pgbind{}-{tag}.sock", std::process::id());
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[tokio::test]
+    async fn bind_reclaims_stale_socket_file() {
+        let path = scratch_socket_path("stale");
+        // A listener that bound and died leaves its socket file behind.
+        let dead = UnixListener::bind(&path).unwrap();
+        drop(dead);
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "precondition: orphaned socket file"
+        );
+
+        let reclaimed = bind_reclaiming_stale(&path).expect("stale socket must be reclaimed");
+        drop(reclaimed);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn bind_refuses_to_clobber_live_listener() {
+        let path = scratch_socket_path("live");
+        let _live = UnixListener::bind(&path).unwrap();
+
+        let err = bind_reclaiming_stale(&path).expect_err("live listener must not be clobbered");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "live socket file must survive"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
