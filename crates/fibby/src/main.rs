@@ -37,6 +37,18 @@ struct Args {
     backend: String,
     reader: String,
     model: String,
+    /// The implicit single card's seeds (every pre-#242 invocation).
+    seeds: SeedSpec,
+    /// `--card NAME` groups (piggy#242): each starts a new virtual card;
+    /// seed flags after it apply to that card. Mutually exclusive with
+    /// seed flags before the first `--card`, with `--reader`, and with
+    /// the hardware backend.
+    cards: Vec<(String, SeedSpec)>,
+}
+
+/// One virtual card's seed configuration (the per-card slice of the CLI).
+#[derive(Default, Clone)]
+struct SeedSpec {
     seed_rfc6979_slot_9a_cert: bool,
     seed_rfc5903_slot_9d_cert: bool,
     seed_slot_9c_cert: bool,
@@ -45,6 +57,15 @@ struct Args {
     /// as *initialized* with empty slots — the starting state for an on-card
     /// GENERATE (`pivy-tool` needs the CHUID to find the card).
     seed_chuid: bool,
+    /// Override the CHUID's 16-byte GUID (piggy#242): multi-card setups
+    /// need distinct GUIDs, since clients identify cards by GUID. Implies
+    /// installing a CHUID. Cards after the first that seed a CHUID and
+    /// give no explicit GUID get a derived default (canonical GUID with
+    /// the last byte replaced by the card index).
+    seed_chuid_guid: Option<[u8; 16]>,
+    /// Non-default application PIN (1–8 ASCII chars; piggy#242/#177 —
+    /// give each card of a multi-card fibby its own PIN).
+    seed_pin: Option<String>,
     /// Raw P-256 scalars / keys to install into the virtual card, parsed
     /// from `--seed-*` hex flags. Let bats/shell seed slot material that
     /// was previously Rust-only (piggy#135). Applied after the cert
@@ -66,6 +87,21 @@ struct Args {
     generate_slot_9d_priv: Option<[u8; 32]>,
 }
 
+impl SeedSpec {
+    /// Whether any of this spec's flags installs a CHUID (the cert
+    /// bundles do so as a side effect; `--seed-chuid`/`--seed-chuid-guid`
+    /// do so directly) — i.e. whether the card presents as initialized
+    /// with a GUID at all.
+    fn seeds_a_chuid(&self) -> bool {
+        self.seed_rfc6979_slot_9a_cert
+            || self.seed_rfc5903_slot_9d_cert
+            || self.seed_slot_9c_cert
+            || self.seed_rfc6979_slot_9e_cert
+            || self.seed_chuid
+            || self.seed_chuid_guid.is_some()
+    }
+}
+
 fn parse_args() -> Result<Args, String> {
     let default_socket =
         std::env::var("FIBBY_SOCK").unwrap_or_else(|_| "/tmp/fibby/pcscd.comm".to_string());
@@ -74,21 +110,11 @@ fn parse_args() -> Result<Args, String> {
         backend: "virtual".to_string(),
         reader: "Yubico".to_string(),
         model: "yk4".to_string(),
-        seed_rfc6979_slot_9a_cert: false,
-        seed_rfc5903_slot_9d_cert: false,
-        seed_slot_9c_cert: false,
-        seed_rfc6979_slot_9e_cert: false,
-        seed_chuid: false,
-        seed_slot_9a_priv: None,
-        seed_slot_9d_priv: None,
-        seed_slot_9c_priv: None,
-        seed_slot_9e_priv: None,
-        generate_slot_9a_priv: None,
-        generate_slot_9c_priv: None,
-        generate_slot_9d_priv: None,
-        seed_mgmt_key: None,
-        seed_mgmt_key_witness: None,
+        seeds: SeedSpec::default(),
+        cards: Vec::new(),
     };
+    let mut reader_flag_given = false;
+    let mut global_seed_flag: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(raw) = it.next() {
         // Accept both `--flag value` and `--flag=value` (the latter is
@@ -103,66 +129,104 @@ fn parse_args() -> Result<Args, String> {
             }
             it.next().ok_or_else(|| format!("{name} needs a value"))
         };
+        // Seed flags target the OPEN `--card` group, else the implicit
+        // single card (piggy#242). Track a sample pre-`--card` seed flag
+        // so mixing the two styles can be rejected below.
+        if args.cards.is_empty() && (key.starts_with("--seed") || key.starts_with("--generate")) {
+            global_seed_flag.get_or_insert_with(|| key.clone());
+        }
+        fn seeds(args: &mut Args) -> &mut SeedSpec {
+            match args.cards.last_mut() {
+                Some((_, s)) => s,
+                None => &mut args.seeds,
+            }
+        }
         match key.as_str() {
             "--socket" => args.socket = value("--socket")?,
             "--backend" => args.backend = value("--backend")?,
-            "--reader" => args.reader = value("--reader")?,
+            "--reader" => {
+                args.reader = value("--reader")?;
+                reader_flag_given = true;
+            }
             "--model" => args.model = value("--model")?,
-            "--seed-rfc6979-slot-9a-cert" => args.seed_rfc6979_slot_9a_cert = true,
-            "--seed-rfc5903-slot-9d-cert" => args.seed_rfc5903_slot_9d_cert = true,
-            "--seed-slot-9c-cert" => args.seed_slot_9c_cert = true,
-            "--seed-rfc6979-slot-9e-cert" => args.seed_rfc6979_slot_9e_cert = true,
-            "--seed-chuid" => args.seed_chuid = true,
+            "--card" => {
+                let name = value("--card")?;
+                if name.is_empty() {
+                    return Err("--card needs a non-empty reader name".into());
+                }
+                if args.cards.iter().any(|(n, _)| *n == name) {
+                    return Err(format!("duplicate --card name {name:?}"));
+                }
+                args.cards.push((name, SeedSpec::default()));
+            }
+            "--seed-rfc6979-slot-9a-cert" => seeds(&mut args).seed_rfc6979_slot_9a_cert = true,
+            "--seed-rfc5903-slot-9d-cert" => seeds(&mut args).seed_rfc5903_slot_9d_cert = true,
+            "--seed-slot-9c-cert" => seeds(&mut args).seed_slot_9c_cert = true,
+            "--seed-rfc6979-slot-9e-cert" => seeds(&mut args).seed_rfc6979_slot_9e_cert = true,
+            "--seed-chuid" => seeds(&mut args).seed_chuid = true,
+            "--seed-chuid-guid" => {
+                seeds(&mut args).seed_chuid_guid = Some(parse_hex_array(
+                    &value("--seed-chuid-guid")?,
+                    "--seed-chuid-guid",
+                )?)
+            }
+            "--seed-pin" => {
+                let pin = value("--seed-pin")?;
+                if pin.is_empty() || pin.len() > 8 || !pin.is_ascii() {
+                    return Err("--seed-pin: want 1..=8 ASCII chars".into());
+                }
+                seeds(&mut args).seed_pin = Some(pin);
+            }
             "--seed-slot-9c-priv" => {
-                args.seed_slot_9c_priv = Some(parse_hex_array(
+                seeds(&mut args).seed_slot_9c_priv = Some(parse_hex_array(
                     &value("--seed-slot-9c-priv")?,
                     "--seed-slot-9c-priv",
                 )?)
             }
             "--seed-slot-9a-priv" => {
-                args.seed_slot_9a_priv = Some(parse_hex_array(
+                seeds(&mut args).seed_slot_9a_priv = Some(parse_hex_array(
                     &value("--seed-slot-9a-priv")?,
                     "--seed-slot-9a-priv",
                 )?)
             }
             "--seed-slot-9d-priv" => {
-                args.seed_slot_9d_priv = Some(parse_hex_array(
+                seeds(&mut args).seed_slot_9d_priv = Some(parse_hex_array(
                     &value("--seed-slot-9d-priv")?,
                     "--seed-slot-9d-priv",
                 )?)
             }
             "--seed-slot-9e-priv" => {
-                args.seed_slot_9e_priv = Some(parse_hex_array(
+                seeds(&mut args).seed_slot_9e_priv = Some(parse_hex_array(
                     &value("--seed-slot-9e-priv")?,
                     "--seed-slot-9e-priv",
                 )?)
             }
             "--generate-slot-9a-priv" => {
-                args.generate_slot_9a_priv = Some(parse_hex_array(
+                seeds(&mut args).generate_slot_9a_priv = Some(parse_hex_array(
                     &value("--generate-slot-9a-priv")?,
                     "--generate-slot-9a-priv",
                 )?)
             }
             "--generate-slot-9c-priv" => {
-                args.generate_slot_9c_priv = Some(parse_hex_array(
+                seeds(&mut args).generate_slot_9c_priv = Some(parse_hex_array(
                     &value("--generate-slot-9c-priv")?,
                     "--generate-slot-9c-priv",
                 )?)
             }
             "--generate-slot-9d-priv" => {
-                args.generate_slot_9d_priv = Some(parse_hex_array(
+                seeds(&mut args).generate_slot_9d_priv = Some(parse_hex_array(
                     &value("--generate-slot-9d-priv")?,
                     "--generate-slot-9d-priv",
                 )?)
             }
             "--seed-mgmt-key" => {
-                args.seed_mgmt_key = Some(parse_hex_array(
+                seeds(&mut args).seed_mgmt_key = Some(parse_hex_array(
                     &value("--seed-mgmt-key")?,
                     "--seed-mgmt-key",
                 )?)
             }
             "--seed-mgmt-key-witness" => {
-                args.seed_mgmt_key_witness = Some(parse_hex_array(
+                seeds(&mut args).seed_mgmt_key_witness = Some(parse_hex_array(
                     &value("--seed-mgmt-key-witness")?,
                     "--seed-mgmt-key-witness",
                 )?)
@@ -172,6 +236,24 @@ fn parse_args() -> Result<Args, String> {
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    // `--card` group rules (piggy#242): the grouped and ungrouped styles
+    // don't mix, and only the virtual backend can serve several cards.
+    if !args.cards.is_empty() {
+        if let Some(flag) = global_seed_flag {
+            return Err(format!(
+                "{flag} appears before the first --card; with --card groups every \
+                 seed flag must follow the --card it configures"
+            ));
+        }
+        if reader_flag_given {
+            return Err(
+                "--reader and --card don't mix: each --card NAME is its reader name".into(),
+            );
+        }
+        if args.backend != "virtual" {
+            return Err("--card requires --backend virtual".into());
         }
     }
     Ok(args)
@@ -207,6 +289,7 @@ fn print_help() {
          \n\
          USAGE: fibby [--socket PATH] [--backend virtual|hardware]\n\
                       [--reader SUBSTR] [--model yk4|yk5]\n\
+                      [--card NAME [seed flags…]]…\n\
                       [--seed-rfc6979-slot-9a-cert]\n\
                       [--seed-rfc5903-slot-9d-cert] [--seed-slot-9c-cert]\n\
                       [--seed-rfc6979-slot-9e-cert] [--seed-chuid]\n\
@@ -262,6 +345,19 @@ fn print_help() {
          directly), this only takes effect when a client sends a GENERATE.\n\
          Without it, GENERATE picks a fresh random key. Virtual backend only.\n\
          \n\
+         --seed-pin ASCII sets a non-default application PIN (1-8 chars,\n\
+         0xFF-padded). Virtual backend only; per --card group.\n\
+         \n\
+         --card NAME starts a new virtual card served as its own reader\n\
+         named NAME (piggy#242): every seed flag AFTER a --card configures\n\
+         that card, and multiple --card groups make fibby serve multiple\n\
+         readers on one socket. Seed flags before the first --card, the\n\
+         --reader flag, and --backend hardware don't mix with --card.\n\
+         Cards after the first that seed a CHUID get a distinct GUID by\n\
+         default (canonical GUID, last byte = card index); override it\n\
+         per card with --seed-chuid-guid HEX32 (16 bytes, implies a\n\
+         CHUID).\n\
+         \n\
          Point clients at the socket via PCSCLITE_CSOCK_NAME.\n\
          Set FIBBY_LOG=info|debug|wire for logging."
     );
@@ -284,7 +380,7 @@ fn main() {
         let _ = std::fs::create_dir_all(dir);
     }
 
-    let backend = match make_backend(&args) {
+    let backends = match make_backends(&args) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("fibby: backend init failed: {e}");
@@ -295,73 +391,132 @@ fn main() {
     trace::emit(
         trace::INFO,
         "main",
-        &format!("backend={} socket={}", args.backend, args.socket),
+        &format!(
+            "backend={} readers={} socket={}",
+            args.backend,
+            backends.len(),
+            args.socket
+        ),
     );
-    if let Err(e) = server::serve(&args.socket, backend) {
+    if let Err(e) = server::serve(&args.socket, backends) {
         eprintln!("fibby: serve failed: {e}");
         std::process::exit(1);
     }
 }
 
-fn make_backend(args: &Args) -> Result<SharedBackend, String> {
+/// Build the reader table (piggy#242): one backend per `--card` group,
+/// or the single implicit card / hardware proxy of every pre-#242
+/// invocation.
+fn make_backends(args: &Args) -> Result<Vec<SharedBackend>, String> {
     match args.backend.as_str() {
         "virtual" => {
             let model = Model::parse_arg(&args.model)?;
-            let mut card = VirtualCard::with_model(model);
-            if args.seed_rfc6979_slot_9a_cert {
-                card.seed_rfc6979_slot_9a_cert();
+            if args.cards.is_empty() {
+                return Ok(vec![into_shared(build_virtual_card(
+                    model,
+                    &args.seeds,
+                    None,
+                    0,
+                ))]);
             }
-            if args.seed_rfc5903_slot_9d_cert {
-                card.seed_rfc5903_slot_9d_cert();
-            }
-            if args.seed_slot_9c_cert {
-                card.seed_fibby_slot_9c_cert();
-            }
-            if args.seed_rfc6979_slot_9e_cert {
-                card.seed_rfc6979_slot_9e_cert();
-            }
-            if args.seed_chuid {
-                card.seed_chuid();
-            }
-            // Explicit per-slot seeds apply after the cert bundle, so an
-            // explicit --seed-slot-9a-priv overrides the scalar the cert
-            // flag installs.
-            if let Some(s) = args.seed_slot_9a_priv {
-                card.seed_slot_9a_priv(s);
-            }
-            if let Some(s) = args.seed_slot_9d_priv {
-                card.seed_slot_9d_priv(s);
-            }
-            if let Some(s) = args.seed_slot_9c_priv {
-                card.seed_slot_9c_priv(s);
-            }
-            if let Some(s) = args.seed_slot_9e_priv {
-                card.seed_slot_9e_priv(s);
-            }
-            // GENERATE overrides: make a subsequent on-card GENERATE for the
-            // slot install this exact scalar instead of a random key.
-            if let Some(s) = args.generate_slot_9a_priv {
-                card.set_generate_override(0x9A, s);
-            }
-            if let Some(s) = args.generate_slot_9c_priv {
-                card.set_generate_override(0x9C, s);
-            }
-            if let Some(s) = args.generate_slot_9d_priv {
-                card.set_generate_override(0x9D, s);
-            }
-            if let Some(k) = args.seed_mgmt_key {
-                card.seed_mgmt_key(k);
-            }
-            if let Some(w) = args.seed_mgmt_key_witness {
-                card.seed_mgmt_key_witness(w);
-            }
-            Ok(into_shared(card))
+            args.cards
+                .iter()
+                .enumerate()
+                .map(|(idx, (name, seeds))| {
+                    Ok(into_shared(build_virtual_card(
+                        model,
+                        seeds,
+                        Some(name),
+                        idx,
+                    )))
+                })
+                .collect()
         }
-        "hardware" => make_hardware_backend(&args.reader),
+        "hardware" => Ok(vec![make_hardware_backend(&args.reader)?]),
         other => Err(format!(
             "unknown backend {other:?} (want 'virtual' or 'hardware')"
         )),
     }
+}
+
+/// Build one seeded [`VirtualCard`]. `reader_name` overrides the default
+/// reader string (each `--card` is its own reader); `card_idx` derives
+/// the default distinct GUID for cards after the first (canonical GUID,
+/// last byte = index) so multi-card setups never present two cards with
+/// the same identity unless explicitly seeded that way.
+fn build_virtual_card(
+    model: Model,
+    seeds: &SeedSpec,
+    reader_name: Option<&str>,
+    card_idx: usize,
+) -> VirtualCard {
+    let mut card = VirtualCard::with_model(model);
+    if let Some(name) = reader_name {
+        card.set_reader_name(name);
+    }
+    if seeds.seed_rfc6979_slot_9a_cert {
+        card.seed_rfc6979_slot_9a_cert();
+    }
+    if seeds.seed_rfc5903_slot_9d_cert {
+        card.seed_rfc5903_slot_9d_cert();
+    }
+    if seeds.seed_slot_9c_cert {
+        card.seed_fibby_slot_9c_cert();
+    }
+    if seeds.seed_rfc6979_slot_9e_cert {
+        card.seed_rfc6979_slot_9e_cert();
+    }
+    if seeds.seed_chuid {
+        card.seed_chuid();
+    }
+    // GUID override AFTER the cert bundles (which install the canonical
+    // CHUID as a side effect): an explicit --seed-chuid-guid always wins;
+    // a CHUID-seeded card after the first gets the derived default.
+    match seeds.seed_chuid_guid {
+        Some(guid) => card.seed_chuid_with_guid(guid),
+        None if card_idx > 0 && seeds.seeds_a_chuid() => {
+            let mut guid = fibby::virtual_card::CANONICAL_GUID;
+            guid[15] = card_idx as u8;
+            card.seed_chuid_with_guid(guid);
+        }
+        None => {}
+    }
+    if let Some(pin) = &seeds.seed_pin {
+        card.seed_pin(pin);
+    }
+    // Explicit per-slot seeds apply after the cert bundle, so an
+    // explicit --seed-slot-9a-priv overrides the scalar the cert
+    // flag installs.
+    if let Some(s) = seeds.seed_slot_9a_priv {
+        card.seed_slot_9a_priv(s);
+    }
+    if let Some(s) = seeds.seed_slot_9d_priv {
+        card.seed_slot_9d_priv(s);
+    }
+    if let Some(s) = seeds.seed_slot_9c_priv {
+        card.seed_slot_9c_priv(s);
+    }
+    if let Some(s) = seeds.seed_slot_9e_priv {
+        card.seed_slot_9e_priv(s);
+    }
+    // GENERATE overrides: make a subsequent on-card GENERATE for the
+    // slot install this exact scalar instead of a random key.
+    if let Some(s) = seeds.generate_slot_9a_priv {
+        card.set_generate_override(0x9A, s);
+    }
+    if let Some(s) = seeds.generate_slot_9c_priv {
+        card.set_generate_override(0x9C, s);
+    }
+    if let Some(s) = seeds.generate_slot_9d_priv {
+        card.set_generate_override(0x9D, s);
+    }
+    if let Some(k) = seeds.seed_mgmt_key {
+        card.seed_mgmt_key(k);
+    }
+    if let Some(w) = seeds.seed_mgmt_key_witness {
+        card.seed_mgmt_key_witness(w);
+    }
+    card
 }
 
 #[cfg(feature = "hardware-proxy")]

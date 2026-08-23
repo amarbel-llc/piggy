@@ -544,12 +544,41 @@ const TAG_CHUID: &[u8] = &[0x5F, 0xC1, 0x02];
 /// Wraps `53 39 30 19 <FASC-N> 34 10 <GUID> 35 08 <expiry> 3E 00`. The
 /// FASC-N / GUID / expiry are the throwaway card's real (public, not
 /// sensitive) values — a CHUID carries no key material.
+/// The 16-byte GUID carried by [`CANONICAL_REAL_CARD_CHUID`]'s tag-0x34
+/// TLV. Public so the multi-card CLI (piggy#242) can derive per-card
+/// default GUIDs from it (vary the last byte) without re-parsing the
+/// CHUID; pinned against the CHUID bytes by a test.
+pub const CANONICAL_GUID: [u8; 16] = [
+    0x19, 0x17, 0x55, 0xCF, 0xF3, 0x9E, 0xFE, 0x52, 0x2C, 0x07, 0xA3, 0x83, 0x27, 0x5B, 0xBE, 0xB1,
+];
+
 const CANONICAL_REAL_CARD_CHUID: &[u8] = &[
     0x53, 0x39, 0x30, 0x19, 0xD0, 0x42, 0x10, 0xD8, 0x21, 0x08, 0x6C, 0x10, 0x84, 0x21, 0x0D, 0x83,
     0x68, 0x58, 0x21, 0x08, 0x42, 0x10, 0x84, 0x21, 0xC8, 0x42, 0x10, 0xC3, 0xEB, 0x34, 0x10, 0x19,
     0x17, 0x55, 0xCF, 0xF3, 0x9E, 0xFE, 0x52, 0x2C, 0x07, 0xA3, 0x83, 0x27, 0x5B, 0xBE, 0xB1, 0x35,
     0x08, 0x32, 0x30, 0x33, 0x36, 0x30, 0x35, 0x32, 0x38, 0x3E, 0x00,
 ];
+
+/// Locate the 16-byte GUID payload inside a `53 <len> …` CHUID object by
+/// walking its one-byte-tag/one-byte-len TLVs to tag `0x34` (SP 800-73-4
+/// CHUID GUID). Returns the offset of the GUID's first byte.
+fn chuid_guid_offset(chuid: &[u8]) -> Option<usize> {
+    if chuid.len() < 2 || chuid[0] != 0x53 {
+        return None;
+    }
+    let content_len = chuid[1] as usize;
+    let mut pos = 2;
+    let end = (2 + content_len).min(chuid.len());
+    while pos + 2 <= end {
+        let (tag, len) = (chuid[pos], chuid[pos + 1] as usize);
+        pos += 2;
+        if tag == 0x34 && len == 16 && pos + 16 <= end {
+            return Some(pos);
+        }
+        pos += len;
+    }
+    None
+}
 
 impl Default for VirtualCard {
     fn default() -> Self {
@@ -722,6 +751,43 @@ impl VirtualCard {
     /// `pivy-tool init` PUT DATA would require).
     pub fn seed_chuid(&mut self) {
         self.seed_data_object(TAG_CHUID.to_vec(), CANONICAL_REAL_CARD_CHUID.to_vec());
+    }
+
+    /// Override the reader name this card's backend advertises. Needed by
+    /// the multi-card server (piggy#242): every reader in the
+    /// `CMD_GET_READERS_STATE` table must carry a distinct name, since
+    /// `SCardConnect` routes by it.
+    pub fn set_reader_name(&mut self, name: &str) {
+        self.reader_name = name.to_string();
+    }
+
+    /// Seed a non-default application PIN (1–8 ASCII chars, 0xFF-padded
+    /// per SP 800-73-4). The multi-card lanes (piggy#242/#177) use this
+    /// to give each card a DIFFERENT PIN, so per-card PIN-cache behavior
+    /// is observable. Panics on an out-of-range length — a test-fixture
+    /// construction error, not a runtime input.
+    pub fn seed_pin(&mut self, pin: &str) {
+        assert!(
+            !pin.is_empty() && pin.len() <= 8 && pin.is_ascii(),
+            "seed_pin: want 1..=8 ASCII chars"
+        );
+        let mut padded = pin.as_bytes().to_vec();
+        padded.resize(8, 0xFF);
+        self.pin = padded;
+    }
+
+    /// Like [`Self::seed_chuid`], but with `guid` substituted into the
+    /// CHUID's GUID TLV (tag `0x34`). The multi-card server needs this
+    /// (piggy#242): clients (piggy's agent, `pivy-tool list`) identify
+    /// cards by GUID, so two cards sharing the canonical CHUID would be
+    /// indistinguishable. Also re-stamps a CHUID installed earlier by one
+    /// of the `seed_*_cert` bundles — call it AFTER those.
+    pub fn seed_chuid_with_guid(&mut self, guid: [u8; 16]) {
+        let mut chuid = CANONICAL_REAL_CARD_CHUID.to_vec();
+        let off = chuid_guid_offset(&chuid)
+            .expect("CANONICAL_REAL_CARD_CHUID carries a 16-byte GUID TLV");
+        chuid[off..off + 16].copy_from_slice(&guid);
+        self.seed_data_object(TAG_CHUID.to_vec(), chuid);
     }
 
     /// Install a P-256 scalar into slot 9A (PIV Authentication, the
@@ -2144,6 +2210,56 @@ mod tests {
         assert_eq!(get, expected);
     }
 
+    /// piggy#242: `seed_chuid_with_guid` swaps only the 16-byte GUID TLV
+    /// inside the canonical CHUID; everything around it (FASC-N, expiry)
+    /// is byte-identical, and the plain `seed_chuid` still carries the
+    /// canonical GUID.
+    #[test]
+    fn seed_chuid_with_guid_substitutes_only_the_guid_tlv() {
+        let guid = [0x42u8; 16];
+        let mut custom = VirtualCard::new();
+        custom.seed_chuid_with_guid(guid);
+        let mut canonical = VirtualCard::new();
+        canonical.seed_chuid();
+
+        let got_custom = custom.transmit(&get_data_apdu(TAG_CHUID)).unwrap();
+        let got_canonical = canonical.transmit(&get_data_apdu(TAG_CHUID)).unwrap();
+        assert_eq!(got_custom.len(), got_canonical.len());
+
+        let off = chuid_guid_offset(CANONICAL_REAL_CARD_CHUID).expect("canonical CHUID has a GUID");
+        assert_eq!(&got_custom[off..off + 16], &guid);
+        assert_eq!(
+            &got_canonical[off..off + 16],
+            &CANONICAL_REAL_CARD_CHUID[off..off + 16]
+        );
+        // Everything outside the GUID TLV is untouched.
+        assert_eq!(&got_custom[..off], &got_canonical[..off]);
+        assert_eq!(&got_custom[off + 16..], &got_canonical[off + 16..]);
+    }
+
+    /// [`CANONICAL_GUID`] is a hand-copied excerpt of the canonical CHUID;
+    /// pin them together so neither can drift.
+    #[test]
+    fn canonical_guid_matches_the_chuid_guid_tlv() {
+        let off = chuid_guid_offset(CANONICAL_REAL_CARD_CHUID).unwrap();
+        assert_eq!(&CANONICAL_REAL_CARD_CHUID[off..off + 16], &CANONICAL_GUID);
+    }
+
+    #[test]
+    fn chuid_guid_offset_rejects_malformed_objects() {
+        assert_eq!(chuid_guid_offset(&[]), None);
+        assert_eq!(
+            chuid_guid_offset(&[0x30, 0x02, 0x00, 0x00]),
+            None,
+            "not 53-wrapped"
+        );
+        // A 53 object with no 0x34 TLV.
+        assert_eq!(
+            chuid_guid_offset(&[0x53, 0x04, 0x30, 0x02, 0xAA, 0xBB]),
+            None
+        );
+    }
+
     #[test]
     fn put_data_namespaces_by_tag() {
         let mut c = VirtualCard::new();
@@ -2430,6 +2546,25 @@ mod tests {
             c.transmit(&verify_status_apdu_ext()).unwrap(),
             vec![0x90, 0x00]
         );
+    }
+
+    /// piggy#242/#177: `seed_pin` replaces the factory PIN — the seeded
+    /// PIN verifies, the factory default no longer does (so multi-card
+    /// lanes can give each card a distinct PIN).
+    #[test]
+    fn seed_pin_replaces_the_factory_default() {
+        let mut c = VirtualCard::new();
+        c.seed_pin("654321");
+        // Factory default now fails (and burns a retry: 63 C2).
+        assert_eq!(
+            c.transmit(&verify_default_pin_apdu_short()).unwrap(),
+            vec![0x63, 0xC2]
+        );
+        // The seeded PIN verifies.
+        let apdu = vec![
+            0x00, 0x20, 0x00, 0x80, 0x08, 0x36, 0x35, 0x34, 0x33, 0x32, 0x31, 0xFF, 0xFF,
+        ];
+        assert_eq!(c.transmit(&apdu).unwrap(), vec![0x90, 0x00]);
     }
 
     #[test]
