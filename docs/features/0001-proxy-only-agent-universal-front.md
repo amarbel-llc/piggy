@@ -187,6 +187,54 @@ on fibby, none in the proxy), and health.
 | health verdict for a dead proxy-only backing | SKIP while ≥1 other live; FAIL when none | backings are alternatives by design; a red health on every healthy remote host trains people to ignore it | a dead backing that *should* be live going unnoticed for days — then promote it to a warning-class point |
 | stale-socket reclaim probe | `connect` → `ECONNREFUSED` ⇒ reclaim | the only unambiguous dead-listener signal; `ENOENT`/other errors are left alone | a platform whose dead unix sockets report something other than `ECONNREFUSED` |
 
+## Deferred cleanup (execute at promotion)
+
+Recorded now so the survey isn't re-run, and deliberately held until this
+record promotes from `experimental` to `accepted`. Doing them while the
+soak is still running would present the cutover as the standard state
+before it has earned that.
+
+**Do not blanket-rewrite these to "piggy-agent is the sole front."**
+`PIGGY_AUTH_SOCK` and the comments below describe a *general* robustness
+mechanism — the ambient `SSH_AUTH_SOCK` cannot be trusted to advertise
+`ecdh@joyent.com` — and that mechanism is not legacy: `ssh-agent-mux`
+still exists as a standalone tool, and 1Password / other muxes still
+front non-eng hosts. Only the wording that presents a front-end
+`ssh-agent-mux` as the *typical* deployment is dated. Soften
+"commonly/typically an ssh-agent-mux" to "an upstream agent that may not
+advertise ecdh"; keep the mechanism and its rationale intact.
+
+Reframe targets (each current-tenses a front-end mux or calls it the
+common case):
+
+- `AGENTS.md` — the `PIGGY_AUTH_SOCK` note ("rather than through an
+  ssh-agent-mux that may not").
+- `crates/piggy/src/crypt.rs` — the `PIGGY_AUTH_SOCK` decrypt-routing doc
+  comment (#123).
+- `crates/piggy/src/reencrypt.rs` — "commonly an ssh-agent-mux that may
+  not advertise ecdh".
+- `crates/piggy/src/cmd/pivy_box.rs` — "commonly an ssh-agent-mux that
+  may not".
+- `doc/piggy.1.scd` — the `PIGGY_AUTH_SOCK` entry cross-referencing
+  *ssh-agent-mux*(1) in the present tense.
+- `nix/hm/eval-test.nix` — the "mux-in-front pattern … common enough"
+  rationale for `setSshAuthSock` defaulting off. This rationale stays
+  VALID (other muxes exist); only revisit whether the eng end-state wants
+  a different default — do not delete the reasoning.
+- `justfile` — the `explore-verify-auth-sock-cache` recipe and its
+  "#119/#123 ssh-agent-mux" comments (kept under the `explore` group;
+  reword to mark the scenario historical, or retire if the #119/#123
+  regression coverage now lives elsewhere).
+- `zz-tests_bats/conformance/pivy_agent_hardware.bats` — "The user's
+  running pivy-agent / ssh-agent-mux is NEVER touched" → include
+  piggy-agent, or say "any running agents".
+
+Not gated on this promotion, noted only so the survey isn't lost:
+`CachedKey::reader_name` (`crates/piggy/src/cmd/agent/session.rs`) is dead
+in the request path (written at key enumeration, never read; carries
+`#[allow(dead_code)]`). Keep it as headroom for multi-card diagnostics
+(#242) or cut it — an independent call, not soak-gated.
+
 ## More Information
 
 - `docs/diagrams/ssh-agent-topology.puml` (rendered `.svg` beside it, `just codemod-diagrams`) — the post-cutover topology: the three ways the workstation agent reaches an is-ssh-host (only the two fixed-path ones are mux upstreams). Its legend tracks the cutover decisions: **(1) SSH_AUTH_SOCK ownership — RESOLVED 2026-08-23** (posh keeps its unconditional per-session export as the spawn-env default; eng's shell-init `SSH_AUTH_SOCK`/mux runs later and overrides it, so the mux is the sole front on eng hosts and posh sessions gain the degrade-select; posh's export is the unmanaged-host fallback — posh#161 / posh FDR 0014); **(2) the `piggy health` mux-targeting invocation — OPEN**, the soak criterion below.
