@@ -312,7 +312,12 @@ function add_identity_routes_to_designated_upstream { # @test
 function health_reports_upstream_point { # @test
   spawn_fibby --seed-rfc6979-slot-9a-cert --seed-rfc5903-slot-9d-cert --seed-chuid
   _spawn_soft_agent_with_key
-  _spawn_rust_agent_with_upstream
+  # piggy#243: the agent self-reports an ABSENT service unit via
+  # --service-name, so health point 1 probes that (systemctl show ->
+  # not-found -> SKIP) instead of the operator's real piggy-agent.service.
+  # Keeps this fibby gate hermetic w.r.t. the host unit's state — a broken
+  # host piggy-agent.service must not fail this test.
+  _spawn_rust_agent_with_upstream --service-name piggy-agent-conformance-absent.service
 
   PIGGY_AUTH_SOCK="$AGENT_SOCK" PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
     run "$PIGGY_BIN" health --format ndjson
@@ -321,6 +326,14 @@ function health_reports_upstream_point { # @test
     printf '%s\n' "$output" >&2
     tail -40 "$AGENT_LOG" >&2 || true
     tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+  # piggy#243 hermeticity guard: point 1 must SKIP (absent self-reported
+  # unit), not read the host's real service. A regression that ignored
+  # --service-name would reintroduce the host coupling.
+  printf '%s\n' "$output" | grep 'service:' | grep -q '"kind":"skip"' || {
+    echo "service point not SKIPped — health coupled to host unit (piggy#243)" >&2
+    printf '%s\n' "$output" >&2
     return 1
   }
   local line
@@ -372,7 +385,11 @@ function proxy_only_agent_fronts_forwarded_card_agent { # @test
   # proxy-only agent must never open PCSC, and if it did, it would fail
   # loudly here rather than silently borrow fibby.
   local proxy_sock="$WORKDIR/p.sock" proxy_log="$WORKDIR/proxy.log"
+  # piggy#243: self-report an ABSENT service unit so health point 1 SKIPs
+  # (not-found) rather than probing the operator's real piggy-agent.service
+  # — keeps this gate hermetic w.r.t. the host unit.
   PCSCLITE_CSOCK_NAME="$WORKDIR/no-such-pcscd" "$PIGGY_BIN" agent --proxy-only \
+    --service-name piggy-agent-conformance-absent.service \
     --upstream "dead=$WORKDIR/dead.sock" --upstream "fwd=$AGENT_SOCK" \
     -a "$proxy_sock" >"$proxy_log" 2>&1 &
   SOFT_PID=$! # reuse the teardown slot
@@ -450,6 +467,13 @@ function proxy_only_agent_fronts_forwarded_card_agent { # @test
     run "$PIGGY_BIN" health --format ndjson
   [[ $status -eq 0 ]] || {
     echo "piggy health against the proxy-only agent exited $status" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  # piggy#243 hermeticity guard: point 1 must SKIP (absent self-reported
+  # unit), not read the host's real piggy-agent.service.
+  printf '%s\n' "$output" | grep 'service:' | grep -q '"kind":"skip"' || {
+    echo "service point not SKIPped — health coupled to host unit (piggy#243)" >&2
     printf '%s\n' "$output" >&2
     return 1
   }
