@@ -599,6 +599,43 @@ let
         };
     }
     {
+      # Regression for piggy#243 (root-caused via eng#295 on a headless
+      # is-ssh-host): the
+      # launcher's socket-dir / stale-socket lines must call coreutils by
+      # absolute store path, never as bare `mkdir`/`dirname`/`rm`. A
+      # `systemd --user` service on a headless is-ssh-host has a minimal
+      # PATH with no coreutils, so bare commands exit 127 under `set -eu`
+      # and crash-loop the unit. The preamble is shared by every variant,
+      # so this card-backed case guards the proxy-only launcher too.
+      name = "launcher-socket-dir-uses-absolute-coreutils";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.guid = "ABCD1234ABCD1234ABCD1234ABCD1234";
+      };
+      check =
+        result:
+        let
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          absoluteMkdir = lib.hasInfix "/bin/mkdir -p -m 0700" text;
+          absoluteRm = lib.hasInfix "/bin/rm -f" text;
+          # dirname is dropped entirely (bash ${SOCK%/*}); a bare dirname
+          # would 127 the same way. The coreutils store path never
+          # contains that substring, so its absence is a clean signal.
+          noDirname = !(lib.hasInfix "dirname" text);
+        in
+        {
+          ok = absoluteMkdir && absoluteRm && noDirname;
+          got = {
+            inherit
+              text
+              absoluteMkdir
+              absoluteRm
+              noDirname
+              ;
+          };
+        };
+    }
+    {
       # Per-instance confirm + notifySend route to the right per-
       # instance unit, not to a sibling. Verifies the option is
       # properly threaded through the multi-instance synthesis.

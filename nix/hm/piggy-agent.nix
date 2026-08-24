@@ -151,13 +151,22 @@ let
       # set on the systemd Service.Environment / launchd
       # EnvironmentVariables instead so they're inspectable in
       # eval-test.
+      #
+      # The socket-dir / stale-socket lines call coreutils by ABSOLUTE
+      # store path (and derive the parent dir with bash ${SOCK%/*}
+      # rather than dirname) because a `systemd --user` service on a
+      # headless is-ssh-host has a minimal PATH with no coreutils on
+      # it — bare mkdir/dirname/rm exit 127 under `set -eu` and crash-
+      # loop the unit. eng#295 exposed this on the first headless
+      # is-ssh-host to run the proxy-only launcher; piggy#243. Do NOT
+      # revert to bare commands.
       launcherText = ''
         set -eu
         : "''${HOME:?HOME must be set}"
         : "''${XDG_STATE_HOME:=$HOME/.local/state}"
         SOCK="${socketPathExpr}"
-        mkdir -p -m 0700 "$(dirname "$SOCK")"
-        rm -f "$SOCK"
+        ${pkgs.coreutils}/bin/mkdir -p -m 0700 "''${SOCK%/*}"
+        ${pkgs.coreutils}/bin/rm -f "$SOCK"
         export SSH_AUTH_SOCK="$SOCK"
         exec ${binPath} ${lib.concatStringsSep " " execWords}
       '';
