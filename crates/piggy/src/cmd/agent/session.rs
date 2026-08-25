@@ -27,6 +27,22 @@ use super::upstream::UpstreamPool;
 /// wrong attempt decrements the card's PIN retry counter (piggy#142).
 const PIN_RETRY_LIMIT: u32 = 1;
 
+/// The lowest remaining PIN-retry count at which the agent will still risk a
+/// speculative `ssh-add -X` offer against a card (piggy#245). Attempting an
+/// offered PIN that is wrong for a card one try from lockout would brick it;
+/// below this the offer is dropped and the user is re-prompted instead. `2`
+/// guarantees a wrong offer never drives a card to 0 — the offer is tried at
+/// most once per card (`PinCache::offered_rejected_by`), so it can cost at
+/// most one retry, and never the last one.
+const MIN_RETRIES_FOR_OFFERED_PIN: u8 = 2;
+
+/// Whether a card's remaining-retry query permits attempting an offered PIN.
+/// A query error is treated as "not safe": without a confirmed count the
+/// agent does not risk the offer.
+fn offered_retries_ok(remaining: Result<u8, PivError>) -> bool {
+    matches!(remaining, Ok(n) if n >= MIN_RETRIES_FOR_OFFERED_PIN)
+}
+
 /// Cached key info from a PIV token (populated at startup)
 #[derive(Clone)]
 pub struct CachedKey {
@@ -83,6 +99,12 @@ pub struct PiggyAgent {
 struct AcquiredPin {
     pin: Zeroizing<String>,
     fresh: bool,
+    /// True only for the speculative `ssh-add -X` offer (piggy#245). A
+    /// prompted PIN and an offered PIN are both `fresh`, but only the
+    /// offer is guarded against driving a low-retry card toward lockout —
+    /// a prompted PIN is the user deliberately trying THIS card and must
+    /// stay usable even at one retry.
+    offered: bool,
 }
 
 impl PiggyAgent {
@@ -162,6 +184,7 @@ impl PiggyAgent {
             cache.lookup(guid).map(|(pin, source)| AcquiredPin {
                 pin,
                 fresh: source == PinSource::Offered,
+                offered: source == PinSource::Offered,
             })
         };
         if let Some(acq) = from_cache(&*self.pins.lock().await) {
@@ -192,6 +215,7 @@ impl PiggyAgent {
         Ok(AcquiredPin {
             pin: result?,
             fresh: true,
+            offered: false,
         })
     }
 
@@ -374,6 +398,14 @@ impl PiggyAgent {
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
             if let Some(acq) = &acquired {
+                // piggy#245: never spend a low-retry card's last tries on a
+                // speculative ssh-add -X offer. Drop the offer for this card
+                // (forget_pin records the rejection) and re-prompt instead;
+                // a prompted PIN is unguarded and stays usable at 1 retry.
+                if acq.offered && !offered_retries_ok(session.pin_retries_remaining()) {
+                    self.forget_pin(&key.guid).await;
+                    continue;
+                }
                 match session.verify_pin(&acq.pin) {
                     Ok(()) => self.cache_pin(&key.guid, acq).await,
                     Err(PivError::PinIncorrect { .. }) if attempt < PIN_RETRY_LIMIT => {
@@ -647,6 +679,14 @@ impl PiggyAgent {
                     .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
                 if let Some(acq) = &acquired {
+                    // piggy#245: never spend a low-retry card's last tries on
+                    // a speculative ssh-add -X offer. Drop the offer for this
+                    // card (forget_pin records the rejection) and re-prompt;
+                    // a prompted PIN is unguarded and stays usable at 1 retry.
+                    if acq.offered && !offered_retries_ok(session.pin_retries_remaining()) {
+                        self.forget_pin(&key.guid).await;
+                        continue;
+                    }
                     match session.verify_pin(&acq.pin) {
                         Ok(()) => self.cache_pin(&key.guid, acq).await,
                         Err(PivError::PinIncorrect { .. }) if attempt < PIN_RETRY_LIMIT => {
@@ -796,6 +836,14 @@ impl PiggyAgent {
                     .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
                 if let Some(acq) = &acquired {
+                    // piggy#245: never spend a low-retry card's last tries on
+                    // a speculative ssh-add -X offer. Drop the offer for this
+                    // card (forget_pin records the rejection) and re-prompt;
+                    // a prompted PIN is unguarded and stays usable at 1 retry.
+                    if acq.offered && !offered_retries_ok(session.pin_retries_remaining()) {
+                        self.forget_pin(&key.guid).await;
+                        continue;
+                    }
                     match session.verify_pin(&acq.pin) {
                         Ok(()) => self.cache_pin(&key.guid, acq).await,
                         Err(PivError::PinIncorrect { .. }) if attempt < PIN_RETRY_LIMIT => {
@@ -1168,6 +1216,26 @@ mod tests {
     use sha2::{Digest, Sha256, Sha384, Sha512};
     use ssh_agent_lib::proto::{Extension, SignRequest, signature};
     use ssh_key::public::{Ed25519PublicKey, KeyData};
+
+    /// piggy#245: the offered-PIN retry guard attempts a speculative
+    /// `ssh-add -X` offer only when the card confirms at least
+    /// `MIN_RETRIES_FOR_OFFERED_PIN` tries left; a low count or a query
+    /// error is treated as unsafe (drop the offer, re-prompt).
+    #[test]
+    fn offered_retries_ok_permits_only_a_confirmed_safe_margin() {
+        assert!(offered_retries_ok(Ok(u8::MAX)), "already verified: safe");
+        assert!(offered_retries_ok(Ok(3)), "3 retries: safe");
+        assert!(
+            offered_retries_ok(Ok(MIN_RETRIES_FOR_OFFERED_PIN)),
+            "at the floor: safe"
+        );
+        assert!(!offered_retries_ok(Ok(1)), "one from lockout: unsafe");
+        assert!(!offered_retries_ok(Ok(0)), "blocked: unsafe");
+        assert!(
+            !offered_retries_ok(Err(PivError::Apdu { sw: 0x6a80 })),
+            "query error: unsafe (no confirmed count)"
+        );
+    }
 
     // -------- Helpers --------
 

@@ -218,6 +218,23 @@ impl Apdu {
         }
     }
 
+    /// VERIFY PIN *status query* (piggy#245): a VERIFY with an empty data
+    /// field (ISO 7816-4 Case 1, encodes to the 4-byte header `00 20 00 80`).
+    /// Per SP 800-73-4 §3.2.1 this does NOT consume a retry — it returns
+    /// 9000 if the PIN is already verified in this session, else 63Cx with
+    /// the remaining retry count (or 6983 when blocked). Used to check the
+    /// remaining tries before risking an offered PIN against a card.
+    pub fn verify_pin_status() -> Self {
+        Self {
+            cla: 0x00,
+            ins: ins::VERIFY,
+            p1: 0x00,
+            p2: 0x80, // PIV PIN
+            data: Vec::new(),
+            le: None,
+        }
+    }
+
     /// Encode APDU to ISO 7816-4 byte format.
     ///
     /// Uses short encoding when data fits in a single Lc byte (≤255).

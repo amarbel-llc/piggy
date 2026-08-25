@@ -412,6 +412,26 @@ impl<'tok> PinSession<'tok> {
         }
     }
 
+    /// Query the card's remaining PIN retry counter WITHOUT consuming a try
+    /// (piggy#245): sends a VERIFY with an empty data field (SP 800-73-4
+    /// §3.2.1). Returns `u8::MAX` when the PIN is already verified in this
+    /// session (9000 — no retry concern), the packed count on 63Cx, and 0
+    /// when the PIN is blocked (6983). Any other status word is an APDU
+    /// error. Non-consuming, so it is safe to call before deciding whether
+    /// to risk an offered PIN against this card.
+    pub fn pin_retries_remaining(&mut self) -> Result<u8, PivError> {
+        let (_, sw) = self.transmit(&Apdu::verify_pin_status())?;
+        if sw.is_success() {
+            Ok(u8::MAX)
+        } else if sw.is_pin_incorrect() {
+            Ok(sw.pin_retries_remaining().unwrap_or(0))
+        } else if sw.as_u16() == 0x6983 {
+            Ok(0)
+        } else {
+            Err(PivError::Apdu { sw: sw.as_u16() })
+        }
+    }
+
     /// Sign pre-hashed data with the key in the given slot, inside this
     /// session's transaction so a concurrent PC/SC client cannot clear the
     /// PIN-verified state between `verify_pin` and this call.

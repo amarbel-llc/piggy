@@ -19,6 +19,9 @@
 #     though A's identical PIN is already cached — the old global cache
 #     would have reused it silently), with no wrong-PIN VERIFY ever
 #     hitting either card
+#   - an `ssh-add -X` offer that is WRONG for a card near PIN lockout is
+#     NEVER tried against it (piggy#245): the agent drops the risky offer
+#     and re-prompts, so a card one retry from lockout is not bricked
 #
 # Required env (supplied by the `test-bats-conformance-agent-multicard`
 # recipe):
@@ -183,6 +186,82 @@ function sign_via_each_card_prompts_pin_once_per_card { # @test
   ! grep -q "(wrong PIN)" "$FIBBY_LOG" || {
     echo "a wrong-PIN VERIFY reached a card:" >&2
     grep "(wrong PIN)" "$FIBBY_LOG" >&2
+    return 1
+  }
+}
+
+# One card, seeded to the FACTORY PIN (123456) but only ONE PIN retry from
+# lockout (piggy#246 --seed-pin-retries).
+_spawn_fibby_low_retry_card() {
+  spawn_fibby \
+    --card "Virtual PCD fibby A 00 00" --seed-rfc6979-slot-9a-cert \
+    --seed-pin-retries 1
+}
+
+# piggy#245: an `ssh-add -X` offer that is WRONG for a card one retry from
+# lockout must NOT be tried against the card — that would spend its last
+# retry and brick it. The agent detects the low retry count (a non-consuming
+# VERIFY status query), drops the offer, and re-prompts; the prompt supplies
+# the correct factory PIN, so the sign succeeds and the card is never
+# bricked. WITHOUT the guard the wrong offer locks the card and the sign
+# fails — so a green run here is the guard working.
+function offered_pin_never_bricks_a_low_retry_card { # @test
+  _spawn_fibby_low_retry_card
+  _spawn_rust_agent
+
+  SSH_AUTH_SOCK="$AGENT_SOCK" run ssh-add -L
+  [[ $status -eq 0 ]] || {
+    echo "ssh-add -L exited $status" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  printf '%s\n' "$output" >"$WORKDIR/key_a.pub"
+  grep -q 'PIV_slot_9A ' "$WORKDIR/key_a.pub" || {
+    echo "no 9A key listed" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+
+  # Offer a WRONG PIN via `ssh-add -X`. `ssh-add`'s OWN askpass supplies it
+  # (999999); the agent's askpass — configured at spawn with the factory PIN
+  # 123456 — is what answers the later on-card prompt. So the offer is wrong
+  # for this card, but a prompt would succeed.
+  SSH_AUTH_SOCK="$AGENT_SOCK" PIGGY_TEST_FIB_PIN=999999 \
+    run ssh-add -X
+  [[ $status -eq 0 ]] || {
+    echo "ssh-add -X (offer) exited $status" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+
+  # Sign with the card's 9A key: the offer is consulted first, found too
+  # risky (1 retry), dropped, and the agent re-prompts (askpass -> 123456).
+  printf 'payload-a\n' >"$WORKDIR/data_a"
+  SSH_AUTH_SOCK="$AGENT_SOCK" \
+    ssh-keygen -Y sign -f "$WORKDIR/key_a.pub" -U -n file "$WORKDIR/data_a" || {
+    echo "sign failed — the offer likely bricked the low-retry card" >&2
+    tail -40 "$AGENT_LOG" >&2 || true
+    tail -60 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  # The wrong offer was NEVER sent to the card...
+  ! grep -q "(wrong PIN)" "$FIBBY_LOG" || {
+    echo "the wrong offer reached the card (guard failed):" >&2
+    grep "(wrong PIN)" "$FIBBY_LOG" >&2
+    return 1
+  }
+  # ...and the card is not blocked.
+  ! grep -q "6983" "$FIBBY_LOG" || {
+    echo "the card was blocked (6983) — it should have been protected:" >&2
+    grep "6983" "$FIBBY_LOG" >&2
+    return 1
+  }
+  # The agent did re-prompt (proving it fell back to the prompt, not the
+  # offer), so this isn't trivially green.
+  grep -q "\[piggy-test-askpass\] supplying" "$AGENT_LOG" || {
+    echo "the agent never prompted — the fallback path did not run" >&2
+    tail -40 "$AGENT_LOG" >&2 || true
     return 1
   }
 }
