@@ -112,6 +112,11 @@ let
           "--service-name"
           serviceName
         ]
+        # Event-driven card presence (piggy#248): near-instant hot-swap via
+        # SCardGetStatusChange, layered on the poll reconcile (which stays the
+        # default and the safety net). Rust agent only; the assertions below
+        # forbid it under proxyOnly (a cardless agent has no reader to watch).
+        ++ lib.optional (isRustAgent && instanceCfg.eventDrivenCardPresence) "--event-driven"
         ++ instanceCfg.extraArgs;
 
       # The exec line's argv, ONE word per list element, joined exactly
@@ -287,6 +292,7 @@ let
       addNewKeysTo
       agentTimeout
       proxyOnly
+      eventDrivenCardPresence
       ;
   };
 
@@ -307,7 +313,8 @@ let
     || cfg.upstreams != [ ]
     || cfg.addNewKeysTo != null
     || cfg.agentTimeout != null
-    || cfg.proxyOnly;
+    || cfg.proxyOnly
+    || cfg.eventDrivenCardPresence;
 
   # Map of effective unit-name → per-instance config. Single-instance
   # mode synthesizes one entry named `piggy-agent` from the top-level
@@ -410,6 +417,18 @@ let
       {
         assertion = ic.addNewKeysTo == null || lib.any (u: u.name == ic.addNewKeysTo) ic.upstreams;
         message = "services.piggy-agent: `addNewKeysTo` must name an entry in `upstreams` (instance ${unitName}).";
+      }
+      # Event-driven card presence (piggy#248) is a Rust-agent feature and
+      # needs a card to watch — so it is rejected for the C pivy-agent and
+      # under proxyOnly (which serves no card), mirroring the binary's own
+      # `--event-driven` conflicts_with `--proxy-only`.
+      {
+        assertion = !ic.eventDrivenCardPresence || isRustAgent;
+        message = "services.piggy-agent: `eventDrivenCardPresence` requires the Rust agent (package pname \"piggy\"), not the C pivy-agent (instance ${unitName}).";
+      }
+      {
+        assertion = !ic.eventDrivenCardPresence || !ic.proxyOnly;
+        message = "services.piggy-agent: `eventDrivenCardPresence` is incompatible with `proxyOnly` — a proxy-only agent has no card to watch (instance ${unitName}).";
       }
     ]) effectiveInstances
   );
@@ -645,6 +664,23 @@ in
       '';
     };
 
+    eventDrivenCardPresence = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Opt into event-driven card presence (`--event-driven`, piggy#248):
+        the agent additionally watches PC/SC reader-state changes via
+        `SCardGetStatusChange`, reacting to a card insert/remove almost
+        instantly instead of waiting for the next {option}`probe-interval`
+        poll. The poll reconcile stays the default AND the safety net — this
+        only adds earlier reactions.
+
+        Rust agent only, and incompatible with {option}`proxyOnly` (a
+        cardless proxy agent has no reader state to watch). Default false
+        (poll-only), so existing configs are unaffected.
+      '';
+    };
+
     _launcherTexts = mkOption {
       type = types.attrsOf types.str;
       internal = true;
@@ -750,6 +786,11 @@ in
               default = false;
               description = "Proxy-only (no card, upstreams only) for this instance (eng#295).";
             };
+            eventDrivenCardPresence = mkOption {
+              type = types.bool;
+              default = false;
+              description = "Event-driven card presence (`--event-driven`, piggy#248) for this instance. Rust agent only; incompatible with `proxyOnly`.";
+            };
           };
         }
       );
@@ -818,9 +859,9 @@ in
           "services.piggy-agent: top-level options "
           + "(`guid`/`allCards`/`cak`/`slots`/`socketPath`/`askpass`"
           + "/`logFile`/`extraArgs`/`upstreams`/`addNewKeysTo`"
-          + "/`agentTimeout`/`proxyOnly`) are forbidden when `instances` "
-          + "is non-empty. Move them into `instances.<name>` "
-          + "entries.";
+          + "/`agentTimeout`/`proxyOnly`/`eventDrivenCardPresence`) are "
+          + "forbidden when `instances` is non-empty. Move them into "
+          + "`instances.<name>` entries.";
       }
     ];
 

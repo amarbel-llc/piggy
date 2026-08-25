@@ -36,6 +36,18 @@ pub trait Backend: Send {
     /// silicon) ignore it.
     fn set_present(&mut self, _present: bool) {}
 
+    /// Monotonic reader-event counter (piggy#248): bumped on each real
+    /// presence toggle, reported in `READER_STATE.eventCounter`. libpcsclite
+    /// diffs this counter (alongside the PRESENT/ABSENT flags) to decide a
+    /// reader-state change occurred, so it must actually move for an
+    /// event-driven client's `SCardGetStatusChange` to unblock on a
+    /// remove-then-reinsert (same end flags, different counter). Default 0 —
+    /// backends with no runtime presence changes (the hardware proxy) never
+    /// bump it.
+    fn event_counter(&self) -> u32 {
+        0
+    }
+
     /// ATR of the present card (empty if absent).
     fn atr(&self) -> Vec<u8>;
 

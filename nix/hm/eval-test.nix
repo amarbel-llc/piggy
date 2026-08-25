@@ -1094,6 +1094,80 @@ let
           };
         };
     }
+
+    # --- eventDrivenCardPresence (piggy#248: opt-in event-driven presence) ---
+
+    {
+      # A card-backed Rust agent with the opt-in flag: passes every assertion
+      # and emits `--event-driven` on the exec line.
+      name = "event-driven-emits-flag";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.eventDrivenCardPresence = true;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          hasEventDriven = lib.hasInfix "--event-driven" text;
+        in
+        {
+          ok = tripped == [ ] && hasEventDriven;
+          got = { inherit tripped text hasEventDriven; };
+        };
+    }
+    {
+      # Default (flag unset): the exec line carries NO --event-driven, so
+      # existing card-backed configs stay poll-only and unaffected.
+      name = "event-driven-default-omits-flag";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          noEventDriven = !(lib.hasInfix "--event-driven" text);
+        in
+        {
+          ok = tripped == [ ] && noEventDriven;
+          got = { inherit tripped noEventDriven; };
+        };
+    }
+    {
+      # eventDrivenCardPresence + proxyOnly is a config error — a cardless
+      # proxy agent has no reader state to watch (mirrors the binary's own
+      # `--event-driven` conflicts_with `--proxy-only`).
+      name = "event-driven-with-proxy-only-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.proxyOnly = true;
+        services.piggy-agent.eventDrivenCardPresence = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "fwd";
+            socketPath = "/tmp/f.sock";
+          }
+        ];
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          hasExpected = lib.any (m: lib.hasInfix "incompatible with `proxyOnly`" m) tripped;
+        in
+        {
+          ok = hasExpected;
+          got = tripped;
+        };
+    }
     {
       # proxyOnly with nothing to proxy to is a config error, not a
       # silently key-less agent.

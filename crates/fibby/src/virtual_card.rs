@@ -193,6 +193,11 @@ pub struct VirtualCard {
     /// `readers_state` reports ABSENT and `connect` is refused. Toggled at
     /// runtime via `set_present` (the control socket / `fibby ctl`).
     inserted: bool,
+    /// Monotonic reader-event counter (piggy#248), bumped on each real
+    /// presence toggle and reported in `READER_STATE.eventCounter`, so an
+    /// event-driven `SCardGetStatusChange` client observes a change even
+    /// across a remove-then-reinsert (identical end flags, moved counter).
+    event_counter: u32,
     powered: bool,
     selected_piv: bool,
     /// PIV data-object storage keyed by tag bytes (the inner `<tag>` in
@@ -624,6 +629,7 @@ impl VirtualCard {
             reader_name: "Virtual PCD piggy fibby 00 00".to_string(),
             model,
             inserted: true,
+            event_counter: 0,
             powered: false,
             selected_piv: false,
             data_objects: HashMap::new(),
@@ -886,7 +892,18 @@ impl Backend for VirtualCard {
             self.pending_mgmt_witness = None;
             self.mgmt_authenticated = false;
         }
+        // piggy#248: bump the reader-event counter on an ACTUAL toggle so an
+        // event-driven SCardGetStatusChange client sees the change (a no-op
+        // set_present — same presence — must not move it, or a spurious wake
+        // would fire on every idempotent `fibby ctl` call).
+        if present != self.inserted {
+            self.event_counter = self.event_counter.wrapping_add(1);
+        }
         self.inserted = present;
+    }
+
+    fn event_counter(&self) -> u32 {
+        self.event_counter
     }
 
     fn atr(&self) -> Vec<u8> {
@@ -2651,6 +2668,25 @@ mod tests {
             vec![0x63, 0xC3],
             "re-inserted card: PIN-verified cleared, 3 retries intact"
         );
+    }
+
+    /// piggy#248: the reader-event counter advances on each REAL presence
+    /// toggle and stays put on an idempotent `set_present` (so a redundant
+    /// `fibby ctl insert` never fires a spurious SCardGetStatusChange wake).
+    #[test]
+    fn event_counter_advances_only_on_a_real_toggle() {
+        let mut c = VirtualCard::new();
+        let start = c.event_counter();
+        // Idempotent: already present.
+        c.set_present(true);
+        assert_eq!(c.event_counter(), start, "no-op insert must not bump");
+        // Real removal, then real re-insert: two toggles, two bumps.
+        c.set_present(false);
+        assert_eq!(c.event_counter(), start + 1, "removal bumps");
+        c.set_present(false);
+        assert_eq!(c.event_counter(), start + 1, "no-op remove must not bump");
+        c.set_present(true);
+        assert_eq!(c.event_counter(), start + 2, "re-insert bumps");
     }
 
     #[test]

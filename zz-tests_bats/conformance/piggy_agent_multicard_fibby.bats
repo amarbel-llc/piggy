@@ -25,6 +25,10 @@
 #   - runtime hot-swap (piggy#244): removing a card at runtime (via the
 #     piggy#130 `fibby ctl` control socket) drops its key while a sibling
 #     survives, and re-inserting it re-adopts the key
+#   - event-driven hot-swap (piggy#248): with `--event-driven` and a LONG
+#     `--probe-interval`, a removed card's key drops far faster than the poll
+#     could manage — proving the SCardGetStatusChange event path, not the poll,
+#     drove the reconcile
 #
 # Required env (supplied by the `test-bats-conformance-agent-multicard`
 # recipe):
@@ -289,6 +293,21 @@ _wait_for_key_count() {
   printf '%s' "$n"
 }
 
+# Like `_wait_for_key_count` but with a SHORT (~8s) deadline. The piggy#248
+# event-driven test runs the agent with `--probe-interval 60`, so a key count
+# reaching its target within 8s cannot be the poll's doing — it proves the
+# SCardGetStatusChange event path drove the reconcile.
+_wait_for_key_count_fast() {
+  local want="$1" n=
+  local _
+  for _ in $(seq 1 40); do # up to ~8s at 0.2s — well under the 60s poll
+    n="$(_served_key_count)"
+    [[ "$n" -eq "$want" ]] && break
+    sleep 0.2
+  done
+  printf '%s' "$n"
+}
+
 # piggy#244: the per-card presence lifecycle. A two-card `-A` agent serves both
 # keys; removing card A at runtime (via #130 `fibby ctl`) drops A's key while
 # card B survives; re-inserting A re-adopts it. `--probe-interval 1` keeps the
@@ -355,6 +374,87 @@ function hot_swap_removes_then_readopts_a_card { # @test
   [[ "$(_wait_for_key_count 2)" -eq 2 ]] || {
     echo "card A was not re-adopted after re-insert" >&2
     tail -40 "$AGENT_LOG" >&2 || true
+    return 1
+  }
+}
+
+# piggy#248: opt-in event-driven card presence. With a LONG `--probe-interval`
+# (60s) the poll reconcile cannot react within the test window, so a removed
+# card's key dropping in a few seconds proves the SCardGetStatusChange event
+# path (fibby's WAIT_READER_STATE_CHANGE wake -> the agent's Notify -> an
+# immediate fail_limit=1 reconcile) drove it, not the poll. Re-insert re-adopts
+# just as fast. This is the end-to-end integration proof for the whole #248
+# chain; the poll default is covered by hot_swap_removes_then_readopts_a_card.
+function event_driven_drops_card_fast_under_long_poll { # @test
+  spawn_fibby --control-socket "$FIBBY_CTL" \
+    --card "Virtual PCD fibby A 00 00" --seed-rfc6979-slot-9a-cert \
+    --card "Virtual PCD fibby B 00 00" --seed-slot-9c-cert \
+    --seed-chuid-guid "$GUID_B"
+
+  local _
+  for _ in $(seq 1 50); do
+    [[ -S $FIBBY_CTL ]] && break
+    sleep 0.1
+  done
+  [[ -S $FIBBY_CTL ]] || {
+    echo "control socket never appeared" >&2
+    cat "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  # --probe-interval 60 disables the poll for the test window; --event-driven
+  # is the only thing that can make a removal fast.
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent -A --event-driven \
+    --probe-interval 60 -a "$AGENT_SOCK" >"$AGENT_LOG" 2>&1 &
+  AGENT_PID=$!
+  for _ in $(seq 1 50); do
+    [[ -S $AGENT_SOCK ]] && break
+    sleep 0.1
+  done
+  [[ -S $AGENT_SOCK ]] || {
+    echo "agent socket never appeared" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+
+  # The event source announced itself (the flag actually took effect).
+  grep -q "event-driven" "$AGENT_LOG" || {
+    echo "agent did not start the event source" >&2
+    tail -40 "$AGENT_LOG" >&2 || true
+    return 1
+  }
+
+  [[ "$(_served_key_count)" -eq 2 ]] || {
+    echo "expected 2 keys at start, got $(_served_key_count)" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+
+  # Remove card A: the event path must drop its key well under the 60s poll.
+  "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" remove "Virtual PCD fibby A 00 00" || {
+    echo "fibby ctl remove failed" >&2
+    return 1
+  }
+  [[ "$(_wait_for_key_count_fast 1)" -eq 1 ]] || {
+    echo "event path did not drop card A within ~8s (< the 60s poll)" >&2
+    tail -60 "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  # ...and it is card B (9C) that survives.
+  SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -L 2>/dev/null | grep -q 'PIV_slot_9C B2B2B2B2' || {
+    echo "the surviving key is not card B's" >&2
+    SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -L >&2 || true
+    return 1
+  }
+
+  # Re-insert card A: the event path re-adopts it, likewise fast.
+  "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" insert "Virtual PCD fibby A 00 00" || {
+    echo "fibby ctl insert failed" >&2
+    return 1
+  }
+  [[ "$(_wait_for_key_count_fast 2)" -eq 2 ]] || {
+    echo "event path did not re-adopt card A within ~8s" >&2
+    tail -60 "$AGENT_LOG" >&2 || true
     return 1
   }
 }

@@ -90,6 +90,15 @@ pub struct AgentArgs {
     #[arg(long = "probe-interval", value_name = "SECONDS")]
     pub probe_interval: Option<u64>,
 
+    /// Event-driven card presence (piggy#248, opt-in): additionally react to
+    /// PC/SC reader-state changes via SCardGetStatusChange for near-instant
+    /// hot-swap, instead of waiting for the next --probe-interval poll. The
+    /// poll reconcile stays the default AND the safety net — this only adds
+    /// earlier reactions. Rejected under --proxy-only (a cardless agent has
+    /// no reader state to watch).
+    #[arg(long = "event-driven", conflicts_with = "proxy_only")]
+    pub event_driven: bool,
+
     /// Route add_identity (ssh-add) requests to this named --upstream;
     /// without it, adds are refused (piggy's native keys live on the
     /// card — an added software key needs a software agent to go to)
@@ -472,23 +481,63 @@ async fn run_async(
             .probe_interval
             .map(std::time::Duration::from_secs)
             .unwrap_or(card::DEFAULT_PROBE_INTERVAL);
-        tracing::info!(
-            interval_secs = probe_interval.as_secs(),
-            "spawning per-card presence reconcile loop (piggy#244)"
-        );
-        tokio::spawn(card::reconcile_loop(
-            keys_handle,
-            pin_handle,
-            card_lock,
-            move || load_cached_keys_from_cards(&config).0,
-            |guid: &piggy_piv::Guid| {
-                session::reconnect_to_token(guid)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            },
-            probe_interval,
-            card::PROBE_FAIL_LIMIT,
-        ));
+        let load = move || load_cached_keys_from_cards(&config).0;
+        let verify = |guid: &piggy_piv::Guid| {
+            session::reconnect_to_token(guid)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        };
+        if cli.event_driven {
+            // piggy#248: an SCardGetStatusChange watch on a dedicated blocking
+            // thread fires this Notify on any reader-state change, triggering
+            // an immediate reconcile; the poll interval stays the safety net.
+            // `changed` carries which readers transitioned, so the reconcile
+            // collapses the debounce for only those cards.
+            let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+            let changed: card::ChangedReaders =
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+            // Bound each blocking wait so the watch periodically re-lists
+            // readers (catching a whole reader added/removed); small relative
+            // to the poll interval.
+            let bounded = probe_interval
+                .min(std::time::Duration::from_secs(5))
+                .max(std::time::Duration::from_secs(1));
+            let watch_notify = notify.clone();
+            let watch_changed = changed.clone();
+            std::thread::Builder::new()
+                .name("piggy-agent-card-events".into())
+                .spawn(move || card::run_event_source(watch_notify, watch_changed, bounded))?;
+            tracing::info!(
+                interval_secs = probe_interval.as_secs(),
+                bounded_secs = bounded.as_secs(),
+                "spawning event-driven per-card presence reconcile loop (piggy#248)"
+            );
+            tokio::spawn(card::reconcile_loop_with_events(
+                keys_handle,
+                pin_handle,
+                card_lock,
+                load,
+                verify,
+                probe_interval,
+                card::PROBE_FAIL_LIMIT,
+                notify,
+                changed,
+            ));
+        } else {
+            tracing::info!(
+                interval_secs = probe_interval.as_secs(),
+                "spawning per-card presence reconcile loop (piggy#244)"
+            );
+            tokio::spawn(card::reconcile_loop(
+                keys_handle,
+                pin_handle,
+                card_lock,
+                load,
+                verify,
+                probe_interval,
+                card::PROBE_FAIL_LIMIT,
+            ));
+        }
     }
 
     // If a command was given, run it with the agent env, then exit
@@ -701,6 +750,32 @@ mod tests {
             "live socket file must survive"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// `--event-driven` (piggy#248) parses on a card-backed agent and is
+    /// rejected together with `--proxy-only` (a cardless agent has no reader
+    /// state to watch).
+    #[test]
+    fn agent_args_event_driven_parses_and_conflicts_with_proxy_only() {
+        let ok = AgentArgs::try_parse_from(["piggy agent", "-A", "--event-driven"]).unwrap();
+        assert!(ok.event_driven);
+        assert!(
+            !AgentArgs::try_parse_from(["piggy agent", "-A"])
+                .unwrap()
+                .event_driven,
+            "default is poll-only (event_driven false)"
+        );
+        assert!(
+            AgentArgs::try_parse_from([
+                "piggy agent",
+                "--proxy-only",
+                "--upstream",
+                "fwd=/tmp/f.sock",
+                "--event-driven",
+            ])
+            .is_err(),
+            "--event-driven must conflict with --proxy-only"
+        );
     }
 
     #[test]

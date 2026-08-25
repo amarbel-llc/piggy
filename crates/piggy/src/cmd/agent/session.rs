@@ -47,7 +47,9 @@ fn offered_retries_ok(remaining: Result<u8, PivError>) -> bool {
 #[derive(Clone)]
 pub struct CachedKey {
     pub guid: Guid,
-    #[allow(dead_code)]
+    /// The PCSC reader this card is on. Used by the piggy#248 event path to
+    /// map a changed-reader name back to the served card whose debounce to
+    /// collapse (`reconcile_once`).
     pub reader_name: String,
     pub slot_id: u8,
     pub algorithm: PivAlgorithm,

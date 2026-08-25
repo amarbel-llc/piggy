@@ -3604,6 +3604,61 @@ debug-fibby-generate:
       exit 1
     fi
 
+# piggy#248 event-driven wake dev-loop: prove fibby's new WAIT_READER_STATE_CHANGE
+# (register + reader-state array + async 8-byte notify on `fibby ctl`) actually
+# unblocks a REAL SCardGetStatusChange client. fib-wait-ready is the oracle (a
+# get_status_change loop): start fibby with a card + control socket, remove the
+# card so fib-wait-ready blocks waiting for PRESENT, then `fibby ctl insert` and
+# confirm fib-wait-ready returns within its timeout. Exits 0 iff the wake works.
+# This is the authoritative empirical check on the old-mode (proto<=4005) wire
+# assumption before the agent event source (piggy#248) is built on top. Uses
+# cargo debug binaries for fast iteration. No hardware.
+#
+# validate fibby's event-driven wake against a real SCardGetStatusChange client
+[group('debug')]
+debug-fibby-get-status-change:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    cargo build -p fibby -p fib-wait-ready >/dev/null 2>&1 || {
+      echo "build failed; rerun to see why:"; cargo build -p fibby -p fib-wait-ready; exit 1; }
+    fibby_bin="$PWD/target/debug/fibby"
+    wait_bin="$PWD/target/debug/fib-wait-ready"
+    [[ -x $fibby_bin && -x $wait_bin ]] || { echo "missing debug binaries"; exit 1; }
+
+    workdir=$(mktemp -d /tmp/pgsc-XXXXXX)
+    sock="$workdir/pcscd.comm"
+    ctl="$workdir/ctl.sock"
+    log="$workdir/fibby.log"
+    reader="Virtual PCD piggy fibby 00 00"
+    fibby_pid=""
+    cleanup() { [[ -n $fibby_pid ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
+    trap cleanup EXIT
+
+    echo "=== Starting fibby (virtual, --seed-chuid, --control-socket) ==="
+    FIBBY_LOG=wire "$fibby_bin" --socket "$sock" --control-socket "$ctl" \
+      --backend virtual --seed-chuid >"$log" 2>&1 &
+    fibby_pid=$!
+    for _ in $(seq 1 50); do [[ -S $sock && -S $ctl ]] && break; sleep 0.1; done
+    [[ -S $sock && -S $ctl ]] || { echo "sockets never appeared:"; cat "$log"; exit 1; }
+
+    echo "=== remove the card so fib-wait-ready blocks on PRESENT ==="
+    "$fibby_bin" ctl --socket "$ctl" remove "$reader"
+
+    echo "=== launch fib-wait-ready (blocks in SCardGetStatusChange, 8s timeout) ==="
+    PCSCLITE_CSOCK_NAME="$sock" timeout 12 "$wait_bin" --reader "$reader" --timeout 8 &
+    wait_pid=$!
+    sleep 1.5
+
+    echo "=== insert the card -> should wake fib-wait-ready promptly ==="
+    "$fibby_bin" ctl --socket "$ctl" insert "$reader"
+
+    wait "$wait_pid"; rc=$?
+    echo "=== fib-wait-ready exit code: $rc (0 = woke on insert) ==="
+    echo "=== fibby wire trace (tail 80) ==="
+    tail -80 "$log"
+    if [[ $rc -eq 0 ]]; then echo "=== WAKE OK (piggy#248 wire confirmed) ==="; else echo "=== WAKE FAILED ==="; fi
+    exit $rc
+
 # Dump the real launchd state of the piggy-agent agent so the `piggy
 # health` macOS service probe (point 1) can be grounded in actual
 # `launchctl print` output rather than guessed. Read-only: print +

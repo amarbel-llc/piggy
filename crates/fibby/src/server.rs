@@ -24,7 +24,6 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::error::*;
@@ -39,6 +38,73 @@ pub type SharedBackend = Arc<Mutex<dyn Backend>>;
 /// slot order.
 pub type SharedBackends = Arc<Vec<SharedBackend>>;
 
+/// A live client connection's server→client write half plus its
+/// reader-state-change registration flag (piggy#248). Every write that can
+/// race the async event notification — the `WAIT_READER_STATE_CHANGE` (0x13)
+/// array reply, the `STOP_WAITING` (0x14) reply, and the notifier's 8-byte
+/// wake — goes through this one mutex, so a reply and a notification can
+/// never interleave mid-message. Regular command replies keep using the
+/// connection thread's own stream handle: they only run while `armed` is
+/// false (the client is not parked in `SCardGetStatusChange`), so they are
+/// never concurrent with a notifier write.
+struct ConnSink {
+    /// A cloned write half of the client socket. The connection thread reads
+    /// from the original handle while the control thread may write a wake
+    /// here — a Unix socket is full-duplex, so the two never conflict.
+    stream: UnixStream,
+    /// Set while the client is blocked in `SCardGetStatusChange` (an
+    /// old-mode `WAIT_READER_STATE_CHANGE` registered this fd for events).
+    /// Exactly one 8-byte notification is delivered per arm cycle — by the
+    /// notifier (on a presence change) OR by the stop handler (0x14) — and
+    /// whichever fires clears the flag so the other sends nothing.
+    armed: bool,
+}
+
+/// Registry of live client connections, so the control thread can wake any
+/// that are blocked in `SCardGetStatusChange` when a card's presence toggles
+/// (piggy#248). A connection registers itself on accept and removes itself on
+/// disconnect.
+type Waiters = Arc<Mutex<Vec<Arc<Mutex<ConnSink>>>>>;
+
+/// The old-mode (`protocol <= 4005`) async event notification / stop reply:
+/// `wait_reader_state_change { u32 timeOut; u32 rv }`, 8 bytes, `timeOut`
+/// zero. libpcsclite reads exactly these 8 bytes to end its blocked wait,
+/// then re-reads the reader-state array to learn what changed.
+fn wait_notification_bytes() -> [u8; 8] {
+    let mut out = [0u8; 8];
+    out[4..8].copy_from_slice(&SCARD_S_SUCCESS.to_le_bytes());
+    out
+}
+
+/// Wake every connection currently blocked in `SCardGetStatusChange`
+/// (piggy#248): write the 8-byte async notification to each armed sink and
+/// clear its flag (one-shot, mirroring pcscd's unregister-on-signal). The
+/// woken client re-registers with a fresh 0x13 and re-reads the state array.
+/// Best-effort: a write to a since-closed connection errors and is ignored;
+/// that connection's own thread removes it from the registry on its next
+/// read. Called by the control thread after a presence toggle.
+fn notify_waiters(waiters: &Waiters) {
+    let bytes = wait_notification_bytes();
+    let live = waiters.lock().unwrap();
+    let mut woke = 0usize;
+    for w in live.iter() {
+        let mut sink = w.lock().unwrap();
+        if sink.armed {
+            trace::hexdump("tx", &bytes);
+            let _ = write_body(&mut sink.stream, &bytes);
+            sink.armed = false;
+            woke += 1;
+        }
+    }
+    if woke > 0 {
+        trace::emit(
+            trace::DEBUG,
+            "ctl",
+            &format!("presence change: woke {woke} SCardGetStatusChange waiter(s) (piggy#248)"),
+        );
+    }
+}
+
 /// Bind `socket_path` and serve forever. Removes a stale socket file
 /// first and chmods the new one so unprivileged clients can connect
 /// (mirrors pcscd's 0777 on `pcscd.comm`). `backends` is one entry per
@@ -50,14 +116,19 @@ pub fn serve(
 ) -> std::io::Result<()> {
     assert!(!backends.is_empty(), "serve needs at least one backend");
     let backends: SharedBackends = Arc::new(backends);
+    // piggy#248: registry of live client connections so the control thread
+    // can wake any blocked in SCardGetStatusChange when presence toggles.
+    let waiters: Waiters = Arc::new(Mutex::new(Vec::new()));
     // piggy#130: an optional control socket lets a test toggle a card's
     // runtime presence (insert/remove) by reader name. Runs on its own
-    // thread over a clone of the shared backends.
+    // thread over a clone of the shared backends. It also holds the waiters
+    // registry (piggy#248) so a toggle wakes event-driven clients.
     if let Some(control_path) = control_socket {
         let control_path = control_path.to_string();
         let control_backends = Arc::clone(&backends);
+        let control_waiters = Arc::clone(&waiters);
         thread::spawn(move || {
-            if let Err(e) = serve_control(&control_path, control_backends) {
+            if let Err(e) = serve_control(&control_path, control_backends, control_waiters) {
                 trace::emit(trace::INFO, "ctl", &format!("control socket ended: {e}"));
             }
         });
@@ -81,8 +152,9 @@ pub fn serve(
         match stream {
             Ok(stream) => {
                 let backends = Arc::clone(&backends);
+                let waiters = Arc::clone(&waiters);
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, backends) {
+                    if let Err(e) = handle_client(stream, backends, waiters) {
                         trace::emit(trace::INFO, "conn", &format!("connection ended: {e}"));
                     }
                 });
@@ -96,7 +168,11 @@ pub fn serve(
 /// Serve the piggy#130 control socket: one command per connection, each of
 /// which toggles a card's runtime presence. Bound + chmod'd like the main
 /// socket so an unprivileged test can drive it.
-fn serve_control(control_path: &str, backends: SharedBackends) -> std::io::Result<()> {
+fn serve_control(
+    control_path: &str,
+    backends: SharedBackends,
+    waiters: Waiters,
+) -> std::io::Result<()> {
     let path = Path::new(control_path);
     if path.exists() {
         std::fs::remove_file(path)?;
@@ -112,8 +188,9 @@ fn serve_control(control_path: &str, backends: SharedBackends) -> std::io::Resul
         match stream {
             Ok(stream) => {
                 let backends = Arc::clone(&backends);
+                let waiters = Arc::clone(&waiters);
                 thread::spawn(move || {
-                    if let Err(e) = handle_control(stream, backends) {
+                    if let Err(e) = handle_control(stream, backends, waiters) {
                         trace::emit(trace::INFO, "ctl", &format!("control conn ended: {e}"));
                     }
                 });
@@ -126,14 +203,18 @@ fn serve_control(control_path: &str, backends: SharedBackends) -> std::io::Resul
 
 /// One control command per connection: read a line, apply it, write the
 /// reply, drop the connection (the client reads to EOF).
-fn handle_control(mut stream: UnixStream, backends: SharedBackends) -> std::io::Result<()> {
+fn handle_control(
+    mut stream: UnixStream,
+    backends: SharedBackends,
+    waiters: Waiters,
+) -> std::io::Result<()> {
     use std::io::{BufRead, BufReader, Write};
     let mut line = String::new();
     let mut reader = BufReader::new(stream.try_clone()?);
     if reader.read_line(&mut line)? == 0 {
         return Ok(());
     }
-    let reply = control_command(&backends, line.trim_end());
+    let reply = control_command(&backends, &waiters, line.trim_end());
     stream.write_all(reply.as_bytes())?;
     stream.write_all(b"\n")?;
     Ok(())
@@ -143,7 +224,7 @@ fn handle_control(mut stream: UnixStream, backends: SharedBackends) -> std::io::
 /// toggle presence (the reader name may contain spaces — everything after the
 /// first space is the name); `list` reports every reader's presence. Replies
 /// `ok[ ...]` or `err <reason>`.
-fn control_command(backends: &SharedBackends, line: &str) -> String {
+fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> String {
     let (verb, name) = match line.split_once(' ') {
         Some((v, n)) => (v, n.trim()),
         None => (line, ""),
@@ -154,7 +235,13 @@ fn control_command(backends: &SharedBackends, line: &str) -> String {
             for b in backends.iter() {
                 let mut card = b.lock().unwrap();
                 if card.reader_name() == name {
-                    card.set_present(present);
+                    card.set_present(present); // bumps event_counter on a real toggle
+                    // Release the backend lock BEFORE waking waiters so the
+                    // notifier never holds a backend lock across a socket write.
+                    drop(card);
+                    // piggy#248: wake any event-driven client blocked in
+                    // SCardGetStatusChange so it re-reads the changed state.
+                    notify_waiters(waiters);
                     return "ok".to_string();
                 }
             }
@@ -223,7 +310,36 @@ impl ConnState {
     }
 }
 
-fn handle_client(mut stream: UnixStream, backends: SharedBackends) -> std::io::Result<()> {
+fn handle_client(
+    stream: UnixStream,
+    backends: SharedBackends,
+    waiters: Waiters,
+) -> std::io::Result<()> {
+    // piggy#248: register this connection in the waiters registry so a
+    // presence toggle on the control socket can wake it if it later blocks
+    // in SCardGetStatusChange. The sink holds a cloned write half; the
+    // command loop reads from the original handle (a Unix socket is
+    // full-duplex, so a concurrent notifier write never conflicts). The
+    // registration is torn down on every exit path.
+    let sink = Arc::new(Mutex::new(ConnSink {
+        stream: stream.try_clone()?,
+        armed: false,
+    }));
+    waiters.lock().unwrap().push(Arc::clone(&sink));
+    let result = serve_connection(stream, backends, &sink);
+    waiters.lock().unwrap().retain(|w| !Arc::ptr_eq(w, &sink));
+    result
+}
+
+/// Serve one client connection: the `CMD_VERSION` handshake then the command
+/// loop. `sink` is the shared write half used only by the piggy#248 wake path
+/// (the 0x13 array reply, the 0x14 stop reply, and the async notification);
+/// every other reply writes through the connection thread's own `stream`.
+fn serve_connection(
+    mut stream: UnixStream,
+    backends: SharedBackends,
+    sink: &Arc<Mutex<ConnSink>>,
+) -> std::io::Result<()> {
     // 1) CMD_VERSION handshake. Must come first; a version-major
     //    mismatch is the sole cause of SCARD_E_SERVICE_STOPPED.
     match read_message(&mut stream)? {
@@ -302,7 +418,8 @@ fn handle_client(mut stream: UnixStream, backends: SharedBackends) -> std::io::R
             Some(Command::Transmit) => transmit(&mut stream, &body, &state, &backends)?,
             Some(Command::Status) => status(&mut stream, &body)?,
             Some(Command::Cancel) => cancel(&mut stream, &body)?,
-            Some(Command::WaitReaderStateChange) => wait_reader_state(&mut stream, &body)?,
+            Some(Command::WaitReaderStateChange) => wait_reader_state(sink, &backends)?,
+            Some(Command::StopWaitingReaderStateChange) => stop_waiting(sink)?,
             // Known commands fibby doesn't speak yet. Closing the
             // connection here is intentional: it makes the unimplemented
             // command loudly visible in the log so a wet-env agent knows
@@ -355,15 +472,19 @@ fn establish(stream: &mut UnixStream, body: &[u8], state: &mut ConnState) -> std
     )
 }
 
-fn readers_state(stream: &mut UnixStream, backends: &SharedBackends) -> std::io::Result<()> {
-    let states: Vec<ReaderState> = backends
+/// Snapshot every reader's current `READER_STATE` from its backend. Shared
+/// by `GET_READERS_STATE` (0x12) and the piggy#248 `WAIT_READER_STATE_CHANGE`
+/// (0x13) reply, so both report the same presence flags, ATR, and — critical
+/// for event-driven clients — the same monotonic `event_counter`.
+fn build_reader_states(backends: &SharedBackends) -> Vec<ReaderState> {
+    backends
         .iter()
         .map(|backend| {
             let b = backend.lock().unwrap();
             let present = b.card_present();
             ReaderState {
                 reader_name: b.reader_name(),
-                event_counter: 0,
+                event_counter: b.event_counter(),
                 reader_state: if present {
                     reader_flags::PRESENT | reader_flags::POWERED | reader_flags::NEGOTIABLE
                 } else {
@@ -378,7 +499,11 @@ fn readers_state(stream: &mut UnixStream, backends: &SharedBackends) -> std::io:
                 },
             }
         })
-        .collect();
+        .collect()
+}
+
+fn readers_state(stream: &mut UnixStream, backends: &SharedBackends) -> std::io::Result<()> {
+    let states = build_reader_states(backends);
     trace::emit(
         trace::DEBUG,
         "tx",
@@ -631,24 +756,60 @@ fn end_transaction(stream: &mut UnixStream, body: &[u8]) -> std::io::Result<()> 
     )
 }
 
-fn wait_reader_state(stream: &mut UnixStream, body: &[u8]) -> std::io::Result<()> {
-    // wait_reader_state_change { u32 timeOut; u32 rv }. Our card state
-    // is static, so honor the timeout (capped) then report success so
-    // the client re-reads states without busy-spinning. Wet-env: real
-    // hot-plug needs an event source here.
-    let timeout_ms = if body.len() >= 4 {
-        u32::from_le_bytes(body[0..4].try_into().unwrap())
+/// `CMD_WAIT_READER_STATE_CHANGE` (0x13), piggy#248. Old-mode
+/// (`protocol <= 4005`) semantics, which the pinned libpcsclite speaks: the
+/// request body is empty; the server REGISTERS this connection for events and
+/// replies the full 16-slot reader-state array (NOT an 8-byte struct — that
+/// is the async notification's shape, and replying it here desyncs an
+/// old-mode client, the bug the pre-#248 sleep-stub had). The client compares
+/// the array to its cached states; if unchanged it blocks reading the 8-byte
+/// async notification, which [`notify_waiters`] delivers on the next presence
+/// toggle. The array write and the `armed` set happen under one sink-lock so a
+/// notification can never interleave between them (a lost or corrupt wake).
+fn wait_reader_state(
+    sink: &Arc<Mutex<ConnSink>>,
+    backends: &SharedBackends,
+) -> std::io::Result<()> {
+    let array = readers_state_array(&build_reader_states(backends));
+    let mut s = sink.lock().unwrap();
+    trace::hexdump("tx", &array);
+    write_body(&mut s.stream, &array)?;
+    s.armed = true;
+    trace::emit(
+        trace::DEBUG,
+        "tx",
+        "WAIT_READER_STATE_CHANGE -> array + registered for events (piggy#248)",
+    );
+    Ok(())
+}
+
+/// `CMD_STOP_WAITING_READER_STATE_CHANGE` (0x14), piggy#248. The client sends
+/// this to end a wait (its own timeout elapsed, or it already saw the change)
+/// and reads one 8-byte reply. Mirroring pcscd: reply the 8 bytes ONLY if this
+/// fd is still registered. If [`notify_waiters`] already fired (fd disarmed),
+/// those already-queued 8 bytes satisfy the client's read, so sending a second
+/// set here would desync it — send nothing. The `armed` test-and-clear under
+/// the sink-lock guarantees exactly one 8-byte message per arm cycle.
+fn stop_waiting(sink: &Arc<Mutex<ConnSink>>) -> std::io::Result<()> {
+    let mut s = sink.lock().unwrap();
+    if s.armed {
+        let out = wait_notification_bytes();
+        trace::hexdump("tx", &out);
+        write_body(&mut s.stream, &out)?;
+        s.armed = false;
+        trace::emit(
+            trace::DEBUG,
+            "tx",
+            "STOP_WAITING -> 8-byte reply (piggy#248)",
+        );
     } else {
-        0
-    };
-    let capped = timeout_ms.min(1_000);
-    if capped > 0 {
-        thread::sleep(Duration::from_millis(capped as u64));
+        trace::emit(
+            trace::DEBUG,
+            "tx",
+            "STOP_WAITING -> already notified; no reply (piggy#248)",
+        );
     }
-    let mut out = [0u8; 8];
-    out[0..4].copy_from_slice(&timeout_ms.to_le_bytes());
-    out[4..8].copy_from_slice(&SCARD_S_SUCCESS.to_le_bytes());
-    reply(stream, &out)
+    Ok(())
 }
 
 /// ReleaseContext-style: echo the request body with a success rv in its

@@ -58,6 +58,22 @@ One agent, reacting to the cards physically present:
   adoption) and the piggy#143 CAK-swap loop (a CAK-mismatched card drops
   out of the enumeration and reconciles as a removal).
 - **`--probe-interval <secs>`** (default 10s) tunes the reconcile cadence.
+- **`--event-driven` is the opt-in near-instant path** (piggy#248). By
+  default the reconcile is poll-only (the cadence above). With
+  `--event-driven`, a dedicated blocking thread watches PC/SC reader states
+  via `SCardGetStatusChange` (`cmd/agent/card.rs::run_event_source`) and, on
+  any change, records **which** reader names transitioned (`State::CHANGED`)
+  and fires a `tokio::sync::Notify`; the reconcile loop
+  (`reconcile_loop_with_events`) then runs an **immediate** pass instead of
+  waiting for the next poll. That pass collapses the removal debounce to a
+  single miss for ONLY the cards whose reader the daemon named — dropping a
+  now-absent one at once — while every other card keeps its full
+  `PROBE_FAIL_LIMIT` blip debounce. This reader-scoping matters: an event
+  about one reader must not evict a *different* still-present card that is
+  merely blipping in enumeration (the poll path's whole reason for
+  debouncing). The poll interval keeps running as the safety net. The flag is
+  layered on the poll, never a replacement; it conflicts with `--proxy-only`
+  (a cardless agent has no reader to watch).
 - **`ssh-add -X` is lockout-safe** (piggy#245). Before verifying an
   *offered* PIN against a card, the agent queries the card's remaining PIN
   retries with a non-consuming VERIFY status query
@@ -73,7 +89,12 @@ Test substrate (fibby, piggy#130 + piggy#246):
   **`fibby ctl --socket <path> <insert|remove|list> <reader-name>`** toggles
   a card's runtime presence by reader name. A removed card reports ABSENT
   in `readers_state` and refuses `SCardConnect`, so a client's enumerate
-  omits it.
+  omits it. For the piggy#248 event path, a toggle also **wakes** any client
+  blocked in `SCardGetStatusChange`: fibby's `WAIT_READER_STATE_CHANGE`
+  (0x13) now registers the connection and replies the reader-state array
+  (old-mode `protocol <= 4005` semantics), a toggle delivers the 8-byte async
+  notification, and a per-reader `event_counter` advances so libpcsclite sees
+  the change — the substrate the `--event-driven` bats e2e drives.
 - **`--seed-pin-retries N`** starts a card near PIN lockout so the `ssh-add
   -X` guard can be tested. (fibby already modelled the retry counter +
   lockout; only the seed flag was new.)
@@ -103,10 +124,19 @@ bricked, and the sign succeeds via the correct prompt.
 
 ## Limitations
 
-- **Poll latency.** Hot-swap reaction is bounded by `--probe-interval` ×
-  the debounce (removal noticed in up to ~`3 × interval`). Instant reaction
-  via `SCardGetStatusChange` is the deferred event-driven follow-up
-  (piggy#248) — the "later" half of the hybrid decision.
+- **Poll latency (default).** With the default poll-only reconcile,
+  hot-swap reaction is bounded by `--probe-interval` × the debounce (removal
+  noticed in up to ~`3 × interval`). The opt-in `--event-driven` path
+  (piggy#248) collapses this to near-instant via `SCardGetStatusChange`;
+  poll-only stays the default so the event source is opt-in rather than a
+  behavioural change for every agent.
+- **Event source watches a stable reader set.** `run_event_source` watches
+  the readers present when its context is established and re-lists on its
+  bounded timeout; a whole *reader* plugged/unplugged mid-wait is caught by
+  the poll safety net rather than instantly. Per-reader card presence (the
+  common hot-swap) is watched directly. Watching the PnP notification reader
+  for instant whole-reader events (and the fibby `GET_READER_EVENTS` 0x15 it
+  needs) is a deferred follow-up.
 - **fibby-validated, not real hardware.** All coverage is against fibby's
   virtual multi-card. Real two-YubiKey hot-swap is the promotion soak.
 - **`ssh-add -X` residual.** The guard guarantees a wrong offer never locks
@@ -125,7 +155,8 @@ bricked, and the sign succeeds via the correct prompt.
 
 | Lever | Current | Rationale | Change signal |
 |---|---|---|---|
-| `--probe-interval` | 10s | shortened from the historic 60s single-card probe for hot-swap responsiveness; ~6× more PCSC enumerate calls, negligible on a workstation | a removed card's keys/PIN lingering too long becomes a complaint → shorten, or land event-driven (piggy#248) |
+| `--probe-interval` | 10s | shortened from the historic 60s single-card probe for hot-swap responsiveness; ~6× more PCSC enumerate calls, negligible on a workstation | a removed card's keys/PIN lingering too long becomes a complaint → shorten, or enable `--event-driven` (piggy#248) for near-instant reaction |
+| `--event-driven` | off (opt-in) | poll-only is the safe default; the event source is layered on and stays opt-in rather than a fleet-wide behavioural change | operators wanting instant hot-swap enable it; if it proves robust on real hardware, revisit making it the default |
 | `PROBE_FAIL_LIMIT` | 3 | debounce a transient enumeration blip without evicting a present card | a real card being falsely evicted under load (raise) or a removal lingering too long (lower, plus interval) |
 | `MIN_RETRIES_FOR_OFFERED_PIN` | 2 | the lockout-safe floor: a wrong offer can cost at most one retry and never the last | a card at 2 retries losing one to a mis-offer becoming a real annoyance → raise to 3, or land the targeted-offer end-state |
 
@@ -137,7 +168,10 @@ bricked, and the sign succeeds via the correct prompt.
 - amarbel-llc/piggy#247 — the umbrella epic.
 - Phase issues: #245 / #246 (`ssh-add -X` lockout safety + fibby retry
   seed), #130 (fibby runtime hot-plug substrate), #244 (the per-card
-  reconcile lifecycle), #248 (deferred event-driven reaction).
+  reconcile lifecycle), #248 (opt-in event-driven reaction via
+  `SCardGetStatusChange` — the `--event-driven` flag + fibby's
+  `WAIT_READER_STATE_CHANGE` wake; the "later" half of the hybrid decision,
+  now landed).
 - Prior art it builds on: #177 (per-card PIN cache), #214 (card lock),
   #175 (0-key recovery, subsumed), #143 (CAK swap, subsumed), #179 / #178
   (sign-path gate + refusal logging — `piggy health --sign-test` already
