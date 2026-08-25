@@ -453,7 +453,12 @@ mod tests {
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         use std::sync::{Mutex, OnceLock};
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        // Poison-tolerant: the guarded region only mutates env, so a panic in
+        // one test leaves no invariant broken — recover the guard rather than
+        // cascade a PoisonError into every sibling test sharing this lock.
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]

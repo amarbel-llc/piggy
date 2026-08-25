@@ -193,11 +193,29 @@ fn cache_disabled() -> bool {
 /// PATH-discovery convention already used by `age-plugin-piggy`.
 fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
     let binary = format!("pigpen-resolver-{kind}");
-    let output = std::process::Command::new(&binary)
-        .arg("resolve")
-        .arg(locator)
-        .output()
-        .map_err(|e| format!("{binary} not found on PATH: {e}"))?;
+    // Retry on ETXTBSY ("Text file busy", os error 26): on Linux, exec fails
+    // this way while any process holds the target file open for writing. In a
+    // multi-threaded program a concurrent fork can transiently inherit a
+    // just-written executable's write fd across the fork→exec window — the
+    // parallel test suite trips this (a resolver written and exec'd while
+    // another thread forks). A short bounded retry rides it out. A stable
+    // installed resolver never hits it, so production behaviour is unchanged.
+    const MAX_RETRIES: u32 = 5;
+    let mut attempts = 0u32;
+    let output = loop {
+        match std::process::Command::new(&binary)
+            .arg("resolve")
+            .arg(locator)
+            .output()
+        {
+            Ok(out) => break out,
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempts < MAX_RETRIES => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(format!("{binary} not found on PATH: {e}")),
+        }
+    };
     if !output.status.success() {
         return Err(format!(
             "{binary} resolve {locator} exited {}: {}",
@@ -219,7 +237,13 @@ mod tests {
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         use std::sync::{Mutex, OnceLock};
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        // Poison-tolerant: the guarded region only mutates PATH, so a panic in
+        // one test (e.g. a transient exec failure) leaves no invariant broken —
+        // recover the guard instead of cascading a PoisonError into every
+        // sibling test that shares this lock.
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn tempdir() -> PathBuf {
