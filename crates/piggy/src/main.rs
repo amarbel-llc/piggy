@@ -33,7 +33,7 @@
 //!
 //! The Rust `agent` re-implementation (`cmd::agent`) is ON the dispatch
 //! path: `piggy agent` runs it (piggy#58), prompting for the PIN on demand
-//! via SSH_ASKPASS and clearing it on a card-presence probe loop (piggy#59),
+//! via SSH_ASKPASS and clearing it via the per-card presence reconcile loop (piggy#244),
 //! atop the PC/SC transactions from #56. This is a clean cutover to the Rust
 //! flag surface (e.g. `-i` prints keys and exits here, unlike C's foreground
 //! mode); the C `pivy-agent` and its C-only features (`-C`, `-K`,
@@ -637,8 +637,8 @@ fn main() {
         })),
 
         // `agent` runs the Rust impl (piggy#58): a PIV-backed SSH agent that
-        // prompts for the PIN on demand via SSH_ASKPASS and clears it on a
-        // card-presence probe loop (piggy#59). Unlike `box`, this is a clean
+        // prompts for the PIN on demand via SSH_ASKPASS and clears it via the
+        // per-card presence reconcile loop (piggy#244). Unlike `box`, this is a clean
         // cutover — `piggy agent` uses the Rust flag surface, not the C one
         // (notably `-i` = print-keys-and-exit here, NOT C's foreground mode).
         // C-only features (confirm `-C`, `-K` CAK, `install-service`, …) stay

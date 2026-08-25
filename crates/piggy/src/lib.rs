@@ -12,7 +12,7 @@
 //!   it doesn't handle — piggy#57), restoring agentless direct-PCSC
 //!   decrypt. `cmd::agent` backs `piggy agent` (piggy#58/#59): a
 //!   PIV-backed SSH agent with on-demand SSH_ASKPASS PIN entry and a
-//!   card-presence probe loop, atop the #56 PC/SC transactions. See
+//!   per-card presence reconcile loop, atop the #56 PC/SC transactions. See
 //!   the head of `main.rs` for the dispatch rationale.
 
 //! - `ecdsa_sig` — shared DER ECDSA signature reframing (DER → raw

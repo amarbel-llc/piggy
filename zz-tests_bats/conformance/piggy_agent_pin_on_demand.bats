@@ -185,7 +185,7 @@ function c_pivy_agent_prompts_for_pin_on_demand_via_askpass { # @test
 # match the C baseline — prompt for the PIN on demand and complete the
 # slot-9D decrypt — AND additionally propagate request context to the
 # askpass child via PIGGY_ASKPASS_CONTEXT (#33/#35), plus spawn the
-# card-presence probe loop (piggy#59).
+# per-card presence reconcile loop (piggy#244).
 function rust_piggy_agent_prompts_on_demand_and_propagates_context { # @test
   _pin_on_demand_scenario "$PIGGY_BIN" agent -A
 
@@ -198,9 +198,10 @@ function rust_piggy_agent_prompts_on_demand_and_propagates_context { # @test
     return 1
   }
 
-  # piggy#59: the card-presence probe loop is spawned for the primary card.
-  grep -q "spawning card-presence probe loop" "$AGENT_LOG" || {
-    echo "Rust agent did not spawn the card-presence probe loop" >&2
+  # piggy#244: the per-card presence reconcile loop is spawned (it clears a
+  # removed card's PIN and adopts a newly-inserted one).
+  grep -q "spawning per-card presence reconcile loop" "$AGENT_LOG" || {
+    echo "Rust agent did not spawn the per-card presence reconcile loop" >&2
     cat "$AGENT_LOG" >&2 || true
     return 1
   }

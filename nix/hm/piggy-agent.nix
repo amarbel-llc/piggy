@@ -630,7 +630,7 @@ in
       description = ''
         Run this agent in proxy-only mode (`--proxy-only`, eng#295):
         it serves NO native PIV keys — never opens PCSC, spawns no
-        card probe/recovery loop — and proxies everything to
+        card presence reconcile loop — and proxies everything to
         {option}`upstreams`. This is the remote-host role: on a
         cardless is-ssh-host, one stable piggy-agent socket fronts
         the forwarded, card-backed agents (e.g. the RemoteForward'd

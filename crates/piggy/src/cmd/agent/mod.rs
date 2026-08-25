@@ -97,7 +97,7 @@ pub struct AgentArgs {
     pub add_new_keys_to: Option<String>,
 
     /// Proxy-only mode: serve NO native PIV keys — never touch PCSC, no
-    /// card probe/recovery loops — and proxy everything to the
+    /// card presence reconcile loop — and proxy everything to the
     /// --upstream agents. The remote-host role (eng#295): one stable
     /// piggy-agent socket fronting the forwarded, card-backed agents.
     /// Requires at least one --upstream; card-selection flags are
@@ -236,7 +236,7 @@ pub fn run(full_argv: Vec<String>) -> i32 {
     };
 
     // The full set of inputs that select and shape the key load. Bundled so the
-    // piggy#175 recovery loop can re-run the exact same enumeration later.
+    // piggy#244 reconcile loop can re-run the exact same enumeration each tick.
     let config = KeyLoadConfig {
         guid_filter: cli.guid.clone(),
         all_cards: cli.all_cards,
@@ -295,8 +295,8 @@ pub fn run(full_argv: Vec<String>) -> i32 {
 
 /// Inputs that select and shape the PIV key load (and re-load): the GUID
 /// filter, all-cards mode, the optional slot whitelist, and the optional CAK.
-/// Owned by `run` and threaded into `run_async` so the piggy#175 recovery loop
-/// can re-run the identical enumeration after a transient startup PCSC failure.
+/// Owned by `run` and threaded into `run_async` so the piggy#244 reconcile loop
+/// can re-run the identical enumeration each tick.
 #[derive(Clone)]
 struct KeyLoadConfig {
     guid_filter: Option<String>,
@@ -307,7 +307,7 @@ struct KeyLoadConfig {
 
 /// Enumerate PIV tokens, logging and degrading to an empty list on any PCSC
 /// failure (no card, denied access, cold pcscd). Both the startup load and the
-/// recovery loop go through here so they treat a transient failure identically.
+/// reconcile loop go through here so they treat a transient failure identically.
 fn enumerate_tokens_or_empty() -> Vec<piggy_piv::PivToken> {
     match piggy_piv::PivContext::new() {
         Ok(ctx) => ctx.enumerate_tokens().unwrap_or_else(|e| {
@@ -472,6 +472,10 @@ async fn run_async(
             .probe_interval
             .map(std::time::Duration::from_secs)
             .unwrap_or(card::DEFAULT_PROBE_INTERVAL);
+        tracing::info!(
+            interval_secs = probe_interval.as_secs(),
+            "spawning per-card presence reconcile loop (piggy#244)"
+        );
         tokio::spawn(card::reconcile_loop(
             keys_handle,
             pin_handle,

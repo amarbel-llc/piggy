@@ -145,9 +145,9 @@ impl PiggyAgent {
         self.pins.clone()
     }
 
-    /// Shared handle to the #213 card lock, so the background probe and
-    /// recovery loops can `try_lock` it around their own card access and
-    /// never race an in-flight request (piggy#214).
+    /// Shared handle to the #213 card lock, so the background reconcile loop
+    /// (piggy#244) can `try_lock` it around its own card access and never race
+    /// an in-flight request (piggy#214).
     pub fn card_lock_handle(&self) -> Arc<Mutex<()>> {
         self.card_lock.clone()
     }
