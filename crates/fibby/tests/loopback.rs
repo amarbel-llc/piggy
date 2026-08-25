@@ -60,7 +60,7 @@ fn start_server(path: &std::path::Path, cards: Vec<VirtualCard>) {
         .collect();
     let serve_path = path.to_path_buf();
     thread::spawn(move || {
-        let _ = server::serve(serve_path.to_str().unwrap(), backends);
+        let _ = server::serve(serve_path.to_str().unwrap(), backends, None);
     });
     // Wait for the socket to appear.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -337,4 +337,134 @@ fn two_readers_route_by_name_over_socket() {
     assert_eq!(bad.h_card, -1);
 
     let _ = std::fs::remove_file(&path);
+}
+
+// --- runtime hot-plug (piggy#130) ----------------------------------------
+
+fn start_server_with_control(
+    path: &std::path::Path,
+    control: &std::path::Path,
+    cards: Vec<VirtualCard>,
+) {
+    let backends = cards
+        .into_iter()
+        .map(|c| Arc::new(Mutex::new(c)) as server::SharedBackend)
+        .collect();
+    let serve_path = path.to_path_buf();
+    let control_path = control.to_path_buf();
+    thread::spawn(move || {
+        let _ = server::serve(
+            serve_path.to_str().unwrap(),
+            backends,
+            Some(control_path.to_str().unwrap()),
+        );
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(path.exists() && control.exists()) {
+        assert!(Instant::now() < deadline, "server sockets never appeared");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Send one control command to fibby's control socket and return its reply.
+fn ctl_command(control: &std::path::Path, command: &str) -> String {
+    let mut s = UnixStream::connect(control).unwrap();
+    writeln!(s, "{command}").unwrap();
+    let mut reply = String::new();
+    s.read_to_string(&mut reply).unwrap();
+    reply
+}
+
+/// Read slot 0 of GET_READERS_STATE.
+fn first_reader(c: &mut Client) -> ReaderState {
+    c.send(Command::GetReadersState, &[]);
+    let arr = c.recv(MAX_READERS_CONTEXTS * ReaderState::WIRE_LEN);
+    ReaderState::from_bytes(&arr[0..ReaderState::WIRE_LEN]).unwrap()
+}
+
+/// piggy#130 end to end over real sockets: the control socket toggles a
+/// card's runtime presence. After `remove`, GET_READERS_STATE reports the
+/// reader ABSENT and CONNECT is refused as no-card; `insert` restores a
+/// present, connectable card.
+#[test]
+fn control_socket_toggles_card_presence() {
+    let path = unique_socket_path();
+    let control = unique_socket_path();
+    start_server_with_control(&path, &control, vec![VirtualCard::new()]);
+    let mut c = Client {
+        stream: UnixStream::connect(&path).unwrap(),
+    };
+
+    // Handshake + context.
+    c.send(
+        Command::Version,
+        &VersionStruct {
+            major: PROTOCOL_VERSION_MAJOR,
+            minor: PROTOCOL_VERSION_MINOR,
+            rv: 0,
+        }
+        .to_bytes(),
+    );
+    let _ = c.recv(VersionStruct::WIRE_LEN);
+    c.send(
+        Command::EstablishContext,
+        &EstablishStruct {
+            dw_scope: scope::SYSTEM,
+            h_context: 0,
+            rv: 0,
+        }
+        .to_bytes(),
+    );
+    let est = EstablishStruct::from_bytes(&c.recv(EstablishStruct::WIRE_LEN)).unwrap();
+
+    // Present at start; capture the reader name.
+    let slot0 = first_reader(&mut c);
+    assert_ne!(
+        slot0.reader_state & reader_flags::PRESENT,
+        0,
+        "present at start"
+    );
+    let reader = slot0.reader_name.clone();
+
+    // Remove -> ABSENT, and CONNECT refused as no-card.
+    assert!(
+        ctl_command(&control, &format!("remove {reader}")).starts_with("ok"),
+        "remove should succeed"
+    );
+    let after = first_reader(&mut c);
+    assert_eq!(
+        after.reader_state & reader_flags::PRESENT,
+        0,
+        "absent after remove"
+    );
+    assert_ne!(
+        after.reader_state & reader_flags::ABSENT,
+        0,
+        "ABSENT flag set"
+    );
+    let con = c.connect_reader(est.h_context, &reader);
+    assert_eq!(
+        con.rv,
+        fibby::error::SCARD_E_NO_SMARTCARD,
+        "connect to a removed card is refused"
+    );
+    assert_eq!(con.h_card, -1);
+
+    // Re-insert -> present + connectable again.
+    assert!(
+        ctl_command(&control, &format!("insert {reader}")).starts_with("ok"),
+        "insert should succeed"
+    );
+    let back = first_reader(&mut c);
+    assert_ne!(
+        back.reader_state & reader_flags::PRESENT,
+        0,
+        "present after re-insert"
+    );
+    let con = c.connect_reader(est.h_context, &reader);
+    assert_eq!(con.rv, 0, "connect after re-insert succeeds");
+    assert!(con.h_card > 0);
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&control);
 }

@@ -43,9 +43,25 @@ pub type SharedBackends = Arc<Vec<SharedBackend>>;
 /// first and chmods the new one so unprivileged clients can connect
 /// (mirrors pcscd's 0777 on `pcscd.comm`). `backends` is one entry per
 /// reader; it must be non-empty.
-pub fn serve(socket_path: &str, backends: Vec<SharedBackend>) -> std::io::Result<()> {
+pub fn serve(
+    socket_path: &str,
+    backends: Vec<SharedBackend>,
+    control_socket: Option<&str>,
+) -> std::io::Result<()> {
     assert!(!backends.is_empty(), "serve needs at least one backend");
     let backends: SharedBackends = Arc::new(backends);
+    // piggy#130: an optional control socket lets a test toggle a card's
+    // runtime presence (insert/remove) by reader name. Runs on its own
+    // thread over a clone of the shared backends.
+    if let Some(control_path) = control_socket {
+        let control_path = control_path.to_string();
+        let control_backends = Arc::clone(&backends);
+        thread::spawn(move || {
+            if let Err(e) = serve_control(&control_path, control_backends) {
+                trace::emit(trace::INFO, "ctl", &format!("control socket ended: {e}"));
+            }
+        });
+    }
     let path = Path::new(socket_path);
     if path.exists() {
         std::fs::remove_file(path)?;
@@ -75,6 +91,93 @@ pub fn serve(socket_path: &str, backends: Vec<SharedBackend>) -> std::io::Result
         }
     }
     Ok(())
+}
+
+/// Serve the piggy#130 control socket: one command per connection, each of
+/// which toggles a card's runtime presence. Bound + chmod'd like the main
+/// socket so an unprivileged test can drive it.
+fn serve_control(control_path: &str, backends: SharedBackends) -> std::io::Result<()> {
+    let path = Path::new(control_path);
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777))?;
+    trace::emit(
+        trace::INFO,
+        "ctl",
+        &format!("fibby control socket on {control_path}"),
+    );
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let backends = Arc::clone(&backends);
+                thread::spawn(move || {
+                    if let Err(e) = handle_control(stream, backends) {
+                        trace::emit(trace::INFO, "ctl", &format!("control conn ended: {e}"));
+                    }
+                });
+            }
+            Err(e) => trace::emit(trace::INFO, "ctl", &format!("control accept error: {e}")),
+        }
+    }
+    Ok(())
+}
+
+/// One control command per connection: read a line, apply it, write the
+/// reply, drop the connection (the client reads to EOF).
+fn handle_control(mut stream: UnixStream, backends: SharedBackends) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut line = String::new();
+    let mut reader = BufReader::new(stream.try_clone()?);
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(());
+    }
+    let reply = control_command(&backends, line.trim_end());
+    stream.write_all(reply.as_bytes())?;
+    stream.write_all(b"\n")?;
+    Ok(())
+}
+
+/// Apply one control command. `insert <reader-name>` / `remove <reader-name>`
+/// toggle presence (the reader name may contain spaces — everything after the
+/// first space is the name); `list` reports every reader's presence. Replies
+/// `ok[ ...]` or `err <reason>`.
+fn control_command(backends: &SharedBackends, line: &str) -> String {
+    let (verb, name) = match line.split_once(' ') {
+        Some((v, n)) => (v, n.trim()),
+        None => (line, ""),
+    };
+    match verb {
+        "insert" | "remove" => {
+            let present = verb == "insert";
+            for b in backends.iter() {
+                let mut card = b.lock().unwrap();
+                if card.reader_name() == name {
+                    card.set_present(present);
+                    return "ok".to_string();
+                }
+            }
+            format!("err no such reader: {name}")
+        }
+        "list" => {
+            let mut out = String::from("ok");
+            for b in backends.iter() {
+                let card = b.lock().unwrap();
+                out.push_str(&format!(
+                    "\n{}\t{}",
+                    card.reader_name(),
+                    if card.card_present() {
+                        "present"
+                    } else {
+                        "absent"
+                    }
+                ));
+            }
+            out
+        }
+        other => format!("err unknown command: {other}"),
+    }
 }
 
 /// Per-connection handle bookkeeping. Handles are minted monotonically;
@@ -321,6 +424,19 @@ fn connect(
         resp.rv = SCARD_E_UNKNOWN_READER;
         return reply(stream, &resp.to_bytes());
     };
+    // piggy#130: a removed card is a known reader with no card — refuse the
+    // connect so the client's enumerate omits it (as pcscd would).
+    if !backends[idx].lock().unwrap().card_present() {
+        trace::emit(
+            trace::DEBUG,
+            "tx",
+            &format!("CONNECT '{}' -> no card (removed)", req.sz_reader),
+        );
+        resp.h_card = -1;
+        resp.dw_active_protocol = 0;
+        resp.rv = SCARD_E_NO_SMARTCARD;
+        return reply(stream, &resp.to_bytes());
+    }
     match backends[idx]
         .lock()
         .unwrap()

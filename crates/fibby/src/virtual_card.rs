@@ -188,6 +188,11 @@ impl Model {
 pub struct VirtualCard {
     reader_name: String,
     model: Model,
+    /// Runtime presence (piggy#130). `false` models the card physically
+    /// removed from its reader: `card_present()` returns it, so
+    /// `readers_state` reports ABSENT and `connect` is refused. Toggled at
+    /// runtime via `set_present` (the control socket / `fibby ctl`).
+    inserted: bool,
     powered: bool,
     selected_piv: bool,
     /// PIV data-object storage keyed by tag bytes (the inner `<tag>` in
@@ -618,6 +623,7 @@ impl VirtualCard {
         VirtualCard {
             reader_name: "Virtual PCD piggy fibby 00 00".to_string(),
             model,
+            inserted: true,
             powered: false,
             selected_piv: false,
             data_objects: HashMap::new(),
@@ -866,7 +872,21 @@ impl Backend for VirtualCard {
     }
 
     fn card_present(&self) -> bool {
-        true // the virtual card is always inserted
+        self.inserted
+    }
+
+    fn set_present(&mut self, present: bool) {
+        // piggy#130: model a runtime insert/remove. A power-cycle's worth of
+        // session state is dropped on removal, matching disconnect() — a
+        // re-inserted card starts cold (no PIN-verified, not powered).
+        if !present && self.inserted {
+            self.powered = false;
+            self.selected_piv = false;
+            self.pin_verified = false;
+            self.pending_mgmt_witness = None;
+            self.mgmt_authenticated = false;
+        }
+        self.inserted = present;
     }
 
     fn atr(&self) -> Vec<u8> {
@@ -2606,6 +2626,30 @@ mod tests {
             c.transmit(&wrong).unwrap(),
             vec![0x69, 0x83],
             "wrong PIN at 1 retry blocks the card"
+        );
+    }
+
+    /// piggy#130: `set_present` toggles runtime presence; removal drops a
+    /// power-cycle's worth of session state (PIN-verified), like disconnect,
+    /// while the retry counter persists.
+    #[test]
+    fn set_present_toggles_presence_and_clears_verified_on_removal() {
+        let mut c = VirtualCard::new();
+        assert!(c.card_present(), "fresh card is present");
+        assert_eq!(
+            c.transmit(&verify_default_pin_apdu_short()).unwrap(),
+            vec![0x90, 0x00],
+            "PIN verifies"
+        );
+        c.set_present(false);
+        assert!(!c.card_present(), "removed card is absent");
+        c.set_present(true);
+        assert!(c.card_present(), "re-inserted card is present");
+        // Cold after re-insert: not verified, retries intact.
+        assert_eq!(
+            c.transmit(&verify_status_apdu_ext()).unwrap(),
+            vec![0x63, 0xC3],
+            "re-inserted card: PIN-verified cleared, 3 retries intact"
         );
     }
 

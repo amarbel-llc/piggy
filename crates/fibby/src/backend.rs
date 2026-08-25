@@ -29,6 +29,13 @@ pub trait Backend: Send {
     /// Whether a card is currently present in the reader.
     fn card_present(&self) -> bool;
 
+    /// Toggle runtime presence (piggy#130): a virtual backend models the
+    /// card being removed from / re-inserted into the reader, driven by the
+    /// control socket. Default no-op — backends whose presence is not
+    /// runtime-controllable (e.g. the hardware proxy, which re-probes real
+    /// silicon) ignore it.
+    fn set_present(&mut self, _present: bool) {}
+
     /// ATR of the present card (empty if absent).
     fn atr(&self) -> Vec<u8>;
 

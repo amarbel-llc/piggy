@@ -44,6 +44,9 @@ struct Args {
     /// seed flags before the first `--card`, with `--reader`, and with
     /// the hardware backend.
     cards: Vec<(String, SeedSpec)>,
+    /// Optional control socket (piggy#130) for runtime insert/remove of a
+    /// card by reader name, driven by `fibby ctl`. Unset by default.
+    control_socket: Option<String>,
 }
 
 /// One virtual card's seed configuration (the per-card slice of the CLI).
@@ -116,6 +119,7 @@ fn parse_args() -> Result<Args, String> {
         model: "yk4".to_string(),
         seeds: SeedSpec::default(),
         cards: Vec::new(),
+        control_socket: None,
     };
     let mut reader_flag_given = false;
     let mut global_seed_flag: Option<String> = None;
@@ -147,6 +151,7 @@ fn parse_args() -> Result<Args, String> {
         }
         match key.as_str() {
             "--socket" => args.socket = value("--socket")?,
+            "--control-socket" => args.control_socket = Some(value("--control-socket")?),
             "--backend" => args.backend = value("--backend")?,
             "--reader" => {
                 args.reader = value("--reader")?;
@@ -380,6 +385,13 @@ fn main() {
     proto_sanity();
     trace::init_from_env();
 
+    // piggy#130: `fibby ctl --socket <ctl-path> <insert|remove|list> [<reader>]`
+    // is the control client — it talks to a running fibby's control socket to
+    // toggle a card's runtime presence.
+    if std::env::args().nth(1).as_deref() == Some("ctl") {
+        std::process::exit(run_ctl_client());
+    }
+
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -411,10 +423,61 @@ fn main() {
             args.socket
         ),
     );
-    if let Err(e) = server::serve(&args.socket, backends) {
+    if let Err(e) = server::serve(&args.socket, backends, args.control_socket.as_deref()) {
         eprintln!("fibby: serve failed: {e}");
         std::process::exit(1);
     }
+}
+
+/// piggy#130 control client: connect to a running fibby's `--control-socket`,
+/// send one command, print the reply. Returns a process exit code (0 on an
+/// `ok` reply). Usage: `fibby ctl --socket <path> <insert|remove|list>
+/// [<reader-name>]` — the reader name may contain spaces (quoted or not).
+fn run_ctl_client() -> i32 {
+    use std::io::{Read, Write};
+    let mut it = std::env::args().skip(2); // past argv[0] and "ctl"
+    let mut socket: Option<String> = None;
+    let mut rest: Vec<String> = Vec::new();
+    while let Some(a) = it.next() {
+        if a == "--socket" {
+            match it.next() {
+                Some(v) => socket = Some(v),
+                None => {
+                    eprintln!("fibby ctl: --socket needs a value");
+                    return 2;
+                }
+            }
+        } else {
+            rest.push(a);
+        }
+    }
+    let Some(socket) = socket else {
+        eprintln!("fibby ctl: --socket <control-path> is required");
+        return 2;
+    };
+    if rest.is_empty() {
+        eprintln!("fibby ctl: want <insert|remove|list> [<reader-name>]");
+        return 2;
+    }
+    let command = rest.join(" ");
+    let mut stream = match std::os::unix::net::UnixStream::connect(&socket) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fibby ctl: connect {socket}: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = writeln!(stream, "{command}") {
+        eprintln!("fibby ctl: write: {e}");
+        return 1;
+    }
+    let mut reply = String::new();
+    if let Err(e) = stream.read_to_string(&mut reply) {
+        eprintln!("fibby ctl: read: {e}");
+        return 1;
+    }
+    print!("{reply}");
+    if reply.starts_with("ok") { 0 } else { 1 }
 }
 
 /// Build the reader table (piggy#242): one backend per `--card` group,
