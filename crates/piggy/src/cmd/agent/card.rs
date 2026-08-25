@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, Instant, sleep};
 
 use pcsc::{Context, ReaderState, Scope, State};
 
@@ -27,6 +27,20 @@ pub const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 /// debounce so a single transient enumeration blip does not evict a card.
 pub const PROBE_FAIL_LIMIT: u32 = 3;
 
+/// How long after launch the reconcile loop polls at the fast startup cadence
+/// while it is still serving 0 keys (piggy#251). Covers the window during
+/// which a deploy's *outgoing* agent may still hold the card, so the new
+/// agent starts keyless; once past this it settles to the steady interval
+/// regardless (a genuinely cardless non-proxy agent must not fast-poll
+/// forever).
+pub const STARTUP_FAST_WINDOW: Duration = Duration::from_secs(30);
+
+/// The fast poll cadence used during [`STARTUP_FAST_WINDOW`] while keyless
+/// (piggy#251), so a card contended at launch is adopted within ~1s of
+/// becoming available instead of up to a full interval later. Always capped by
+/// the configured interval (see [`next_reconcile_delay`]).
+pub const STARTUP_FAST_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Reader names whose card presence the event source (piggy#248) has observed
 /// change since the last reconcile pass. Shared from the sync watch thread to
 /// the async reconcile loop; the loop drains it on an event wake and collapses
@@ -39,9 +53,11 @@ pub type ChangedReaders = Arc<std::sync::Mutex<HashSet<String>>>;
 /// The per-card presence reconcile loop (piggy#244) — the agent side of
 /// runtime card hot-swap.
 ///
-/// Each `interval` tick, under the piggy#214 request-serializing card lock
-/// (`try_lock`ed, so a wedged request can never starve the loop and a probe
-/// never races an in-flight card op), it re-enumerates the DESIRED served set
+/// Each pass (cadence per [`next_reconcile_delay`]: the steady `interval`,
+/// or a fast startup cadence while keyless — piggy#251), under the piggy#214
+/// request-serializing card lock (`try_lock`ed, so a wedged request can never
+/// starve the loop and a probe never races an in-flight card op), it
+/// re-enumerates the DESIRED served set
 /// via `load` (production: `super::load_cached_keys_from_cards`, which applies
 /// the guid filter, all-cards/first-card selection, and the piggy#143 CAK
 /// anti-swap) and reconciles the live `keys` vec by GUID:
@@ -74,12 +90,14 @@ pub async fn reconcile_loop<L, V>(
     V: FnMut(&Guid) -> Result<(), String> + Send,
 {
     let mut misses: HashMap<Guid, u32> = HashMap::new();
-    let mut interval = interval(interval_duration);
     // Poll-only: every card always uses the full blip debounce.
     let no_immediate = HashSet::new();
+    let start = Instant::now();
 
+    // Reconcile first (immediately at launch, as the old immediate-first tick
+    // did), then sleep the computed delay — short while keyless at startup
+    // (piggy#251), the steady interval otherwise.
     loop {
-        interval.tick().await;
         reconcile_once(
             &keys,
             &pin,
@@ -91,6 +109,28 @@ pub async fn reconcile_loop<L, V>(
             &no_immediate,
         )
         .await;
+        sleep(next_reconcile_delay(&keys, start, interval_duration).await).await;
+    }
+}
+
+/// The delay before the next reconcile pass. Normally the steady
+/// `interval`, but a short [`STARTUP_FAST_INTERVAL`] while the agent is still
+/// serving 0 keys within [`STARTUP_FAST_WINDOW`] of launch (piggy#251) — so a
+/// card contended at startup (a deploy overlapping the outgoing agent's card
+/// hold) is adopted within ~1s of release instead of up to a full interval
+/// later. Capped by `interval` so an already-short `--probe-interval` (or a
+/// test clock) is never made slower, and bounded by the window so a genuinely
+/// cardless non-proxy agent settles to the steady poll rather than fast-polling
+/// forever.
+async fn next_reconcile_delay(
+    keys: &Arc<Mutex<Vec<CachedKey>>>,
+    start: Instant,
+    interval: Duration,
+) -> Duration {
+    if keys.lock().await.is_empty() && start.elapsed() < STARTUP_FAST_WINDOW {
+        STARTUP_FAST_INTERVAL.min(interval)
+    } else {
+        interval
     }
 }
 
@@ -130,24 +170,13 @@ pub async fn reconcile_loop_with_events<L, V>(
     V: FnMut(&Guid) -> Result<(), String> + Send,
 {
     let mut misses: HashMap<Guid, u32> = HashMap::new();
-    let mut interval = interval(interval_duration);
+    let start = Instant::now();
+    // The opening pass runs immediately with no immediate-drop readers
+    // (matching reconcile_loop); each later pass's `immediate` set comes from
+    // the wake below.
+    let mut immediate: HashSet<String> = HashSet::new();
 
     loop {
-        // A reader-state change (event) OR the poll deadline, whichever comes
-        // first. `interval.tick()` fires immediately on the first poll, so the
-        // opening pass is always a timer reconcile (matching `reconcile_loop`).
-        let event = tokio::select! {
-            _ = interval.tick() => false,
-            _ = notify.notified() => true,
-        };
-        // On an event, drain the readers the watch reported changed; those
-        // cards drop on the first absent pass, others keep the blip debounce.
-        // A timer tick uses the empty set — full debounce for every card.
-        let immediate = if event {
-            std::mem::take(&mut *changed.lock().unwrap())
-        } else {
-            HashSet::new()
-        };
         reconcile_once(
             &keys,
             &pin,
@@ -159,6 +188,21 @@ pub async fn reconcile_loop_with_events<L, V>(
             &immediate,
         )
         .await;
+        // A reader-state change (event) OR the poll deadline, whichever comes
+        // first. The poll delay is short while keyless at startup (piggy#251),
+        // the steady interval otherwise.
+        let delay = next_reconcile_delay(&keys, start, interval_duration).await;
+        let event = tokio::select! {
+            _ = sleep(delay) => false,
+            _ = notify.notified() => true,
+        };
+        // On an event, collapse the debounce for ONLY the readers the watch
+        // reported changed; a timer tick uses the empty set — full debounce.
+        immediate = if event {
+            std::mem::take(&mut *changed.lock().unwrap())
+        } else {
+            HashSet::new()
+        };
     }
 }
 
@@ -901,11 +945,48 @@ mod tests {
         handle.abort();
     }
 
+    // -------- Startup fast recovery (piggy#251) --------
+
+    /// The startup fast-recovery cadence. While serving 0 keys within the
+    /// startup window the delay is the fast interval (capped by the configured
+    /// interval); once a key is served, or past the window, it's the steady
+    /// interval — so a genuinely cardless agent never fast-polls forever.
+    #[tokio::test(start_paused = true)]
+    async fn next_reconcile_delay_fast_only_while_keyless_in_window() {
+        let empty: Arc<Mutex<Vec<CachedKey>>> = Arc::new(Mutex::new(Vec::new()));
+        let served = Arc::new(Mutex::new(vec![cached_key(&guid_a())]));
+        let start = Instant::now();
+        let normal = Duration::from_secs(10);
+
+        // Keyless, within the window → the fast interval.
+        assert_eq!(
+            next_reconcile_delay(&empty, start, normal).await,
+            STARTUP_FAST_INTERVAL
+        );
+        // Serving a key → the steady interval, even within the window.
+        assert_eq!(next_reconcile_delay(&served, start, normal).await, normal);
+        // Never SLOWER than an already-short configured interval.
+        let short = Duration::from_millis(250);
+        assert_eq!(next_reconcile_delay(&empty, start, short).await, short);
+
+        // Past the window, still keyless → the steady interval.
+        tokio::time::advance(STARTUP_FAST_WINDOW + Duration::from_secs(1)).await;
+        assert_eq!(next_reconcile_delay(&empty, start, normal).await, normal);
+    }
+
     // -------- Production constants (pinned) --------
 
     #[test]
     fn probe_fail_limit_is_3() {
         assert_eq!(PROBE_FAIL_LIMIT, 3);
+    }
+
+    /// The startup fast-recovery constants (piggy#251). Changing either is a
+    /// deliberate behavioural knob on deploy-overlap serve latency.
+    #[test]
+    fn startup_fast_recovery_constants() {
+        assert_eq!(STARTUP_FAST_INTERVAL, Duration::from_secs(1));
+        assert_eq!(STARTUP_FAST_WINDOW, Duration::from_secs(30));
     }
 
     /// The default reconcile cadence (piggy#244). Shortened from the historic

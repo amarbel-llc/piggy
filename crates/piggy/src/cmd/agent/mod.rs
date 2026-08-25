@@ -480,7 +480,11 @@ async fn run_async(
         let probe_interval = cli
             .probe_interval
             .map(std::time::Duration::from_secs)
-            .unwrap_or(card::DEFAULT_PROBE_INTERVAL);
+            .unwrap_or(card::DEFAULT_PROBE_INTERVAL)
+            // A zero interval would spin the reconcile loop (`sleep(0)`); the
+            // flag is whole seconds, so 0 is the only sub-second value — floor
+            // it to 1s rather than busy-loop (piggy#251).
+            .max(std::time::Duration::from_secs(1));
         let load = move || load_cached_keys_from_cards(&config).0;
         let verify = |guid: &piggy_piv::Guid| {
             session::reconnect_to_token(guid)

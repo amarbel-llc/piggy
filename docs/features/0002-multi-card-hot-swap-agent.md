@@ -129,7 +129,11 @@ bricked, and the sign succeeds via the correct prompt.
   noticed in up to ~`3 × interval`). The opt-in `--event-driven` path
   (piggy#248) collapses this to near-instant via `SCardGetStatusChange`;
   poll-only stays the default so the event source is opt-in rather than a
-  behavioural change for every agent.
+  behavioural change for every agent. **Startup** latency is separate: a card
+  contended by an *outgoing* agent during a deploy (the card stays present, so
+  no event fires — this hits poll and event-driven alike) is recovered by the
+  fast startup cadence (piggy#251), within ~1s of the outgoing agent releasing
+  it rather than up to a full interval.
 - **Event source watches a stable reader set.** `run_event_source` watches
   the readers present when its context is established and re-lists on its
   bounded timeout; a whole *reader* plugged/unplugged mid-wait is caught by
@@ -157,6 +161,7 @@ bricked, and the sign succeeds via the correct prompt.
 |---|---|---|---|
 | `--probe-interval` | 10s | shortened from the historic 60s single-card probe for hot-swap responsiveness; ~6× more PCSC enumerate calls, negligible on a workstation | a removed card's keys/PIN lingering too long becomes a complaint → shorten, or enable `--event-driven` (piggy#248) for near-instant reaction |
 | `--event-driven` | off (opt-in) | poll-only is the safe default; the event source is layered on and stays opt-in rather than a fleet-wide behavioural change | operators wanting instant hot-swap enable it; if it proves robust on real hardware, revisit making it the default |
+| `STARTUP_FAST_INTERVAL` / `STARTUP_FAST_WINDOW` | 1s / 30s | while serving 0 keys at launch, poll fast for a bounded window so a card contended by an *outgoing* agent during a deploy is served within ~1s of release, not up to a full interval later (piggy#251); capped by the configured interval, and only while keyless so a card served from start never fast-polls | deploy serve-delay still too long (widen the window / shorten the interval) or startup PCSC churn on a real card a concern (narrow) |
 | `PROBE_FAIL_LIMIT` | 3 | debounce a transient enumeration blip without evicting a present card | a real card being falsely evicted under load (raise) or a removal lingering too long (lower, plus interval) |
 | `MIN_RETRIES_FOR_OFFERED_PIN` | 2 | the lockout-safe floor: a wrong offer can cost at most one retry and never the last | a card at 2 retries losing one to a mis-offer becoming a real annoyance → raise to 3, or land the targeted-offer end-state |
 
