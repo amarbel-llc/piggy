@@ -22,6 +22,9 @@
 #   - an `ssh-add -X` offer that is WRONG for a card near PIN lockout is
 #     NEVER tried against it (piggy#245): the agent drops the risky offer
 #     and re-prompts, so a card one retry from lockout is not bricked
+#   - runtime hot-swap (piggy#244): removing a card at runtime (via the
+#     piggy#130 `fibby ctl` control socket) drops its key while a sibling
+#     survives, and re-inserting it re-adopts the key
 #
 # Required env (supplied by the `test-bats-conformance-agent-multicard`
 # recipe):
@@ -56,6 +59,7 @@ setup() {
   # sun_path's 108-byte limit under deep nix sandbox prefixes.
   WORKDIR="$(mktemp -d -t agmc.XXXXXX)"
   FIBBY_SOCK="$WORKDIR/pcscd.comm"
+  FIBBY_CTL="$WORKDIR/control.sock"
   AGENT_SOCK="$WORKDIR/a.sock"
   FIBBY_LOG="$WORKDIR/fibby.log"
   AGENT_LOG="$WORKDIR/agent.log"
@@ -261,6 +265,95 @@ function offered_pin_never_bricks_a_low_retry_card { # @test
   # offer), so this isn't trivially green.
   grep -q "\[piggy-test-askpass\] supplying" "$AGENT_LOG" || {
     echo "the agent never prompted — the fallback path did not run" >&2
+    tail -40 "$AGENT_LOG" >&2 || true
+    return 1
+  }
+}
+
+# Count the PIV keys the running agent currently serves.
+_served_key_count() {
+  SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -L 2>/dev/null \
+    | grep -c '^ecdsa-sha2-nistp256 ' || true
+}
+
+# Poll `_served_key_count` until it equals $1 or a deadline passes; echoes the
+# final count.
+_wait_for_key_count() {
+  local want="$1" n=
+  local _
+  for _ in $(seq 1 100); do # up to ~20s at 0.2s
+    n="$(_served_key_count)"
+    [[ "$n" -eq "$want" ]] && break
+    sleep 0.2
+  done
+  printf '%s' "$n"
+}
+
+# piggy#244: the per-card presence lifecycle. A two-card `-A` agent serves both
+# keys; removing card A at runtime (via #130 `fibby ctl`) drops A's key while
+# card B survives; re-inserting A re-adopts it. `--probe-interval 1` keeps the
+# reconcile cadence fast enough for the test.
+function hot_swap_removes_then_readopts_a_card { # @test
+  spawn_fibby --control-socket "$FIBBY_CTL" \
+    --card "Virtual PCD fibby A 00 00" --seed-rfc6979-slot-9a-cert \
+    --card "Virtual PCD fibby B 00 00" --seed-slot-9c-cert \
+    --seed-chuid-guid "$GUID_B"
+
+  local _
+  for _ in $(seq 1 50); do
+    [[ -S $FIBBY_CTL ]] && break
+    sleep 0.1
+  done
+  [[ -S $FIBBY_CTL ]] || {
+    echo "control socket never appeared" >&2
+    cat "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent -A --probe-interval 1 \
+    -a "$AGENT_SOCK" >"$AGENT_LOG" 2>&1 &
+  AGENT_PID=$!
+  for _ in $(seq 1 50); do
+    [[ -S $AGENT_SOCK ]] && break
+    sleep 0.1
+  done
+  [[ -S $AGENT_SOCK ]] || {
+    echo "agent socket never appeared" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+
+  # Both cards served at start.
+  [[ "$(_served_key_count)" -eq 2 ]] || {
+    echo "expected 2 keys at start, got $(_served_key_count)" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+
+  # Remove card A: the reconcile loop drops its key within a few ticks.
+  "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" remove "Virtual PCD fibby A 00 00" || {
+    echo "fibby ctl remove failed" >&2
+    return 1
+  }
+  [[ "$(_wait_for_key_count 1)" -eq 1 ]] || {
+    echo "card A was not dropped after removal" >&2
+    tail -40 "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  # ...and it is card B (9C) that survives, not A.
+  SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -L 2>/dev/null | grep -q 'PIV_slot_9C B2B2B2B2' || {
+    echo "the surviving key is not card B's" >&2
+    SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -L >&2 || true
+    return 1
+  }
+
+  # Re-insert card A: the reconcile loop re-adopts it.
+  "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" insert "Virtual PCD fibby A 00 00" || {
+    echo "fibby ctl insert failed" >&2
+    return 1
+  }
+  [[ "$(_wait_for_key_count 2)" -eq 2 ]] || {
+    echo "card A was not re-adopted after re-insert" >&2
     tail -40 "$AGENT_LOG" >&2 || true
     return 1
   }
