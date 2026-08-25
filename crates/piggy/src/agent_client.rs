@@ -573,7 +573,7 @@ fn parse_flat_cstrings(mut buf: &[u8]) -> Result<Vec<String>, String> {
 /// Returns `PIGGY_AUTH_SOCK` when it is set and non-empty, else `None`.
 /// Callers fall back to the ambient `SSH_AUTH_SOCK` themselves. The point
 /// is to route piggy's own decrypts at piggy-agent — which advertises the
-/// `ecdh@joyent.com` extension — rather than through an ssh-agent-mux that
+/// `ecdh@joyent.com` extension — rather than through an upstream agent that
 /// may not. See piggy#123.
 pub fn piggy_auth_sock_override() -> Option<std::ffi::OsString> {
     std::env::var_os("PIGGY_AUTH_SOCK").filter(|s| !s.is_empty())

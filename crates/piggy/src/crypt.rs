@@ -83,7 +83,7 @@ pub(crate) fn encrypt(
 ///
 /// PIGGY_AUTH_SOCK (#123): if set and non-empty, override
 /// `SSH_AUTH_SOCK` for the child so piggy's decrypts hit piggy-agent
-/// (which advertises `ecdh@joyent.com`) rather than an ssh-agent-mux
+/// (which advertises `ecdh@joyent.com`) rather than an upstream agent
 /// that may not.
 pub(crate) fn decrypt(infile: &Path) -> Result<Vec<u8>, String> {
     let input =

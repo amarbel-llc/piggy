@@ -72,11 +72,11 @@ legend bottom
   is the unmanaged-host fallback. posh FDR 0014 documents it.
   (eng confirms the shell-init override fires per posh-session shell.)
 
-  **2 — `piggy health` targeting — OPEN.** health prefers
+  **2 — `piggy health` targeting — DEFINED.** health prefers
   PIGGY_AUTH_SOCK, so a bare run probes #2 (card-backed),
-  not the mux. Define the mux-targeting invocation
+  not the mux. The mux-targeting invocation
   (env -u PIGGY_AUTH_SOCK SSH_AUTH_SOCK=...ssh_client-agent.sock)
-  as the FDR 0001 soak criterion.
+  is documented in eng-ssh(7); FDR 0001 accepted 2026-08-25.
 endlegend
 
 @enduml

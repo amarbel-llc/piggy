@@ -19,7 +19,7 @@
 # Isolation invariants (Important — see #35 design notes):
 #
 #   - Agent runs on a private socket under $BATS_TEST_TMPDIR. The
-#     user's running pivy-agent / ssh-agent-mux is NEVER touched.
+#     user's running pivy-agent / piggy-agent (or any agent) is NEVER touched.
 #   - SSH_ASKPASS points at the refusal helper. If any test path
 #     accidentally requests a PIN, the helper logs a banner and exits
 #     non-zero — no GUI dialog, no /dev/tty prompt, no retry consumed.

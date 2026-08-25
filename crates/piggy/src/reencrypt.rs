@@ -393,7 +393,7 @@ fn reencrypt_one(real: &Path, piggy_ids: &Path) -> Result<(), String> {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         // Prefer piggy's own agent socket over the ambient SSH_AUTH_SOCK
-        // (commonly an ssh-agent-mux that may not advertise ecdh@joyent.com).
+        // (an upstream agent that may not advertise ecdh@joyent.com).
         // The binary and library crates are disjoint, so this mirrors
         // piggy::agent_client::piggy_auth_sock_override rather than calling
         // it. See #123.

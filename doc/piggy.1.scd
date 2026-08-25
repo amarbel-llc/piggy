@@ -683,7 +683,7 @@ _PIGGY_AUTH_SOCK_
 	set and non-empty, it overrides _SSH_AUTH_SOCK_ for piggy's own decrypts
 	only; when unset, piggy uses _SSH_AUTH_SOCK_. Use it to route decrypts at
 	a piggy-agent that advertises the _ecdh@joyent.com_ extension rather than
-	through an *ssh-agent-mux*(1) that may not.
+	through an upstream agent that may not.
 
 _SECURE_TMPDIR_
 	If set, skip automatic secure temporary directory creation (ramdisk on

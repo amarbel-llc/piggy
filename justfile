@@ -2191,7 +2191,7 @@ explore-pivy-tool-bats: build-nix
       zz-tests_bats/conformance/pivy_tool_admin_key.bats
 
 # Send a pivy-shaped query extension request directly to $SSH_AUTH_SOCK
-# (typically ssh-agent-mux) and hex-dump the response. Hardware-free:
+# (e.g. an ssh-agent-mux) and hex-dump the response. Hardware-free:
 # query does not touch the card. Used to investigate piggy#119 where
 # pivy's piv_box_open_agent() fails parsing the query response through
 # ssh-agent-mux at vendor/pivy/src/piv.c:7014.

@@ -181,8 +181,8 @@ fn cmd_stream_decrypt(args: &[&str]) -> i32 {
     // Checkpoint 3A (#32): build an AgentEcdhOracle from the agent socket
     // if set, so unlock can hit a running piggy-agent / pivy-agent.
     // Prefer PIGGY_AUTH_SOCK (piggy's own agent, which advertises
-    // ecdh@joyent.com) over the ambient SSH_AUTH_SOCK (commonly an
-    // ssh-agent-mux that may not) — see #123. A missing socket is not
+    // ecdh@joyent.com) over the ambient SSH_AUTH_SOCK (an upstream
+    // agent that may not) — see #123. A missing socket is not
     // fatal: we also try the direct-PCSC card path (#31) below. PIN unlock
     // for the agent path is NOT done here; the user is expected to have run
     // `ssh-add -X` externally.
