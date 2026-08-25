@@ -66,6 +66,10 @@ struct SeedSpec {
     /// Non-default application PIN (1–8 ASCII chars; piggy#242/#177 —
     /// give each card of a multi-card fibby its own PIN).
     seed_pin: Option<String>,
+    /// Start the PIN retry counter below the factory 3 (piggy#246), so a
+    /// test can put a card near lockout and exercise the agent's
+    /// offered-PIN lockout guard (piggy#245).
+    seed_pin_retries: Option<u8>,
     /// Raw P-256 scalars / keys to install into the virtual card, parsed
     /// from `--seed-*` hex flags. Let bats/shell seed slot material that
     /// was previously Rust-only (piggy#135). Applied after the cert
@@ -176,6 +180,15 @@ fn parse_args() -> Result<Args, String> {
                     return Err("--seed-pin: want 1..=8 ASCII chars".into());
                 }
                 seeds(&mut args).seed_pin = Some(pin);
+            }
+            "--seed-pin-retries" => {
+                let n: u8 = value("--seed-pin-retries")?
+                    .parse()
+                    .map_err(|_| "--seed-pin-retries: want an integer".to_string())?;
+                if !(1..=3).contains(&n) {
+                    return Err("--seed-pin-retries: want 1..=3".into());
+                }
+                seeds(&mut args).seed_pin_retries = Some(n);
             }
             "--seed-slot-9c-priv" => {
                 seeds(&mut args).seed_slot_9c_priv = Some(parse_hex_array(
@@ -483,6 +496,12 @@ fn build_virtual_card(
     }
     if let Some(pin) = &seeds.seed_pin {
         card.seed_pin(pin);
+    }
+    // Lower the retry counter (constructed at the factory default 3) so a
+    // test can start a card near lockout. Independent of seed_pin above,
+    // which only sets the PIN value.
+    if let Some(r) = seeds.seed_pin_retries {
+        card.seed_pin_retries(r);
     }
     // Explicit per-slot seeds apply after the cert bundle, so an
     // explicit --seed-slot-9a-priv overrides the scalar the cert

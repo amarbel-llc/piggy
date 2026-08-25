@@ -776,6 +776,19 @@ impl VirtualCard {
         self.pin = padded;
     }
 
+    /// Start the PIN retry counter below the factory default of 3
+    /// (piggy#246), so a test can put a card near lockout to exercise the
+    /// agent's offered-PIN lockout guard (piggy#245). A correct VERIFY
+    /// still resets it to the default; this only sets the starting value.
+    /// Panics on 0 or a value above the default — a test-fixture error.
+    pub fn seed_pin_retries(&mut self, retries: u8) {
+        assert!(
+            (1..=DEFAULT_PIN_RETRIES).contains(&retries),
+            "seed_pin_retries: want 1..={DEFAULT_PIN_RETRIES}"
+        );
+        self.pin_retries = retries;
+    }
+
     /// Like [`Self::seed_chuid`], but with `guid` substituted into the
     /// CHUID's GUID TLV (tag `0x34`). The multi-card server needs this
     /// (piggy#242): clients (piggy's agent, `pivy-tool list`) identify
@@ -2565,6 +2578,35 @@ mod tests {
             0x00, 0x20, 0x00, 0x80, 0x08, 0x36, 0x35, 0x34, 0x33, 0x32, 0x31, 0xFF, 0xFF,
         ];
         assert_eq!(c.transmit(&apdu).unwrap(), vec![0x90, 0x00]);
+    }
+
+    /// piggy#246: `seed_pin_retries` starts a card near lockout so a test
+    /// can exercise the agent's offered-PIN lockout guard (piggy#245). The
+    /// status query reports the seeded count WITHOUT consuming a try; a
+    /// single wrong VERIFY then blocks the card.
+    #[test]
+    fn seed_pin_retries_starts_low_and_status_query_is_non_consuming() {
+        let mut c = VirtualCard::new();
+        c.seed_pin_retries(1);
+        // Status query reports 1 remaining, twice — it does not decrement.
+        assert_eq!(
+            c.transmit(&verify_status_apdu_ext()).unwrap(),
+            vec![0x63, 0xC1],
+            "seeded to 1 retry"
+        );
+        assert_eq!(
+            c.transmit(&verify_status_apdu_ext()).unwrap(),
+            vec![0x63, 0xC1],
+            "status query must not consume a retry"
+        );
+        // A wrong VERIFY at 1 retry blocks the card (last try consumed).
+        let mut wrong = verify_default_pin_apdu_short();
+        wrong[5] = 0x39;
+        assert_eq!(
+            c.transmit(&wrong).unwrap(),
+            vec![0x69, 0x83],
+            "wrong PIN at 1 retry blocks the card"
+        );
     }
 
     #[test]
