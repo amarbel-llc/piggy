@@ -2161,16 +2161,42 @@ debug-capture-jcardsim-m2:
       pom.xml > pom.xml.tmp
     mv pom.xml.tmp pom.xml
 
+    echo "=== Resolving the jcardsim derivation's own Maven + JDK ==="
+    # Capture against EXACTLY the toolchain nix/virtual-piv.nix builds with,
+    # not `nixpkgs#maven` from the ambient flake registry. Those drift apart:
+    # the registry shipped maven 3.9.11 while the derivation (via igloo's
+    # pkgs) used 3.9.16, and each bundles a different default
+    # maven-resources-plugin. Capturing with the wrong Maven yields a closure
+    # that still fails the offline (-o -nsu) resolve with
+    # "Plugin org.apache.maven.plugins:maven-resources-plugin:<v> ... could
+    # not be resolved". Deriving the tools from the drv keeps the capture
+    # correct across any future nixpkgs/igloo bump.
+    # NB: we have already cd'd into $tmpdir/jcardsim, so the flake must be
+    # addressed via $project_root rather than a bare `.#`.
+    jcardsim_drv=$(nix path-info --derivation "$project_root#jcardsim")
+    tool_bins=()
+    while read -r tool_drv; do
+      [[ -z $tool_drv ]] && continue
+      tool_out=$(nix build --no-link --print-out-paths "${tool_drv}^out")
+      tool_bins+=("$tool_out/bin")
+    done < <(nix derivation show "$jcardsim_drv" \
+      | jq -r '.[].inputDrvs | keys[] | select(test("(-maven-|-openjdk-)"))')
+
+    if [[ ${#tool_bins[@]} -eq 0 ]]; then
+      echo "ERROR: Could not resolve Maven/JDK from $jcardsim_drv" >&2
+      exit 1
+    fi
+    export PATH="$(IFS=:; echo "${tool_bins[*]}"):$PATH"
+    echo "Using maven: $(command -v mvn) ($(mvn --version | head -n1))"
+
     echo "=== Running Maven to download dependency closure ==="
     m2repo="$tmpdir/m2-repo"
     mkdir -p "$m2repo"
-    # Use nix shell to get Maven + JDK without polluting the devshell
-    nix shell nixpkgs#maven nixpkgs#jdk21_headless --command \
-      mvn package \
-        "-Dmaven.repo.local=$m2repo" \
-        -Dmaven.test.skip=true \
-        -Dgpg.skip=true \
-        -Djava.version=1.8
+    mvn package \
+      "-Dmaven.repo.local=$m2repo" \
+      -Dmaven.test.skip=true \
+      -Dgpg.skip=true \
+      -Djava.version=1.8
 
     echo "=== Stripping ephemeral Maven metadata (matches buildMavenPackage) ==="
     find "$m2repo" -name '*.lastUpdated' -delete
