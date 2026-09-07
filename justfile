@@ -378,6 +378,73 @@ test-bats-conformance-box-agentless-fibby: build-rust
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
 
+# Byte-identical to test-bats-conformance-box-agentless-fibby except for
+# batman's --no-sandbox. Isolates the fence sandbox as the barrier that
+# stops the test's libpcsclite reaching fibby's AF_UNIX socket.
+#
+# Context (piggy#253): the igloo bump carried nixpkgs 567a49d -> f13ff45
+# into `pkgs` — igloo/default.nix resolves nixpkgs from igloo's OWN
+# flake.lock, so piggy's igloo.inputs.nixpkgs-master.follows does not
+# govern it (igloo#37). After that, the gate lane fails with "The Smart
+# card resource manager is not running" while the pivy-tool call in the
+# same recipe, which runs OUTSIDE the sandbox, reaches the same socket.
+#
+# Bisected and narrowed by experiment:
+#   - passes at 3a65727, fails on the bump          -> a real regression
+#   - reverting only nixpkgs-master still fails     -> piggy's pin is not the lever
+#   - reverting only igloo passes                   -> igloo b13d154 is the trigger
+#   - THIS recipe (--no-sandbox) passes             -> the fence is the barrier
+#   - dropping TMPDIR=/tmp does NOT help            -> not the bats#37 workaround
+#   - fibby-pivy-agent-smoke passes sandboxed       -> not every fibby lane
+#
+# So the open question is narrower than "fence broke": what does a
+# sandboxed process connecting DIRECTLY to fibby's PCSC socket depend on
+# that the agent-mediated lanes do not. Still unidentified inside f13ff45.
+#
+# run the agentless box decrypt lane with the fence sandbox disabled
+[group('debug')]
+[linux]
+debug-box-agentless-fibby-nosandbox: build-rust
+  #!/usr/bin/env bash
+  set -uo pipefail
+  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+  export PATH="$pivy_out/bin:$PATH"
+  pivy_tool="$pivy_out/bin/pivy-tool"
+  fibby_bin="$PWD/target/debug/fibby"
+  piggy_bin="$PWD/target/debug/piggy"
+  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
+
+  workdir=$(mktemp -d /tmp/pbox-agentless-nosandbox-XXXXXX)
+  fibby_sock="$workdir/pcscd.comm"
+  fibby_log="$workdir/fibby.log"
+  fibby_pid=""
+  cleanup() { [[ -n "$fibby_pid" ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
+  trap cleanup EXIT
+
+  echo "=== Starting fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
+  FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+    --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+  fibby_pid=$!
+  for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+  [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
+
+  echo "=== discover fibby GUID via pivy-tool list ==="
+  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+  [[ -n $guid ]] || { echo "no GUID from fibby"; cat "$fibby_log"; exit 1; }
+  echo "  guid: $guid"
+
+  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+  INTEROP_GUID="$guid" \
+    PIGGY="$piggy_bin" \
+    PCSCLITE_CSOCK_NAME="$fibby_sock" \
+    SSH_ASKPASS="$askpass" \
+    SSH_ASKPASS_REQUIRE=force \
+    DISPLAY="" \
+    PIGGY_TEST_FIB_PIN=123456 \
+    {{ fence-tmpdir-linux }} \
+    BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
+    zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
+
 # Box interop against FIBBY — the fibby companion to
 # test-bats-conformance-interop, part of the fib→fibby retirement
 # (docs/plans/2026-06-15-retire-fib-for-fibby.md, Phase 1 spike). Runs the
