@@ -55,6 +55,7 @@ let
   # could not be resolved". That failure takes fib and the devShell
   # with it, which also blocks the very recipe that repairs it — drop
   # virtualPiv.fib from the devShell packages to bootstrap out.
+  # Pinning Maven so the closure and toolchain move together is #252.
   jcardsim = pkgs.stdenv.mkDerivation {
     pname = "jcardsim";
     version = "3.0.5-SNAPSHOT";
