@@ -152,14 +152,11 @@ enum Dir {
 /// hex span between offset and the trailing `|...|` matters.
 fn parse_apdu_line(line: &str) -> Option<(Dir, Vec<u8>)> {
     let line = line.trim_start();
-    let dir = if let Some(rest) = line.strip_prefix("[fibby:apdu>] ") {
+    let (dir, rest) = if let Some(rest) = line.strip_prefix("[fibby:apdu>] ") {
         (Dir::Req, rest)
-    } else if let Some(rest) = line.strip_prefix("[fibby:apdu<] ") {
-        (Dir::Resp, rest)
     } else {
-        return None;
+        (Dir::Resp, line.strip_prefix("[fibby:apdu<] ")?)
     };
-    let (dir, rest) = dir;
 
     // After the prefix: "OFFSET  HEX_BYTES  |ASCII|" or, on the last
     // hexdump line of a short payload, "OFFSET  HEX_BYTES  |ASCII|"

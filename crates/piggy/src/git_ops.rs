@@ -31,10 +31,7 @@ pub(crate) fn find_inner_git_dir<'a>(
         if !current.starts_with(store_root) {
             return None;
         }
-        match current.parent() {
-            Some(parent) => current = parent.to_path_buf(),
-            None => return None,
-        }
+        current = current.parent()?.to_path_buf();
     }
 }
 
