@@ -4,7 +4,17 @@
     # The bats lane builder (`batsLane`) is sourced directly from
     # `amarbel-llc/bats` below — not from `pkgs.testers.batsLane`, which
     # the bats flake no longer ships through this overlay.
-    igloo.url = "https://code.linenisgreat.com/igloo/archive/master.tar.gz";
+    # PINNED, LOAD-BEARING — do not re-float to master without reading
+    # piggy#253. igloo b13d154 carries nixpkgs 567a49d -> f13ff45 into
+    # `pkgs` (igloo/default.nix resolves nixpkgs from igloo's OWN
+    # flake.lock, so the nixpkgs-master follows below does NOT govern it
+    # — igloo#37). That nixpkgs breaks any sandboxed process connecting
+    # directly to a host-created AF_UNIX socket, which takes out the
+    # fibby box-agentless conformance lane. Bisected in piggy#253; the
+    # fence fix is upstream in bats/fence. Lift this pin — and re-run
+    # `just debug-capture-jcardsim-m2`, since pkgs.maven moves with it
+    # (piggy#252) — once #253 closes.
+    igloo.url = "https://code.linenisgreat.com/igloo/archive/2c8ca7354b2bba467b0602277f5d621d7d688dd4.tar.gz";
     nixpkgs-master.url = "github:NixOS/nixpkgs/f13ff45afd1bb73e640eaa08a7066dbed07e3238";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
 
