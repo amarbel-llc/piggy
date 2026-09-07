@@ -45,8 +45,16 @@ let
   # Maven dependencies are vendored in nix/jcardsim-m2/ (captured by
   # `just debug-capture-jcardsim-m2`). This eliminates the
   # buildMavenPackage FOD whose hash drifts when Maven Central changes
-  # dependency metadata. Re-run that recipe when bumping the jcardsim
-  # flake input.
+  # dependency metadata.
+  #
+  # Re-run that recipe when bumping the jcardsim flake input, AND
+  # whenever `pkgs.maven` below moves — the vendored closure is pinned
+  # to one Maven's default plugin set, so an igloo/nixpkgs bump that
+  # changes the Maven version fails the offline (-o -nsu) resolve with
+  # "Plugin org.apache.maven.plugins:maven-resources-plugin:<v> ...
+  # could not be resolved". That failure takes fib and the devShell
+  # with it, which also blocks the very recipe that repairs it — drop
+  # virtualPiv.fib from the devShell packages to bootstrap out.
   jcardsim = pkgs.stdenv.mkDerivation {
     pname = "jcardsim";
     version = "3.0.5-SNAPSHOT";
