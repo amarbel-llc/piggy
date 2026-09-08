@@ -453,6 +453,7 @@ async fn run_async(
     let listener = bind_reclaiming_stale(&socket_path)?;
     let agent = PiggyAgent::new(cached_keys)
         .with_proxy_only(cli.proxy_only)
+        .with_event_driven(cli.event_driven)
         .with_service_name(cli.service_name.clone());
     // piggy#215: with --upstream flags, proxy the named agents for keys
     // piggy does not serve natively. Without them the pool stays empty

@@ -870,11 +870,30 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
         },
         // NOTE: identities: 0 still passes here — point 9 owns the
         // cross-referenced verdict (zero-identities semantics, design doc).
-        Some(Ok(ids)) => CheckResult {
-            name: "agent: answers request_identities".into(),
-            status: Status::Pass,
-            diags: vec![("identities".into(), ids.len().to_string())],
-        },
+        Some(Ok(ids)) => {
+            let mut diags = vec![("identities".into(), ids.len().to_string())];
+            // piggy#248: surface the agent's presence-detection mode from its
+            // `agent-mode@piggy` self-report, so an operator can confirm
+            // event-driven vs poll (`piggy health -v`) without reading the
+            // journal. Omitted for an agent that doesn't self-report the mode
+            // (older/C agent) rather than guessing.
+            if let Some(Ok(m)) = &probes.mode {
+                diags.push((
+                    "presence".into(),
+                    if m.event_driven {
+                        "event-driven"
+                    } else {
+                        "poll"
+                    }
+                    .into(),
+                ));
+            }
+            CheckResult {
+                name: "agent: answers request_identities".into(),
+                status: Status::Pass,
+                diags,
+            }
+        }
     });
 
     // 5 — ecdh extension
@@ -1198,6 +1217,44 @@ mod tests {
             .map(|(_, v)| v.as_str())
     }
 
+    /// piggy#248: the agent's presence-detection mode (event-driven vs poll)
+    /// is surfaced as a `presence` diagnostic on the request_identities point,
+    /// read from the `agent-mode@piggy` self-report — and omitted (not guessed)
+    /// when the agent doesn't self-report a mode (older/C agent).
+    #[test]
+    fn presence_mode_surfaced_on_request_identities_point() {
+        use piggy::cmd::agent::mode::AgentMode;
+        let mode = |event_driven| {
+            Some(Ok(AgentMode {
+                proxy_only: false,
+                native_keys: 1,
+                upstreams: 0,
+                service: None,
+                event_driven,
+            }))
+        };
+        let point = |probes: &Probes| {
+            evaluate(probes)
+                .into_iter()
+                .find(|r| r.name == "agent: answers request_identities")
+                .expect("request_identities point")
+        };
+
+        let mut probes = healthy_probes();
+        probes.mode = mode(true);
+        let p = point(&probes);
+        assert_eq!(diag(&p, "presence"), Some("event-driven"));
+
+        probes.mode = mode(false);
+        let p = point(&probes);
+        assert_eq!(diag(&p, "presence"), Some("poll"));
+
+        // No self-report (older/C agent) → no presence diagnostic.
+        probes.mode = None;
+        let p = point(&probes);
+        assert_eq!(diag(&p, "presence"), None);
+    }
+
     /// piggy#215: the upstream self-report appends one point per
     /// upstream after the base nine — Pass with a keys diag when
     /// reachable, Fail when not, in report order.
@@ -1255,6 +1312,7 @@ mod tests {
             native_keys: 0,
             upstreams: 2,
             service: None,
+            event_driven: false,
         }));
         probes.pcsc = PcscProbe::Error("PC/SC unavailable".into());
         probes.cards = None;
@@ -1373,6 +1431,7 @@ mod tests {
             native_keys: 0,
             upstreams: 0,
             service: None,
+            event_driven: false,
         }));
         let results = evaluate(&probes);
         assert!(matches!(results[5].status, Status::Fail));
@@ -1391,6 +1450,7 @@ mod tests {
                 native_keys: 1,
                 upstreams: 0,
                 service: s.map(str::to_string),
+                event_driven: false,
             }))
         };
         assert_eq!(

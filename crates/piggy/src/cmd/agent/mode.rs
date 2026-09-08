@@ -34,4 +34,12 @@ pub struct AgentMode {
     /// across agent/health version skew.
     #[serde(default)]
     pub service: Option<String>,
+    /// `--event-driven` (piggy#248): whether this agent additionally watches
+    /// PC/SC reader states via `SCardGetStatusChange` for near-instant
+    /// hot-swap, on top of the default poll. `piggy health` surfaces it so an
+    /// operator can confirm a host's presence-detection mode without reading
+    /// the journal. `#[serde(default)]` → an older agent (no field) reports
+    /// `false` (poll-only), which is correct for every pre-#248 agent.
+    #[serde(default)]
+    pub event_driven: bool,
 }

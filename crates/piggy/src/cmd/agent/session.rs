@@ -89,6 +89,10 @@ pub struct PiggyAgent {
     /// request paths don't branch on it (an empty native key set
     /// already routes everything upstream).
     proxy_only: bool,
+    /// `--event-driven` (piggy#248): whether the event-driven presence watch
+    /// is running. Consulted only by the `agent-mode@piggy` self-report so
+    /// `piggy health` can surface the presence-detection mode.
+    event_driven: bool,
     /// `--service-name` (piggy#162): the service unit / launchd label this
     /// agent runs under, relayed in the `agent-mode@piggy` self-report so
     /// `piggy health` probes the right unit. `None` = not told; health
@@ -118,6 +122,7 @@ impl PiggyAgent {
             card_lock: Arc::new(Mutex::new(())),
             upstreams: UpstreamPool::empty(),
             proxy_only: false,
+            event_driven: false,
             service_name: None,
         }
     }
@@ -132,6 +137,13 @@ impl PiggyAgent {
     /// `agent-mode@piggy` self-report.
     pub fn with_proxy_only(mut self, proxy_only: bool) -> Self {
         self.proxy_only = proxy_only;
+        self
+    }
+
+    /// Record whether the event-driven presence watch is running
+    /// (`--event-driven`, piggy#248) for the `agent-mode@piggy` self-report.
+    pub fn with_event_driven(mut self, event_driven: bool) -> Self {
+        self.event_driven = event_driven;
         self
     }
 
@@ -575,6 +587,7 @@ impl PiggyAgent {
                     native_keys: self.keys.lock().await.len(),
                     upstreams: self.upstreams.len(),
                     service: self.service_name.clone(),
+                    event_driven: self.event_driven,
                 };
                 let json = serde_json::to_vec(&mode)
                     .map_err(|e| AgentError::Other(format!("agent-mode: {e}").into()))?;
@@ -2227,9 +2240,9 @@ mod tests {
     async fn agent_mode_extension_reports_role() {
         use crate::cmd::agent::mode::{AGENT_MODE_EXT, AgentMode};
 
-        // Card-backed, no upstreams, no --service-name: advertised,
-        // proxy_only=false, service=None (health falls back to default).
-        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9A)]);
+        // Card-backed, event-driven, no upstreams, no --service-name:
+        // advertised, proxy_only=false, event_driven=true, service=None.
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9A)]).with_event_driven(true);
         let resp = agent
             .extension(ext_request("query"))
             .await
@@ -2250,6 +2263,7 @@ mod tests {
                 native_keys: 1,
                 upstreams: 0,
                 service: None,
+                event_driven: true,
             }
         );
 
@@ -2272,6 +2286,7 @@ mod tests {
                 native_keys: 0,
                 upstreams: 1,
                 service: Some("piggy-agent-proxy.service".into()),
+                event_driven: false,
             }
         );
     }
