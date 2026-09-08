@@ -25,10 +25,11 @@
 #   - runtime hot-swap (piggy#244): removing a card at runtime (via the
 #     piggy#130 `fibby ctl` control socket) drops its key while a sibling
 #     survives, and re-inserting it re-adopts the key
-#   - event-driven hot-swap (piggy#248): with `--event-driven` and a LONG
-#     `--probe-interval`, a removed card's key drops far faster than the poll
-#     could manage — proving the SCardGetStatusChange event path, not the poll,
-#     drove the reconcile
+#   - event-driven hot-swap (piggy#248, the default as of piggy#255): with a
+#     LONG `--probe-interval`, a removed card's key drops far faster than the
+#     poll could manage — proving the SCardGetStatusChange event path, not the
+#     poll, drove the reconcile (and the poll path above is pinned with
+#     `--poll-only`)
 #
 # Required env (supplied by the `test-bats-conformance-agent-multicard`
 # recipe):
@@ -329,7 +330,10 @@ function hot_swap_removes_then_readopts_a_card { # @test
     return 1
   }
 
-  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent -A --probe-interval 1 \
+  # --poll-only: exercise the poll-based reconcile lifecycle explicitly, since
+  # event-driven is the default as of piggy#255 (the event path has its own
+  # test below). --probe-interval 1 keeps the poll cadence fast for the test.
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent -A --poll-only --probe-interval 1 \
     -a "$AGENT_SOCK" >"$AGENT_LOG" 2>&1 &
   AGENT_PID=$!
   for _ in $(seq 1 50); do
@@ -378,8 +382,9 @@ function hot_swap_removes_then_readopts_a_card { # @test
   }
 }
 
-# piggy#248: opt-in event-driven card presence. With a LONG `--probe-interval`
-# (60s) the poll reconcile cannot react within the test window, so a removed
+# piggy#248: event-driven card presence (the default as of piggy#255). With a
+# LONG `--probe-interval` (60s) the poll reconcile cannot react within the test
+# window, so a removed
 # card's key dropping in a few seconds proves the SCardGetStatusChange event
 # path (fibby's WAIT_READER_STATE_CHANGE wake -> the agent's Notify -> an
 # immediate fail_limit=1 reconcile) drove it, not the poll. Re-insert re-adopts
@@ -402,9 +407,10 @@ function event_driven_drops_card_fast_under_long_poll { # @test
     return 1
   }
 
-  # --probe-interval 60 disables the poll for the test window; --event-driven
-  # is the only thing that can make a removal fast.
-  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent -A --event-driven \
+  # --probe-interval 60 disables the poll for the test window; event-driven
+  # (the default as of piggy#255, so no flag) is the only thing that can make a
+  # removal fast.
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent -A \
     --probe-interval 60 -a "$AGENT_SOCK" >"$AGENT_LOG" 2>&1 &
   AGENT_PID=$!
   for _ in $(seq 1 50); do

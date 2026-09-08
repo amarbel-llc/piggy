@@ -199,8 +199,10 @@ function rust_piggy_agent_prompts_on_demand_and_propagates_context { # @test
   }
 
   # piggy#244: the per-card presence reconcile loop is spawned (it clears a
-  # removed card's PIN and adopts a newly-inserted one).
-  grep -q "spawning per-card presence reconcile loop" "$AGENT_LOG" || {
+  # removed card's PIN and adopts a newly-inserted one). Matches either spawn
+  # line — the poll loop (#244) or the event-driven loop (#248, the default
+  # since #255) — since this test doesn't pin the presence mode.
+  grep -q "per-card presence reconcile loop" "$AGENT_LOG" || {
     echo "Rust agent did not spawn the per-card presence reconcile loop" >&2
     cat "$AGENT_LOG" >&2 || true
     return 1

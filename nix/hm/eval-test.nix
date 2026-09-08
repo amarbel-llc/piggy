@@ -1095,34 +1095,12 @@ let
         };
     }
 
-    # --- eventDrivenCardPresence (piggy#248: opt-in event-driven presence) ---
+    # --- card-presence mode (piggy#255: event-driven is the default) ---
 
     {
-      # A card-backed Rust agent with the opt-in flag: passes every assertion
-      # and emits `--event-driven` on the exec line.
-      name = "event-driven-emits-flag";
-      cfg = {
-        services.piggy-agent.enable = true;
-        services.piggy-agent.package = rustPackageStub;
-        services.piggy-agent.allCards = true;
-        services.piggy-agent.eventDrivenCardPresence = true;
-      };
-      check =
-        result:
-        let
-          tripped = trippedMessages result;
-          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
-          hasEventDriven = lib.hasInfix "--event-driven" text;
-        in
-        {
-          ok = tripped == [ ] && hasEventDriven;
-          got = { inherit tripped text hasEventDriven; };
-        };
-    }
-    {
-      # Default (flag unset): the exec line carries NO --event-driven, so
-      # existing card-backed configs stay poll-only and unaffected.
-      name = "event-driven-default-omits-flag";
+      # A card-backed Rust agent at the default: event-driven is on, so the
+      # exec line carries NO --poll-only (and passes every assertion).
+      name = "event-driven-is-the-default-no-flag";
       cfg = {
         services.piggy-agent.enable = true;
         services.piggy-agent.package = rustPackageStub;
@@ -1133,23 +1111,44 @@ let
         let
           tripped = trippedMessages result;
           text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
-          noEventDriven = !(lib.hasInfix "--event-driven" text);
+          noPollOnly = !(lib.hasInfix "--poll-only" text);
         in
         {
-          ok = tripped == [ ] && noEventDriven;
-          got = { inherit tripped noEventDriven; };
+          ok = tripped == [ ] && noPollOnly;
+          got = { inherit tripped noPollOnly; };
         };
     }
     {
-      # eventDrivenCardPresence + proxyOnly is a config error — a cardless
-      # proxy agent has no reader state to watch (mirrors the binary's own
-      # `--event-driven` conflicts_with `--proxy-only`).
-      name = "event-driven-with-proxy-only-trips-assertion";
+      # Opting out: eventDrivenCardPresence = false on a card-backed Rust agent
+      # emits --poll-only.
+      name = "poll-only-opt-out-emits-flag";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.eventDrivenCardPresence = false;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          hasPollOnly = lib.hasInfix "--poll-only" text;
+        in
+        {
+          ok = tripped == [ ] && hasPollOnly;
+          got = { inherit tripped text hasPollOnly; };
+        };
+    }
+    {
+      # A proxy-only agent runs no card loop, so it ignores the presence
+      # setting entirely: no --poll-only and no assertion, even at the default
+      # true (which would trip a naive C/proxyOnly guard — see piggy#255).
+      name = "proxy-only-ignores-presence-setting";
       cfg = {
         services.piggy-agent.enable = true;
         services.piggy-agent.package = rustPackageStub;
         services.piggy-agent.proxyOnly = true;
-        services.piggy-agent.eventDrivenCardPresence = true;
         services.piggy-agent.upstreams = [
           {
             name = "fwd";
@@ -1161,11 +1160,12 @@ let
         result:
         let
           tripped = trippedMessages result;
-          hasExpected = lib.any (m: lib.hasInfix "incompatible with `proxyOnly`" m) tripped;
+          text = result.config.services.piggy-agent._launcherTexts.piggy-agent or "";
+          noPollOnly = !(lib.hasInfix "--poll-only" text);
         in
         {
-          ok = hasExpected;
-          got = tripped;
+          ok = tripped == [ ] && noPollOnly;
+          got = { inherit tripped noPollOnly; };
         };
     }
     {

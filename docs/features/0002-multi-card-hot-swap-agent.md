@@ -58,22 +58,23 @@ One agent, reacting to the cards physically present:
   adoption) and the piggy#143 CAK-swap loop (a CAK-mismatched card drops
   out of the enumeration and reconciles as a removal).
 - **`--probe-interval <secs>`** (default 10s) tunes the reconcile cadence.
-- **`--event-driven` is the opt-in near-instant path** (piggy#248). By
-  default the reconcile is poll-only (the cadence above). With
-  `--event-driven`, a dedicated blocking thread watches PC/SC reader states
-  via `SCardGetStatusChange` (`cmd/agent/card.rs::run_event_source`) and, on
-  any change, records **which** reader names transitioned (`State::CHANGED`)
-  and fires a `tokio::sync::Notify`; the reconcile loop
-  (`reconcile_loop_with_events`) then runs an **immediate** pass instead of
-  waiting for the next poll. That pass collapses the removal debounce to a
-  single miss for ONLY the cards whose reader the daemon named — dropping a
-  now-absent one at once — while every other card keeps its full
-  `PROBE_FAIL_LIMIT` blip debounce. This reader-scoping matters: an event
-  about one reader must not evict a *different* still-present card that is
-  merely blipping in enumeration (the poll path's whole reason for
-  debouncing). The poll interval keeps running as the safety net. The flag is
-  layered on the poll, never a replacement; it conflicts with `--proxy-only`
-  (a cardless agent has no reader to watch).
+- **Event-driven presence is the near-instant DEFAULT** (piggy#248, made the
+  default in piggy#255; `--poll-only` opts out). A dedicated blocking thread
+  watches PC/SC reader states via `SCardGetStatusChange`
+  (`cmd/agent/card.rs::run_event_source`) and, on any change, records **which**
+  reader names transitioned (`State::CHANGED`) and fires a
+  `tokio::sync::Notify`; the reconcile loop (`reconcile_loop_with_events`) then
+  runs an **immediate** pass instead of waiting for the next poll. That pass
+  collapses the removal debounce to a single miss for ONLY the cards whose
+  reader the daemon named — dropping a now-absent one at once — while every
+  other card keeps its full `PROBE_FAIL_LIMIT` blip debounce. This
+  reader-scoping matters: an event about one reader must not evict a
+  *different* still-present card that is merely blipping in enumeration (the
+  poll path's whole reason for debouncing). The `--probe-interval` poll keeps
+  running as the safety net. **`--poll-only`** is the escape hatch — it
+  reconciles by polling only (`reconcile_loop`), for a host where the event
+  watch ever misbehaves. Neither applies to `--proxy-only` (a cardless agent
+  runs no card loop), which rejects both flags.
 - **`ssh-add -X` is lockout-safe** (piggy#245). Before verifying an
   *offered* PIN against a card, the agent queries the card's remaining PIN
   retries with a non-consuming VERIFY status query
@@ -124,16 +125,14 @@ bricked, and the sign succeeds via the correct prompt.
 
 ## Limitations
 
-- **Poll latency (default).** With the default poll-only reconcile,
-  hot-swap reaction is bounded by `--probe-interval` × the debounce (removal
-  noticed in up to ~`3 × interval`). The opt-in `--event-driven` path
-  (piggy#248) collapses this to near-instant via `SCardGetStatusChange`;
-  poll-only stays the default so the event source is opt-in rather than a
-  behavioural change for every agent. **Startup** latency is separate: a card
-  contended by an *outgoing* agent during a deploy (the card stays present, so
-  no event fires — this hits poll and event-driven alike) is recovered by the
-  fast startup cadence (piggy#251), within ~1s of the outgoing agent releasing
-  it rather than up to a full interval.
+- **Poll latency (under `--poll-only`).** Event-driven presence is the
+  default (piggy#255) and reacts near-instantly via `SCardGetStatusChange`.
+  Only under the `--poll-only` opt-out is hot-swap reaction bounded by
+  `--probe-interval` × the debounce (removal noticed in up to ~`3 × interval`).
+  **Startup** latency is separate and hits both modes: a card contended by an
+  *outgoing* agent during a deploy (the card stays present, so no event fires)
+  is recovered by the fast startup cadence (piggy#251), within ~1s of the
+  outgoing agent releasing it rather than up to a full interval.
 - **Event source watches a stable reader set.** `run_event_source` watches
   the readers present when its context is established and re-lists on its
   bounded timeout; a whole *reader* plugged/unplugged mid-wait is caught by
@@ -159,8 +158,8 @@ bricked, and the sign succeeds via the correct prompt.
 
 | Lever | Current | Rationale | Change signal |
 |---|---|---|---|
-| `--probe-interval` | 10s | shortened from the historic 60s single-card probe for hot-swap responsiveness; ~6× more PCSC enumerate calls, negligible on a workstation | a removed card's keys/PIN lingering too long becomes a complaint → shorten, or enable `--event-driven` (piggy#248) for near-instant reaction |
-| `--event-driven` | off (opt-in) | poll-only is the safe default; the event source is layered on and stays opt-in rather than a fleet-wide behavioural change | operators wanting instant hot-swap enable it; if it proves robust on real hardware, revisit making it the default |
+| `--probe-interval` | 10s | the safety-net poll cadence under event-driven, and the primary cadence under `--poll-only`; ~6× more PCSC enumerate calls than the historic 60s, negligible on a workstation | a `--poll-only` host's removals lingering too long → shorten |
+| event-driven default / `--poll-only` | event-driven ON (piggy#255) | proven robust live (nikulin); near-instant hot-swap for every card-backed agent, poll kept as the safety net | a host where the event watch misbehaves → `--poll-only` opts that host back to polling |
 | `STARTUP_FAST_INTERVAL` / `STARTUP_FAST_WINDOW` | 1s / 30s | while serving 0 keys at launch, poll fast for a bounded window so a card contended by an *outgoing* agent during a deploy is served within ~1s of release, not up to a full interval later (piggy#251); capped by the configured interval, and only while keyless so a card served from start never fast-polls | deploy serve-delay still too long (widen the window / shorten the interval) or startup PCSC churn on a real card a concern (narrow) |
 | `PROBE_FAIL_LIMIT` | 3 | debounce a transient enumeration blip without evicting a present card | a real card being falsely evicted under load (raise) or a removal lingering too long (lower, plus interval) |
 | `MIN_RETRIES_FOR_OFFERED_PIN` | 2 | the lockout-safe floor: a wrong offer can cost at most one retry and never the last | a card at 2 retries losing one to a mis-offer becoming a real annoyance → raise to 3, or land the targeted-offer end-state |
@@ -173,10 +172,11 @@ bricked, and the sign succeeds via the correct prompt.
 - amarbel-llc/piggy#247 — the umbrella epic.
 - Phase issues: #245 / #246 (`ssh-add -X` lockout safety + fibby retry
   seed), #130 (fibby runtime hot-plug substrate), #244 (the per-card
-  reconcile lifecycle), #248 (opt-in event-driven reaction via
-  `SCardGetStatusChange` — the `--event-driven` flag + fibby's
-  `WAIT_READER_STATE_CHANGE` wake; the "later" half of the hybrid decision,
-  now landed).
+  reconcile lifecycle), #248 (event-driven reaction via `SCardGetStatusChange`
+  + fibby's `WAIT_READER_STATE_CHANGE` wake — the "later" half of the hybrid
+  decision), #251 (fast startup-recovery cadence for deploy overlap), #254
+  (`piggy health` presence-mode point), #255 (event-driven made the default;
+  `--poll-only` opt-out).
 - Prior art it builds on: #177 (per-card PIN cache), #214 (card lock),
   #175 (0-key recovery, subsumed), #143 (CAK swap, subsumed), #179 / #178
   (sign-path gate + refusal logging — `piggy health --sign-test` already

@@ -870,30 +870,11 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
         },
         // NOTE: identities: 0 still passes here — point 9 owns the
         // cross-referenced verdict (zero-identities semantics, design doc).
-        Some(Ok(ids)) => {
-            let mut diags = vec![("identities".into(), ids.len().to_string())];
-            // piggy#248: surface the agent's presence-detection mode from its
-            // `agent-mode@piggy` self-report, so an operator can confirm
-            // event-driven vs poll (`piggy health -v`) without reading the
-            // journal. Omitted for an agent that doesn't self-report the mode
-            // (older/C agent) rather than guessing.
-            if let Some(Ok(m)) = &probes.mode {
-                diags.push((
-                    "presence".into(),
-                    if m.event_driven {
-                        "event-driven"
-                    } else {
-                        "poll"
-                    }
-                    .into(),
-                ));
-            }
-            CheckResult {
-                name: "agent: answers request_identities".into(),
-                status: Status::Pass,
-                diags,
-            }
-        }
+        Some(Ok(ids)) => CheckResult {
+            name: "agent: answers request_identities".into(),
+            status: Status::Pass,
+            diags: vec![("identities".into(), ids.len().to_string())],
+        },
     });
 
     // 5 — ecdh extension
@@ -1081,7 +1062,36 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     });
 
     push_upstream_points(&mut out, probes, false);
+    push_presence_point(&mut out, probes);
     out
+}
+
+/// piggy#248/#255: append an informational point naming the agent's
+/// presence-detection mode (event-driven — the default since #255 — vs
+/// `--poll-only`), read from the `agent-mode@piggy` self-report. A POINT (not
+/// a `-v`-only diagnostic) so it shows in plain `piggy health`. Appended after
+/// any upstream points so every base/upstream point keeps its index. Omitted
+/// for a proxy-only agent (no card loop, so presence detection is n/a — its
+/// card points already SKIP) and for an agent that doesn't self-report a mode
+/// (older/C agent) rather than guessing.
+fn push_presence_point(out: &mut Vec<CheckResult>, probes: &Probes) {
+    if let Some(Ok(m)) = &probes.mode {
+        if m.proxy_only {
+            return;
+        }
+        out.push(CheckResult {
+            name: format!(
+                "agent presence: {}",
+                if m.event_driven {
+                    "event-driven"
+                } else {
+                    "poll"
+                }
+            ),
+            status: Status::Pass,
+            diags: vec![],
+        });
+    }
 }
 
 /// 10.. — piggy#215 step 5: one point per proxied upstream, from the
@@ -1217,42 +1227,48 @@ mod tests {
             .map(|(_, v)| v.as_str())
     }
 
-    /// piggy#248: the agent's presence-detection mode (event-driven vs poll)
-    /// is surfaced as a `presence` diagnostic on the request_identities point,
-    /// read from the `agent-mode@piggy` self-report — and omitted (not guessed)
-    /// when the agent doesn't self-report a mode (older/C agent).
+    /// piggy#248/#255: the agent's presence-detection mode is surfaced as a
+    /// POINT (shown in plain `piggy health`, not a `-v`-only diagnostic), read
+    /// from the `agent-mode@piggy` self-report. Event-driven (the default) is
+    /// `agent presence: event-driven`; `--poll-only` is `agent presence: poll`.
+    /// Omitted for a proxy-only agent (no card loop) and for an agent that
+    /// doesn't self-report a mode (older/C agent).
     #[test]
-    fn presence_mode_surfaced_on_request_identities_point() {
+    fn presence_mode_surfaced_as_a_point() {
         use piggy::cmd::agent::mode::AgentMode;
-        let mode = |event_driven| {
+        let mode = |proxy_only, event_driven| {
             Some(Ok(AgentMode {
-                proxy_only: false,
+                proxy_only,
                 native_keys: 1,
                 upstreams: 0,
                 service: None,
                 event_driven,
             }))
         };
-        let point = |probes: &Probes| {
+        let presence = |probes: &Probes| {
             evaluate(probes)
                 .into_iter()
-                .find(|r| r.name == "agent: answers request_identities")
-                .expect("request_identities point")
+                .find(|r| r.name.starts_with("agent presence:"))
+                .map(|r| r.name)
         };
 
         let mut probes = healthy_probes();
-        probes.mode = mode(true);
-        let p = point(&probes);
-        assert_eq!(diag(&p, "presence"), Some("event-driven"));
+        probes.mode = mode(false, true);
+        assert_eq!(
+            presence(&probes).as_deref(),
+            Some("agent presence: event-driven")
+        );
 
-        probes.mode = mode(false);
-        let p = point(&probes);
-        assert_eq!(diag(&p, "presence"), Some("poll"));
+        probes.mode = mode(false, false);
+        assert_eq!(presence(&probes).as_deref(), Some("agent presence: poll"));
 
-        // No self-report (older/C agent) → no presence diagnostic.
+        // Proxy-only: no card loop → no presence point.
+        probes.mode = mode(true, false);
+        assert_eq!(presence(&probes), None);
+
+        // No self-report (older/C agent) → no presence point.
         probes.mode = None;
-        let p = point(&probes);
-        assert_eq!(diag(&p, "presence"), None);
+        assert_eq!(presence(&probes), None);
     }
 
     /// piggy#215: the upstream self-report appends one point per

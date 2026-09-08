@@ -112,11 +112,14 @@ let
           "--service-name"
           serviceName
         ]
-        # Event-driven card presence (piggy#248): near-instant hot-swap via
-        # SCardGetStatusChange, layered on the poll reconcile (which stays the
-        # default and the safety net). Rust agent only; the assertions below
-        # forbid it under proxyOnly (a cardless agent has no reader to watch).
-        ++ lib.optional (isRustAgent && instanceCfg.eventDrivenCardPresence) "--event-driven"
+        # Card-presence mode (piggy#255): event-driven (near-instant hot-swap
+        # via SCardGetStatusChange, piggy#248) is the DEFAULT. Emit --poll-only
+        # only to opt a card-backed Rust agent OUT. A proxy-only agent runs no
+        # card loop and the C agent has no such flag, so neither ever gets it —
+        # which is also why the flipped default needs no C/proxyOnly assertion.
+        ++ lib.optional (
+          isRustAgent && !instanceCfg.proxyOnly && !instanceCfg.eventDrivenCardPresence
+        ) "--poll-only"
         ++ instanceCfg.extraArgs;
 
       # The exec line's argv, ONE word per list element, joined exactly
@@ -418,18 +421,11 @@ let
         assertion = ic.addNewKeysTo == null || lib.any (u: u.name == ic.addNewKeysTo) ic.upstreams;
         message = "services.piggy-agent: `addNewKeysTo` must name an entry in `upstreams` (instance ${unitName}).";
       }
-      # Event-driven card presence (piggy#248) is a Rust-agent feature and
-      # needs a card to watch — so it is rejected for the C pivy-agent and
-      # under proxyOnly (which serves no card), mirroring the binary's own
-      # `--event-driven` conflicts_with `--proxy-only`.
-      {
-        assertion = !ic.eventDrivenCardPresence || isRustAgent;
-        message = "services.piggy-agent: `eventDrivenCardPresence` requires the Rust agent (package pname \"piggy\"), not the C pivy-agent (instance ${unitName}).";
-      }
-      {
-        assertion = !ic.eventDrivenCardPresence || !ic.proxyOnly;
-        message = "services.piggy-agent: `eventDrivenCardPresence` is incompatible with `proxyOnly` — a proxy-only agent has no card to watch (instance ${unitName}).";
-      }
+      # No eventDrivenCardPresence assertion (piggy#255): it now defaults true,
+      # so a C-agent or proxyOnly instance that never touches it would trip a
+      # naive `!eventDrivenCardPresence || …` guard. Instead the launcher only
+      # emits `--poll-only` for a card-backed Rust agent, so the C agent and
+      # proxyOnly simply ignore the setting.
     ]) effectiveInstances
   );
 in
@@ -666,18 +662,18 @@ in
 
     eventDrivenCardPresence = mkOption {
       type = types.bool;
-      default = false;
+      default = true;
       description = ''
-        Opt into event-driven card presence (`--event-driven`, piggy#248):
-        the agent additionally watches PC/SC reader-state changes via
-        `SCardGetStatusChange`, reacting to a card insert/remove almost
-        instantly instead of waiting for the next {option}`probe-interval`
-        poll. The poll reconcile stays the default AND the safety net — this
-        only adds earlier reactions.
+        Event-driven card presence (piggy#248, the default since piggy#255):
+        the agent watches PC/SC reader-state changes via `SCardGetStatusChange`
+        and reacts to a card insert/remove almost instantly, with the
+        {option}`probe-interval` poll as the safety net.
 
-        Rust agent only, and incompatible with {option}`proxyOnly` (a
-        cardless proxy agent has no reader state to watch). Default false
-        (poll-only), so existing configs are unaffected.
+        Default `true`. Set `false` to opt OUT (emitting `--poll-only`) — the
+        escape hatch if the event watch ever misbehaves on a host. Only
+        meaningful for a card-backed Rust agent: the C `pivy-agent` has no such
+        flag and a {option}`proxyOnly` agent runs no card loop, so both ignore
+        this setting (no flag emitted, no assertion).
       '';
     };
 
@@ -788,8 +784,8 @@ in
             };
             eventDrivenCardPresence = mkOption {
               type = types.bool;
-              default = false;
-              description = "Event-driven card presence (`--event-driven`, piggy#248) for this instance. Rust agent only; incompatible with `proxyOnly`.";
+              default = true;
+              description = "Event-driven card presence for this instance (piggy#248; default since piggy#255). Set `false` to opt out to poll-only (`--poll-only`). Card-backed Rust agent only; the C agent and `proxyOnly` ignore it.";
             };
           };
         }

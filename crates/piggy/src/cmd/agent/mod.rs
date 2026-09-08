@@ -90,14 +90,14 @@ pub struct AgentArgs {
     #[arg(long = "probe-interval", value_name = "SECONDS")]
     pub probe_interval: Option<u64>,
 
-    /// Event-driven card presence (piggy#248, opt-in): additionally react to
-    /// PC/SC reader-state changes via SCardGetStatusChange for near-instant
-    /// hot-swap, instead of waiting for the next --probe-interval poll. The
-    /// poll reconcile stays the default AND the safety net — this only adds
-    /// earlier reactions. Rejected under --proxy-only (a cardless agent has
-    /// no reader state to watch).
-    #[arg(long = "event-driven", conflicts_with = "proxy_only")]
-    pub event_driven: bool,
+    /// Poll-only card presence (piggy#255): opt OUT of the default
+    /// event-driven presence watch and reconcile by --probe-interval polling
+    /// only. Event-driven (a SCardGetStatusChange reader-state watch for
+    /// near-instant hot-swap, piggy#248) is the DEFAULT as of #255; this is
+    /// the escape hatch if it misbehaves on a host. Rejected under
+    /// --proxy-only (a cardless agent runs no card loop either way).
+    #[arg(long = "poll-only", conflicts_with = "proxy_only")]
+    pub poll_only: bool,
 
     /// Route add_identity (ssh-add) requests to this named --upstream;
     /// without it, adds are refused (piggy's native keys live on the
@@ -451,9 +451,12 @@ async fn run_async(
     }
 
     let listener = bind_reclaiming_stale(&socket_path)?;
+    // piggy#255: event-driven presence is the default for a card-backed agent;
+    // --poll-only opts out, and a proxy-only agent runs no card loop at all.
+    let event_driven = !cli.proxy_only && !cli.poll_only;
     let agent = PiggyAgent::new(cached_keys)
         .with_proxy_only(cli.proxy_only)
-        .with_event_driven(cli.event_driven)
+        .with_event_driven(event_driven)
         .with_service_name(cli.service_name.clone());
     // piggy#215: with --upstream flags, proxy the named agents for keys
     // piggy does not serve natively. Without them the pool stays empty
@@ -492,10 +495,11 @@ async fn run_async(
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         };
-        if cli.event_driven {
+        if event_driven {
             // piggy#248: an SCardGetStatusChange watch on a dedicated blocking
             // thread fires this Notify on any reader-state change, triggering
             // an immediate reconcile; the poll interval stays the safety net.
+            // The default since piggy#255 (--poll-only takes the else branch).
             // `changed` carries which readers transitioned, so the reconcile
             // collapses the debounce for only those cards.
             let notify = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -757,29 +761,30 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// `--event-driven` (piggy#248) parses on a card-backed agent and is
-    /// rejected together with `--proxy-only` (a cardless agent has no reader
-    /// state to watch).
+    /// piggy#255: event-driven is the DEFAULT; `--poll-only` opts out and is
+    /// rejected together with `--proxy-only` (a cardless agent runs no card
+    /// loop either way).
     #[test]
-    fn agent_args_event_driven_parses_and_conflicts_with_proxy_only() {
-        let ok = AgentArgs::try_parse_from(["piggy agent", "-A", "--event-driven"]).unwrap();
-        assert!(ok.event_driven);
+    fn agent_args_poll_only_parses_and_conflicts_with_proxy_only() {
+        // Default is event-driven, i.e. NOT poll-only.
         assert!(
             !AgentArgs::try_parse_from(["piggy agent", "-A"])
                 .unwrap()
-                .event_driven,
-            "default is poll-only (event_driven false)"
+                .poll_only,
+            "event-driven is the default (poll_only false)"
         );
+        let ok = AgentArgs::try_parse_from(["piggy agent", "-A", "--poll-only"]).unwrap();
+        assert!(ok.poll_only);
         assert!(
             AgentArgs::try_parse_from([
                 "piggy agent",
                 "--proxy-only",
                 "--upstream",
                 "fwd=/tmp/f.sock",
-                "--event-driven",
+                "--poll-only",
             ])
             .is_err(),
-            "--event-driven must conflict with --proxy-only"
+            "--poll-only must conflict with --proxy-only"
         );
     }
 
