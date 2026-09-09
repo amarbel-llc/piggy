@@ -2,7 +2,7 @@ piggy(1)
 
 # NAME
 
-piggy - stores, retrieves, generates, and synchronizes passwords using PIV smart cards
+piggy - PIV smart-card backed password store and agent
 
 # SYNOPSIS
 
@@ -23,6 +23,9 @@ piggy - stores, retrieves, generates, and synchronizes passwords using PIV smart
 *piggy pivy* _TOOL_ [_ARGS_]...
 
 # DESCRIPTION
+
+*piggy* stores, retrieves, generates, and synchronizes passwords using PIV
+smart cards.
 
 *piggy* is a simple password store that keeps passwords inside *pivy-box*(1)
 encrypted files (with the _.ebox_ extension) inside a directory tree residing
