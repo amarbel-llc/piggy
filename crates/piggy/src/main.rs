@@ -438,9 +438,21 @@ enum CardCommand {
     Init {
         /// YubiKey serial of the card to provision. Optional: with one blank
         /// card attached it is auto-selected; required to disambiguate when
-        /// multiple are present.
+        /// multiple are present. Mutually exclusive with `--guid`/`--reader`.
         #[arg(long)]
         serial: Option<u32>,
+        /// Select the card to provision by CHUID GUID (hex) — for a card whose
+        /// serial isn't exposed over the PIV channel (e.g. an older YubiKey 4,
+        /// piggy#256). Mutually exclusive with `--serial`/`--reader`. Note:
+        /// factory-blank cards share the all-zeros GUID, so use `--reader` to
+        /// disambiguate two blank cards.
+        #[arg(long, conflicts_with_all = ["serial", "reader"])]
+        guid: Option<String>,
+        /// Select the card to provision by PC/SC reader name. Mutually
+        /// exclusive with `--serial`/`--guid`. The robust selector for a
+        /// serial-less blank card (piggy#256).
+        #[arg(long, conflicts_with_all = ["serial", "guid"])]
+        reader: Option<String>,
         /// Also accept an already-initialized card-in-hand and re-provision it
         /// (piggy#204). Without this, only a factory-blank card is eligible.
         /// Reprovision overwrites the card's 9A + 9D keys/certs and resets
@@ -624,11 +636,20 @@ fn main() {
         Command::Card(args) => match args.cmd {
             CardCommand::Init {
                 serial,
+                guid,
+                reader,
                 allow_reprovision,
                 frontend,
                 socket,
             } => std::process::exit(piggy::stats::timed_card("init", || {
-                piggy::card::init_cmd::run(serial, allow_reprovision, frontend, socket.as_deref())
+                piggy::card::init_cmd::run(
+                    serial,
+                    guid,
+                    reader,
+                    allow_reprovision,
+                    frontend,
+                    socket.as_deref(),
+                )
             })),
         },
 

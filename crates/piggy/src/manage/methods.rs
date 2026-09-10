@@ -18,7 +18,7 @@ use base64::Engine as _;
 use serde_json::Value;
 
 use crate::card::engine::ProvisionError;
-use crate::card::init_cmd::provision_with_frontend;
+use crate::card::init_cmd::{CardSelector, provision_with_frontend};
 use crate::card::protocol::{Frontend, FrontendError};
 use crate::manage::{CARD_OP_FAILED, INTERACTION_DECLINED, INVALID_PARAMS};
 use crate::sign_core::{self, SigFormat, SignError};
@@ -92,6 +92,19 @@ pub fn card_init(params: &Value, fe: &mut dyn Frontend) -> Result<Value, (i64, S
             "card.init: 'serial' must be a u32".to_string(),
         ))?),
     };
+    // `guid` (hex) / `reader` select a serial-less card; mutually exclusive with
+    // `serial` and each other (piggy#256). `from_flags` validates the hex + the
+    // exclusivity, so a bad selector is an invalid-params error.
+    let guid = params
+        .get("guid")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let reader = params
+        .get("reader")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let selector = CardSelector::from_flags(serial, guid, reader)
+        .map_err(|e| (INVALID_PARAMS, format!("card.init: {e}")))?;
     // Also accept an already-initialized card-in-hand and re-provision it
     // (piggy#204) — default false (factory-blank only).
     let allow_reprovision = params
@@ -99,7 +112,7 @@ pub fn card_init(params: &Value, fe: &mut dyn Frontend) -> Result<Value, (i64, S
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    match provision_with_frontend(serial, allow_reprovision, fe) {
+    match provision_with_frontend(selector, allow_reprovision, fe) {
         Ok(outcome) => {
             let mut result = serde_json::json!({ "guid": outcome.guid });
             if let Some(key) = &outcome.generated_mgmt_key {

@@ -62,6 +62,10 @@ struct Args {
     /// Optional YubiKey serial to provision (card.init).
     #[arg(long)]
     serial: Option<u32>,
+    /// Optional PC/SC reader name to select the card for card.init (piggy#256).
+    /// The `--guid` flag (below) doubles as the card.init GUID selector.
+    #[arg(long)]
+    reader: Option<String>,
 
     // --- card.list params ---
     /// Whether card.list includes factory-blank cards (default true).
@@ -167,6 +171,12 @@ fn build_params(args: &Args) -> Value {
             let mut p = json!({});
             if let Some(s) = args.serial {
                 p["serial"] = json!(s);
+            }
+            if let Some(g) = &args.guid {
+                p["guid"] = json!(g);
+            }
+            if let Some(r) = &args.reader {
+                p["reader"] = json!(r);
             }
             p
         }
