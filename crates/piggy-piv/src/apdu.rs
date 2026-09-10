@@ -8,6 +8,12 @@ pub const PIV_AID: &[u8] = &[
 /// YubiKey PIV management AID
 pub const YKPIV_AID: &[u8] = &[0xA0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
 
+/// YubiKey OTP application AID. On older YubiKeys (firmware < 5.x, e.g. the
+/// YubiKey 4) the factory serial is NOT exposed over the PIV applet's
+/// `YK_GET_SERIAL` (0xF8); it is read from this applet instead, matching
+/// `ykman` / `yubico-piv-tool` (`lib/ykpiv.c` `_ykpiv_get_serial`). piggy#256.
+pub const YK_OTP_AID: &[u8] = &[0xA0, 0x00, 0x00, 0x05, 0x27, 0x20, 0x01, 0x01];
+
 /// Data object tag for the YubiKey attestation certificate (slot F9)
 pub const PIV_TAG_CERT_YK_ATTESTATION: u32 = 0x5FFF01;
 
@@ -33,6 +39,18 @@ pub mod ins {
     /// `<alg> <0x9B ref> <key_len> <key>`. Mirrors yubico-piv-tool's
     /// `YKPIV_INS_SET_MGMKEY`.
     pub const SET_MGMT_KEY: u8 = 0xFF;
+}
+
+/// YubiKey OTP-applet commands, used only for the serial fallback on firmware
+/// that doesn't expose the serial over the PIV applet (piggy#256). Selected via
+/// [`super::YK_OTP_AID`]. Wire format from yubico-piv-tool `lib/ykpiv.c`
+/// `_ykpiv_get_serial` (`00 01 10 00 00` → 4-byte big-endian serial).
+pub mod otp {
+    /// OTP "API request" instruction.
+    pub const API_REQ: u8 = 0x01;
+    /// P1 slot selecting the device serial for the API request. The response
+    /// is the 4-byte big-endian factory serial.
+    pub const SLOT_DEVICE_SERIAL: u8 = 0x10;
 }
 
 /// PIV slot IDs

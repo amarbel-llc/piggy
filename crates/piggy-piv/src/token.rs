@@ -62,16 +62,32 @@ pub struct PivToken {
     card: pcsc::Card,
     guid: Guid,
     reader_name: String,
-    /// YubiKey factory serial, cached at connect() time. `None` for
-    /// non-YubiKey PIV cards (the vendor-specific INS rejects with a
-    /// non-9000 SW) or YubiKey firmware too old to support the INS.
-    /// See `read_yk_serial` for the failure-as-None policy.
+    /// YubiKey factory serial, cached at connect() time. `None` only for
+    /// non-YubiKey PIV cards; a YubiKey whose firmware doesn't expose the
+    /// serial over the PIV applet (e.g. a YubiKey 4) is read via the OTP-applet
+    /// fallback. See `read_yk_serial` for the two-path read + failure-as-None
+    /// policy.
     yk_serial: Option<u32>,
+    /// Human diagnostic for the serial read: which path produced it, or why
+    /// none did. Surfaced by `piggy list --verbose` (piggy#256); never affects
+    /// `yk_serial` itself. `None` only if the read was never attempted.
+    yk_serial_diag: Option<String>,
     /// Whether the card carries a CHUID (and thus a real GUID). `false` for
     /// a factory-blank / uninitialized PIV card. Only `connect_inner` with
     /// `require_chuid = false` can yield `false` here; the strict `connect`
     /// errors instead, so existing callers never see an uninitialized token.
     initialized: bool,
+}
+
+/// Parse a 4-byte big-endian serial from a vendor serial-read response, or
+/// `None` when the status word isn't success or the response is too short.
+/// Shared by the PIV (`0xF8`) and OTP-applet serial-read paths (piggy#256).
+fn parse_serial_response(data: &[u8], sw: StatusWord) -> Option<u32> {
+    if sw.is_success() && data.len() >= 4 {
+        Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+    } else {
+        None
+    }
 }
 
 impl PivToken {
@@ -111,6 +127,7 @@ impl PivToken {
             guid: Guid::from_bytes(&[0; 16])?,
             reader_name: reader.to_string(),
             yk_serial: None,
+            yk_serial_diag: None,
             initialized: false,
         };
         token.select_piv()?;
@@ -128,7 +145,9 @@ impl PivToken {
                 }
             }
         }
-        token.yk_serial = token.read_yk_serial();
+        let (serial, diag) = token.read_yk_serial();
+        token.yk_serial = serial;
+        token.yk_serial_diag = diag;
         Ok(token)
     }
 
@@ -186,12 +205,20 @@ impl PivToken {
         &self.reader_name
     }
 
-    /// Cached YubiKey factory serial. `None` for non-YubiKey PIV cards
-    /// or YubiKey firmware that pre-dates the `INS_GET_SERIAL` (0xF8)
-    /// vendor extension. Populated at `connect()` time via
+    /// Cached YubiKey factory serial. `None` only for non-YubiKey PIV cards:
+    /// a YubiKey that doesn't expose the serial over the PIV applet is read via
+    /// the OTP-applet fallback (piggy#256). Populated at `connect()` time via
     /// `read_yk_serial`; never re-queries the card.
     pub fn yk_serial(&self) -> Option<u32> {
         self.yk_serial
+    }
+
+    /// Human diagnostic for the serial read — which path produced the serial,
+    /// or why none did (e.g. `"PIV GET_SERIAL SW=0x6D00; read via OTP applet"`).
+    /// Surfaced by `piggy list --verbose`. `None` only if the read was never
+    /// attempted; independent of whether [`Self::yk_serial`] is `Some`.
+    pub fn yk_serial_diag(&self) -> Option<&str> {
+        self.yk_serial_diag.as_deref()
     }
 
     /// Whether the card is initialized (carries a CHUID, and thus a real
@@ -202,19 +229,76 @@ impl PivToken {
         self.initialized
     }
 
-    /// Probe the YubiKey factory-serial vendor INS (0xF8) against the
-    /// already-selected PIV applet. Returns the serial on `SW=9000`
-    /// with a >=4-byte response, `None` on every other outcome. We
-    /// deliberately swallow errors: non-YubiKey cards routinely reject
-    /// this INS, and a missing serial is not a connect-time failure.
-    /// Mirrors pivy's `ykpiv_read_serial` (vendor/pivy/src/piv.c:644).
-    fn read_yk_serial(&self) -> Option<u32> {
-        let apdu = Apdu::new(0x00, crate::apdu::ins::YK_GET_SERIAL, 0x00, 0x00);
-        let (data, sw) = self.transmit(&apdu).ok()?;
-        if !sw.is_success() || data.len() < 4 {
-            return None;
+    /// Read the YubiKey factory serial, returning `(serial, diagnostic)`.
+    ///
+    /// Path 1 is the PIV-applet vendor INS `0xF8` (`YK_GET_SERIAL`) against the
+    /// already-selected PIV applet — the path all YubiKey-5-era firmware
+    /// answers. If it yields no serial (a non-9000 SW, e.g. the `0x6D00` an
+    /// older YubiKey 4 returns because it doesn't expose the serial over PIV),
+    /// path 2 falls back to the **OTP applet**: SELECT it, issue its serial
+    /// API-request, then re-SELECT the PIV applet so the token is left
+    /// PIV-selected for every later card op. This mirrors ykman /
+    /// yubico-piv-tool (`lib/ykpiv.c` `_ykpiv_get_serial`), which reads the
+    /// serial from the OTP applet on pre-5.x firmware (piggy#256).
+    ///
+    /// The diagnostic records which path produced the serial, or why none did
+    /// — surfaced by `piggy list --verbose`. A missing serial is never a
+    /// connect-time failure, so every error is swallowed into the diagnostic.
+    fn read_yk_serial(&self) -> (Option<u32>, Option<String>) {
+        // Path 1: PIV-applet vendor GET_SERIAL (YubiKey 5+). On success, return
+        // immediately without touching the OTP applet.
+        let piv = Apdu::new(0x00, crate::apdu::ins::YK_GET_SERIAL, 0x00, 0x00);
+        let piv_note = match self.transmit(&piv) {
+            Ok((data, sw)) => match parse_serial_response(&data, sw) {
+                Some(serial) => {
+                    return (Some(serial), Some("read via PIV GET_SERIAL".to_string()));
+                }
+                None => format!("PIV GET_SERIAL SW={sw}"),
+            },
+            Err(e) => format!("PIV GET_SERIAL error: {e}"),
+        };
+
+        // Path 2: OTP-applet serial (YubiKey 4 / pre-5.x firmware). ALWAYS
+        // re-SELECT PIV afterward — a failed OTP SELECT may leave the card with
+        // no (or a different) applet selected, and every later op assumes PIV.
+        let otp_result = self.read_otp_serial();
+        let reselect = self
+            .transmit(&Apdu::select(crate::apdu::PIV_AID))
+            .err()
+            .map(|e| format!("; re-SELECT PIV error: {e}"))
+            .unwrap_or_default();
+
+        match otp_result {
+            Ok(serial) => (
+                Some(serial),
+                Some(format!("{piv_note}; read via OTP applet{reselect}")),
+            ),
+            Err(otp_note) => (None, Some(format!("{piv_note}; {otp_note}{reselect}"))),
         }
-        Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+    }
+
+    /// SELECT the OTP applet and read the 4-byte big-endian factory serial.
+    /// Does NOT restore PIV selection — [`Self::read_yk_serial`] does that
+    /// unconditionally. Returns the serial or a diagnostic reason (a non-YubiKey
+    /// card has no OTP applet, so its SELECT fails with e.g. `0x6A82`).
+    fn read_otp_serial(&self) -> Result<u32, String> {
+        let (_, sw) = self
+            .transmit(&Apdu::select(crate::apdu::YK_OTP_AID))
+            .map_err(|e| format!("OTP SELECT error: {e}"))?;
+        if !sw.is_success() {
+            return Err(format!("OTP SELECT SW={sw} (not a YubiKey?)"));
+        }
+        let req = Apdu::new(
+            0x00,
+            crate::apdu::otp::API_REQ,
+            crate::apdu::otp::SLOT_DEVICE_SERIAL,
+            0x00,
+        );
+        let (data, sw) = self
+            .transmit(&req)
+            .map_err(|e| format!("OTP serial read error: {e}"))?;
+        parse_serial_response(&data, sw)
+            .ok_or_else(|| format!("OTP serial read SW={sw}, len={}", data.len()))
     }
 
     pub fn transmit_apdu(&self, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord), PivError> {
@@ -733,5 +817,44 @@ impl PivContext {
             }
         }
         Ok(tokens)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sw(sw1: u8, sw2: u8) -> StatusWord {
+        StatusWord::from_bytes(sw1, sw2)
+    }
+
+    #[test]
+    fn parse_serial_ok() {
+        // 0x00BC614E = 12345678, big-endian.
+        let data = [0x00, 0xBC, 0x61, 0x4E];
+        assert_eq!(
+            parse_serial_response(&data, sw(0x90, 0x00)),
+            Some(12_345_678)
+        );
+    }
+
+    #[test]
+    fn parse_serial_ignores_trailing_bytes() {
+        // A response longer than 4 bytes uses only the first 4.
+        let data = [0x00, 0x00, 0x00, 0x01, 0xFF, 0xFF];
+        assert_eq!(parse_serial_response(&data, sw(0x90, 0x00)), Some(1));
+    }
+
+    #[test]
+    fn parse_serial_none_on_non_success_sw() {
+        // 0x6D00 = instruction not supported (an old YubiKey 4 on PIV 0xF8).
+        let data = [0x00, 0x00, 0x00, 0x01];
+        assert_eq!(parse_serial_response(&data, sw(0x6D, 0x00)), None);
+    }
+
+    #[test]
+    fn parse_serial_none_on_short_response() {
+        let data = [0x00, 0x00, 0x01]; // only 3 bytes
+        assert_eq!(parse_serial_response(&data, sw(0x90, 0x00)), None);
     }
 }

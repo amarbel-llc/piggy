@@ -10,10 +10,12 @@
 # papi needs to discover a blank card for provisioning (papi#17).
 #
 # Driven direct-PCSC against fibby (no agent). A no-seed fibby card presents as
-# blank (SELECT PIV ok, GET DATA CHUID -> 6A82). We use `--model yk5` so the
-# vendor serial INS (0xF8) returns fibby's pinned yk5 serial (0x00F2C2E6 =
-# 15909606); the default yk4 model returns 6D00 (no serial), matching real
-# YubiKey 4 firmware.
+# blank (SELECT PIV ok, GET DATA CHUID -> 6A82). `--model yk5` returns fibby's
+# pinned yk5 serial over the PIV vendor INS 0xF8 (0x00F2C2E6 = 15909606). The
+# yk4 model returns 6D00 to that INS (matching real YubiKey 4 firmware) but now
+# serves its serial via the OTP-applet fallback (piggy#256), which piggy reads
+# when the PIV path is empty — exercised by
+# `blank_yk4_card_serial_via_otp_fallback`.
 #
 # Required env (supplied by `test-bats-conformance-list-blank-fibby`):
 #   FIBBY_BIN=/path/to/fibby   (nix build .#fibby)
@@ -117,6 +119,56 @@ function provisioned_card_is_not_uninitialized { # @test
   printf '%s\n' "$output" | grep -q '"slot":"9D"' || {
     echo "provisioned card did not surface its 9D recipient record" >&2
     printf '%s\n' "$output" >&2
+    return 1
+  }
+}
+
+# piggy#256: a blank yk4 card returns 6D00 to the PIV vendor serial INS (0xF8),
+# so piggy falls back to the OTP applet. The serial now appears where it was
+# absent before this change — the end-to-end proof of the piggy-piv OTP-applet
+# fallback against a (virtual) card.
+function blank_yk4_card_serial_via_otp_fallback { # @test
+  spawn_fibby --model yk4
+
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" run "$PIGGY_BIN" list --format=ndjson
+  [[ $status -eq 0 ]] || {
+    echo "piggy list --format=ndjson exited $status" >&2
+    printf '%s\n' "$output" >&2
+    tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  local line
+  line=$(printf '%s\n' "$output" | grep '"uninitialized":true' | head -1)
+  [[ -n $line ]] || {
+    echo "no uninitialized record in piggy list output" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  # fibby's yk4 OTP-applet serial is 0x00BC614E = 12345678. Before the OTP
+  # fallback a yk4 reported NO serial (PIV 0xF8 -> 6D00, swallowed).
+  printf '%s\n' "$line" | grep -q '"serial":12345678' || {
+    echo "yk4 record missing the OTP-applet serial (fallback not exercised?): $line" >&2
+    tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+}
+
+# `piggy list --verbose` explains how the serial was read: the yk4 note records
+# the PIV 0xF8 miss followed by the OTP-applet read (piggy#256).
+function verbose_serial_note_reports_otp_fallback { # @test
+  spawn_fibby --model yk4
+
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" run "$PIGGY_BIN" list --format=ndjson --verbose
+  [[ $status -eq 0 ]] || {
+    echo "piggy list --format=ndjson --verbose exited $status" >&2
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+  printf '%s\n' "$output" | grep -q '"serial_note":"[^"]*OTP applet[^"]*"' || {
+    echo "verbose output missing the OTP-applet serial_note:" >&2
+    printf '%s\n' "$output" >&2
+    tail -40 "$FIBBY_LOG" >&2 || true
     return 1
   }
 }

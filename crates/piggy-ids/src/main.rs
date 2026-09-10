@@ -32,12 +32,14 @@
 //!     Default format auto-selects based on TTY: human-readable when
 //!     stdout is a TTY, NDJSON otherwise. Records carry the CHUID
 //!     `guid`, the PCSC `reader`, the slot id (e.g. `9D`, `82`), and
-//!     the YubiKey factory `serial` when the card is a YubiKey v5+
-//!     (the vendor `INS_GET_SERIAL` extension). Non-YubiKey PIV cards
-//!     simply omit `serial`. Unsupported slots (RSA, malformed cert,
-//!     etc) are prefixed with `# unsupported:` in human mode and
-//!     marked `"unsupported":true` in NDJSON mode. Drives
-//!     `piggy pass recipients list-available`.
+//!     the YubiKey factory `serial` (read via the PIV vendor
+//!     `INS_GET_SERIAL`, or the OTP-applet fallback on older firmware
+//!     that doesn't expose it over PIV — piggy#256). Non-YubiKey PIV
+//!     cards omit `serial`; `--verbose` adds a `serial_note` field
+//!     explaining how each serial was read, or why it is absent.
+//!     Unsupported slots (RSA, malformed cert, etc) are prefixed with
+//!     `# unsupported:` in human mode and marked `"unsupported":true`
+//!     in NDJSON mode. Drives `piggy pass recipients list-available`.
 //!
 //! Reachable from `piggy.sh` via the `PIGGY_IDS_PATH` env var that
 //! `flake.nix`'s `makeWrapper` bakes into the user-facing `piggy`
@@ -126,6 +128,11 @@ enum Cmd {
         /// `ndjson` otherwise.
         #[arg(long)]
         format: Option<ListFormat>,
+        /// Add a `serial_note` field explaining how each card's serial was
+        /// read, or why it is absent (piggy#256). Off by default so normal
+        /// output is unchanged.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Enumerate every populated PIV slot — both recipient-eligible
     /// slots (9D + retired 0x82..=0x95, same as `list-available`) and
@@ -142,6 +149,11 @@ enum Cmd {
     ListAll {
         #[arg(long)]
         format: Option<ListFormat>,
+        /// Add a `serial_note` field explaining how each card's serial was
+        /// read, or why it is absent (piggy#256). Off by default so normal
+        /// output is unchanged.
+        #[arg(long)]
+        verbose: bool,
     },
 }
 
@@ -183,8 +195,8 @@ fn dispatch(cli: Cli) -> Result<ExitCode, DynErr> {
         Cmd::Diff { current, desired } => cmd_diff(&current, &desired),
         Cmd::DetectPubkey { guid } => cmd_detect_pubkey(guid.as_deref()),
         Cmd::DetectAllPubkeys => cmd_detect_all_pubkeys(),
-        Cmd::ListAvailable { format } => cmd_list_available(format),
-        Cmd::ListAll { format } => cmd_list_all(format),
+        Cmd::ListAvailable { format, verbose } => cmd_list_available(format, verbose),
+        Cmd::ListAll { format, verbose } => cmd_list_all(format, verbose),
     }
 }
 
@@ -293,6 +305,8 @@ fn cmd_detect_pubkey(guid_hex: Option<&str>) -> Result<ExitCode, DynErr> {
         guid: token.guid().clone(),
         reader: token.reader_name().to_string(),
         serial: token.yk_serial(),
+        // TSV detect path; --verbose is a list-all/list-available feature.
+        serial_diag: None,
         algo: slot.algorithm(),
         cert_der: slot.cert_der(),
         // detect-pubkey doesn't surface PIN/touch policy.
@@ -367,6 +381,7 @@ fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
                 guid: token.guid().clone(),
                 reader,
                 serial,
+                serial_diag: None,
                 algo: slot.algorithm(),
                 cert_der: slot.cert_der(),
                 pin_policy: None,
@@ -376,6 +391,7 @@ fn enumerate_and_classify() -> Result<Vec<piggy_ids::Classification>, DynErr> {
                 guid: token.guid().clone(),
                 reader,
                 serial,
+                serial_diag: None,
                 slot_id: 0x9D,
                 cn: None,
                 pin_policy: None,
@@ -421,6 +437,7 @@ fn uninitialized_classification(token: &piggy_piv::PivToken) -> piggy_ids::Class
         guid: token.guid().clone(),
         reader: token.reader_name().to_string(),
         serial: token.yk_serial(),
+        serial_diag: token.yk_serial_diag().map(String::from),
     }
 }
 
@@ -453,6 +470,7 @@ fn enumerate_all_recipient_slots() -> Result<Vec<piggy_ids::Classification>, Dyn
         }
         let reader = token.reader_name().to_string();
         let serial = token.yk_serial();
+        let serial_diag = token.yk_serial_diag().map(String::from);
         for &slot_id in &slots {
             let slot = match token.read_slot(slot_id) {
                 Ok(s) => s,
@@ -469,6 +487,7 @@ fn enumerate_all_recipient_slots() -> Result<Vec<piggy_ids::Classification>, Dyn
                 guid: token.guid().clone(),
                 reader: reader.clone(),
                 serial,
+                serial_diag: serial_diag.clone(),
                 algo: slot.algorithm(),
                 cert_der: slot.cert_der(),
                 pin_policy,
@@ -550,6 +569,7 @@ fn enumerate_all_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
         }
         let reader = token.reader_name().to_string();
         let serial = token.yk_serial();
+        let serial_diag = token.yk_serial_diag().map(String::from);
 
         for &slot_id in recipient_slots.iter().chain(ssh_slots.iter()) {
             let slot = match token.read_slot(slot_id) {
@@ -565,6 +585,7 @@ fn enumerate_all_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
                 guid: token.guid().clone(),
                 reader: reader.clone(),
                 serial,
+                serial_diag: serial_diag.clone(),
                 algo: slot.algorithm(),
                 cert_der: slot.cert_der(),
                 pin_policy,
@@ -591,7 +612,7 @@ fn enumerate_all_slots() -> Result<Vec<piggy_ids::Classification>, DynErr> {
 /// User-facing full-slot list. Same output shape as `cmd_list_available`
 /// but covers 9A/9C/9E in addition to recipient slots. Drives
 /// `piggy list`.
-fn cmd_list_all(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
+fn cmd_list_all(format: Option<ListFormat>, verbose: bool) -> Result<ExitCode, DynErr> {
     let classifications = enumerate_all_slots()?;
 
     let stdout = io::stdout();
@@ -606,8 +627,8 @@ fn cmd_list_all(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
 
     for c in &classifications {
         let line = match effective_format {
-            ListFormat::Human => Some(format_human(c)),
-            ListFormat::Ndjson => Some(format_ndjson(c)),
+            ListFormat::Human => Some(format_human(c, verbose)),
+            ListFormat::Ndjson => Some(format_ndjson(c, verbose)),
             ListFormat::Ssh => format_ssh(c),
         };
         if let Some(line) = line {
@@ -621,7 +642,7 @@ fn cmd_list_all(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
 /// status — human-readable when interactive, NDJSON when piped — so
 /// `piggy pass recipients list-available | xargs piggy pass
 /// recipients add ...` Just Works.
-fn cmd_list_available(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
+fn cmd_list_available(format: Option<ListFormat>, verbose: bool) -> Result<ExitCode, DynErr> {
     // `list-available` only enumerates ECDH recipient slots, which by
     // design have no `authorized_keys`-style representation. Rather
     // than emit a file of all-`#`-comment lines, refuse loudly so the
@@ -647,8 +668,8 @@ fn cmd_list_available(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
 
     for c in &classifications {
         let line = match effective_format {
-            ListFormat::Human => format_human(c),
-            ListFormat::Ndjson => format_ndjson(c),
+            ListFormat::Human => format_human(c, verbose),
+            ListFormat::Ndjson => format_ndjson(c, verbose),
             ListFormat::Ssh => unreachable!("rejected at function entry"),
         };
         writeln!(out, "{line}")?;
@@ -665,20 +686,28 @@ fn cmd_list_available(format: Option<ListFormat>) -> Result<ExitCode, DynErr> {
 /// slots are commented out entirely so the output round-trips through
 /// `xargs piggy pass recipients add` without picking up rejected
 /// entries.
-fn format_human(c: &piggy_ids::Classification) -> String {
+fn format_human(c: &piggy_ids::Classification, verbose: bool) -> String {
     use piggy_ids::Classification;
+    // `--verbose` appends a `, serial_note=<diag>` field explaining how the
+    // serial was read (or why it is absent). Off by default → output unchanged.
+    let note_field = verbose
+        .then(|| c.serial_diag())
+        .flatten()
+        .map(|n| format!(", serial_note={n}"))
+        .unwrap_or_default();
     match c {
         Classification::Supported {
             id,
             guid,
             reader,
             serial,
+            serial_diag: _,
             slot_id,
             cn,
             pin_policy,
             touch_policy,
         } => format!(
-            "{}  # {}",
+            "{}  # {}{}",
             id,
             human_metadata(
                 guid,
@@ -689,18 +718,20 @@ fn format_human(c: &piggy_ids::Classification) -> String {
                 *pin_policy,
                 *touch_policy,
             ),
+            note_field,
         ),
         Classification::Unsupported {
             guid,
             reader,
             serial,
+            serial_diag: _,
             slot_id,
             cn,
             pin_policy,
             touch_policy,
             reason,
         } => format!(
-            "# unsupported: {}, reason={}",
+            "# unsupported: {}{}, reason={}",
             human_metadata(
                 guid,
                 *serial,
@@ -710,22 +741,25 @@ fn format_human(c: &piggy_ids::Classification) -> String {
                 *pin_policy,
                 *touch_policy,
             ),
+            note_field,
             reason,
         ),
         Classification::Uninitialized {
             guid,
             reader,
             serial,
+            serial_diag: _,
         } => {
             let serial_field = match serial {
                 Some(s) => format!(", serial={s}"),
                 None => String::new(),
             };
             format!(
-                "# uninitialized: guid={}, reader={}{}",
+                "# uninitialized: guid={}, reader={}{}{}",
                 guid.to_hex(),
                 reader,
                 serial_field,
+                note_field,
             )
         }
     }
@@ -778,14 +812,22 @@ fn human_metadata(
 /// are the lowercase names accepted by `pivy-tool generate -i/-t`:
 /// `default`, `never`, `once`, `always` (pin); `default`, `never`,
 /// `always`, `cached` (touch).
-fn format_ndjson(c: &piggy_ids::Classification) -> String {
+fn format_ndjson(c: &piggy_ids::Classification, verbose: bool) -> String {
     use piggy_ids::Classification;
+    // `--verbose` adds a `"serial_note"` string field; off by default so the
+    // record consumers parse (papi) is byte-for-byte unchanged.
+    let note_field = verbose
+        .then(|| c.serial_diag())
+        .flatten()
+        .map(|n| format!(",\"serial_note\":{}", json_string(n)))
+        .unwrap_or_default();
     match c {
         Classification::Supported {
             id,
             guid,
             reader,
             serial,
+            serial_diag: _,
             slot_id,
             cn,
             pin_policy,
@@ -800,7 +842,7 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
                 .unwrap_or_default();
             let policy_fields = policy_ndjson_fields(*pin_policy, *touch_policy);
             format!(
-                "{{\"id\":{},\"guid\":{}{},\"reader\":{},\"slot\":{}{}{}}}",
+                "{{\"id\":{},\"guid\":{}{},\"reader\":{},\"slot\":{}{}{}{}}}",
                 json_string(&id.to_wire()),
                 json_string(&guid.to_hex()),
                 serial_field,
@@ -808,12 +850,14 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
                 json_string(&piggy_ids::format_slot_id(*slot_id)),
                 cn_field,
                 policy_fields,
+                note_field,
             )
         }
         Classification::Unsupported {
             guid,
             reader,
             serial,
+            serial_diag: _,
             slot_id,
             cn,
             pin_policy,
@@ -829,7 +873,7 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
                 .unwrap_or_default();
             let policy_fields = policy_ndjson_fields(*pin_policy, *touch_policy);
             format!(
-                "{{\"unsupported\":true,\"guid\":{}{},\"reader\":{},\"slot\":{}{}{},\"reason\":{}}}",
+                "{{\"unsupported\":true,\"guid\":{}{},\"reader\":{},\"slot\":{}{}{},\"reason\":{}{}}}",
                 json_string(&guid.to_hex()),
                 serial_field,
                 json_string(reader),
@@ -837,12 +881,14 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
                 cn_field,
                 policy_fields,
                 json_string(reason),
+                note_field,
             )
         }
         Classification::Uninitialized {
             guid,
             reader,
             serial,
+            serial_diag: _,
         } => {
             // Card-level discovery record (piggy#193): a boolean marker
             // mirroring `unsupported:true`, plus the all-zeros guid, reader, and
@@ -851,10 +897,11 @@ fn format_ndjson(c: &piggy_ids::Classification) -> String {
                 .map(|s| format!(",\"serial\":{}", s))
                 .unwrap_or_default();
             format!(
-                "{{\"uninitialized\":true,\"guid\":{},\"reader\":{}{}}}",
+                "{{\"uninitialized\":true,\"guid\":{},\"reader\":{}{}{}}}",
                 json_string(&guid.to_hex()),
                 json_string(reader),
                 serial_field,
+                note_field,
             )
         }
     }
@@ -949,10 +996,21 @@ fn json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_human, format_ndjson, format_ssh, json_string, slot_sort_key};
+    use super::{format_ssh, json_string, slot_sort_key};
     use piggy_ids::Classification;
     use piggy_markl::{FormatId, Id as MarklId, PurposeId};
     use piggy_piv::{Guid, PinPolicy, TouchPolicy};
+
+    // Most of these tests assert the default (non-verbose) rendering; wrap the
+    // real 2-arg formatters so each call site stays terse. The `--verbose`
+    // behavior has its own tests that call `super::format_{human,ndjson}(c,
+    // true)` directly.
+    fn format_human(c: &Classification) -> String {
+        super::format_human(c, false)
+    }
+    fn format_ndjson(c: &Classification) -> String {
+        super::format_ndjson(c, false)
+    }
 
     #[test]
     fn json_string_quotes_basic_ascii() {
@@ -1010,6 +1068,7 @@ mod tests {
             guid: Guid::from_hex("00112233445566778899aabbccddeeff").expect("valid hex"),
             reader: "Yubico YubiKey OTP+FIDO+CCID 00 00".into(),
             serial,
+            serial_diag: None,
             slot_id,
             cn,
             pin_policy,
@@ -1022,6 +1081,7 @@ mod tests {
             guid: Guid::from_hex("ffeeddccbbaa99887766554433221100").expect("valid hex"),
             reader: "Some Other Reader 00 00".into(),
             serial,
+            serial_diag: None,
             slot_id: 0x9D,
             cn: None,
             pin_policy: None,
@@ -1035,7 +1095,56 @@ mod tests {
             guid: Guid::from_bytes(&[0u8; 16]).expect("all-zeros guid"),
             reader: "Yubico YubiKey OTP+FIDO+CCID 00 00".into(),
             serial,
+            serial_diag: None,
         }
+    }
+
+    fn sample_supported_with_diag(diag: &str) -> Classification {
+        let mut c = sample_supported(None);
+        if let Classification::Supported { serial_diag, .. } = &mut c {
+            *serial_diag = Some(diag.to_string());
+        }
+        c
+    }
+
+    // --- `--verbose` serial_note (piggy#256) ---
+
+    #[test]
+    fn format_human_verbose_adds_serial_note() {
+        let c = sample_supported_with_diag("via OTP applet");
+        let plain = super::format_human(&c, false);
+        assert!(
+            !plain.contains("serial_note"),
+            "non-verbose leaked note: {plain}"
+        );
+        let verbose = super::format_human(&c, true);
+        assert!(
+            verbose.contains("serial_note=via OTP applet"),
+            "missing note: {verbose}"
+        );
+    }
+
+    #[test]
+    fn format_ndjson_verbose_adds_serial_note() {
+        let c = sample_supported_with_diag("PIV GET_SERIAL SW=0x6D00; via OTP applet");
+        let plain = super::format_ndjson(&c, false);
+        assert!(
+            !plain.contains("serial_note"),
+            "non-verbose leaked note: {plain}"
+        );
+        let verbose = super::format_ndjson(&c, true);
+        assert!(
+            verbose.contains("\"serial_note\":\"PIV GET_SERIAL SW=0x6D00; via OTP applet\""),
+            "missing note field: {verbose}"
+        );
+    }
+
+    #[test]
+    fn format_verbose_absent_diag_omits_note() {
+        // A card with no diagnostic shows no note even under --verbose.
+        let c = sample_supported(None);
+        assert!(!super::format_ndjson(&c, true).contains("serial_note"));
+        assert!(!super::format_human(&c, true).contains("serial_note"));
     }
 
     #[test]
@@ -1374,6 +1483,7 @@ mod tests {
             guid: Guid::from_hex("00112233445566778899aabbccddeeff").expect("valid hex"),
             reader: "Yubico YubiKey OTP+FIDO+CCID 00 00".into(),
             serial: Some(12_345_678),
+            serial_diag: None,
             slot_id,
             cn: cn.map(str::to_string),
             pin_policy: None,
@@ -1518,6 +1628,7 @@ mod tests {
             guid: Guid::from_hex("00112233445566778899aabbccddeeff").unwrap(),
             reader: "Test Reader".into(),
             serial: None,
+            serial_diag: None,
             slot_id: 0x9A,
             cn: None,
             pin_policy: None,
@@ -1548,6 +1659,7 @@ mod tests {
             guid: Guid::from_hex("00112233445566778899aabbccddeeff").expect("valid hex"),
             reader: "Yubico YubiKey OTP+FIDO+CCID 00 00".into(),
             serial: Some(12_345_678),
+            serial_diag: None,
             slot_id,
             cn: cn.map(str::to_string),
             pin_policy: None,
@@ -1573,6 +1685,7 @@ mod tests {
             guid: Guid::from_hex("00112233445566778899aabbccddeeff").unwrap(),
             reader: "Test Reader".into(),
             serial: None,
+            serial_diag: None,
             slot_id: 0x9C,
             cn: None,
             pin_policy: None,

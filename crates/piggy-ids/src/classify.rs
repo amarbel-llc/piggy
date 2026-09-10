@@ -18,10 +18,15 @@ pub enum Classification {
         id: MarklId,
         guid: Guid,
         reader: String,
-        /// YubiKey factory serial when the card is a YubiKey v5+ with
-        /// the vendor `INS_GET_SERIAL` extension. `None` for every
-        /// other PIV card. Populated upstream by `PivToken::yk_serial`.
+        /// YubiKey factory serial. `None` only for non-YubiKey PIV cards;
+        /// a YubiKey that doesn't expose the serial over PIV (e.g. a YubiKey
+        /// 4) is read via the OTP-applet fallback. Populated upstream by
+        /// `PivToken::yk_serial`.
         serial: Option<u32>,
+        /// Diagnostic for the serial read (which path produced it, or why
+        /// none did), from `PivToken::yk_serial_diag`. Surfaced only under
+        /// `piggy list --verbose`; `None` when the read wasn't attempted.
+        serial_diag: Option<String>,
         /// PIV slot id (e.g. 0x9D for key management, 0x82..=0x95 for
         /// retired key management).
         slot_id: u8,
@@ -43,6 +48,9 @@ pub enum Classification {
         guid: Guid,
         reader: String,
         serial: Option<u32>,
+        /// Serial-read diagnostic (see the `Supported` variant). Surfaced
+        /// only under `piggy list --verbose`.
+        serial_diag: Option<String>,
         slot_id: u8,
         /// Subject Common Name from the slot's self-signed cert. Useful
         /// for identifying RSA-bearing retired slots even though they
@@ -67,6 +75,9 @@ pub enum Classification {
         guid: Guid,
         reader: String,
         serial: Option<u32>,
+        /// Serial-read diagnostic (see the `Supported` variant). Surfaced
+        /// only under `piggy list --verbose`.
+        serial_diag: Option<String>,
     },
 }
 
@@ -92,6 +103,16 @@ impl Classification {
             Classification::Supported { serial, .. } => *serial,
             Classification::Unsupported { serial, .. } => *serial,
             Classification::Uninitialized { serial, .. } => *serial,
+        }
+    }
+
+    /// Diagnostic for the serial read (which path produced the serial, or
+    /// why none did). Surfaced only under `piggy list --verbose`.
+    pub fn serial_diag(&self) -> Option<&str> {
+        match self {
+            Classification::Supported { serial_diag, .. } => serial_diag.as_deref(),
+            Classification::Unsupported { serial_diag, .. } => serial_diag.as_deref(),
+            Classification::Uninitialized { serial_diag, .. } => serial_diag.as_deref(),
         }
     }
 
@@ -144,6 +165,10 @@ pub struct ClassifyInput<'a> {
     pub guid: Guid,
     pub reader: String,
     pub serial: Option<u32>,
+    /// Serial-read diagnostic from `PivToken::yk_serial_diag`, carried onto the
+    /// resulting [`Classification`] for `piggy list --verbose`. `None` on the
+    /// TSV detect paths, which never surface it.
+    pub serial_diag: Option<String>,
     pub algo: PivAlgorithm,
     pub cert_der: &'a [u8],
     pub pin_policy: Option<PinPolicy>,
@@ -160,6 +185,7 @@ impl ClassifyInput<'_> {
             guid: self.guid,
             reader: self.reader,
             serial: self.serial,
+            serial_diag: self.serial_diag,
             slot_id: self.slot_id,
             cn,
             pin_policy: self.pin_policy,
@@ -174,6 +200,7 @@ impl ClassifyInput<'_> {
             guid: self.guid,
             reader: self.reader,
             serial: self.serial,
+            serial_diag: self.serial_diag,
             slot_id: self.slot_id,
             cn,
             pin_policy: self.pin_policy,
@@ -199,6 +226,7 @@ pub fn classify_slot_9d(
         guid,
         reader,
         serial,
+        serial_diag: None,
         algo,
         cert_der,
         pin_policy: None,

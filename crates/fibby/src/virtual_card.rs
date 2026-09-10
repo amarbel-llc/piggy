@@ -151,6 +151,18 @@ impl Model {
         }
     }
 
+    /// 4-byte serial returned by the OTP-applet serial API-request (INS 0x01,
+    /// P1 0x10). Unlike the PIV vendor `0xF8` path ([`Self::serial`]), the OTP
+    /// applet exposes the serial on ALL YubiKey firmware — it's how ykman reads
+    /// it on a YubiKey 4 (piggy#256). Synthetic test fixture, not a wet-env
+    /// capture; the Yk5 value matches its PIV serial as a real card's would.
+    pub fn otp_serial(self) -> [u8; 4] {
+        match self {
+            Model::Yk4 => [0x00, 0xBC, 0x61, 0x4E], // 12345678, synthetic
+            Model::Yk5 => [0x00, 0xF2, 0xC2, 0xE6], // matches its PIV serial
+        }
+    }
+
     /// 3-byte firmware version returned by the YubiKey vendor GET
     /// VERSION instruction (INS 0xFD): `[major, minor, patch]`. The
     /// wire response is these three bytes followed by SW 9000.
@@ -200,6 +212,11 @@ pub struct VirtualCard {
     event_counter: u32,
     powered: bool,
     selected_piv: bool,
+    /// Whether the YubiKey OTP applet is currently selected. Set by a SELECT
+    /// of [`apdu::YK_OTP_AID`], cleared by SELECT PIV / power changes. Gates
+    /// the OTP-applet serial API-request that models a YubiKey 4's serial
+    /// read (piggy#256).
+    selected_otp: bool,
     /// PIV data-object storage keyed by tag bytes (the inner `<tag>` in
     /// `5C <len> <tag>`). Values are stored already-wrapped in a 53
     /// BER-TLV so GET DATA can return them verbatim — that's how real
@@ -632,6 +649,7 @@ impl VirtualCard {
             event_counter: 0,
             powered: false,
             selected_piv: false,
+            selected_otp: false,
             data_objects: HashMap::new(),
             pin: DEFAULT_PIN.to_vec(),
             pin_retries: DEFAULT_PIN_RETRIES,
@@ -888,6 +906,7 @@ impl Backend for VirtualCard {
         if !present && self.inserted {
             self.powered = false;
             self.selected_piv = false;
+            self.selected_otp = false;
             self.pin_verified = false;
             self.pending_mgmt_witness = None;
             self.mgmt_authenticated = false;
@@ -913,12 +932,14 @@ impl Backend for VirtualCard {
     fn connect(&mut self, _share_mode: u32, _preferred_protocols: u32) -> ScardResult<u32> {
         self.powered = true;
         self.selected_piv = false;
+        self.selected_otp = false;
         Ok(protocol::T1)
     }
 
     fn disconnect(&mut self, _disposition: u32) -> ScardResult<()> {
         self.powered = false;
         self.selected_piv = false;
+        self.selected_otp = false;
         // Real silicon clears PIN-verified status when the card loses
         // power. retry counter is persistent — only a successful
         // VERIFY resets it.
@@ -953,6 +974,7 @@ impl Backend for VirtualCard {
             let aid = apdu_body(command_apdu).unwrap_or(&[]);
             if aid.starts_with(apdu::PIV_AID_PREFIX) {
                 self.selected_piv = true;
+                self.selected_otp = false;
                 trace::emit(
                     trace::DEBUG,
                     "vcard",
@@ -961,6 +983,20 @@ impl Backend for VirtualCard {
                 let mut resp = self.model.select_fci_bytes().to_vec();
                 resp.extend_from_slice(&sw(0x90, 0x00));
                 return Ok(resp);
+            }
+            // SELECT the OTP applet (piggy#256): the serial-read fallback for a
+            // YubiKey 4 whose PIV applet doesn't expose YK_SERIAL. piggy reads
+            // the serial here, then re-SELECTs PIV. The client ignores the FCI
+            // body, so an empty 9000 is enough.
+            if aid.starts_with(apdu::YK_OTP_AID) {
+                self.selected_otp = true;
+                self.selected_piv = false;
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "SELECT OTP AID -> 9000 (serial fallback, piggy#256)",
+                );
+                return Ok(sw(0x90, 0x00));
             }
             trace::emit(trace::DEBUG, "vcard", "SELECT non-PIV AID -> 6A82");
             return Ok(sw(0x6A, 0x82)); // file/application not found
@@ -1031,6 +1067,30 @@ impl Backend for VirtualCard {
                     return Ok(sw(0x6D, 0x00));
                 }
             }
+        }
+
+        // YubiKey OTP-applet serial API-request (00 01 10 00 ...), only when
+        // the OTP applet is selected. Models how ykman reads the serial on a
+        // YubiKey 4 whose PIV applet doesn't implement YK_SERIAL (piggy#256):
+        // a 4-byte big-endian serial + SW 9000, unconditional on all models.
+        if self.selected_otp
+            && cla == 0x00
+            && ins == apdu::ins::OTP_API_REQ
+            && p1 == apdu::ins::OTP_SLOT_DEVICE_SERIAL
+            && p2 == 0x00
+        {
+            let serial = self.model.otp_serial();
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!(
+                    "OTP SERIAL -> {:02X}{:02X}{:02X}{:02X} 9000",
+                    serial[0], serial[1], serial[2], serial[3]
+                ),
+            );
+            let mut out = serial.to_vec();
+            out.extend_from_slice(&sw(0x90, 0x00));
+            return Ok(out);
         }
 
         // VERIFY (00 20 P1 P2 ...). PIV application PIN at P1=00 P2=80.
@@ -2544,6 +2604,57 @@ mod tests {
     #[test]
     fn model_serial_for_yk5_is_primary_capture() {
         assert_eq!(Model::Yk5.serial(), Some([0x00, 0xF2, 0xC2, 0xE6]));
+    }
+
+    // -- OTP-applet serial fallback (piggy#256) --------------------------
+
+    fn select_otp() -> Vec<u8> {
+        let mut a = vec![0x00, 0xA4, 0x04, 0x00, apdu::YK_OTP_AID.len() as u8];
+        a.extend_from_slice(apdu::YK_OTP_AID);
+        a
+    }
+
+    #[test]
+    fn otp_select_then_serial_reads_serial_on_yk4() {
+        let mut c = VirtualCard::with_model(Model::Yk4);
+        c.connect(2, 3).unwrap();
+        // The YK4 PIV 0xF8 path returns 6D00 (covered above), so the client
+        // falls back to the OTP applet: SELECT it, then read the serial.
+        assert_eq!(c.transmit(&select_otp()).unwrap(), vec![0x90, 0x00]);
+        let resp = c.transmit(&[0x00, 0x01, 0x10, 0x00, 0x00]).unwrap();
+        // 12345678 = 00 BC 61 4E, + SW 9000.
+        assert_eq!(resp, vec![0x00, 0xBC, 0x61, 0x4E, 0x90, 0x00]);
+    }
+
+    #[test]
+    fn otp_serial_without_select_is_unsupported() {
+        let mut c = VirtualCard::with_model(Model::Yk4);
+        c.connect(2, 3).unwrap();
+        // Without selecting the OTP applet the API-request is just an
+        // unimplemented INS → 6D00 (the catch-all).
+        assert_eq!(
+            c.transmit(&[0x00, 0x01, 0x10, 0x00, 0x00]).unwrap(),
+            vec![0x6D, 0x00]
+        );
+    }
+
+    #[test]
+    fn selecting_otp_then_piv_restores_piv_selection() {
+        let mut c = VirtualCard::with_model(Model::Yk4);
+        c.connect(2, 3).unwrap();
+        c.transmit(&select_otp()).unwrap();
+        // Re-SELECT PIV (what read_yk_serial does after the OTP read).
+        let resp = c.transmit(&select_piv()).unwrap();
+        assert_eq!(&resp[resp.len() - 2..], &[0x90, 0x00]);
+        // A PIV op now works again: GET VERSION responds 9000.
+        let ver = c.transmit(&[0x00, 0xFD, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(&ver[ver.len() - 2..], &[0x90, 0x00]);
+    }
+
+    #[test]
+    fn model_otp_serial_values() {
+        assert_eq!(Model::Yk4.otp_serial(), [0x00, 0xBC, 0x61, 0x4E]);
+        assert_eq!(Model::Yk5.otp_serial(), [0x00, 0xF2, 0xC2, 0xE6]);
     }
 
     // -- VERIFY PIN tests ---------------------------------------------

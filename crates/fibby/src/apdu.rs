@@ -15,6 +15,11 @@ pub const PIV_AID: &[u8] = &[
 /// trailing version bytes are optional in the SELECT data field.
 pub const PIV_AID_PREFIX: &[u8] = &[0xA0, 0x00, 0x00, 0x03, 0x08];
 
+/// YubiKey OTP application AID. On firmware where the PIV applet doesn't
+/// expose the serial (e.g. a YubiKey 4), the serial is read from this applet
+/// instead — how ykman reads it (piggy#256). SELECTed like any other AID.
+pub const YK_OTP_AID: &[u8] = &[0xA0, 0x00, 0x00, 0x05, 0x27, 0x20, 0x01, 0x01];
+
 /// ISO 7816-4 instruction bytes fibby's stub recognizes.
 pub mod ins {
     pub const SELECT: u8 = 0xA4;
@@ -60,6 +65,14 @@ pub mod ins {
     /// SW 9000. `P1 P2 = 00 00`; no body. Not in SP 800-73-4 — it's a
     /// YubicoPIV extension pivy-tool issues during discovery.
     pub const YK_SERIAL: u8 = 0xF8;
+    /// YubiKey OTP-applet "API request". Issued against the OTP applet
+    /// ([`super::YK_OTP_AID`], not PIV). With `P1 = OTP_SLOT_DEVICE_SERIAL`
+    /// (`0x10`) the response is the 4-byte big-endian factory serial + SW
+    /// 9000 — how ykman reads the serial on a YubiKey 4 whose PIV applet
+    /// doesn't implement `YK_SERIAL` (piggy#256).
+    pub const OTP_API_REQ: u8 = 0x01;
+    /// `P1` for `OTP_API_REQ` selecting the device serial.
+    pub const OTP_SLOT_DEVICE_SERIAL: u8 = 0x10;
     /// PIV GENERAL AUTHENTICATE (SP 800-73-4 §3.2.4). Used for
     /// challenge-response (slot ECDSA + mgmt-key auth) and key
     /// agreement (slot ECDH). `P1` is the algorithm reference (e.g.
