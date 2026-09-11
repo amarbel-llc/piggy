@@ -133,6 +133,26 @@ pub(crate) fn is_ebox(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("ebox"))
 }
 
+/// `dirname -- "$path"` semantics, projected into the subfolder
+/// argument shape [`find_piggy_ids`] expects.
+pub(crate) fn path_parent_for_search(path: &str) -> String {
+    let p = PathBuf::from(path);
+    match p.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_string_lossy().into_owned(),
+        _ => String::new(),
+    }
+}
+
+/// Why a pass-name is a sneaky path (a `..` component), or `None` if it is fine.
+pub(crate) fn sneaky_path_reason(path: &str) -> Option<&'static str> {
+    for component in Path::new(path).components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Some("`..` component");
+        }
+    }
+    None
+}
+
 /// Walk up from `root/subfolder` toward `root`, returning the first
 /// directory that contains a `piggy-ids` file. Mirrors
 /// `find_piggy_ids` in piggy.sh.

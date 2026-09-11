@@ -6,9 +6,11 @@
 //! [`frontend`] holds the bindings: the default in-process tty frontend and the
 //! JSON-RPC frontend an external TUI drives over a socket. [`engine`]
 //! orchestrates `piggy card init`'s full setup against a `&mut dyn Frontend`,
-//! staying agnostic to which binding is in use.
+//! staying agnostic to which binding is in use. [`seal`] escrows a generated
+//! management key into the password store (piggy#258).
 
 pub mod engine;
 pub mod frontend;
 pub mod init_cmd;
 pub mod protocol;
+pub mod seal;

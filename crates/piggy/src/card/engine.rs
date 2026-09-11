@@ -13,11 +13,13 @@
 //!
 //! Management-key policy: the engine rotates per whatever [`MgmtKeyChoice`] the
 //! frontend returns (the mechanism). The tty default returns
-//! [`MgmtKeyChoice::Random`]; the engine then generates the key and returns it
-//! in [`ProvisionOutcome::generated_mgmt_key`] for the command to display once
-//! — the key never crosses a `progress`/`completed` notification (RFC 0006
-//! security). PIN-protected storage — the eventual secure default — is
-//! piggy#198.
+//! [`MgmtKeyChoice::Random`]; the engine then generates the key and either
+//! seals it into an [`Escrow`] (piggy#258) or returns it in
+//! [`ProvisionOutcome::generated_mgmt_key`] for the command to display once —
+//! the key never crosses a `progress`/`completed` notification (RFC 0006
+//! security). An escrowed key is sealed *before* it is set on the card and
+//! removed again if the card rejects it, so a key is never applied without its
+//! escrow. PIN-protected on-card storage is piggy#198.
 
 use openssl::rand::rand_bytes;
 use zeroize::Zeroizing;
@@ -28,6 +30,7 @@ use crate::card::protocol::{
     CardId, CompletedEvent, CompletedStatus, ConfirmRequest, Frontend, FrontendError,
     MgmtKeyChoice, MgmtKeyRequest, ProgressEvent, SecretKind, SecretRequest,
 };
+use crate::card::seal::KeyEscrow;
 
 /// PIV factory-default application PIN (`123456`). A factory-blank card carries
 /// this; full-setup verifies it (so the card can sign its own certs) and then
@@ -94,15 +97,33 @@ pub struct ProvisionConfig {
     pub reprovision: bool,
 }
 
+/// A management-key escrow the engine seals a generated key into (piggy#258).
+pub struct Escrow<'a> {
+    pub sink: &'a mut dyn KeyEscrow,
+    /// Ask the operator through the frontend before sealing, rather than
+    /// sealing unconditionally.
+    pub ask: bool,
+}
+
+/// Where a generated management key was sealed instead of being displayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedKey {
+    pub pass_name: String,
+    pub recipients: usize,
+}
+
 /// What a successful provision produced.
 #[derive(Debug)]
 pub struct ProvisionOutcome {
     /// The provisioned card's GUID, uppercase hex.
     pub guid: String,
     /// The newly-generated random management key (hex), present **only** when
-    /// the frontend chose [`MgmtKeyChoice::Random`]. The caller displays it
-    /// once; it is never logged or sent over a notification.
+    /// the frontend chose [`MgmtKeyChoice::Random`] and the key was not
+    /// sealed. The caller displays it once; it is never logged or sent over a
+    /// notification.
     pub generated_mgmt_key: Option<Zeroizing<String>>,
+    /// Where the generated management key was sealed, when it was.
+    pub sealed_mgmt_key: Option<SealedKey>,
 }
 
 /// Why a provision failed.
@@ -126,6 +147,10 @@ pub enum ProvisionError {
     PukMismatch,
     #[error("supplied management key is not valid 24-byte hex: {0}")]
     BadMgmtKey(String),
+    /// Sealing the generated management key failed; the card's management key
+    /// was left unrotated.
+    #[error("sealing the management key failed (the card's management key was not rotated): {0}")]
+    Seal(String),
 }
 
 /// The CN for a slot's self-signed cert: `<prefix>@<first-8-hex-of-guid>`.
@@ -157,14 +182,21 @@ pub fn run(
     card: &mut dyn ProvisionCard,
     fe: &mut dyn Frontend,
     cfg: &ProvisionConfig,
+    escrow: Option<Escrow<'_>>,
 ) -> Result<ProvisionOutcome, ProvisionError> {
-    let result = run_inner(card, fe, cfg);
+    let result = run_inner(card, fe, cfg, escrow);
     match &result {
-        Ok(outcome) => fe.completed(CompletedEvent {
-            status: CompletedStatus::Ok,
-            summary: Some(serde_json::json!({ "guid": outcome.guid })),
-            error: None,
-        }),
+        Ok(outcome) => {
+            let mut summary = serde_json::json!({ "guid": outcome.guid });
+            if let Some(sealed) = &outcome.sealed_mgmt_key {
+                summary["sealed_management_key"] = sealed.pass_name.clone().into();
+            }
+            fe.completed(CompletedEvent {
+                status: CompletedStatus::Ok,
+                summary: Some(summary),
+                error: None,
+            })
+        }
         Err(e) => fe.completed(CompletedEvent {
             status: CompletedStatus::Error,
             summary: None,
@@ -178,6 +210,7 @@ fn run_inner(
     card: &mut dyn ProvisionCard,
     fe: &mut dyn Frontend,
     cfg: &ProvisionConfig,
+    escrow: Option<Escrow<'_>>,
 ) -> Result<ProvisionOutcome, ProvisionError> {
     let guid_hex = hex::encode_upper(cfg.guid);
     let card_id = CardId {
@@ -259,11 +292,12 @@ fn run_inner(
 
     // 6. Rotate the management key per the frontend's choice.
     step(fe, 6, "rotate-mgmt-key", "Rotating management key");
-    let generated_mgmt_key = rotate_mgmt_key(card, fe, &card_id)?;
+    let (generated_mgmt_key, sealed_mgmt_key) = rotate_mgmt_key(card, fe, &card_id, escrow)?;
 
     Ok(ProvisionOutcome {
         guid: guid_hex,
         generated_mgmt_key,
+        sealed_mgmt_key,
     })
 }
 
@@ -298,19 +332,25 @@ fn collect_new_secret(
     Ok(first)
 }
 
-/// Resolve the frontend's management-key choice into an applied rotation,
-/// returning the generated key (hex) only for the `Random` case.
+/// Resolve the frontend's management-key choice into an applied rotation.
+/// Returns the generated key (hex) for a `Random` key that was not sealed, or
+/// where it was sealed. `Default`/`Hex` keys are never sealed: the operator
+/// already knows them.
 fn rotate_mgmt_key(
     card: &mut dyn ProvisionCard,
     fe: &mut dyn Frontend,
     card_id: &CardId,
-) -> Result<Option<Zeroizing<String>>, ProvisionError> {
+    escrow: Option<Escrow<'_>>,
+) -> Result<(Option<Zeroizing<String>>, Option<SealedKey>), ProvisionError> {
     let choice = fe.request_mgmt_key(MgmtKeyRequest {
         prompt: "Management key for the card".into(),
         card: card_id.clone(),
     })?;
     match choice {
-        MgmtKeyChoice::Default => Ok(None),
+        MgmtKeyChoice::Default => {
+            note_unsealed(fe, escrow.as_ref());
+            Ok((None, None))
+        }
         MgmtKeyChoice::Hex { key } => {
             let bytes =
                 hex::decode(key.trim()).map_err(|e| ProvisionError::BadMgmtKey(e.to_string()))?;
@@ -321,15 +361,92 @@ fn rotate_mgmt_key(
                 )));
             }
             card.set_management_key_3des(&bytes)?;
-            Ok(None)
+            note_unsealed(fe, escrow.as_ref());
+            Ok((None, None))
         }
         MgmtKeyChoice::Random => {
-            let mut key = [0u8; 24];
-            rand_bytes(&mut key).map_err(|e| ProvisionError::BadMgmtKey(format!("rng: {e}")))?;
-            card.set_management_key_3des(&key)?;
-            Ok(Some(Zeroizing::new(hex::encode_upper(key))))
+            let mut key = Zeroizing::new([0u8; 24]);
+            rand_bytes(&mut key[..])
+                .map_err(|e| ProvisionError::BadMgmtKey(format!("rng: {e}")))?;
+            let key_hex = Zeroizing::new(hex::encode_upper(&key[..]));
+            // A failed or cancelled offer answer means "don't seal": by now the
+            // card's keys and PIN/PUK are rewritten, so aborting here would
+            // leave it half-provisioned with its key never shown.
+            let sink = match escrow {
+                Some(e) if !e.ask || offer_seal(fe, card_id, &*e.sink).unwrap_or(false) => {
+                    Some(e.sink)
+                }
+                _ => None,
+            };
+            match sink {
+                Some(sink) => seal_then_rotate(card, fe, sink, &key[..], &key_hex)
+                    .map(|sealed| (None, Some(sealed))),
+                None => {
+                    card.set_management_key_3des(&key[..])?;
+                    Ok((Some(key_hex), None))
+                }
+            }
         }
     }
+}
+
+/// Ask the operator whether to seal the new key into the store.
+fn offer_seal(
+    fe: &mut dyn Frontend,
+    card_id: &CardId,
+    sink: &dyn KeyEscrow,
+) -> Result<bool, FrontendError> {
+    let n = sink.recipients().len();
+    fe.confirm(ConfirmRequest {
+        message: format!(
+            "Seal {}'s new management key into the password store at {} ({n} recipient{})? Otherwise it is shown once and is NOT recoverable.",
+            card_id.short_label(),
+            sink.pass_name(),
+            if n == 1 { "" } else { "s" }
+        ),
+        default: Some(false),
+    })
+}
+
+/// Tell the operator an explicitly requested seal did not happen: only a
+/// piggy-generated key is escrowed.
+fn note_unsealed(fe: &mut dyn Frontend, escrow: Option<&Escrow<'_>>) {
+    if matches!(escrow, Some(e) if !e.ask) {
+        fe.progress(ProgressEvent {
+            step: "seal-skipped".into(),
+            message: "Management key not sealed: only a generated (random) key is escrowed".into(),
+            current: None,
+            total: None,
+        });
+    }
+}
+
+/// Seal `key` into `sink`, then set it on the card. A card that rejects the key
+/// rolls the seal back, so an escrow never outlives a failed rotation and a
+/// rotation never happens without its escrow.
+fn seal_then_rotate(
+    card: &mut dyn ProvisionCard,
+    fe: &mut dyn Frontend,
+    sink: &mut dyn KeyEscrow,
+    key: &[u8],
+    key_hex: &str,
+) -> Result<SealedKey, ProvisionError> {
+    fe.progress(ProgressEvent {
+        step: "seal-mgmt-key".into(),
+        message: format!("Sealing management key to {}", sink.pass_name()),
+        current: None,
+        total: None,
+    });
+    sink.seal(key_hex).map_err(ProvisionError::Seal)?;
+    if let Err(e) = card.set_management_key_3des(key) {
+        sink.rollback();
+        return Err(e.into());
+    }
+    sink.commit();
+    Ok(SealedKey {
+        pass_name: sink.pass_name().to_string(),
+        recipients: sink.recipients().len(),
+    })
 }
 
 #[cfg(test)]
@@ -344,6 +461,8 @@ mod tests {
     struct MockCard {
         log: Vec<String>,
         last_mgmt_key: Option<Vec<u8>>,
+        /// Fail the management-key rotation, as a card whose write errors.
+        reject_mgmt_key: bool,
     }
 
     impl ProvisionCard for MockCard {
@@ -392,17 +511,22 @@ mod tests {
             Ok(())
         }
         fn set_management_key_3des(&mut self, key: &[u8]) -> Result<(), PivError> {
+            if self.reject_mgmt_key {
+                return Err(PivError::SlotEmpty(0x9B));
+            }
             self.log.push("set_mgmt_key".into());
             self.last_mgmt_key = Some(key.to_vec());
             Ok(())
         }
     }
 
-    /// A scripted frontend: canned secrets (FIFO), a fixed confirm answer and
-    /// mgmt-key choice, recording progress step tokens + the completion status.
+    /// A scripted frontend: canned secrets (FIFO), confirm answers (FIFO, then
+    /// the fixed `confirm` fallback) and a mgmt-key choice, recording progress
+    /// step tokens + the completion status.
     struct ScriptedFrontend {
         secrets: VecDeque<String>,
         confirm: bool,
+        answers: VecDeque<bool>,
         mgmt: MgmtKeyChoice,
         steps: Vec<String>,
         completed: Option<CompletedStatus>,
@@ -414,11 +538,17 @@ mod tests {
             Self {
                 secrets: secrets.iter().map(|s| s.to_string()).collect(),
                 confirm,
+                answers: VecDeque::new(),
                 mgmt,
                 steps: Vec::new(),
                 completed: None,
                 confirm_message: None,
             }
+        }
+
+        fn answering(mut self, answers: &[bool]) -> Self {
+            self.answers = answers.iter().copied().collect();
+            self
         }
     }
 
@@ -440,7 +570,7 @@ mod tests {
         }
         fn confirm(&mut self, req: ConfirmRequest) -> Result<bool, FrontendError> {
             self.confirm_message = Some(req.message);
-            Ok(self.confirm)
+            Ok(self.answers.pop_front().unwrap_or(self.confirm))
         }
         fn select_card(&mut self, _req: CardSelectRequest) -> Result<String, FrontendError> {
             Err(FrontendError::Declined("not used".into()))
@@ -471,7 +601,7 @@ mod tests {
             true,
             MgmtKeyChoice::Random,
         );
-        let outcome = run(&mut card, &mut fe, &cfg()).unwrap();
+        let outcome = run(&mut card, &mut fe, &cfg(), None).unwrap();
 
         assert_eq!(outcome.guid, "191755CFF39EFE522C07A383275BBEB1");
         // Random choice → the engine generated and returned a 24-byte (48 hex) key.
@@ -518,7 +648,7 @@ mod tests {
     fn declined_confirmation_aborts_before_touching_card() {
         let mut card = MockCard::default();
         let mut fe = ScriptedFrontend::new(&[], false, MgmtKeyChoice::Default);
-        let err = run(&mut card, &mut fe, &cfg()).unwrap_err();
+        let err = run(&mut card, &mut fe, &cfg(), None).unwrap_err();
         assert!(matches!(err, ProvisionError::Aborted(_)), "got {err:?}");
         assert!(card.log.is_empty(), "no card op fired: {:?}", card.log);
         assert_eq!(fe.completed, Some(CompletedStatus::Error));
@@ -532,7 +662,7 @@ mod tests {
             true,
             MgmtKeyChoice::Default,
         );
-        let err = run(&mut card, &mut fe, &cfg()).unwrap_err();
+        let err = run(&mut card, &mut fe, &cfg(), None).unwrap_err();
         assert!(matches!(err, ProvisionError::PinMismatch), "got {err:?}");
         // Keys/certs were written, but the PIN was never changed.
         assert!(card.log.contains(&"put_cert:9a".to_string()));
@@ -548,7 +678,7 @@ mod tests {
             true,
             MgmtKeyChoice::Default,
         );
-        let outcome = run(&mut card, &mut fe, &cfg()).unwrap();
+        let outcome = run(&mut card, &mut fe, &cfg(), None).unwrap();
         assert!(outcome.generated_mgmt_key.is_none());
         assert!(
             !card.log.contains(&"set_mgmt_key".to_string()),
@@ -567,7 +697,7 @@ mod tests {
                 key: "0102030405060708".repeat(3), // 24 bytes
             },
         );
-        let outcome = run(&mut card, &mut fe, &cfg()).unwrap();
+        let outcome = run(&mut card, &mut fe, &cfg(), None).unwrap();
         assert!(
             outcome.generated_mgmt_key.is_none(),
             "Hex is not 'generated'"
@@ -585,7 +715,7 @@ mod tests {
                 key: "abcd".into(), // 2 bytes, not 24
             },
         );
-        let err = run(&mut card, &mut fe, &cfg()).unwrap_err();
+        let err = run(&mut card, &mut fe, &cfg(), None).unwrap_err();
         assert!(matches!(err, ProvisionError::BadMgmtKey(_)), "got {err:?}");
     }
 
@@ -598,7 +728,7 @@ mod tests {
             true,
             MgmtKeyChoice::Default,
         );
-        run(&mut card, &mut fe, &cfg()).unwrap();
+        run(&mut card, &mut fe, &cfg(), None).unwrap();
         let msg = fe.confirm_message.clone().unwrap();
         assert!(msg.contains("Provision card"), "default wording: {msg}");
         assert!(
@@ -617,7 +747,7 @@ mod tests {
             reprovision: true,
             ..cfg()
         };
-        run(&mut card, &mut fe, &reprov).unwrap();
+        run(&mut card, &mut fe, &reprov, None).unwrap();
         let msg = fe.confirm_message.clone().unwrap();
         assert!(
             msg.contains("ALREADY PROVISIONED") && msg.contains("DESTROYS"),
@@ -631,5 +761,233 @@ mod tests {
             slot_cn("piv-auth", "191755CFF39EFE522C07A383275BBEB1"),
             "piv-auth@191755CF"
         );
+    }
+
+    // --- piggy#258: management-key escrow ---
+
+    #[derive(Default)]
+    struct MockEscrow {
+        sealed: Option<String>,
+        rolled_back: bool,
+        committed: bool,
+        fail_seal: bool,
+    }
+
+    /// Two stand-in recipient ids (only their count reaches the engine).
+    fn two_recipients() -> &'static [piggy_markl::Id] {
+        static RECIPIENTS: std::sync::LazyLock<Vec<piggy_markl::Id>> =
+            std::sync::LazyLock::new(|| {
+                [0x02u8, 0x03]
+                    .iter()
+                    .map(|prefix| {
+                        piggy_markl::Id::new(
+                            Some(piggy_markl::PurposeId::PiggyRecipientV1),
+                            piggy_markl::FormatId::PivyEcdhP256Pub,
+                            vec![*prefix; 33],
+                        )
+                        .unwrap()
+                    })
+                    .collect()
+            });
+        &RECIPIENTS
+    }
+
+    impl KeyEscrow for MockEscrow {
+        fn pass_name(&self) -> &str {
+            "piv/TEST/management-key"
+        }
+        fn recipients(&self) -> &[piggy_markl::Id] {
+            two_recipients()
+        }
+        fn seal(&mut self, key_hex: &str) -> Result<(), String> {
+            if self.fail_seal {
+                return Err("disk full".into());
+            }
+            self.sealed = Some(key_hex.to_string());
+            Ok(())
+        }
+        fn rollback(&mut self) {
+            self.rolled_back = true;
+        }
+        fn commit(&mut self) {
+            self.committed = true;
+        }
+    }
+
+    const NEW_SECRETS: [&str; 4] = ["999999", "999999", "12345678", "12345678"];
+
+    fn seal_run(
+        card: &mut MockCard,
+        fe: &mut ScriptedFrontend,
+        escrow: &mut MockEscrow,
+        ask: bool,
+    ) -> Result<ProvisionOutcome, ProvisionError> {
+        run(card, fe, &cfg(), Some(Escrow { sink: escrow, ask }))
+    }
+
+    #[test]
+    fn required_seal_escrows_the_applied_key_and_withholds_it() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&NEW_SECRETS, true, MgmtKeyChoice::Random);
+        let mut escrow = MockEscrow::default();
+        let outcome = seal_run(&mut card, &mut fe, &mut escrow, false).unwrap();
+
+        assert!(
+            outcome.generated_mgmt_key.is_none(),
+            "a sealed key is not displayed"
+        );
+        assert_eq!(
+            outcome.sealed_mgmt_key,
+            Some(SealedKey {
+                pass_name: "piv/TEST/management-key".into(),
+                recipients: 2,
+            })
+        );
+        let applied = hex::encode_upper(card.last_mgmt_key.expect("rotated"));
+        assert_eq!(escrow.sealed.as_deref(), Some(applied.as_str()));
+        assert!(escrow.committed && !escrow.rolled_back);
+        assert!(fe.steps.contains(&"seal-mgmt-key".to_string()));
+    }
+
+    #[test]
+    fn failed_seal_leaves_the_management_key_unrotated() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&NEW_SECRETS, true, MgmtKeyChoice::Random);
+        let mut escrow = MockEscrow {
+            fail_seal: true,
+            ..Default::default()
+        };
+        let err = seal_run(&mut card, &mut fe, &mut escrow, false).unwrap_err();
+        assert!(matches!(err, ProvisionError::Seal(_)), "got {err:?}");
+        assert!(
+            !card.log.contains(&"set_mgmt_key".to_string()),
+            "the key is sealed before it is set: {:?}",
+            card.log
+        );
+        assert!(!escrow.committed);
+        assert_eq!(fe.completed, Some(CompletedStatus::Error));
+    }
+
+    #[test]
+    fn card_rejecting_the_key_rolls_the_seal_back() {
+        let mut card = MockCard {
+            reject_mgmt_key: true,
+            ..Default::default()
+        };
+        let mut fe = ScriptedFrontend::new(&NEW_SECRETS, true, MgmtKeyChoice::Random);
+        let mut escrow = MockEscrow::default();
+        let err = seal_run(&mut card, &mut fe, &mut escrow, false).unwrap_err();
+        assert!(matches!(err, ProvisionError::Card(_)), "got {err:?}");
+        assert!(escrow.sealed.is_some() && escrow.rolled_back && !escrow.committed);
+    }
+
+    #[test]
+    fn accepted_seal_offer_escrows_the_key() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&NEW_SECRETS, true, MgmtKeyChoice::Random);
+        let mut escrow = MockEscrow::default();
+        let outcome = seal_run(&mut card, &mut fe, &mut escrow, true).unwrap();
+        assert!(outcome.sealed_mgmt_key.is_some());
+        assert!(outcome.generated_mgmt_key.is_none());
+        let offer = fe.confirm_message.unwrap();
+        assert!(
+            offer.contains("piv/TEST/management-key") && offer.contains("2 recipients"),
+            "{offer}"
+        );
+    }
+
+    #[test]
+    fn declined_seal_offer_displays_the_key() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&NEW_SECRETS, true, MgmtKeyChoice::Random)
+            .answering(&[true, false]);
+        let mut escrow = MockEscrow::default();
+        let outcome = seal_run(&mut card, &mut fe, &mut escrow, true).unwrap();
+        assert!(outcome.sealed_mgmt_key.is_none());
+        assert!(outcome.generated_mgmt_key.is_some());
+        assert!(escrow.sealed.is_none() && !escrow.committed);
+    }
+
+    #[test]
+    fn operator_supplied_key_is_never_sealed() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(
+            &NEW_SECRETS,
+            true,
+            MgmtKeyChoice::Hex {
+                key: "0102030405060708".repeat(3),
+            },
+        );
+        let mut escrow = MockEscrow::default();
+        let outcome = seal_run(&mut card, &mut fe, &mut escrow, false).unwrap();
+        assert!(outcome.sealed_mgmt_key.is_none());
+        assert!(escrow.sealed.is_none());
+        assert!(
+            fe.steps.contains(&"seal-skipped".to_string()),
+            "{:?}",
+            fe.steps
+        );
+    }
+
+    /// Confirms the provision, then fails every later confirm as a cancelled
+    /// prompt — i.e. the seal offer's answer never arrives.
+    struct CancelsOffer(ScriptedFrontend);
+
+    impl Frontend for CancelsOffer {
+        fn request_secret(
+            &mut self,
+            req: SecretRequest,
+        ) -> Result<Zeroizing<String>, FrontendError> {
+            self.0.request_secret(req)
+        }
+        fn request_mgmt_key(
+            &mut self,
+            req: MgmtKeyRequest,
+        ) -> Result<MgmtKeyChoice, FrontendError> {
+            self.0.request_mgmt_key(req)
+        }
+        fn confirm(&mut self, req: ConfirmRequest) -> Result<bool, FrontendError> {
+            if self.0.confirm_message.is_some() {
+                return Err(FrontendError::Declined("prompt cancelled".into()));
+            }
+            self.0.confirm(req)
+        }
+        fn select_card(&mut self, req: CardSelectRequest) -> Result<String, FrontendError> {
+            self.0.select_card(req)
+        }
+        fn progress(&mut self, ev: ProgressEvent) {
+            self.0.progress(ev)
+        }
+        fn completed(&mut self, ev: CompletedEvent) {
+            self.0.completed(ev)
+        }
+    }
+
+    #[test]
+    fn failed_seal_offer_answer_still_rotates_and_displays_the_key() {
+        let mut card = MockCard::default();
+        let mut fe = CancelsOffer(ScriptedFrontend::new(
+            &NEW_SECRETS,
+            true,
+            MgmtKeyChoice::Random,
+        ));
+        let mut escrow = MockEscrow::default();
+        let outcome = run(
+            &mut card,
+            &mut fe,
+            &cfg(),
+            Some(Escrow {
+                sink: &mut escrow,
+                ask: true,
+            }),
+        )
+        .unwrap();
+        assert!(
+            outcome.generated_mgmt_key.is_some(),
+            "the key is displayed, not lost"
+        );
+        assert!(outcome.sealed_mgmt_key.is_none());
+        assert!(escrow.sealed.is_none());
+        assert!(card.last_mgmt_key.is_some(), "the key was still rotated");
     }
 }

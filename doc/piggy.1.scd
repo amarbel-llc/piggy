@@ -453,7 +453,7 @@ passthroughs for the C pivy binaries:
 	piggy sign-bytes --slot 9a --guid DEADBEEF... < message > sig.raw
 	```
 
-*card init* [*--serial* _N_] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]
+*card init* [*--serial* _N_|*--guid* _HEX_|*--reader* _NAME_] [*--allow-reprovision*] [*--seal-management-key*[=_PASS-NAME_]|*--no-seal-management-key*] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]
 	Provision a factory-blank PIV card in one step: write the CHUID (a fresh
 	random GUID), generate slot 9D (Key Management / ECDH — piggy's decrypt
 	recipient) and slot 9A (PIV Authentication — the SSH-auth key) as ECDSA
@@ -475,11 +475,29 @@ passthroughs for the C pivy binaries:
 	newline-framed JSON-RPC, piggy connects as the client. A missing or
 	unusable channel fails before any card operation. The management key rotates
 	to a fresh random value, displayed once on stderr by the tty frontend
-	(record it — it is not recoverable).
+	(record it — it is not recoverable) unless it is sealed.
+
+	*--guid* _HEX_ and *--reader* _NAME_ select a card whose serial is not
+	exposed over PIV (e.g. an older YubiKey 4); factory-blank cards share the
+	all-zeros GUID, so *--reader* is the one that tells two of them apart.
+	*--allow-reprovision* also accepts an already-initialized card still at its
+	factory credentials, behind a destructive-overwrite confirmation.
+
+	*--seal-management-key*[=_PASS-NAME_] seals the generated management key
+	into the password store instead of displaying it. Like *pass insert*, it is
+	encrypted to the recipients of the store's nearest *piggy-ids* for
+	_PASS-NAME_ (default _piv/<GUID>/management-key_), so any of those cards can
+	recover it with *pass show*. List a backup card there: a reset destroys the
+	provisioned card's own key. The seal is checked before the card is touched
+	(a path with no encryption recipients, or one that already exists, fails the
+	command), and the key is sealed before it is set on the card. Without the
+	flag the tty flow offers the seal whenever the store can take it;
+	*--no-seal-management-key* suppresses the offer.
 
 	```
 	piggy card init
 	piggy card init --serial 15909078
+	piggy card init --seal-management-key
 	piggy card init --frontend jsonrpc --socket /run/user/1000/piggy-ui.sock
 	```
 

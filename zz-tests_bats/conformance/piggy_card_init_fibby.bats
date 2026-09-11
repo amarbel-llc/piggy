@@ -135,6 +135,155 @@ function card_init_tty_provisions_blank_card { # @test
   assert_provisioned "$guid"
 }
 
+# --- piggy#258: sealing the generated management key into the store ---------
+#
+# Card A is factory-blank (the provision target); card B carries a seeded 9D
+# key and plays the backup card the escrow is sealed to. The store's piggy-ids
+# lists only card B, so recovering the key proves it survives the loss or
+# reset of the card it belongs to.
+
+READER_A="Virtual PCD fibby A 00 00"
+READER_B="Virtual PCD fibby B 00 00"
+GUID_B="B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2"
+
+# Spawn both cards and make card B the store's only recipient.
+_spawn_cards_with_backup_recipient() {
+  [[ -x ${PIGGY_IDS_BIN:-/nonexistent} ]] ||
+    skip "PIGGY_IDS_BIN unset; run via just test-bats-conformance-card-init-fibby"
+  spawn_fibby --model yk5 \
+    --card "$READER_A" \
+    --card "$READER_B" --seed-rfc5903-slot-9d-cert --seed-chuid-guid "$GUID_B"
+  local b_id
+  b_id=$(PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_IDS_BIN" detect-pubkey --guid "$GUID_B") || {
+    echo "detect-pubkey on the backup card failed" >&2
+    tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+  printf '%s\n' "$b_id" >"$PIGGY_STORE_DIR/piggy-ids"
+}
+
+# Decrypt a sealed management key with the backup card (factory PIN).
+_recover_sealed_key() {
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_TEST_FIB_PIN=123456 \
+    "$PIGGY_BIN" box stream decrypt <"$1"
+}
+
+_fail_with_card_init_output() {
+  echo "$1" >&2
+  printf 'status: %s\nstdout: %s\nstderr: %s\n' "$status" "$output" "$stderr" >&2
+  tail -60 "$FIBBY_LOG" >&2 || true
+  return 1
+}
+
+# `piggy card init ARGS` through the tty frontend (see the tty lane above for
+# why `setsid -w`); stdin answers the confirmations.
+_card_init_tty() {
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    PIGGY_TEST_FIB_PIN=654321 \
+    run --separate-stderr setsid -w "$PIGGY_BIN" card init "$@"
+}
+
+function card_init_seal_flag_escrows_key_recoverable_by_backup_card { # @test
+  [[ -x ${PIVY_TOOL:-/nonexistent} ]] ||
+    skip "PIVY_TOOL unset; run via just test-bats-conformance-card-init-fibby"
+  _spawn_cards_with_backup_recipient
+
+  _card_init_tty --reader "$READER_A" --seal-management-key <<<"y"
+  [[ $status -eq 0 ]] || _fail_with_card_init_output "card init --seal-management-key failed"
+
+  local guid="$output"
+  [[ $guid =~ ^[0-9A-F]{32}$ ]] || _fail_with_card_init_output "stdout was not a bare GUID"
+  printf '%s\n' "$stderr" | grep -q "sealed to piv/$guid/management-key" ||
+    _fail_with_card_init_output "no seal confirmation on stderr"
+  if printf '%s\n' "$stderr" | grep -q "record this"; then
+    _fail_with_card_init_output "the sealed key was also displayed"
+  fi
+
+  local ebox="$PIGGY_STORE_DIR/piv/$guid/management-key.ebox"
+  [[ -f $ebox ]] || _fail_with_card_init_output "no sealed ebox at $ebox"
+
+  local key
+  key=$(_recover_sealed_key "$ebox") || {
+    echo "the backup card could not decrypt the escrow" >&2
+    tail -40 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+  [[ $key =~ ^[0-9A-F]{48}$ ]] || {
+    echo "recovered escrow is not a 24-byte hex key: '$key'" >&2
+    return 1
+  }
+
+  # The recovered key admin-authenticates card A: set-admin rewrites it to
+  # itself (-R skips the PIN-gated printed-info write) ...
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    run "$PIVY_TOOL" -g "$guid" -A 3des -K "$key" -R set-admin "$key"
+  [[ $status -eq 0 ]] || {
+    echo "the recovered key failed admin auth on card A: $output" >&2
+    return 1
+  }
+  # ... and a wrong key does not, so the check discriminates.
+  local wrong
+  wrong=$(printf '11%.0s' {1..24})
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    run "$PIVY_TOOL" -g "$guid" -A 3des -K "$wrong" -R set-admin "$wrong"
+  [[ $status -ne 0 ]] || {
+    echo "a wrong management key passed admin auth on card A" >&2
+    return 1
+  }
+}
+
+# The tty flow offers the seal when the store can take it; accepting seals.
+function card_init_accepted_seal_offer_escrows_key { # @test
+  _spawn_cards_with_backup_recipient
+
+  _card_init_tty --reader "$READER_A" <<<$'y\ny'
+  [[ $status -eq 0 ]] || _fail_with_card_init_output "card init with an accepted seal offer failed"
+
+  local guid="$output"
+  printf '%s\n' "$stderr" | grep -q "into the password store at piv/$guid/management-key" ||
+    _fail_with_card_init_output "the seal was not offered"
+  [[ -f "$PIGGY_STORE_DIR/piv/$guid/management-key.ebox" ]] ||
+    _fail_with_card_init_output "accepting the offer did not seal the key"
+  if printf '%s\n' "$stderr" | grep -q "record this"; then
+    _fail_with_card_init_output "the sealed key was also displayed"
+  fi
+}
+
+# Declining the offer keeps the display-once behaviour and writes no escrow.
+function card_init_declined_seal_offer_displays_key { # @test
+  _spawn_cards_with_backup_recipient
+
+  _card_init_tty --reader "$READER_A" <<<$'y\nn'
+  [[ $status -eq 0 ]] || _fail_with_card_init_output "card init with a declined seal offer failed"
+
+  printf '%s\n' "$stderr" | grep -q "record this" ||
+    _fail_with_card_init_output "a declined offer did not display the key"
+  [[ ! -e "$PIGGY_STORE_DIR/piv" ]] ||
+    _fail_with_card_init_output "a declined offer still wrote an escrow"
+}
+
+# An explicit seal with nowhere to seal to refuses before the destructive
+# confirm, leaving the card factory-blank.
+function card_init_seal_flag_without_recipients_refuses_before_touching_card { # @test
+  spawn_fibby --model yk5
+
+  _card_init_tty --seal-management-key <<<"y"
+  [[ $status -ne 0 ]] || _fail_with_card_init_output "seal with no piggy-ids should refuse"
+  printf '%s\n' "$stderr" | grep -q "piggy-ids" ||
+    _fail_with_card_init_output "the refusal does not name the missing piggy-ids"
+  if printf '%s\n' "$stderr" | grep -q "Provision card"; then
+    _fail_with_card_init_output "the refusal came after the destructive confirm"
+  fi
+
+  local out
+  out=$(PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" list --format=ndjson)
+  printf '%s\n' "$out" | grep -q '"uninitialized":true' || {
+    echo "the card was touched despite the refusal" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  }
+}
+
 # JSON-RPC lane: a scripted frontend server answers every interaction over an
 # AF_UNIX socket; piggy connects as the client. No askpass, no tty.
 function card_init_jsonrpc_provisions_blank_card { # @test

@@ -144,11 +144,18 @@ is the client's concern. `include_uninitialized: false` omits the
 
 #### 5.2 `card.init`
 
-    params := { "serial": <integer>,             ; OPTIONAL; omitted ⇒ the sole eligible card
-                "allow_reprovision": <boolean> }  ; OPTIONAL; default false
-    result := { "guid": <string>, "generated_management_key": <string> }
-                                  ; generated_management_key present iff a random
-                                  ; key was generated (RFC 0006 §2.3 "random")
+    params := { "serial": <integer>,             ; OPTIONAL; at most one of serial/guid/reader;
+                "guid": <string>,                ;   none ⇒ the sole eligible card
+                "reader": <string>,
+                "allow_reprovision": <boolean>,  ; OPTIONAL; default false
+                "seal_management_key": <boolean> | <string> }
+                                                 ; OPTIONAL; default false
+    result := { "guid": <string>,
+                "generated_management_key": <string>,
+                                  ; present iff a random key was generated
+                                  ; (RFC 0006 §2.3 "random") and not sealed
+                "sealed_management_key": <string> }
+                                  ; present iff the generated key was sealed
 
 Provisions a factory-blank card (piggy#194). With `allow_reprovision: true`
 (piggy#204) an already-initialized card-in-hand is also eligible and is
@@ -157,6 +164,17 @@ credentials were rotated off the factory defaults fails — the full creds-lost
 reset is out of scope. Issues `confirm`, `secret`
 (new PIN/PUK), `mgmt_key`, and `progress`/`completed` interaction requests. The
 `generated_management_key` is sensitive (§Security).
+
+With `seal_management_key` (piggy#258) a generated key is sealed into the
+password store instead of being returned: it is encrypted to the recipients of
+the store's nearest `piggy-ids` for the path (`true` ⇒
+`piv/<GUID>/management-key`; a string ⇒ that store path), and
+`sealed_management_key` names the path. The seal is prepared before the card is
+touched, so a path with no encryption recipients, or one that already exists,
+fails the call (`-32050`) without provisioning; the key is sealed before it is
+set on the card and removed again if the card rejects it. Only a `random` key is
+sealed. `card.init` never offers the seal as an interaction — the client asks
+for it through this param.
 
 #### 5.3 `sign_bytes`
 

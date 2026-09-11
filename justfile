@@ -892,9 +892,16 @@ test-bats-conformance-card-init-fibby:
     set -euo pipefail
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     cargo build -p card-frontend-server --quiet
-    FIBBY_BIN="$fibby_out/bin/fibby" \
+    # PIGGY satisfies the parent common.bash loader without a cargo build.
+    # PIGGY_IDS_BIN reads the backup card's 9D recipient and PIVY_TOOL proves
+    # a recovered management key admin-authenticates (piggy#258 seal cases).
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
+      PIGGY_IDS_BIN="$piggy_out/libexec/piggy/piggy-ids" \
+      PIVY_TOOL="$pivy_out/bin/pivy-tool" \
       CARD_FRONTEND_BIN="$PWD/target/debug/card-frontend-server" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_card_init_fibby.bats

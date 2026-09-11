@@ -37,6 +37,7 @@ use serde_json::Value;
 
 use crate::card::frontend::jsonrpc::JsonRpcFrontend;
 use crate::card::protocol::PROTOCOL_VERSION;
+use crate::card::seal::ManagementKeySealer;
 
 mod methods;
 
@@ -168,6 +169,7 @@ fn dispatch<R: BufRead, W: Write>(
     id: &Value,
     reader: &mut R,
     writer: &mut W,
+    sealer: &dyn ManagementKeySealer,
 ) -> std::io::Result<()> {
     match method {
         // Read-only, PIN-free: no interaction frontend needed.
@@ -176,7 +178,7 @@ fn dispatch<R: BufRead, W: Write>(
             let outcome = {
                 let mut fe =
                     JsonRpcFrontend::already_initialized(&mut *reader, &mut *writer, "card init");
-                methods::card_init(params, &mut fe)
+                methods::card_init(params, &mut fe, sealer)
             };
             respond(writer, id, outcome)
         }
@@ -215,7 +217,11 @@ fn respond<W: Write>(
 /// client-side close. A per-message error (parse failure, unsupported method,
 /// declined interaction) is reported as a JSON-RPC error response and the loop
 /// continues; only a transport I/O failure aborts with `Err`.
-pub fn serve<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> std::io::Result<()> {
+pub fn serve<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    sealer: &dyn ManagementKeySealer,
+) -> std::io::Result<()> {
     let mut initialized = false;
     loop {
         let mut line = String::new();
@@ -277,33 +283,34 @@ pub fn serve<R: BufRead, W: Write>(reader: &mut R, writer: &mut W) -> std::io::R
             continue;
         }
 
-        dispatch(method, &req.params, &req.id, reader, writer)?;
+        dispatch(method, &req.params, &req.id, reader, writer, sealer)?;
     }
 }
 
 /// `piggy manage` entry point. `jsonrpc` MUST be set (the only protocol in v1).
 /// With `socket == None` the server speaks over stdio (the headless default —
 /// the spawner owns the channel); with `Some(path)` it listens on an `AF_UNIX`
-/// socket. Returns a process exit code.
-pub fn run(jsonrpc: bool, socket: Option<&Path>) -> i32 {
+/// socket. `sealer` backs `card.init`'s `seal_management_key` (piggy#258).
+/// Returns a process exit code.
+pub fn run(jsonrpc: bool, socket: Option<&Path>, sealer: &dyn ManagementKeySealer) -> i32 {
     if !jsonrpc {
         eprintln!("piggy manage: only the JSON-RPC command protocol is supported; pass --jsonrpc");
         return 2;
     }
     match socket {
-        None => serve_stdio(),
-        Some(path) => serve_socket(path),
+        None => serve_stdio(sealer),
+        Some(path) => serve_socket(path, sealer),
     }
 }
 
 /// Serve a single session over stdio (RFC 0007 §3). Protocol output is stdout;
 /// diagnostics go to stderr so they never corrupt the stream.
-fn serve_stdio() -> i32 {
+fn serve_stdio(sealer: &dyn ManagementKeySealer) -> i32 {
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
-    match serve(&mut reader, &mut writer) {
+    match serve(&mut reader, &mut writer, sealer) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("piggy manage: {e}");
@@ -316,7 +323,7 @@ fn serve_stdio() -> i32 {
 /// §3). The socket is created `0600` (§Security); a stale socket at `path` is
 /// removed first. The server is long-lived — it serves each client to EOF and
 /// then accepts the next — so it runs until killed.
-fn serve_socket(path: &Path) -> i32 {
+fn serve_socket(path: &Path, sealer: &dyn ManagementKeySealer) -> i32 {
     let _ = std::fs::remove_file(path);
     let listener = match UnixListener::bind(path) {
         Ok(l) => l,
@@ -349,7 +356,7 @@ fn serve_socket(path: &Path) -> i32 {
         };
         let mut reader = BufReader::new(cloned);
         let mut writer = stream;
-        if let Err(e) = serve(&mut reader, &mut writer) {
+        if let Err(e) = serve(&mut reader, &mut writer, sealer) {
             eprintln!("piggy manage: connection error: {e}");
         }
     }
@@ -367,7 +374,8 @@ mod tests {
     fn run_serve(input: &str) -> Vec<Value> {
         let mut reader = Cursor::new(input.as_bytes().to_vec());
         let mut writer: Vec<u8> = Vec::new();
-        serve(&mut reader, &mut writer).expect("in-memory transport never errors");
+        serve(&mut reader, &mut writer, &crate::card::seal::NoStore)
+            .expect("in-memory transport never errors");
         String::from_utf8(writer)
             .unwrap()
             .lines()
@@ -488,6 +496,6 @@ mod tests {
 
     #[test]
     fn run_without_jsonrpc_flag_errors() {
-        assert_eq!(run(false, None), 2);
+        assert_eq!(run(false, None, &crate::card::seal::NoStore), 2);
     }
 }

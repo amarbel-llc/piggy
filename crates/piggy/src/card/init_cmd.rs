@@ -12,11 +12,18 @@ use std::path::Path;
 
 use openssl::rand::rand_bytes;
 
+use piggy_ids::Classification;
+use piggy_markl::Id;
 use piggy_piv::{Guid, PinSession, PivAlgorithm, PivContext, PivError, PivToken};
 
-use crate::card::engine::{self, ProvisionCard, ProvisionConfig, ProvisionError, ProvisionOutcome};
+use crate::card::engine::{
+    self, Escrow, ProvisionCard, ProvisionConfig, ProvisionError, ProvisionOutcome,
+};
 use crate::card::frontend::select::{FrontendKind, build_frontend};
-use crate::card::protocol::Frontend;
+use crate::card::protocol::{Frontend, ProgressEvent};
+use crate::card::seal::{
+    KeyEscrow, SealMode, SealRequest, check_escrow_recipients, default_pass_name,
+};
 
 /// Adapter wiring the engine's [`ProvisionCard`] seam to a live
 /// [`PinSession`]. Each method delegates to the session; `serial` is captured
@@ -247,9 +254,15 @@ fn select_card_for_provision(
 /// [`run_inner`] with a tty/socket frontend. Selecting the blank card, opening
 /// the one PIN session, and minting the GUID happen here; the
 /// [`SessionCard`] adapter then holds the live session for the engine.
+///
+/// `seal` decides whether the generated management key is escrowed
+/// (piggy#258). The escrow is prepared here, before the card is touched, so a
+/// [`SealMode::Always`] whose target can't take the key fails without writing
+/// anything.
 pub fn provision_with_frontend(
     selector: CardSelector,
     allow_reprovision: bool,
+    seal: SealRequest<'_>,
     frontend: &mut dyn Frontend,
 ) -> Result<ProvisionOutcome, ProvisionError> {
     let ctx = PivContext::new().map_err(|e| ProvisionError::Setup(format!("PC/SC: {e}")))?;
@@ -264,6 +277,17 @@ pub fn provision_with_frontend(
     // passed with --allow-reprovision (which is just a normal init).
     let reprovision = token.is_initialized();
 
+    let mut guid = [0u8; 16];
+    rand_bytes(&mut guid).map_err(|e| ProvisionError::Setup(format!("generate GUID: {e}")))?;
+
+    let mut escrow = prepare_escrow(&seal, &hex::encode_upper(guid), frontend, || {
+        if reprovision {
+            current_9d_recipient(&token)
+        } else {
+            None
+        }
+    })?;
+
     let mut session = token
         .begin_pin_session()
         .map_err(|e| ProvisionError::Setup(format!("open card session: {e}")))?;
@@ -272,11 +296,71 @@ pub fn provision_with_frontend(
         serial: card_serial,
     };
 
-    let mut guid = [0u8; 16];
-    rand_bytes(&mut guid).map_err(|e| ProvisionError::Setup(format!("generate GUID: {e}")))?;
     let cfg = ProvisionConfig { guid, reprovision };
+    let escrow = escrow.as_mut().map(|sink| Escrow {
+        sink: sink.as_mut(),
+        ask: seal.mode == SealMode::Offer,
+    });
+    engine::run(&mut card, frontend, &cfg, escrow)
+}
 
-    engine::run(&mut card, frontend, &cfg)
+/// The markl-id of `token`'s current 9D key — the recipient a reprovision
+/// destroys. `None` when the slot is empty or unreadable.
+fn current_9d_recipient(token: &PivToken) -> Option<Id> {
+    let slot = token.read_slot(0x9D).ok()?;
+    match piggy_ids::classify_slot_9d(
+        token.guid().clone(),
+        token.reader_name().to_string(),
+        token.yk_serial(),
+        slot.algorithm(),
+        slot.cert_der(),
+    ) {
+        Classification::Supported { id, .. } => Some(id),
+        _ => None,
+    }
+}
+
+/// Resolve and guard the escrow `seal` asks for. An `Always` seal that can't be
+/// prepared is a setup error; an `Offer` that can't be prepared is dropped, and
+/// the key is displayed as before. `destroyed_9d` yields the recipient a
+/// reprovision destroys; it is only read once a store has produced recipients.
+fn prepare_escrow(
+    seal: &SealRequest<'_>,
+    guid_hex: &str,
+    fe: &mut dyn Frontend,
+    destroyed_9d: impl FnOnce() -> Option<Id>,
+) -> Result<Option<Box<dyn KeyEscrow>>, ProvisionError> {
+    let (pass_name, required) = match &seal.mode {
+        SealMode::Never => return Ok(None),
+        SealMode::Offer => (default_pass_name(guid_hex), false),
+        SealMode::Always(pass_name) => (
+            pass_name
+                .clone()
+                .unwrap_or_else(|| default_pass_name(guid_hex)),
+            true,
+        ),
+    };
+    let prepared = seal.sealer.prepare(&pass_name).and_then(|escrow| {
+        let warning = check_escrow_recipients(escrow.recipients(), destroyed_9d().as_ref())?;
+        Ok((escrow, warning))
+    });
+    match prepared {
+        Ok((escrow, warning)) => {
+            if let Some(message) = warning {
+                fe.progress(ProgressEvent {
+                    step: "seal-warning".into(),
+                    message,
+                    current: None,
+                    total: None,
+                });
+            }
+            Ok(Some(escrow))
+        }
+        Err(_) if !required => Ok(None),
+        Err(e) => Err(ProvisionError::Setup(format!(
+            "cannot seal the management key to {pass_name}: {e}"
+        ))),
+    }
 }
 
 fn run_inner(
@@ -284,6 +368,7 @@ fn run_inner(
     guid: Option<String>,
     reader: Option<String>,
     allow_reprovision: bool,
+    seal: SealRequest<'_>,
     frontend: FrontendKind,
     socket: Option<&Path>,
 ) -> Result<ProvisionOutcome, String> {
@@ -293,7 +378,7 @@ fn run_inner(
     // Build the frontend first: a jsonrpc channel that can't be opened must
     // fail before we touch any card (RFC 0006 §6).
     let mut frontend = build_frontend(frontend, socket, "card init")?;
-    provision_with_frontend(selector, allow_reprovision, frontend.as_mut())
+    provision_with_frontend(selector, allow_reprovision, seal, frontend.as_mut())
         .map_err(|e| e.to_string())
 }
 
@@ -303,14 +388,31 @@ pub fn run(
     guid: Option<String>,
     reader: Option<String>,
     allow_reprovision: bool,
+    seal: SealRequest<'_>,
     frontend: FrontendKind,
     socket: Option<&Path>,
 ) -> i32 {
-    match run_inner(serial, guid, reader, allow_reprovision, frontend, socket) {
+    match run_inner(
+        serial,
+        guid,
+        reader,
+        allow_reprovision,
+        seal,
+        frontend,
+        socket,
+    ) {
         Ok(outcome) => {
             // stdout: the provisioned GUID (machine-readable; papi re-lists by
             // serial and ignores this, but a human/script can capture it).
             println!("{}", outcome.guid);
+            if let Some(sealed) = &outcome.sealed_mgmt_key {
+                eprintln!(
+                    "Management key sealed to {} in the password store ({} recipient{}).",
+                    sealed.pass_name,
+                    sealed.recipients,
+                    if sealed.recipients == 1 { "" } else { "s" }
+                );
+            }
             if let Some(key) = &outcome.generated_mgmt_key {
                 // The random mgmt key, displayed once. Never logged or sent over
                 // a notification (RFC 0006 security); printed to stderr so it is

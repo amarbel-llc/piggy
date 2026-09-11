@@ -20,11 +20,28 @@ use serde_json::Value;
 use crate::card::engine::ProvisionError;
 use crate::card::init_cmd::{CardSelector, provision_with_frontend};
 use crate::card::protocol::{Frontend, FrontendError};
+use crate::card::seal::{ManagementKeySealer, SealMode, SealRequest};
 use crate::manage::{CARD_OP_FAILED, INTERACTION_DECLINED, INVALID_PARAMS};
 use crate::sign_core::{self, SigFormat, SignError};
 
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
+
+/// `card.init`'s `seal_management_key` (piggy#258): absent, null, or `false`
+/// never seals (no interactive offer either — the client drives this path);
+/// `true` seals to the default store path; a non-empty string seals there.
+fn seal_param(params: &Value) -> Result<SealMode, (i64, String)> {
+    match params.get("seal_management_key") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(SealMode::Never),
+        Some(Value::Bool(true)) => Ok(SealMode::Always(None)),
+        Some(Value::String(s)) if !s.is_empty() => Ok(SealMode::Always(Some(s.clone()))),
+        Some(_) => Err((
+            INVALID_PARAMS,
+            "card.init: 'seal_management_key' must be a boolean or a non-empty store path"
+                .to_string(),
+        )),
+    }
+}
 
 /// `card.list` (RFC 0007 §5.1) — enumerate attached PIV cards. Read-only,
 /// PIN-free, issues no interactions: shells out to the same `piggy-ids
@@ -80,11 +97,18 @@ fn enumerate_cards() -> Result<Vec<Value>, (i64, String)> {
 
 /// `card.init` (RFC 0007 §5.2) — provision a factory-blank card. Issues
 /// confirm/secret/mgmt_key/progress interactions through `fe`. Returns
-/// `{ "guid": …, "generated_management_key"?: … }`; a generated random mgmt
-/// key is the sensitive result (RFC 0007 §Security) and is present only when
-/// the frontend chose `random`. An operator decline (the destructive confirm,
-/// or a cancelled prompt) surfaces as `-32010`.
-pub fn card_init(params: &Value, fe: &mut dyn Frontend) -> Result<Value, (i64, String)> {
+/// `{ "guid": …, "generated_management_key"?: …, "sealed_management_key"?: … }`.
+/// A generated random mgmt key is the sensitive result (RFC 0007 §Security),
+/// present only when the frontend chose `random` and the key was not sealed;
+/// with `seal_management_key` (piggy#258) it is sealed into the password store
+/// through `sealer` instead, and the result names the store path. An operator
+/// decline (the destructive confirm, or a cancelled prompt) surfaces as
+/// `-32010`.
+pub fn card_init(
+    params: &Value,
+    fe: &mut dyn Frontend,
+    sealer: &dyn ManagementKeySealer,
+) -> Result<Value, (i64, String)> {
     let serial = match params.get("serial") {
         None | Some(Value::Null) => None,
         Some(v) => Some(v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or((
@@ -111,12 +135,17 @@ pub fn card_init(params: &Value, fe: &mut dyn Frontend) -> Result<Value, (i64, S
         .get("allow_reprovision")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let seal = seal_param(params)?;
 
-    match provision_with_frontend(selector, allow_reprovision, fe) {
+    let seal = SealRequest { mode: seal, sealer };
+    match provision_with_frontend(selector, allow_reprovision, seal, fe) {
         Ok(outcome) => {
             let mut result = serde_json::json!({ "guid": outcome.guid });
             if let Some(key) = &outcome.generated_mgmt_key {
                 result["generated_management_key"] = Value::String(key.as_str().to_string());
+            }
+            if let Some(sealed) = &outcome.sealed_mgmt_key {
+                result["sealed_management_key"] = Value::String(sealed.pass_name.clone());
             }
             Ok(result)
         }
@@ -265,7 +294,48 @@ mod tests {
     #[test]
     fn card_init_rejects_non_integer_serial() {
         let mut fe = no_frontend();
-        let err = card_init(&serde_json::json!({ "serial": "nope" }), &mut fe).unwrap_err();
+        let err = card_init(
+            &serde_json::json!({ "serial": "nope" }),
+            &mut fe,
+            &crate::card::seal::NoStore,
+        )
+        .unwrap_err();
         assert_eq!(err.0, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn card_init_rejects_malformed_seal_param() {
+        for bad in [
+            serde_json::json!(7),
+            serde_json::json!(""),
+            serde_json::json!([]),
+        ] {
+            let mut fe = no_frontend();
+            let err = card_init(
+                &serde_json::json!({ "seal_management_key": bad }),
+                &mut fe,
+                &crate::card::seal::NoStore,
+            )
+            .unwrap_err();
+            assert_eq!(err.0, INVALID_PARAMS, "{bad}");
+            assert!(err.1.contains("seal_management_key"), "{}", err.1);
+        }
+    }
+
+    #[test]
+    fn seal_param_maps_to_modes() {
+        assert_eq!(seal_param(&serde_json::json!({})), Ok(SealMode::Never));
+        assert_eq!(
+            seal_param(&serde_json::json!({ "seal_management_key": false })),
+            Ok(SealMode::Never)
+        );
+        assert_eq!(
+            seal_param(&serde_json::json!({ "seal_management_key": true })),
+            Ok(SealMode::Always(None))
+        );
+        assert_eq!(
+            seal_param(&serde_json::json!({ "seal_management_key": "escrow/yk" })),
+            Ok(SealMode::Always(Some("escrow/yk".into())))
+        );
     }
 }

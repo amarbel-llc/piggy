@@ -20,11 +20,10 @@
 
 use std::io::{BufRead as _, IsTerminal as _, Read as _, Write as _};
 use std::os::unix::io::AsRawFd as _;
-use std::path::{Path, PathBuf};
 
 use crate::crypt;
 use crate::git_ops;
-use crate::store::{find_piggy_ids, store_root};
+use crate::store::{find_piggy_ids, path_parent_for_search, sneaky_path_reason, store_root};
 
 /// Exit code conventions:
 /// - 0: inserted (or user declined the yesno overwrite prompt — same
@@ -302,25 +301,6 @@ fn confirm(message: &str) -> bool {
         }
         Err(_) => false,
     }
-}
-
-/// `dirname -- "$path"` semantics, projected into the subfolder
-/// argument shape `find_piggy_ids` expects.
-fn path_parent_for_search(path: &str) -> String {
-    let p = PathBuf::from(path);
-    match p.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_string_lossy().into_owned(),
-        _ => String::new(),
-    }
-}
-
-fn sneaky_path_reason(path: &str) -> Option<&'static str> {
-    for component in Path::new(path).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Some("`..` component");
-        }
-    }
-    None
 }
 
 #[cfg(test)]

@@ -57,6 +57,7 @@ mod platform;
 mod recipients;
 mod reencrypt;
 mod rm;
+mod seal_store;
 mod show;
 mod show_batch;
 mod sign_bytes;
@@ -461,6 +462,24 @@ enum CardCommand {
         /// (a card whose creds were rotated fails at admin-auth).
         #[arg(long = "allow-reprovision")]
         allow_reprovision: bool,
+        /// Seal the generated management key into the password store instead
+        /// of displaying it (piggy#258). It is encrypted to the recipients the
+        /// store's piggy-ids declares for PASS-NAME (default
+        /// `piv/<GUID>/management-key`), so any of those cards can recover it.
+        /// Fails before touching the card when that path has no usable
+        /// recipients. Without this flag the tty flow offers the seal when the
+        /// store can take it.
+        #[arg(
+            long,
+            value_name = "PASS-NAME",
+            num_args = 0..=1,
+            default_missing_value = "",
+            conflicts_with = "no_seal_management_key"
+        )]
+        seal_management_key: Option<String>,
+        /// Never offer to seal the management key; display it once instead.
+        #[arg(long)]
+        no_seal_management_key: bool,
         /// Interaction frontend: `tty` (default, askpass) or `jsonrpc` (an
         /// external program drives the prompts over `--socket`).
         #[arg(long, value_enum, default_value_t = piggy::card::frontend::select::FrontendKind::Tty)]
@@ -639,6 +658,8 @@ fn main() {
                 guid,
                 reader,
                 allow_reprovision,
+                seal_management_key,
+                no_seal_management_key,
                 frontend,
                 socket,
             } => std::process::exit(piggy::stats::timed_card("init", || {
@@ -647,6 +668,13 @@ fn main() {
                     guid,
                     reader,
                     allow_reprovision,
+                    piggy::card::seal::SealRequest {
+                        mode: piggy::card::seal::SealMode::from_cli(
+                            seal_management_key,
+                            no_seal_management_key,
+                        ),
+                        sealer: &seal_store::StoreSealer,
+                    },
                     frontend,
                     socket.as_deref(),
                 )
@@ -654,7 +682,11 @@ fn main() {
         },
 
         Command::Manage(args) => std::process::exit(piggy::stats::timed_manage(|| {
-            piggy::manage::run(args.jsonrpc, args.socket.as_deref())
+            piggy::manage::run(
+                args.jsonrpc,
+                args.socket.as_deref(),
+                &seal_store::StoreSealer,
+            )
         })),
 
         // `agent` runs the Rust impl (piggy#58): a PIV-backed SSH agent that
