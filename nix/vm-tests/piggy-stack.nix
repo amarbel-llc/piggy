@@ -11,6 +11,8 @@
 # fibbySeedArgs: extra fibby flags selecting what the virtual card holds
 #   (default: the RFC 5903 slot-9D key + CHUID, enough for a store).
 # agentExtraArgs: extra `piggy agent` flags (e.g. --upstream NAME=PATH).
+# extraEnvironment: extra Environment= entries for both units (the
+#   coverage lanes pass LLVM_PROFILE_FILE here).
 {
   pkgs,
   piggy,
@@ -18,6 +20,7 @@
   askpass,
   fibbySeedArgs ? [ "--seed-rfc5903-slot-9d-cert" ],
   agentExtraArgs ? [ ],
+  extraEnvironment ? [ ],
 }:
 { lib, ... }:
 let
@@ -67,7 +70,7 @@ in
       );
       # `wire` puts the APDU trace in the journal so the testScript can
       # assert `GA ECDH 9D -> 9000` the way the bats lanes grep FIBBY_LOG.
-      Environment = [ "FIBBY_LOG=wire" ];
+      Environment = [ "FIBBY_LOG=wire" ] ++ extraEnvironment;
     };
   };
 
@@ -106,7 +109,8 @@ in
         # Shared code reached from the agent wants a cache dir.
         "HOME=/run/piggy"
         "XDG_CACHE_HOME=/run/piggy/cache"
-      ];
+      ]
+      ++ extraEnvironment;
     };
   };
 }

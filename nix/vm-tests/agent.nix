@@ -18,6 +18,10 @@
   bootstrap,
   piggy,
   askpass,
+  # Coverage plumbing (see ./default.nix): Environment= entries for the
+  # front unit, and `VAR=value ` words for the ssh-forwarded remote command.
+  frontExtraEnvironment ? [ ],
+  remoteExtraEnv ? "",
 }:
 { pkgs, lib, ... }:
 let
@@ -86,7 +90,8 @@ in
         Environment = [
           "HOME=/run/piggy-front"
           "XDG_CACHE_HOME=/run/piggy-front/cache"
-        ];
+        ]
+        ++ frontExtraEnvironment;
       };
     };
   };
@@ -173,6 +178,7 @@ in
       with subtest("ssh -A forwards the front: a remote pass show decrypts through it"):
           n0 = ecdh_count()
           remote = (
+              "${remoteExtraEnv}"
               "PIGGY_STORE_DIR=/root/store "
               "SSH_ASKPASS=${askpass} SSH_ASKPASS_REQUIRE=force DISPLAY= "
               # Absolute paths: a non-interactive sshd command shell has no

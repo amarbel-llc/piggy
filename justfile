@@ -1180,6 +1180,24 @@ test-vm-zfs:
 test-vm-agent:
     nix build .#checks.x86_64-linux.vm-piggy-agent --no-link --print-build-logs --show-trace
 
+# Line coverage from the three VM lanes: re-runs them on a `-C
+# instrument-coverage` build of piggy (.#vm-piggy-*-cov), then
+# merges every guest's .profraw and reports with the rustc-matched
+# llvm-cov (nix/vm-tests/coverage-report.nix). Deliberately OUT of the
+# merge gate and of `nix flake check` (packages, not checks) until the
+# added wall time is measured; the report is the first line-coverage
+# number piggy has, and only counts what the VM lanes exercise.
+#
+# run the instrumented VM lanes and print the merged llvm-cov report
+[group('post-build')]
+[linux]
+test-vm-coverage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=$(nix build .#coverage-report --no-link --print-build-logs --show-trace --print-out-paths)
+    cat "$out/report.txt"
+    echo "lcov: $out/lcov.info"
+
 # Show what a VM check would build vs fetch without running it — the
 # cache-miss tripwire for the ZFS lane's kernel module. Serves the
 # test-vm-* dev loop.

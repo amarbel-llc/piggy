@@ -218,6 +218,37 @@
           import ./nix/vm-tests { inherit pkgs piggy fibby; }
         );
 
+        # The same lanes on the instrumented (`-C instrument-coverage`)
+        # piggy, each shipping its guest's .profraw files in $out, plus
+        # the merged llvm-cov report over all of them. Exposed as packages,
+        # NOT checks: deliberately outside the merge gate and `nix flake
+        # check` until the added wall time is measured (`just
+        # test-vm-coverage`). fibby stays uninstrumented: it is test
+        # infrastructure, and it has no SIGTERM handler, so an instrumented
+        # daemon would be killed without flushing its profile anyway.
+        vmCoverage = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
+          let
+            lanes = import ./nix/vm-tests {
+              inherit pkgs fibby;
+              piggy = piggy-cov;
+              coverage = true;
+            };
+            covLanes = pkgs.lib.mapAttrs' (name: drv: pkgs.lib.nameValuePair "${name}-cov" drv) lanes;
+          in
+          covLanes
+          // {
+            coverage-report = import ./nix/vm-tests/coverage-report.nix {
+              inherit pkgs;
+              tests = pkgs.lib.attrValues covLanes;
+              objects = [
+                "${piggy-rs-cov}/bin/piggy"
+                "${piggy-rs-cov}/bin/piggy-ids"
+                "${piggy-rs-cov}/bin/age-plugin-piggy"
+              ];
+            };
+          }
+        );
+
         # pivy C package, built from vendor/pivy (see nix/pivy.nix and
         # piggy #21). Local derivation instead of a nested flake input.
         pivyPkg = import ./nix/pivy.nix {
@@ -280,43 +311,66 @@
           };
         };
 
-        piggy-rs = pkgs.rustPlatform.buildRustPackage {
-          pname = "piggy-rs";
-          version = "0.1.0";
-
-          src = pkgs.lib.cleanSourceWith {
-            src = ./.;
-            filter =
-              name: type:
-              let
-                rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
-                base = baseNameOf rel;
-              in
-              base == "Cargo.toml"
-              || base == "Cargo.lock"
-              # version.env is read by crates/piggy/build.rs at compile
-              # time and must reach the sandboxed source tree.
-              || base == "version.env"
-              || pkgs.lib.hasPrefix "crates" rel;
-          };
-
-          cargoLock = sharedCargoLock;
-
-          buildInputs = rustBuildInputs;
-          nativeBuildInputs = rustNativeBuildInputs;
-
-          # Integration tests in crates/piggy-piv/tests/ need a pcsc daemon
-          # that nix sandboxes can't provide. Match pivy's flake, which skips
-          # checks on darwin for the same reason (no system pcscd under CI).
-          doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
-
-          meta = with pkgs.lib; {
-            description = "Piggy rust workspace (piggy CLI + piggy-piv library)";
-            homepage = "https://code.linenisgreat.com/piggy";
-            license = licenses.mpl20;
-            platforms = platforms.linux ++ platforms.darwin;
-          };
+        # Coverage variant knobs for the Rust derivations (nix/vm-tests/
+        # coverage-report.nix): `-C instrument-coverage` makes every
+        # process write an LLVM .profraw at exit (path from
+        # LLVM_PROFILE_FILE), the binaries stay unstripped so llvm-cov can
+        # map counters back to source, and the in-sandbox `cargo test` is
+        # skipped — the normal variant already runs it, and instrumented
+        # tests would only slow the build.
+        coverageAttrs = {
+          RUSTFLAGS = "-C instrument-coverage";
+          dontStrip = true;
+          doCheck = false;
         };
+
+        mkPiggyRs =
+          {
+            coverage ? false,
+          }:
+          pkgs.rustPlatform.buildRustPackage (
+            {
+              pname = if coverage then "piggy-rs-cov" else "piggy-rs";
+              version = "0.1.0";
+
+              src = pkgs.lib.cleanSourceWith {
+                src = ./.;
+                filter =
+                  name: type:
+                  let
+                    rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
+                    base = baseNameOf rel;
+                  in
+                  base == "Cargo.toml"
+                  || base == "Cargo.lock"
+                  # version.env is read by crates/piggy/build.rs at compile
+                  # time and must reach the sandboxed source tree.
+                  || base == "version.env"
+                  || pkgs.lib.hasPrefix "crates" rel;
+              };
+
+              cargoLock = sharedCargoLock;
+
+              buildInputs = rustBuildInputs;
+              nativeBuildInputs = rustNativeBuildInputs;
+
+              # Integration tests in crates/piggy-piv/tests/ need a pcsc daemon
+              # that nix sandboxes can't provide. Match pivy's flake, which skips
+              # checks on darwin for the same reason (no system pcscd under CI).
+              doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
+
+              meta = with pkgs.lib; {
+                description = "Piggy rust workspace (piggy CLI + piggy-piv library)";
+                homepage = "https://code.linenisgreat.com/piggy";
+                license = licenses.mpl20;
+                platforms = platforms.linux ++ platforms.darwin;
+              };
+            }
+            // pkgs.lib.optionalAttrs coverage coverageAttrs
+          );
+
+        piggy-rs = mkPiggyRs { };
+        piggy-rs-cov = mkPiggyRs { coverage = true; };
 
         # Standalone `fibby` package — the pcsc-lite-daemon-protocol Rust
         # server (see docs/plans/2026-05-29-fibby-virtual-piv-rust-design.md
@@ -399,116 +453,123 @@
         };
 
         # Wrapped `piggy` binary: rust dispatch + bash passwordstore + pivy
-        # fallback, bundled as a single symlink-joined package.
-        piggy = pkgs.stdenv.mkDerivation {
-          pname = "piggy";
-          version = piggyVersion;
+        # fallback, bundled as a single symlink-joined package. A function
+        # of the Rust workspace derivation so the coverage variant
+        # (piggy-rs-cov) gets the identical wrapper.
+        mkPiggy =
+          piggyRs:
+          pkgs.stdenv.mkDerivation {
+            pname = if piggyRs.pname == "piggy-rs-cov" then "piggy-cov" else "piggy";
+            version = piggyVersion;
 
-          src = ./.;
+            src = ./.;
 
-          nativeBuildInputs = [
-            pkgs.makeWrapper
-            pkgs.scdoc
-          ];
+            nativeBuildInputs = [
+              pkgs.makeWrapper
+              pkgs.scdoc
+            ];
 
-          dontBuild = true;
+            dontBuild = true;
 
-          installPhase = ''
-            mkdir -p $out/bin \
-                     $out/libexec/piggy \
-                     $out/share/man/man1
+            installPhase = ''
+              mkdir -p $out/bin \
+                       $out/libexec/piggy \
+                       $out/share/man/man1
 
-            # Stash the rust dispatcher and the piggy-ids helper binary
-            # at known paths, then wrap the rust binary as
-            # $out/bin/piggy with PIGGY_IDS_PATH set so the rust
-            # `piggy-ids` callers (encrypt / list-available / etc.)
-            # locate it.
-            install -m 0755 ${piggy-rs}/bin/piggy \
-                            $out/libexec/piggy/piggy-rs
-            install -m 0755 ${piggy-rs}/bin/piggy-ids \
-                            $out/libexec/piggy/piggy-ids
-            # age discovers the plugin by PATH name (`age-plugin-piggy`); it
-            # reads PIGGY_AUTH_SOCK / SSH_AUTH_SOCK at runtime and talks to
-            # piggy-agent over the `ecdh@joyent.com` extension. The thin
-            # wrapper exists only to bake PIGGY_VERSION/COMMIT in for the
-            # eng-versioning(7) `--version` line (build.rs can't get the commit
-            # in the .git-less sandbox). makeWrapper exec's the real binary
-            # with all args + the rest of the env intact, so the `--age-plugin`
-            # protocol and the agent-socket env still flow through. Having
-            # `piggy` on PATH then also exposes the plugin to age.
-            install -m 0755 ${piggy-rs}/bin/age-plugin-piggy \
-                            $out/libexec/piggy/age-plugin-piggy
-            makeWrapper $out/libexec/piggy/age-plugin-piggy \
-                        $out/bin/age-plugin-piggy \
-              --set PIGGY_VERSION ${piggyVersion} \
-              --set PIGGY_COMMIT ${piggyCommit}
-            # User-facing SSH_ASKPASS helper. Lives under libexec/piggy/
-            # so consumers can reference it as
-            # `''${piggy}/libexec/piggy/piggy-askpass.sh`, matching the
-            # pattern pivy uses for its bundled pivy-askpass. We install
-            # the raw script (preserves shebang + comments) then wrap
-            # it to pin runtime deps (ps, zenity) on PATH — the script
-            # is invoked by pivy-agent's launchd job where PATH is
-            # otherwise unset. Replaces pivy's `exec zenity --password`
-            # one-liner whose GTK4 AdwMessageDialog deprecation
-            # triggers GLib NULL-str warnings on every prompt.
-            install -m 0755 contrib/piggy-askpass.sh \
-                            $out/libexec/piggy/piggy-askpass.sh.unwrapped
-            makeWrapper $out/libexec/piggy/piggy-askpass.sh.unwrapped \
-                        $out/libexec/piggy/piggy-askpass.sh \
-              --prefix PATH : ${pkgs.lib.makeBinPath askpassRuntimeDeps}
-            for f in doc/*.scd; do
-              stem="$(basename "$f" .scd)"
-              section="''${stem##*.}"
-              name="''${stem%.*}"
-              mkdir -p "$out/share/man/man''${section}"
-              scdoc < "$f" > "$out/share/man/man''${section}/''${name}.''${section}"
-            done
+              # Stash the rust dispatcher and the piggy-ids helper binary
+              # at known paths, then wrap the rust binary as
+              # $out/bin/piggy with PIGGY_IDS_PATH set so the rust
+              # `piggy-ids` callers (encrypt / list-available / etc.)
+              # locate it.
+              install -m 0755 ${piggyRs}/bin/piggy \
+                              $out/libexec/piggy/piggy-rs
+              install -m 0755 ${piggyRs}/bin/piggy-ids \
+                              $out/libexec/piggy/piggy-ids
+              # age discovers the plugin by PATH name (`age-plugin-piggy`); it
+              # reads PIGGY_AUTH_SOCK / SSH_AUTH_SOCK at runtime and talks to
+              # piggy-agent over the `ecdh@joyent.com` extension. The thin
+              # wrapper exists only to bake PIGGY_VERSION/COMMIT in for the
+              # eng-versioning(7) `--version` line (build.rs can't get the commit
+              # in the .git-less sandbox). makeWrapper exec's the real binary
+              # with all args + the rest of the env intact, so the `--age-plugin`
+              # protocol and the agent-socket env still flow through. Having
+              # `piggy` on PATH then also exposes the plugin to age.
+              install -m 0755 ${piggyRs}/bin/age-plugin-piggy \
+                              $out/libexec/piggy/age-plugin-piggy
+              makeWrapper $out/libexec/piggy/age-plugin-piggy \
+                          $out/bin/age-plugin-piggy \
+                --set PIGGY_VERSION ${piggyVersion} \
+                --set PIGGY_COMMIT ${piggyCommit}
+              # User-facing SSH_ASKPASS helper. Lives under libexec/piggy/
+              # so consumers can reference it as
+              # `''${piggy}/libexec/piggy/piggy-askpass.sh`, matching the
+              # pattern pivy uses for its bundled pivy-askpass. We install
+              # the raw script (preserves shebang + comments) then wrap
+              # it to pin runtime deps (ps, zenity) on PATH — the script
+              # is invoked by pivy-agent's launchd job where PATH is
+              # otherwise unset. Replaces pivy's `exec zenity --password`
+              # one-liner whose GTK4 AdwMessageDialog deprecation
+              # triggers GLib NULL-str warnings on every prompt.
+              install -m 0755 contrib/piggy-askpass.sh \
+                              $out/libexec/piggy/piggy-askpass.sh.unwrapped
+              makeWrapper $out/libexec/piggy/piggy-askpass.sh.unwrapped \
+                          $out/libexec/piggy/piggy-askpass.sh \
+                --prefix PATH : ${pkgs.lib.makeBinPath askpassRuntimeDeps}
+              for f in doc/*.scd; do
+                stem="$(basename "$f" .scd)"
+                section="''${stem##*.}"
+                name="''${stem%.*}"
+                mkdir -p "$out/share/man/man''${section}"
+                scdoc < "$f" > "$out/share/man/man''${section}/''${name}.''${section}"
+              done
 
-            # The PIGGY_VERSION/COMMIT/<component> --set group below is the
-            # `piggy version` data source: the native `version` handler
-            # reads these from the environment makeWrapper bakes in.
-            # Component versions are read live off the derivations
-            # (pivyPkg.version, pkgs-master.pcsclite.version) so a pin
-            # bump shows up in the output with no manual edit — drift
-            # stays visible, per eng-versioning(7).
-            #
-            # IGLOO-PROMOTION CANDIDATE (amarbel-llc/nixpkgs#68): this
-            # version+commit+component injection is the non-Go analog of
-            # buildGoApplication's auto-embedding (amarbel-llc/nixpkgs#31).
-            # A generalized `mkVersionedWrapper` deriving these flags from
-            # {version.env, src.rev, components} is the lift target — this
-            # block is the tracer-bullet reference consumer.
-            makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
-              --set PIGGY_IDS_PATH $out/libexec/piggy/piggy-ids \
-              --set PIGGY_VERSION ${piggyVersion} \
-              --set PIGGY_COMMIT ${piggyCommit} \
-              --set PIGGY_PIVY_VERSION ${pivyPkg.version} \
-              --set PIGGY_PIVY_REV vendored \
-              --set PIGGY_PCSCLITE_VERSION ${pkgs-master.pcsclite.version} \
-              --set PIGGY_PCSCLITE_REV ${pcscliteRev} \
-              --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
-          '';
+              # The PIGGY_VERSION/COMMIT/<component> --set group below is the
+              # `piggy version` data source: the native `version` handler
+              # reads these from the environment makeWrapper bakes in.
+              # Component versions are read live off the derivations
+              # (pivyPkg.version, pkgs-master.pcsclite.version) so a pin
+              # bump shows up in the output with no manual edit — drift
+              # stays visible, per eng-versioning(7).
+              #
+              # IGLOO-PROMOTION CANDIDATE (amarbel-llc/nixpkgs#68): this
+              # version+commit+component injection is the non-Go analog of
+              # buildGoApplication's auto-embedding (amarbel-llc/nixpkgs#31).
+              # A generalized `mkVersionedWrapper` deriving these flags from
+              # {version.env, src.rev, components} is the lift target — this
+              # block is the tracer-bullet reference consumer.
+              makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
+                --set PIGGY_IDS_PATH $out/libexec/piggy/piggy-ids \
+                --set PIGGY_VERSION ${piggyVersion} \
+                --set PIGGY_COMMIT ${piggyCommit} \
+                --set PIGGY_PIVY_VERSION ${pivyPkg.version} \
+                --set PIGGY_PIVY_REV vendored \
+                --set PIGGY_PCSCLITE_VERSION ${pkgs-master.pcsclite.version} \
+                --set PIGGY_PCSCLITE_REV ${pcscliteRev} \
+                --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
+            '';
 
-          # Expose the Go-based SSH-agent conformance binary as a test
-          # attribute of the main piggy package. Reachable via
-          # `nix build .#piggy.tests.conformance` and enumerated by
-          # `nix flake check`. Keeps the relationship between the agent
-          # and its wire-protocol oracle explicit without merging the
-          # Rust and Go toolchains into one derivation.
-          passthru.tests = {
-            conformance = piggy-agent-conformance;
-          }
-          // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-            fib = virtualPiv.fibBundle;
+            # Expose the Go-based SSH-agent conformance binary as a test
+            # attribute of the main piggy package. Reachable via
+            # `nix build .#piggy.tests.conformance` and enumerated by
+            # `nix flake check`. Keeps the relationship between the agent
+            # and its wire-protocol oracle explicit without merging the
+            # Rust and Go toolchains into one derivation.
+            passthru.tests = {
+              conformance = piggy-agent-conformance;
+            }
+            // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+              fib = virtualPiv.fibBundle;
+            };
+
+            meta = with pkgs.lib; {
+              description = "PIV-based password store using pivy-box and ebox templates";
+              license = licenses.gpl2Plus;
+              platforms = platforms.linux ++ platforms.darwin;
+            };
           };
 
-          meta = with pkgs.lib; {
-            description = "PIV-based password store using pivy-box and ebox templates";
-            license = licenses.gpl2Plus;
-            platforms = platforms.linux ++ platforms.darwin;
-          };
-        };
+        piggy = mkPiggy piggy-rs;
+        piggy-cov = mkPiggy piggy-rs-cov;
 
         # The two Go test binaries piggy's bats lanes need, now built from the
         # unified go/ module (code.linenisgreat.com/piggy/go) via
@@ -756,6 +817,9 @@
           # `just load-fibby` and the wet-env capture recipes; future
           # consumer is the planned home-manager service (#129 stretch).
           fibby = fibby;
+          # Instrumented-coverage variant of the wrapped piggy, consumed by
+          # the vm-piggy-*-cov lanes and `.#coverage-report`.
+          piggy-cov = piggy-cov;
           # Go test-only SSH server for the SSH-over-fibby bats lane
           # (piggy#135). Consumed by the forthcoming Phase D recipe via
           # `nix build .#piggy-test-sshd`.
@@ -793,6 +857,7 @@
           gomod2nix = pkgs.gomod2nix;
         }
         // batsLib.batsLaneOutputs
+        // vmCoverage
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           fib = virtualPiv.fib;
           fib-bundle = virtualPiv.fibBundle;
