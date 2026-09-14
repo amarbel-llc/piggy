@@ -18,7 +18,7 @@
 # first end-to-end validation of the closure on a real NixOS system.
 #
 # mkVmChecks supplies the Linux-only guard (`{ }` elsewhere), the no-KVM
-# declaration (host flac has no /dev/kvm; the guest runs under TCG), and
+# declaration (the build host has no /dev/kvm; the guest runs under TCG), and
 # the TCG sizing. Measured 2026-09-14: 2-3 minutes per lane.
 #
 # coverage = true runs the SAME lanes on an instrumented piggy (pass the

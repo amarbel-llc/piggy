@@ -151,7 +151,7 @@ Recommendations; each needs an operator yes/no before its phase starts.
 | Surface | Recommendation | Rationale / escape hatch |
 |---|---|---|
 | `piggy ca` | **drop** | Never built; needs json-c and the 7k-line CA/cert-template stack; no piggy doc, test, or recipe exercises it. Anyone needing a PIV CA can build upstream pivy. |
-| `piggy luks` | **drop** | FDR 0003 already rejects `pivy-luks` for the twerk LUKS2 use case in favour of systemd-cryptenroll FIDO2. |
+| `piggy luks` | **drop** | FDR 0003 already rejects `pivy-luks` for the laptop LUKS2 use case in favour of systemd-cryptenroll FIDO2. |
 | `piggy zfs` | **drop** | Never built; needs libzfs. If ZFS native-encryption unlock is wanted later it is a ~300-line Rust command over `piggy-box` key eboxes plus `zfs load-key`, not a port. |
 | `pam_pivy` | **drop** | Never built or exposed. |
 | `pivy-wire-test` | **drop** | The Go `piggy-agent-conformance` binary covers the extension wire-shape checks. |

@@ -2,7 +2,7 @@
 status: proposed
 date: 2026-09-14
 promotion-criteria: >
-  One NixOS host (first candidate: circus's twerk reprovision) boots a
+  One NixOS host (first candidate: the laptop circus is reprovisioning) boots a
   LUKS2 root through systemd stage 1 with a FIDO2 keyslot per operator
   YubiKey plus a passphrase and a recovery key; each fallback (card absent
   -> passphrase after token-timeout, wrong FIDO2 PIN, recovery key) is
@@ -64,7 +64,7 @@ different key on a different applet behind a different PIN, so:
 
 ### Combining with TPM2
 
-Circus measured a discrete TPM 2.0 on twerk (Nuvoton NTC0702, `/dev/tpmrm0`),
+Circus measured a discrete TPM 2.0 on the target laptop (Nuvoton NTC0702, `/dev/tpmrm0`),
 so a TPM2 slot is available. The rule that governs the combination: **LUKS
 unlocks with any one keyslot, so the volume is only as strong as its weakest
 slot.**
@@ -80,7 +80,7 @@ slot.**
   dictionary-attack lockout (systemd-cryptenroll(1) `--tpm2-with-pin`), which
   makes a short PIN far stronger offline than an equally short passphrase.
   A passphrase is brute-forceable against a copied header. crypttab
-  `tpm2-pin=` exists since v251, within twerk's likely systemd.
+  `tpm2-pin=` exists since v251, within the target host's likely systemd.
 - **Recommended role ordering:** card (FIDO2 PIN + touch) for daily boot →
   TPM2+PIN when the card is not at hand → long passphrase / recovery key as
   last resort (lost TPM state after firmware or Secure Boot changes, a
@@ -90,7 +90,7 @@ slot.**
 - **Unverified: automatic ordering.** crypttab(5) as read does not say which
   enrolled token systemd-cryptsetup tries first when a volume carries both
   TPM2 and FIDO2 tokens, or whether one crypttab line can offer both. Verify
-  on twerk before relying on "card first", for example by checking which
+  on the target host before relying on "card first", for example by checking which
   prompt appears with both enrolled and the card unplugged. If it cannot
   offer both, prefer `fido2-device=auto` in crypttab. The TPM2+PIN slot is
   still usable manually from a live system via `systemd-cryptsetup attach`
@@ -161,7 +161,7 @@ NixOS config fragment (device name illustrative):
 Escrowing the recovery key in the piggy store, encrypted to the store's
 nearest `piggy-ids` like the #258 management-key seal:
 
-    piggy pass insert -m luks/twerk/recovery-key
+    piggy pass insert -m luks/<host>/recovery-key
 
 Card rotation (new card in, old card out). Unlock with the passphrase or
 another enrolled card, then wipe **by numeric slot index**:
@@ -261,7 +261,7 @@ Do **not** use `--wipe-slot=fido2` for a single-card rotation. It wipes
   covers TPM2 as well as FIDO2/PKCS#11. The multi-token try order is
   unverified.
 - The nixpkgs module source cited was a local nixos-25.11-era store copy.
-  It was not confirmed to be byte-identical to twerk's eventual pin.
+  It was not confirmed to be byte-identical to the target host's eventual pin.
 - piggy adds no code or commands for this feature. The FDR records a
   deliberate decision that the operator's cards unlock disks through
   FIDO2, outside piggy.
@@ -283,5 +283,4 @@ Do **not** use `--wipe-slot=fido2` for a single-card rotation. It wipes
   semantics.
 - `vendor/pivy/src/pivy-luks.c`, `vendor/pivy/README.adoc` "LUKS/cryptsetup",
   and `nix/pivy.nix` (pivy-luks not built).
-- Consumer: circus's twerk NixOS reprovision design
-  (circus/keen-aspen/clarabell).
+- Consumer: circus's laptop NixOS reprovision design (circus FDR 0030).

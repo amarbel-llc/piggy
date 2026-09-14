@@ -209,7 +209,7 @@
 
         # NixOS VM integration lane (nix/vm-tests/): fibby + the Rust
         # agent as guest systemd units, LUKS2 and ZFS unlocked from the
-        # store. Linux-only, TCG-tolerant (no KVM on flac). Merged into
+        # store. Linux-only, TCG-tolerant (no KVM on the build host). Merged into
         # `checks` so `nix flake check` runs it; the justfile
         # `test-vm-*` recipes are the paved paths. The guard wraps the
         # import: runNixOSTest must never be evaluated on darwin.

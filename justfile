@@ -229,12 +229,13 @@ _test-fibby-manual: test-bats-conformance-pass-ls-recipients-fibby test-bats-con
 [macos]
 _test-fibby-manual:
 
-# NixOS VM lanes (nix/vm-tests/), part of the merge gate via `test`. Host
-# flac has no /dev/kvm (Hetzner Cloud exposes no nested virt on any server
-# type, per circus 2026-09-14), so each run is a TCG boot: measured
-# 2026-09-14 at 2-3 minutes per lane once the guest closure is cached,
-# which the operator accepted for every merge. A KVM builder
-# (nikulin/twerk, a circus follow-up) would only make them faster.
+# NixOS VM lanes (nix/vm-tests/), part of the merge gate via `test`. The
+# shared Linux build host has no /dev/kvm (its cloud provider exposes no
+# nested virt on any server type, per circus 2026-09-14), so each run is
+# a TCG boot: measured 2026-09-14 at 2-3 minutes per lane once the guest
+# closure is cached, which the operator accepted for every merge. A KVM
+# builder (a bare-metal fleet host, a circus follow-up) would only make
+# them faster.
 [linux]
 _test-vm-linux-only: test-vm-luks test-vm-zfs test-vm-agent
 
@@ -1149,7 +1150,7 @@ test-nix-hm-secrets-module:
 # package with fibby + the Rust `piggy agent` as systemd units; a store
 # secret sealed to the virtual card formats, opens and re-opens a LUKS2
 # volume, and a second passphrase keyslot is enrolled beside it (the FDR
-# 0003 shape). Runs under TCG on flac (no KVM): measured 2026-09-14 at
+# 0003 shape). Runs under TCG on the build host (no KVM): measured 2026-09-14 at
 # 168s for the test script (~145s of it guest boot) once the closure is
 # built. Lives under `checks`, so `nix flake check` boots it too.
 #
