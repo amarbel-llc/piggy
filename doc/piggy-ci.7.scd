@@ -2,82 +2,69 @@ piggy-ci(7)
 
 # NAME
 
-piggy-ci - continuous integration workflow conventions for piggy
+piggy-ci - continuous integration conventions for piggy
 
 # DESCRIPTION
 
-This page documents the GitHub Actions CI workflow for the piggy project:
-its trigger policy, matrix strategy, job structure, and platform-specific
-steps. It is intended as a reference for contributors and maintainers.
+piggy has no hosted CI service. The integration gate is the spinclass
+pre-merge hook: *merge-this-session* runs *just* (the repo's *default*
+recipe, *lint build test*) in a detached build worktree on the shared Linux
+build host, and only a green run fast-forwards the default branch. The
+same *just* is what a contributor runs locally; there is no second
+pipeline to keep in step with it. See *spinclass-merge-this-session*(1) and
+the repo's *sweatfile* (*pre-merge = "just"*).
 
-# WORKFLOW
+# THE GATE
 
-The single workflow file lives at _.github/workflows/nix.yml_.
+*just lint*
+	Formatting via conformist (*lint-fmt*), clippy with warnings as
+	errors (*lint-rust*), and the impure eng-convention checks plus the
+	go/ facade drift check (*lint-worktree*).
 
-The workflow triggers on every *push* to any branch.
+*just build*
+	The go/ module, the nix package set (*build-nix*: the default piggy
+	package, fibby, the Go test binaries), and the Rust workspace.
 
-Concurrency is grouped by workflow name and git ref:
+*just test*
+	The grammar gates (*validate-grammar*, *test-grammar-vectors*), the
+	sandboxed bats lane (*test-bats-default*, *nix build .#bats-default*),
+	the conformance bats glob (*test-bats-conformance*), *cargo test*
+	(*test-rust*), the go/ tests (*test-go*), the standalone piggy-pigpen
+	crate (*test-pigpen*), and, on Linux only, the fibby-backed conformance
+	lanes (*_test-conformance-linux-only*) and the NixOS VM lanes
+	(*_test-vm-linux-only*: *test-vm-luks*, *test-vm-zfs*,
+	*test-vm-agent*).
 
-```
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-```
+# LINUX-ONLY LANES
 
-This means a new push to the same branch cancels any in-flight run for that
-branch. Pushes to different branches run independently.
+The fibby conformance lanes redirect PC/SC clients at a virtual card through
+*PCSCLITE_CSOCK_NAME*, which macOS's PCSC.framework ignores, and the NixOS
+VM lanes evaluate to nothing on darwin (*pkgs.mkVmChecks*). Both aggregates
+are declared as a *[linux]* / *[macos]* recipe pair so *just test* stays a
+single entry point on either platform; on macOS the Linux-only halves are
+empty.
 
-# MATRIX
+The VM lanes boot each guest under TCG (the build host has no /dev/kvm) and
+take two to three minutes each once the guest closure is cached; a
+*[clown-job]* wake or the recipe's own exit is the signal, never a poll.
 
-The *build-nix-package* job runs on a two-entry matrix:
+# OUTSIDE THE GATE
 
-[[ *Runner*
-:[ *Nix system*
-|  ubuntu-22.04
-:  x86_64-linux
-|  macos-15
-:  aarch64-darwin
+*just test-optional*
+	Lanes that need hardware, a tty, or a human: the C pivy-agent hardware
+	lane, the wire-protocol conformance bats, the home-manager module
+	evaluation smoke test.
 
-*fail-fast* is set to *false*: a failure on one platform does not cancel the
-sibling job on the other platform. This ensures a Darwin regression does not
-mask a Linux failure (and vice versa).
-
-# JOBS
-
-*flakehub-publish*
-	Publishes the flake to FlakeHub. Runs only on the default branch (master).
-	Uses _DeterminateSystems/flakehub-push_ with rolling visibility.
-
-*build-nix-package*
-	The main build-and-test job. Runs only on the default branch. Steps:
-
-	. *nix build* — build the piggy package
-	. *just test* — full end-to-end suite: cargo build, bats tests (piggy
-	  bash tests routed through the rust dispatcher), and cargo test
-	. *just verify-fib* — smoke-test the legacy fib virtual PIV card stack,
-	  retained as a fibby differential oracle (Linux only)
-	. *just test-bats-conformance-interop-fibby* — interop tests between
-	  piggy box and pivy-box against the fibby virtual card (Linux only)
-
-# LINUX-ONLY STEPS
-
-The fib (fake-it-backend) virtual PIV card stack depends on *pcscd*, *vpcd*,
-and *jCardSim*, which are only available on the Linux runner. Two steps are
-gated on _matrix.system == 'x86_64-linux'_:
+*just test-vm-coverage*
+	The three VM lanes re-run on an instrumented piggy, merged into an
+	llvm-cov report. Roughly thirteen minutes serialized; kept out of the
+	gate until that cost is accepted.
 
 *just verify-fib*
-	Starts the virtual PIV card stack (pcscd + vpcd + jCardSim with
-	PivApplet), runs basic card operations, and tears down.
-
-*just test-bats-conformance-interop-fibby*
-	Runs BATS interop tests that encrypt with piggy box and decrypt with
-	pivy-box (and vice versa) against the fibby virtual card. (Pure-Rust;
-	gated on Linux only because the PCSCLITE_CSOCK_NAME redirect is a no-op
-	on macOS's PCSC.framework.)
-
-These steps are skipped on the Darwin runner: fib has no macOS support, and
-the fibby lanes' socket redirect is a no-op there.
+	Smoke-test of the legacy fib (jCardSim) virtual PIV card, retained as a
+	fibby differential oracle. Linux only.
 
 # SEE ALSO
 
-*piggy*(1), *piggy-agent*(1), *piggy-piv-slots*(7)
+*piggy*(1), *piggy-agent*(1), *piggy-piv-slots*(7),
+*spinclass-merge-this-session*(1), *eng-design_patterns-justfile*(7)

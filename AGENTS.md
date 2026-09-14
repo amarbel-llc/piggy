@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Where to start work
 
-Open the GitHub issue **amarbel-llc/piggy#26 — "Sequenced work: open issue triage"** before doing anything that needs picking-up-where-it-left-off. It maintains a tiered to-do list with a "Recommended next" pointer at the top and links to every active issue. If you finish a chunk of work, update #26 alongside the commit. The umbrella tracker is **#3 — Rust parity roadmap**; #26 is the operational triage that drives day-to-day priorities.
+Open issue **piggy#26 — "Sequenced work: open issue triage"** in piggy's tracker before doing anything that needs picking-up-where-it-left-off. It maintains a tiered to-do list with a "Recommended next" pointer at the top and links to every active issue. If you finish a chunk of work, update #26 alongside the commit. The umbrella tracker is **#3 — Rust parity roadmap**; #26 is the operational triage that drives day-to-day priorities.
 
 ## Overview
 
@@ -14,11 +14,11 @@ Piggy is a passwordstore.org fork that replaces GPG encryption with PIV smart ca
 
 ```sh
 just build              # Build nix package (nix build --show-trace)
-just test               # Full suite: test-bats-default + test-bats-conformance + test-rust + test-go-markl + test-pigpen
+just test               # Full suite: grammar gates + test-bats-default + test-bats-conformance + test-rust + test-go + test-pigpen + (Linux) the fibby conformance lanes and the NixOS VM lanes; see piggy-ci(7)
 just test-bats-default  # Sandboxed bats lane via nix build .#bats-default
 just codemod-fmt        # Format nix + shell + rust via conformist (= nix fmt)
 just clean              # Remove build artifacts
-just release X.Y.Z      # Cut a release: bump version.env, sign+push tags, gh release create
+just release X.Y.Z      # Cut a release: changelog, bump version.env, sign+push tags, Forgejo release
 ```
 
 Run a single bats test file outside the sandbox (fast iteration):
@@ -159,9 +159,9 @@ Beyond the per-request `piggy.agent.<op>` surface, the Rust side also emits (sam
 
 ## Debugging
 
-### darwin CI: silent exit 126 under `env -i` with `set -euo pipefail`
+### macOS: silent exit 126 under `env -i` with `set -euo pipefail`
 
-On the macos-15 GitHub Actions runner, `/usr/bin/ps` (or `/usr/bin/tr`) exits 126 under a stripped environment (`env -i HOME=$HOME PATH=/usr/bin:/bin ...`), while `/bin/echo` and other `/bin` binaries run fine. Linux runners don't exhibit this. Suspected macOS hardened-runtime + stripped DYLD env, not proven; tracked at #100.
+On some macOS hosts, `/usr/bin/ps` (or `/usr/bin/tr`) exits 126 under a stripped environment (`env -i HOME=$HOME PATH=/usr/bin:/bin ...`), while `/bin/echo` and other `/bin` binaries run fine. Linux does not exhibit this. Suspected macOS hardened-runtime + stripped DYLD env, not proven; tracked at #100.
 
 Consequence for `set -euo pipefail`: a pipeline like `var="$(ps … | tr …)"` whose RHS exits 126 propagates through pipefail, the assignment inherits 126, and `set -e` exits the script silently with 126 — no stderr, no failing command. This bit us in #92; fixed in `contrib/piggy-askpass.sh` by appending `|| true` to the pipeline. When porting a shell helper that strips its env or runs under launchd-style fork+exec: pin `|| true` on pipelines whose output is decorative (with a trailing `[[ -z "$var" ]] && var="?"`), or pin specific absolute exec paths and add a diagnostic test.
 
