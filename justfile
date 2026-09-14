@@ -210,7 +210,7 @@ run-nix *ARGS:
 test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-rust test-go test-pigpen _test-conformance-linux-only
 
 [group('post-build')]
-test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module test-nix-hm-secrets-module
+test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module test-nix-hm-secrets-module _test-vm-linux-only
 
 [linux]
 _test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby
@@ -228,6 +228,18 @@ _test-fibby-manual: test-bats-conformance-pass-ls-recipients-fibby test-bats-con
 
 [macos]
 _test-fibby-manual:
+
+# NixOS VM lanes (nix/vm-tests/). Out of the merge gate for now: host flac
+# has no /dev/kvm (Hetzner Cloud exposes no nested virt on any server
+# type, per circus 2026-09-14), so each run is a TCG boot measured in
+# minutes. Promote into _test-conformance-linux-only once a KVM builder
+# (nikulin/twerk, a circus follow-up) exists or the measured runtime is
+# acceptable for every merge.
+[linux]
+_test-vm-linux-only: test-vm-luks test-vm-zfs
+
+[macos]
+_test-vm-linux-only:
 
 # Sandboxed bats lane: runs every top-level t*.bats NOT tagged
 # `# bats file_tags=hardware` inside the nix build sandbox. See
@@ -1125,6 +1137,43 @@ test-nix-hm-secrets-module:
     printf '%s\n' "$json" | jq -r '.failures[] | "FAIL: \(.name)\n  got: \(.result.got)"'
     exit 1
   fi
+
+# NixOS VM lane (nix/vm-tests/luks.nix): a guest running the shipped piggy
+# package with fibby + the Rust `piggy agent` as systemd units; a store
+# secret sealed to the virtual card formats, opens and re-opens a LUKS2
+# volume, and a second passphrase keyslot is enrolled beside it (the FDR
+# 0003 shape). Runs under TCG on flac (no KVM): measured 2026-09-14 at
+# 168s for the test script (~145s of it guest boot) once the closure is
+# built. Lives under `checks`, so `nix flake check` boots it too.
+#
+# run the LUKS2-from-store NixOS VM test
+[group('post-build')]
+[linux]
+test-vm-luks:
+    nix build .#checks.x86_64-linux.vm-piggy-luks --no-link --print-build-logs --show-trace
+
+# ZFS sibling of test-vm-luks (nix/vm-tests/zfs.nix): an encrypted dataset
+# keyed from the store, unload-key / load-key round-tripped through
+# `piggy pass show`. Split from the LUKS lane because this guest carries
+# the zfs kernel module — run `just debug-vm-dry-run vm-piggy-zfs` first
+# if the igloo pin moved; a `linux-*`/`zfs-kernel-*` derivation in the
+# "will be built" list means a local kernel-module compile.
+#
+# run the ZFS-encrypted-dataset-from-store NixOS VM test
+[group('post-build')]
+[linux]
+test-vm-zfs:
+    nix build .#checks.x86_64-linux.vm-piggy-zfs --no-link --print-build-logs --show-trace
+
+# Show what a VM check would build vs fetch without running it — the
+# cache-miss tripwire for the ZFS lane's kernel module. Serves the
+# test-vm-* dev loop.
+#
+# dry-run a nix/vm-tests check and list what it would build vs fetch
+[group('debug')]
+[linux]
+debug-vm-dry-run check="vm-piggy-luks":
+    nix build .#checks.x86_64-linux.{{ check }} --dry-run --show-trace
 
 # Rust card-integration tests against FIBBY — the consolidated fibby
 # companion to test-rust-agent-ecdh / -agent-unlock / -card-unlock, part of

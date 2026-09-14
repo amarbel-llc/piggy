@@ -208,6 +208,16 @@
           }
         );
 
+        # NixOS VM integration lane (nix/vm-tests/): fibby + the Rust
+        # agent as guest systemd units, LUKS2 and ZFS unlocked from the
+        # store. Linux-only, TCG-tolerant (no KVM on flac). Merged into
+        # `checks` so `nix flake check` runs it; the justfile
+        # `test-vm-*` recipes are the paved paths. The guard wraps the
+        # import: runNixOSTest must never be evaluated on darwin.
+        vmTests = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
+          import ./nix/vm-tests { inherit pkgs piggy fibby; }
+        );
+
         # pivy C package, built from vendor/pivy (see nix/pivy.nix and
         # piggy #21). Local derivation instead of a nested flake input.
         pivyPkg = import ./nix/pivy.nix {
@@ -799,7 +809,8 @@
           # file-based linters, and fails if any file would change. Driven
           # from `just lint-fmt` and surfaced under `nix flake check`.
           formatting = conformistEval.config.build.check self;
-        };
+        }
+        // vmTests;
 
         # `nix fmt` runs the generated conformist wrapper (config + every
         # formatter baked as /nix/store paths). See conformistEval.

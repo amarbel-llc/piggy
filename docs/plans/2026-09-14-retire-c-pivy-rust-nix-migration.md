@@ -356,6 +356,7 @@ later phase uses them.
 | `codemod-capture-pivy-oracle-*` recipes + fixture layout | turns the live C oracle into static fixtures | 1, 2, 3, 5 |
 | `PIGGY_TEST_THROWAWAY_SERIALS` guard in `lib/fibby.bash` and the hardware recipes | makes destructive hardware lanes safe to run | 3.3+ |
 | `lint-closure-no-pivy` | proves the shipped closure is C-free | 4 |
+| NixOS VM lane (`nix/vm-tests/`, `just test-vm-luks` / `test-vm-zfs`) — **landed 2026-09-14** | the only place LUKS/ZFS unlock and the shipped closure-as-a-system can be exercised; harness for any future `piggy luks`/`zfs` port | 3+, and the Phase 4 soak |
 | state-readback comparator helper (`helpers/card-state-dump.sh`: GET DATA every object, hex, sorted) | differential tests compare card state, not just stdout | 3 |
 
 ## Risks and unknowns
