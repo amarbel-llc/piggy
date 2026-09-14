@@ -4,7 +4,6 @@
 { bootstrap }:
 { ... }:
 {
-  name = "piggy-vm-luks";
   nodes.machine = { };
   testScript = bootstrap { secretName = "luks/test"; } + ''
     DEV = "/dev/vdb"

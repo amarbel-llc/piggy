@@ -456,9 +456,12 @@
         # of the Rust workspace derivation so the coverage variant
         # (piggy-rs-cov) gets the identical wrapper.
         mkPiggy =
-          piggyRs:
+          {
+            piggyRs,
+            coverage ? false,
+          }:
           pkgs.stdenv.mkDerivation {
-            pname = if piggyRs.pname == "piggy-rs-cov" then "piggy-cov" else "piggy";
+            pname = if coverage then "piggy-cov" else "piggy";
             version = piggyVersion;
 
             src = ./.;
@@ -567,8 +570,11 @@
             };
           };
 
-        piggy = mkPiggy piggy-rs;
-        piggy-cov = mkPiggy piggy-rs-cov;
+        piggy = mkPiggy { piggyRs = piggy-rs; };
+        piggy-cov = mkPiggy {
+          piggyRs = piggy-rs-cov;
+          coverage = true;
+        };
 
         # The two Go test binaries piggy's bats lanes need, now built from the
         # unified go/ module (code.linenisgreat.com/piggy/go) via

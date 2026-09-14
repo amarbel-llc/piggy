@@ -6,7 +6,6 @@
 { bootstrap }:
 { lib, ... }:
 {
-  name = "piggy-vm-zfs";
   nodes.machine = {
     boot.supportedFilesystems = [ "zfs" ];
     networking.hostId = "8425e349";

@@ -11,13 +11,13 @@
 # fibbySeedArgs: extra fibby flags selecting what the virtual card holds
 #   (default: the RFC 5903 slot-9D key + CHUID, enough for a store).
 # agentExtraArgs: extra `piggy agent` flags (e.g. --upstream NAME=PATH).
-# extraEnvironment: extra Environment= entries for both units (the
-#   coverage lanes pass LLVM_PROFILE_FILE here).
+# extraEnvironment: extra Environment= entries for both units — the
+#   test askpass discipline (SSH_ASKPASS + PIGGY_TEST_FIB_PIN, never a
+#   real prompt, piggy#35) and, in the coverage lanes, LLVM_PROFILE_FILE.
 {
   pkgs,
   piggy,
   fibby,
-  askpass,
   fibbySeedArgs ? [ "--seed-rfc5903-slot-9d-cert" ],
   agentExtraArgs ? [ ],
   extraEnvironment ? [ ],
@@ -42,7 +42,7 @@ in
 {
   # fibby IS the pcsc-lite server; the system pcscd must not compete for
   # the same client library.
-  services.pcscd.enable = lib.mkForce false;
+  services.pcscd.enable = false;
 
   users.users.piggy-agent = {
     isSystemUser = true;
@@ -100,12 +100,6 @@ in
       );
       Environment = [
         "PCSCLITE_CSOCK_NAME=${fibbySock}"
-        # The test-harness askpass: supplies PIGGY_TEST_FIB_PIN, or refuses
-        # loudly. Never a real prompt (piggy#35).
-        "SSH_ASKPASS=${askpass}"
-        "SSH_ASKPASS_REQUIRE=force"
-        "DISPLAY="
-        "PIGGY_TEST_FIB_PIN=123456"
         # Shared code reached from the agent wants a cache dir.
         "HOME=/run/piggy"
         "XDG_CACHE_HOME=/run/piggy/cache"

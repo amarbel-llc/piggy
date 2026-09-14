@@ -41,25 +41,32 @@ let
     builtins.readFile ../../zz-tests_bats/helpers/piggy-test-askpass.sh
   );
 
+  # The test-harness askpass discipline, identical for every process that
+  # could prompt: supplies PIGGY_TEST_FIB_PIN or refuses loudly, never a
+  # real prompt (piggy#35). DISPLAY is blanked because the backdoor shell
+  # exports DISPLAY=:0.0.
+  askpassEnv = [
+    "SSH_ASKPASS=${askpass}"
+    "SSH_ASKPASS_REQUIRE=force"
+    "DISPLAY="
+    "PIGGY_TEST_FIB_PIN=123456"
+  ];
   # systemd expands %p/%m in Environment= lines; %% is a literal %. The
-  # shell-side spelling (testScript ENV) uses single percents.
-  profilePatternUnit = "/coverage/%%p-%%m.profraw";
-  profilePatternShell = "/coverage/%p-%m.profraw";
-  coverageEnvUnit = pkgs.lib.optionals coverage [ "LLVM_PROFILE_FILE=${profilePatternUnit}" ];
-  coverageEnvShell = pkgs.lib.optionalString coverage "LLVM_PROFILE_FILE=${profilePatternShell} ";
+  # shell-side spelling uses single percents.
+  coverageEnvUnit = pkgs.lib.optionals coverage [ "LLVM_PROFILE_FILE=/coverage/%%p-%%m.profraw" ];
+  coverageEnvShell = pkgs.lib.optionals coverage [ "LLVM_PROFILE_FILE=/coverage/%p-%m.profraw" ];
+  # One list per consumer shape: systemd Environment= entries, and the
+  # `VAR=value ` prefix words a shell command line takes.
+  unitEnv = askpassEnv ++ coverageEnvUnit;
+  shellEnv = pkgs.lib.concatMapStrings (kv: "${kv} ") (askpassEnv ++ coverageEnvShell);
 
   # The per-lane stack module (card seeds, agent flags differ per lane).
   mkStack =
     stackArgs:
     import ./piggy-stack.nix (
       {
-        inherit
-          pkgs
-          piggy
-          fibby
-          askpass
-          ;
-        extraEnvironment = coverageEnvUnit;
+        inherit pkgs piggy fibby;
+        extraEnvironment = unitEnv;
       }
       // stackArgs
     );
@@ -92,9 +99,8 @@ let
   # the agent, a store initialised against the card, one generated
   # secret that decrypts through agent -> askpass -> fibby.
   bootstrap = import ./store-bootstrap.nix {
-    inherit askpass;
     prelude = pkgs.vmTestPrelude;
-    extraEnv = coverageEnvShell;
+    extraEnv = shellEnv;
   };
 
   # Stop the instrumented daemons cleanly (the LLVM profile runtime
@@ -146,13 +152,9 @@ pkgs.mkVmChecks {
     };
     vm-piggy-agent = lane {
       module = import ./agent.nix {
-        inherit
-          bootstrap
-          piggy
-          askpass
-          ;
-        frontExtraEnvironment = coverageEnvUnit;
-        remoteExtraEnv = coverageEnvShell;
+        inherit bootstrap piggy;
+        frontExtraEnvironment = unitEnv;
+        remoteExtraEnv = shellEnv;
       };
       stack = mkStack {
         # 9A for SSH auth + 9D for the store decrypt, both on one card.

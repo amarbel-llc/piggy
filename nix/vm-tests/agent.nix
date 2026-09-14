@@ -16,11 +16,11 @@
 {
   bootstrap,
   piggy,
-  askpass,
-  # Coverage plumbing (see ./default.nix): Environment= entries for the
-  # front unit, and `VAR=value ` words for the ssh-forwarded remote command.
-  frontExtraEnvironment ? [ ],
-  remoteExtraEnv ? "",
+  # From ./default.nix: Environment= entries for the front unit, and
+  # `VAR=value ` words for the ssh-forwarded remote command (the test
+  # askpass discipline and, in the coverage lanes, LLVM_PROFILE_FILE).
+  frontExtraEnvironment,
+  remoteExtraEnv,
 }:
 { pkgs, lib, ... }:
 let
@@ -29,7 +29,6 @@ let
   frontSock = "/run/piggy-front/agent.sock";
 in
 {
-  name = "piggy-vm-agent";
   nodes.machine = {
     services.openssh = {
       enable = true;
@@ -175,7 +174,6 @@ in
           remote = (
               "${remoteExtraEnv}"
               "PIGGY_STORE_DIR=/root/store "
-              "SSH_ASKPASS=${askpass} SSH_ASKPASS_REQUIRE=force DISPLAY= "
               # Absolute paths: a non-interactive sshd command shell has no
               # guaranteed PATH.
               "${piggy}/bin/piggy pass show agent/test | ${pkgs.coreutils}/bin/head -n1"

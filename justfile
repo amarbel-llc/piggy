@@ -288,11 +288,13 @@ test-bats-piggy-local: build-rust
 fence-tmpdir-linux := if os() == "linux" { "TMPDIR=/tmp" } else { "" }
 
 # Every fence-sandboxed lane whose fibby is spawned by the recipe (socket
-# under a /tmp workdir) passes `--expose-host-path-rw "$workdir"` to the
-# bats wrapper: since fence 0.1.66 the Linux sandbox mounts a private
-# tmpfs over /tmp, so a host-created AF_UNIX socket there is invisible
-# unless its directory is exposed (bats 2de2b9e; piggy#253). Accepted by
-# fence 0.1.60 too, so it is safe on either side of the igloo pin.
+# under a /tmp `$workdir`) passes this to the bats wrapper: since fence
+# 0.1.66 the Linux sandbox mounts a private tmpfs over /tmp, so a
+# host-created AF_UNIX socket there is invisible unless its directory is
+# exposed (bats 2de2b9e; piggy#253). Accepted by fence 0.1.60 too. The
+# string is spliced into the recipe's shell verbatim, so `$workdir` is
+# the recipe's own variable.
+bats-expose-fibby-workdir := '--expose-host-path-rw "$workdir"'
 
 # Run the conformance bats glob outside the sandbox: the non-pty tests under
 # batman (with fibby/pivy redirect on Linux) plus the pty-tagged tests
@@ -400,7 +402,7 @@ test-bats-conformance-box-agentless-fibby: build-rust
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
-    BATS_TEST_TIMEOUT=30 bats --allow-local-binding --expose-host-path-rw "$workdir" --tap \
+    BATS_TEST_TIMEOUT=30 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
     zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
 
 # Byte-identical to test-bats-conformance-box-agentless-fibby except for
@@ -524,7 +526,7 @@ test-bats-conformance-interop-fibby: build-rust
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
-    BATS_TEST_TIMEOUT=30 bats --allow-local-binding --expose-host-path-rw "$workdir" --tap \
+    BATS_TEST_TIMEOUT=30 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
     zz-tests_bats/conformance/piggy_box_interop.bats \
     zz-tests_bats/conformance/piggy_box_decrypt_interop.bats
 
@@ -570,7 +572,7 @@ test-bats-conformance-recipients-add-attached-fibby: build-rust
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
-    BATS_TEST_TIMEOUT=30 bats --allow-local-binding --expose-host-path-rw "$workdir" --tap \
+    BATS_TEST_TIMEOUT=30 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
     zz-tests_bats/conformance/piggy_recipients_add_attached.bats
 
 # Fibby-backed `piggy pass init` auto-detect lane — the pure-Rust
@@ -650,7 +652,7 @@ test-bats-conformance-show-batch-fibby: build-rust
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
-    BATS_TEST_TIMEOUT=60 bats --allow-local-binding --expose-host-path-rw "$workdir" --tap \
+    BATS_TEST_TIMEOUT=60 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
     zz-tests_bats/conformance/piggy_pass_show_batch_hardware.bats
 
 # `piggy secrets reconcile` against FIBBY (FDR 0003): brings up fibby

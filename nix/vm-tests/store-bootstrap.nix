@@ -17,11 +17,10 @@
 # SSH_ASKPASS_REQUIRE=force and the refusing askpass, a misrouted PIN
 # prompt fails loudly instead of hanging on a GUI that does not exist.
 {
-  askpass,
   prelude,
-  # Extra `VAR=value ` words prepended to every piggy invocation (the
-  # coverage lanes pass LLVM_PROFILE_FILE).
-  extraEnv ? "",
+  # `VAR=value ` words prepended to every piggy invocation: the test
+  # askpass discipline and, in the coverage lanes, LLVM_PROFILE_FILE.
+  extraEnv,
 }:
 {
   secretName,
@@ -34,8 +33,6 @@ prelude
       "PIGGY_STORE_DIR=/root/store "
       "PCSCLITE_CSOCK_NAME=/run/fibby/pcscd.comm "
       "SSH_AUTH_SOCK=/run/piggy/agent.sock "
-      "SSH_ASKPASS=${askpass} SSH_ASKPASS_REQUIRE=force DISPLAY= "
-      "PIGGY_TEST_FIB_PIN=123456 "
   )
 
 
