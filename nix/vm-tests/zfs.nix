@@ -20,7 +20,7 @@
     # runs the LTS kernel at the module default, which this keeps.
     virtualisation.memorySize = lib.mkForce 3072;
   };
-  testScript = bootstrap "zfs/test" + ''
+  testScript = bootstrap { secretName = "zfs/test"; } + ''
     with subtest("encrypted dataset keyed from the store"):
         machine.succeed("zpool status")
         machine.succeed("zpool create -O mountpoint=none pigpool /dev/vdb")

@@ -7,11 +7,17 @@
 # agents come from nix/hm/piggy-agent.nix. This module exists so a
 # testScript can drive the shipped `piggy` package end to end against a
 # card that needs no hardware and no pcscd.
+#
+# fibbySeedArgs: extra fibby flags selecting what the virtual card holds
+#   (default: the RFC 5903 slot-9D key + CHUID, enough for a store).
+# agentExtraArgs: extra `piggy agent` flags (e.g. --upstream NAME=PATH).
 {
   pkgs,
   piggy,
   fibby,
   askpass,
+  fibbySeedArgs ? [ "--seed-rfc5903-slot-9d-cert" ],
+  agentExtraArgs ? [ ],
 }:
 { lib, ... }:
 let
@@ -49,9 +55,16 @@ in
       DynamicUser = true;
       RuntimeDirectory = "fibby";
       RuntimeDirectoryMode = "0755";
-      # --seed-rfc5903-slot-9d-cert installs the RFC 5903 §8.1 P-256 key
-      # in slot 9D (plus CHUID), the same seed the conformance lanes use.
-      ExecStart = "${fibby}/bin/fibby --socket ${fibbySock} --backend virtual --seed-rfc5903-slot-9d-cert";
+      ExecStart = lib.concatStringsSep " " (
+        [
+          "${fibby}/bin/fibby"
+          "--socket"
+          fibbySock
+          "--backend"
+          "virtual"
+        ]
+        ++ fibbySeedArgs
+      );
       # `wire` puts the APDU trace in the journal so the testScript can
       # assert `GA ECDH 9D -> 9000` the way the bats lanes grep FIBBY_LOG.
       Environment = [ "FIBBY_LOG=wire" ];
@@ -70,7 +83,18 @@ in
       RuntimeDirectory = "piggy";
       RuntimeDirectoryMode = "0755";
       ExecStartPre = waitForFibby;
-      ExecStart = "${piggy}/bin/piggy agent -A -a ${agentSock}";
+      ExecStart = lib.concatStringsSep " " (
+        [
+          "${piggy}/bin/piggy"
+          "agent"
+          "-A"
+          "-a"
+          agentSock
+          "--service-name"
+          "piggy-agent.service"
+        ]
+        ++ agentExtraArgs
+      );
       Environment = [
         "PCSCLITE_CSOCK_NAME=${fibbySock}"
         # The test-harness askpass: supplies PIGGY_TEST_FIB_PIN, or refuses

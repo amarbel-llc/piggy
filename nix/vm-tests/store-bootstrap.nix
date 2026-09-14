@@ -5,16 +5,22 @@
 #   ENV          env prefix for every `piggy` invocation from the backdoor
 #   show(name)   shell pipeline printing a store secret, newline-stripped
 #   ecdh_count() number of successful slot-9D ECDH ops fibby has logged
+#   secret       the generated secret's value
 #
-# and a store at /root/store holding `<secretName>` (64 alphanumeric
-# chars), proven to decrypt through the agent.
+# and a store at /root/store holding `secretName` (64 alphanumeric
+# chars), proven to decrypt through the agent. `nativeKeys` is how many
+# keys the seeded card is expected to offer through `ssh-add -L`.
 #
 # The backdoor shell exports DISPLAY=:0.0 (nixos/modules/testing/
 # test-instrumentation.nix), so DISPLAY is blanked explicitly: with
 # SSH_ASKPASS_REQUIRE=force and the refusing askpass, a misrouted PIN
 # prompt fails loudly instead of hanging on a GUI that does not exist.
 { askpass }:
-secretName: ''
+{
+  secretName,
+  nativeKeys ? 1,
+}:
+''
   ENV = (
       "PIGGY_STORE_DIR=/root/store "
       "PCSCLITE_CSOCK_NAME=/run/fibby/pcscd.comm "
@@ -42,11 +48,11 @@ secretName: ''
   machine.wait_for_file("/run/fibby/pcscd.comm")
   machine.wait_for_file("/run/piggy/agent.sock")
 
-  with subtest("agent serves exactly the seeded slot-9D key"):
+  with subtest("agent serves exactly the seeded card keys"):
       keys = machine.wait_until_succeeds(
           "SSH_AUTH_SOCK=/run/piggy/agent.sock ssh-add -L", timeout=120
       )
-      assert keys.count("ecdsa-sha2-nistp256 ") == 1, keys
+      assert keys.count("ecdsa-sha2-nistp256 ") == ${toString nativeKeys}, keys
 
   with subtest("store init + generate + show decrypts through the agent"):
       machine.succeed(ENV + "piggy pass init")

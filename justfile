@@ -207,10 +207,10 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-rust test-go test-pigpen _test-conformance-linux-only
+test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-rust test-go test-pigpen _test-conformance-linux-only _test-vm-linux-only
 
 [group('post-build')]
-test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module test-nix-hm-secrets-module _test-vm-linux-only
+test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module test-nix-hm-secrets-module
 
 [linux]
 _test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby
@@ -229,14 +229,14 @@ _test-fibby-manual: test-bats-conformance-pass-ls-recipients-fibby test-bats-con
 [macos]
 _test-fibby-manual:
 
-# NixOS VM lanes (nix/vm-tests/). Out of the merge gate for now: host flac
-# has no /dev/kvm (Hetzner Cloud exposes no nested virt on any server
-# type, per circus 2026-09-14), so each run is a TCG boot measured in
-# minutes. Promote into _test-conformance-linux-only once a KVM builder
-# (nikulin/twerk, a circus follow-up) exists or the measured runtime is
-# acceptable for every merge.
+# NixOS VM lanes (nix/vm-tests/), part of the merge gate via `test`. Host
+# flac has no /dev/kvm (Hetzner Cloud exposes no nested virt on any server
+# type, per circus 2026-09-14), so each run is a TCG boot: measured
+# 2026-09-14 at 2-3 minutes per lane once the guest closure is cached,
+# which the operator accepted for every merge. A KVM builder
+# (nikulin/twerk, a circus follow-up) would only make them faster.
 [linux]
-_test-vm-linux-only: test-vm-luks test-vm-zfs
+_test-vm-linux-only: test-vm-luks test-vm-zfs test-vm-agent
 
 [macos]
 _test-vm-linux-only:
@@ -1166,6 +1166,19 @@ test-vm-luks:
 [linux]
 test-vm-zfs:
     nix build .#checks.x86_64-linux.vm-piggy-zfs --no-link --print-build-logs --show-trace
+
+# Agent sibling (nix/vm-tests/agent.nix): the card-backed `piggy agent`
+# proxying a stock ssh-agent upstream (workstation shape), a --proxy-only
+# front over both (FDR 0001 remote-host shape), a real sshd accepting a
+# login with either key via the front, an `ssh -A` forwarded decrypt, and
+# dead-upstream degradation. Measured 2026-09-14 at 112s for the test
+# script under TCG.
+#
+# run the multiplexed-agent + sshd NixOS VM test
+[group('post-build')]
+[linux]
+test-vm-agent:
+    nix build .#checks.x86_64-linux.vm-piggy-agent --no-link --print-build-logs --show-trace
 
 # Show what a VM check would build vs fetch without running it — the
 # cache-miss tripwire for the ZFS lane's kernel module. Serves the

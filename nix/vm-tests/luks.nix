@@ -7,7 +7,7 @@
   name = "piggy-vm-luks";
   inherit (common) requiredFeatures globalTimeout defaults;
   nodes.machine = { };
-  testScript = bootstrap "luks/test" + ''
+  testScript = bootstrap { secretName = "luks/test"; } + ''
     DEV = "/dev/vdb"
     # argon2id benchmarks itself to ~1 GiB / seconds per op, which is
     # hostile under TCG; pbkdf2 with a fixed low count keeps the test
