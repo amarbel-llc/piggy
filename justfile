@@ -1191,6 +1191,8 @@ test-vm-agent:
 # 2026-09-14): nix has no per-derivation concurrency limit, and three
 # TCG guests plus a cargo build on one host is what produced the
 # IO-APIC timer panic. The gate lanes are already serial via `just`.
+# Measured 2026-09-14: 803s (13.4 min) end to end with the instrumented
+# piggy already cached — the number to weigh before this joins the gate.
 #
 # run the instrumented VM lanes one at a time and print the merged llvm-cov report
 [group('post-build')]
