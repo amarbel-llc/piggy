@@ -215,6 +215,18 @@ Locked card and no agent. The old file stays:
   can't root them and the check exits 2. The switch still succeeds, but no
   secrets are written. The same happens if a GC runs between evaluation and
   activation, which is a narrow window.
+- **Bumping piggy can be a long local build.** The default `askpass` pulls
+  piggy's own nixpkgs closure into the home, including zenity with its
+  gstreamer/pipewire dependencies. A host that can't substitute those
+  builds them from source; the first nikulin switch took about 45 minutes.
+  Consumers should push piggy's input closure to their binary cache before
+  deploying a bump.
+- **The PIN prompt depends on the user manager's environment.** The unit
+  inherits `systemd --user`'s environment. `piggy-askpass.sh` re-derives a
+  missing display from `systemctl --user show-environment` or
+  `$XDG_RUNTIME_DIR/wayland-*` (piggy#179). A session whose compositor
+  never publishes either gets no dialog, and that entry fails with
+  `pin-cancelled`.
 - **Whole files only.** No key extraction from structured documents.
 - **User-scope secrets only.** Outputs belong to the reconciling user.
   Root and system secrets are out of scope.
