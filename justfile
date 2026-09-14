@@ -1187,14 +1187,18 @@ test-vm-agent:
 # merge gate and of `nix flake check` (packages, not checks) until the
 # added wall time is measured; the report is the first line-coverage
 # number piggy has, and only counts what the VM lanes exercise.
+# --max-jobs 1 runs the three guests one at a time (operator decision,
+# 2026-09-14): nix has no per-derivation concurrency limit, and three
+# TCG guests plus a cargo build on one host is what produced the
+# IO-APIC timer panic. The gate lanes are already serial via `just`.
 #
-# run the instrumented VM lanes and print the merged llvm-cov report
+# run the instrumented VM lanes one at a time and print the merged llvm-cov report
 [group('post-build')]
 [linux]
 test-vm-coverage:
     #!/usr/bin/env bash
     set -euo pipefail
-    out=$(nix build .#coverage-report --no-link --print-build-logs --show-trace --print-out-paths)
+    out=$(nix build .#coverage-report --max-jobs 1 --no-link --print-build-logs --show-trace --print-out-paths)
     cat "$out/report.txt"
     echo "lcov: $out/lcov.info"
 
