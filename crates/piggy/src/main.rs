@@ -58,6 +58,7 @@ mod recipients;
 mod reencrypt;
 mod rm;
 mod seal_store;
+mod secrets;
 mod show;
 mod show_batch;
 mod sign_bytes;
@@ -150,6 +151,8 @@ enum Command {
     },
     /// Manage PIV cards (provisioning).
     Card(CardArgs),
+    /// Declarative ebox-backed secret files (FDR 0003).
+    Secrets(SecretsArgs),
     /// Run the headless JSON-RPC management server (RFC 0007).
     ///
     /// Exposes piggy's neutral management primitives (`card.list`,
@@ -492,6 +495,48 @@ enum CardCommand {
 }
 
 #[derive(Args, Debug)]
+struct SecretsArgs {
+    #[command(subcommand)]
+    cmd: SecretsCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum SecretsCommand {
+    /// Write the secret files a manifest declares, decrypting only entries
+    /// that are missing or changed, all in one PIN prompt.
+    ///
+    /// Freshness is the ebox's content hash plus the target's recorded stat
+    /// fingerprint (state in `$XDG_STATE_HOME/piggy/secrets/state.json`), so a
+    /// steady-state run never touches a card. Writes are atomic renames; a
+    /// failed decrypt keeps the previous file. An existing target not
+    /// recorded as piggy-managed is a conflict unless adopted. Nothing is
+    /// ever deleted. Reports TAP-14. Exit 0 all fresh or written, 1 on any
+    /// failure (or any drift with `--check`), 2 on a usage/manifest error.
+    Reconcile {
+        /// Manifest to reconcile (default:
+        /// `$XDG_STATE_HOME/piggy/secrets/manifest.json`, which the
+        /// home-manager module maintains).
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+        /// Report what would change without decrypting or writing anything.
+        #[arg(long)]
+        check: bool,
+        /// Take over existing targets that are not recorded as piggy-managed.
+        #[arg(long)]
+        adopt: bool,
+        /// Attach a diagnostic block to every TAP point.
+        #[arg(short = 'v', long = "verbose")]
+        verbose: bool,
+        /// Interaction frontend for the batch PIN prompt (RFC 0006 §6).
+        #[arg(long, value_enum, default_value_t = piggy::card::frontend::select::FrontendKind::Tty)]
+        frontend: piggy::card::frontend::select::FrontendKind,
+        /// `AF_UNIX` socket the JSON-RPC frontend listens on.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
+}
+
+#[derive(Args, Debug)]
 struct ManageArgs {
     /// Speak the JSON-RPC command protocol (RFC 0007). Currently the only
     /// supported protocol, so it is required; reserved so a future protocol can
@@ -678,6 +723,24 @@ fn main() {
                     frontend,
                     socket.as_deref(),
                 )
+            })),
+        },
+
+        Command::Secrets(args) => match args.cmd {
+            SecretsCommand::Reconcile {
+                manifest,
+                check,
+                adopt,
+                verbose,
+                frontend,
+                socket,
+            } => std::process::exit(secrets::run(secrets::ReconcileArgs {
+                manifest,
+                check,
+                adopt,
+                verbose,
+                frontend,
+                socket,
             })),
         },
 

@@ -885,5 +885,10 @@
       # under `home-manager.users.<u>.services.piggy-agent`.
       homeManagerModules.piggy-agent = import ./nix/hm/piggy-agent.nix;
       nixosModules.piggy-agent = import ./nix/nixos/piggy-agent.nix;
+
+      # `services.piggy-secrets` — ebox-backed secret files kept current by
+      # `piggy secrets reconcile` (FDR 0003). Same thin NixOS re-export shape.
+      homeManagerModules.piggy-secrets = import ./nix/hm/piggy-secrets.nix;
+      nixosModules.piggy-secrets = import ./nix/nixos/piggy-secrets.nix;
     };
 }

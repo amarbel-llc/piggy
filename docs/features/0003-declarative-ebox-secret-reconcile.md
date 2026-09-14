@@ -1,16 +1,12 @@
 ---
-status: proposed
+status: experimental
 date: 2026-09-14
 promotion-criteria: >
-  proposed → experimental: `piggy secrets reconcile` and
-  `homeManagerModules.piggy-secrets` land, with an eval-test for the module
-  and a fibby-backed bats lane that covers a one-PIN batch, a no-op
-  steady state (no card touched), a locked card that leaves existing
-  outputs byte-identical, and the ownership refusal on an unrecorded file.
-  experimental → testing: circus wires it for the operator's home on
-  nikulin and twerk (replacing eng `bin/bootstrap-piggy-eboxes.bash`), and
-  one secret rotation goes through end to end (insert, commit, switch, one
-  prompt, new plaintext).
+  experimental → testing: circus wires `services.piggy-secrets` for the
+  operator's home on nikulin and twerk (replacing eng
+  `bin/bootstrap-piggy-eboxes.bash`), and one secret rotation goes through end
+  to end (insert, commit, switch, one prompt, new plaintext), with the
+  ciphertext absent from the krone cache after a generation upload.
   testing → accepted: two weeks with no `home-manager switch` failing or
   blocking because of it, no output deleted by it, and no lever change.
 ---
@@ -32,138 +28,144 @@ may delete outputs that another run is supposed to recreate (circus#178).
 
 ## Interface
 
-The design has two parts. Piggy owns both.
+The feature has two parts, both in piggy.
 
 ### 1. `piggy secrets reconcile` (CLI)
 
-    piggy secrets reconcile [--manifest FILE] [--check] [--adopt] [--frontend tty|jsonrpc] [-v]
+    piggy secrets reconcile [--manifest FILE] [--check] [--adopt] [-v] [--frontend tty|jsonrpc] [--socket PATH]
 
 - `--manifest FILE` is a JSON manifest (schema below). It defaults to
-  `$XDG_CONFIG_HOME/piggy/secrets.json`, which the home-manager module
-  installs.
+  `$XDG_STATE_HOME/piggy/secrets/manifest.json`, which the home-manager
+  module keeps as a GC-root symlink.
 - Each entry names a ciphertext file (`ebox`, any path, normally a
-  `/nix/store` path), a `target` (an absolute path), a `mode` (default
-  `0600`) and an `adopt` flag.
-- **Freshness is keyed by content, not mtime.** An entry is fresh when all
-  of these hold:
-  - the target is a regular file (not a symlink);
-  - the target is recorded in the state file
-    `$XDG_STATE_HOME/piggy/secrets/state.json`;
-  - the recorded ciphertext digest matches the current `ebox`;
-  - the target's recorded stat fingerprint (dev, inode, size, mtime)
-    still matches.
+  `/nix/store` path), an absolute `target`, a `mode` (default `0600`) and
+  an `adopt` flag.
+- **Freshness is keyed by content, not mtime.** An entry is fresh when
+  both of these hold:
+  - its target is recorded in `$XDG_STATE_HOME/piggy/secrets/state.json`
+    and still matches the recorded stat fingerprint (dev, inode, size,
+    mode, mtime; a regular file);
+  - the recorded SHA-256 of the ciphertext matches the current `ebox`.
 
-  mtime cannot be the key: nix-store files have mtime 1, and a git
-  checkout sets mtime to checkout time. The state file stores no
-  plaintext digest, because a hash of a low-entropy token is an offline
-  guessing oracle.
-- **The fast path is offline.** Classifying entries reads only the
-  ciphertext and `stat`s the targets. It needs no card, no agent, no PIN.
-  A steady-state run exits 0 without touching PC/SC.
-- **One PIN per batch.** Every stale or missing entry is decrypted in a
-  single unlock session through the same core that `pass show-batch` uses
-  (RFC 0005). The card is tried first; when no local PC/SC card serves
-  the batch, it falls back to the agent in `PIGGY_AUTH_SOCK`, else
-  `SSH_AUTH_SOCK`. PIN prompts go through `SSH_ASKPASS`. There is no
-  `/dev/tty` dependency.
-- **Writes are atomic and never delete first.** Plaintext goes to a
-  mode-`0600` temp file created with `O_EXCL` in the target's own
-  directory. The file is fsynced, chmodded to `mode`, then `rename(2)`d
-  over the target, and only then is the state entry recorded. If any
-  step fails, the previous target stays exactly as it was. A failed
-  decrypt costs only that entry.
-- **Ownership is explicit.** reconcile writes to a target only when one
-  of these holds:
-  1. the target does not exist;
-  2. the target is recorded in the state file as piggy's (whether stale
-     or tampered);
-  3. `adopt` is set on the entry (or `--adopt` is passed) and the target
-     is an unrecorded file or symlink, such as an rcm symlink into
-     `~/eng` or a file the bash bootstrap wrote. The adopted target is
-     replaced once and recorded.
+  mtime can't be the key: nix-store files have mtime 1. The state file
+  stores no plaintext digest, because a hash of a low-entropy token is an
+  offline guessing oracle.
+- **Classification is offline.** It reads the ciphertext and `lstat`s the
+  targets, and never touches PC/SC. A steady-state run needs no card and no
+  PIN.
+- **One PIN per batch.** Every entry that needs a write is decrypted in a
+  single unlock session through the backend `pass show-batch` uses:
+  - Card first: the first attached card whose 9D slot matches, holding one
+    PIN session.
+  - Otherwise the agent at `PIGGY_AUTH_SOCK`, falling back to
+    `SSH_AUTH_SOCK`.
+  - The PIN comes through `SSH_ASKPASS` (or the RFC 0006 `--frontend`).
 
-  An unrecorded target without `adopt` is reported as a conflict
-  (`not ok`) and left alone.
-- **It never deletes outputs.** An entry that leaves the manifest is
-  reported as `orphaned`, and its state record is dropped. The file
-  stays, and piggy no longer owns it. Removing the file is the operator's
-  call.
-- `--check` classifies the entries and reports `STALE`, `MISSING`,
-  `CONFLICT` and `ORPHANED`. It never decrypts or writes. It exits 1 if
-  any entry would change.
-- Output is a TAP-14 stream: one point per entry, `# SKIP up to date` for
-  fresh entries, and a YAML diagnostic on failure (and on every point
-  with `-v`). This matches the `reencrypt` walk.
+  An ebox that doesn't parse fails on its own. A batch-fatal failure (PIN
+  exhausted, card removed) marks the entries after it as not attempted.
+- **Writes are atomic and never delete first.** The plaintext goes to a
+  mode-`0600` temp file in the target's own directory, which is chmodded to
+  `mode`, fsynced, then `rename(2)`d over the target. The rename replaces a
+  symlink rather than following it. Only after that is the state entry
+  recorded. If any step fails, the previous target is left as it was.
+- **Ownership is explicit.** reconcile writes a target only when one of
+  these holds:
+  - the target is absent;
+  - it is recorded as piggy's (stale, or edited since it was written);
+  - the entry has `adopt` (or `--adopt` was passed) and the target is an
+    unrecorded file or symlink.
+
+  Anything else, including a directory, is a conflict (`not ok`) and is
+  left alone, with no prompt.
+- **It never deletes outputs.** When a recorded target leaves the
+  manifest, its state record is dropped and the file stays. The report
+  shows it as `# SKIP orphaned: released; file kept`.
+- `--check` classifies entries and reports drift (`would write (missing|
+  stale|modified|adopt)`) without decrypting or writing anything.
+- Output is TAP-14: one point per entry and then one per orphan. Fresh
+  entries are `# SKIP up to date`. Failures and drift carry a YAML
+  diagnostic, and `-v` adds one to every point.
 
   | Exit | Meaning |
   |---|---|
   | 0 | every entry fresh or written |
-  | 1 | a conflict, failed decrypt, or (under `--check`) any drift |
-  | 2 | usage or manifest error |
+  | 1 | any failure or conflict, or (under `--check`) any drift |
+  | 2 | usage error, or an unreadable manifest or state file |
 
-Manifest (`piggy-secrets-manifest/1`):
+  An unreadable state file is never replaced with an empty one, since that
+  would silently forget what piggy owns.
+
+Manifest (`version` 1; unknown fields are rejected):
 
     { "version": 1,
       "entries": [
-        { "name": "ssh-config-user-secret",
-          "ebox": "/nix/store/…-config-user-secret.ebox",
-          "target": "/home/u/.config/ssh/rcm/config-user-secret",
+        { "name": "smith-keys",
+          "ebox": "/nix/store/…-piggy-secrets-smith-keys.ebox",
+          "target": "/home/u/.local/share/smith/keys.json",
           "mode": "0600",
           "adopt": false } ] }
+
+`name` must match `[A-Za-z0-9._-]+`. Names and targets must be unique, and
+targets must be absolute file paths.
 
 ### 2. `homeManagerModules.piggy-secrets` (option `services.piggy-secrets`)
 
     services.piggy-secrets = {
-      enable      = true;
-      package     = piggy.packages.${system}.piggy;         # mkPackageOption
+      enable       = true;
+      package      = piggy.packages.${system}.piggy;   # mkPackageOption
       files.<name> = {
-        source = ./piggy-store/rcm/config/ssh/rcm/config-user-secret.ebox;  # types.path
-        target = ".config/ssh/rcm/config-user-secret";      # home-relative or absolute
-        mode   = "0600";                                    # default
-        adopt  = false;                                     # default; true for a cutover
+        source = ./piggy-store/rcm/local/share/smith/keys.json.ebox;   # types.path
+        target = ".local/share/smith/keys.json";   # home-relative or absolute
+        mode   = "0600";                           # default
+        adopt  = false;                            # default
       };
-      agentSocket  = …;        # default: services.piggy-agent.resolvedSocketPath when that module is enabled, else null
+      agentSocket  = …;        # default: services.piggy-agent.resolvedSocketPath if that module is enabled, else null
       askpass      = …;        # default: "${package}/libexec/piggy/piggy-askpass.sh"
       onActivation = "start";  # "start" | "check" | "none"
     };
 
-The module does the following:
+Read-only outputs: `storeNamePrefix` (`"piggy-secrets-"`) and
+`manifestFile` (the manifest's store path, as a string without context).
 
-- **Manifest.** It renders the manifest into the store and links it to
-  `$XDG_CONFIG_HOME/piggy/secrets.json` through `xdg.configFile`. The
-  manifest holds only ciphertext paths, so it is safe in the store.
-  `source` is a `types.path`, so the ciphertext lands in `/nix/store`,
-  which is world-readable. That is acceptable for an ebox: it is
-  encrypted to its PIV recipients, as with sops-nix.
-- **Unit.** It declares a systemd user unit, `piggy-secrets.service`
-  (`Type=oneshot`), that runs `piggy secrets reconcile`. The unit sets
+What the module does:
+
+- **Store names.** Every store path it creates has a name (the part after
+  `<hash>-`) starting with `piggy-secrets-`:
+  `piggy-secrets-<name>.ebox` for each ciphertext copy and
+  `piggy-secrets-manifest.json` for the manifest. This prefix is a stable
+  contract, so a binary-cache uploader can exclude on it.
+- **Keeping secrets material out of the closure.** The ciphertext copies
+  (`builtins.path`) and the manifest (`builtins.toFile`) are added to the
+  local store at evaluation time. They are referenced only as strings
+  without context, so they are **not store references** of the home
+  generation, and `nix copy` of the generation never carries them.
+  Activation keeps them alive with per-user GC roots:
+  `$XDG_STATE_HOME/piggy/secrets/manifest.json` and
+  `…/gcroots/<name>.ebox` (`nix-store --add-root`). Roots for entries that
+  have been removed are pruned.
+- **Unit.** A systemd user unit, `piggy-secrets.service` (`Type=oneshot`),
+  runs `piggy secrets reconcile` against the rooted manifest. It sets
   `PIGGY_AUTH_SOCK`, `SSH_ASKPASS` and `SSH_ASKPASS_REQUIRE=force` in
-  `Environment=`, and has `WantedBy=default.target`, so a login also
-  reconciles. It has no `Restart=`: a failed run waits for the next
-  trigger instead of re-prompting in a loop.
-- **Activation.** It adds a `home.activation.piggySecrets` step after
-  `writeBoundary` that can neither block nor fail:
-  - `"check"` runs `reconcile --check` and prints the drift.
-  - `"start"` (the default) does the same and, if anything drifted, runs
-    `systemctl --user start --no-block piggy-secrets.service`.
-  - `"none"` skips the step.
+  `Environment=`. There is no `WantedBy`, so no login-time run (an operator
+  decision), and no `Restart=`.
+- **Activation.** A `home.activation.piggySecrets` step runs after
+  `writeBoundary` and `reloadSystemd`. It always refreshes the GC roots
+  (skipped under `DRY_RUN`), then:
+  - `"start"`: runs `reconcile --check` and, on drift, starts the unit with
+    `systemctl --user start --no-block`;
+  - `"check"`: prints the hint only;
+  - `"none"`: runs no check.
 
-  Every branch ends in `|| true`. A switch never waits on a PIN prompt
-  and never fails because a card is locked or absent.
-- **`home.packages`.** It adds nothing there. The CLI is reachable as
-  `piggy secrets` from whichever piggy the user already has, and the unit
-  and activation step call `package` by absolute store path.
+  Every command's failure is caught. A switch never waits on a PIN and
+  never fails because of this step.
 
 A NixOS re-export, `nixosModules.piggy-secrets`, puts the module into
-`home-manager.sharedModules`, following the `piggy-agent` pattern.
-Standalone home-manager on Ubuntu uses `homeManagerModules` directly.
+`home-manager.sharedModules`, following the piggy-agent pattern.
 
 ## Examples
 
-A circus consumer on a workstation. The secrets-nix target is up to
-circus.
+Circus consumer:
 
-    services.piggy-agent.enable = true;   # agentSocket follows it
     services.piggy-secrets = {
       enable = true;
       package = inputs.piggy.packages.${system}.piggy;
@@ -171,21 +173,11 @@ circus.
         ssh-config-user-secret = {
           source = ./piggy-store/rcm/config/ssh/rcm/config-user-secret.ebox;
           target = ".config/ssh/rcm/config-user-secret";
-          adopt = true;                   # first switch replaces the bash-written file
-        };
-        ssh-known-hosts = {
-          source = ./piggy-store/rcm/config/ssh/rcm/known_hosts.ebox;
-          target = ".config/ssh/rcm/known_hosts";
-          adopt = true;
-        };
-        smith-keys = {
-          source = ./piggy-store/rcm/local/share/smith/keys.json.ebox;
-          target = ".local/share/smith/keys.json";
-          adopt = true;
+          adopt = true;           # take over the file the bash bootstrap wrote
         };
         secrets-nix-env = {
           source = ./piggy-store/circus/secrets-nix.env.ebox;
-          target = ".secrets-nix.env";
+          target = ".config/nix/secrets.env";
           adopt = true;
         };
       };
@@ -193,106 +185,81 @@ circus.
 
 Steady state. The switch prints nothing and no card is touched:
 
-    $ home-manager switch …
     $ piggy secrets reconcile
     TAP version 14
-    1..4
-    ok 1 - ssh-config-user-secret # SKIP up to date
-    …
+    1..2
+    ok 1 - secrets-nix-env # SKIP up to date
+    ok 2 - ssh-config-user-secret # SKIP up to date
 
-Rotation. The operator changes a secret, commits it and switches. That
-yields one askpass prompt, from the unit rather than the switch:
+Rotation. There is one askpass prompt, and it comes from the unit, not the
+switch:
 
-    $ piggy pass insert -f rcm/local/share/smith/keys.json   # in the circus checkout's store
-    $ git commit … && home-manager switch …
-    piggy-secrets: 1 entry drifted; started piggy-secrets.service
+    $ home-manager switch …
+    piggy-secrets: secret files need reconciling; started piggy-secrets.service
     $ journalctl --user -u piggy-secrets
-    ok 3 - smith-keys
+    ok 1 - secrets-nix-env
 
-Locked card or missing agent. The switch still succeeds. The unit fails
-that entry and the old file stays in place:
+Locked card and no agent. The old file stays:
 
-    not ok 3 - smith-keys
+    not ok 1 - secrets-nix-env
       ---
-      message: "no local card served the batch; and no agent fallback available"
+      message: "no attached PIV card has a 9D slot matching any of the ebox's recipients; and no agent fallback available (…)"
+      target: "/home/u/.config/nix/secrets.env"
       ...
-
-Manual rerun after plugging in the card (the paved path):
-
-    $ piggy secrets reconcile            # or: systemctl --user start piggy-secrets
 
 ## Limitations
 
-- **Whole files only.** There is no key extraction from a structured
-  document. A secret is one ebox mapped to one file, as in the `pass show`
-  model.
-- **User-scope secrets only.** Outputs belong to the reconciling user and
-  live under paths that user can write. Root or system secrets are out of
-  scope, since PIV decryption needs the card or a forwarded agent in the
-  user's session.
+- **The generation must be evaluated on the host that activates it.** The
+  ciphertext and manifest are outside the closure, so a generation built
+  elsewhere and copied in arrives without them. Activation then reports it
+  can't root them and the check exits 2. The switch still succeeds, but no
+  secrets are written. The same happens if a GC runs between evaluation and
+  activation, which is a narrow window.
+- **Whole files only.** No key extraction from structured documents.
+- **User-scope secrets only.** Outputs belong to the reconciling user.
+  Root and system secrets are out of scope.
 - **No `restartUnits`.** Consumers that read a secret only at startup are
   not restarted when it rotates.
-- **Linux systemd user units only at first.** darwin (a launchd agent plus
-  activation) will follow the `piggy-agent` module's launchd branch once a
-  live darwin host exists. On a host without a user systemd manager,
-  `onActivation = "start"` degrades to `"check"`'s printed hint.
+- **Linux systemd user units only.** darwin (a launchd agent) comes when a
+  live darwin host exists. Without `systemctl`, `"start"` degrades to the
+  printed hint.
 - **Headless hosts decrypt only while a card-backed agent is reachable.**
-  A proxy-only `piggy-agent` (FDR 0001) fronts an SSH-forwarded workstation
-  agent. The unit's login trigger usually fires before any forwarding
-  connection exists, so the first reconcile on such a host usually happens
-  on an `onActivation` start or a manual run.
-- **The world-readable ciphertext reveals some metadata.** Anyone on a
-  shared host can see the recipient set, the entry names and the plaintext
-  sizes, but no plaintext.
-- **`piggy pass` authoring is out of scope.** Where the writable store
-  lives (`~/.local/share/piggy` → the circus checkout) matters only to
-  `piggy pass insert`/`edit`. reconcile reads ciphertext from the manifest
-  and never consults `PIGGY_STORE_DIR`.
+  On such hosts that agent is the forwarded one behind a proxy-only
+  piggy-agent (FDR 0001).
+- **The ciphertext in the store reveals some metadata** (recipients, names,
+  sizes) to local users, but no plaintext.
+- **`piggy pass` authoring is separate.** Where the writable store lives
+  matters only to `pass insert`/`edit`. reconcile reads only manifest paths.
 - **This supersedes the unmerged `piggy.secrets` module** (branch
-  `claude/nix-sops-piggy-eboxes-QI46P`, fc9aac3). That module is not
-  revived, for four reasons:
-  1. It decrypts inside activation under `set -e`, so a locked card fails
-     or blocks the switch.
-  2. Its outputs live in `$XDG_RUNTIME_DIR`, which disappears at logout
-     and is reached through symlinks rather than plain files.
-  3. It rebuilds and prunes a whole generation every switch, which is the
-     delete-then-render shape of circus#178.
-  4. It decrypts each file separately with `box stream decrypt`, which
-     gives no one-PIN batch.
+  `claude/nix-sops-piggy-eboxes-QI46P`, fc9aac3). That module:
+  - decrypted during activation under `set -e`, so a locked card failed the
+    switch;
+  - put its outputs in `$XDG_RUNTIME_DIR` behind symlinks;
+  - pruned a whole generation on every switch;
+  - prompted for a PIN once per file.
 
 ## Tuning Levers
 
 | Lever | Current | Rationale | Change signal |
 |---|---|---|---|
-| `onActivation` default | `start` (no-block) | rotation reaches the home without a manual step, and the switch never waits | prompts land at surprising moments, so move to `check` |
-| unit `WantedBy` | `default.target` | a fresh login heals a missing output | login-time prompts before the compositor is up are common, so drop it or add a delay |
+| `onActivation` default | `start` (no-block) | rotation lands without a manual step, and the switch never waits | prompts at surprising moments; move to `check` |
+| login-time run | none | operator decision: no PIN prompt before the desktop is up | missing outputs after fresh logins go unnoticed |
 | default `mode` | `0600` | matches the bash bootstrap | a consumer needs group read |
-| freshness fingerprint | ciphertext digest + (dev, inode, size, mtime) | detects both rotation and local edits | backup restores or copies that keep inodes cause spurious re-decrypts |
-| orphan handling | forget, keep the file | never delete (circus#178) | stale secrets pile up and the operator asks for `--prune` |
+| freshness fingerprint | ciphertext SHA-256 + (dev, inode, size, mode, mtime) | detects both rotation and local edits | restores that change inodes cause spurious re-decrypts |
+| orphan handling | release, keep the file | never delete (circus#178) | stale secrets pile up; add `--prune` |
 
 ## More Information
 
 - eng FDR-0004 (relocated), "RCM Piggy Ebox Decryption Hook": why the
-  decrypt moved off every rcup, and the circus#178 log lesson.
-- eng `bin/bootstrap-piggy-eboxes.bash`: the mechanism this replaces.
-- piggy RFC 0005 (`pass show-batch`): the batched unlock core reconcile
-  shares. RFC 0006 covers the `--frontend` seam.
+  decrypt moved off every rcup, and the circus#178 lesson.
+- piggy RFC 0005 (`pass show-batch`): the batch unlock backend, shared
+  through `show_batch::with_batch_unlock`. RFC 0006 covers `--frontend`.
 - FDR 0001: the proxy-only agent that `agentSocket` resolves to on
   headless hosts.
-- `nix/hm/piggy-agent.nix`: the module pattern this follows
-  (`resolvedSocketPath`, launcher by absolute store path, eval-test
-  harness).
+- Code: `crates/piggy/src/secrets.rs`, `nix/hm/piggy-secrets.nix`,
+  `nix/nixos/piggy-secrets.nix`.
+- Tests: `nix/hm/secrets-eval-test.nix` (`just test-nix-hm-secrets-module`)
+  and `zz-tests_bats/conformance/piggy_secrets_reconcile_fibby.bats`
+  (`just test-bats-conformance-secrets-reconcile-fibby`).
 - circus `docs/plans/2026-09-14-eng-into-circus.md`, slice S3b: the
   consumer.
-
-Implementation sketch (piggy):
-
-1. Factor the unlock-and-decrypt loop out of `show_batch.rs` so it takes
-   `(name, ebox path)` pairs instead of pass-names under `store_root`.
-2. Add `crates/piggy/src/secrets.rs` with the manifest parser, state file,
-   classification, atomic write and TAP-14 output. Wire it into the clap
-   tree.
-3. Add `nix/hm/piggy-secrets.nix`, `nix/nixos/piggy-secrets.nix` and an
-   eval-test with a `test-nix-hm-secrets-module` recipe.
-4. Add `zz-tests_bats/conformance/piggy_secrets_reconcile_fibby.bats`
-   covering the promotion cases.

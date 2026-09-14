@@ -210,10 +210,10 @@ run-nix *ARGS:
 test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-rust test-go test-pigpen _test-conformance-linux-only
 
 [group('post-build')]
-test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module
+test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module test-nix-hm-secrets-module
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby
+_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -633,6 +633,52 @@ test-bats-conformance-show-batch-fibby: build-rust
     BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_pass_show_batch_hardware.bats
 
+# `piggy secrets reconcile` against FIBBY (FDR 0003): brings up fibby
+# (virtual backend, seeded slot 9D + CHUID/GUID) and runs the card-facing
+# reconcile contract — one PIN per batch, a card-free steady state, rotation,
+# locked-card survival of the old file, ownership conflicts/adopt, --check,
+# and orphan release. Hermetic: inherited agent sockets are unset so the
+# agent fallback can't reach the operator's real agent.
+#
+# run the fibby-backed piggy secrets reconcile bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-secrets-reconcile-fibby: build-rust
+  #!/usr/bin/env bash
+  set -uo pipefail
+  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+  pivy_tool="$pivy_out/bin/pivy-tool"
+  fibby_bin="$PWD/target/debug/fibby"
+  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
+
+  workdir=$(mktemp -d /tmp/secrets-reconcile-fibby-XXXXXX)
+  fibby_sock="$workdir/pcscd.comm"
+  fibby_log="$workdir/fibby.log"
+  fibby_pid=""
+  cleanup() { [[ -n "$fibby_pid" ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
+  trap cleanup EXIT
+
+  echo "=== Starting fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
+  FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+    --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+  fibby_pid=$!
+  for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+  [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
+
+  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+  [[ -n $guid ]] || { echo "no GUID from fibby"; cat "$fibby_log"; exit 1; }
+
+  unset SSH_AUTH_SOCK PIGGY_AUTH_SOCK
+  INTEROP_GUID="$guid" \
+    PCSCLITE_CSOCK_NAME="$fibby_sock" \
+    SSH_ASKPASS="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh" \
+    SSH_ASKPASS_REQUIRE=force \
+    DISPLAY="" \
+    PIGGY_TEST_FIB_PIN=123456 \
+    {{ fence-tmpdir-linux }} \
+    BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
+    zz-tests_bats/conformance/piggy_secrets_reconcile_fibby.bats
+
 # Hardware-free Phase 0 smoke for piggy#135: stand up fibby (virtual
 # backend, empty slots) and pivy-agent against it, run ssh-add -L,
 # assert the substrate works. Lives in the default `just test` lane
@@ -1046,6 +1092,31 @@ test-nix-hm-module:
     test = import ./nix/hm/eval-test.nix {
       inherit pkgs;
       module = flake.homeManagerModules.piggy-agent;
+    };
+  in test'
+  json="$(nix eval --impure --json --expr "$expr")"
+  printf '%s\n' "$json" | jq -r '"\(.summary)"'
+  if [[ "$(printf '%s\n' "$json" | jq -r '.pass')" != "true" ]]; then
+    printf '%s\n' "$json" | jq -r '.failures[] | "FAIL: \(.name)\n  got: \(.result.got)"'
+    exit 1
+  fi
+
+# Smoke-test for the `services.piggy-secrets` home-manager module (FDR 0003):
+# evaluates it against synthetic configs and checks the manifest, the
+# out-of-closure ciphertext handling, the oneshot unit, the non-blocking
+# activation step, and the assertions. Serves the module's edit loop.
+#
+# smoke-test the services.piggy-secrets home-manager module
+[group('post-build')]
+test-nix-hm-secrets-module:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  expr='let
+    flake = builtins.getFlake (toString ./.);
+    pkgs = flake.inputs.igloo.legacyPackages.${builtins.currentSystem};
+    test = import ./nix/hm/secrets-eval-test.nix {
+      inherit pkgs;
+      module = flake.homeManagerModules.piggy-secrets;
     };
   in test'
   json="$(nix eval --impure --json --expr "$expr")"
