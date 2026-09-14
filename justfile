@@ -1157,7 +1157,9 @@ test-vm-luks:
 # `piggy pass show`. Split from the LUKS lane because this guest carries
 # the zfs kernel module — run `just debug-vm-dry-run vm-piggy-zfs` first
 # if the igloo pin moved; a `linux-*`/`zfs-kernel-*` derivation in the
-# "will be built" list means a local kernel-module compile.
+# "will be built" list means a local kernel-module compile. Measured
+# 2026-09-14 at 120s for the test script (kernel module was a cache hit;
+# zfs-user, grub, nfs-utils and bind built locally on the first run).
 #
 # run the ZFS-encrypted-dataset-from-store NixOS VM test
 [group('post-build')]
