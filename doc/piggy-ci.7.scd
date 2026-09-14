@@ -31,8 +31,8 @@ the repo's *sweatfile* (*pre-merge = "just"*).
 	the conformance bats glob (*test-bats-conformance*), *cargo test*
 	(*test-rust*), the go/ tests (*test-go*), the standalone piggy-pigpen
 	crate (*test-pigpen*), and, on Linux only, the fibby-backed conformance
-	lanes (*_test-conformance-linux-only*) and the NixOS VM lanes
-	(*_test-vm-linux-only*: *test-vm-luks*, *test-vm-zfs*,
+	lanes (*\_test-conformance-linux-only*) and the NixOS VM lanes
+	(*\_test-vm-linux-only*: *test-vm-luks*, *test-vm-zfs*,
 	*test-vm-agent*).
 
 # LINUX-ONLY LANES
