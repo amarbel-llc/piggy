@@ -1,4 +1,6 @@
-# NixOS VM integration lane (pkgs.testers.runNixOSTest).
+# NixOS VM integration lane, on igloo's `pkgs.mkVmChecks` (FDR 0011,
+# vm-tests(7)): piggy's lanes were the reference implementation the
+# library was lifted from, and are its first consumer.
 #
 # Boots a NixOS guest carrying the shipped `piggy` package, runs fibby
 # and the Rust `piggy agent` as systemd units (./piggy-stack.nix), builds
@@ -15,10 +17,9 @@
 # (docs/plans/2026-09-14-retire-c-pivy-rust-nix-migration.md), and the
 # first end-to-end validation of the closure on a real NixOS system.
 #
-# KVM is NOT required: host flac has no /dev/kvm (Hetzner cpx42, no
-# nested virt) so the guest runs under TCG. `requiredFeatures.kvm =
-# false` says so to nix; qemu-common.nix already falls back
-# `accel=kvm:tcg`. Measured 2026-09-14: 2-3 minutes per lane.
+# mkVmChecks supplies the Linux-only guard (`{ }` elsewhere), the no-KVM
+# declaration (host flac has no /dev/kvm; the guest runs under TCG), and
+# the TCG sizing. Measured 2026-09-14: 2-3 minutes per lane.
 #
 # coverage = true runs the SAME lanes on an instrumented piggy (pass the
 # `piggy-cov` variant): every guest piggy process writes an LLVM
@@ -26,8 +27,6 @@
 # end so they flush, and the directory is copied into the test's $out
 # for ./coverage-report.nix to merge. fibby is left uninstrumented
 # (test infrastructure; no SIGTERM handler to flush on).
-#
-# Linux-only: flake.nix wraps the import in `optionalAttrs isLinux`.
 {
   pkgs,
   piggy,
@@ -49,61 +48,52 @@ let
   coverageEnvUnit = pkgs.lib.optionals coverage [ "LLVM_PROFILE_FILE=${profilePatternUnit}" ];
   coverageEnvShell = pkgs.lib.optionalString coverage "LLVM_PROFILE_FILE=${profilePatternShell} ";
 
-  # Test-level settings shared by every VM test in this directory; the
-  # stack module is parameterised per lane (card seeds, agent flags).
-  mkCommon =
+  # The per-lane stack module (card seeds, agent flags differ per lane).
+  mkStack =
     stackArgs:
-    let
-      stack = import ./piggy-stack.nix (
-        {
-          inherit
-            pkgs
-            piggy
-            fibby
-            askpass
-            ;
-          extraEnvironment = coverageEnvUnit;
-        }
-        // stackArgs
-      );
-    in
-    {
-      requiredFeatures.kvm = false;
-      # TCG boot of a NixOS guest is minutes; the framework default is
-      # already 3600s, restated here so a future bump is a one-line diff.
-      globalTimeout = 3600;
-      defaults = {
-        imports = [ stack ];
-        virtualisation.memorySize = 2048;
-        virtualisation.cores = 2;
-        # Under TCG on a loaded host the early-boot IO-APIC timer
-        # calibration can miss its window and the guest panics with
-        # "IO-APIC + timer doesn't work!" (seen 2026-09-14 at host load
-        # ~26 with three guests and an instrumented cargo build running).
-        # The check guards against broken real hardware; a qemu guest
-        # does not need it.
-        boot.kernelParams = [ "no_timer_check" ];
-        # /dev/vdb: a real block device for cryptsetup / zpool, without
-        # depending on the loop module.
-        virtualisation.emptyDiskImages = [ 512 ];
-        environment.systemPackages = [
+    import ./piggy-stack.nix (
+      {
+        inherit
+          pkgs
           piggy
-          pkgs.cryptsetup
-          pkgs.e2fsprogs
-          pkgs.openssh
-          pkgs.util-linux
-        ];
-        # World-writable: the daemons run as piggy-agent / DynamicUser and
-        # the backdoor shell as root all write profiles here.
-        systemd.tmpfiles.rules = pkgs.lib.optionals coverage [ "d /coverage 1777 root root -" ];
-      };
-    };
+          fibby
+          askpass
+          ;
+        extraEnvironment = coverageEnvUnit;
+      }
+      // stackArgs
+    );
+
+  # Node settings every lane shares (mkVmChecks adds memory/cores).
+  sharedNode = {
+    # /dev/vdb: a real block device for cryptsetup / zpool, without
+    # depending on the loop module.
+    virtualisation.emptyDiskImages = [ 512 ];
+    environment.systemPackages = [
+      piggy
+      pkgs.cryptsetup
+      pkgs.e2fsprogs
+      pkgs.openssh
+      pkgs.util-linux
+    ];
+    # Under TCG on a loaded host the early-boot IO-APIC timer
+    # calibration can miss its window and the guest panics with
+    # "IO-APIC + timer doesn't work!" (seen 2026-09-14 at host load
+    # ~26 with three guests and an instrumented cargo build running).
+    # The check guards against broken real hardware; a qemu guest
+    # does not need it.
+    boot.kernelParams = [ "no_timer_check" ];
+    # World-writable: the daemons run as piggy-agent / DynamicUser and
+    # the backdoor shell as root all write profiles here.
+    systemd.tmpfiles.rules = pkgs.lib.optionals coverage [ "d /coverage 1777 root root -" ];
+  };
 
   # Shared testScript prefix: units up, the seeded key(s) visible through
   # the agent, a store initialised against the card, one generated
   # secret that decrypts through agent -> askpass -> fibby.
   bootstrap = import ./store-bootstrap.nix {
     inherit askpass;
+    prelude = pkgs.vmTestPrelude;
     extraEnv = coverageEnvShell;
   };
 
@@ -136,39 +126,49 @@ let
         m // { testScript = m.testScript + coverageEpilogue; }
       ) (pkgs.lib.functionArgs laneModule);
 
-  lane = path: laneArgs: pkgs.testers.runNixOSTest (withCoverage (import path laneArgs));
-in
-{
-  vm-piggy-luks = lane ./luks.nix {
-    common = mkCommon { };
-    inherit bootstrap;
-  };
-  vm-piggy-zfs = lane ./zfs.nix {
-    common = mkCommon { };
-    inherit bootstrap;
-  };
-  vm-piggy-agent = lane ./agent.nix {
-    common = mkCommon {
-      # 9A for SSH auth + 9D for the store decrypt, both on one card.
-      fibbySeedArgs = [
-        "--seed-rfc6979-slot-9a-cert"
-        "--seed-rfc5903-slot-9d-cert"
-      ];
-      # Workstation shape (piggy#215): card-backed agent that also
-      # proxies a software ssh-agent and routes ssh-add there.
-      agentExtraArgs = [
-        "--upstream"
-        "soft=/run/upstream/agent.sock"
-        "--add-new-keys-to"
-        "soft"
-      ];
+  lane =
+    { module, stack }:
+    {
+      imports = [ (withCoverage module) ];
+      defaults.imports = [ stack ];
     };
-    inherit
-      bootstrap
-      piggy
-      askpass
-      ;
-    frontExtraEnvironment = coverageEnvUnit;
-    remoteExtraEnv = coverageEnvShell;
+in
+pkgs.mkVmChecks {
+  defaults = sharedNode;
+  tests = {
+    vm-piggy-luks = lane {
+      module = import ./luks.nix { inherit bootstrap; };
+      stack = mkStack { };
+    };
+    vm-piggy-zfs = lane {
+      module = import ./zfs.nix { inherit bootstrap; };
+      stack = mkStack { };
+    };
+    vm-piggy-agent = lane {
+      module = import ./agent.nix {
+        inherit
+          bootstrap
+          piggy
+          askpass
+          ;
+        frontExtraEnvironment = coverageEnvUnit;
+        remoteExtraEnv = coverageEnvShell;
+      };
+      stack = mkStack {
+        # 9A for SSH auth + 9D for the store decrypt, both on one card.
+        fibbySeedArgs = [
+          "--seed-rfc6979-slot-9a-cert"
+          "--seed-rfc5903-slot-9d-cert"
+        ];
+        # Workstation shape (piggy#215): card-backed agent that also
+        # proxies a software ssh-agent and routes ssh-add there.
+        agentExtraArgs = [
+          "--upstream"
+          "soft=/run/upstream/agent.sock"
+          "--add-new-keys-to"
+          "soft"
+        ];
+      };
+    };
   };
 }

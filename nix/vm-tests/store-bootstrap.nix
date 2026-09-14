@@ -1,6 +1,7 @@
 # Shared testScript prefix for the VM lane. Returns a Python string
-# (the nixos-test-driver's testScript language) that leaves these names
-# defined for the caller:
+# (the nixos-test-driver's testScript language), opening with igloo's
+# vmTestPrelude (`wait_for_units`, `journal_count`), that leaves these
+# names defined for the caller:
 #
 #   ENV          env prefix for every `piggy` invocation from the backdoor
 #   show(name)   shell pipeline printing a store secret, newline-stripped
@@ -17,6 +18,7 @@
 # prompt fails loudly instead of hanging on a GUI that does not exist.
 {
   askpass,
+  prelude,
   # Extra `VAR=value ` words prepended to every piggy invocation (the
   # coverage lanes pass LLVM_PROFILE_FILE).
   extraEnv ? "",
@@ -25,7 +27,8 @@
   secretName,
   nativeKeys ? 1,
 }:
-''
+prelude
++ ''
   ENV = (
       "${extraEnv}"
       "PIGGY_STORE_DIR=/root/store "
@@ -44,13 +47,10 @@
 
 
   def ecdh_count():
-      out = machine.succeed("journalctl -u fibby --no-pager -o cat || true")
-      return out.count("GA ECDH 9D -> 9000")
+      return journal_count("fibby", "GA ECDH 9D -> 9000")
 
 
-  machine.wait_for_unit("multi-user.target")
-  machine.wait_for_unit("fibby.service")
-  machine.wait_for_unit("piggy-agent.service")
+  wait_for_units(["multi-user.target", "fibby.service", "piggy-agent.service"])
   machine.wait_for_file("/run/fibby/pcscd.comm")
   machine.wait_for_file("/run/piggy/agent.sock")
 

@@ -14,7 +14,6 @@
 # the front so a remote `pass show` decrypts through it, and that a dead
 # upstream degrades the listing instead of breaking it.
 {
-  common,
   bootstrap,
   piggy,
   askpass,
@@ -31,7 +30,6 @@ let
 in
 {
   name = "piggy-vm-agent";
-  inherit (common) requiredFeatures globalTimeout defaults;
   nodes.machine = {
     services.openssh = {
       enable = true;
@@ -110,9 +108,7 @@ in
           "-o IdentitiesOnly=yes -o BatchMode=yes"
       )
 
-      machine.wait_for_unit("soft-ssh-agent.service")
-      machine.wait_for_unit("piggy-front.service")
-      machine.wait_for_unit("sshd.service")
+      wait_for_units(["soft-ssh-agent.service", "piggy-front.service", "sshd.service"])
       machine.wait_for_file(SOFT)
       machine.wait_for_file(FRONT)
       machine.wait_for_open_port(22)
@@ -123,8 +119,7 @@ in
 
 
       def ecdsa_9a_count():
-          out = machine.succeed("journalctl -u fibby --no-pager -o cat || true")
-          return out.count("GA ECDSA 9A -> 9000")
+          return journal_count("fibby", "GA ECDSA 9A -> 9000")
 
 
       def sign_and_verify(sock, pubfile, ident):

@@ -3,11 +3,10 @@
 # through `piggy pass show`. Split from luks.nix because this guest
 # carries the zfs kernel module (a possible local kernel-module build
 # when the igloo pin has no cache hit).
-{ common, bootstrap }:
+{ bootstrap }:
 { lib, ... }:
 {
   name = "piggy-vm-zfs";
-  inherit (common) requiredFeatures globalTimeout defaults;
   nodes.machine = {
     boot.supportedFilesystems = [ "zfs" ];
     networking.hostId = "8425e349";
@@ -16,9 +15,10 @@
     boot.zfs.devNodes = "/dev/disk/by-uuid";
     boot.zfs.forceImportRoot = false;
     virtualisation.emptyDiskImages = lib.mkForce [ 1024 ];
-    # 2 GiB leaves little room once the ARC is live; upstream's zfs test
-    # runs the LTS kernel at the module default, which this keeps.
-    virtualisation.memorySize = lib.mkForce 3072;
+    # 2 GiB leaves little room once the ARC is live (mkVmChecks' sizing is
+    # mkDefault); upstream's zfs test runs the LTS kernel at the module
+    # default, which this keeps.
+    virtualisation.memorySize = 3072;
   };
   testScript = bootstrap { secretName = "zfs/test"; } + ''
     with subtest("encrypted dataset keyed from the store"):

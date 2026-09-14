@@ -1,11 +1,10 @@
 # LUKS2 from the piggy store: a secret sealed to the fibby card formats,
 # opens, and re-opens a LUKS2 volume; a second passphrase keyslot is
 # enrolled alongside it (the FDR 0003 shape: token slot + passphrase).
-{ common, bootstrap }:
+{ bootstrap }:
 { ... }:
 {
   name = "piggy-vm-luks";
-  inherit (common) requiredFeatures globalTimeout defaults;
   nodes.machine = { };
   testScript = bootstrap { secretName = "luks/test"; } + ''
     DEV = "/dev/vdb"
