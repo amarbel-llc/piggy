@@ -356,7 +356,9 @@ later phase uses them.
 | `codemod-capture-pivy-oracle-*` recipes + fixture layout | turns the live C oracle into static fixtures | 1, 2, 3, 5 |
 | `PIGGY_TEST_THROWAWAY_SERIALS` guard in `lib/fibby.bash` and the hardware recipes | makes destructive hardware lanes safe to run | 3.3+ |
 | `lint-closure-no-pivy` | proves the shipped closure is C-free | 4 |
-| NixOS VM lane (`nix/vm-tests/`, `just test-vm-luks` / `test-vm-zfs`) — **landed 2026-09-14** | the only place LUKS/ZFS unlock and the shipped closure-as-a-system can be exercised; harness for any future `piggy luks`/`zfs` port | 3+, and the Phase 4 soak |
+| NixOS VM lanes (`nix/vm-tests/`, `just test-vm-{luks,zfs,agent}`, in the merge gate) — **landed 2026-09-14** | the only place LUKS/ZFS unlock, the multiplexed agent against sshd, and the shipped closure-as-a-system can be exercised; harness for any future `piggy luks`/`zfs` port | 3+, and the Phase 4 soak |
+| VM-lane line coverage (`just test-vm-coverage`, `.#coverage-report`) — **landed 2026-09-14**, 13.4 min serialized, outside the gate | names the migration gaps by file: `unlock.rs`/`cmd/pivy_box.rs` at 0% until #164, the card-admin half of `piggy-piv` at 0% until a `card init` VM lane exists | 1, 3 |
+| Adopt igloo's `pkgs.mkVmChecks` + `pkgs.vmTestPrelude` (igloo f235a1f, FDR 0011) in place of piggy's `mkCommon` and the bootstrap helpers | one ecosystem-wide VM-lane shape | blocked on piggy#253 (the igloo pin); do it with the igloo bump |
 | state-readback comparator helper (`helpers/card-state-dump.sh`: GET DATA every object, hex, sorted) | differential tests compare card state, not just stdout | 3 |
 
 ## Risks and unknowns
