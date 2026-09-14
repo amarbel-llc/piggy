@@ -4,17 +4,16 @@
     # The bats lane builder (`batsLane`) is sourced directly from
     # `amarbel-llc/bats` below — not from `pkgs.testers.batsLane`, which
     # the bats flake no longer ships through this overlay.
-    # PINNED, LOAD-BEARING — do not re-float to master without reading
-    # piggy#253. igloo b13d154 carries nixpkgs 567a49d -> f13ff45 into
-    # `pkgs` (igloo/default.nix resolves nixpkgs from igloo's OWN
+    # Note on `pkgs`: igloo/default.nix resolves nixpkgs from igloo's OWN
     # flake.lock, so the nixpkgs-master follows below does NOT govern it
-    # — igloo#37). That nixpkgs breaks any sandboxed process connecting
-    # directly to a host-created AF_UNIX socket, which takes out the
-    # fibby box-agentless conformance lane. Bisected in piggy#253; the
-    # fence fix is upstream in bats/fence. Lift this pin — and re-run
-    # `just debug-capture-jcardsim-m2`, since pkgs.maven moves with it
-    # (piggy#252) — once #253 closes.
-    igloo.url = "https://code.linenisgreat.com/igloo/archive/2c8ca7354b2bba467b0602277f5d621d7d688dd4.tar.gz";
+    # (igloo#37); `pkgs` moves when igloo's lock moves. This input was
+    # pinned at 2c8ca73 from 2026-09-03 to 2026-09-14 because igloo
+    # b13d154's nixpkgs brought fence 0.1.66, whose private /tmp tmpfs
+    # hid the recipe-spawned fibby socket from the sandboxed
+    # box-agentless lane (piggy#253). The fix is on piggy's side — the
+    # fence-sandboxed fibby lanes pass `--expose-host-path-rw "$workdir"`
+    # (see the justfile note by fence-tmpdir-linux) — so the pin is gone.
+    igloo.url = "https://code.linenisgreat.com/igloo/archive/master.tar.gz";
     nixpkgs-master.url = "github:NixOS/nixpkgs/f13ff45afd1bb73e640eaa08a7066dbed07e3238";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
 
@@ -939,10 +938,14 @@
               bats.packages.${system}.bats
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-              # `just load-fib` needs pcscd + fib + opensc-tool on PATH.
+              # `just load-fib` needs pcscd + opensc-tool on PATH; it runs
+              # fib itself via `nix run .#fib`, so fib is deliberately NOT
+              # a devShell package: a jcardsim build failure (its vendored
+              # Maven closure vs the toolchain, piggy#252) must not take
+              # every `just` recipe down with it, least of all
+              # `debug-capture-jcardsim-m2`, the recipe that repairs it.
               pkgs.pcsclite
               pkgs.opensc
-              virtualPiv.fib
             ];
 
           # Help the openssl + pcsc-sys crates find their libraries

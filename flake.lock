@@ -154,15 +154,15 @@
         "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1788535345,
-        "narHash": "sha256-NxbTMcQtNxE/wMbOpDNbsqKG5QAZEDiHWCtG9vieEBQ=",
-        "rev": "2c8ca7354b2bba467b0602277f5d621d7d688dd4",
+        "lastModified": 1789414687,
+        "narHash": "sha256-/XVdkMybPjMj1zBLBZKCSNhOLw3U22ppegYosIrSFpM=",
+        "rev": "f235a1f93735479bd95a07692bb8f0e093c25c76",
         "type": "tarball",
-        "url": "https://code.linenisgreat.com/igloo/archive/2c8ca7354b2bba467b0602277f5d621d7d688dd4.tar.gz"
+        "url": "https://code.linenisgreat.com/igloo/archive/f235a1f93735479bd95a07692bb8f0e093c25c76.tar.gz"
       },
       "original": {
         "type": "tarball",
-        "url": "https://code.linenisgreat.com/igloo/archive/2c8ca7354b2bba467b0602277f5d621d7d688dd4.tar.gz"
+        "url": "https://code.linenisgreat.com/igloo/archive/master.tar.gz"
       }
     },
     "jcardsim": {
