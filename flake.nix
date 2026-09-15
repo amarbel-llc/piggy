@@ -912,10 +912,12 @@
               # Go toolchain for the go/ module (piggy-agent-conformance
               # + piggy-test-sshd): `go build`/`vet`/`gofmt` for fast
               # dev-loop iteration outside nix, and to back the hamster.*
-              # MCP tools. The packaged binaries still build via
-              # buildGoModule (which uses its own pkgs.go); this is the
-              # same toolchain, exposed on the devShell PATH.
-              pkgs.go
+              # MCP tools. igloo FDR 0012: `pkgs.go` is nixpkgs' go again
+              # (the overlay override rebuilt libcap and everything above
+              # it on every registry bump); the newest registry toolchain
+              # is `pkgs.goToolchain`, which is what the packaged binaries
+              # build with, so the shell go matches the build.
+              pkgs.goToolchain.go
               # dagnabit (from purse-first): generates the go/ module's pkgs/
               # export facades from its internal/ packages. The facade
               # check/repair now runs through conformist's

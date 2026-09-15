@@ -83,15 +83,10 @@ let
       pkgs.openssh
       pkgs.util-linux
     ];
-    # Under TCG on a loaded host the early-boot IO-APIC timer
-    # calibration can miss its window and the guest panics with
-    # "IO-APIC + timer doesn't work!" (seen 2026-09-14 at host load
-    # ~26 with three guests and an instrumented cargo build running).
-    # The check guards against broken real hardware; a qemu guest
-    # does not need it. REQUIRED HERE at the pinned igloo (f235a1f):
-    # mkVmChecks only sets it itself from igloo 2a6e42d on, so this
-    # line goes with the next igloo bump (piggy#267), not before.
-    boot.kernelParams = [ "no_timer_check" ];
+    # `no_timer_check` (the IO-APIC timer panic under TCG on a loaded
+    # host, seen 2026-09-14) is mkVmChecks' no-KVM default since igloo
+    # 2a6e42d (piggy#267), so it is no longer set here.
+    #
     # fibby at FIBBY_LOG=wire logs every APDU hexdump line; journald's
     # default per-service rate limit (10000 msgs / 30s) could suppress
     # a burst and swallow the `GA … -> 9000` lines the asserts count.
