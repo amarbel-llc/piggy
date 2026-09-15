@@ -62,14 +62,9 @@ function pivy_nonexistent_tool_errors_clearly { # @test
 # `piggy ca` / `luks` / `zfs` used to exec `pivy-ca`/`-luks`/`-zfs`,
 # binaries the nix build never installed. The arms are gone; clap
 # rejects the names like any other unknown subcommand (exit 2). Guards
-# against re-adding a dead arm before the Rust commands land (#279 zfs,
-# #280 ca), at which point the guard is replaced by the command's own
-# tests — as `luks` already was (piggy#277, t0900-luks.bats).
-
-function removed_shortcut_zfs_is_unknown_subcommand { # @test
-  run -2 "$PIGGY" zfs load-key pool/ds
-  assert_output --partial "unrecognized subcommand 'zfs'"
-}
+# against re-adding a dead arm before the Rust command lands (#280 ca),
+# at which point the guard is replaced by the command's own tests — as
+# `luks` (t0900-luks.bats) and `zfs` (t0910-zfs.bats) already were.
 
 function removed_shortcut_ca_is_unknown_subcommand { # @test
   run -2 "$PIGGY" ca list

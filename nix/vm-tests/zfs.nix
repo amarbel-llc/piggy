@@ -1,8 +1,10 @@
-# ZFS native encryption from the piggy store: a store secret is the
-# passphrase for an encrypted dataset; unload-key / load-key round-trips
-# through `piggy pass show`. Split from luks.nix because this guest
-# carries the zfs kernel module (a possible local kernel-module build
-# when the igloo pin has no cache hit).
+# ZFS native encryption from the piggy store via `piggy zfs` (piggy#279):
+# a store secret is the passphrase for an encrypted dataset created and
+# re-keyed through the command; the unload-key half and the wrong-
+# passphrase check stay on stock zfs to prove it is an ordinary encrypted
+# dataset. Split from luks.nix because this guest carries the zfs kernel
+# module (a possible local kernel-module build when the igloo pin has no
+# cache hit).
 { bootstrap }:
 { lib, ... }:
 {
@@ -20,28 +22,33 @@
     virtualisation.memorySize = 3072;
   };
   testScript = bootstrap { secretName = "zfs/test"; } + ''
-    with subtest("encrypted dataset keyed from the store"):
+    ZFS = ENV + "piggy zfs"
+
+    with subtest("piggy zfs create: encrypted dataset keyed from the store"):
         machine.succeed("zpool status")
         machine.succeed("zpool create -O mountpoint=none pigpool /dev/vdb")
         n0 = ecdh_count()
-        # zfs reads the passphrase as a line from a non-tty stdin.
-        machine.succeed(
-            ENV + "piggy pass show zfs/test | head -n1 | "
-            "zfs create -o encryption=aes-256-gcm -o keyformat=passphrase "
-            "-o keylocation=prompt -o mountpoint=/mnt/enc pigpool/enc"
-        )
+        machine.succeed(f"{ZFS} create pigpool/enc --secret zfs/test -- -o mountpoint=/mnt/enc")
         machine.succeed("zfs get -Ho value keystatus pigpool/enc | grep -Fx available")
+        machine.succeed("zfs get -Ho value encryption pigpool/enc | grep -Fx aes-256-gcm")
         machine.succeed("echo piggy-vm-zfs-marker > /mnt/enc/marker && sync")
         expect_ecdh(n0 + 1)
 
-    with subtest("unload-key locks the dataset; load-key from the store unlocks it"):
+    with subtest("unload-key locks the dataset; piggy zfs load-key unlocks it"):
         machine.succeed("zfs unmount pigpool/enc && zfs unload-key pigpool/enc")
         machine.succeed("zfs get -Ho value keystatus pigpool/enc | grep -Fx unavailable")
         machine.fail("zfs mount pigpool/enc")
         machine.fail("echo wrong-passphrase | zfs load-key pigpool/enc")
-        machine.succeed(ENV + "piggy pass show zfs/test | head -n1 | zfs load-key pigpool/enc")
+        n0 = ecdh_count()
+        machine.succeed(f"{ZFS} load-key pigpool/enc --secret zfs/test")
+        expect_ecdh(n0 + 1)
         machine.succeed("zfs mount pigpool/enc")
         marker = machine.succeed("cat /mnt/enc/marker").strip()
         assert marker == "piggy-vm-zfs-marker", marker
+
+    with subtest("a missing store entry fails before zfs runs"):
+        machine.succeed("zfs unmount pigpool/enc && zfs unload-key pigpool/enc")
+        machine.fail(f"{ZFS} load-key pigpool/enc --secret zfs/does-not-exist")
+        machine.succeed("zfs get -Ho value keystatus pigpool/enc | grep -Fx unavailable")
   '';
 }

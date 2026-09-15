@@ -71,6 +71,7 @@ mod tree_recipients;
 mod usage;
 mod verify;
 mod version;
+mod zfs;
 
 use std::path::PathBuf;
 
@@ -165,6 +166,14 @@ enum Command {
     /// also opens without a card. Arguments after `--` are forwarded to
     /// `cryptsetup` verbatim (e.g. `-- -q --pbkdf pbkdf2`).
     Luks(LuksArgs),
+    /// ZFS native-encryption datasets keyed by a store secret (piggy#279).
+    ///
+    /// The first line of the `--secret` store entry is the dataset
+    /// passphrase, fed to `zfs … -o keylocation=prompt` / `zfs load-key -L
+    /// prompt` on stdin; decrypted through the agent like `pass show`, one
+    /// card operation per invocation. Arguments after `--` are forwarded
+    /// to `zfs` verbatim (e.g. `-- -o mountpoint=/mnt/enc`).
+    Zfs(ZfsArgs),
     /// Run the headless JSON-RPC management server (RFC 0007).
     ///
     /// Exposes piggy's neutral management primitives (`card.list`,
@@ -493,6 +502,39 @@ enum CardCommand {
 struct SecretsArgs {
     #[command(subcommand)]
     cmd: SecretsCommand,
+}
+
+#[derive(Args, Debug)]
+struct ZfsArgs {
+    #[command(subcommand)]
+    cmd: ZfsCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum ZfsCommand {
+    /// `zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o
+    /// keylocation=prompt` DATASET with the secret as the passphrase.
+    Create {
+        dataset: String,
+        /// Store entry whose first line is the passphrase.
+        #[arg(long, value_name = "PASS-NAME")]
+        secret: String,
+        /// Extra `zfs` arguments (e.g. further `-o` properties), forwarded
+        /// verbatim.
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+    /// `zfs load-key -L prompt` DATASET with the secret as the passphrase.
+    #[command(name = "load-key")]
+    LoadKey {
+        dataset: String,
+        /// Store entry whose first line is the passphrase.
+        #[arg(long, value_name = "PASS-NAME")]
+        secret: String,
+        /// Extra `zfs` arguments, forwarded verbatim.
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -835,6 +877,24 @@ fn main() {
             };
             std::process::exit(piggy::stats::timed_luks(sub, || {
                 luks::run(action, secret.as_deref(), &extra)
+            }))
+        }
+
+        Command::Zfs(args) => {
+            let (sub, action, secret, extra) = match args.cmd {
+                ZfsCommand::Create {
+                    dataset,
+                    secret,
+                    extra,
+                } => ("create", zfs::Action::Create { dataset }, secret, extra),
+                ZfsCommand::LoadKey {
+                    dataset,
+                    secret,
+                    extra,
+                } => ("load_key", zfs::Action::LoadKey { dataset }, secret, extra),
+            };
+            std::process::exit(piggy::stats::timed_zfs(sub, || {
+                zfs::run(action, &secret, &extra)
             }))
         }
 

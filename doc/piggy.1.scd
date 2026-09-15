@@ -593,6 +593,27 @@ Primary keyslots only — there is no N-of-M recovery shape. This is not
 the *pivy-luks* key-ebox format; it is a piggy command over ordinary
 store entries.
 
+## piggy zfs
+
+ZFS native-encryption datasets keyed by a store secret; the sibling of
+*piggy luks* with the same rules: the *--secret* entry's first line is
+the passphrase, decrypted like *piggy pass show* and written to *zfs*(8)
+on stdin, one card operation per invocation; everything after *--* is
+forwarded to *zfs* verbatim before the dataset.
+
+*zfs create* _dataset_ *--secret* _pass-name_ [*--* _zfs-args_...]
+	*zfs create -o encryption=aes-256-gcm -o keyformat=passphrase -o
+	keylocation=prompt* [_zfs-args_...] _dataset_. Further *-o*
+	properties (mountpoint, compression, …) go after *--*.
+
+*zfs load-key* _dataset_ *--secret* _pass-name_ [*--* _zfs-args_...]
+	*zfs load-key -L prompt* _dataset_. Unloading needs no secret; use
+	*zfs unload-key* directly.
+
+A missing entry, an empty first line, or a decrypt failure exits 1
+before *zfs* runs; otherwise the exit status is *zfs*'s. This is not
+the *pivy-zfs* key-ebox format.
+
 # SIMPLE EXAMPLES
 
 Initialize password store with auto-detected YubiKey:

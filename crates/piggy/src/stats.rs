@@ -203,6 +203,16 @@ pub fn timed_luks<F: FnOnce() -> i32>(sub: &str, f: F) -> i32 {
     code
 }
 
+/// Time `f` — a `piggy zfs` subcommand handler returning its exit code — and
+/// emit a `piggy.zfs.<sub>` counter + timer. Returns the code. Rust-only
+/// category (piggy#279; C `pivy-zfs` was never shipped).
+pub fn timed_zfs<F: FnOnce() -> i32>(sub: &str, f: F) -> i32 {
+    let start = Instant::now();
+    let code = f();
+    record("zfs", sub, outcome_of_code(code), start.elapsed());
+    code
+}
+
 /// Time `f` — the `piggy manage` JSON-RPC server handler returning its exit
 /// code — and emit a `piggy.manage.run` counter + timer. Returns the code.
 /// Rust-only category (the headless command server has no C-agent path).
