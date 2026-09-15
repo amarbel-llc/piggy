@@ -67,6 +67,12 @@ take two to three minutes each once the guest closure is cached; a
 	Smoke-test of the legacy fib (jCardSim) virtual PIV card, retained as a
 	fibby differential oracle. Linux only.
 
+*just lint-justfile-profile*
+	conformist's profile-delivered justfile linters (recipe verbs, orphaned
+	doc summaries) over *conformist.profile* at the repo root, a verbatim
+	copy of conformist's own. Linux only; outside the *lint* aggregate
+	while the profile mechanism is experimental (conformist RFC 0005).
+
 *darwin*
 	No darwin build or test runs before a merge: the gate is the Linux
 	build host. The macOS-specific code (clipboard, ramdisk tmpdir,
