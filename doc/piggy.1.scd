@@ -509,6 +509,60 @@ passthroughs for the C pivy binaries:
 	followed by a table of the pinned downstream components (pivy,
 	pcsclite) with their versions and revisions. See *eng-versioning*(7).
 
+## piggy health
+
+*health* [*--format* _auto_|_tap_|_ndjson_] [*-v*, *--verbose*] [*--sign-test*]
+	Read-only, PIN-free checks of the piggy layer: the agent socket, its
+	identities and the *ecdh@joyent.com* extension, pcscd, attached cards
+	and their 9D slots, and the agent's service unit. Nine fixed points;
+	TAP-14 on a tty, tap-ndjson(7) otherwise; exit 0 iff no point fails
+	(SKIPs count as ok). *-v* attaches the diagnostic block to every
+	point.
+
+	An agent proxying upstreams (*piggy-agent*(1) *--upstream*) appends
+	one point per upstream, read from the agent's *upstream-status@piggy*
+	self-report; the upstreams are probed with a plain identity request.
+	A *--proxy-only* agent SKIPs the four local-card points and its
+	upstreams are treated as alternatives: a dead one SKIPs while another
+	is live and FAILs only when none is. The service point probes the unit
+	the agent names via *--service-name*, else the platform default. A
+	final point reports the agent's presence mode (event-driven or poll).
+
+	*--sign-test* adds an agent self-sign probe with every served identity
+	— the only path that exercises the private key and MAY prompt for a
+	PIN — catching an agent that lists keys but refuses to sign.
+
+## piggy manage
+
+*manage* *--jsonrpc* [*--socket* _PATH_]
+	Run the headless JSON-RPC 2.0 management server (RFC 0007): piggy's
+	neutral management primitives *card.list*, *card.init* and
+	*sign_bytes* over stdio, or an *AF_UNIX* socket with *--socket*, so an
+	external program drives piggy without spawning subprocesses. After an
+	*initialize* handshake (*piggy-mgmt/1*) requests are served one at a
+	time until EOF. While an interactive method runs, piggy issues the RFC
+	0006 interaction requests (PIN, confirm, progress) back over the same
+	connection.
+
+## piggy secrets
+
+*secrets reconcile* [*--manifest* _FILE_] [*--check*] [*--adopt*] [*-v*] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]
+	Write the plain secret files a JSON manifest declares from their ebox
+	ciphertexts (piggy FDR 0003), decrypting only entries that are missing
+	or changed, in one PIN prompt. Freshness is the ciphertext's content
+	hash plus the target's recorded stat fingerprint (never mtime), kept
+	in _$XDG_STATE_HOME/piggy/secrets/state.json_, so a steady-state run
+	touches no card. Writes are atomic renames; a failed decrypt keeps the
+	previous file; an existing target not recorded as piggy-managed is a
+	conflict unless *--adopt*; nothing is ever deleted. *--check* reports
+	drift without decrypting. TAP-14 output; exit 0 when everything is
+	fresh or written, 1 on any failure (or any drift with *--check*), 2 on
+	a usage or manifest error. The default manifest is the one the
+	*services.piggy-secrets* home-manager module maintains, which also
+	runs *--check* at activation and starts the oneshot
+	_piggy-secrets.service_ on drift without ever decrypting during a
+	switch.
+
 ## piggy luks
 
 LUKS2 volumes keyed by a store secret. The first line of the *--secret*
@@ -744,11 +798,19 @@ _SECURE_TMPDIR_
 _EDITOR_
 	The location of the text editor used by *pass edit*.
 
+_STATSD_HOST_, _STATSD_PORT_
+	Opt in to stats-me telemetry for the pass-style commands
+	(_piggy.pass.<cmd>_ counters and timers, plus _piggy.box.<op>_,
+	_piggy.luks.<sub>_, _piggy.card.<sub>_, _piggy.health.run_ and the
+	others). Their presence is the gate; see *piggy-agent*(1) ENVIRONMENT
+	for the wire shape and defaults.
+
 # SEE ALSO
 
-*piggy-agent*(1), *pivy-box*(1), *pivy-tool*(1), *pivy-agent*(1), *git*(1),
-*tree*(1), *tr*(1), *xclip*(1), *wl-clipboard*(1), *qrencode*(1),
-*ssh-copy-id*(1), *piggy-ids*(5), *piggy-piv-slots*(7)
+*piggy-agent*(1), *age-plugin-piggy*(1), *pivy-box*(1), *pivy-tool*(1),
+*git*(1), *tree*(1), *xclip*(1), *wl-clipboard*(1), *qrencode*(1),
+*ssh-copy-id*(1), *piggy-ids*(5), *piggy-piv-slots*(7), *piggy-ci*(7),
+*piggy-testing*(7), *piggy-markl*(7)
 
 # AUTHOR
 
