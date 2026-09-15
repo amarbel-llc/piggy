@@ -3,9 +3,18 @@
 # vmTestPrelude (`wait_for_units`, `journal_count`), that leaves these
 # names defined for the caller:
 #
-#   ENV          env prefix for every `piggy` invocation from the backdoor
+#   ENV          env prefix for every `piggy` invocation from the backdoor;
+#                deliberately WITHOUT PCSCLITE_CSOCK_NAME, so a decrypt can
+#                only go through the agent (the C pivy-box that
+#                crypt::decrypt still execs falls back to a direct card
+#                unlock whenever PC/SC is reachable, which would let a
+#                broken agent path pass the "through the agent" asserts)
+#   CARD_ENV     ENV plus PCSCLITE_CSOCK_NAME, for the one call that reads
+#                the card directly (`pass init`)
 #   show(name)   shell pipeline printing a store secret, newline-stripped
 #   ecdh_count() number of successful slot-9D ECDH ops fibby has logged
+#   expect_ecdh(n)  wait until fibby has logged exactly n of them (the
+#                journal lags the daemon's stderr under TCG load)
 #   secret       the generated secret's value
 #
 # and a store at /root/store holding `secretName` (64 alphanumeric
@@ -31,9 +40,9 @@ prelude
   ENV = (
       "${extraEnv}"
       "PIGGY_STORE_DIR=/root/store "
-      "PCSCLITE_CSOCK_NAME=/run/fibby/pcscd.comm "
       "SSH_AUTH_SOCK=/run/piggy/agent.sock "
   )
+  CARD_ENV = ENV + "PCSCLITE_CSOCK_NAME=/run/fibby/pcscd.comm "
 
 
   def show(name):
@@ -43,8 +52,22 @@ prelude
       return ENV + f"piggy pass show {name} | head -n1 | tr -d '\\n'"
 
 
+  def expect_count(unit, needle, n):
+      # journald ingests a daemon's stderr asynchronously (and mirrors it to
+      # the serial console under the test driver), so a count taken right
+      # after the command can be one short; wait for the exact value.
+      machine.wait_until_succeeds(
+          f"[ \"$(journalctl -u {unit} --no-pager -o cat | grep -c '{needle}' || true)\" -eq {n} ]",
+          timeout=60,
+      )
+
+
   def ecdh_count():
       return journal_count("fibby", "GA ECDH 9D -> 9000")
+
+
+  def expect_ecdh(n):
+      expect_count("fibby", "GA ECDH 9D -> 9000", n)
 
 
   wait_for_units(["multi-user.target", "fibby.service", "piggy-agent.service"])
@@ -58,12 +81,14 @@ prelude
       assert keys.count("ecdsa-sha2-nistp256 ") == ${toString nativeKeys}, keys
 
   with subtest("store init + generate + show decrypts through the agent"):
-      machine.succeed(ENV + "piggy pass init")
+      # init reads the card's 9D pubkey directly (offline, PIN-free);
+      # everything after it must reach the card through the agent only.
+      machine.succeed(CARD_ENV + "piggy pass init")
       machine.succeed(ENV + "piggy pass generate -n ${secretName} 64")
       before = ecdh_count()
       secret = machine.succeed(show("${secretName}"))
       assert len(secret) == 64 and secret.isalnum(), repr(secret)
-      assert ecdh_count() == before + 1, "decrypt did not perform exactly one slot-9D ECDH on fibby"
+      expect_ecdh(before + 1)
       agent_log = machine.succeed("journalctl -u piggy-agent --no-pager -o cat || true")
       assert "[piggy-test-askpass] supplying PIGGY_TEST_FIB_PIN" in agent_log, agent_log
       assert "REFUSING to prompt" not in agent_log, agent_log

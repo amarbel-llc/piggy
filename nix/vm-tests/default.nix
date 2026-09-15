@@ -88,8 +88,14 @@ let
     # "IO-APIC + timer doesn't work!" (seen 2026-09-14 at host load
     # ~26 with three guests and an instrumented cargo build running).
     # The check guards against broken real hardware; a qemu guest
-    # does not need it.
+    # does not need it. REQUIRED HERE at the pinned igloo (f235a1f):
+    # mkVmChecks only sets it itself from igloo 2a6e42d on, so this
+    # line goes with the next igloo bump (piggy#267), not before.
     boot.kernelParams = [ "no_timer_check" ];
+    # fibby at FIBBY_LOG=wire logs every APDU hexdump line; journald's
+    # default per-service rate limit (10000 msgs / 30s) could suppress
+    # a burst and swallow the `GA … -> 9000` lines the asserts count.
+    services.journald.extraConfig = "RateLimitIntervalSec=0";
     # World-writable: the daemons run as piggy-agent / DynamicUser and
     # the backdoor shell as root all write profiles here.
     systemd.tmpfiles.rules = pkgs.lib.optionals coverage [ "d /coverage 1777 root root -" ];
@@ -104,16 +110,24 @@ let
   };
 
   # Stop the instrumented daemons cleanly (the LLVM profile runtime
-  # writes at exit) and ship /coverage to $out/coverage. Units that a
-  # lane did not define are ignored.
+  # writes at exit) and ship /coverage to $out/coverage. Each
+  # instrumented daemon that was running must have left a profile named
+  # by its own PID: the short-lived `piggy pass` processes always leave
+  # profraws, so `ls /coverage/*.profraw` alone would hide a daemon that
+  # got SIGKILLed past its stop timeout and never flushed. Units a lane
+  # did not define are skipped.
   coverageEpilogue = ''
 
     with subtest("collect coverage profiles"):
-        machine.succeed("systemctl stop piggy-front.service 2>/dev/null || true")
-        machine.succeed("systemctl stop piggy-agent.service fibby.service")
-        machine.succeed("ls /coverage/*.profraw")
-        copy_out = getattr(machine, "copy_from_machine", None) or machine.copy_from_vm
-        copy_out("/coverage", "")
+        for unit in ["piggy-front.service", "piggy-agent.service"]:
+            active, _ = machine.execute(f"systemctl is-active --quiet {unit}")
+            if active != 0:
+                continue
+            pid = machine.succeed(f"systemctl show -p MainPID --value {unit}").strip()
+            machine.succeed(f"systemctl stop {unit}")
+            machine.succeed(f"ls /coverage/{pid}-*.profraw")
+        machine.succeed("systemctl stop fibby.service")
+        machine.copy_from_machine("/coverage", "")
   '';
 
   # The module system injects only the arguments a module function

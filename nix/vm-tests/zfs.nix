@@ -32,7 +32,7 @@
         )
         machine.succeed("zfs get -Ho value keystatus pigpool/enc | grep -Fx available")
         machine.succeed("echo piggy-vm-zfs-marker > /mnt/enc/marker && sync")
-        assert ecdh_count() == n0 + 1
+        expect_ecdh(n0 + 1)
 
     with subtest("unload-key locks the dataset; load-key from the store unlocks it"):
         machine.succeed("zfs unmount pigpool/enc && zfs unload-key pigpool/enc")

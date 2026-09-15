@@ -23,7 +23,7 @@
         machine.succeed("echo piggy-vm-luks-marker > /mnt/pig/marker && sync")
         machine.succeed("umount /mnt/pig && cryptsetup close pigcrypt")
         machine.wait_until_fails("test -e /dev/mapper/pigcrypt")
-        assert ecdh_count() == n0 + 2, "format+open should have cost exactly two card ECDH ops"
+        expect_ecdh(n0 + 2)  # format + open: exactly two card ECDH ops
 
     with subtest("reopen from the store and read the marker back"):
         machine.succeed(f"{show('luks/test')} | cryptsetup open --key-file - {DEV} pigcrypt")

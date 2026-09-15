@@ -121,6 +121,10 @@ in
           return journal_count("fibby", "GA ECDSA 9A -> 9000")
 
 
+      def expect_ecdsa_9a(n):
+          expect_count("fibby", "GA ECDSA 9A -> 9000", n)
+
+
       def sign_and_verify(sock, pubfile, ident):
           data = f"/root/payload-{ident}"
           machine.succeed(f"echo payload-{ident} > {data}")
@@ -156,18 +160,18 @@ in
       with subtest("sign via the front: PIV key reaches the card, software key does not"):
           n0 = ecdsa_9a_count()
           sign_and_verify(FRONT, "/root/id9a.pub", "native@fibby")
-          assert ecdsa_9a_count() == n0 + 1, "native sign did not hit fibby's slot 9A exactly once"
+          expect_ecdsa_9a(n0 + 1)  # the native sign hit slot 9A exactly once
           sign_and_verify(FRONT, "/root/softkey.pub", "soft@upstream")
-          assert ecdsa_9a_count() == n0 + 1, "routed software sign touched the card"
+          expect_ecdsa_9a(n0 + 1)  # the routed software sign never touched the card
 
       with subtest("sshd accepts a login with either key offered by the front"):
           machine.succeed("mkdir -p -m 700 /root/.ssh")
           machine.succeed(f"SSH_AUTH_SOCK={FRONT} ssh-add -L > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys")
           n0 = ecdsa_9a_count()
           machine.succeed(f"SSH_AUTH_SOCK={FRONT} {SSH} -i /root/id9a.pub root@localhost true")
-          assert ecdsa_9a_count() == n0 + 1, "PIV login did not sign on the card exactly once"
+          expect_ecdsa_9a(n0 + 1)  # the PIV login signed on the card exactly once
           machine.succeed(f"SSH_AUTH_SOCK={FRONT} {SSH} -i /root/softkey.pub root@localhost true")
-          assert ecdsa_9a_count() == n0 + 1, "software-key login touched the card"
+          expect_ecdsa_9a(n0 + 1)  # the software-key login never touched the card
 
       with subtest("ssh -A forwards the front: a remote pass show decrypts through it"):
           n0 = ecdh_count()
@@ -182,7 +186,7 @@ in
               f"SSH_AUTH_SOCK={FRONT} {SSH} -A -i /root/softkey.pub root@localhost '{remote}'"
           ).strip()
           assert out == secret, (out, secret)
-          assert ecdh_count() == n0 + 1, "forwarded decrypt did not perform exactly one slot-9D ECDH"
+          expect_ecdh(n0 + 1)  # the forwarded decrypt cost exactly one slot-9D ECDH
 
       with subtest("a dead software upstream degrades the front to the PIV keys"):
           machine.succeed("systemctl stop soft-ssh-agent.service")

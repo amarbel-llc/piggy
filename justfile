@@ -296,6 +296,11 @@ fence-tmpdir-linux := if os() == "linux" { "TMPDIR=/tmp" } else { "" }
 # the recipe's own variable.
 bats-expose-fibby-workdir := '--expose-host-path-rw "$workdir"'
 
+# The flake exports the VM checks for every Linux system eachDefaultSystem
+# covers; the `[linux]` recipes below must ask for the host's own, or a
+# gate run on an aarch64-linux host would request a foreign guest.
+vm-check-system := arch() + "-linux"
+
 # Run the conformance bats glob outside the sandbox: the non-pty tests under
 # batman (with fibby/pivy redirect on Linux) plus the pty-tagged tests
 # unsandboxed (fence blocks /dev/ptmx).
@@ -1160,7 +1165,7 @@ test-nix-hm-secrets-module:
 [group('post-build')]
 [linux]
 test-vm-luks:
-    nix build .#checks.x86_64-linux.vm-piggy-luks --no-link --print-build-logs --show-trace
+    nix build .#checks.{{ vm-check-system }}.vm-piggy-luks --no-link --print-build-logs --show-trace
 
 # ZFS sibling of test-vm-luks (nix/vm-tests/zfs.nix): an encrypted dataset
 # keyed from the store, unload-key / load-key round-tripped through
@@ -1175,7 +1180,7 @@ test-vm-luks:
 [group('post-build')]
 [linux]
 test-vm-zfs:
-    nix build .#checks.x86_64-linux.vm-piggy-zfs --no-link --print-build-logs --show-trace
+    nix build .#checks.{{ vm-check-system }}.vm-piggy-zfs --no-link --print-build-logs --show-trace
 
 # Agent sibling (nix/vm-tests/agent.nix): the card-backed `piggy agent`
 # proxying a stock ssh-agent upstream (workstation shape), a --proxy-only
@@ -1188,7 +1193,7 @@ test-vm-zfs:
 [group('post-build')]
 [linux]
 test-vm-agent:
-    nix build .#checks.x86_64-linux.vm-piggy-agent --no-link --print-build-logs --show-trace
+    nix build .#checks.{{ vm-check-system }}.vm-piggy-agent --no-link --print-build-logs --show-trace
 
 # Line coverage from the three VM lanes: re-runs them on a `-C
 # instrument-coverage` build of piggy (.#vm-piggy-*-cov), then
@@ -1222,7 +1227,7 @@ test-vm-coverage:
 [group('debug')]
 [linux]
 debug-vm-dry-run check="vm-piggy-luks":
-    nix build .#checks.x86_64-linux.{{ check }} --dry-run --show-trace
+    nix build .#checks.{{ vm-check-system }}.{{ check }} --dry-run --show-trace
 
 # Rust card-integration tests against FIBBY — the consolidated fibby
 # companion to test-rust-agent-ecdh / -agent-unlock / -card-unlock, part of

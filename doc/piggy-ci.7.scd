@@ -22,8 +22,9 @@ the repo's *sweatfile* (*pre-merge = "just"*).
 	go/ facade drift check (*lint-worktree*).
 
 *just build*
-	The go/ module, the nix package set (*build-nix*: the default piggy
-	package, fibby, the Go test binaries), and the Rust workspace.
+	*build-nix* (the default piggy package, fibby, the Go test binaries),
+	*build-rust* (the workspace), *build-go* (the go/ module) and
+	*build-pigpen* (the standalone piggy-pigpen crate).
 
 *just test*
 	The grammar gates (*validate-grammar*, *test-grammar-vectors*), the
@@ -51,9 +52,11 @@ take two to three minutes each once the guest closure is cached; a
 # OUTSIDE THE GATE
 
 *just test-optional*
-	Lanes that need hardware, a tty, or a human: the C pivy-agent hardware
-	lane, the wire-protocol conformance bats, the home-manager module
-	evaluation smoke test.
+	Not run by the gate: *test-bats-file* and *test-bats-piggy-local* (the
+	fast, unsandboxed local-iteration paths), *test-bats-conformance-protocol*
+	(the SSH-agent wire-protocol bats), *test-bats-conformance-pivy-agent-hardware*
+	(needs a plugged-in card), and *test-nix-hm-module* (the home-manager
+	module evaluation smoke test).
 
 *just test-vm-coverage*
 	The three VM lanes re-run on an instrumented piggy, merged into an
@@ -63,6 +66,12 @@ take two to three minutes each once the guest closure is cached; a
 *just verify-fib*
 	Smoke-test of the legacy fib (jCardSim) virtual PIV card, retained as a
 	fibby differential oracle. Linux only.
+
+*darwin*
+	No darwin build or test runs before a merge: the gate is the Linux
+	build host. The macOS-specific code (clipboard, ramdisk tmpdir,
+	askpass, the darwin devShell half) is covered only when a contributor
+	runs *just* on a Mac.
 
 # SEE ALSO
 
