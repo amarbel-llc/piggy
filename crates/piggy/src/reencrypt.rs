@@ -1,5 +1,5 @@
 //! `reencrypt_path` port — walk every `*.ebox` under a target
-//! directory, decrypt with `pivy-box stream decrypt`, re-encrypt with
+//! directory, decrypt in process (piggy#164), re-encrypt with
 //! `piggy-ids encrypt $piggy_ids`, and atomic-rename over the
 //! original.
 //!
@@ -28,9 +28,9 @@
 //! `(pipeline && mv) || rm` so a failed pipeline doesn't abort the
 //! whole pass.
 //!
-//! The Rust port spawns the decrypt and encrypt processes connected
-//! by an OS pipe (no buffering plaintext in our address space) — same
-//! risk profile as the bash pipeline.
+//! The decrypt runs in process, so each entry's plaintext is buffered
+//! in memory for the length of the `piggy-ids encrypt` call (the bash
+//! pipeline kept it in a kernel pipe instead); it never touches disk.
 //!
 //! This module is reachable two ways:
 //!
@@ -43,6 +43,7 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -61,7 +62,7 @@ use crate::store::{collect_eboxes, find_piggy_ids, store_root};
 /// when the ebox already encrypts to exactly the current recipient set
 /// (see [`reencrypt_unnecessary`]); under `verbose`, every point also
 /// carries a YAML diagnostic block. Failures always carry one.
-/// Subprocess noise (`pivy-box`/`piggy-ids`) stays on stderr so the TAP
+/// Decrypt diagnostics and `piggy-ids` noise stay on stderr so the TAP
 /// stream is clean.
 ///
 /// Exit code:
@@ -95,6 +96,9 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
         return 1;
     }
 
+    // One decryptor for the whole walk: agent connection and card PIN are
+    // paid once, not once per ebox.
+    let mut decryptor = piggy::cmd::pivy_box::Decryptor::from_env();
     let mut any_failed = false;
     for (idx, (path, real)) in entries.iter().enumerate() {
         let n = idx + 1;
@@ -144,7 +148,7 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
         // `real` is the canonical (symlink-resolved) target, already
         // computed during the dedup walk — pass it straight through so
         // reencrypt_one doesn't re-`canonicalize`.
-        match reencrypt_one(real, &piggy_ids) {
+        match reencrypt_one(real, &piggy_ids, &mut decryptor) {
             Ok(()) => {
                 let _ = tap.ok(n, &display);
             }
@@ -170,9 +174,8 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
 /// Conservative by construction: any parse failure, a box pubkey that
 /// doesn't decode as a point, a non-PIV (age) recipient, or an empty
 /// recipient set yields `false` (→ re-encrypt). It never returns a
-/// false-positive SKIP. Under the base64 bats mock the stored bytes are
-/// not real ebox wire format, so [`Ebox::from_bytes`] fails and the walk
-/// re-encrypts as before.
+/// false-positive SKIP. Bytes that are not ebox wire format fail
+/// [`Ebox::from_bytes`] and the walk re-encrypts (and reports) as before.
 fn reencrypt_unnecessary(ebox_path: &Path, piggy_ids: &Path) -> bool {
     let (Some(want), Some(have)) = (
         recipients_from_piggy_ids(piggy_ids),
@@ -367,8 +370,10 @@ fn display_name(path: &Path, store: &Path) -> String {
         .to_string()
 }
 
-/// Run `pivy-box stream decrypt < real | piggy-ids encrypt $piggy_ids > tmp`
-/// connected by an OS pipe, then atomic-rename tmp over `real`.
+/// Decrypt `real` in process (piggy#164) and pipe the plaintext into
+/// `piggy-ids encrypt $piggy_ids > tmp`, then atomic-rename tmp over
+/// `real`. The plaintext lives in memory for the length of the encrypt
+/// call and never touches disk or argv.
 ///
 /// `real` is the canonical (symlink-resolved) target, resolved once by
 /// [`collect_eboxes_dedup_targets`]. When the store-side entry was a
@@ -379,35 +384,18 @@ fn display_name(path: &Path, store: &Path) -> String {
 /// directly would replace the link with a regular file and orphan the
 /// real target — the hazard the old skip-symlinks behavior avoided by
 /// refusing to act at all.
-fn reencrypt_one(real: &Path, piggy_ids: &Path) -> Result<(), String> {
+fn reencrypt_one(
+    real: &Path,
+    piggy_ids: &Path,
+    decryptor: &mut piggy::cmd::pivy_box::Decryptor,
+) -> Result<(), String> {
     let tmp = make_tmp_path(real);
 
     let pipeline_result = (|| -> Result<(), String> {
-        let input = std::fs::File::open(real).map_err(|e| format!("open passfile: {e}"))?;
-
-        let mut decrypt_cmd = Command::new("pivy-box");
-        decrypt_cmd
-            .arg("stream")
-            .arg("decrypt")
-            .stdin(input)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        // Prefer piggy's own agent socket over the ambient SSH_AUTH_SOCK
-        // (an upstream agent that may not advertise ecdh@joyent.com).
-        // The binary and library crates are disjoint, so this mirrors
-        // piggy::agent_client::piggy_auth_sock_override rather than calling
-        // it. See #123.
-        if let Some(sock) = std::env::var_os("PIGGY_AUTH_SOCK").filter(|s| !s.is_empty()) {
-            decrypt_cmd.env("SSH_AUTH_SOCK", sock);
-        }
-        let mut decrypt = decrypt_cmd
-            .spawn()
-            .map_err(|e| format!("spawn pivy-box: {e}"))?;
-
-        let decrypt_stdout = decrypt
-            .stdout
-            .take()
-            .ok_or_else(|| "pivy-box stdout unavailable".to_string())?;
+        let input = std::fs::read(real).map_err(|e| format!("open passfile: {e}"))?;
+        let plaintext = decryptor
+            .decrypt(&input)
+            .map_err(|e| format!("decrypt: {e}"))?;
 
         let piggy_ids_bin: OsString =
             std::env::var_os("PIGGY_IDS_PATH").unwrap_or_else(|| OsString::from("piggy-ids"));
@@ -418,18 +406,21 @@ fn reencrypt_one(real: &Path, piggy_ids: &Path) -> Result<(), String> {
         let mut encrypt = Command::new(&piggy_ids_bin)
             .arg("encrypt")
             .arg(piggy_ids)
-            .stdin(decrypt_stdout)
+            .stdin(Stdio::piped())
             .stdout(tmp_file)
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| format!("spawn piggy-ids: {e}"))?;
-
-        let decrypt_status = decrypt.wait().map_err(|e| format!("wait pivy-box: {e}"))?;
-        let encrypt_status = encrypt.wait().map_err(|e| format!("wait piggy-ids: {e}"))?;
-
-        if !decrypt_status.success() {
-            return Err(format!("pivy-box exited {decrypt_status}"));
+        {
+            let mut stdin = encrypt
+                .stdin
+                .take()
+                .ok_or_else(|| "piggy-ids stdin unavailable".to_string())?;
+            stdin
+                .write_all(&plaintext)
+                .map_err(|e| format!("write plaintext to piggy-ids: {e}"))?;
         }
+        let encrypt_status = encrypt.wait().map_err(|e| format!("wait piggy-ids: {e}"))?;
         if !encrypt_status.success() {
             return Err(format!("piggy-ids encrypt exited {encrypt_status}"));
         }

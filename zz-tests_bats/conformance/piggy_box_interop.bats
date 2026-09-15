@@ -44,11 +44,10 @@ setup() {
     skip "REAL_PIVY_BOX not set (run: just test-bats-conformance-interop-fibby)"
   fi
 
-  # Replace common.bash's mock pivy-box symlink with the real C
-  # binary — wrapper smoke tests need `piggy box` (which exec's
-  # `pivy-box` from PATH via exec::exec_pivy) to reach the real
-  # binary. Scoped to BATS_TEST_TMPDIR, so other bats files keep the
-  # mock.
+  # Put the real C binary at the front of PATH ($BATS_TEST_TMPDIR) —
+  # wrapper smoke tests need `piggy box` (which exec's `pivy-box` from
+  # PATH via exec::exec_pivy for the subcommands Rust doesn't cover) to
+  # reach it.
   ln -sf "$REAL_PIVY_BOX" "$BATS_TEST_TMPDIR/pivy-box"
 }
 

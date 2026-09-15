@@ -359,7 +359,7 @@ function health_reports_upstream_point { # @test
 #   piggy agent --proxy-only --upstream dead=… --upstream fwd=…  <- clients
 #
 # Gates: the proxy lists the card's 9A key; `piggy pass show` routed at the
-# proxy decrypts — the ecdh-rebox native-miss forwards to the card agent
+# proxy decrypts — the ecdh native-miss forwards to the card agent
 # (which prompts the PIN on demand); `piggy health` against the proxy exits
 # 0 with the local-card points SKIPped and the dead alternative backing
 # SKIPped (one backing is live).
@@ -418,7 +418,7 @@ function proxy_only_agent_fronts_forwarded_card_agent { # @test
 
   # 2. Decrypt through the proxy: init/insert talk to fibby directly
   # (offline encrypt); `pass show` is routed at the PROXY, whose
-  # ecdh-rebox native-miss must forward to the card agent.
+  # ecdh native-miss must forward to the card agent.
   local store="$WORKDIR/store" secret="proxied-decrypt-secret"
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_STORE_DIR="$store" \
     run "$PIGGY_BIN" pass init

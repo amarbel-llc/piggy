@@ -11,9 +11,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use crate::store::{collect_eboxes, resolve_target, store_root};
 
@@ -47,10 +45,17 @@ pub fn run(subpath: Option<&str>) -> i32 {
         }
     };
 
+    // One decryptor for the whole walk: the C era ran `pivy-box stream
+    // decrypt -b` per ebox (batch: agent only, never a PIN prompt). In
+    // process the card path is available too, and the shared oracle
+    // caches the PIN per card, so an agentless verify prompts at most
+    // once for the whole store rather than failing every entry. A true
+    // no-prompt run is `SSH_ASKPASS_REQUIRE=never` without a tty.
+    let mut decryptor = piggy::cmd::pivy_box::Decryptor::from_env();
     let mut results: Vec<(PathBuf, VerifyResult)> = Vec::with_capacity(entries.len());
     let mut any_fail = false;
     for path in entries {
-        let result = verify_one(&path);
+        let result = verify_one(&path, &mut decryptor);
         if matches!(result, VerifyResult::Fail(_)) {
             any_fail = true;
         }
@@ -69,63 +74,14 @@ enum VerifyResult {
     Fail(String),
 }
 
-fn verify_one(path: &Path) -> VerifyResult {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
+fn verify_one(path: &Path, decryptor: &mut piggy::cmd::pivy_box::Decryptor) -> VerifyResult {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
         Err(err) => return VerifyResult::Fail(format!("open: {err}")),
     };
-
-    let mut child = match Command::new("pivy-box")
-        .arg("stream")
-        .arg("decrypt")
-        .arg("-b")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(err) => return VerifyResult::Fail(format!("spawn pivy-box: {err}")),
-    };
-
-    {
-        let mut stdin = match child.stdin.take() {
-            Some(s) => s,
-            None => {
-                return VerifyResult::Fail("pivy-box stdin unavailable".into());
-            }
-        };
-        let mut reader = file;
-        if let Err(err) = std::io::copy(&mut reader, &mut stdin) {
-            return VerifyResult::Fail(format!("write to pivy-box: {err}"));
-        }
-        let _ = stdin.flush();
-    }
-
-    let output = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(err) => return VerifyResult::Fail(format!("wait pivy-box: {err}")),
-    };
-
-    if output.status.success() {
-        VerifyResult::Ok
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let last = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim();
-        let msg = if last.is_empty() {
-            match output.status.code() {
-                Some(c) => format!("exit {c}"),
-                None => "killed by signal".into(),
-            }
-        } else {
-            last.to_string()
-        };
-        VerifyResult::Fail(msg)
+    match decryptor.decrypt(&bytes) {
+        Ok(_) => VerifyResult::Ok,
+        Err(msg) => VerifyResult::Fail(msg),
     }
 }
 

@@ -79,13 +79,13 @@ export PIGGY
 export SECURE_TMPDIR="$BATS_TEST_TMPDIR/secure-tmp"
 mkdir -p "$SECURE_TMPDIR"
 
-# Mock pivy-box and pivy-tool (base64 encode/decode instead of real crypto)
-# and mock piggy-ids. We copy-with-shebang-rewrite rather than symlink so
-# the staged scripts work inside the nix build sandbox (where
-# /usr/bin/env doesn't exist, breaking the helpers' `#!/usr/bin/env bash`
-# shebang). The rewrite uses whichever bash is currently on PATH, which
-# is the sandbox's `${pkgs.bash}/bin/bash` or the local devshell's bash
-# depending on context.
+# Mock pivy-tool (canned card discovery) and mock piggy-ids. We
+# copy-with-shebang-rewrite rather than symlink so the staged scripts
+# work inside the nix build sandbox (where /usr/bin/env doesn't exist,
+# breaking the helpers' `#!/usr/bin/env bash` shebang). The rewrite uses
+# whichever bash is currently on PATH, which is the sandbox's
+# `${pkgs.bash}/bin/bash` or the local devshell's bash depending on
+# context.
 # Install a helper from zz-tests_bats/helpers/ into $BATS_TEST_TMPDIR
 # with its shebang rewritten to whichever bash is on PATH. Exposed for
 # tests that need to install additional helpers (e.g. the fake editor
@@ -96,16 +96,61 @@ piggy_install_helper_as() {
   sed "1s|^#!.*|#!$(command -v bash)|" "$PIGGY_BATS_HELPERS_DIR/$helper" >"$dest"
   chmod +x "$dest"
 }
-piggy_install_helper_as mock-pivy-box.sh pivy-box
 piggy_install_helper_as mock-pivy-tool.sh pivy-tool
-# Mock piggy-ids: encrypt → base64 (compatible with mock-pivy-box's
-# decrypt). validate / canonicalize / diff delegate to the real Rust
-# binary ($PIGGY_IDS_REAL). The lane builder pins this to the wrapped
+# Mock piggy-ids: `encrypt` execs the real Rust binary ($PIGGY_IDS_REAL),
+# so every ebox a test writes is genuine RFC 0002 wire format encrypted
+# to the virtual card below; only card *discovery* (detect-pubkey /
+# detect-all-pubkeys) is canned, driven by PIGGY_TEST_DETECT_* env vars.
+# validate / canonicalize / diff delegate to the real binary too. The
+# lane builder pins PIGGY_IDS_REAL to the wrapped
 # $out/libexec/piggy/piggy-ids; local runs fall back to target/debug/.
 : "${PIGGY_IDS_REAL:=$REPO_ROOT/target/debug/piggy-ids}"
 export PIGGY_IDS_REAL
 piggy_install_helper_as mock-piggy-ids.sh piggy-ids
 export PATH="$BATS_TEST_TMPDIR:$PATH"
+
+# The virtual card (piggy#164, piggy#281). Store decrypt runs in process
+# — there is no `pivy-box` subprocess left to mock — so every test gets
+# its own fibby on a private PC/SC socket: real encrypt through piggy-ids,
+# real ECDH on decrypt, PIN 123456 supplied by the test askpass (an
+# installed copy: the sandbox has no /usr/bin/env for the helper's
+# shebang, and a failing askpass looks exactly like a card refusing the
+# PIN). PIGGY_TEST_RECIPIENT is that card's slot-9D recipient, the RFC
+# 5903 seed fibby loads by default; create_test_template writes it and
+# t0980 pins it against `piggy-ids detect-pubkey`.
+#
+# PIGGY_TEST_CARD=none opts a harness out (conformance/common.bash does:
+# those lanes spawn their own fibby or run against a recipe-provided
+# PC/SC socket), and a preset PCSCLITE_CSOCK_NAME is left alone for the
+# same reason.
+export PIGGY_TEST_RECIPIENT="piggy-recipient-v1@pivy_ecdh_p256_pub-q0ddpdjnjs3pe7ds28slajjhslgf3hlxxl7fpw00j3wscdmjtqgcqqshc3f"
+load "$PIGGY_BATS_DIR/lib/fibby.bash"
+if [[ ${PIGGY_TEST_CARD:-auto} == auto && -z ${PCSCLITE_CSOCK_NAME:-} ]]; then
+  # The helper narrates on stderr ("[piggy-test-askpass] supplying …"),
+  # which `run` would fold into $output and break exact-match asserts;
+  # a thin wrapper keeps that narration in a per-test log instead.
+  piggy_install_helper_as piggy-test-askpass.sh piggy-test-askpass.real
+  export PIGGY_TEST_ASKPASS_LOG="$BATS_TEST_TMPDIR/askpass.log"
+  printf '#!%s\nexec "%s" "$@" 2>>"%s"\n' "$(command -v bash)" \
+    "$BATS_TEST_TMPDIR/piggy-test-askpass.real" "$PIGGY_TEST_ASKPASS_LOG" \
+    >"$BATS_TEST_TMPDIR/piggy-test-askpass"
+  chmod +x "$BATS_TEST_TMPDIR/piggy-test-askpass"
+  export SSH_ASKPASS="$BATS_TEST_TMPDIR/piggy-test-askpass" \
+    SSH_ASKPASS_REQUIRE=force DISPLAY="" PIGGY_TEST_FIB_PIN=123456
+  # bats predefines a no-op teardown() (lib/bats-core/test_functions.bash),
+  # so "is one declared" cannot tell a file's own teardown from the
+  # default. Chain whatever is there and append fibby_down: the file's
+  # teardown runs first, and the card always comes down — a leaked fibby
+  # keeps bats' fd 3 open and bats waits on it forever.
+  eval "$(declare -f teardown | sed '1s/^teardown ()/piggy_harness_chained_teardown ()/')"
+  teardown() {
+    local rc=0
+    piggy_harness_chained_teardown || rc=$?
+    fibby_down
+    return "$rc"
+  }
+  fibby_up
+fi
 
 # Pre-init git repo with --separate-git-dir so the actual git data lives
 # outside .git/ (sandcastle blocks writes to .git directories).
@@ -137,15 +182,14 @@ skip_unless_af_unix_bind() {
   rm -f "$probe"
 }
 
-# Create a test piggy-ids file with a canonical RFC 0002 recipient
-# (the `pivy_ecdh_p256_pub` non-trivial vector at madder fd53684).
-# The mock piggy-ids encrypt only checks file existence, so any valid
-# piggy-ids works for tests that don't drive the recipients flow.
+# Create a test piggy-ids file naming the virtual card's slot-9D key, so
+# an insert/generate in the test encrypts to a key the harness card can
+# actually unwrap.
 create_test_template() {
   local dir="${1:-$PIGGY_STORE_DIR}"
   mkdir -p "$dir"
   cat >"$dir/piggy-ids" <<-_EOF
-		# test fixture — canonical RFC 0002 vector
-		piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu
+		# test fixture — the harness fibby card (RFC 5903 slot-9D seed)
+		$PIGGY_TEST_RECIPIENT
 		_EOF
 }

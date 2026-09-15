@@ -147,6 +147,127 @@ fn cmd_stream_encrypt(args: &[&str]) -> i32 {
     0
 }
 
+/// The in-process ebox-stream decryptor every store decrypt goes through
+/// (piggy#164/#154: `pass show`/`edit`/`generate -i`/`grep`/`verify`, the
+/// re-encryption walk, and `piggy box stream decrypt` itself). Holds the
+/// two ECDH oracles for the life of one command so a walk over many
+/// eboxes pays for the agent connection and the card PIN once: the
+/// card oracle caches the PIN per token GUID.
+///
+/// Oracle resolution:
+/// - agent: `PIGGY_AUTH_SOCK` when set and non-empty, else `SSH_AUTH_SOCK`
+///   (piggy#123); constructed lazily-connecting, so an unreachable socket
+///   costs nothing until a part is tried.
+/// - card: direct PC/SC through [`crate::card_oracle::CardEcdhOracle`]
+///   with the askpass PIN supplier (piggy#31); skipped when no resource
+///   manager is reachable. There is no agent-only mode (the C era's
+///   `pivy-box stream decrypt -b`): a caller that must never prompt runs
+///   with `SSH_ASKPASS_REQUIRE=never` and no tty, and the askpass
+///   refuses.
+///
+/// Test hook (#123): when `PIGGY_TEST_SOCK_RECORD` names a file, the
+/// agent socket this decryptor resolved (or an empty line) is appended
+/// to it, so a bats test can assert routing without a real agent. It
+/// replaces the hook the C-era mock `pivy-box` carried.
+pub struct Decryptor {
+    agent: Option<crate::agent_client::AgentEcdhOracle>,
+    card: Option<crate::card_oracle::CardEcdhOracle>,
+}
+
+impl Decryptor {
+    /// Build both oracles from the environment. The agent socket is not
+    /// contacted until the first [`Decryptor::decrypt`]; the card oracle
+    /// establishes its PC/SC context here (and is dropped if it cannot).
+    pub fn from_env() -> Self {
+        let agent_socket = crate::agent_client::piggy_auth_sock_override()
+            .or_else(|| std::env::var_os("SSH_AUTH_SOCK"))
+            .map(PathBuf::from);
+        record_agent_socket_for_tests(agent_socket.as_deref());
+        let agent =
+            agent_socket.and_then(
+                |sock| match crate::agent_client::AgentEcdhOracle::new(&sock) {
+                    Ok(o) => Some(o),
+                    Err(e) => {
+                        tracing::warn!(
+                            "decrypt: failed to construct AgentEcdhOracle for {}: {e} — \
+                         proceeding without agent",
+                            sock.display()
+                        );
+                        None
+                    }
+                },
+            );
+        let card = match crate::card_oracle::CardEcdhOracle::new(
+            crate::card_oracle::askpass_pin_supplier(),
+        ) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                tracing::debug!("decrypt: card oracle unavailable: {e} — agent path only");
+                None
+            }
+        };
+        Self { agent, card }
+    }
+
+    /// Decrypt one on-disk ebox stream (header + chunk frames) to its
+    /// plaintext. Errors are one-line, user-facing strings.
+    pub fn decrypt(&mut self, input: &[u8]) -> Result<Vec<u8>, String> {
+        let mut stream =
+            EboxStream::from_bytes(input).map_err(|e| format!("invalid stream: {e}"))?;
+
+        let agent_dyn: Option<&mut dyn piggy_box::oracle::EcdhOracle> = self
+            .agent
+            .as_mut()
+            .map(|o| o as &mut dyn piggy_box::oracle::EcdhOracle);
+        let card_dyn: Option<&mut dyn piggy_box::oracle::EcdhOracle> = self
+            .card
+            .as_mut()
+            .map(|o| o as &mut dyn piggy_box::oracle::EcdhOracle);
+        unlock_ebox(&mut stream.ebox, agent_dyn, card_dyn)
+            .map_err(|e| format!("unlock failed: {e}"))?;
+
+        // The remaining bytes after the stream header are the chunks.
+        // Re-serialize the header to find where chunks begin.
+        let header_bytes = stream.to_bytes().map_err(|e| e.to_string())?;
+        let mut chunk_data = &input[header_bytes.len()..];
+        let mut out = Vec::new();
+        let mut expected_seqnr: u32 = 0;
+        while !chunk_data.is_empty() {
+            // Each chunk frame is: u32(seqnr) + u32(len) + len bytes.
+            if chunk_data.len() < 8 {
+                return Err("truncated chunk frame".into());
+            }
+            let string_len =
+                u32::from_be_bytes([chunk_data[4], chunk_data[5], chunk_data[6], chunk_data[7]])
+                    as usize;
+            let frame_len = 4 + 4 + string_len;
+            if chunk_data.len() < frame_len {
+                return Err("truncated chunk data".into());
+            }
+            let (_, plain) = stream
+                .decrypt_chunk(Some(expected_seqnr), &chunk_data[..frame_len])
+                .map_err(|e| format!("chunk {expected_seqnr}: {e}"))?;
+            out.extend_from_slice(&plain);
+            chunk_data = &chunk_data[frame_len..];
+            expected_seqnr += 1;
+        }
+        Ok(out)
+    }
+}
+
+fn record_agent_socket_for_tests(sock: Option<&std::path::Path>) {
+    if let Some(record) = std::env::var_os("PIGGY_TEST_SOCK_RECORD") {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(record)
+        {
+            let line = sock.map(|p| p.display().to_string()).unwrap_or_default();
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
 /// `piggy box stream decrypt [file]`
 ///
 /// Reads an ebox stream (from file or stdin), unlocks it via agent/card,
@@ -170,116 +291,17 @@ fn cmd_stream_decrypt(args: &[&str]) -> i32 {
         }
     };
 
-    let mut stream = match EboxStream::from_bytes(&input) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("piggy box stream decrypt: invalid stream: {e}");
-            return 1;
-        }
-    };
-
-    // Checkpoint 3A (#32): build an AgentEcdhOracle from the agent socket
-    // if set, so unlock can hit a running piggy-agent / pivy-agent.
-    // Prefer PIGGY_AUTH_SOCK (piggy's own agent, which advertises
-    // ecdh@joyent.com) over the ambient SSH_AUTH_SOCK (an upstream
-    // agent that may not) — see #123. A missing socket is not
-    // fatal: we also try the direct-PCSC card path (#31) below. PIN unlock
-    // for the agent path is NOT done here; the user is expected to have run
-    // `ssh-add -X` externally.
-    let agent_socket = crate::agent_client::piggy_auth_sock_override()
-        .or_else(|| std::env::var_os("SSH_AUTH_SOCK"))
-        .map(PathBuf::from);
-    let mut agent_oracle: Option<crate::agent_client::AgentEcdhOracle> = match &agent_socket {
-        Some(sock) => match crate::agent_client::AgentEcdhOracle::new(sock) {
-            Ok(o) => Some(o),
-            Err(e) => {
-                tracing::warn!(
-                    "piggy box stream decrypt: failed to construct AgentEcdhOracle: {e} — \
-                     proceeding without agent"
-                );
-                None
-            }
-        },
-        None => None,
-    };
-
-    // Issue #31: build a CardEcdhOracle backed by PCSC + SSH_ASKPASS.
-    // Construction can fail if the PCSC resource manager is unreachable
-    // (no pcscd, no PCSCLITE_CSOCK_NAME); that's fine — we simply skip
-    // the card path and let the agent path carry the unlock, or surface
-    // UnlockFailed if neither is available.
-    let mut card_oracle: Option<crate::card_oracle::CardEcdhOracle> =
-        match crate::card_oracle::CardEcdhOracle::new(crate::card_oracle::askpass_pin_supplier()) {
-            Ok(o) => Some(o),
-            Err(e) => {
-                tracing::debug!(
-                    "piggy box stream decrypt: card oracle unavailable: {e} — \
-                     agent path only"
-                );
-                None
-            }
-        };
-
-    let agent_dyn: Option<&mut dyn piggy_box::oracle::EcdhOracle> = agent_oracle
-        .as_mut()
-        .map(|o| o as &mut dyn piggy_box::oracle::EcdhOracle);
-    let card_dyn: Option<&mut dyn piggy_box::oracle::EcdhOracle> = card_oracle
-        .as_mut()
-        .map(|o| o as &mut dyn piggy_box::oracle::EcdhOracle);
-
-    if let Err(e) = unlock_ebox(&mut stream.ebox, agent_dyn, card_dyn) {
-        eprintln!("piggy box stream decrypt: unlock failed: {e}");
-        return 1;
-    }
-
-    // The remaining bytes after the stream header are the chunks.
-    // Re-serialize the header to find where chunks begin.
-    let header_bytes = match stream.to_bytes() {
-        Ok(b) => b,
+    let plain = match Decryptor::from_env().decrypt(&input) {
+        Ok(p) => p,
         Err(e) => {
             eprintln!("piggy box stream decrypt: {e}");
             return 1;
         }
     };
-    let mut chunk_data = &input[header_bytes.len()..];
-
-    let mut stdout = io::stdout().lock();
-    let mut expected_seqnr: u32 = 0;
-
-    while !chunk_data.is_empty() {
-        // Each chunk frame is: u32(seqnr) + u32(len) + len bytes.
-        // Peek at the string length to compute the frame size.
-        if chunk_data.len() < 8 {
-            eprintln!("piggy box stream decrypt: truncated chunk frame");
-            return 1;
-        }
-        let string_len =
-            u32::from_be_bytes([chunk_data[4], chunk_data[5], chunk_data[6], chunk_data[7]])
-                as usize;
-        let frame_len = 4 + 4 + string_len;
-        if chunk_data.len() < frame_len {
-            eprintln!("piggy box stream decrypt: truncated chunk data");
-            return 1;
-        }
-
-        let frame = &chunk_data[..frame_len];
-        match stream.decrypt_chunk(Some(expected_seqnr), frame) {
-            Ok((_, plain)) => {
-                if let Err(e) = stdout.write_all(&plain) {
-                    eprintln!("piggy box stream decrypt: write: {e}");
-                    return 1;
-                }
-            }
-            Err(e) => {
-                eprintln!("piggy box stream decrypt: chunk {expected_seqnr}: {e}");
-                return 1;
-            }
-        }
-
-        chunk_data = &chunk_data[frame_len..];
-        expected_seqnr += 1;
+    if let Err(e) = io::stdout().lock().write_all(&plain) {
+        eprintln!("piggy box stream decrypt: write: {e}");
+        return 1;
     }
-
     0
 }
 

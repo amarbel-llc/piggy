@@ -1,24 +1,24 @@
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
+  create_test_template
 }
 
-# Helper: write a valid (mock-decryptable) ebox: mock-pivy-box's
-# `stream decrypt` runs base64 -d, so any base64 payload decodes
-# successfully.
+# Helper: write a genuine ebox encrypted to the harness card, which the
+# in-process decrypt unwraps.
 seed_ok() {
   local relpath="$1"
   local target="$PIGGY_STORE_DIR/$relpath.ebox"
   mkdir -p "$(dirname "$target")"
-  printf 'hello\n' | base64 >"$target"
+  printf 'hello\n' | "$PIGGY_IDS_REAL" encrypt "$PIGGY_STORE_DIR/piggy-ids" >"$target"
 }
 
-# Helper: write an ebox whose contents are NOT valid base64; mock
-# decrypt will exit nonzero, which is what we want for "not ok".
+# Helper: write an ebox that is not an ebox stream at all; decrypt fails
+# before any card traffic, which is what we want for "not ok".
 seed_fail() {
   local relpath="$1"
   local target="$PIGGY_STORE_DIR/$relpath.ebox"
   mkdir -p "$(dirname "$target")"
-  printf '!!!garbage-not-base64!!!\n' >"$target"
+  printf '!!!garbage-not-an-ebox!!!\n' >"$target"
 }
 
 function verify_empty_store_succeeds_with_no_output { # @test
@@ -101,8 +101,7 @@ function verify_skips_dot_git { # @test
 }
 
 function verify_follows_symlinks { # @test
-  mkdir -p "$PIGGY_STORE_DIR/elsewhere"
-  printf 'hi\n' | base64 >"$PIGGY_STORE_DIR/elsewhere/payload.ebox"
+  seed_ok elsewhere/payload
   ln -s elsewhere "$PIGGY_STORE_DIR/link"
 
   run "$PIGGY" pass verify

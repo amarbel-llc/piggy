@@ -1100,6 +1100,21 @@ test-bats-conformance-pivy-agent-hardware: build-rust
 test-bats-file *FILES: build-rust
     BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
 
+# Survey (and optionally kill) bats / fibby / piggy processes left over from
+# a wedged local bats run — a background fibby that keeps bats' fd 3 open
+# makes bats wait forever (piggy#164 harness-card bring-up). KILL=1 kills them.
+#
+# list leftover bats/fibby/piggy processes from a wedged local bats run; KILL=1 kills them
+[group('debug')]
+debug-stale-bats-procs KILL="0":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    ps -eo pid,ppid,etimes,stat,cmd | grep -E '(^|/)(bats|bats-exec|fibby|piggy) |fibby --socket|bats-exec-test' | grep -v grep || true
+    if [[ "{{KILL}}" == 1 ]]; then
+      ps -eo pid,cmd | grep -E 'bats-exec-(test|file|suite)|fibby --socket /tmp/pf\.' | grep -v grep | awk '{print $1}' | xargs -r kill
+      echo "killed"
+    fi
+
 # run the Rust test suite (cargo test), forwarding ARGS
 [group('post-build')]
 test-rust *ARGS:

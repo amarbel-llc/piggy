@@ -20,12 +20,20 @@ this page says how they work.
 	_CardEcdhOracle_ test also has a hardware mode gated on
 	_PIGGY_TEST_CARD_GUID=<guid>_.
 
-*bats over mocks*
-	_zz-tests_bats/t\*.bats_. The harness (_common.bash_) installs
-	mock _pivy-box_ / _pivy-tool_ / _piggy-ids_ helpers on PATH that
-	substitute base64 for real crypto, so no card is needed. Additional
-	per-test mocks (_mock-ssh-copy-id.sh_, _mock-cryptsetup.sh_) record
-	argv and stdin to sentinel files for assertion.
+*bats over the harness card*
+	_zz-tests_bats/t\*.bats_. The harness (_common.bash_) brings up a
+	fibby virtual card per test (see *FIBBY*) and exports
+	_PIGGY_TEST_RECIPIENT_, that card's slot-9D key, which
+	*create_test_template* writes into the store's _piggy-ids_. Encrypt
+	goes through the real _piggy-ids_ and decrypt is the in-process
+	unlock against the card, so the lane exercises genuine wire format
+	with no pcscd, agent or hardware. Only card *discovery* is mocked:
+	_mock-piggy-ids.sh_ cans *detect-pubkey* / *detect-all-pubkeys*
+	(driven by _PIGGY_TEST_DETECT_\*_) and _mock-pivy-tool.sh_ cans
+	_pivy-tool list_. Additional per-test mocks (_mock-ssh-copy-id.sh_,
+	_mock-cryptsetup.sh_, _mock-zfs.sh_) record argv and stdin to
+	sentinel files for assertion. _t0980_ pins _PIGGY_TEST_RECIPIENT_
+	against what the card reports.
 
 *bats over fibby*
 	_zz-tests_bats/conformance/\*.bats_ tagged _hardware_. fibby
@@ -83,15 +91,20 @@ path runs against it.
 *--hardware-proxy* relays a real card and keeps the wire trace; that is
 how APDU fixtures for new client code are captured.
 
-fibby also runs INSIDE the sandboxed default lane (piggy#281): the lane
-injects it as _FIBBY_BIN_, and a test loads _lib/fibby.bash_ and calls
-*fibby_up* [_seed-flags_...] from *setup()* (default seed: the RFC 5903
-slot-9D key, PIN 123456) and *fibby_down* from *teardown()*. That exports
-_PCSCLITE_CSOCK_NAME_ for the test, so real encrypt and in-process
-decrypt run with no pcscd and no _hardware_ tag. Point _SSH_ASKPASS_ at a
-*piggy_install_helper_as* copy of the test askpass: the sandbox has no
-_/usr/bin/env_ for the helper's shebang, and a failing askpass is
-indistinguishable from a card refusing the PIN.
+fibby also runs INSIDE the sandboxed default lane (piggy#281, piggy#164):
+the lane injects it as _FIBBY_BIN_, and _common.bash_ calls *fibby_up*
+(default seed: the RFC 5903 slot-9D key, PIN 123456) for every test,
+exporting _PCSCLITE_CSOCK_NAME_, _FIBBY_SOCK_ and _FIBBY_LOG_, and
+chains *fibby_down* onto the file's *teardown()* (or bats' default
+no-op), so a file needs no teardown of its own. The harness
+also points _SSH_ASKPASS_ at a *piggy_install_helper_as* copy of the test
+askpass (the sandbox has no _/usr/bin/env_ for the helper's shebang, and
+a failing askpass is indistinguishable from a card refusing the PIN) with
+_PIGGY_TEST_FIB_PIN=123456_. Set _PIGGY_TEST_CARD=none_ before loading
+_common.bash_ to opt out (the conformance harness does: those files
+spawn their own fibby); a preset _PCSCLITE_CSOCK_NAME_ is left alone.
+Outside the sandbox the harness card needs _target/debug/fibby_ (*just
+build-rust*).
 
 # PIN PROMPT SAFETY NET
 

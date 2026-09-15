@@ -12,5 +12,11 @@
 bats_load_library bats-support
 bats_load_library bats-assert
 
+# The conformance lanes spawn their own fibby (spawn_fibby on a per-test
+# socket) or run against a recipe-provided PCSCLITE_CSOCK_NAME, so opt
+# out of the parent harness's automatic per-test card (piggy#164) unless
+# a file asked for it before loading this.
+: "${PIGGY_TEST_CARD:=none}"
+
 # Load the parent harness for $PIGGY resolution.
 load "$(dirname "$BATS_TEST_FILE")/../common.bash"

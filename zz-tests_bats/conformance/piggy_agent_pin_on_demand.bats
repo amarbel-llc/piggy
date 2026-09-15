@@ -11,9 +11,9 @@
 #
 # The scenario is the slot-9D ECDH decrypt path, hardware-free over fibby:
 # seed fibby's 9D slot, start the agent WITHOUT pre-seeding a PIN, then run
-# `piggy pass show` routed at the agent via PIGGY_AUTH_SOCK. The decrypt
-# reaches the agent's ecdh-rebox handler, which — with no cached PIN —
-# must fork SSH_ASKPASS. The test askpass supplies the VirtualCard default
+# `piggy pass show` routed at the agent via PIGGY_AUTH_SOCK. The in-process
+# decrypt sends the agent an `ecdh@joyent.com` request, whose handler —
+# with no cached PIN — must fork SSH_ASKPASS. The test askpass supplies the VirtualCard default
 # PIN (123456) non-interactively, so a successful decrypt proves the
 # on-demand prompt fired and was answered.
 #
@@ -126,9 +126,9 @@ _pin_on_demand_scenario() {
     return 1
   }
 
-  # The crux: NO `ssh-add -X` here. With no cached PIN, the decrypt's rebox
-  # against the agent must trigger an on-demand SSH_ASKPASS prompt, which the
-  # test askpass answers with PIGGY_TEST_FIB_PIN.
+  # The crux: NO `ssh-add -X` here. With no cached PIN, the decrypt's ecdh
+  # request to the agent must trigger an on-demand SSH_ASKPASS prompt, which
+  # the test askpass answers with PIGGY_TEST_FIB_PIN.
   PIGGY_AUTH_SOCK="$AGENT_SOCK" PIGGY_STORE_DIR="$store" \
     run "$PIGGY_BIN" pass show foo/bar
   [[ $status -eq 0 ]] || {
@@ -140,7 +140,7 @@ _pin_on_demand_scenario() {
     tail -60 "$FIBBY_LOG" >&2 || true
     return 1
   }
-  # `run` merges pivy-box's stderr into $output; assert the secret as a line.
+  # `run` merges stderr into $output; assert the secret as a line.
   printf '%s\n' "$output" | grep -Fxq "$secret" || {
     echo "decrypt output missing the secret line '$secret'" >&2
     printf 'got:\n%s\n' "$output" >&2
@@ -190,8 +190,11 @@ function rust_piggy_agent_prompts_on_demand_and_propagates_context { # @test
   _pin_on_demand_scenario "$PIGGY_BIN" agent -A
 
   # piggy#58: unlike the C agent, the Rust agent sets PIGGY_ASKPASS_CONTEXT
-  # when it forks askpass; the test askpass echoes it into its banner.
-  grep -q "context: piggy-agent:ecdh-rebox" "$AGENT_LOG" || {
+  # when it forks askpass; the test askpass echoes it into its banner. The
+  # in-process decrypt (piggy#164) asks the agent for a plain ecdh, so the
+  # context is `piggy-agent:ecdh:<guid>` (the C pivy-box era's was
+  # `piggy-agent:ecdh-rebox`); either proves propagation.
+  grep -q "context: piggy-agent:ecdh" "$AGENT_LOG" || {
     echo "Rust agent did not propagate PIGGY_ASKPASS_CONTEXT to the askpass child" >&2
     echo "--- agent log ---" >&2
     cat "$AGENT_LOG" >&2 || true

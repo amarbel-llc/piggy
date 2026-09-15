@@ -3,10 +3,10 @@
 //! each plaintext. Print a colored `dir/name:` header before each
 //! match block.
 //!
-//! Mirrors `cmd_grep` in `src/piggy.sh:438`. The decrypt is via the
-//! same `pivy-box stream decrypt` pipeline used elsewhere; failing
-//! decrypts and grep-no-match are both swallowed silently — only
-//! actual matches produce output.
+//! Mirrors `cmd_grep` in `src/piggy.sh:438`. The decrypt is the shared
+//! in-process `Decryptor` (piggy#164); failing decrypts and
+//! grep-no-match are both swallowed silently — only actual matches
+//! produce output.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -40,9 +40,12 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
 
+    // One decryptor per walk: the PIN (card path) or agent connection is
+    // paid once for the whole store, not per entry.
+    let mut decryptor = piggy::cmd::pivy_box::Decryptor::from_env();
     let mut stdout = std::io::stdout().lock();
     for path in entries {
-        let plaintext = match decrypt(&path) {
+        let plaintext = match decrypt(&path, &mut decryptor) {
             Some(p) => p,
             None => continue,
         };
@@ -66,29 +69,12 @@ pub fn run(args: &[String]) -> i32 {
     0
 }
 
-fn decrypt(path: &std::path::Path) -> Option<Vec<u8>> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut child = Command::new("pivy-box")
-        .arg("stream")
-        .arg("decrypt")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    {
-        let mut stdin = child.stdin.take()?;
-        let mut reader = file;
-        if std::io::copy(&mut reader, &mut stdin).is_err() {
-            return None;
-        }
-    }
-    let output = child.wait_with_output().ok()?;
-    if output.status.success() {
-        Some(output.stdout)
-    } else {
-        None
-    }
+fn decrypt(
+    path: &std::path::Path,
+    decryptor: &mut piggy::cmd::pivy_box::Decryptor,
+) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    decryptor.decrypt(&bytes).ok()
 }
 
 fn grep_plaintext(plaintext: &[u8], args: &[String]) -> Option<Vec<u8>> {

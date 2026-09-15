@@ -1,41 +1,34 @@
 #!/usr/bin/env bats
 #
-# piggy#281 spike: a real card in the DEFAULT lane. fibby (the pure-Rust
-# virtual PIV card) is brought up per test on a private socket, the real
-# piggy-ids encrypts to the card's slot-9D recipient, and the Rust
-# in-process decrypt (`piggy box stream decrypt`, agentless: no agent
-# socket, CardEcdhOracle over PC/SC, PIN from the test askpass) recovers
-# the plaintext. Deliberately NOT tagged `hardware`: it must run under
-# `nix build .#bats-default`. This is the harness the Phase 1 decrypt
-# re-point (piggy#164/#154) relies on instead of the base64 mocks.
+# The harness card (piggy#281, piggy#164): common.bash brings up fibby
+# (the pure-Rust virtual PIV card) per test on a private socket and
+# exports PCSCLITE_CSOCK_NAME, so the default lane runs real crypto with
+# no pcscd, no agent and no `hardware` tag. This file pins that
+# contract: the real piggy-ids encrypts to the card's slot-9D recipient,
+# the in-process decrypt (`piggy box stream decrypt`, agentless:
+# CardEcdhOracle over PC/SC, PIN from the test askpass) recovers the
+# plaintext, and PIGGY_TEST_RECIPIENT is what the card actually reports.
 bats_require_minimum_version 1.5.0
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
-  load "$PIGGY_BATS_DIR/lib/fibby.bash"
   [[ -x ${PIGGY_IDS_REAL:-} ]] || skip "PIGGY_IDS_REAL not built"
-  # Installed copy, not the source file: the sandbox has no /usr/bin/env
-  # for the helper's shebang (the same reason common.bash copies the
-  # pivy mocks), and a silently failing askpass looks exactly like a
-  # card that refuses the PIN.
-  piggy_install_helper_as piggy-test-askpass.sh piggy-test-askpass
-  export SSH_ASKPASS="$BATS_TEST_TMPDIR/piggy-test-askpass" \
-    SSH_ASKPASS_REQUIRE=force DISPLAY="" PIGGY_TEST_FIB_PIN=123456
-  fibby_up
 }
 
-teardown() {
-  fibby_down
+function harness_recipient_constant_is_the_virtual_cards_slot_9d { # @test
+  # create_test_template writes PIGGY_TEST_RECIPIENT blind; this is the
+  # one place it is checked against the card. A fibby seed change fails
+  # here, not as a hundred "unlock failed" tests.
+  run "$PIGGY_IDS_REAL" detect-pubkey
+  assert_success
+  assert_output "$PIGGY_TEST_RECIPIENT"
 }
 
 function real_encrypt_then_agentless_in_process_decrypt_against_fibby { # @test
-  local recipient ids ebox plaintext recovered
-  recipient="$("$PIGGY_IDS_REAL" detect-pubkey)"
-  [[ $recipient == piggy-recipient-v1@pivy_ecdh_p256_pub-* ]] || fail "unexpected recipient: $recipient"
-
+  local ids ebox plaintext recovered
   ids="$BATS_TEST_TMPDIR/piggy-ids"
   ebox="$BATS_TEST_TMPDIR/secret.ebox"
-  echo "$recipient" >"$ids"
+  echo "$PIGGY_TEST_RECIPIENT" >"$ids"
   plaintext='piggy#281: real RFC 0002 ebox, decrypted in-process inside the sandbox'
   printf '%s' "$plaintext" | "$PIGGY_IDS_REAL" encrypt "$ids" >"$ebox"
 
@@ -49,11 +42,10 @@ function real_encrypt_then_agentless_in_process_decrypt_against_fibby { # @test
 }
 
 function wrong_pin_is_refused_by_the_card_not_the_harness { # @test
-  local recipient ids ebox
-  recipient="$("$PIGGY_IDS_REAL" detect-pubkey)"
+  local ids ebox
   ids="$BATS_TEST_TMPDIR/piggy-ids"
   ebox="$BATS_TEST_TMPDIR/secret.ebox"
-  echo "$recipient" >"$ids"
+  echo "$PIGGY_TEST_RECIPIENT" >"$ids"
   printf 'x' | "$PIGGY_IDS_REAL" encrypt "$ids" >"$ebox"
 
   PIGGY_TEST_FIB_PIN=000000 run env -u SSH_AUTH_SOCK -u PIGGY_AUTH_SOCK "$PIGGY" box stream decrypt <"$ebox"

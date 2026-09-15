@@ -2,10 +2,11 @@
 #
 # PIGGY_AUTH_SOCK routing (#123): `piggy pass show` should decrypt against
 # piggy's own agent socket (PIGGY_AUTH_SOCK) when set, falling back to the
-# ambient SSH_AUTH_SOCK otherwise. The mock pivy-box records the
-# SSH_AUTH_SOCK each `stream decrypt` invocation saw (PIGGY_TEST_SOCK_RECORD
-# hook), so we can assert which socket the decrypt was routed at without a
-# real agent or card.
+# ambient SSH_AUTH_SOCK otherwise. The in-process decryptor records the
+# agent socket it resolved (PIGGY_TEST_SOCK_RECORD hook), so we can assert
+# which socket the decrypt was routed at without a real agent; the
+# sentinel sockets don't exist, so the unlock then falls through to the
+# harness card and the show still succeeds.
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"

@@ -2,9 +2,9 @@
 #
 # `piggy luks` (piggy#277): the store secret's first line is the
 # passphrase handed to `cryptsetup … --key-file -` on stdin. Uses the
-# mock cryptsetup (argv + stdin recorded) and the mock pivy-box (base64
-# "encryption"), so no root, block device, or card is needed. The real
-# cryptsetup path is proven by the LUKS VM lane (`just test-vm-luks`).
+# mock cryptsetup (argv + stdin recorded) over the harness card, so no
+# root or block device is needed. The real cryptsetup path is proven by
+# the LUKS VM lane (`just test-vm-luks`).
 bats_require_minimum_version 1.5.0
 
 setup() {

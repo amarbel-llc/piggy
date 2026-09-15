@@ -30,12 +30,10 @@ function show_nonexistent_password_fails { # @test
 
 function show_recipients_flag_renders_tree { # @test
   # `pass show -r` renders the store tree with each ebox annotated by
-  # its recipients, read offline from the ebox wire header. Under the
-  # base64 mock the .ebox files are NOT real ebox wire format, so
-  # Ebox::from_bytes fails and every leaf degrades to the [?] sentinel.
-  # This asserts the native renderer runs end-to-end and degrades
-  # gracefully; the real-recipient extraction is proved in the fibby
-  # conformance lane (piggy_pass_ls_recipients_fibby.bats).
+  # its recipients, read offline from the ebox wire header (no card
+  # traffic). Every leaf names the harness card's recipient, rendered as
+  # its shortest-unique prefix; an unparseable ebox would show the [?]
+  # sentinel instead.
   "$PIGGY" pass generate etsy/jira.env 19
   "$PIGGY" pass generate top-level 19
   run "$PIGGY" pass show -r
@@ -44,7 +42,8 @@ function show_recipients_flag_renders_tree { # @test
   assert_output --partial "etsy"
   assert_output --partial "jira.env"
   assert_output --partial "top-level"
-  assert_output --partial "[?]"
+  assert_output --partial "[piggy-re"
+  refute_output --partial "[?]"
 }
 
 function show_recipients_long_flag_is_accepted { # @test

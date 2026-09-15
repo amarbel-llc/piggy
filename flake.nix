@@ -256,11 +256,10 @@
         };
 
         # Runtime deps on PATH for the wrapped piggy binary. `pivy`
-        # backs the C-pivy delegations (tool/ca/luks/zfs + the `piggy
-        # box` subcommands the rust impl doesn't cover — see
-        # crates/piggy/src/exec.rs) and the decrypt backend for
-        # `pass show` / `pass edit` / `pass generate -i` (the rust
-        # `crypt::decrypt` shells to `pivy-box stream decrypt`).
+        # backs the C-pivy delegations (`tool`, `piggy pivy <tool>`, and
+        # the `piggy box` subcommands the rust impl doesn't cover — see
+        # crates/piggy/src/exec.rs); store decrypt is in-process
+        # (piggy#164) and needs nothing from it.
         # `openssh` provides `ssh-copy-id`, which `piggy ssh-copy-id`
         # (crates/piggy/src/ssh_copy_id.rs) execs to install the 9A keys.
         runtimeDeps = [

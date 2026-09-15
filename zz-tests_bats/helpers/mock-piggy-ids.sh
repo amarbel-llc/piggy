@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Mock piggy-ids for testing without real ECDH crypto.
+# Mock piggy-ids: real crypto, canned card discovery.
 #
-# `encrypt` is mocked: stdin → base64 → stdout (so the mock pivy-box's
-# `stream decrypt` can round-trip via `base64 -d`). The piggy-ids
-# file is only checked for existence; its contents are not parsed.
+# `encrypt` is REAL: it execs the Rust binary (PIGGY_IDS_REAL, set by
+# common.bash), so eboxes are genuine wire format encrypted to whatever
+# the piggy-ids file names — the harness's virtual card, normally.
 #
-# `detect-pubkey` is mocked: tests don't have a real PIV card, so
-# emit a fixed RFC 0002 vector. PIGGY_TEST_DETECT_FAIL flips the
-# command to a failure (covers the no-card error path).
+# `detect-pubkey` is mocked: emit a fixed RFC 0002 vector without
+# enumerating cards. PIGGY_TEST_DETECT_FAIL flips the command to a
+# failure (covers the no-card error path).
 #
 # `detect-all-pubkeys` is mocked: canned tab-separated output driven
 # by env vars (matches the real binary's TAB-delimited format).
@@ -25,28 +25,14 @@
 # Tests that assert output ORDER (not content) should pre-sort
 # their env-var lines by GUID hex to match the real binary.
 #
-# `validate`, `canonicalize`, `diff` are delegated to the real
-# piggy-ids Rust binary (PIGGY_IDS_REAL, set by common.bash) so the
-# recipients-flow tests exercise real validation logic.
+# `validate`, `canonicalize`, `diff` are delegated to the real binary
+# as well, so the recipients-flow tests exercise real validation logic.
 
 set -euo pipefail
 
 case "${1:-}" in
-  encrypt)
-    ids="${2:-}"
-    [[ -f $ids ]] || {
-      echo "mock-piggy-ids: piggy-ids not found: $ids" >&2
-      exit 1
-    }
-    # Mirror the real binary's age-recipient rejection so bats tests
-    # can exercise the bash-level error path. Real piggy-ids encrypt
-    # surfaces BoxError::UnsupportedRecipientFormat for any
-    # age_x25519_pub recipient until piggy RFC 0004 lands.
-    if grep -q '@age_x25519_pub-\|^age_x25519_pub-' "$ids"; then
-      echo "recipient format AgeX25519Pub not yet wired into the encrypt pipeline" >&2
-      exit 1
-    fi
-    base64
+  encrypt | validate | canonicalize | diff)
+    exec "${PIGGY_IDS_REAL:-piggy-ids}" "$@"
     ;;
   detect-pubkey)
     if [[ -n ${PIGGY_TEST_DETECT_FAIL:-} ]]; then
@@ -82,9 +68,6 @@ case "${1:-}" in
       }
       printf 'unsupported\t%s\t%s\n' "${guid^^}" "$reason"
     done <<<"${PIGGY_TEST_DETECT_ALL_UNSUPPORTED:-}"
-    ;;
-  validate | canonicalize | diff)
-    exec "${PIGGY_IDS_REAL:-piggy-ids}" "$@"
     ;;
   *)
     echo "mock-piggy-ids: unknown command: ${1:-}" >&2

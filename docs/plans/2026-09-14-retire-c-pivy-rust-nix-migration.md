@@ -21,7 +21,7 @@ and well-bounded:
 
 | Surface | Today | Fate |
 |---|---|---|
-| store decrypt (`show`/`edit`/`generate -i`/`grep`/`verify`/re-encrypt walk) | spawns C `pivy-box stream decrypt` | port in-process (#164) |
+| store decrypt (`show`/`edit`/`generate -i`/`grep`/`verify`/re-encrypt walk) | ~~spawns C `pivy-box stream decrypt`~~ in-process `Decryptor` since 2026-09-15 | ~~port in-process (#164)~~ done |
 | `piggy box` residual (`tpl edit`, `key *`, `challenge *`, interactive modes) | falls back to C `pivy-box` | drop (#165) |
 | `piggy tool` | exec C `pivy-tool` | port the subset piggy needs |
 | `piggy ca` / `luks` / `zfs` | exec binaries nix never builds (#265) | delete the dead exec arms now; re-land each as a Rust command (Phase 3b), `luks` first |
@@ -81,10 +81,7 @@ rewrite. fibby models none of INS 2C/FB/FE/FA/F7 either.
 
 | Site | What it runs |
 |---|---|
-| `crates/piggy/src/crypt.rs:92` | `pivy-box stream decrypt` |
-| `crates/piggy/src/reencrypt.rs:388` | `pivy-box stream decrypt` |
-| `crates/piggy/src/verify.rs:78` | `pivy-box stream decrypt -b` |
-| `crates/piggy/src/grep.rs:71` | `pivy-box stream decrypt` |
+| ~~`crypt.rs` / `reencrypt.rs` / `verify.rs` / `grep.rs`~~ | ~~`pivy-box stream decrypt`~~ — **done**: in-process `cmd::pivy_box::Decryptor` (#164/#154) |
 | `crates/piggy/src/main.rs:707-709` | `pivy-box` for anything `cmd::pivy_box::run` returns `None` on |
 | `crates/piggy/src/main.rs:711-717` | `pivy-tool`, `pivy-ca`, `pivy-luks`, `pivy-zfs`, `pivy-<tool>` |
 
@@ -106,9 +103,11 @@ key), `age_plugin_piggy_fibby.bats` and several others that set
 `PIVY_AGENT`. Plus about twenty `debug-*`/`explore-*` justfile recipes
 and the `pivy` output exported from `flake.nix` for the hardware lanes.
 
-The `bats-default` sandboxed lane uses `helpers/mock-pivy-box.sh`
-(base64) intercepted by PATH. Moving decrypt in-process (#164) breaks
-that interception; the lane needs a new strategy (Phase 1).
+The `bats-default` sandboxed lane used `helpers/mock-pivy-box.sh`
+(base64) intercepted by PATH. Moving decrypt in-process (#164) broke
+that interception; the lane now runs fibby inside the sandbox per test
+(`common.bash` → `fibby_up`, #281) with real encrypt and real decrypt.
+The mock is gone.
 
 ### C sizes, for effort estimation (lines, `vendor/pivy/src`)
 
@@ -240,6 +239,19 @@ Test strategy (this phase sets the pattern for the rest):
    hardware. This is reused in Phase 3.
 
 Effort: two merge cycles (one for the spike, one for the port).
+
+**Status 2026-09-15: port landed.** `cmd::pivy_box::Decryptor` is the
+one decrypt path (`crypt::decrypt`, `grep`, `verify`, `reencrypt_one`,
+`piggy box stream decrypt`); a walk shares one `Decryptor` so the agent
+connection and the card PIN are paid once. `verify -b` has no
+equivalent: there is no agent-only mode, a no-prompt run is
+`SSH_ASKPASS_REQUIRE=never`. The `PIGGY_TEST_SOCK_RECORD` hook moved
+into the Rust decryptor. The default lane now runs the harness card
+for every test (`common.bash` → `fibby_up`), `mock-pivy-box.sh` is
+deleted, and `mock-piggy-ids.sh encrypt` execs the real binary — only
+card discovery stays canned. `pass git init`'s textconv is `piggy box
+stream decrypt`. Items 2 (differential corpus) and 4 (`fibby ctl
+fault`, #284) remain open.
 
 ### Phase 2: `piggy box` residual (#165)
 

@@ -29,7 +29,9 @@ use std::process::Command;
 use crate::git_ops::{add_and_commit, git_at, is_inside_work_tree};
 use crate::store::store_root;
 
-const PIGGY_DIFF_TEXTCONV: &str = "pivy-box stream decrypt";
+// piggy's own in-process decrypt (piggy#164): git appends the blob's
+// temp path, which `piggy box stream decrypt [file]` accepts.
+const PIGGY_DIFF_TEXTCONV: &str = "piggy box stream decrypt";
 
 /// Exit code conventions:
 /// - 0: success (including a passthrough that exits 0)

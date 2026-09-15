@@ -352,11 +352,12 @@ function pivy_agent_against_empty_fibby_serves_repeated_probes { # @test
 #
 # Drives the FULL piggy decrypt path: `pass init` (auto-detect the slot-9D
 # recipient) + `pass insert` (encrypt) against fibby directly, then
-# `pass show` routed at the agent via PIGGY_AUTH_SOCK. The wrapped piggy
-# (.#default, PIGGY_BIN) carries the real pivy-box + piggy-ids, so the mock
-# crypto common.bash puts on PATH is bypassed. Legitimately PIN-gated (slot-9D
-# unlock during the rebox), so it supplies the VirtualCard PIN via the test
-# askpass — like the slot-9A sign test, the only other PIN-reaching test here.
+# `pass show` routed at the agent via PIGGY_AUTH_SOCK (the in-process
+# decrypt asks the C agent for a plain `ecdh@joyent.com`, piggy#164; the
+# rebox path this test was written for is what `piggy pivy box` still
+# exercises). Legitimately PIN-gated (slot-9D unlock), so it supplies the
+# VirtualCard PIN via the test askpass — like the slot-9A sign test, the
+# only other PIN-reaching test here.
 function piggy_rebox_decrypts_via_seeded_fibby_slot_9d { # @test
   [[ -n ${PIGGY_BIN:-} && -x ${PIGGY_BIN:-/nonexistent} ]] ||
     skip "PIGGY_BIN unset or not executable; run via just test-bats-conformance-fibby-pivy-agent-smoke"
@@ -390,8 +391,8 @@ function piggy_rebox_decrypts_via_seeded_fibby_slot_9d { # @test
     return 1
   }
 
-  # The decrypt routes through pivy-box stream decrypt -> piv_box_open_agent
-  # rebox against the agent. Pre-fix this SIGABRTed the agent (-> -26 here).
+  # The decrypt's ECDH is answered by the agent (which unlocks the card on
+  # demand). Pre-fix the rebox flavour SIGABRTed the agent (-> -26 here).
   PIGGY_AUTH_SOCK="$AGENT_SOCK" PIGGY_STORE_DIR="$store" \
     run "$PIGGY_BIN" pass show foo/bar
   [[ $status -eq 0 ]] || {
@@ -403,9 +404,8 @@ function piggy_rebox_decrypts_via_seeded_fibby_slot_9d { # @test
     tail -60 "$FIBBY_LOG" >&2 || true
     return 1
   }
-  # `run` merges pivy-box's stderr ("Using key ... in ssh-agent...") into
-  # $output, so assert the decrypted secret appears as its own line rather
-  # than equalling the whole capture.
+  # `run` merges stderr into $output, so assert the decrypted secret
+  # appears as its own line rather than equalling the whole capture.
   printf '%s\n' "$output" | grep -Fxq "$secret" || {
     echo "decrypt output missing the secret line '$secret'" >&2
     printf 'got:\n%s\n' "$output" >&2

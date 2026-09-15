@@ -2,9 +2,9 @@
 #
 # `piggy zfs` (piggy#279): the store secret's first line is the passphrase
 # handed to `zfs … -o keylocation=prompt` / `zfs load-key -L prompt` on
-# stdin. Uses the mock zfs (argv + stdin recorded) and the mock pivy-box,
-# so no root, pool, or card is needed. The real zfs path is proven by the
-# ZFS VM lane (`just test-vm-zfs`).
+# stdin. Uses the mock zfs (argv + stdin recorded) over the harness card,
+# so no root or pool is needed. The real zfs path is proven by the ZFS VM
+# lane (`just test-vm-zfs`).
 bats_require_minimum_version 1.5.0
 
 setup() {

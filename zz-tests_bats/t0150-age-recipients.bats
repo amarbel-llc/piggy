@@ -1,12 +1,14 @@
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
+  # The pivy recipient is the harness card's slot-9D key, so the inserts
+  # below encrypt to something the in-process decrypt can unwrap.
+  PIVY_RECIPIENT="$PIGGY_TEST_RECIPIENT"
 }
 
-# Markl IDs sourced from piggy-markl's canonical RFC 0002 test
+# Age markl IDs sourced from piggy-markl's canonical RFC 0002 test
 # vectors (crates/piggy-markl/testdata/0002-markl-id-format-vectors.json).
 # Each format has its own blech32 checksum binding the format-id and
 # payload, so encoded suffixes are NOT interchangeable across formats.
-PIVY_RECIPIENT="piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu"
 AGE_RECIPIENT_BARE="age_x25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0scveleg"
 AGE_RECIPIENT_TAGGED="piggy-recipient-v1@age_x25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0scveleg"
 
@@ -41,9 +43,8 @@ function piggy_ids_canonicalize_accepts_mixed_recipients { # @test
 }
 
 function pass_insert_into_age_only_store_emits_unsupported_error { # @test
-  # piggy_encrypt sees an age-only piggy-ids, mock-piggy-ids exits
-  # with the UnsupportedRecipientFormat error the real binary would
-  # emit. The error reaches stderr.
+  # piggy_encrypt sees an age-only piggy-ids; the real piggy-ids exits
+  # with its UnsupportedRecipientFormat error. The error reaches stderr.
   #
   # IMPORTANT: today the encrypt failure does NOT propagate to a
   # nonzero exit because piggy.sh's cmd_insert pipelines
@@ -55,7 +56,7 @@ function pass_insert_into_age_only_store_emits_unsupported_error { # @test
   init_test_git
   printf '%s\n' "$AGE_RECIPIENT_TAGGED" >"$PIGGY_STORE_DIR/piggy-ids"
   run bash -c "echo secret | '$PIGGY' pass insert -e age-only-cred 2>&1"
-  assert_output --partial "AgeX25519Pub not yet wired"
+  assert_output --partial "age_x25519_pub not yet wired"
   assert_output --partial "Encryption aborted"
 }
 
@@ -72,7 +73,7 @@ function pass_insert_into_mixed_store_emits_unsupported_error { # @test
 		$AGE_RECIPIENT_TAGGED
 		_EOF
   run bash -c "echo secret | '$PIGGY' pass insert -e mixed-cred 2>&1"
-  assert_output --partial "AgeX25519Pub not yet wired"
+  assert_output --partial "age_x25519_pub not yet wired"
   assert_output --partial "Encryption aborted"
 }
 
@@ -80,20 +81,19 @@ function pass_recipients_add_age_into_pivy_store_reencrypt_emits_error { # @test
   # `recipients add` flow:
   #   1. canonicalize candidate piggy-ids — accepts age line
   #   2. install candidate over PIGGY_IDS
-  #   3. reencrypt_path → piggy_encrypt → mock detects age → fails
+  #   3. reencrypt walk → in-process decrypt (card) → piggy-ids encrypt
+  #      rejects the age part → that point is `not ok`
   #
-  # reencrypt_path (piggy.sh:101) is `pivy-box stream decrypt |
-  # piggy-ids encrypt >$tmp && mv || rm` — same pipeline-exit-status
-  # bug as cmd_insert (see amarbel-llc/piggy#98): the encrypt error
-  # is on stderr but the function continues, the command exits 0,
-  # and the existing .ebox is left unchanged.
+  # The encrypt error is on stderr, the walk continues, and the
+  # existing .ebox is left unchanged (the tmp is discarded).
   init_test_git
   printf '%s\n' "$PIVY_RECIPIENT" >"$PIGGY_STORE_DIR/piggy-ids"
   echo "secret" | "$PIGGY" pass insert -e existing-cred
   assert [ -e "$PIGGY_STORE_DIR/existing-cred.ebox" ]
 
   run "$PIGGY" pass recipients add "$AGE_RECIPIENT_BARE"
-  assert_output --partial "AgeX25519Pub not yet wired"
+  assert_output --partial "age_x25519_pub not yet wired"
+  assert_output --partial "not ok 1 - existing-cred"
 
   # piggy-ids did get updated (step 2 completed before reencrypt failed).
   run grep -F "$AGE_RECIPIENT_TAGGED" "$PIGGY_STORE_DIR/piggy-ids"

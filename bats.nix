@@ -28,7 +28,7 @@
   bats-libs,
   # The UNWRAPPED rust dispatcher (piggy-rs from flake.nix). Tests
   # need the unwrapped binary so that PATH overrides from
-  # zz-tests_bats/helpers/ (mock-pivy-box.sh etc.) win over what
+  # zz-tests_bats/helpers/ (mock-pivy-tool.sh etc.) win over what
   # the rust handlers try to invoke; the wrapped piggy injects pivyPkg
   # + git via makeWrapper's `--prefix PATH`, which beats every prefix
   # the bats setup can add.
@@ -123,16 +123,15 @@ let
         # (placed at the front of $PATH by common.bash).
       };
       nativeBuildInputs = [
-        # The bats helpers (mock-pivy-box.sh / mock-pivy-tool.sh /
-        # mock-piggy-ids.sh) and the rust handlers' callouts shell out
-        # to these directly; without them on PATH the sandboxed tests
-        # get cryptic "<tool>: command not found" errors. pivy-* are
-        # NOT here on purpose — the mock symlinks must win.
+        # The bats helpers (mock-pivy-tool.sh / mock-piggy-ids.sh) and
+        # the rust handlers' callouts shell out to these directly;
+        # without them on PATH the sandboxed tests get cryptic "<tool>:
+        # command not found" errors. pivy-* are NOT here on purpose —
+        # the mock symlinks must win.
         #
-        # `openssl` survives as a transitive dep of the mock helpers
-        # (mock-pivy-box.sh uses base64 / openssl for its faux
-        # encryption). Keeping it in the closure on both platforms is
-        # cheap and avoids a platform split here.
+        # `openssl` is used by tests that inspect keys/signatures
+        # (e.g. the agent conformance files). Keeping it in the closure
+        # on both platforms is cheap and avoids a platform split here.
         pkgs.bash
         pkgs.coreutils
         pkgs.git

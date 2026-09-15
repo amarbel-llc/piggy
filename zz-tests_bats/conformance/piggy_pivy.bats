@@ -19,7 +19,7 @@ bats_require_minimum_version 1.5.0
 #
 # All tests go through the top-level rust `piggy` dispatcher (the bats
 # parent `common.bash` resolves `$PIGGY` to `target/debug/piggy` and
-# symlinks mock pivy-tool / pivy-box into the test PATH).
+# installs the mock pivy-tool into the test PATH).
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"

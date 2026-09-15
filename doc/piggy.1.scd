@@ -234,8 +234,10 @@ passthroughs for the C pivy binaries:
 	Decrypt every ebox file under the store (or the specified
 	_subpath_ within it) and emit a tree-decorated ok/not-ok report
 	mirroring the *tree*(1) layout used by *pass ls*. Each ebox is
-	tested by spawning *pivy-box stream decrypt -b*, which exercises
-	the full unlock path without writing plaintext to disk.
+	unlocked and decrypted in process (agent first, then a local card),
+	which exercises the full unlock path without writing plaintext to
+	disk; the shared unlock caches the PIN, so an agentless verify
+	prompts at most once per card.
 
 	The walk is sequential by design — PIV-card serialization makes
 	parallelism a non-win and the simple model is easier to reason
@@ -318,7 +320,8 @@ passthroughs for the C pivy binaries:
 	_git-command-args_ is *init*, in addition to initializing the git
 	repository, add the current contents of the password store to the
 	repository in an initial commit and configure _.gitattributes_ so that
-	*git-diff*(1) can display decrypted content via *pivy-box*(1) textconv.
+	*git-diff*(1) can display decrypted content via a *piggy box stream
+	decrypt* textconv.
 	If the git config key _piggy.signcommits_ is set to _true_, then all
 	commits will be signed using the default git signing key. This config key
 	may be turned on using: *piggy pass git config --bool --add piggy.signcommits true*
@@ -805,7 +808,9 @@ _PIGGY_GETOPT_
 	getopt is provided on PATH.
 
 _PIGGY_AUTH_SOCK_
-	SSH-agent socket used for PIV decrypt (*pivy-box stream decrypt*). When
+	SSH-agent socket used for PIV decrypt (the in-process unlock behind
+	*pass show*, *edit*, *grep*, *verify*, the re-encryption walk and
+	*piggy box stream decrypt*). When
 	set and non-empty, it overrides _SSH_AUTH_SOCK_ for piggy's own decrypts
 	only; when unset, piggy uses _SSH_AUTH_SOCK_. Use it to route decrypts at
 	a piggy-agent that advertises the _ecdh@joyent.com_ extension rather than

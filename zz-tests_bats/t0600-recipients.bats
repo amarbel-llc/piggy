@@ -1,16 +1,18 @@
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   init_test_git
+  # PRIMARY is the harness card's own slot-9D key, so inserts encrypt to
+  # something the in-process decrypt can unwrap.
+  RECIPIENT_PRIMARY="$PIGGY_TEST_RECIPIENT"
   "$PIGGY" pass init -k "$RECIPIENT_PRIMARY"
 }
 
-# Two real markl IDs minted from RFC 0002 vectors. PRIMARY is the
-# canonical pivy_ecdh_p256_pub/non_trivial vector pinned by the
-# fixture at madder fd53684. SECONDARY is generated from
-# pivy_pubkey_payload() in piggy-markl tests (a deterministic 33-byte
-# SEC1-compressed point).
-RECIPIENT_PRIMARY="piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu"
-RECIPIENT_SECONDARY="piggy-recipient-v1@pivy_ecdh_p256_pub-qvqq6x38x3q5ukmgwkpgl89fkmpaph027uzpz83t8pz4yhmv0xrfxgs3lef"
+# SECONDARY is the P-256 generator point as a recipient (the same point
+# t0800's 9A SSH-auth ID carries, in the 9D format): a valid curve point
+# nobody holds the private half of, so the store can encrypt to it (the
+# real piggy-ids rejects an off-curve point) but only the harness card
+# can decrypt.
+RECIPIENT_SECONDARY="piggy-recipient-v1@pivy_ecdh_p256_pub-qd43050juykyy3lchnnw2caygre8wqmasyk7kvaq7jsnj3wcnrpfve2jwdn"
 WRONG_FORMAT="sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6"
 
 function recipients_list_prints_recipients { # @test
@@ -20,7 +22,7 @@ function recipients_list_prints_recipients { # @test
 }
 
 function recipients_add_appends_canonical_form { # @test
-  local bare="pivy_ecdh_p256_pub-qvqq6x38x3q5ukmgwkpgl89fkmpaph027uzpz83t8pz4yhmv0xrfxgs3lef"
+  local bare="${RECIPIENT_SECONDARY#piggy-recipient-v1@}"
   run "$PIGGY" pass recipients add "$bare"
   assert_success
   run cat "$PIGGY_STORE_DIR/piggy-ids"
@@ -83,19 +85,18 @@ function recipients_sync_rejects_wrong_format { # @test
 
 function recipients_sync_no_file_reencrypts_whole_store { # @test
   # No <file>: re-encrypt every ebox to the recipients already in piggy-ids.
-  # The base64 mock round-trips bit-identically, so this asserts the dispatch
-  # path succeeds and the plaintext survives. The real-crypto proof (ciphertext
-  # actually re-encrypted, decryptable via the card, commit landed) lives in
+  # Both eboxes already encrypt to exactly that set, so the walk's offline
+  # recipients-match check SKIPs each point without touching the card. The
+  # rewrite-and-commit proof for a changed set lives in
   # zz-tests_bats/conformance/piggy_recipients_sync_fibby.bats.
   echo "secret-one" | "$PIGGY" pass insert -e foo/bar
   echo "secret-two" | "$PIGGY" pass insert -e baz
   run "$PIGGY" pass recipients sync
   assert_success
   # The walk emits a TAP-14 stream: version + a 1..2 plan (one point per ebox).
-  # The base64 mock isn't real ebox wire format, so the recipients-match SKIP
-  # never fires here (it parses real eboxes only); every point is a plain `ok`.
   assert_output --partial "TAP version 14"
   assert_output --partial "1..2"
+  assert_output --partial "# SKIP recipients already current"
   run "$PIGGY" pass show foo/bar
   assert_success
   assert_output --partial "secret-one"
@@ -109,10 +110,9 @@ function recipients_sync_no_file_follows_symlink_into_external_dir { # @test
   # symlink pointing at an ebox that lives OUTSIDE the store (an rcm
   # checkout). reencrypt must follow the link, rewrite the real target,
   # and leave the link in place — not skip it (the old behavior, which
-  # made `recipients sync` a no-op on such stores). The base64 mock
-  # round-trips bit-identically, so this proves the link survives and
-  # the target still decrypts; the real-crypto re-encrypt proof lives in
-  # the fibby conformance lane.
+  # made `recipients sync` a no-op on such stores). This proves the link
+  # survives and the target still decrypts; the changed-recipient-set
+  # rewrite proof lives in the fibby conformance lane.
   local ext="$BATS_TEST_TMPDIR/external-store"
   mkdir -p "$ext"
   # Create the real ebox inside the store, then relocate it outside and
@@ -176,10 +176,9 @@ function recipients_sync_no_file_with_p_scopes { # @test
 }
 
 function recipients_add_commits_piggy_ids_change { # @test
-  # `add` lands a commit for the piggy-ids change. Under real
-  # crypto a second commit lands for the reencryption pass too, but
-  # the bats mock's base64 round-trips bit-identically so re-encryption
-  # is a content no-op that git won't commit.
+  # `add` lands a commit for the piggy-ids change and a second one for
+  # the re-encryption pass (the ebox now carries a second recipient part,
+  # so its bytes change). The entry must still decrypt via the card.
   echo "secret content" | "$PIGGY" pass insert -e folder/cred1
   local before_sha
   before_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
@@ -188,8 +187,12 @@ function recipients_add_commits_piggy_ids_change { # @test
   local after_sha
   after_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
   [[ $before_sha != "$after_sha" ]] || fail "expected a new commit after recipients add"
-  run git -C "$PIGGY_STORE_DIR" log -1 --pretty=%s
-  assert_output --partial "Add recipient(s) to piggy-ids."
+  run git -C "$PIGGY_STORE_DIR" log --pretty=%s
+  assert_line --index 0 "Reencrypt password store after adding recipient(s)."
+  assert_line --index 1 "Add recipient(s) to piggy-ids."
+  run "$PIGGY" pass show folder/cred1
+  assert_success
+  assert_output "secret content"
 }
 
 function recipients_add_invalid_id_does_not_corrupt_piggy_ids { # @test

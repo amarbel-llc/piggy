@@ -10,17 +10,14 @@
 //!   piping plaintext on stdin and writing the ebox to a file. Mirrors
 //!   bash `piggy_encrypt() { "${PIGGY_IDS_PATH:-piggy-ids}" encrypt
 //!   "$piggy_ids" >"$outfile" || die "Encryption aborted."; }`.
-//! - [`decrypt`] shells to **`pivy-box stream decrypt`** directly (NOT
-//!   through piggy-ids — same as the bash) with the ebox piped on stdin
-//!   and stdout captured into a Vec<u8>. Honors `PIGGY_AUTH_SOCK` per
-//!   #123: when set and non-empty, the child sees `SSH_AUTH_SOCK =
-//!   PIGGY_AUTH_SOCK`, so piggy's decrypts always go through piggy's
-//!   own agent (which advertises `ecdh@joyent.com`) rather than through
-//!   a mux that may not. The canonical resolver lives in the lib crate
-//!   at `piggy::agent_client::piggy_auth_sock_override`.
+//! - [`decrypt`] runs **in process** through the Rust ebox unlock
+//!   (`piggy::cmd::pivy_box::Decryptor`, piggy#164/#154): agent oracle
+//!   from `PIGGY_AUTH_SOCK` (preferred, #123) else `SSH_AUTH_SOCK`, and
+//!   the direct-PCSC card oracle with the askpass PIN. The C `pivy-box`
+//!   subprocess the bash `piggy_decrypt` spawned is gone.
 //!
 //! Plaintext never crosses argv; stderr is inherited so user-facing
-//! pivy-box / piggy-ids diagnostics still surface.
+//! piggy-ids diagnostics still surface.
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -77,48 +74,14 @@ pub(crate) fn encrypt(
     Ok(())
 }
 
-/// Decrypt `infile` and return the plaintext bytes. Spawns
-/// `pivy-box stream decrypt` with the ebox file piped on stdin and
-/// captures stdout.
-///
-/// PIGGY_AUTH_SOCK (#123): if set and non-empty, override
-/// `SSH_AUTH_SOCK` for the child so piggy's decrypts hit piggy-agent
-/// (which advertises `ecdh@joyent.com`) rather than an upstream agent
-/// that may not.
+/// Decrypt `infile` and return the plaintext bytes, in process
+/// (piggy#164/#154): the ebox stream is unlocked through the agent named
+/// by `PIGGY_AUTH_SOCK` / `SSH_AUTH_SOCK` (#123) or directly against a
+/// local card with the askpass PIN, then its chunks are decrypted. No C
+/// `pivy-box` subprocess is involved; see [`piggy::cmd::pivy_box::Decryptor`].
 pub(crate) fn decrypt(infile: &Path) -> Result<Vec<u8>, String> {
-    let input =
-        std::fs::File::open(infile).map_err(|err| format!("open {}: {err}", infile.display()))?;
-
-    let mut cmd = Command::new("pivy-box");
-    cmd.arg("stream")
-        .arg("decrypt")
-        .stdin(input)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-
-    if let Some(sock) = piggy::agent_client::piggy_auth_sock_override() {
-        cmd.env("SSH_AUTH_SOCK", sock);
-    }
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| format!("spawn pivy-box: {err}"))?;
-
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "pivy-box stdout unavailable".to_string())?;
-
-    let mut out = Vec::new();
-    std::io::copy(&mut stdout, &mut out).map_err(|err| format!("read pivy-box stdout: {err}"))?;
-
-    let status = child
-        .wait()
-        .map_err(|err| format!("wait pivy-box: {err}"))?;
-    if !status.success() {
-        return Err(format!("pivy-box stream decrypt exited {status}"));
-    }
-    Ok(out)
+    let input = std::fs::read(infile).map_err(|err| format!("open {}: {err}", infile.display()))?;
+    piggy::cmd::pivy_box::Decryptor::from_env().decrypt(&input)
 }
 
 /// Decrypt the store entry `pass_name` and return its first line without

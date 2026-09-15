@@ -68,7 +68,9 @@ fibby_up() {
   if [[ $# -eq 0 ]]; then
     set -- --seed-rfc5903-slot-9d-cert
   fi
-  spawn_fibby "$@" || fail "fibby did not come up"
+  # fd 3 is bats' own output channel; a child that inherits it keeps bats
+  # waiting after the test, so the card never gets it.
+  spawn_fibby "$@" 3>&- || fail "fibby did not come up"
   export PCSCLITE_CSOCK_NAME="$FIBBY_SOCK"
 }
 
