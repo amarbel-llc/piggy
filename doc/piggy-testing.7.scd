@@ -110,6 +110,36 @@ When a test builds an ebox template part, name it
 _piggy-test:<short-context>_ so an escaped prompt's "token (partname)"
 line is obviously a test.
 
+# THROWAWAY CARD GUARD
+
+Anything that writes to a real card — factory reset, key import,
+set-admin, PIN/PUK changes, a PIN verify that could consume a retry —
+must first pass _zz-tests_bats/helpers/piggy-throwaway-guard.sh_
+(piggy#286): *--guid* _HEX_ [*--serial* _N_], or *--probe* to identify
+the single inserted card through _pivy-tool list_, falling back to
+*ykman list --serials* for the serial when the PIV applet reports none
+and ykman is on PATH. In a bats lane, load
+_lib/hardware.bash_ and call *require_throwaway_card* _GUID_ [_SERIAL_],
+which fails the test loudly before any writing APDU.
+
+The allowlists live in the operator's environment, never in the repo:
+
+_PIGGY_TEST_THROWAWAY_SERIALS_
+	Space-separated YubiKey serials.
+
+_PIGGY_TEST_THROWAWAY_GUIDS_
+	Space-separated CHUID GUIDs, for cards that report no serial (older
+	YubiKey 4 firmware, piggy#256).
+
+A card that reports a serial is judged by the serial alone, even if its
+GUID is listed: a re-provisioned throwaway keeps its serial but rolls its
+GUID, and a production card must never inherit a stale GUID entry. A
+card with no serial is judged by GUID. With neither variable set every
+card is refused. The recipes _debug-yk-throwaway-reset_,
+_debug-yk-throwaway-import-rfc6979_ and _explore-rust-card-unlock-hw_
+call the guard; the Phase 3 hardware lanes of the C-pivy retirement
+(piggy#289) will too.
+
 # PC/SC IN THE SANDBOX
 
 A bats recipe whose tests talk to pcscd runs under batman with

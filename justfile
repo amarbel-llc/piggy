@@ -2728,6 +2728,10 @@ explore-rust-card-unlock-hw guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456"
     pub="$tmpdir/9d.pub"
 
     echo "=== pre-flight: throwaway $guid present + single PIN check ==="
+    # piggy#286: verifies the PIN on the card (consumes a retry on a wrong
+    # PIN), so the card must be an allowlisted throwaway.
+    serial="$("$pivy_tool" -g "$guid" list 2>/dev/null | awk '/serial:/ {print $2; exit}')"
+    bash zz-tests_bats/helpers/piggy-throwaway-guard.sh --guid "$guid" ${serial:+--serial "$serial"} || exit 1
     "$pivy_tool" -g "$guid" pubkey 9d >"$pub" 2>/dev/null || { echo "no 9d key on $guid"; exit 1; }
     if ! "$pivy_tool" -g "$guid" -P "$pin" ecdh 9d <"$pub" >/dev/null 2>&1; then
       echo "REFUSING: PIN/ECDH check failed on $guid slot 9d. NOT running."; exit 1
@@ -2763,8 +2767,18 @@ debug-list-piv-cards:
     # Pull each GUID from the list output and query its serial individually.
     "$pivy_tool" list 2>/dev/null | awk '/guid:/ {print $2}' | while read -r g; do
       serial="$("$pivy_tool" -g "$g" list 2>/dev/null | awk '/serial:/ {print $2; exit}')"
-      printf '  guid %s  serial %s\n' "$g" "${serial:-<not reported>}"
+      printf '  guid %s  serial %s\n' "$g" "${serial:-<not reported by the PIV applet>}"
     done
+    # Older YubiKey 4 firmware never answers the 0xF8 probe; ykman reads the
+    # serial over the management interface instead (piggy#286).
+    if command -v ykman >/dev/null 2>&1; then
+      echo
+      echo "=== ykman list --serials (management interface; the fallback for a serial-less YK4) ==="
+      ykman list --serials 2>/dev/null || echo "  (ykman saw no device)"
+    else
+      echo
+      echo "  ykman not on PATH; for a YK4 that reports no serial above, run: nix run nixpkgs#yubikey-manager -- list --serials"
+    fi
 
 # DIAGNOSTIC (piggy#56) — hold an SCardBeginTransaction lock on the card at
 # <guid> for <secs>s via the piggy-piv hold_lock example, so a co-resident
@@ -3065,6 +3079,11 @@ debug-yk-throwaway-reset:
       echo "this recipe is hard-coded for the throwaway YK4; primary YK5 must be swapped out" >&2
       exit 1
     fi
+    # piggy#286: the inserted card must be on the operator's throwaway
+    # allowlist (environment), identified by pivy-tool; the firmware check
+    # above is only a coarse second line.
+    PIVY_TOOL="$(nix build .#pivy --no-link --print-out-paths)/bin/pivy-tool" \
+      bash zz-tests_bats/helpers/piggy-throwaway-guard.sh --probe || exit 1
     echo "Pre-reset: firmware=$version serial=$serial"
     echo
     echo "=== Blocking PIN with 3 wrong attempts ==="
@@ -3107,6 +3126,9 @@ debug-yk-throwaway-import-rfc6979:
       echo "ERROR: refusing to import — firmware '$version' is not 4.x" >&2
       exit 1
     fi
+    # piggy#286: destructive (overwrites 9D) — allowlisted throwaway only.
+    PIVY_TOOL="$(nix build .#pivy --no-link --print-out-paths)/bin/pivy-tool" \
+      bash zz-tests_bats/helpers/piggy-throwaway-guard.sh --probe || exit 1
     pem="crates/fibby/tests/fixtures/test-vectors/rfc6979-a-2-5-priv.pem"
     if [[ ! -f "$pem" ]]; then
       echo "ERROR: test-vector PEM not found: $pem" >&2
