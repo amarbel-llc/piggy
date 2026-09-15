@@ -389,8 +389,26 @@ and the differential test would (correctly) reject it. So `list` and
 `pinfo` are DEFERRED and scoped on their own later; the port proceeds to
 the cleanly-differentiable ops instead. `version` is likewise deferred
 (it would print piggy's version, not pivy's — not a differential
-contract). Next: 3.2 (PIN/PUK) and 3.5 (`sign`/`ecdh`), which fibby
-exercises fully.
+contract).
+
+**Milestone 3.5 landed (`sign`, `ecdh`), taken before 3.2.** These are
+the cleanest differential targets — non-destructive, no new fibby INS,
+crisp byte outputs — so they went first. `sign <slot>` hashes stdin
+(SHA-256 for P-256, SHA-384 for P-384) and ECDSA-signs the digest,
+writing the card's raw DER signature (matches C `piv_sign` + `fwrite`);
+`ecdh <slot>` reads an OpenSSH pubkey from stdin and writes the raw
+shared secret (matches C `piv_ecdh` + `fwrite`). Both reuse
+`PinSession::{verify_pin,sign_prehash,ecdh_derive}`; the PIN comes from
+`-P` or the same `SSH_ASKPASS` prompt C uses. Because fibby signs with
+RFC 6979 deterministic ECDSA and ECDH is deterministic, the differential
+lane compares the raw bytes and they match C exactly (via `-P`; a
+separate case proves piggy's askpass path yields the same signature).
+One contract difference surfaced and is documented: C `pivy-tool
+sign`/`ecdh` will not use `SSH_ASKPASS` for the PIN when stdin is the
+data pipe, so `-P` is the portable driver; piggy's askpass path works
+regardless. Next: **3.2 (PIN/PUK)** — destructive, needs new fibby INS
+(RESET RETRY COUNTER 2C, SET PIN RETRIES FA) — then `list`/`pinfo`
+scoped on their own.
 
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 

@@ -70,6 +70,53 @@ function cert_output_is_pem { # @test
   assert_output --partial "-----END CERTIFICATE-----"
 }
 
+# fibby signs with RFC 6979 deterministic ECDSA, so the same input +
+# digest yields the same signature bytes from both impls. The PIN is
+# supplied with `-P` because C pivy-tool, unlike piggy, will not use
+# SSH_ASKPASS for the PIN when stdin is a pipe carrying the data — so
+# `-P` is the portable way to drive both. piggy's own askpass path is
+# checked separately below.
+function sign_9a_matches_c { # @test
+  local msg="piggy tool sign differential payload"
+  local r="$BATS_TEST_TMPDIR/r.sig" c="$BATS_TEST_TMPDIR/c.sig"
+  printf '%s' "$msg" | "$PIGGY" tool -P 123456 sign 9a >"$r" || fail "piggy tool sign failed"
+  printf '%s' "$msg" | "$REAL_PIVY_TOOL" -P 123456 sign 9a >"$c" || fail "pivy-tool sign failed"
+  assert [ -s "$r" ]
+  run cmp "$r" "$c"
+  assert_success
+}
+
+function sign_askpass_path_matches_dash_p { # @test
+  # piggy's PIN-via-SSH_ASKPASS path (no -P) must produce the same
+  # deterministic signature as -P, proving the askpass prompt is wired.
+  local msg="askpass path"
+  local a="$BATS_TEST_TMPDIR/a.sig" p="$BATS_TEST_TMPDIR/p.sig"
+  printf '%s' "$msg" | "$PIGGY" tool sign 9a >"$a" || fail "piggy tool sign (askpass) failed"
+  printf '%s' "$msg" | "$PIGGY" tool -P 123456 sign 9a >"$p" || fail "piggy tool sign (-P) failed"
+  run cmp "$a" "$p"
+  assert_success
+}
+
+function ecdh_9d_matches_c { # @test
+  # ECDH(9D_priv, peer) is deterministic. Use the card's own 9A public key
+  # as the peer, fed to both impls; compare the raw shared secret. `-P`
+  # for the PIN, same reason as sign.
+  local peer="$BATS_TEST_TMPDIR/peer.pub"
+  "$REAL_PIVY_TOOL" pubkey 9a >"$peer" || fail "pubkey 9a for peer failed"
+  local r="$BATS_TEST_TMPDIR/r.ss" c="$BATS_TEST_TMPDIR/c.ss"
+  "$PIGGY" tool -P 123456 ecdh 9d <"$peer" >"$r" || fail "piggy tool ecdh failed"
+  "$REAL_PIVY_TOOL" -P 123456 ecdh 9d <"$peer" >"$c" || fail "pivy-tool ecdh failed"
+  assert [ -s "$r" ]
+  run cmp "$r" "$c"
+  assert_success
+}
+
+function ecdh_non_ec_slot_rejected { # @test
+  # 9B is the management key slot (no EC key / cert); ecdh must refuse.
+  run "$PIGGY" tool ecdh 9b
+  assert_failure
+}
+
 function attest_imported_key_fails_like_c { # @test
   # fibby's slot keys are imported (seeded scalars), so INS_ATTEST returns
   # 6A80: attestation is unavailable. Both impls must fail (non-zero) and

@@ -672,9 +672,16 @@ test-bats-conformance-tool-fibby: build-rust
   for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
   [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
 
+  # sign/ecdh are PIN-gated; the test askpass supplies fibby's PIN to BOTH
+  # piggy tool and C pivy-tool (both honour SSH_ASKPASS).
+  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
   REAL_PIVY_TOOL="$pivy_tool" \
     PIGGY="$piggy_bin" \
     PCSCLITE_CSOCK_NAME="$fibby_sock" \
+    SSH_ASKPASS="$askpass" \
+    SSH_ASKPASS_REQUIRE=force \
+    DISPLAY="" \
+    PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
     zz-tests_bats/conformance/piggy_tool_fibby.bats

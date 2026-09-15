@@ -11,23 +11,35 @@
 //!   attestation is unavailable — every fibby key, and a real YubiKey's
 //!   imported keys) this fails exactly as C does; the two-PEM happy path
 //!   is exercised only by the hardware lane.
+//! - `piggy tool sign <slot>` — hash stdin (SHA-256 for P-256, SHA-384
+//!   for P-384) and ECDSA-sign the digest, writing the card's raw
+//!   signature bytes (DER) to stdout (matches C `piv_sign` + `fwrite`).
+//! - `piggy tool ecdh <slot>` — read an OpenSSH public key from stdin and
+//!   write the raw ECDH shared secret to stdout (matches C `piv_ecdh` +
+//!   `fwrite`). Both are PIN-gated; the PIN comes from `-P` or the same
+//!   `SSH_ASKPASS` prompt C uses.
 //!
 //! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
 //! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
 //! and `None` for everything else, so `main.rs` execs the C `pivy-tool`
-//! for the rest (`list`, `pinfo`, `attest`, `sign`, the whole admin/key
+//! for the rest (`list`, `pinfo`, `version`, the PIN/PUK and admin/key
 //! surface). It also returns `None` the moment it sees an option it does
 //! not model, so a flag piggy would silently ignore is handled by C
 //! instead — the superset stays honest. `piggy pivy tool` always reaches
 //! C regardless.
 
-use piggy_piv::{PivContext, PivToken};
+use std::io::{Read, Write};
+
+use piggy_piv::{PivAlgorithm, PivContext, PivToken};
 
 /// One parsed `piggy tool` invocation: the general options piggy models,
 /// the operation, and its positional arguments.
 struct Invocation {
     /// `-g <hex>`: GUID (or prefix) selecting a token among several.
     guid: Option<String>,
+    /// `-P <code>`: the PIV PIN, supplied on the command line instead of
+    /// prompting.
+    pin: Option<String>,
     op: String,
     positionals: Vec<String>,
 }
@@ -37,6 +49,7 @@ struct Invocation {
 /// caller falls back to C `pivy-tool`.
 fn parse(args: &[String]) -> Option<Invocation> {
     let mut guid = None;
+    let mut pin = None;
     let mut i = 0;
     // Leading options (pivy-tool style: options precede the operation).
     while i < args.len() {
@@ -49,6 +62,10 @@ fn parse(args: &[String]) -> Option<Invocation> {
                 guid = Some(args.get(i + 1)?.clone());
                 i += 2;
             }
+            "-P" => {
+                pin = Some(args.get(i + 1)?.clone());
+                i += 2;
+            }
             // Any other flag is not modeled here — let C handle the whole
             // invocation so behavior is never silently dropped.
             _ => return None,
@@ -57,11 +74,12 @@ fn parse(args: &[String]) -> Option<Invocation> {
     let op = args.get(i)?.clone();
     // Only claim the ops this milestone implements; everything else falls
     // through to C.
-    if !matches!(op.as_str(), "pubkey" | "cert" | "attest") {
+    if !matches!(op.as_str(), "pubkey" | "cert" | "attest" | "sign" | "ecdh") {
         return None;
     }
     Some(Invocation {
         guid,
+        pin,
         op,
         positionals: args[i + 1..].to_vec(),
     })
@@ -75,6 +93,8 @@ pub fn run(args: &[String]) -> Option<i32> {
         "pubkey" => cmd_pubkey(&inv),
         "cert" => cmd_cert(&inv),
         "attest" => cmd_attest(&inv),
+        "sign" => cmd_sign(&inv),
+        "ecdh" => cmd_ecdh(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     })
@@ -239,6 +259,168 @@ fn print_cert_pem(cert_der: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// `piggy tool sign <slot>`: hash stdin with the key's matching digest
+/// (SHA-256 for P-256, SHA-384 for P-384) and ECDSA-sign it, writing the
+/// card's raw signature bytes to stdout — matching C `pivy-tool`'s
+/// `piv_sign` (which auto-selects the hash) + `fwrite`. PIN-gated.
+fn cmd_sign(inv: &Invocation) -> i32 {
+    let slot_id = match slot_arg(inv, "sign") {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool sign: {msg}");
+            return 1;
+        }
+    };
+    let algorithm = match token.read_slot(slot_id) {
+        Ok(s) => s.algorithm(),
+        Err(e) => {
+            eprintln!(
+                "piggy tool sign: failed to read cert for signing key in slot {slot_id:02X}: {e}"
+            );
+            return 1;
+        }
+    };
+    let mut input = Vec::new();
+    if let Err(e) = std::io::stdin().read_to_end(&mut input) {
+        eprintln!("piggy tool sign: stdin: {e}");
+        return 1;
+    }
+    let digest: Vec<u8> = match algorithm {
+        PivAlgorithm::EcP256 => openssl::sha::sha256(&input).to_vec(),
+        PivAlgorithm::EcP384 => openssl::sha::sha384(&input).to_vec(),
+        other => {
+            eprintln!(
+                "piggy tool sign: slot {slot_id:02X} key algorithm {other:?} is not supported for signing"
+            );
+            return 1;
+        }
+    };
+    let pin = match get_pin(inv, "sign") {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("piggy tool sign: {e}");
+            return 1;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool sign: begin session: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.verify_pin(&pin) {
+        eprintln!("piggy tool sign: PIN verification failed: {e}");
+        return 1;
+    }
+    let sig = match session.sign_prehash(slot_id, &digest) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool sign: failed to sign data: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = std::io::stdout().write_all(&sig) {
+        eprintln!("piggy tool sign: write: {e}");
+        return 1;
+    }
+    0
+}
+
+/// `piggy tool ecdh <slot>`: read an OpenSSH public key from stdin and
+/// write the raw ECDH shared secret (the card's GENERAL AUTHENTICATE
+/// output) to stdout — matching C `pivy-tool`'s `piv_ecdh` + `fwrite`.
+/// PIN-gated; only the EC key slots 9A/9C/9D/9E can do ECDH.
+fn cmd_ecdh(inv: &Invocation) -> i32 {
+    let slot_id = match slot_arg(inv, "ecdh") {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    if !matches!(slot_id, 0x9A | 0x9C | 0x9D | 0x9E) {
+        eprintln!("piggy tool ecdh: PIV slot {slot_id:02X} cannot be used for ECDH");
+        return 1;
+    }
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool ecdh: {msg}");
+            return 1;
+        }
+    };
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        eprintln!("piggy tool ecdh: stdin: {e}");
+        return 1;
+    }
+    let peer_point = match parse_openssh_ec_point(&input) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("piggy tool ecdh: {e}");
+            return 1;
+        }
+    };
+    let pin = match get_pin(inv, "ecdh") {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("piggy tool ecdh: {e}");
+            return 1;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool ecdh: begin session: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.verify_pin(&pin) {
+        eprintln!("piggy tool ecdh: PIN verification failed: {e}");
+        return 1;
+    }
+    let secret = match session.ecdh_derive(slot_id, &peer_point) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool ecdh: failed to compute ECDH: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = std::io::stdout().write_all(&secret) {
+        eprintln!("piggy tool ecdh: write: {e}");
+        return 1;
+    }
+    0
+}
+
+/// Parse an OpenSSH public-key line into its uncompressed SEC1 EC point,
+/// the peer input `ecdh` feeds to the card (matches C's `sshkey_read` +
+/// `piv_ecdh`).
+fn parse_openssh_ec_point(input: &str) -> Result<Vec<u8>, String> {
+    let pk = ssh_key::PublicKey::from_openssh(input.trim())
+        .map_err(|e| format!("failed to parse public key input: {e}"))?;
+    match pk.key_data() {
+        ssh_key::public::KeyData::Ecdsa(ec) => Ok(ec.as_sec1_bytes().to_vec()),
+        _ => Err("public key input is not an EC key".into()),
+    }
+}
+
+/// The PIV PIN for a PIN-gated op: from `-P` if given, otherwise the same
+/// `SSH_ASKPASS` prompt C `pivy-tool` uses (via `card_oracle::run_askpass`),
+/// tagged with a `piggy-tool:<op>` context.
+fn get_pin(inv: &Invocation, op: &str) -> Result<zeroize::Zeroizing<String>, String> {
+    if let Some(p) = &inv.pin {
+        return Ok(zeroize::Zeroizing::new(p.clone()));
+    }
+    crate::card_oracle::run_askpass(
+        &format!("Enter PIV PIN for {op}: "),
+        Some(&format!("piggy-tool:{op}")),
+    )
+    .map_err(|e| format!("PIN prompt failed: {e}"))
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -311,11 +493,14 @@ mod tests {
         assert!(parse(&argv(&["pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["cert", "9a"])).is_some());
         assert!(parse(&argv(&["attest", "9d"])).is_some());
+        assert!(parse(&argv(&["sign", "9c"])).is_some());
+        assert!(parse(&argv(&["ecdh", "9d"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
+        assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
         // Unported ops fall through to C.
         assert!(parse(&argv(&["list"])).is_none());
         assert!(parse(&argv(&["pinfo"])).is_none());
-        assert!(parse(&argv(&["sign", "9c"])).is_none());
+        assert!(parse(&argv(&["init"])).is_none());
         // An option we don't model → C handles the whole invocation.
         assert!(parse(&argv(&["-d", "pubkey", "9d"])).is_none());
         // No op at all.
@@ -325,10 +510,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_extracts_guid_and_positionals() {
-        let inv = parse(&argv(&["-g", "deadbeef", "cert", "9d"])).unwrap();
+    fn parse_extracts_guid_pin_and_positionals() {
+        let inv = parse(&argv(&["-g", "deadbeef", "-P", "123456", "sign", "9c"])).unwrap();
         assert_eq!(inv.guid.as_deref(), Some("deadbeef"));
-        assert_eq!(inv.op, "cert");
-        assert_eq!(inv.positionals, vec!["9d".to_string()]);
+        assert_eq!(inv.pin.as_deref(), Some("123456"));
+        assert_eq!(inv.op, "sign");
+        assert_eq!(inv.positionals, vec!["9c".to_string()]);
     }
 }
