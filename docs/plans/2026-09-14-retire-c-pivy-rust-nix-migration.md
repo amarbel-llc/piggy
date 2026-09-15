@@ -216,6 +216,14 @@ Test strategy (this phase sets the pattern for the rest):
    - (b) fibby inside the sandbox (see principle 5). Spike first; if
      it works it is strictly better and (a) is unnecessary.
    Recommendation: spike (b) for one cycle; fall back to (a).
+   **Resolved 2026-09-15 (#281): (b) works.** fibby is injected into the
+   sandboxed lane as `FIBBY_BIN`; `lib/fibby.bash`'s `fibby_up` brings a
+   seeded card up per test on a private socket, and
+   `t0980-fibby-in-sandbox.bats` proves a real RFC 0002 encrypt followed
+   by the in-process agentless decrypt (CardEcdhOracle, PIN via the
+   installed test askpass) inside `nix build .#bats-default`. The
+   software-identity oracle (a) is not needed. One sandbox trap: the
+   askpass must be an installed copy, since `/usr/bin/env` is absent.
 2. **Differential corpus, captured now.** New recipe
    `codemod-capture-pivy-oracle-box`: for a matrix of (plaintext size,
    recipient count, agent vs card path), encrypt with Rust, decrypt

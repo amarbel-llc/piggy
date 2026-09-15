@@ -51,6 +51,14 @@
   # common.bash at the front of $PATH must still win for the other
   # tests; we hand the real binary in by absolute path instead.
   pivy,
+  # fibby, the pure-Rust virtual PIV card (crates/fibby). Injected as
+  # `FIBBY_BIN` so untagged tests can bring up a seeded card INSIDE the
+  # nix sandbox (piggy#281): real RFC 0002 encrypt + in-process
+  # agentless decrypt with no pcscd, no hardware, no fence. The
+  # `hardware` tag keeps meaning "needs a card the sandbox cannot
+  # provide"; fibby-backed tests that only need this socket are plain
+  # default-lane tests.
+  fibby,
   # batsSrc may be null when this file is imported outside a flake
   # context — `batsLaneOutputs` then returns `{ }` instead of crashing
   # in builtins.readDir. Matches madder's go/default.nix factoring.
@@ -90,6 +98,12 @@ let
         CONFORMANCE_BIN = {
           base = conformanceBin;
           name = "piggy-agent-conformance";
+        };
+        # The virtual card for in-sandbox card tests (piggy#281); see
+        # zz-tests_bats/lib/fibby.bash `fibby_up`.
+        FIBBY_BIN = {
+          base = fibby;
+          name = "fibby";
         };
       };
       batsLibPath = [ bats-libs.batsLibPath ];

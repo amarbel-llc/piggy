@@ -83,6 +83,16 @@ path runs against it.
 *--hardware-proxy* relays a real card and keeps the wire trace; that is
 how APDU fixtures for new client code are captured.
 
+fibby also runs INSIDE the sandboxed default lane (piggy#281): the lane
+injects it as _FIBBY_BIN_, and a test loads _lib/fibby.bash_ and calls
+*fibby_up* [_seed-flags_...] from *setup()* (default seed: the RFC 5903
+slot-9D key, PIN 123456) and *fibby_down* from *teardown()*. That exports
+_PCSCLITE_CSOCK_NAME_ for the test, so real encrypt and in-process
+decrypt run with no pcscd and no _hardware_ tag. Point _SSH_ASKPASS_ at a
+*piggy_install_helper_as* copy of the test askpass: the sandbox has no
+_/usr/bin/env_ for the helper's shebang, and a failing askpass is
+indistinguishable from a card refusing the PIN.
+
 # PIN PROMPT SAFETY NET
 
 Any recipe or test that can reach an agent unlock or a card PIN path
