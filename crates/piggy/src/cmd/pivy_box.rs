@@ -1,7 +1,12 @@
 //! `piggy box` subcommand — PIV-based encryption/decryption.
 //!
-//! Replaces the C `pivy-box` binary. Implements the same subcommand
-//! surface used by `piggy.sh`:
+//! The first-party Rust re-implementation of the C `pivy-box` surface
+//! piggy uses. As of piggy#165 it is NO LONGER a superset that falls
+//! back to C: the only subcommands are the four below, and anything else
+//! is a usage error, not a silent hop to the C binary. The full C
+//! surface (`tpl edit`, `key *`, `challenge *`, interactive modes) stays
+//! reachable only through the explicit `piggy pivy box` escape hatch
+//! while C is still shipped (piggy#289 Phase 5 removes it).
 //!
 //! - `piggy box stream encrypt <tpl-path>`
 //! - `piggy box stream decrypt [file]`
@@ -16,22 +21,37 @@ use piggy_box::unlock::unlock_ebox;
 
 /// Entry point for `piggy box ...`. `args` is the argv *after* `box`
 /// (i.e. `Command::Box { rest }`), dispatched as `<type> <operation>` to
-/// match pivy-box's two-level subcommand structure.
-///
-/// Returns `Some(exit_code)` for subcommands the Rust impl handles
-/// (`stream encrypt`/`decrypt`, `tpl create`/`show`); returns `None` for
-/// anything else (empty, unknown type/op, `tpl edit`, the rest of the
-/// pivy-box surface) so the caller falls back to the C `pivy-box` — keeping
-/// `piggy box` a superset of C while restoring the agentless direct-PCSC
-/// decrypt the Rust impl carries (piggy#57).
-pub fn run(args: &[String]) -> Option<i32> {
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (type_name, op_rest) = args.split_first()?;
-    match *type_name {
+/// match pivy-box's two-level subcommand structure. Returns the process
+/// exit code: a handler's own code, or `2` for an unrecognized
+/// subcommand (piggy#165 — the C fallback is gone).
+pub fn run(args: &[String]) -> i32 {
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let Some((type_name, op_rest)) = argv.split_first() else {
+        return usage_error("");
+    };
+    let handled = match *type_name {
         "stream" => dispatch_stream(op_rest),
         "tpl" => dispatch_tpl(op_rest),
         _ => None,
+    };
+    handled.unwrap_or_else(|| usage_error(&argv.join(" ")))
+}
+
+/// Print the `piggy box` usage banner for an unrecognized subcommand and
+/// return exit code 2. The C `pivy-box` surface piggy does not
+/// re-implement is reachable through `piggy pivy box`.
+fn usage_error(attempted: &str) -> i32 {
+    if attempted.is_empty() {
+        eprintln!("piggy box: missing subcommand");
+    } else {
+        eprintln!("piggy box: unknown subcommand: {attempted}");
     }
+    eprintln!("supported: stream encrypt|decrypt, tpl create|show");
+    eprintln!(
+        "for the rest of the pivy-box surface (tpl edit, key, challenge, …): \
+         piggy pivy box <args>"
+    );
+    2
 }
 
 fn dispatch_stream(args: &[&str]) -> Option<i32> {
@@ -45,7 +65,7 @@ fn dispatch_stream(args: &[&str]) -> Option<i32> {
         "decrypt" => Some(crate::stats::timed_box("stream_decrypt", || {
             cmd_stream_decrypt(rest)
         })),
-        // Unknown stream op (or empty) — fall back to C `pivy-box`.
+        // Unknown stream op (or empty) — a usage error (piggy#165).
         _ => None,
     }
 }
@@ -58,7 +78,8 @@ fn dispatch_tpl(args: &[&str]) -> Option<i32> {
         })),
         "show" => Some(crate::stats::timed_box("tpl_show", || cmd_tpl_show(rest))),
         // `edit` (and any unknown tpl op, or empty) — the Rust impl never
-        // implemented `tpl edit`; fall back to C `pivy-box`, which does.
+        // implemented `tpl edit`; it is a usage error now (piggy#165), and
+        // the C builder is reachable via `piggy pivy box tpl edit`.
         _ => None,
     }
 }
@@ -550,4 +571,41 @@ fn extract_ec_compressed_point(
         .map_err(|e| format!("compress: {e}"))?;
 
     Ok(compressed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// piggy#165: an unrecognized `piggy box` subcommand is a usage error
+    /// (exit 2), no longer a silent fall-through to the C `pivy-box`.
+    #[test]
+    fn unknown_subcommands_are_usage_errors() {
+        // No subcommand at all.
+        assert_eq!(run(&argv(&[])), 2);
+        // Unknown top-level type.
+        assert_eq!(run(&argv(&["key"])), 2);
+        assert_eq!(run(&argv(&["challenge", "respond"])), 2);
+        // Known type, unknown op — including the dropped `tpl edit`.
+        assert_eq!(run(&argv(&["tpl", "edit"])), 2);
+        assert_eq!(run(&argv(&["stream", "sign"])), 2);
+        // A bare known type with no op.
+        assert_eq!(run(&argv(&["tpl"])), 2);
+        assert_eq!(run(&argv(&["stream"])), 2);
+    }
+
+    /// A recognized subcommand reaches its handler, so it returns the
+    /// handler's own code — here `1` for a missing template argument, NOT
+    /// the `2` a usage error would give. This pins that `run` still
+    /// dispatches rather than rejecting everything.
+    #[test]
+    fn recognized_subcommand_reaches_its_handler() {
+        // `stream encrypt` with no template path: the handler prints
+        // "template path required" and returns 1 before touching stdin.
+        assert_eq!(run(&argv(&["stream", "encrypt"])), 1);
+    }
 }

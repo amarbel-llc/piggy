@@ -284,6 +284,20 @@ Tests:
 
 Effort: one merge cycle.
 
+**Status 2026-09-15: landed.** `cmd::pivy_box::run` returns `i32`, not
+`Option`; an unrecognized `piggy box` subcommand prints a usage banner
+and exits 2 (unit-tested for unknown type, `tpl edit`, unknown stream
+op, and the empty/bare-type cases), and the `None => exec_pivy("box",
+…)` arm in `main.rs` is gone. The full C surface stays reachable via
+`piggy pivy box` while C is shipped. `unlock_ebox` now reports "ebox has
+only RECOVERY config(s), which piggy cannot unlock" for a foreign
+recovery-only ebox instead of the bare "no configs could be unlocked"
+(unit-tested). `piggy_box_interop.bats` is relabelled as what it always
+was — Rust ⟂ C template-format interop, not a C passthrough — with its
+dead mock-symlink setup removed; it becomes a fixture replay when Phase
+5 drops the pivy build. Docs updated: piggy(1), AGENTS.md, the
+`cmd/pivy_box.rs` module docstring.
+
 ### Phase 3: `piggy tool` port
 
 Reframes the 2026-04-21 scoping doc against what `card init` already

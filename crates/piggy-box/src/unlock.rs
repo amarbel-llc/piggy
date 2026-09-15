@@ -48,7 +48,20 @@ pub fn unlock_ebox(
 
     // The most recent substantive failure (not a plain "no such key")
     // across every oracle and config, so the final error names it.
-    let mut reason: Option<String> = None;
+    // A foreign ebox may carry only RECOVERY (N-of-M Shamir) configs,
+    // which piggy cannot unlock (it builds and opens PRIMARY only; the C
+    // `pivy-box` recovery path was dropped in piggy#165). Say so plainly
+    // instead of the bare "no configs could be unlocked".
+    let mut reason: Option<String> = if primary_indices.is_empty()
+        && ebox
+            .configs
+            .iter()
+            .any(|c| c.config_type == EboxConfigType::Recovery)
+    {
+        Some("ebox has only RECOVERY config(s), which piggy cannot unlock".into())
+    } else {
+        None
+    };
     let mut note = |what: &str, idx: usize, e: BoxError| {
         tracing::debug!("{what} unlock failed for config {idx}: {e}");
         if let BoxError::UnlockFailed { reason: Some(r) } = e {
@@ -392,6 +405,27 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "no configs could be unlocked: wrong PIN, 2 retries remaining"
+        );
+    }
+
+    /// piggy#165: piggy builds and opens only PRIMARY configs. A foreign
+    /// ebox that carries only a RECOVERY (N-of-M) config must fail with a
+    /// message that says so, not the bare "no configs could be unlocked".
+    /// (Flip a sealed PRIMARY box to RECOVERY — `unlock_ebox` only reads
+    /// `config_type` for this branch, so no real Shamir sealing is needed.)
+    #[test]
+    fn recovery_only_ebox_reports_it_cannot_be_unlocked() {
+        let (tpl, _) = seed_tpl_and_priv();
+        let sealed = Ebox::create(&tpl, &[0x11; 32], EboxType::Stream).unwrap();
+        let mut deserialized = Ebox::from_bytes(&sealed.to_bytes().unwrap()).unwrap();
+        for config in &mut deserialized.configs {
+            config.config_type = EboxConfigType::Recovery;
+        }
+        let err = unlock_ebox(&mut deserialized, None, None)
+            .expect_err("a recovery-only ebox is not unlockable by piggy");
+        assert_eq!(
+            err.to_string(),
+            "no configs could be unlocked: ebox has only RECOVERY config(s), which piggy cannot unlock"
         );
     }
 }

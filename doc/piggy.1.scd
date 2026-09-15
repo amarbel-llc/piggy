@@ -54,17 +54,22 @@ for a detailed description using *piggy pass init* and *piggy pass git*.
 The *piggy pass init* command must be run before other *pass* subcommands in
 order to initialize the password store with a pivy-box template.
 
-In addition to the *pass* family, *piggy* also provides top-level
-passthroughs for the C pivy binaries:
+In addition to the *pass* family, *piggy* provides these top-level PIV
+commands:
 
-- *piggy agent* runs *pivy-agent*(1).
-- *piggy box* runs *pivy-box*(1).
+- *piggy agent* is piggy's own Rust SSH/PIV agent; see *piggy-agent*(1).
+- *piggy box* is piggy's Rust re-implementation of the *pivy-box*(1)
+  subset piggy uses: *stream encrypt*|*decrypt* and *tpl create*|*show*.
+  Any other *box* subcommand is a usage error (piggy#165); the rest of
+  the *pivy-box*(1) surface (*tpl edit*, *key*, *challenge*, interactive
+  modes) is reachable only through *piggy pivy box* while the C binary is
+  still shipped.
 - *piggy tool* runs *pivy-tool*(1) from _$PATH_ (a Rust port is in
   progress; see the C-pivy retirement plan in _docs/plans_).
-- *piggy pivy* _TOOL_ is the explicit-escape-hatch form: *piggy pivy box*
-  always runs *pivy-box*(1), regardless of whether *piggy box* is later
-  rerouted to a Rust reimplementation. See *pivy-box*(1) etc. for their
-  own documentation.
+- *piggy pivy* _TOOL_ is the explicit escape hatch to the C binaries:
+  *piggy pivy box* always runs *pivy-box*(1) and *piggy pivy agent*
+  always runs *pivy-agent*(1), bypassing the Rust re-implementations.
+  See *pivy-box*(1) etc. for their own documentation.
 
 # COMMANDS
 

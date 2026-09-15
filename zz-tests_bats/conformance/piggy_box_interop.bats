@@ -1,37 +1,18 @@
 #! /usr/bin/env bats
 # bats file_tags=hardware
 #
-# Wrapper-integrity smoke tests for `piggy box`. Confirms argv- and
-# template-path forwarding from the Rust clap dispatcher in
-# `crates/piggy/src/main.rs` to C `pivy-box` survives intact.
-#
-# History. This file was originally a cross-language *template*-format
-# compat probe (Rust `piggy box` ↔ C `pivy-box`) — see #29 / #41 / #55.
-# After commit `79658e1` (2026-04-28), `piggy box` itself exec's into C
-# `pivy-box` via what is now `exec::exec_pivy`, so both sides of the original
-# tests reach the same binary. The cipher interop tests (`rust_encrypt_
-# c_decrypt` and the reverse) were deleted in #41; their bodies live in
-# git at `38df53c`. The remaining template tests have been relabeled
-# here as wrapper smoke tests — what they verify today is that
-# `piggy box tpl create` and `piggy box tpl show` reach `pivy-box`
-# unmolested, NOT anything about cross-language template format
-# compatibility (the latter no longer has two sides). See #55 for the
-# disposition discussion.
-#
-# Mock override. `common.bash` symlinks `zz-tests_bats/helpers/
-# mock-pivy-box.sh` as `pivy-box` in the test PATH so unit-test bats
-# files run without a real card. That mock errors on `tpl create`,
-# which would mask wrapper-integrity bugs here — `piggy box` would
-# reach the mock, hit the error, and the test would fail with a
-# misleading message. setup() below replaces that symlink with
-# $REAL_PIVY_BOX for this file's tests only (each bats test gets a
-# fresh BATS_TEST_TMPDIR).
-#
-# Requires a virtual PIV card (just test-bats-conformance-interop-fibby).
-# The recipe brings up fibby with a seeded slot-9D key, captures the
-# real C pivy-box path BEFORE bats prepends the mock to PATH, and sets
-# PCSCLITE_CSOCK_NAME + REAL_PIVY_BOX + INTEROP_GUID before invoking
-# bats. Tests skip gracefully when these are absent.
+# Template-format interop between the Rust `piggy box tpl create`/`tpl
+# show` (which are FIRST-PARTY Rust, not a hop to C — piggy#165) and the C
+# `pivy-box`. Both directions:
+#   - piggy_box_tpl_create_forwards_to_pivy_box: Rust writes a template,
+#     C `pivy-box tpl show` reads it (Rust output stays C-readable).
+#   - piggy_box_tpl_show_forwards_to_pivy_box: C writes a template, Rust
+#     `piggy box tpl show` reads it (C output stays Rust-readable).
+# `piggy box tpl create` reads the card's slot-9D pubkey, so this needs a
+# real (fibby) card; the recipe sets PCSCLITE_CSOCK_NAME + REAL_PIVY_BOX +
+# INTEROP_GUID. Tests skip gracefully when absent. These are the last
+# tests using C `pivy-box` as a live oracle; piggy#289 Phase 5 (which
+# drops the pivy build) turns them into fixture replays.
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
@@ -43,12 +24,8 @@ setup() {
   if [[ -z ${REAL_PIVY_BOX:-} || ! -x ${REAL_PIVY_BOX:-} ]]; then
     skip "REAL_PIVY_BOX not set (run: just test-bats-conformance-interop-fibby)"
   fi
-
-  # Put the real C binary at the front of PATH ($BATS_TEST_TMPDIR) —
-  # wrapper smoke tests need `piggy box` (which exec's `pivy-box` from
-  # PATH via exec::exec_pivy for the subcommands Rust doesn't cover) to
-  # reach it.
-  ln -sf "$REAL_PIVY_BOX" "$BATS_TEST_TMPDIR/pivy-box"
+  # No PATH shim: `piggy box tpl create`/`show` are Rust and never exec
+  # `pivy-box`; the tests invoke the C side through $REAL_PIVY_BOX directly.
 }
 
 # `piggy box tpl create` must forward argv + write its output where C

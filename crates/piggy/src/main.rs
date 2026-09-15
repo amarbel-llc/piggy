@@ -918,13 +918,10 @@ fn main() {
             argv.extend(rest);
             std::process::exit(piggy::cmd::agent::run(argv));
         }
-        // `box` runs the Rust impl (restores agentless direct-PCSC decrypt,
-        // piggy#57); subcommands it doesn't handle return None and fall back
-        // to C `pivy-box`, so `piggy box` stays a superset.
-        Command::Box { rest } => match piggy::cmd::pivy_box::run(&rest) {
-            Some(code) => std::process::exit(code),
-            None => exec::exec_pivy("box", &rest),
-        },
+        // `box` runs the Rust impl (agentless direct-PCSC decrypt, piggy#57).
+        // Unknown subcommands are a usage error, not a hop to C (piggy#165);
+        // the full C surface is reachable via `piggy pivy box`.
+        Command::Box { rest } => std::process::exit(piggy::cmd::pivy_box::run(&rest)),
         Command::Tool { rest } => exec::exec_pivy("tool", &rest),
 
         Command::Pivy { tool, rest } => match tool {
