@@ -54,6 +54,7 @@ mod health;
 mod init;
 mod insert;
 mod internal_clipboard_restore;
+mod luks;
 mod pigpen_pointer;
 mod platform;
 mod recipients;
@@ -155,6 +156,15 @@ enum Command {
     Card(CardArgs),
     /// Declarative ebox-backed secret files (FDR 0003).
     Secrets(SecretsArgs),
+    /// LUKS2 volumes keyed by a store secret (piggy#277).
+    ///
+    /// The first line of the `--secret` store entry is the passphrase,
+    /// piped to `cryptsetup … --key-file -`; it is decrypted through the
+    /// agent like `pass show`, one card operation per invocation. Add a
+    /// second passphrase keyslot beside it with `add-key` so the volume
+    /// also opens without a card. Arguments after `--` are forwarded to
+    /// `cryptsetup` verbatim (e.g. `-- -q --pbkdf pbkdf2`).
+    Luks(LuksArgs),
     /// Run the headless JSON-RPC management server (RFC 0007).
     ///
     /// Exposes piggy's neutral management primitives (`card.list`,
@@ -485,6 +495,59 @@ struct SecretsArgs {
     cmd: SecretsCommand,
 }
 
+#[derive(Args, Debug)]
+struct LuksArgs {
+    #[command(subcommand)]
+    cmd: LuksCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum LuksCommand {
+    /// `cryptsetup luksFormat --type luks2` DEVICE with the secret as the
+    /// first keyslot's passphrase. Destructive: wipes DEVICE.
+    Format {
+        device: String,
+        /// Store entry whose first line is the passphrase.
+        #[arg(long, value_name = "PASS-NAME")]
+        secret: String,
+        /// Extra `cryptsetup` arguments, forwarded verbatim.
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+    /// `cryptsetup open` DEVICE as /dev/mapper/NAME using the secret.
+    Open {
+        device: String,
+        name: String,
+        /// Store entry whose first line is the passphrase.
+        #[arg(long, value_name = "PASS-NAME")]
+        secret: String,
+        /// Extra `cryptsetup` arguments, forwarded verbatim.
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+    /// `cryptsetup luksAddKey` DEVICE: the secret authorises, and the
+    /// contents of NEW-KEY-FILE become an additional keyslot (a
+    /// passphrase that opens the volume without the card).
+    #[command(name = "add-key")]
+    AddKey {
+        device: String,
+        new_key_file: String,
+        /// Store entry whose first line is the existing passphrase.
+        #[arg(long, value_name = "PASS-NAME")]
+        secret: String,
+        /// Extra `cryptsetup` arguments, forwarded verbatim.
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+    /// `cryptsetup close` NAME. No secret involved; here for symmetry.
+    Close {
+        name: String,
+        /// Extra `cryptsetup` arguments, forwarded verbatim.
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 enum SecretsCommand {
     /// Write the secret files a manifest declares, decrypting only entries
@@ -728,6 +791,52 @@ fn main() {
                 socket,
             })),
         },
+
+        Command::Luks(args) => {
+            let (sub, action, secret, extra) = match args.cmd {
+                LuksCommand::Format {
+                    device,
+                    secret,
+                    extra,
+                } => (
+                    "format",
+                    luks::Action::Format { device },
+                    Some(secret),
+                    extra,
+                ),
+                LuksCommand::Open {
+                    device,
+                    name,
+                    secret,
+                    extra,
+                } => (
+                    "open",
+                    luks::Action::Open { device, name },
+                    Some(secret),
+                    extra,
+                ),
+                LuksCommand::AddKey {
+                    device,
+                    new_key_file,
+                    secret,
+                    extra,
+                } => (
+                    "add_key",
+                    luks::Action::AddKey {
+                        device,
+                        new_key_file,
+                    },
+                    Some(secret),
+                    extra,
+                ),
+                LuksCommand::Close { name, extra } => {
+                    ("close", luks::Action::Close { name }, None, extra)
+                }
+            };
+            std::process::exit(piggy::stats::timed_luks(sub, || {
+                luks::run(action, secret.as_deref(), &extra)
+            }))
+        }
 
         Command::Manage(args) => std::process::exit(piggy::stats::timed_manage(|| {
             piggy::manage::run(

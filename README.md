@@ -36,6 +36,7 @@ The user-facing CLI is `piggy <subcommand>`. `piggy --help` prints the full subc
 
 - **Pass-style** (`init`, `show`, `insert`, `edit`, `generate`, `rm`, `mv`, `cp`, `find`, `grep`, `git`) — same surface as passwordstore.org.
 - **First-party Rust** (`box`) — a pivy-box reimplementation whose decrypt carries a direct-PCSC ECDH oracle, so it unseals against a local card with **no agent** (#57); box subcommands it doesn't handle fall back to C. (`agent` currently execs the C `pivy-agent`.)
+- **Store-keyed volumes** (`luks format|open|add-key|close`) — a store entry's first line is the passphrase handed to `cryptsetup`; see `piggy(1)`.
 - **C `pivy-*` shortcut** (`tool`) and the generic `piggy pivy <tool>` escape hatch — forwarded to the corresponding `pivy-*` C binary (`piggy pivy box` reaches C `pivy-box` even though `piggy box` runs the Rust impl).
 
 See the manpages in `doc/` for the full command reference and the `PIGGY_*` environment-variable knobs.

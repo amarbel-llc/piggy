@@ -121,6 +121,37 @@ pub(crate) fn decrypt(infile: &Path) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Decrypt the store entry `pass_name` and return its first line without
+/// the trailing newline — the bytes `piggy pass show <name> | head -n1 |
+/// tr -d '\n'` yields, i.e. what a passphrase-shaped consumer
+/// (`cryptsetup --key-file -`, `zfs load-key`) wants on stdin. Shared by
+/// `piggy luks` and `piggy zfs`.
+///
+/// Errors on a sneaky path, a missing entry, a decrypt failure, or an
+/// empty first line (an empty passphrase is never what the caller meant).
+pub(crate) fn decrypt_first_line(pass_name: &str) -> Result<Vec<u8>, String> {
+    let name = pass_name.trim_end_matches('/');
+    if let Some(reason) = crate::store::sneaky_path_reason(name) {
+        return Err(format!(
+            "sneaky path ({reason}) in secret name {pass_name:?}"
+        ));
+    }
+    let passfile = crate::store::store_root().join(format!("{name}.ebox"));
+    if !passfile.is_file() {
+        return Err(format!("{name} is not in the password store"));
+    }
+    let plaintext = decrypt(&passfile)?;
+    let end = plaintext
+        .iter()
+        .position(|b| *b == b'\n')
+        .unwrap_or(plaintext.len());
+    let line = plaintext[..end].to_vec();
+    if line.is_empty() {
+        return Err(format!("{name}: first line is empty"));
+    }
+    Ok(line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

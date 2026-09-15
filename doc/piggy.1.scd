@@ -509,6 +509,36 @@ passthroughs for the C pivy binaries:
 	followed by a table of the pinned downstream components (pivy,
 	pcsclite) with their versions and revisions. See *eng-versioning*(7).
 
+## piggy luks
+
+LUKS2 volumes keyed by a store secret. The first line of the *--secret*
+entry is the passphrase: it is decrypted the same way *piggy pass show*
+does (through the agent, honouring _PIGGY_AUTH_SOCK_) and piped to
+*cryptsetup*(8) with *--key-file -*, one card operation per invocation.
+Everything after *--* is forwarded to *cryptsetup* verbatim, before the
+positional device. piggy interprets none of it.
+
+*luks format* _device_ *--secret* _pass-name_ [*--* _cryptsetup-args_...]
+	*cryptsetup luksFormat --type luks2 --key-file -* _device_ with the
+	secret as the first keyslot. Destructive.
+
+*luks open* _device_ _name_ *--secret* _pass-name_ [*--* _cryptsetup-args_...]
+	*cryptsetup open --key-file -* _device_ _name_.
+
+*luks add-key* _device_ _new-key-file_ *--secret* _pass-name_ [*--* _cryptsetup-args_...]
+	*cryptsetup luksAddKey --key-file -* _device_ _new-key-file_: the
+	secret authorises, the file's contents become an additional keyslot —
+	a passphrase that opens the volume without a card.
+
+*luks close* _name_ [*--* _cryptsetup-args_...]
+	*cryptsetup close* _name_. No secret involved.
+
+A missing entry, an empty first line, or a decrypt failure exits 1
+before *cryptsetup* runs; otherwise the exit status is *cryptsetup*'s.
+Primary keyslots only — there is no N-of-M recovery shape. This is not
+the *pivy-luks* key-ebox format; it is a piggy command over ordinary
+store entries.
+
 # SIMPLE EXAMPLES
 
 Initialize password store with auto-detected YubiKey:
