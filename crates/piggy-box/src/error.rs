@@ -50,8 +50,12 @@ pub enum BoxError {
     #[error("ebox already unlocked")]
     AlreadyUnlocked,
 
-    #[error("no configs could be unlocked")]
-    UnlockFailed,
+    /// No PRIMARY config could be opened. `reason` carries the last
+    /// oracle failure that was not a plain "no such key" (a wrong PIN, a
+    /// blocked PIN, a dead agent socket, …) so the user sees why, not
+    /// only that.
+    #[error("no configs could be unlocked{}", unlock_reason_suffix(reason))]
+    UnlockFailed { reason: Option<String> },
 
     #[error("recovery threshold not met: have {have}, need {need}")]
     ThresholdNotMet { have: usize, need: usize },
@@ -73,6 +77,13 @@ pub enum BoxError {
 
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
+}
+
+fn unlock_reason_suffix(reason: &Option<String>) -> String {
+    reason
+        .as_ref()
+        .map(|r| format!(": {r}"))
+        .unwrap_or_default()
 }
 
 pub type Result<T> = std::result::Result<T, BoxError>;

@@ -46,22 +46,31 @@ pub fn unlock_ebox(
         .map(|(i, _)| i)
         .collect();
 
+    // The most recent substantive failure (not a plain "no such key")
+    // across every oracle and config, so the final error names it.
+    let mut reason: Option<String> = None;
+    let mut note = |what: &str, idx: usize, e: BoxError| {
+        tracing::debug!("{what} unlock failed for config {idx}: {e}");
+        if let BoxError::UnlockFailed { reason: Some(r) } = e {
+            reason = Some(r);
+        }
+    };
     for idx in primary_indices {
         if let Some(oracle) = agent_oracle.as_deref_mut() {
             match try_unlock_with_oracle(ebox, idx, oracle) {
                 Ok(()) => return Ok(()),
-                Err(e) => tracing::debug!("agent unlock failed for config {idx}: {e}"),
+                Err(e) => note("agent", idx, e),
             }
         }
         if let Some(oracle) = card_oracle.as_deref_mut() {
             match try_unlock_with_oracle(ebox, idx, oracle) {
                 Ok(()) => return Ok(()),
-                Err(e) => tracing::debug!("card unlock failed for config {idx}: {e}"),
+                Err(e) => note("card", idx, e),
             }
         }
     }
 
-    Err(BoxError::UnlockFailed)
+    Err(BoxError::UnlockFailed { reason })
 }
 
 /// Try to unlock a single PRIMARY config via the supplied ECDH oracle.
@@ -102,6 +111,9 @@ fn try_unlock_with_oracle(
     oracle: &mut dyn EcdhOracle,
 ) -> Result<()> {
     let mut any_opened = false;
+    // The last failure worth telling the user about; `NoKey` is not one
+    // (it is how an oracle says "not my card, try the next part").
+    let mut reason: Option<String> = None;
 
     // Version-2+ eboxes hoist per-curve ephemeral pubkeys to the Ebox
     // level (see `read_ebox_part`'s `PART_BOX` branch — each part's
@@ -165,6 +177,7 @@ fn try_unlock_with_oracle(
             }
             Err(e) => {
                 tracing::warn!("config {config_idx} part: oracle ecdh failed: {e}");
+                reason = Some(e.to_string());
                 continue;
             }
         };
@@ -173,6 +186,7 @@ fn try_unlock_with_oracle(
             tracing::warn!(
                 "config {config_idx} part: open_with_secret failed after successful oracle call: {e}"
             );
+            reason = Some(format!("open_with_secret: {e}"));
             continue;
         }
         any_opened = true;
@@ -183,7 +197,7 @@ fn try_unlock_with_oracle(
     }
 
     if !any_opened {
-        return Err(BoxError::UnlockFailed);
+        return Err(BoxError::UnlockFailed { reason });
     }
     ebox.unlock(config_idx)
 }
@@ -337,7 +351,10 @@ mod tests {
         let mut oracle = NoKeyOracle;
         let err = unlock_ebox(&mut deserialized, Some(&mut oracle), None)
             .expect_err("missing key should be UnlockFailed");
-        assert!(matches!(err, BoxError::UnlockFailed));
+        assert!(
+            matches!(err, BoxError::UnlockFailed { reason: None }),
+            "NoKey is not a reason worth reporting: {err}"
+        );
     }
 
     /// With neither oracle supplied there's nothing to try; surface
@@ -351,6 +368,30 @@ mod tests {
 
         let err = unlock_ebox(&mut deserialized, None, None)
             .expect_err("neither oracle supplied must fail");
-        assert!(matches!(err, BoxError::UnlockFailed));
+        assert!(matches!(err, BoxError::UnlockFailed { reason: None }));
+    }
+
+    /// A substantive oracle failure (anything but `NoKey`) is carried in
+    /// the error the caller prints, so a wrong PIN reads as a wrong PIN
+    /// and not as a generic "no configs could be unlocked".
+    #[test]
+    fn unlock_ebox_reports_the_last_oracle_failure() {
+        struct WrongPinOracle;
+        impl EcdhOracle for WrongPinOracle {
+            fn ecdh(&mut self, _: &[u8], _: &[u8]) -> std::result::Result<Vec<u8>, OracleError> {
+                Err(OracleError::Other("wrong PIN, 2 retries remaining".into()))
+            }
+        }
+        let (tpl, _) = seed_tpl_and_priv();
+        let sealed = Ebox::create(&tpl, &[0x5A; 32], EboxType::Stream).unwrap();
+        let mut deserialized = Ebox::from_bytes(&sealed.to_bytes().unwrap()).unwrap();
+
+        let mut oracle = WrongPinOracle;
+        let err = unlock_ebox(&mut deserialized, None, Some(&mut oracle))
+            .expect_err("wrong PIN must fail");
+        assert_eq!(
+            err.to_string(),
+            "no configs could be unlocked: wrong PIN, 2 retries remaining"
+        );
     }
 }

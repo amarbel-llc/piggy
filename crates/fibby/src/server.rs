@@ -222,7 +222,11 @@ fn handle_control(
 
 /// Apply one control command. `insert <reader-name>` / `remove <reader-name>`
 /// toggle presence (the reader name may contain spaces — everything after the
-/// first space is the name); `list` reports every reader's presence. Replies
+/// first space is the name); `list` reports every reader's presence;
+/// `fault <INS|*> <SW>[x<count>] <reader-name>` queues an injected fault
+/// (piggy#284: the next `count` APDUs with that INS — `*` for any — answer
+/// `SW`, e.g. `fault 20 63C2 …` makes one VERIFY report a wrong PIN with 2
+/// retries left) and `fault clear <reader-name>` drops them. Replies
 /// `ok[ ...]` or `err <reason>`.
 fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> String {
     let (verb, name) = match line.split_once(' ') {
@@ -230,6 +234,7 @@ fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> 
         None => (line, ""),
     };
     match verb {
+        "fault" => control_fault(backends, name),
         "insert" | "remove" => {
             let present = verb == "insert";
             for b in backends.iter() {
@@ -265,6 +270,64 @@ fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> 
         }
         other => format!("err unknown command: {other}"),
     }
+}
+
+/// `fault <INS|*> <SW>[x<count>] <reader-name>` / `fault clear <reader-name>`
+/// (piggy#284). The reader name is last because it may contain spaces.
+fn control_fault(backends: &SharedBackends, args: &str) -> String {
+    let Some((first, rest)) = args.split_once(' ') else {
+        return "err usage: fault <INS|*> <SW>[x<count>] <reader-name> | fault clear <reader-name>"
+            .to_string();
+    };
+    if first == "clear" {
+        let name = rest.trim();
+        return match find_backend(backends, name) {
+            Some(b) => {
+                b.lock().unwrap().clear_faults();
+                "ok".to_string()
+            }
+            None => format!("err no such reader: {name}"),
+        };
+    }
+    let ins = match first {
+        "*" => None,
+        hex => match u8::from_str_radix(hex, 16) {
+            Ok(v) => Some(v),
+            Err(_) => return format!("err bad INS {hex:?}: want two hex digits or *"),
+        },
+    };
+    let Some((sw_count, name)) = rest.split_once(' ') else {
+        return "err usage: fault <INS|*> <SW>[x<count>] <reader-name>".to_string();
+    };
+    let (sw_hex, count) = match sw_count.split_once('x') {
+        Some((sw, n)) => match n.parse::<u32>() {
+            Ok(n) if n > 0 => (sw, n),
+            _ => return format!("err bad count {n:?}: want a positive integer"),
+        },
+        None => (sw_count, 1),
+    };
+    let sw = match u16::from_str_radix(sw_hex, 16) {
+        Ok(v) if sw_hex.len() == 4 => v,
+        _ => return format!("err bad SW {sw_hex:?}: want four hex digits, e.g. 63C2"),
+    };
+    let name = name.trim();
+    match find_backend(backends, name) {
+        Some(b) => match b.lock().unwrap().inject_fault(crate::virtual_card::Fault {
+            ins,
+            sw,
+            remaining: count,
+        }) {
+            Ok(()) => "ok".to_string(),
+            Err(e) => format!("err {e}"),
+        },
+        None => format!("err no such reader: {name}"),
+    }
+}
+
+fn find_backend<'a>(backends: &'a SharedBackends, name: &str) -> Option<&'a SharedBackend> {
+    backends
+        .iter()
+        .find(|b| b.lock().unwrap().reader_name() == name)
 }
 
 /// Per-connection handle bookkeeping. Handles are minted monotonically;

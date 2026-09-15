@@ -187,7 +187,7 @@ impl Ebox {
                 return Ok(());
             }
         }
-        Err(BoxError::UnlockFailed)
+        Err(BoxError::UnlockFailed { reason: None })
     }
 
     /// Recover with a RECOVERY config — combine Shamir shares, XOR with

@@ -326,6 +326,22 @@ pub struct VirtualCard {
     /// flags); empty by default (real random keygen). Config, not session
     /// state: persists across `disconnect()`.
     generate_overrides: HashMap<u8, [u8; 32]>,
+    /// Injected faults (piggy#284), consumed in order by `transmit`: the
+    /// next matching command APDUs answer the fault's status word instead
+    /// of being processed, so a test can make one VERIFY return 63C2 or
+    /// 6983, or one GENERAL AUTHENTICATE return 6982, without seeding a
+    /// whole different card. Set through the control socket (`fibby ctl
+    /// fault`). Config, not session state: survives `disconnect()`.
+    faults: Vec<Fault>,
+}
+
+/// One injected fault (piggy#284): `remaining` command APDUs whose INS
+/// matches `ins` (`None` = any INS) answer `sw` verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fault {
+    pub ins: Option<u8>,
+    pub sw: u16,
+    pub remaining: u32,
 }
 
 /// YubiKey factory-default PIN: ASCII "123456" padded with 0xFF bytes
@@ -664,7 +680,24 @@ impl VirtualCard {
             pending_mgmt_witness: None,
             mgmt_authenticated: false,
             generate_overrides: HashMap::new(),
+            faults: Vec::new(),
         }
+    }
+
+    /// Consume the first queued fault matching `ins`, if any, returning
+    /// the status word to answer with (piggy#284).
+    fn take_fault(&mut self, ins: u8) -> Option<u16> {
+        let idx = self
+            .faults
+            .iter()
+            .position(|f| f.remaining > 0 && f.ins.is_none_or(|want| want == ins))?;
+        let fault = &mut self.faults[idx];
+        fault.remaining -= 1;
+        let sw = fault.sw;
+        if fault.remaining == 0 {
+            self.faults.remove(idx);
+        }
+        Some(sw)
     }
 
     /// Seed the next mgmt-key auth phase-1's witness bytes. The
@@ -925,6 +958,18 @@ impl Backend for VirtualCard {
         self.event_counter
     }
 
+    fn inject_fault(&mut self, fault: Fault) -> Result<(), String> {
+        if fault.remaining == 0 {
+            return Err("fault count must be at least 1".into());
+        }
+        self.faults.push(fault);
+        Ok(())
+    }
+
+    fn clear_faults(&mut self) {
+        self.faults.clear();
+    }
+
     fn atr(&self) -> Vec<u8> {
         self.model.atr().to_vec()
     }
@@ -963,6 +1008,18 @@ impl Backend for VirtualCard {
             command_apdu[2],
             command_apdu[3],
         );
+
+        // piggy#284: an injected fault answers before any processing, so
+        // the card's own state (PIN retries, verified flag) is untouched —
+        // the test is about the CLIENT's handling of the status word.
+        if let Some(fault_sw) = self.take_fault(ins) {
+            trace::emit(
+                trace::INFO,
+                "vcard",
+                &format!("INS {ins:02X} -> {fault_sw:04X} (injected fault, piggy#284)"),
+            );
+            return Ok(sw((fault_sw >> 8) as u8, (fault_sw & 0xFF) as u8));
+        }
 
         // SELECT (00 A4 04 00 <Lc> <AID>) of the PIV application. Use
         // apdu_body() so both short-form and extended-length Lc work
@@ -2798,6 +2855,76 @@ mod tests {
         assert_eq!(c.event_counter(), start + 1, "no-op remove must not bump");
         c.set_present(true);
         assert_eq!(c.event_counter(), start + 2, "re-insert bumps");
+    }
+
+    /// piggy#284: an injected fault answers the next matching APDU with
+    /// the queued status word, exactly `remaining` times, without touching
+    /// the card's own state — the retry counter is intact afterwards and
+    /// the real PIN still verifies.
+    #[test]
+    fn injected_fault_answers_matching_ins_then_expires() {
+        let mut c = VirtualCard::new();
+        c.inject_fault(Fault {
+            ins: Some(apdu::ins::VERIFY),
+            sw: 0x63C2,
+            remaining: 2,
+        })
+        .unwrap();
+        // A non-matching INS is processed normally (SELECT PIV → FCI + 9000).
+        let select = c.transmit(&select_piv()).unwrap();
+        assert_eq!(&select[select.len() - 2..], &[0x90, 0x00]);
+        assert_eq!(
+            c.transmit(&verify_default_pin_apdu_short()).unwrap(),
+            vec![0x63, 0xC2],
+            "first VERIFY: injected wrong-PIN"
+        );
+        assert_eq!(
+            c.transmit(&verify_default_pin_apdu_short()).unwrap(),
+            vec![0x63, 0xC2],
+            "second VERIFY: fault still queued"
+        );
+        assert_eq!(
+            c.transmit(&verify_default_pin_apdu_short()).unwrap(),
+            vec![0x90, 0x00],
+            "third VERIFY: fault expired, real PIN verifies"
+        );
+        assert_eq!(
+            c.transmit(&verify_status_apdu_ext()).unwrap(),
+            vec![0x90, 0x00],
+            "retry counter never consumed: verified session reports 9000"
+        );
+    }
+
+    /// piggy#284: `ins: None` matches any INS; `clear_faults` drops the
+    /// queue; a zero count is refused.
+    #[test]
+    fn wildcard_fault_and_clear() {
+        let mut c = VirtualCard::new();
+        c.inject_fault(Fault {
+            ins: None,
+            sw: 0x6A82,
+            remaining: 1,
+        })
+        .unwrap();
+        assert_eq!(c.transmit(&select_piv()).unwrap(), vec![0x6A, 0x82]);
+        c.inject_fault(Fault {
+            ins: None,
+            sw: 0x6A82,
+            remaining: 5,
+        })
+        .unwrap();
+        c.clear_faults();
+        let select = c.transmit(&select_piv()).unwrap();
+        assert_eq!(&select[select.len() - 2..], &[0x90, 0x00], "cleared");
+        assert!(
+            c.inject_fault(Fault {
+                ins: None,
+                sw: 0x6A82,
+                remaining: 0,
+            })
+            .is_err(),
+            "zero count is refused"
+        );
     }
 
     #[test]

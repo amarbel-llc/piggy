@@ -48,6 +48,18 @@ pub trait Backend: Send {
         0
     }
 
+    /// Queue an injected fault (piggy#284): the next `fault.remaining`
+    /// command APDUs matching `fault.ins` answer `fault.sw` instead of
+    /// being processed. Driven by the control socket (`fibby ctl fault`).
+    /// Default: refused — a backend fronting real silicon cannot fake a
+    /// status word.
+    fn inject_fault(&mut self, _fault: crate::virtual_card::Fault) -> Result<(), String> {
+        Err("this backend does not support fault injection".into())
+    }
+
+    /// Drop every queued fault (piggy#284). Default no-op.
+    fn clear_faults(&mut self) {}
+
     /// ATR of the present card (empty if absent).
     fn atr(&self) -> Vec<u8>;
 

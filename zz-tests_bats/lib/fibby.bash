@@ -64,14 +64,30 @@ fibby_up() {
   FIBBY_WORKDIR="$(mktemp -d "$base/pf.XXXXXX")"
   FIBBY_SOCK="$FIBBY_WORKDIR/pcscd.comm"
   FIBBY_LOG="$FIBBY_WORKDIR/fibby.log"
-  export FIBBY_WORKDIR FIBBY_SOCK FIBBY_LOG
+  # The control socket (piggy#130/#284) is always on, so any test can
+  # hot-plug the card or inject a fault: `fibby_ctl fault 20 63C2`.
+  FIBBY_CTL="$FIBBY_WORKDIR/control.sock"
+  FIBBY_READER="Virtual PCD piggy fibby 00 00"
+  export FIBBY_WORKDIR FIBBY_SOCK FIBBY_LOG FIBBY_CTL FIBBY_READER
   if [[ $# -eq 0 ]]; then
     set -- --seed-rfc5903-slot-9d-cert
   fi
   # fd 3 is bats' own output channel; a child that inherits it keeps bats
   # waiting after the test, so the card never gets it.
-  spawn_fibby "$@" 3>&- || fail "fibby did not come up"
+  spawn_fibby --control-socket "$FIBBY_CTL" "$@" 3>&- || fail "fibby did not come up"
   export PCSCLITE_CSOCK_NAME="$FIBBY_SOCK"
+}
+
+# Send one control command to the fibby_up card, reader name appended:
+#   fibby_ctl remove            fibby_ctl insert
+#   fibby_ctl fault 20 63C2     # next VERIFY: wrong PIN, 2 retries left
+#   fibby_ctl fault 87 6982x2   # next two GENERAL AUTHENTICATE: 6982
+#   fibby_ctl fault clear
+# Fails the test on an `err` reply.
+fibby_ctl() {
+  local out
+  out="$("$FIBBY_BIN" ctl --socket "$FIBBY_CTL" "$@" "$FIBBY_READER")" ||
+    fail "fibby ctl $*: $out"
 }
 
 fibby_down() {

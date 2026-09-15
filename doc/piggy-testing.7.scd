@@ -84,9 +84,17 @@ one socket (piggy#242): each is its own reader with a distinct GUID
 _--seed-pin-retries N_ starts a card near lockout). *--control-socket*
 _PATH_ opens a second socket and *fibby ctl --socket* _PATH_
 *insert*|*remove*|*list* _READER_ toggles a card's presence at runtime,
-which is how the agent's hot-swap lifecycle is exercised. fibby also
-implements the reader-state wait so the agent's event-driven presence
-path runs against it.
+which is how the agent's hot-swap lifecycle is exercised.
+*fibby ctl --socket* _PATH_ *fault* _INS_|*\** _SW_[*x*_COUNT_] _READER_
+queues an injected fault (piggy#284): the next _COUNT_ (default 1)
+command APDUs with that instruction byte — *\** for any — answer _SW_
+verbatim, with
+no change to the card's own state, so a client's handling of 63Cx
+(wrong PIN, x retries), 6983 (PIN blocked), 6982 (security status not
+satisfied) or 6A82 (no such object) is asserted deterministically;
+*fault clear* _READER_ drops the queue. fibby also implements the
+reader-state wait so the agent's event-driven presence path runs
+against it.
 
 *--hardware-proxy* relays a real card and keeps the wire trace; that is
 how APDU fixtures for new client code are captured.
@@ -94,7 +102,9 @@ how APDU fixtures for new client code are captured.
 fibby also runs INSIDE the sandboxed default lane (piggy#281, piggy#164):
 the lane injects it as _FIBBY_BIN_, and _common.bash_ calls *fibby_up*
 (default seed: the RFC 5903 slot-9D key, PIN 123456) for every test,
-exporting _PCSCLITE_CSOCK_NAME_, _FIBBY_SOCK_ and _FIBBY_LOG_, and
+exporting _PCSCLITE_CSOCK_NAME_, _FIBBY_SOCK_, _FIBBY_LOG_ and the
+control socket _FIBBY_CTL_ (so *fibby_ctl* _COMMAND_... — e.g.
+*fibby_ctl fault 20 63C2*, *fibby_ctl remove* — drives that card), and
 chains *fibby_down* onto the file's *teardown()* (or bats' default
 no-op), so a file needs no teardown of its own. The harness
 also points _SSH_ASKPASS_ at a *piggy_install_helper_as* copy of the test

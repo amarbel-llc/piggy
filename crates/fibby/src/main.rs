@@ -385,9 +385,9 @@ fn main() {
     proto_sanity();
     trace::init_from_env();
 
-    // piggy#130: `fibby ctl --socket <ctl-path> <insert|remove|list> [<reader>]`
+    // piggy#130: `fibby ctl --socket <ctl-path> <insert|remove|list|fault> …`
     // is the control client — it talks to a running fibby's control socket to
-    // toggle a card's runtime presence.
+    // toggle a card's runtime presence or queue an injected fault (piggy#284).
     if std::env::args().nth(1).as_deref() == Some("ctl") {
         std::process::exit(run_ctl_client());
     }
@@ -432,7 +432,9 @@ fn main() {
 /// piggy#130 control client: connect to a running fibby's `--control-socket`,
 /// send one command, print the reply. Returns a process exit code (0 on an
 /// `ok` reply). Usage: `fibby ctl --socket <path> <insert|remove|list>
-/// [<reader-name>]` — the reader name may contain spaces (quoted or not).
+/// [<reader-name>]`, or `fibby ctl --socket <path> fault <INS|*>
+/// <SW>[x<count>] <reader-name>` / `fault clear <reader-name>` (piggy#284) —
+/// the reader name may contain spaces (quoted or not).
 fn run_ctl_client() -> i32 {
     use std::io::{Read, Write};
     let mut it = std::env::args().skip(2); // past argv[0] and "ctl"
@@ -456,7 +458,9 @@ fn run_ctl_client() -> i32 {
         return 2;
     };
     if rest.is_empty() {
-        eprintln!("fibby ctl: want <insert|remove|list> [<reader-name>]");
+        eprintln!(
+            "fibby ctl: want <insert|remove|list> [<reader-name>] | fault <INS|*> <SW>[x<count>] <reader-name> | fault clear <reader-name>"
+        );
         return 2;
     }
     let command = rest.join(" ");

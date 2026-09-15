@@ -250,8 +250,11 @@ into the Rust decryptor. The default lane now runs the harness card
 for every test (`common.bash` → `fibby_up`), `mock-pivy-box.sh` is
 deleted, and `mock-piggy-ids.sh encrypt` execs the real binary — only
 card discovery stays canned. `pass git init`'s textconv is `piggy box
-stream decrypt`. Items 2 (differential corpus) and 4 (`fibby ctl
-fault`, #284) remain open.
+stream decrypt`. Item 4 landed the same day: `fibby ctl fault <INS|*>
+<SW>[x<count>] <reader>` (#284) queues a status word for the next
+matching APDUs (`t0980` asserts the decrypt's 63C2 and 6983 messages
+through it; `fibby_ctl` in `lib/fibby.bash`). Item 2 (differential
+corpus) remains open.
 
 ### Phase 2: `piggy box` residual (#165)
 

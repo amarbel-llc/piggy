@@ -41,6 +41,44 @@ function real_encrypt_then_agentless_in_process_decrypt_against_fibby { # @test
   assert_output "1"
 }
 
+# piggy#284: `fibby ctl fault` makes the NEXT matching APDU answer a chosen
+# status word without touching the card's state, so the client's handling
+# of each PIV error path is asserted deterministically — here the
+# in-process decrypt's PIN errors.
+function injected_wrong_pin_fault_reports_retries_remaining { # @test
+  local ids ebox
+  ids="$BATS_TEST_TMPDIR/piggy-ids"
+  ebox="$BATS_TEST_TMPDIR/secret.ebox"
+  echo "$PIGGY_TEST_RECIPIENT" >"$ids"
+  printf 'x' | "$PIGGY_IDS_REAL" encrypt "$ids" >"$ebox"
+
+  fibby_ctl fault 20 63C2
+  run env -u SSH_AUTH_SOCK -u PIGGY_AUTH_SOCK "$PIGGY" box stream decrypt <"$ebox"
+  assert_failure
+  assert_output --partial "wrong PIN, 2 retries remaining"
+  run grep -c 'INS 20 -> 63C2 (injected fault' "$FIBBY_LOG"
+  assert_output "1"
+
+  # The fault was consumed and the card's own retry counter was never
+  # touched: the same PIN now unlocks.
+  run env -u SSH_AUTH_SOCK -u PIGGY_AUTH_SOCK "$PIGGY" box stream decrypt <"$ebox"
+  assert_success
+  assert_output "x"
+}
+
+function injected_blocked_pin_fault_reports_pin_blocked { # @test
+  local ids ebox
+  ids="$BATS_TEST_TMPDIR/piggy-ids"
+  ebox="$BATS_TEST_TMPDIR/secret.ebox"
+  echo "$PIGGY_TEST_RECIPIENT" >"$ids"
+  printf 'x' | "$PIGGY_IDS_REAL" encrypt "$ids" >"$ebox"
+
+  fibby_ctl fault 20 6983
+  run env -u SSH_AUTH_SOCK -u PIGGY_AUTH_SOCK "$PIGGY" box stream decrypt <"$ebox"
+  assert_failure
+  assert_output --partial "PIN blocked"
+}
+
 function wrong_pin_is_refused_by_the_card_not_the_harness { # @test
   local ids ebox
   ids="$BATS_TEST_TMPDIR/piggy-ids"
