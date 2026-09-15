@@ -1,6 +1,6 @@
 ---
-status: draft
-date: 2026-09-14
+status: accepted
+date: 2026-09-15
 provenance: |
   Plan to retire the vendored C pivy stack (vendor/pivy, nix/pivy.nix,
   openssh.patch) in favour of the Rust crates plus nix, with the test
@@ -24,7 +24,7 @@ and well-bounded:
 | store decrypt (`show`/`edit`/`generate -i`/`grep`/`verify`/re-encrypt walk) | spawns C `pivy-box stream decrypt` | port in-process (#164) |
 | `piggy box` residual (`tpl edit`, `key *`, `challenge *`, interactive modes) | falls back to C `pivy-box` | drop (#165) |
 | `piggy tool` | exec C `pivy-tool` | port the subset piggy needs |
-| `piggy ca` / `luks` / `zfs` | exec binaries nix never builds (#265) | delete now |
+| `piggy ca` / `luks` / `zfs` | exec binaries nix never builds (#265) | delete the dead exec arms now; re-land each as a Rust command (Phase 3b), `luks` first |
 | `piggy pivy <tool>` escape hatch | exec any `pivy-*` | delete last |
 | C `pivy-agent` (`-C` confirm, `install-service`) | reachable via `piggy pivy agent` and the HM module's `package = pkgs.pivy` branch | drop |
 | C pivy as a **test oracle** (~14 conformance bats + ~20 justfile recipes) | live differential baseline | freeze into golden fixtures, then delete |
@@ -35,7 +35,8 @@ differential-testing discipline C gives us today is converted into
 static fixtures before the C binaries disappear.
 
 Five phases. Phases 0 to 2 are small and can start immediately.
-Phase 3 (`piggy tool`) is the only large port. Phases 4 and 5 are
+Phase 3 (`piggy tool`) is the only large port; Phase 3b re-lands
+`luks`, then `zfs`, then `ca` as Rust commands. Phases 4 and 5 are
 packaging: first demote C pivy to a test-only nix input, then delete
 it.
 
@@ -146,22 +147,24 @@ that interception; the lane needs a new strategy (Phase 1).
 
 ## Product decisions
 
-Recommendations; each needs an operator yes/no before its phase starts.
+Confirmed by the operator on 2026-09-15 (issue numbers in the Issue
+map). Where the decision differs from the original recommendation the
+recommendation is kept in the rationale column as history.
 
-| Surface | Recommendation | Rationale / escape hatch |
+| Surface | Decision | Rationale / escape hatch |
 |---|---|---|
-| `piggy ca` | **drop** | Never built; needs json-c and the 7k-line CA/cert-template stack; no piggy doc, test, or recipe exercises it. Anyone needing a PIV CA can build upstream pivy. |
-| `piggy luks` | **drop** | FDR 0004 already rejects `pivy-luks` for the laptop LUKS2 use case in favour of systemd-cryptenroll FIDO2. |
-| `piggy zfs` | **drop** | Never built; needs libzfs. If ZFS native-encryption unlock is wanted later it is a ~300-line Rust command over `piggy-box` key eboxes plus `zfs load-key`, not a port. |
+| `piggy luks` | **keep; rewrite in Rust first (Phase 3b.1)** | circus will explore `piggy luks` for LUKS2 unlock from a store secret. The dead C exec arm still goes in Phase 0; the Rust command re-lands the name. The VM LUKS lane is its gate. (Recommendation was drop: FDR 0004 rejects `pivy-luks` for the laptop root, which stays true — this is the non-root, store-keyed use case.) |
+| `piggy zfs` | **keep; rewrite in Rust (Phase 3b.2)** | ~300-line command over `piggy-box` key eboxes plus `zfs load-key`; the VM ZFS lane is its gate. (Recommendation was drop.) |
+| `piggy ca` | **keep; rewrite in Rust (Phase 3b.3, last)** | The largest of the three (the CA/cert-template stack); scoped after `luks` and `zfs` land and only for the in-house cert workflows. (Recommendation was drop.) |
 | `pam_pivy` | **drop** | Never built or exposed. |
 | `pivy-wire-test` | **drop** | The Go `piggy-agent-conformance` binary covers the extension wire-shape checks. |
 | `piggy box tpl edit`, `tpl create -i`, `tpl list` | **drop** | `piggy-ids` files are the recipient-management surface; templates are derived. |
 | `piggy box key generate/lock/unlock/info/relock` | **drop** | No piggy path produces or consumes key eboxes. |
-| `piggy box challenge *` and N-of-M recovery configs | **drop (for now)** | piggy's re-encrypt walk emits primary configs only; recovery is a separate feature to design if wanted (file an issue, do not port blind). |
-| C `pivy-agent -C` confirm | **drop** | Not on any piggy workflow; Rust agent's per-op PIN prompt and `--upstream` model replace the threat model it served. File a Rust `--confirm` issue if wanted later. |
+| `piggy box challenge *` and N-of-M recovery configs | **drop; design placeholder filed** | piggy's re-encrypt walk emits primary configs only; recovery is a separate feature to design from scratch, tracked so it is not forgotten, not ported blind. |
+| C `pivy-agent -C` confirm | **drop; Rust `--confirm` issue filed** | Not on any piggy workflow; the Rust agent's per-op PIN prompt and `--upstream` model replace the threat model it served. A per-op confirmation prompt in the Rust agent is tracked as its own feature. |
 | C `pivy-agent install-service` | **drop** | HM module owns unit installation. |
 | `piggy pivy <tool>` | **delete in Phase 5** | Dies with the C stack. |
-| `piggy tool` | **port the subset** (table in Phase 3) | Everything with an in-house workflow: read-only ops, PIN/PUK, keygen/import/certs, factory reset, admin key incl. AES. Drop cert templates (`-T`/`-D`), PKINIT (`-r`), SunSSH, CACS. |
+| `piggy tool` | **port the subset** (table in Phase 3), as a `cmd/tool/` module in the piggy crate | One clap tree; reuses `card_oracle`/`sign_core`. Everything with an in-house workflow: read-only ops, PIN/PUK, keygen/import/certs, factory reset, admin key incl. AES. Drop cert templates (`-T`/`-D`), PKINIT (`-r`), SunSSH, CACS. |
 
 ## Phases
 
@@ -173,7 +176,9 @@ Closes #265. Removes what is already broken.
   `exec.rs` name-list entries and test, and every doc mention
   (`doc/piggy.1.scd`, `README.md`, `AGENTS.md`, the 2026-04-27 CLI
   scope doc gets a status note, FDR 0004's "rejected" section stays as
-  history).
+  history). The three names come back as Rust commands in Phase 3b;
+  until then a user gets clap's unknown-subcommand error instead of
+  "pivy-luks: not found".
 - Keep `piggy pivy <tool>` for now; it is the documented escape hatch
   until Phase 5.
 - Update `exec.rs`'s module doc: "no Rust port planned" becomes "C
@@ -247,9 +252,9 @@ Effort: one merge cycle.
 ### Phase 3: `piggy tool` port
 
 Reframes the 2026-04-21 scoping doc against what `card init` already
-delivered. Crate layout as scoped there (`crates/piggy-tool` or
-`crates/piggy/src/cmd/tool/`; choose at implementation time, the
-dispatcher shape is the same).
+delivered. Layout decided 2026-09-15: a `crates/piggy/src/cmd/tool/`
+module in the piggy crate (one clap tree; reuses `card_oracle` and
+`sign_core`), not a separate crate.
 
 | Milestone | Ops | New piggy-piv surface | New fibby surface |
 |---|---|---|---|
@@ -301,6 +306,27 @@ Tests, per milestone (the rigorous part):
 
 Effort: 3.1 and 3.2 one cycle each; 3.3 and 3.4 two cycles each; 3.5
 one; 3.6 one. About eight merge cycles.
+
+### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
+
+Independent of Phase 3 (they need no new `piggy-piv` surface: the key
+material is a store secret or a `piggy-box` key ebox, decrypted through
+the existing agent/in-process path), so 3b.1 can start as soon as
+Phase 0 has removed the dead arms. Order is `luks` first because circus
+wants to explore it; `zfs` second because it is the same shape; `ca`
+last and only after the first two have real users.
+
+| Milestone | Command | Shape | Gate |
+|---|---|---|---|
+| 3b.1 `piggy luks` | `luks format\|open\|add-key\|close <dev> [--secret <pass-name>]` | thin driver over `cryptsetup` fed by `crypt::decrypt` on stdin (exactly what `nix/vm-tests/luks.nix` scripts by hand today); primary configs only, no N-of-M | the LUKS VM lane rewritten to call `piggy luks` instead of piping `pass show` into cryptsetup; asserts one card ECDH per open |
+| 3b.2 `piggy zfs` | `zfs load-key\|create <dataset> [--secret <pass-name>]` | same driver shape over `zfs load-key -L prompt` | the ZFS VM lane, same rewrite |
+| 3b.3 `piggy ca` | scoped separately once 3b.1/3b.2 are in use | the CA/cert-template stack is the bulk of C `pivy-ca`; the Rust port is limited to the in-house cert workflows and reuses `cert_builder.rs` | a fibby-backed bats lane plus a `card init`-style VM lane |
+
+The C `pivy-luks`/`pivy-zfs` key-ebox format is **not** the target:
+these are new piggy commands keyed by store secrets (FDR 0004's
+"token slot + passphrase" shape), and the LUKS/ZFS VM lanes already
+prove that shape end to end. Effort: 3b.1 and 3b.2 one to two cycles
+each; 3b.3 to be estimated when scoped.
 
 ### Phase 4: demote C pivy to a test-only nix input
 
@@ -393,16 +419,12 @@ later phase uses them.
 
 ## Open questions for the operator
 
-1. Confirm the drop list in "Product decisions", in particular
-   recovery/N-of-M and the `key *` family.
-2. Is there any ZFS native-encryption use in the fleet that would want
-   `piggy zfs` re-created in Rust later? (Affects whether the zfs drop
-   gets a placeholder issue.)
+Answered 2026-09-15 (1: confirmed, with luks/zfs/ca kept as Rust
+rewrites; 2: yes, `piggy zfs` is re-created, Phase 3b.2; 4: module).
+Still open:
+
 3. Which throwaway YubiKey serials may the hardware lane treat as
-   destructible?
-4. Should `piggy tool` be a separate crate (`crates/piggy-tool`) or a
-   `cmd/tool/` module in the piggy crate? Recommendation: module, to
-   keep one clap tree and reuse `card_oracle`/`sign_core`.
+   destructible? (Needed before Phase 3.3's hardware lane runs.)
 
 ## Issue map
 
@@ -412,7 +434,14 @@ moot at Phase 5), #105 to #111 (C agent, moot at Phase 5), #28/#42/#43
 (moot at Phase 5), #30 (`tpl create` hardware-free mode, subsumed by
 the Phase 2 drop).
 
-To file when the plan is accepted: one epic linking this doc; one
-issue per Phase 3 milestone; one each for the six infrastructure items
-above; a "recovery/N-of-M in piggy" design placeholder if the operator
-wants it.
+Filed 2026-09-15. Epic: #289 (links every item below; child of #3).
+
+- Phase 3 milestones: #272 (3.1), #273 (3.2), #276 (3.3), #274 (3.4),
+  #275 (3.5), #278 (3.6).
+- Phase 3b rewrites: #277 (`luks`), #279 (`zfs`), #280 (`ca`).
+- Placeholders from the product decisions: #282 (recovery/N-of-M
+  design), #283 (Rust agent `--confirm`).
+- Infrastructure: #281 (fibby-in-sandbox spike), #284 (`fibby ctl
+  fault`), #285 (oracle capture recipes + fixtures), #286
+  (`PIGGY_TEST_THROWAWAY_SERIALS` guard), #287 (`lint-closure-no-pivy`),
+  #288 (card-state-dump helper).
