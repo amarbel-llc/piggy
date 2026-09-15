@@ -1,6 +1,6 @@
 # LUKS2 from the piggy store: a secret sealed to the fibby card formats,
 # opens, and re-opens a LUKS2 volume; a second passphrase keyslot is
-# enrolled alongside it (the FDR 0003 shape: token slot + passphrase).
+# enrolled alongside it (the FDR 0004 shape: token slot + passphrase).
 { bootstrap }:
 { ... }:
 {
