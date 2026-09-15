@@ -703,7 +703,7 @@ test-bats-conformance-secrets-reconcile-fibby: build-rust
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
-    BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
+    BATS_TEST_TIMEOUT=60 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
     zz-tests_bats/conformance/piggy_secrets_reconcile_fibby.bats
 
 # Hardware-free Phase 0 smoke for piggy#135: stand up fibby (virtual
