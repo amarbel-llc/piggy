@@ -70,6 +70,19 @@ function cert_output_is_pem { # @test
   assert_output --partial "-----END CERTIFICATE-----"
 }
 
+function attest_imported_key_fails_like_c { # @test
+  # fibby's slot keys are imported (seeded scalars), so INS_ATTEST returns
+  # 6A80: attestation is unavailable. Both impls must fail (non-zero) and
+  # neither should emit a certificate. The two-PEM happy path is the
+  # hardware lane's job (a generated, attestable key).
+  run "$PIGGY" tool attest 9d
+  assert_failure
+  refute_output --partial "BEGIN CERTIFICATE"
+  run "$REAL_PIVY_TOOL" attest 9d
+  assert_failure
+  refute_output --partial "BEGIN CERTIFICATE"
+}
+
 function pubkey_empty_slot_fails_like_c { # @test
   # Slot 9C is not seeded on this card: both impls must fail (non-zero),
   # neither should print a key.

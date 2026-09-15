@@ -5,6 +5,12 @@
 //!   (matches C `pivy-tool`'s `sshkey_write`).
 //! - `piggy tool cert <slot>` — the slot's X.509 certificate as PEM
 //!   (matches C `PEM_write_X509`).
+//! - `piggy tool attest <slot>` — the slot's YubiKey attestation cert
+//!   followed by the device attestation cert, both PEM (matches C's two
+//!   `PEM_write_X509` calls). On a card whose slot key was imported (so
+//!   attestation is unavailable — every fibby key, and a real YubiKey's
+//!   imported keys) this fails exactly as C does; the two-PEM happy path
+//!   is exercised only by the hardware lane.
 //!
 //! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
 //! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
@@ -51,7 +57,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
     let op = args.get(i)?.clone();
     // Only claim the ops this milestone implements; everything else falls
     // through to C.
-    if !matches!(op.as_str(), "pubkey" | "cert") {
+    if !matches!(op.as_str(), "pubkey" | "cert" | "attest") {
         return None;
     }
     Some(Invocation {
@@ -68,7 +74,8 @@ pub fn run(args: &[String]) -> Option<i32> {
     Some(match inv.op.as_str() {
         "pubkey" => cmd_pubkey(&inv),
         "cert" => cmd_cert(&inv),
-        // parse() only returns these two ops.
+        "attest" => cmd_attest(&inv),
+        // parse() only returns these ops.
         _ => unreachable!(),
     })
 }
@@ -167,16 +174,69 @@ fn cmd_cert(inv: &Invocation) -> i32 {
             return 1;
         }
     };
-    let pem = match openssl::x509::X509::from_der(slot.cert_der()).and_then(|x509| x509.to_pem()) {
-        Ok(p) => p,
+    match print_cert_pem(slot.cert_der()) {
+        Ok(()) => 0,
         Err(e) => {
-            eprintln!("piggy tool cert: encode PEM: {e}");
+            eprintln!("piggy tool cert: {e}");
+            1
+        }
+    }
+}
+
+/// `piggy tool attest <slot>`: print the slot's YubiKey attestation cert
+/// and then the device attestation cert, both PEM — matching C's two
+/// `PEM_write_X509` calls (pivy-tool.c:1699,1719). Attestation is
+/// unavailable for an imported key (INS_ATTEST returns 6A80), so on fibby
+/// and on a real YubiKey's imported keys this fails just as C does; the
+/// happy path is validated by the hardware lane.
+fn cmd_attest(inv: &Invocation) -> i32 {
+    let slot_id = match slot_arg(inv, "attest") {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool attest: {msg}");
             return 1;
         }
     };
-    // PEM already ends in a newline, matching PEM_write_X509.
-    print!("{}", String::from_utf8_lossy(&pem));
+    // 1. The per-slot attestation cert (INS_ATTEST / 0xF9 signing key).
+    let att = match token.yk_attest(slot_id) {
+        Ok(der) => der,
+        Err(e) => {
+            eprintln!("piggy tool attest: attestation failed: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = print_cert_pem(&att) {
+        eprintln!("piggy tool attest: slot attestation cert: {e}");
+        return 1;
+    }
+    // 2. The device attestation cert (the F9 slot's own cert object).
+    let dev = match token.read_slot(0xF9) {
+        Ok(slot) => slot.cert_der().to_vec(),
+        Err(e) => {
+            eprintln!("piggy tool attest: read device attestation cert: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = print_cert_pem(&dev) {
+        eprintln!("piggy tool attest: device attestation cert: {e}");
+        return 1;
+    }
     0
+}
+
+/// Re-encode a DER X.509 certificate as PEM and write it to stdout,
+/// matching OpenSSL's `PEM_write_X509` (the PEM already ends in a
+/// newline). Shared by `cert` and `attest`.
+fn print_cert_pem(cert_der: &[u8]) -> Result<(), String> {
+    let pem = openssl::x509::X509::from_der(cert_der)
+        .and_then(|x509| x509.to_pem())
+        .map_err(|e| format!("encode PEM: {e}"))?;
+    print!("{}", String::from_utf8_lossy(&pem));
+    Ok(())
 }
 
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
@@ -250,6 +310,7 @@ mod tests {
     fn parse_claims_only_the_ported_ops() {
         assert!(parse(&argv(&["pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["cert", "9a"])).is_some());
+        assert!(parse(&argv(&["attest", "9d"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         // Unported ops fall through to C.
         assert!(parse(&argv(&["list"])).is_none());

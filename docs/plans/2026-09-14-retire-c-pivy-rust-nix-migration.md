@@ -367,10 +367,30 @@ does not model, so the superset stays honest). `pubkey <slot>` and
 and `cert` re-encodes the DER as PEM. The differential lane
 `test-bats-conformance-tool-fibby` (in the merge gate) runs BOTH `piggy
 tool` and C `pivy-tool` against one fibby card (slots 9A + 9D seeded)
-and asserts equality — the external contract. Remaining in 3.1
-(**3.1b**): `list` (+`-p`/`-j`), `pinfo` (Printed Information parse),
-`attest`, `version`, and the GET METADATA (F7) surface with fibby's INS
-F7.
+and asserts equality — the external contract.
+
+`attest <slot>` landed next: it prints the slot attestation cert then
+the device attestation cert (two PEMs, matching C's two
+`PEM_write_X509`). Attestation is unavailable for an imported key
+(INS_ATTEST → 6A80), so on fibby — and on a real YubiKey's imported keys
+— it fails exactly as C does; the differential lane asserts both fail
+and emit no cert, and the two-PEM happy path is deferred to the hardware
+lane (a generated, attestable key).
+
+**Scope decision 2026-09-15 (operator: option 3).** `list` and `pinfo`
+are NOT "read ops" like `pubkey`/`cert`: matching C `pivy-tool list`
+faithfully (any of its human/`-p`/`-j` forms) requires reproducing a
+large card-introspection surface piggy-piv does not parse today — CHUID
+internals (signed-status, cardholder UUID, FASC-N, expiry), the CCC /
+cardcap object, YubiKey applet version/label/URI, the Discovery Object's
+auth methods, the algorithm list, VCI — plus teaching fibby to model all
+of it so the differential lane can run. A partial `list` would diverge
+and the differential test would (correctly) reject it. So `list` and
+`pinfo` are DEFERRED and scoped on their own later; the port proceeds to
+the cleanly-differentiable ops instead. `version` is likewise deferred
+(it would print piggy's version, not pivy's — not a differential
+contract). Next: 3.2 (PIN/PUK) and 3.5 (`sign`/`ecdh`), which fibby
+exercises fully.
 
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
