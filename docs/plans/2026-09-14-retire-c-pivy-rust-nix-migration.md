@@ -356,6 +356,22 @@ Tests, per milestone (the rigorous part):
 Effort: 3.1 and 3.2 one cycle each; 3.3 and 3.4 two cycles each; 3.5
 one; 3.6 one. About eight merge cycles.
 
+**Status 2026-09-15: milestone 3.1a landed** (`pubkey`, `cert`). The
+port lives in `crates/piggy/src/cmd/tool/` with the `cmd::pivy_box`
+Some/None shape: `piggy tool` handles the ops it has ported and execs C
+`pivy-tool` for the rest (and for any invocation carrying an option it
+does not model, so the superset stays honest). `pubkey <slot>` and
+`cert <slot>` read the slot offline (no PIN) via the existing
+`PivToken::read_slot`; `pubkey` reproduces C's exact comment
+(`<type> <base64> PIV_slot_<SLOT>@<GUID> "<subject>"`, pivy-tool.c:1762)
+and `cert` re-encodes the DER as PEM. The differential lane
+`test-bats-conformance-tool-fibby` (in the merge gate) runs BOTH `piggy
+tool` and C `pivy-tool` against one fibby card (slots 9A + 9D seeded)
+and asserts equality — the external contract. Remaining in 3.1
+(**3.1b**): `list` (+`-p`/`-j`), `pinfo` (Printed Information parse),
+`attest`, `version`, and the GET METADATA (F7) surface with fibby's INS
+F7.
+
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
 Independent of Phase 3 (they need no new `piggy-piv` surface: the key

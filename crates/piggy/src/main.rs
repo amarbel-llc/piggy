@@ -922,7 +922,13 @@ fn main() {
         // Unknown subcommands are a usage error, not a hop to C (piggy#165);
         // the full C surface is reachable via `piggy pivy box`.
         Command::Box { rest } => std::process::exit(piggy::cmd::pivy_box::run(&rest)),
-        Command::Tool { rest } => exec::exec_pivy("tool", &rest),
+        // `tool` runs piggy's Rust re-impl for the ops it handles (piggy#289
+        // Phase 3); the rest still exec C `pivy-tool`. `piggy pivy tool`
+        // always reaches C.
+        Command::Tool { rest } => match piggy::cmd::tool::run(&rest) {
+            Some(code) => std::process::exit(code),
+            None => exec::exec_pivy("tool", &rest),
+        },
 
         Command::Pivy { tool, rest } => match tool {
             Some(tool) => exec::exec_pivy(&tool, &rest),
