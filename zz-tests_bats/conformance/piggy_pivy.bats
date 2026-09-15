@@ -57,6 +57,29 @@ function pivy_nonexistent_tool_errors_clearly { # @test
   assert_output --partial "failed to launch pivy-thiswillneverexist"
 }
 
+# --- removed shortcuts (piggy#265) ---
+#
+# `piggy ca` / `luks` / `zfs` used to exec `pivy-ca`/`-luks`/`-zfs`,
+# binaries the nix build never installed. The arms are gone; clap
+# rejects the names like any other unknown subcommand (exit 2). Guards
+# against re-adding a dead arm before the Rust commands land
+# (piggy#277, #279, #280), at which point these tests get replaced.
+
+function removed_shortcut_luks_is_unknown_subcommand { # @test
+  run -2 "$PIGGY" luks open /dev/null
+  assert_output --partial "unrecognized subcommand 'luks'"
+}
+
+function removed_shortcut_zfs_is_unknown_subcommand { # @test
+  run -2 "$PIGGY" zfs load-key pool/ds
+  assert_output --partial "unrecognized subcommand 'zfs'"
+}
+
+function removed_shortcut_ca_is_unknown_subcommand { # @test
+  run -2 "$PIGGY" ca list
+  assert_output --partial "unrecognized subcommand 'ca'"
+}
+
 # --- happy path through the mock pivy-* binaries ---
 
 function pivy_tool_list_reaches_mock_pivy_tool { # @test

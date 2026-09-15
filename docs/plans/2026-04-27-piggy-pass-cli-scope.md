@@ -1,5 +1,11 @@
 # `piggy` pass-style CLI — v1.0 scoping
 
+> **Status note (2026-09-15).** Historical. The `ca`/`luks`/`zfs`
+> passthrough rows below described arms that exec'd binaries the nix
+> build never installed; they were removed (piggy#265) and are being
+> re-created as Rust commands under the C-pivy retirement plan
+> (`2026-09-14-retire-c-pivy-rust-nix-migration.md`, epic piggy#289).
+
 Status: **scope only, no implementation**. Issue: #46.
 Milestone: [v1.0.0 — Rust clap CLI shelling out to C `pivy-*`](https://github.com/amarbel-llc/piggy/milestone/4).
 (Tracker #45 retired 2026-04-27 — operational state lives on the

@@ -19,13 +19,15 @@
 //!    that C `pivy-box` lacks (piggy#57). Subcommands it doesn't handle
 //!    (`tpl edit` + the rest of the pivy-box surface) fall back to C
 //!    `pivy-box` via [`exec::exec_pivy`], so `piggy box` is a superset.
-//! 4. C-pivy passthroughs — `tool`/`ca`/`luks`/`zfs` `exec(2)` the
-//!    matching `pivy-*` binary from `$PATH` via [`exec::exec_pivy`]
-//!    (`tool` → `pivy-tool`, `ca` → `pivy-ca`, `luks` → `pivy-luks`,
-//!    `zfs` → `pivy-zfs`). `piggy pivy <X>` is the explicit escape
-//!    hatch — `piggy pivy box` always reaches C `pivy-box` and
-//!    `piggy pivy agent` always reaches C `pivy-agent`, even though
-//!    `piggy box` and `piggy agent` run the Rust impls.
+//! 4. C-pivy passthrough — `tool` `exec(2)`s `pivy-tool` from `$PATH`
+//!    via [`exec::exec_pivy`] until its Rust port lands (piggy#289,
+//!    Phase 3). `piggy pivy <X>` is the explicit escape hatch — `piggy
+//!    pivy box` always reaches C `pivy-box` and `piggy pivy agent`
+//!    always reaches C `pivy-agent`, even though `piggy box` and
+//!    `piggy agent` run the Rust impls. The former `ca`/`luks`/`zfs`
+//!    shortcuts exec'd binaries the nix build never installed (they
+//!    were dead on every deployed piggy, piggy#265) and were removed;
+//!    the names come back as Rust commands (piggy#277, #279, #280).
 //!
 //! Bare `piggy` and bare `piggy pass` both print clap help (no implicit
 //! `cmd_show ""`); `arg_required_else_help` handles that on the top-level
@@ -191,24 +193,6 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
-    /// Run the C `pivy-ca` binary.
-    #[command(disable_help_flag = true)]
-    Ca {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// Run the C `pivy-luks` binary.
-    #[command(disable_help_flag = true)]
-    Luks {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
-    /// Run the C `pivy-zfs` binary.
-    #[command(disable_help_flag = true)]
-    Zfs {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
-    },
     /// Run any C `pivy-<tool>` binary explicitly (escape hatch).
     ///
     /// Always reaches the C binary from `$PATH`; `piggy pivy box` runs
@@ -219,9 +203,10 @@ enum Command {
     /// family.
     #[command(disable_help_flag = true)]
     Pivy {
-        /// Subcommand name (e.g. `box`, `tool`, `agent`, `ca`, `luks`,
-        /// `zfs`). Concatenated as `pivy-<TOOL>` and looked up on
-        /// `$PATH`.
+        /// Subcommand name (e.g. `box`, `tool`, `agent`). Concatenated
+        /// as `pivy-<TOOL>` and looked up on `$PATH`; the nix build
+        /// installs only `pivy-tool`, `pivy-agent`, `pivy-box` and
+        /// `pivy-wire-test`.
         tool: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
@@ -772,9 +757,6 @@ fn main() {
             None => exec::exec_pivy("box", &rest),
         },
         Command::Tool { rest } => exec::exec_pivy("tool", &rest),
-        Command::Ca { rest } => exec::exec_pivy("ca", &rest),
-        Command::Luks { rest } => exec::exec_pivy("luks", &rest),
-        Command::Zfs { rest } => exec::exec_pivy("zfs", &rest),
 
         Command::Pivy { tool, rest } => match tool {
             Some(tool) => exec::exec_pivy(&tool, &rest),

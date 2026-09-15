@@ -10,11 +10,15 @@
 //!   `recipients list-available` subcommand, kept for namespace
 //!   stability). Present to dodge the `piggy list` vs
 //!   `piggy pass list` name collision, not as a port stopgap.
-//! - [`exec_pivy`] runs `pivy-<tool>` for the C-pivy shortcuts
-//!   (`tool` / `ca` / `luks` / `zfs` — no Rust port planned; the C
-//!   pivy stack is the intended product architecture there), the
-//!   `piggy box` subcommands the Rust impl doesn't cover, and the
-//!   `piggy pivy <tool>` passthrough.
+//! - [`exec_pivy`] runs `pivy-<tool>` for the `piggy tool` shortcut,
+//!   the `piggy box` subcommands the Rust impl doesn't cover, and the
+//!   `piggy pivy <tool>` passthrough. All three are transitional: the
+//!   C pivy stack is being retired (piggy#289,
+//!   `docs/plans/2026-09-14-retire-c-pivy-rust-nix-migration.md`) —
+//!   `tool` ports in Phase 3, the box residual is dropped in Phase 2,
+//!   and `piggy pivy` dies with the C binaries in Phase 5. The former
+//!   `ca`/`luks`/`zfs` shortcuts exec'd binaries the nix build never
+//!   installed and were removed in Phase 0 (piggy#265).
 //!
 //! Top-level dispatch is exhaustive in clap; this module owns no
 //! subcommand-name routing and has no catch-all. Every reachable
@@ -49,8 +53,8 @@ pub fn exec_piggy_ids(subcmd: &str, rest: &[String]) -> ! {
     std::process::exit(127);
 }
 
-/// Exec `pivy-<tool> <rest...>`. Used by the C-pivy shortcut handlers
-/// (`tool/ca/luks/zfs`) and by the `piggy pivy <tool>` passthrough.
+/// Exec `pivy-<tool> <rest...>`. Used by the `piggy tool` shortcut, the
+/// `piggy box` C fallback, and the `piggy pivy <tool>` passthrough.
 /// Never returns on success.
 ///
 /// `tool` is rejected if it contains a path separator, a NUL, or
@@ -87,7 +91,10 @@ mod tests {
 
     #[test]
     fn accepts_known_pivy_tool_names() {
-        for name in ["box", "tool", "agent", "ca", "luks", "zfs"] {
+        // The three the nix build installs plus the escape hatch's own
+        // spelling of them; `ca`/`luks`/`zfs` are no longer shortcuts
+        // (piggy#265) but stay valid `piggy pivy <tool>` names.
+        for name in ["box", "tool", "agent"] {
             assert!(is_safe_pivy_tool_name(name), "{name} should be accepted");
         }
     }

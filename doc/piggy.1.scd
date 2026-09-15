@@ -59,8 +59,8 @@ passthroughs for the C pivy binaries:
 
 - *piggy agent* runs *pivy-agent*(1).
 - *piggy box* runs *pivy-box*(1).
-- *piggy tool* / *piggy ca* / *piggy luks* / *piggy zfs* run the matching
-  pivy binary from _$PATH_.
+- *piggy tool* runs *pivy-tool*(1) from _$PATH_ (a Rust port is in
+  progress; see the C-pivy retirement plan in _docs/plans_).
 - *piggy pivy* _TOOL_ is the explicit-escape-hatch form: *piggy pivy box*
   always runs *pivy-box*(1), regardless of whether *piggy box* is later
   rerouted to a Rust reimplementation. See *pivy-box*(1) etc. for their
