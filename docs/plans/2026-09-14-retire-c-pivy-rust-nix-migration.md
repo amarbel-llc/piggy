@@ -419,12 +419,14 @@ later phase uses them.
 
 ## Open questions for the operator
 
-Answered 2026-09-15 (1: confirmed, with luks/zfs/ca kept as Rust
-rewrites; 2: yes, `piggy zfs` is re-created, Phase 3b.2; 4: module).
-Still open:
-
-3. Which throwaway YubiKey serials may the hardware lane treat as
-   destructible? (Needed before Phase 3.3's hardware lane runs.)
+All answered 2026-09-15: (1) confirmed, with luks/zfs/ca kept as Rust
+rewrites; (2) yes, `piggy zfs` is re-created, Phase 3b.2; (3) one
+throwaway YubiKey 4 on the card host, identified by serial through ykman
+(the PIV applet reports none on its firmware) and allowlisted in that
+host's environment via `PIGGY_TEST_THROWAWAY_SERIALS` (#286 landed and
+validated with a real factory reset); (4) module. Hardware lanes run
+from a session on the card host, directed from wherever the plan's
+software work runs; the merge gate stays card-free.
 
 ## Issue map
 
