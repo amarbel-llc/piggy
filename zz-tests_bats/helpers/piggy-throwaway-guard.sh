@@ -58,22 +58,25 @@ if [[ $probe -eq 1 ]]; then
   fi
   guid="$guids"
   serial="$("$pivy_tool" -g "$guid" list 2>/dev/null | awk '/serial:/ {print $2; exit}')"
-  # Older YubiKey 4 firmware does not report the serial through the PIV
-  # applet (piggy#256) but ykman reads it over the management interface.
-  # With exactly one device attached the mapping to the one GUID above
-  # is unambiguous; otherwise leave it to the GUID rule.
-  if [[ -z $serial ]] && command -v "${YKMAN:-ykman}" >/dev/null 2>&1; then
-    yk_serials="$("${YKMAN:-ykman}" list --serials 2>/dev/null | grep -E '^[0-9]+$' || true)"
-    if [[ "$(printf '%s\n' "$yk_serials" | grep -c . || true)" -eq 1 ]]; then
-      serial="$yk_serials"
-      echo "piggy-throwaway-guard: serial $serial via ykman (PIV applet reported none)" >&2
-    fi
-  fi
 fi
 
 if [[ -z $guid && -z $serial ]]; then
   echo "piggy-throwaway-guard: REFUSING — no card identity given (--guid/--serial/--probe)" >&2
   exit 1
+fi
+
+# Older YubiKey 4 firmware does not report the serial through the PIV
+# applet (piggy#256) but ykman reads it over the management interface.
+# Applies to every identification path (--probe and a caller-supplied
+# --guid without --serial): with exactly one device attached the mapping
+# to the one GUID is unambiguous; otherwise leave it to the GUID rule.
+# YKMAN=/path overrides the PATH lookup (also how the bats test mocks it).
+if [[ -z $serial ]] && command -v "${YKMAN:-ykman}" >/dev/null 2>&1; then
+  yk_serials="$("${YKMAN:-ykman}" list --serials 2>/dev/null | grep -E '^[0-9]+$' || true)"
+  if [[ "$(printf '%s\n' "$yk_serials" | grep -c . || true)" -eq 1 ]]; then
+    serial="$yk_serials"
+    echo "piggy-throwaway-guard: serial $serial via ykman (PIV applet reported none)" >&2
+  fi
 fi
 
 serials="${PIGGY_TEST_THROWAWAY_SERIALS:-}"

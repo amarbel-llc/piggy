@@ -62,6 +62,42 @@ function guard_serial_bearing_card_ignores_guid_list_only { # @test
   assert_output --partial "REFUSING"
 }
 
+# ykman fallback: a mock on YKMAN prints whatever YKMAN_MOCK_SERIALS holds,
+# one per line, standing in for `ykman list --serials`.
+mock_ykman() {
+  local mock="$BATS_TEST_TMPDIR/ykman"
+  printf '#!%s\nprintf "%%s\\n" $YKMAN_MOCK_SERIALS\n' "$(command -v bash)" >"$mock"
+  chmod +x "$mock"
+  export YKMAN="$mock"
+}
+
+function guard_guid_path_takes_serial_from_ykman_when_applet_has_none { # @test
+  # The explore-rust-card-unlock-hw shape: caller passes --guid only (the
+  # PIV applet reported no serial); with one device ykman supplies it and
+  # the serial list decides, so a GUID allowlist is not needed.
+  mock_ykman
+  YKMAN_MOCK_SERIALS=87654321 PIGGY_TEST_THROWAWAY_SERIALS=87654321 \
+    run -0 bash "$GUARD" --guid 0123456789ABCDEF0123456789ABCDEF
+  assert_output --partial "serial 87654321 via ykman"
+  assert_output --partial "allowlisted"
+}
+
+function guard_ykman_serial_refuses_when_not_listed_even_if_guid_is { # @test
+  mock_ykman
+  YKMAN_MOCK_SERIALS=87654321 PIGGY_TEST_THROWAWAY_GUIDS=0123456789ABCDEF0123456789ABCDEF \
+    run -1 bash "$GUARD" --guid 0123456789ABCDEF0123456789ABCDEF
+  assert_output --partial "not in PIGGY_TEST_THROWAWAY_SERIALS"
+}
+
+function guard_ignores_ykman_when_several_devices_are_attached { # @test
+  # Two serials cannot be mapped to one GUID; fall back to the GUID rule.
+  mock_ykman
+  YKMAN_MOCK_SERIALS="87654321 11111111" PIGGY_TEST_THROWAWAY_GUIDS=0123456789ABCDEF0123456789ABCDEF \
+    run -0 bash "$GUARD" --guid 0123456789ABCDEF0123456789ABCDEF
+  refute_output --partial "via ykman"
+  assert_output --partial "no serial reported"
+}
+
 function guard_rejects_unknown_flag { # @test
   run -2 bash "$GUARD" --bogus
   assert_output --partial "unknown argument"
