@@ -175,6 +175,106 @@ codemod-facades:
 codemod-rfc0002-fixture:
     cd go && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
 
+# Capture the pivy-oracle differential corpus (piggy#164 Phase 1 item 2).
+# Encrypt a matrix of plaintexts to fibby's RFC 5903 slot-9D key with the
+# Rust `piggy-ids encrypt`, decrypt each ebox with BOTH the C `pivy-box
+# stream decrypt` and the Rust in-process `piggy box stream decrypt`
+# against the same fibby card, assert all three (the two decrypts and the
+# input) agree byte-for-byte, then freeze the ebox + plaintext under
+# crates/piggy-box/tests/fixtures/oracle-box/. The committed fixtures are
+# replayed OFFLINE (no card, no C) by crates/piggy-box/tests/
+# oracle_box_corpus.rs, so they outlive the C pivy-box this recipe uses as
+# the capture-time oracle. Re-run after any piggy-box wire-format change.
+# Linux-only (needs fibby's AF_UNIX pcsc socket); runs on flac (fibby is a
+# virtual card, no hardware).
+[group('codemod')]
+[linux]
+codemod-capture-pivy-oracle-box: build-rust
+    #!/usr/bin/env bash
+    set -uo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths) || exit 1
+    real_pivy_box="$pivy_out/bin/pivy-box"
+    pivy_tool="$pivy_out/bin/pivy-tool"
+    piggy="$PWD/target/debug/piggy"
+    piggy_ids="$PWD/target/debug/piggy-ids"
+    fibby="$PWD/target/debug/fibby"
+    for b in "$real_pivy_box" "$piggy" "$piggy_ids" "$fibby"; do
+      [[ -x $b ]] || { echo "missing $b (build-rust / nix build .#pivy)"; exit 1; }
+    done
+
+    workdir=$(mktemp -d /tmp/oracle-box-XXXXXX)
+    fibby_sock="$workdir/pcscd.comm"
+    fibby_log="$workdir/fibby.log"
+    fibby_pid=""
+    cleanup() { [[ -n "$fibby_pid" ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
+    trap cleanup EXIT
+
+    echo "=== fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
+    FIBBY_LOG=wire "$fibby" --socket "$fibby_sock" --backend virtual \
+      --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+    fibby_pid=$!
+    for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+    [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
+
+    # The card path only (no agent), PIN via the refusing-by-default test
+    # askpass (piggy-testing(7) PIN PROMPT SAFETY NET).
+    askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    export PCSCLITE_CSOCK_NAME="$fibby_sock" \
+      SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY="" \
+      PIGGY_TEST_FIB_PIN=123456
+    unset SSH_AUTH_SOCK PIGGY_AUTH_SOCK
+
+    card_recipient=$("$piggy_ids" detect-pubkey) || { echo "detect-pubkey failed"; cat "$fibby_log"; exit 1; }
+    [[ $card_recipient == piggy-recipient-v1@pivy_ecdh_p256_pub-* ]] || {
+      echo "unexpected card recipient: $card_recipient"; exit 1; }
+    # A second, cardless recipient (the P-256 generator point) for the
+    # any-of-N case: fibby cannot open its part, so C and the offline
+    # replay both open the card part — which is exactly what we assert.
+    gen_recipient="piggy-recipient-v1@pivy_ecdh_p256_pub-qd43050juykyy3lchnnw2caygre8wqmasyk7kvaq7jsnj3wcnrpfve2jwdn"
+
+    outdir="$PWD/crates/piggy-box/tests/fixtures/oracle-box"
+    rm -rf "$outdir"; mkdir -p "$outdir"
+
+    # emit_case <name> <plaintext-file> <recipient...>
+    fail=0
+    emit_case() {
+      local name="$1" plain="$2"; shift 2
+      local ids="$workdir/$name.ids" ebox="$workdir/$name.ebox"
+      printf '%s\n' "$@" >"$ids"
+      "$piggy_ids" encrypt "$ids" <"$plain" >"$ebox" || { echo "  [$name] encrypt failed"; fail=1; return; }
+
+      local out_c="$workdir/$name.c" out_rust="$workdir/$name.rust"
+      "$real_pivy_box" stream decrypt <"$ebox" >"$out_c" 2>/dev/null || { echo "  [$name] C decrypt failed"; fail=1; return; }
+      "$piggy" box stream decrypt "$ebox" >"$out_rust" 2>/dev/null || { echo "  [$name] Rust decrypt failed"; fail=1; return; }
+      cmp -s "$plain" "$out_c"    || { echo "  [$name] C decrypt != plaintext"; fail=1; return; }
+      cmp -s "$plain" "$out_rust" || { echo "  [$name] Rust decrypt != plaintext"; fail=1; return; }
+
+      cp "$ebox" "$outdir/$name.ebox"
+      cp "$plain" "$outdir/$name.plaintext"
+      echo "  [$name] ok ($(wc -c <"$plain") B plaintext -> $(wc -c <"$ebox") B ebox, $# recipient(s))"
+    }
+
+    # Plaintext matrix: empty, single byte, short text, a full 0x00..0xFF
+    # byte range, and 128 KiB + 1 to cross the 128 KiB stream chunk boundary
+    # (multi-chunk framing). Deterministic so a re-capture diffs cleanly.
+    : >"$workdir/empty.plain"
+    printf 'x' >"$workdir/one-byte.plain"
+    printf 'oracle-box corpus: rust encrypt, C+rust decrypt agree' >"$workdir/short-text.plain"
+    for i in $(seq 0 255); do printf "\\x$(printf %02x "$i")"; done >"$workdir/binary-256.plain"
+    head -c 131073 /dev/zero | tr '\0' 'M' >"$workdir/multi-chunk.plain"
+
+    echo "=== capturing corpus ==="
+    emit_case empty          "$workdir/empty.plain"       "$card_recipient"
+    emit_case one-byte       "$workdir/one-byte.plain"    "$card_recipient"
+    emit_case short-text     "$workdir/short-text.plain"  "$card_recipient"
+    emit_case binary-256     "$workdir/binary-256.plain"  "$card_recipient"
+    emit_case multi-chunk    "$workdir/multi-chunk.plain" "$card_recipient"
+    emit_case two-recipients "$workdir/short-text.plain"  "$card_recipient" "$gen_recipient"
+
+    [[ $fail -eq 0 ]] || { echo "=== FAILED: some cases did not round-trip ==="; exit 1; }
+    echo "=== corpus captured under crates/piggy-box/tests/fixtures/oracle-box/ ==="
+    echo "    git add it; oracle_box_corpus.rs replays it offline in test-rust."
+
 # Render docs/diagrams/*.puml to SVG in place via plantuml (on PATH). The
 # .puml is the source of truth; the .svg beside it is generated and
 # committed so readers (and cross-session peers) can view it without

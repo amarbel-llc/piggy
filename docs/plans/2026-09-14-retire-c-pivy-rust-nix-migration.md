@@ -224,11 +224,14 @@ Test strategy (this phase sets the pattern for the rest):
    software-identity oracle (a) is not needed. One sandbox trap: the
    askpass must be an installed copy, since `/usr/bin/env` is absent.
 2. **Differential corpus, captured now.** New recipe
-   `codemod-capture-pivy-oracle-box`: for a matrix of (plaintext size,
-   recipient count, agent vs card path), encrypt with Rust, decrypt
-   with C `pivy-box` and with Rust, assert byte equality, and store
-   the ebox plus plaintext under `crates/piggy-box/tests/fixtures/`.
-   These fixtures outlive C.
+   `codemod-capture-pivy-oracle-box`: for a matrix of plaintext size and
+   recipient count, encrypt with Rust, decrypt with C `pivy-box` and
+   with Rust (both against fibby), assert byte equality, and store the
+   ebox plus plaintext under `crates/piggy-box/tests/fixtures/`. The
+   "agent vs card path" axis is not a fixture axis — the ebox is
+   identical regardless of which oracle opens it; the two oracles are a
+   capture-time cross-check. These fixtures outlive C: they are replayed
+   offline with the RFC 5903 card scalar.
 3. **Existing gates stay green:** `piggy_box_decrypt_interop.bats`,
    `piggy_recipients_sync_fibby.bats`, `piggy_pass_init_fibby.bats`,
    `t0700-verify.bats`, `t0110-auth-sock.bats` (the sock-record hook
@@ -253,8 +256,17 @@ card discovery stays canned. `pass git init`'s textconv is `piggy box
 stream decrypt`. Item 4 landed the same day: `fibby ctl fault <INS|*>
 <SW>[x<count>] <reader>` (#284) queues a status word for the next
 matching APDUs (`t0980` asserts the decrypt's 63C2 and 6983 messages
-through it; `fibby_ctl` in `lib/fibby.bash`). Item 2 (differential
-corpus) remains open.
+through it; `fibby_ctl` in `lib/fibby.bash`). Item 2 landed the same
+day: `just codemod-capture-pivy-oracle-box` encrypts a size × recipient
+matrix (empty, one byte, short text, a full 0x00..0xFF byte range,
+128 KiB + 1 for multi-chunk framing; one and two recipients) to fibby's
+RFC 5903 slot-9D key, decrypts each ebox with BOTH C `pivy-box` and the
+Rust in-process decrypt against the same card, asserts all three agree,
+and freezes the ebox + plaintext under
+`crates/piggy-box/tests/fixtures/oracle-box/`. `oracle_box_corpus.rs`
+replays the frozen corpus **offline** (no card, no C) with the RFC 5903
+scalar as a software oracle, so the wire format C accepted stays
+decryptable after C is gone. Phase 1 is complete.
 
 ### Phase 2: `piggy box` residual (#165)
 
