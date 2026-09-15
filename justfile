@@ -180,6 +180,8 @@ codemod-rfc0002-fixture:
 # committed so readers (and cross-session peers) can view it without
 # plantuml. Re-run after editing any diagram. Serves the design-doc loop
 # (piggy FDR 0001's SSH-agent topology, eng#295).
+#
+# render docs/diagrams/*.puml to SVG in place via plantuml
 [group('codemod')]
 codemod-diagrams:
     plantuml -tsvg docs/diagrams/*.puml
@@ -2099,6 +2101,22 @@ lint-worktree:
     set -euo pipefail
     cfg=$(nix build --no-link --print-out-paths '.#conformist-impure-config')
     conformist check --config-file "$cfg" --tree-root .
+
+# The justfile convention linters (recipe verbs, orphaned doc summaries)
+# delivered as conformist's profile-pulled artifacts rather than a Nix
+# module: `conformist.profile` at the repo root is conformist master's
+# file copied verbatim (conformist RFC 0005, experimental), and the run
+# pulls conformist itself from its forge so no devShell input changes.
+# Linux only: the profile pins static `just` builds for x86_64/aarch64
+# Linux and nothing for darwin. Not in the `lint` aggregate while the
+# profile mechanism is experimental; run it by hand before touching
+# recipe names or doc comments.
+#
+# run conformist's profile-delivered justfile linters over this justfile
+[group('pre-build')]
+[linux]
+lint-justfile-profile:
+    nix run --refresh 'git+https://code.linenisgreat.com/conformist.git' -- check --tree-root . --profile conformist.profile --profile-only
 
 # --- fib: virtual PIV smart card ---
 #
