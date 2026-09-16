@@ -70,6 +70,17 @@ prelude
       expect_count("fibby", "GA ECDH 9D -> 9000", n)
 
 
+  def expect_present(unit, needle):
+      # Like expect_count, but only waits for the line to appear (not an exact
+      # count) — for the askpass-supply marker, which journald ingests
+      # asynchronously just like the ECDH log. `grep -F` so a needle with
+      # regex metacharacters (the bracketed tag) matches literally.
+      machine.wait_until_succeeds(
+          f"journalctl -u {unit} --no-pager -o cat | grep -qF '{needle}'",
+          timeout=60,
+      )
+
+
   wait_for_units(["multi-user.target", "fibby.service", "piggy-agent.service"])
   machine.wait_for_file("/run/fibby/pcscd.comm")
   machine.wait_for_file("/run/piggy/agent.sock")
@@ -89,7 +100,10 @@ prelude
       secret = machine.succeed(show("${secretName}"))
       assert len(secret) == 64 and secret.isalnum(), repr(secret)
       expect_ecdh(before + 1)
+      # The askpass-supply marker lands in journald asynchronously (like the
+      # ECDH count above), so wait for it rather than reading the journal once
+      # — a single read raced the ingest under the ZFS lane's TCG load.
+      expect_present("piggy-agent", "[piggy-test-askpass] supplying PIGGY_TEST_FIB_PIN")
       agent_log = machine.succeed("journalctl -u piggy-agent --no-pager -o cat || true")
-      assert "[piggy-test-askpass] supplying PIGGY_TEST_FIB_PIN" in agent_log, agent_log
       assert "REFUSING to prompt" not in agent_log, agent_log
 ''
