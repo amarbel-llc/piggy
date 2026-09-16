@@ -18,11 +18,15 @@
 //!   write the raw ECDH shared secret to stdout (matches C `piv_ecdh` +
 //!   `fwrite`). Both are PIN-gated; the PIN comes from `-P` or the same
 //!   `SSH_ASKPASS` prompt C uses.
+//! - `piggy tool change-pin` / `change-puk` — rotate the PIV PIN / PUK
+//!   (CHANGE REFERENCE DATA, matches C `piv_change_pin`). The current and
+//!   new values come from two repeated `-P` options, as C consumes them;
+//!   piggy prompts via `SSH_ASKPASS` when either is absent.
 //!
 //! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
 //! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
 //! and `None` for everything else, so `main.rs` execs the C `pivy-tool`
-//! for the rest (`list`, `pinfo`, `version`, the PIN/PUK and admin/key
+//! for the rest (`list`, `pinfo`, `version`, `reset-pin`, the admin/key
 //! surface). It also returns `None` the moment it sees an option it does
 //! not model, so a flag piggy would silently ignore is handled by C
 //! instead — the superset stays honest. `piggy pivy tool` always reaches
@@ -37,9 +41,10 @@ use piggy_piv::{PivAlgorithm, PivContext, PivToken};
 struct Invocation {
     /// `-g <hex>`: GUID (or prefix) selecting a token among several.
     guid: Option<String>,
-    /// `-P <code>`: the PIV PIN, supplied on the command line instead of
-    /// prompting.
-    pin: Option<String>,
+    /// Repeated `-P <code>` values, in order. pivy-tool consumes the first
+    /// as the current PIN/PUK and the second as the new one (change-pin,
+    /// change-puk); the single-secret ops (sign, ecdh) use only the first.
+    pins: Vec<String>,
     op: String,
     positionals: Vec<String>,
 }
@@ -49,7 +54,7 @@ struct Invocation {
 /// caller falls back to C `pivy-tool`.
 fn parse(args: &[String]) -> Option<Invocation> {
     let mut guid = None;
-    let mut pin = None;
+    let mut pins = Vec::new();
     let mut i = 0;
     // Leading options (pivy-tool style: options precede the operation).
     while i < args.len() {
@@ -63,7 +68,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
                 i += 2;
             }
             "-P" => {
-                pin = Some(args.get(i + 1)?.clone());
+                pins.push(args.get(i + 1)?.clone());
                 i += 2;
             }
             // Any other flag is not modeled here — let C handle the whole
@@ -74,12 +79,15 @@ fn parse(args: &[String]) -> Option<Invocation> {
     let op = args.get(i)?.clone();
     // Only claim the ops this milestone implements; everything else falls
     // through to C.
-    if !matches!(op.as_str(), "pubkey" | "cert" | "attest" | "sign" | "ecdh") {
+    if !matches!(
+        op.as_str(),
+        "pubkey" | "cert" | "attest" | "sign" | "ecdh" | "change-pin" | "change-puk"
+    ) {
         return None;
     }
     Some(Invocation {
         guid,
-        pin,
+        pins,
         op,
         positionals: args[i + 1..].to_vec(),
     })
@@ -95,6 +103,8 @@ pub fn run(args: &[String]) -> Option<i32> {
         "attest" => cmd_attest(&inv),
         "sign" => cmd_sign(&inv),
         "ecdh" => cmd_ecdh(&inv),
+        "change-pin" => cmd_change_secret(&inv, Secret::Pin),
+        "change-puk" => cmd_change_secret(&inv, Secret::Puk),
         // parse() only returns these ops.
         _ => unreachable!(),
     })
@@ -411,7 +421,7 @@ fn parse_openssh_ec_point(input: &str) -> Result<Vec<u8>, String> {
 /// `SSH_ASKPASS` prompt C `pivy-tool` uses (via `card_oracle::run_askpass`),
 /// tagged with a `piggy-tool:<op>` context.
 fn get_pin(inv: &Invocation, op: &str) -> Result<zeroize::Zeroizing<String>, String> {
-    if let Some(p) = &inv.pin {
+    if let Some(p) = inv.pins.first() {
         return Ok(zeroize::Zeroizing::new(p.clone()));
     }
     crate::card_oracle::run_askpass(
@@ -419,6 +429,100 @@ fn get_pin(inv: &Invocation, op: &str) -> Result<zeroize::Zeroizing<String>, Str
         Some(&format!("piggy-tool:{op}")),
     )
     .map_err(|e| format!("PIN prompt failed: {e}"))
+}
+
+/// Which credential `change-pin`/`change-puk` rotates.
+#[derive(Clone, Copy)]
+enum Secret {
+    Pin,
+    Puk,
+}
+
+impl Secret {
+    fn label(self) -> &'static str {
+        match self {
+            Secret::Pin => "PIN",
+            Secret::Puk => "PUK",
+        }
+    }
+    fn op(self) -> &'static str {
+        match self {
+            Secret::Pin => "change-pin",
+            Secret::Puk => "change-puk",
+        }
+    }
+}
+
+/// Prompt for one credential value with `SSH_ASKPASS`, tagged so an
+/// escaped prompt is identifiable.
+fn prompt_secret(op: &str, which: &str, label: &str) -> Result<zeroize::Zeroizing<String>, String> {
+    crate::card_oracle::run_askpass(
+        &format!("Enter {which} {label}: "),
+        Some(&format!("piggy-tool:{op}:{which}")),
+    )
+    .map_err(|e| format!("{which} {label} prompt failed: {e}"))
+}
+
+/// `piggy tool change-pin` / `change-puk`: rotate the PIV PIN or PUK
+/// (CHANGE REFERENCE DATA, INS 0x24) — matching C `pivy-tool`'s
+/// `piv_change_pin`. The current and new values come from two repeated
+/// `-P` options (exactly as C consumes them); when either is absent piggy
+/// prompts via `SSH_ASKPASS` (C requires a tty for that path). No stdout
+/// on success, matching C.
+fn cmd_change_secret(inv: &Invocation, secret: Secret) -> i32 {
+    let label = secret.label();
+    let op = secret.op();
+    let old = match inv.pins.first() {
+        Some(p) => zeroize::Zeroizing::new(p.clone()),
+        None => match prompt_secret(op, "current", label) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("piggy tool {op}: {e}");
+                return 1;
+            }
+        },
+    };
+    let new = match inv.pins.get(1) {
+        Some(p) => zeroize::Zeroizing::new(p.clone()),
+        None => match prompt_secret(op, "new", label) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("piggy tool {op}: {e}");
+                return 1;
+            }
+        },
+    };
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: begin session: {e}");
+            return 1;
+        }
+    };
+    let result = match secret {
+        Secret::Pin => session.change_pin(&old, &new),
+        Secret::Puk => session.change_puk(&old, &new),
+    };
+    match result {
+        Ok(()) => 0,
+        Err(piggy_piv::PivError::PinIncorrect { retries }) => {
+            eprintln!(
+                "piggy tool {op}: current {label} was incorrect ({retries} attempt(s) remaining); {label} change failed"
+            );
+            1
+        }
+        Err(e) => {
+            eprintln!("piggy tool {op}: failed to set new {label}: {e}");
+            1
+        }
+    }
 }
 
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
@@ -495,8 +599,11 @@ mod tests {
         assert!(parse(&argv(&["attest", "9d"])).is_some());
         assert!(parse(&argv(&["sign", "9c"])).is_some());
         assert!(parse(&argv(&["ecdh", "9d"])).is_some());
+        assert!(parse(&argv(&["change-pin"])).is_some());
+        assert!(parse(&argv(&["change-puk"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
+        assert!(parse(&argv(&["-P", "123456", "-P", "654321", "change-pin"])).is_some());
         // Unported ops fall through to C.
         assert!(parse(&argv(&["list"])).is_none());
         assert!(parse(&argv(&["pinfo"])).is_none());
@@ -513,8 +620,17 @@ mod tests {
     fn parse_extracts_guid_pin_and_positionals() {
         let inv = parse(&argv(&["-g", "deadbeef", "-P", "123456", "sign", "9c"])).unwrap();
         assert_eq!(inv.guid.as_deref(), Some("deadbeef"));
-        assert_eq!(inv.pin.as_deref(), Some("123456"));
+        assert_eq!(inv.pins, vec!["123456".to_string()]);
         assert_eq!(inv.op, "sign");
         assert_eq!(inv.positionals, vec!["9c".to_string()]);
+    }
+
+    #[test]
+    fn parse_collects_repeated_pins_for_change() {
+        // pivy-tool consumes the first -P as the current secret, the
+        // second as the new one.
+        let inv = parse(&argv(&["-P", "123456", "-P", "654321", "change-pin"])).unwrap();
+        assert_eq!(inv.pins, vec!["123456".to_string(), "654321".to_string()]);
+        assert_eq!(inv.op, "change-pin");
     }
 }

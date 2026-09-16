@@ -406,9 +406,25 @@ separate case proves piggy's askpass path yields the same signature).
 One contract difference surfaced and is documented: C `pivy-tool
 sign`/`ecdh` will not use `SSH_ASKPASS` for the PIN when stdin is the
 data pipe, so `-P` is the portable driver; piggy's askpass path works
-regardless. Next: **3.2 (PIN/PUK)** — destructive, needs new fibby INS
-(RESET RETRY COUNTER 2C, SET PIN RETRIES FA) — then `list`/`pinfo`
-scoped on their own.
+regardless.
+
+**Milestone 3.2a landed (`change-pin`, `change-puk`).** Both rotate a
+credential via CHANGE REFERENCE DATA (INS 0x24), reusing
+`PinSession::{change_pin,change_puk}` (already exercised by `card init`
+and fibby's INS 0x24 — no new card surface). The current and new values
+come from two repeated `-P` options exactly as C consumes them (its
+prompt path is tty-only; piggy also offers an `SSH_ASKPASS` fallback).
+`set-pin-retries` from the plan's 3.2 row is DROPPED: it is not a
+`pivy-tool` op, so there is no C contract to differentially test — it
+would be a piggy-native addition, out of scope for a C-parity port. The
+new differential lane `test-bats-conformance-tool-pin-fibby` (in the
+gate) brings up a FRESH fibby per test (state-modifying ops need pristine
+state) and checks both the observable contract (both impls change the
+credential silently, exit 0; a wrong old secret fails on both) and card
+state (after piggy's change the new PIN verifies via a `sign`, the old is
+rejected). Remaining in 3.2 (**3.2b**): `reset-pin` — PUK-driven PIN
+reset via RESET RETRY COUNTER (INS 0x2C), which is new surface in both
+`piggy-piv` and fibby. Then `list`/`pinfo` scoped on their own.
 
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
