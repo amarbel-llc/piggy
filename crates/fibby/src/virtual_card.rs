@@ -1184,6 +1184,21 @@ impl Backend for VirtualCard {
             return Ok(self.handle_change_reference_data(p2, apdu_body(command_apdu)));
         }
 
+        // RESET RETRY COUNTER (00 2C 00 80). Uses the PUK to reset the PIV
+        // PIN and unblock its retry counter (SP 800-73-4 §3.2.3). Body is
+        // `<puk8> <newpin8>`. Only P2=0x80 (the PIN) is resettable this way.
+        if cla == 0x00 && ins == apdu::ins::RESET_RETRY_COUNTER {
+            if p1 != 0x00 || p2 != 0x80 {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!("RESET RETRY COUNTER P1={p1:#04x} P2={p2:#04x} -> 6A80"),
+                );
+                return Ok(sw(0x6A, 0x80));
+            }
+            return Ok(self.handle_reset_retry_counter(apdu_body(command_apdu)));
+        }
+
         // GENERAL AUTHENTICATE (00 87 <alg> <slot> <Lc> 7C ...). Slot 9D
         // ECDH (alg=0x11, slot=0x9D) is the piggy decrypt path; slots 9A
         // and 9C ECDSA (alg=0x11, slot=0x9A / 0x9C) are the SSH-auth and
@@ -1523,6 +1538,62 @@ impl VirtualCard {
             trace::DEBUG,
             "vcard",
             &format!("CHANGE {kind} -> 9000 (changed)"),
+        );
+        sw(0x90, 0x00)
+    }
+
+    /// Handle RESET RETRY COUNTER (INS 0x2C, P2=0x80): use the PUK to reset
+    /// the PIV PIN and unblock its retry counter (SP 800-73-4 §3.2.3). Body
+    /// is `<puk8> <newpin8>`. A correct PUK is required (a wrong one
+    /// decrements the PUK counter, not the PIN counter); on success the PIN
+    /// becomes the new value and BOTH the PIN and PUK counters reset to 3.
+    /// Status words mirror CHANGE REFERENCE DATA:
+    ///
+    /// - `90 00` on success.
+    /// - `6A 80` on a malformed body (not exactly 16 bytes).
+    /// - `63 Cx` on a wrong PUK, `x` = PUK retries remaining.
+    /// - `69 83` when the PUK counter is already at 0 (blocked).
+    fn handle_reset_retry_counter(&mut self, body: Option<&[u8]>) -> Vec<u8> {
+        let body = match body {
+            Some(b) if b.len() == 16 => b,
+            _ => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "RESET RETRY COUNTER -> 6A80 (body must be 16 bytes)",
+                );
+                return sw(0x6A, 0x80);
+            }
+        };
+        let (puk, new_pin) = (&body[..8], &body[8..]);
+        if self.puk_retries == 0 {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                "RESET RETRY COUNTER -> 6983 (PUK blocked)",
+            );
+            return sw(0x69, 0x83);
+        }
+        if puk != self.puk.as_slice() {
+            self.puk_retries -= 1;
+            let left = self.puk_retries;
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("RESET RETRY COUNTER -> 63 C{left} (wrong PUK)"),
+            );
+            return sw(0x63, 0xC0 | left);
+        }
+        self.pin = new_pin.to_vec();
+        self.pin_retries = DEFAULT_PIN_RETRIES;
+        self.puk_retries = DEFAULT_PUK_RETRIES;
+        // A power-cycle's worth of PIN-verified state is not granted by a
+        // reset; the new PIN must be VERIFYed like any other.
+        self.pin_verified = false;
+        trace::emit(
+            trace::DEBUG,
+            "vcard",
+            "RESET RETRY COUNTER -> 9000 (PIN reset, counters unblocked)",
         );
         sw(0x90, 0x00)
     }
@@ -3771,6 +3842,68 @@ mod tests {
             "correct old PUK -> 9000"
         );
         assert_eq!(c.puk, new.to_vec(), "PUK rotated");
+    }
+
+    /// Build a RESET RETRY COUNTER APDU: `00 2C 00 80 10 <puk8> <newpin8>`.
+    fn reset_retry_apdu(puk: &[u8; 8], new_pin: &[u8; 8]) -> Vec<u8> {
+        let mut a = vec![0x00, 0x2C, 0x00, 0x80, 0x10];
+        a.extend_from_slice(puk);
+        a.extend_from_slice(new_pin);
+        a
+    }
+
+    #[test]
+    fn reset_retry_with_correct_puk_resets_pin_and_unblocks() {
+        let mut c = VirtualCard::new();
+        // Block the PIN: three wrong VERIFYs.
+        let wrong_pin: [u8; 8] = [0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0xFF, 0xFF];
+        for _ in 0..DEFAULT_PIN_RETRIES {
+            let mut a = vec![0x00, 0x20, 0x00, 0x80, 0x08];
+            a.extend_from_slice(&wrong_pin);
+            c.transmit(&a).unwrap();
+        }
+        assert_eq!(c.pin_retries, 0, "PIN blocked");
+
+        // Reset with the correct PUK (12345678) to a new PIN (654321).
+        let puk: [u8; 8] = [0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38];
+        let new_pin: [u8; 8] = [0x36, 0x35, 0x34, 0x33, 0x32, 0x31, 0xFF, 0xFF];
+        assert_eq!(
+            c.transmit(&reset_retry_apdu(&puk, &new_pin)).unwrap(),
+            vec![0x90, 0x00],
+            "correct PUK resets the PIN -> 9000"
+        );
+        assert_eq!(c.pin, new_pin.to_vec(), "PIN is the new value");
+        assert_eq!(c.pin_retries, DEFAULT_PIN_RETRIES, "PIN counter unblocked");
+        // The new PIN verifies.
+        let mut v = vec![0x00, 0x20, 0x00, 0x80, 0x08];
+        v.extend_from_slice(&new_pin);
+        assert_eq!(
+            c.transmit(&v).unwrap(),
+            vec![0x90, 0x00],
+            "new PIN verifies"
+        );
+    }
+
+    #[test]
+    fn reset_retry_wrong_puk_decrements_puk_and_leaves_pin() {
+        let mut c = VirtualCard::new();
+        let wrong_puk: [u8; 8] = [0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30];
+        let new_pin: [u8; 8] = [0x36, 0x35, 0x34, 0x33, 0x32, 0x31, 0xFF, 0xFF];
+        let resp = c.transmit(&reset_retry_apdu(&wrong_puk, &new_pin)).unwrap();
+        assert_eq!(resp, vec![0x63, 0xC2], "wrong PUK -> 63 C2 (2 left)");
+        assert_eq!(c.puk_retries, 2, "PUK counter decremented");
+        assert_eq!(c.pin, DEFAULT_PIN, "PIN untouched by a failed reset");
+    }
+
+    #[test]
+    fn reset_retry_bad_p2_returns_6a80() {
+        let mut c = VirtualCard::new();
+        // P2=0x81 (PUK) is not resettable via RESET RETRY COUNTER.
+        let v: [u8; 8] = [0xFF; 8];
+        let mut a = vec![0x00, 0x2C, 0x00, 0x81, 0x10];
+        a.extend_from_slice(&v);
+        a.extend_from_slice(&v);
+        assert_eq!(c.transmit(&a).unwrap(), vec![0x6A, 0x80]);
     }
 
     #[test]

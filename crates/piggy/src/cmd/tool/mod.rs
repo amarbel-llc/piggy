@@ -22,12 +22,17 @@
 //!   (CHANGE REFERENCE DATA, matches C `piv_change_pin`). The current and
 //!   new values come from two repeated `-P` options, as C consumes them;
 //!   piggy prompts via `SSH_ASKPASS` when either is absent.
+//! - `piggy tool reset-pin` — unblock a PIN whose retry counter hit zero,
+//!   installing a new PIN under PUK authority (RESET RETRY COUNTER, INS
+//!   0x2C, matches C `piv_reset_pin`). The two repeated `-P` options are
+//!   the PUK then the new PIN, as C consumes them; piggy prompts via
+//!   `SSH_ASKPASS` when either is absent.
 //!
 //! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
 //! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
 //! and `None` for everything else, so `main.rs` execs the C `pivy-tool`
-//! for the rest (`list`, `pinfo`, `version`, `reset-pin`, the admin/key
-//! surface). It also returns `None` the moment it sees an option it does
+//! for the rest (`list`, `pinfo`, `version`, the admin/key surface). It
+//! also returns `None` the moment it sees an option it does
 //! not model, so a flag piggy would silently ignore is handled by C
 //! instead — the superset stays honest. `piggy pivy tool` always reaches
 //! C regardless.
@@ -81,7 +86,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
     // through to C.
     if !matches!(
         op.as_str(),
-        "pubkey" | "cert" | "attest" | "sign" | "ecdh" | "change-pin" | "change-puk"
+        "pubkey" | "cert" | "attest" | "sign" | "ecdh" | "change-pin" | "change-puk" | "reset-pin"
     ) {
         return None;
     }
@@ -105,6 +110,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         "ecdh" => cmd_ecdh(&inv),
         "change-pin" => cmd_change_secret(&inv, Secret::Pin),
         "change-puk" => cmd_change_secret(&inv, Secret::Puk),
+        "reset-pin" => cmd_reset_pin(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     })
@@ -525,6 +531,63 @@ fn cmd_change_secret(inv: &Invocation, secret: Secret) -> i32 {
     }
 }
 
+/// `piggy tool reset-pin`: unblock the PIV PIN using the PUK and install a
+/// new PIN (RESET RETRY COUNTER, INS 0x2C) — matching C `pivy-tool`'s
+/// `piv_reset_pin`. The two repeated `-P` options are the PUK then the new
+/// PIN (exactly as C consumes them); when either is absent piggy prompts
+/// via `SSH_ASKPASS` (C requires a tty for that path). No stdout on
+/// success, matching C.
+fn cmd_reset_pin(inv: &Invocation) -> i32 {
+    let op = "reset-pin";
+    let puk = match inv.pins.first() {
+        Some(p) => zeroize::Zeroizing::new(p.clone()),
+        None => match prompt_secret(op, "current", "PUK") {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("piggy tool {op}: {e}");
+                return 1;
+            }
+        },
+    };
+    let new_pin = match inv.pins.get(1) {
+        Some(p) => zeroize::Zeroizing::new(p.clone()),
+        None => match prompt_secret(op, "new", "PIN") {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("piggy tool {op}: {e}");
+                return 1;
+            }
+        },
+    };
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: begin session: {e}");
+            return 1;
+        }
+    };
+    match session.reset_pin(&puk, &new_pin) {
+        Ok(()) => 0,
+        Err(piggy_piv::PivError::PinIncorrect { retries }) => {
+            eprintln!(
+                "piggy tool {op}: PUK was incorrect ({retries} attempt(s) remaining); PIN reset failed"
+            );
+            1
+        }
+        Err(e) => {
+            eprintln!("piggy tool {op}: failed to reset PIN: {e}");
+            1
+        }
+    }
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -601,6 +664,8 @@ mod tests {
         assert!(parse(&argv(&["ecdh", "9d"])).is_some());
         assert!(parse(&argv(&["change-pin"])).is_some());
         assert!(parse(&argv(&["change-puk"])).is_some());
+        assert!(parse(&argv(&["reset-pin"])).is_some());
+        assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "-P", "654321", "change-pin"])).is_some());

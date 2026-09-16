@@ -53,6 +53,12 @@ pub mod ins {
     /// trailing `0xFF` — the same block shape VERIFY uses. Takes the OLD
     /// value directly; no prior VERIFY is needed.
     pub const CHANGE_REFERENCE_DATA: u8 = 0x24;
+    /// PIV RESET RETRY COUNTER (SP 800-73-4 §3.2.3). Uses the PUK to reset
+    /// the PIV PIN and unblock its retry counter. `P1 = 00`, `P2 = 80`
+    /// (only the PIN can be reset this way); data field is `<puk8> <newpin8>`,
+    /// each padded to 8 bytes with trailing `0xFF`, same block shape as
+    /// CHANGE REFERENCE DATA.
+    pub const RESET_RETRY_COUNTER: u8 = 0x2C;
     /// YubicoPIV vendor SET MANAGEMENT KEY. `P1 P2 = FF FF`; data field is
     /// `<alg> <0x9B ref> <key_len> <key>` (e.g. `03 9B 18 <24-byte 3DES>`).
     /// Rotates the card's PIV management key; gated on a prior successful

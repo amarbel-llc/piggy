@@ -2,8 +2,9 @@
 # bats file_tags=hardware
 #
 # Differential conformance for the state-modifying `piggy tool change-pin`
-# / `change-puk` (piggy#289 Phase 3, milestone 3.2a). These rotate card
-# credentials, so each test gets its OWN fresh fibby card (setup ->
+# / `change-puk` (milestone 3.2a) and `reset-pin` (milestone 3.2b) of
+# piggy#289 Phase 3. These rotate card credentials, so each test gets its
+# OWN fresh fibby card (setup ->
 # fibby_up, teardown -> fibby_down; PIN 123456 / PUK 12345678 at start).
 # The contract is checked BOTH ways:
 #   - observable output: both C pivy-tool and piggy tool exit 0 and print
@@ -73,4 +74,48 @@ function change_puk_matches_c { # @test
 function change_puk_wrong_old_fails { # @test
   run "$PIGGY" tool -P 00000000 -P 87654321 change-puk
   assert_failure
+}
+
+function reset_pin_matches_c_and_takes_effect { # @test
+  # reset-pin installs a new PIN under PUK authority (RESET RETRY COUNTER).
+  # The PUK (12345678) is unchanged, so both tools can reset in turn.
+  # C resets the PIN to 654321 (exit 0, no output).
+  run "$REAL_PIVY_TOOL" -P 12345678 -P 654321 reset-pin
+  assert_success
+  assert_output ""
+  # piggy resets the PIN again to 111111 on the same card (exit 0, no output).
+  run "$PIGGY" tool -P 12345678 -P 111111 reset-pin
+  assert_success
+  assert_output ""
+  # The new PIN works and the intermediate one is rejected — piggy's reset took.
+  printf 'x' | "$PIGGY" tool -P 111111 sign 9a >/dev/null || fail "reset PIN did not verify"
+  run bash -c "printf 'x' | '$PIGGY' tool -P 654321 sign 9a"
+  assert_failure
+}
+
+function reset_pin_wrong_puk_fails_like_c { # @test
+  run "$REAL_PIVY_TOOL" -P 00000000 -P 654321 reset-pin
+  assert_failure
+  run "$PIGGY" tool -P 00000000 -P 654321 reset-pin
+  assert_failure
+  # The original PIN still works (a failed reset consumed a PUK retry but
+  # left the PIN untouched).
+  printf 'x' | "$PIGGY" tool -P 123456 sign 9a >/dev/null || fail "original PIN no longer verifies"
+}
+
+function reset_pin_unblocks_a_blocked_pin { # @test
+  # Exhaust the PIN retry counter with wrong-PIN sign attempts.
+  for _ in 1 2 3; do
+    run bash -c "printf 'x' | '$PIGGY' tool -P 999999 sign 9a"
+    assert_failure
+  done
+  # The correct original PIN is now blocked — a sign with it fails.
+  run bash -c "printf 'x' | '$PIGGY' tool -P 123456 sign 9a"
+  assert_failure
+  # reset-pin with the correct PUK unblocks the PIN and installs a new one.
+  run "$PIGGY" tool -P 12345678 -P 222222 reset-pin
+  assert_success
+  assert_output ""
+  # The new PIN verifies — the counter was reset, not merely the value.
+  printf 'x' | "$PIGGY" tool -P 222222 sign 9a >/dev/null || fail "PIN not unblocked after reset"
 }

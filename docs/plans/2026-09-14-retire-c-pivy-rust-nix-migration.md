@@ -422,9 +422,26 @@ gate) brings up a FRESH fibby per test (state-modifying ops need pristine
 state) and checks both the observable contract (both impls change the
 credential silently, exit 0; a wrong old secret fails on both) and card
 state (after piggy's change the new PIN verifies via a `sign`, the old is
-rejected). Remaining in 3.2 (**3.2b**): `reset-pin` — PUK-driven PIN
-reset via RESET RETRY COUNTER (INS 0x2C), which is new surface in both
-`piggy-piv` and fibby. Then `list`/`pinfo` scoped on their own.
+rejected).
+
+**Milestone 3.2b landed (`reset-pin`), completing 3.2.** PUK-driven PIN
+reset via RESET RETRY COUNTER (INS 0x2C) — new surface in both layers:
+fibby's `handle_reset_retry_counter` (verify PUK, on success install the
+new PIN and reset BOTH the PIN and PUK counters to their card defaults; a
+wrong PUK decrements the PUK counter and returns `63 Cx`; a blocked PUK
+returns `6983`), and `PinSession::reset_pin(puk, new_pin)` in
+`piggy-piv`'s `pin_mgmt.rs` (mirrors `change_reference_data`, mapping a
+wrong PUK to `PivError::PinIncorrect`). The `piggy tool reset-pin` command
+takes the PUK then the new PIN from two repeated `-P` options exactly as C
+consumes them (askpass fallback when either is absent). The differential
+lane gains three tests in `piggy_tool_pin_fibby.bats`: a plain
+C-then-piggy reset with the new PIN proven via `sign`; a wrong-PUK failure
+that leaves the original PIN intact on both impls; and the end-to-end
+unblock (exhaust the PIN retry counter with wrong signs → the correct PIN
+is blocked → `reset-pin` with the PUK unblocks it → the new PIN verifies).
+Still deferred from 3.1's row: `list`/`pinfo`/`version`, scoped on their
+own (the large card-introspection surface that would fail the byte-exact
+differential contract).
 
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 

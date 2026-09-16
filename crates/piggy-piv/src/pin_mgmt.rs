@@ -49,6 +49,27 @@ impl PinSession<'_> {
         Ok(())
     }
 
+    /// Reset the PIV PIN using the PUK (RESET RETRY COUNTER, INS 0x2C, P2=0x80).
+    ///
+    /// Unblocks a PIN whose retry counter has hit zero and installs `new_pin`,
+    /// authorised by the PUK rather than the (possibly-forgotten) old PIN. A
+    /// wrong PUK decrements the PUK retry counter and maps to
+    /// [`PivError::PinIncorrect`] with the remaining tries; on success both the
+    /// PIN and PUK counters return to their card defaults.
+    pub fn reset_pin(&mut self, puk: &str, new_pin: &str) -> Result<(), PivError> {
+        let apdu = reset_retry_counter_apdu(puk.as_bytes(), new_pin.as_bytes())?;
+        let (_resp, sw) = self.transmit(&apdu)?;
+        if sw.is_pin_incorrect() {
+            return Err(PivError::PinIncorrect {
+                retries: sw.pin_retries_remaining().unwrap_or(0) as u32,
+            });
+        }
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+        Ok(())
+    }
+
     /// Set a new 3-key 3DES management key (YubicoPIV SET MANAGEMENT KEY).
     /// Requires a prior [`PinSession::authenticate_admin`] in this session.
     pub fn set_management_key_3des(&mut self, key: &[u8]) -> Result<(), PivError> {
@@ -83,6 +104,16 @@ fn change_reference_data_apdu(p2: u8, old: &[u8], new: &[u8]) -> Result<Apdu, Pi
     data.extend_from_slice(&pad_reference(old)?);
     data.extend_from_slice(&pad_reference(new)?);
     let mut apdu = Apdu::new(0x00, ins::CHANGE_PIN, 0x00, p2);
+    apdu.data = data;
+    Ok(apdu)
+}
+
+/// RESET RETRY COUNTER APDU: `00 2C 00 80 10 <puk8> <newpin8>`.
+fn reset_retry_counter_apdu(puk: &[u8], new_pin: &[u8]) -> Result<Apdu, PivError> {
+    let mut data = Vec::with_capacity(16);
+    data.extend_from_slice(&pad_reference(puk)?);
+    data.extend_from_slice(&pad_reference(new_pin)?);
+    let mut apdu = Apdu::new(0x00, ins::RESET_PIN, 0x00, P2_PIN);
     apdu.data = data;
     Ok(apdu)
 }
@@ -132,6 +163,17 @@ mod tests {
         // Full 8-byte PUK: no padding bytes.
         assert_eq!(&apdu.data[..8], b"12345678");
         assert_eq!(&apdu.data[8..], b"87654321");
+    }
+
+    #[test]
+    fn reset_retry_apdu_frames_puk_newpin_padded() {
+        let apdu = reset_retry_counter_apdu(b"12345678", b"654321").unwrap();
+        assert_eq!(apdu.ins, 0x2C);
+        assert_eq!(apdu.p1, 0x00);
+        assert_eq!(apdu.p2, 0x80);
+        // Full 8-byte PUK (no padding), then new PIN "654321" + FF FF.
+        assert_eq!(&apdu.data[..8], b"12345678");
+        assert_eq!(&apdu.data[8..], b"654321\xff\xff");
     }
 
     #[test]
