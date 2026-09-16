@@ -2,18 +2,25 @@
 # bats file_tags=hardware
 #
 # Differential conformance for the `piggy tool` key-surface ops of piggy#289
-# Phase 3.4: `write-cert` (milestone 3.4a). These mutate slot material, so
-# each test gets its OWN fresh fibby card (setup -> fibby_up, teardown ->
-# fibby_down; factory 3DES admin key, seeded 9D cert). The contract is
-# checked BOTH ways against C pivy-tool:
-#   - observable output: both exit 0 and print nothing on a successful
-#     write, and both fail on a wrong current admin key;
-#   - card state: after either impl writes a cert to a slot, BOTH impls read
-#     back exactly that cert.
-# write-cert is ported for the 9A/9C/9D/9E cert slots.
+# Phase 3.4: `write-cert` (milestone 3.4a) and `generate` (3.4b). These
+# mutate slot material, so each test gets its OWN fresh fibby card (setup ->
+# fibby_up, teardown -> fibby_down; factory 3DES admin key, seeded 9D cert,
+# and a pinned scalar for GENERATE on slot 9A so keygen is deterministic).
+# The contract is checked against C pivy-tool:
+#   - write-cert: after either impl writes a cert to a slot, BOTH impls read
+#     back exactly that cert; a wrong current admin key fails on both;
+#   - generate: with the 9A scalar pinned, both impls' GENERATE returns the
+#     same key, so `generate 9a -a eccp256` prints the identical pubkey line
+#     (the self-signed cert side effect has a random serial and legitimately
+#     differs, so only the printed pubkey is compared).
+# Both are ported for the 9A/9C/9D/9E cert slots; generate models the EC
+# algorithms (eccp256/eccp384) only.
 #
 # Required env (set by test-bats-conformance-tool-keys-fibby):
 #   FIBBY_BIN, REAL_PIVY_TOOL, PIGGY.
+
+# RFC 6979 §A.2.5 P-256 private scalar — a known test key with a known pubkey.
+GEN_9A_SCALAR=c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
@@ -25,7 +32,8 @@ setup() {
   if [[ -z ${PIGGY:-} || ! -x ${PIGGY:-} ]]; then
     skip "PIGGY not set or not executable"
   fi
-  fibby_up --seed-rfc5903-slot-9d-cert --seed-chuid
+  fibby_up --seed-rfc5903-slot-9d-cert --seed-chuid \
+    --generate-slot-9a-priv "$GEN_9A_SCALAR"
 }
 
 teardown() {
@@ -86,4 +94,20 @@ function write_cert_wrong_admin_key_fails { # @test
   # The original 9D cert is still readable — the failed write did not replace it.
   run "$PIGGY" tool cert 9d
   assert_success
+}
+
+function generate_9a_matches_c { # @test
+  # The 9A generated scalar is pinned (--generate-slot-9a-priv in setup), so
+  # both impls' GENERATE returns the same pubkey. Compare the printed
+  # public-key line (stderr stripped; the self-signed cert side effect
+  # legitimately differs by random serial and is not compared).
+  run bash -c "'$REAL_PIVY_TOOL' -P 123456 -a eccp256 generate 9a 2>/dev/null"
+  assert_success
+  local c_out="$output"
+  run bash -c "'$PIGGY' tool -P 123456 -a eccp256 generate 9a 2>/dev/null"
+  assert_success
+  [[ "$output" == "$c_out" ]] || fail "generate pubkey differs: C=[$c_out] piggy=[$output]"
+  # Sanity: a P-256 pubkey line with the bare slot/GUID comment (no subject).
+  [[ "$output" == "ecdsa-sha2-nistp256 "*" PIV_slot_9A@"* ]] \
+    || fail "unexpected generate output: $output"
 }

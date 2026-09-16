@@ -534,6 +534,25 @@ impl, and confirm BOTH impls read back exactly that cert — plus the mirror
 intact. Remaining in 3.4: `generate` (3.4b, Tier 1), then the Tier-2 decision
 (`import`, `factory-reset`).
 
+**Milestone 3.4b landed (`generate`, EC).** Generates a new key pair
+(GENERATE ASYMMETRIC under mgmt auth), self-signs a minimal cert for it
+(PIN-gated — C's `selfsign_slot` signs the cert with the fresh slot key),
+writes it, and prints the new public key — matching C's `cmd_generate`.
+Reuses `generate_key` + `build_self_signed_cert` + `sign_prehash` + `put_cert`
+(all from `card init`); no new piv/fibby surface. `piggy tool generate <slot>
+-a <alg>` models the EC algorithms `eccp256`/`eccp384` on slots 9A/9C/9D/9E;
+RSA/Ed25519 and other slots fall through to C. It needs `-K` (mgmt) and a PIN
+(`-P`/askpass, for the self-sign). The printed line is
+`<openssh-pubkey> PIV_slot_XX@<GUID>` (a bare slot/GUID comment, no cert
+subject). **Differential:** a random key is not byte-comparable, but fibby's
+`--generate-slot-9a-priv <scalar>` pins the generated key (config, not
+consumed — it persists across GENERATEs), so both C and piggy emit the same
+pubkey; the lane compares the printed line (the self-signed cert's random
+serial is a side effect that legitimately differs and is not compared). This
+completes Tier 1 of 3.4; the remaining ops are the Tier-2 decision (`import`,
+`factory-reset` — both need new INS 0xFE/0xFB wire on `piggy-piv` and fibby)
+and the Tier-3 deferrals (`req-cert`, RSA/Ed25519).
+
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
 Independent of Phase 3 (they need no new `piggy-piv` surface: the key

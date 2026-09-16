@@ -48,6 +48,12 @@
 //!   then PUT DATA; matches C `cmd_write_cert`). The current key comes from
 //!   `-K` (`default` or hex). Ported for the cert-holding slots 9A/9C/9D/9E;
 //!   retired and other slots fall through to C.
+//! - `piggy tool generate <slot> -a <alg>` — generate a new key pair
+//!   (GENERATE ASYMMETRIC under mgmt auth), self-sign a minimal cert for it
+//!   (PIN-gated), and print the new public key (matches C `cmd_generate`).
+//!   Modeled for the EC algorithms `eccp256`/`eccp384` on slots 9A/9C/9D/9E;
+//!   RSA/Ed25519 and other slots fall through to C. Needs `-K` (mgmt) and a
+//!   PIN (`-P` or askpass, for the self-sign).
 //!
 //! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
 //! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
@@ -75,6 +81,9 @@ struct Invocation {
     /// write op, as `default` or a hex string. pivy-tool's general admin-key
     /// option; `set-admin` reads it as the old key to auth with.
     admin_key: Option<String>,
+    /// `-a <alg>`: pivy-tool's algorithm option (e.g. `eccp256`). Required by
+    /// `generate`; this port models the EC algorithms only.
+    alg: Option<String>,
     op: String,
     positionals: Vec<String>,
 }
@@ -86,6 +95,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
     let mut guid = None;
     let mut pins = Vec::new();
     let mut admin_key = None;
+    let mut alg = None;
     let mut i = 0;
     // Leading options (pivy-tool style: options precede the operation).
     while i < args.len() {
@@ -104,6 +114,10 @@ fn parse(args: &[String]) -> Option<Invocation> {
             }
             "-K" => {
                 admin_key = Some(args.get(i + 1)?.clone());
+                i += 2;
+            }
+            "-a" => {
+                alg = Some(args.get(i + 1)?.clone());
                 i += 2;
             }
             // Any other flag is not modeled here — let C handle the whole
@@ -128,6 +142,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "delete-cert"
             | "update-keyhist"
             | "write-cert"
+            | "generate"
     ) {
         return None;
     }
@@ -137,12 +152,24 @@ fn parse(args: &[String]) -> Option<Invocation> {
     // superset honest.
     if matches!(
         op.as_str(),
-        "set-admin" | "delete-cert" | "update-keyhist" | "write-cert"
+        "set-admin" | "delete-cert" | "update-keyhist" | "write-cert" | "generate"
     ) {
         if let Some(k) = &admin_key {
             if !is_admin_key_arg(k) {
                 return None;
             }
+        }
+    }
+    // `generate` requires `-a <alg>` and this port models only the EC
+    // algorithms (eccp256/eccp384); a missing or RSA/Ed25519 `-a` falls
+    // through to C, as does an unsupported slot.
+    if op == "generate" {
+        let slot = positionals.first()?;
+        if positionals.len() != 1
+            || !is_supported_cert_slot(slot)
+            || alg.as_deref().and_then(parse_ec_alg).is_none()
+        {
+            return None;
         }
     }
     // `update-keyhist` takes no positionals (C errors "too many arguments").
@@ -169,9 +196,21 @@ fn parse(args: &[String]) -> Option<Invocation> {
         guid,
         pins,
         admin_key,
+        alg,
         op,
         positionals,
     })
+}
+
+/// Map a pivy-tool `-a` algorithm name to the EC algorithms this port
+/// models: `eccp256` → P-256, `eccp384` → P-384. Everything else (RSA,
+/// Ed25519, X25519) returns `None` and falls through to C.
+fn parse_ec_alg(s: &str) -> Option<(PivAlgorithm, u8)> {
+    match s {
+        "eccp256" => Some((PivAlgorithm::EcP256, piggy_piv::apdu::alg::ECCP256)),
+        "eccp384" => Some((PivAlgorithm::EcP384, piggy_piv::apdu::alg::ECCP384)),
+        _ => None,
+    }
 }
 
 /// Whether an admin-key argument is one this port models: the literal
@@ -207,6 +246,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         "delete-cert" => cmd_delete_cert(&inv),
         "update-keyhist" => cmd_update_keyhist(&inv),
         "write-cert" => cmd_write_cert(&inv),
+        "generate" => cmd_generate(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     })
@@ -924,6 +964,111 @@ fn parse_cert_input(bytes: &[u8]) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("re-encode cert DER: {e}"))
 }
 
+/// `piggy tool generate <slot> -a <alg>`: generate a new key pair on the
+/// card, self-sign a minimal cert for it, and print the new public key —
+/// matching C `pivy-tool`'s `cmd_generate` (GENERATE ASYMMETRIC under mgmt
+/// auth, then a PIN-gated self-signed cert). Modeled for the EC algorithms
+/// (`eccp256`, `eccp384`) on the cert-holding slots 9A/9C/9D/9E; other
+/// algorithms/slots fall through to C. The generated key is random on real
+/// hardware (so the printed pubkey differs per run); the self-signed cert C
+/// writes carries a random serial (a side effect that legitimately differs).
+/// Prints `<openssh-pubkey> PIV_slot_XX@<GUID>`, matching C's format (a bare
+/// slot/GUID comment — no cert subject, unlike `pubkey`).
+fn cmd_generate(inv: &Invocation) -> i32 {
+    let op = "generate";
+    let slot_id = match slot_arg(inv, op) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    // parse() validated the algorithm and slot.
+    let (algorithm, alg_byte) = inv
+        .alg
+        .as_deref()
+        .and_then(parse_ec_alg)
+        .expect("parse() validated -a");
+    let admin_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("piggy tool {op}: current admin key: {e}");
+            return 2;
+        }
+    };
+    let pin = match get_pin(inv, op) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("piggy tool {op}: {e}");
+            return 1;
+        }
+    };
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let guid = token.guid().to_hex();
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: begin session: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.authenticate_admin(&admin_key, piggy_piv::apdu::alg::TDEA_3KEY) {
+        eprintln!("piggy tool {op}: failed to authenticate with current admin key: {e}");
+        return 1;
+    }
+    let point = match session.generate_key(slot_id, alg_byte, None, None) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("piggy tool {op}: key generation failed: {e}");
+            return 1;
+        }
+    };
+    // The self-signed cert is signed by the freshly-generated slot key, which
+    // is PIN-gated — C's selfsign_slot does the same via assert_pin.
+    if let Err(e) = session.verify_pin(&pin) {
+        eprintln!("piggy tool {op}: PIN verification failed: {e}");
+        return 1;
+    }
+    let cert_der = match piggy_piv::cert_builder::build_self_signed_cert(
+        &point,
+        algorithm,
+        &format!("PIV slot {slot_id:02X}"),
+        |digest| session.sign_prehash(slot_id, digest),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("piggy tool {op}: self-signing the new cert failed: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.put_cert(slot_id, &cert_der) {
+        eprintln!("piggy tool {op}: failed to write the new cert to slot {slot_id:02X}: {e}");
+        return 1;
+    }
+    let ecdsa = match ssh_key::public::EcdsaPublicKey::from_sec1_bytes(&point) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("piggy tool {op}: parse generated public key: {e}");
+            return 1;
+        }
+    };
+    let mut pubkey = ssh_key::PublicKey::from(ssh_key::public::KeyData::Ecdsa(ecdsa));
+    pubkey.set_comment(format!("PIV_slot_{slot_id:02X}@{guid}"));
+    match pubkey.to_openssh() {
+        Ok(line) => {
+            println!("{line}");
+            0
+        }
+        Err(e) => {
+            eprintln!("piggy tool {op}: render OpenSSH: {e}");
+            1
+        }
+    }
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -1012,6 +1157,9 @@ mod tests {
         assert!(parse(&argv(&["-K", "default", "update-keyhist"])).is_some());
         assert!(parse(&argv(&["write-cert", "9d"])).is_some());
         assert!(parse(&argv(&["-K", "default", "write-cert", "9a"])).is_some());
+        assert!(parse(&argv(&["-a", "eccp256", "generate", "9a"])).is_some());
+        assert!(parse(&argv(&["-a", "eccp384", "generate", "9d"])).is_some());
+        assert!(parse(&argv(&["-P", "123456", "-a", "eccp256", "generate", "9c"])).is_some());
         assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
@@ -1038,6 +1186,12 @@ mod tests {
         assert!(parse(&argv(&["write-cert", "82"])).is_none()); // retired slot
         assert!(parse(&argv(&["write-cert"])).is_none()); // missing slot
         assert!(parse(&argv(&["-K", "@keyfile", "write-cert", "9d"])).is_none());
+        // generate requires -a and an EC algorithm on a cert slot.
+        assert!(parse(&argv(&["generate", "9a"])).is_none()); // no -a
+        assert!(parse(&argv(&["-a", "rsa2048", "generate", "9a"])).is_none()); // RSA -> C
+        assert!(parse(&argv(&["-a", "ed25519", "generate", "9a"])).is_none()); // Ed25519 -> C
+        assert!(parse(&argv(&["-a", "eccp256", "generate", "82"])).is_none()); // retired slot
+        assert!(parse(&argv(&["-a", "eccp256", "generate"])).is_none()); // no slot
         // An option we don't model → C handles the whole invocation.
         assert!(parse(&argv(&["-d", "pubkey", "9d"])).is_none());
         // No op at all.
