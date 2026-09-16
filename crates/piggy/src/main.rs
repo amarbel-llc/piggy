@@ -922,13 +922,12 @@ fn main() {
         // Unknown subcommands are a usage error, not a hop to C (piggy#165);
         // the full C surface is reachable via `piggy pivy box`.
         Command::Box { rest } => std::process::exit(piggy::cmd::pivy_box::run(&rest)),
-        // `tool` runs piggy's Rust re-impl for the ops it handles (piggy#289
-        // Phase 3); the rest still exec C `pivy-tool`. `piggy pivy tool`
-        // always reaches C.
-        Command::Tool { rest } => match piggy::cmd::tool::run(&rest) {
-            Some(code) => std::process::exit(code),
-            None => exec::exec_pivy("tool", &rest),
-        },
+        // `tool` runs piggy's Rust re-impl (piggy#289 Phase 3). As of the 3.6
+        // cutover it is NO LONGER a superset that falls back to C: an unported
+        // op or an unmodeled option is a usage error (exit 2), not a silent
+        // hop to `pivy-tool`. The full C surface (list, pinfo, init, req-cert,
+        // …) stays reachable via `piggy pivy tool` while C is shipped.
+        Command::Tool { rest } => std::process::exit(piggy::cmd::tool::run(&rest)),
 
         Command::Pivy { tool, rest } => match tool {
             Some(tool) => exec::exec_pivy(&tool, &rest),

@@ -574,6 +574,24 @@ split into its own pass** (operator call) and tracked in **piggy#291** (needs
 INS 0xFB on both sides plus a non-interactive confirmation gate to replace
 pivy-tool's tty `YES`). Tier-3 (`req-cert`, RSA/Ed25519) stays deferred.
 
+**Milestone 3.6 landed (cutover).** `piggy tool` is now Rust, not a
+superset-by-fallback — mirroring the Phase 2 `box` cutover (#165). The
+`None => exec_pivy("tool", …)` arm in `main.rs` is gone; `cmd::tool::run`
+returns `i32`, and an unported op (`list`, `pinfo`, `version`, `init`,
+`req-cert`, `factory-reset`) or an unmodeled option (whatever `parse`
+rejects — an RSA/Ed25519 `-a`, a pivy debug flag) prints a usage banner and
+exits 2, pointing at the `piggy pivy tool` escape hatch rather than silently
+hopping to C. The full C `pivy-tool` surface stays reachable via `piggy pivy
+tool` while C is shipped (Phase 4 demotes it to a test-only input, Phase 5
+deletes it). The fibby lane's old `unported_op_falls_through_to_c` test is
+rewritten to assert the usage error (exit 2, names `piggy pivy tool`, no card
+output) and that `piggy pivy tool list` still reaches C. AGENTS.md's
+exec-to-C bullet is updated: only `piggy pivy <tool>` execs C now.
+**Phase 3 is complete** except the deliberately-deferred `list`/`pinfo`
+(their own later pass) and factory-reset (piggy#291); the differentiable
+`pivy-tool` surface is ported and C is reachable only through the explicit
+passthrough.
+
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
 Independent of Phase 3 (they need no new `piggy-piv` surface: the key

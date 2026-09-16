@@ -11,11 +11,12 @@ bats_require_minimum_version 1.5.0
 # from $PATH (in tests, the mocks under `helpers/`). Differs from the
 # top-level shortcuts:
 #   - `piggy box`   → rust pivy-box reimplementation
-#   - `piggy tool`  → C pivy-tool (via fallback)
+#   - `piggy tool`  → rust pivy-tool reimplementation (piggy#289 3.6 cutover;
+#     unported ops/options are a usage error, NOT a C fallthrough)
 #   - `piggy pivy box`  → ALWAYS C pivy-box, regardless of the top-level
 #     rust impl
-#   - `piggy pivy tool` → identical effect to `piggy tool` for now;
-#     diverges once `tool` ports to rust (#3)
+#   - `piggy pivy tool` → ALWAYS C pivy-tool — the escape hatch to the full
+#     surface the rust `piggy tool` does not (yet) reimplement
 #
 # All tests go through the top-level rust `piggy` dispatcher (the bats
 # parent `common.bash` resolves `$PIGGY` to `target/debug/piggy` and

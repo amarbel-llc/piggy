@@ -140,12 +140,17 @@ function pubkey_empty_slot_fails_like_c { # @test
   assert_failure
 }
 
-function unported_op_falls_through_to_c { # @test
-  # `list` is not ported yet, so `piggy tool list` execs `pivy-tool list`
-  # by PATH name (which in this lane is common.bash's mock — that is fine:
-  # it proves the Some/None fallback still reaches a pivy-tool). Both real
-  # and mock print a `guid:` line.
+function unported_op_is_a_usage_error_not_a_c_fallthrough { # @test
+  # As of the 3.6 cutover (piggy#289) `piggy tool` no longer falls back to C:
+  # an unported op like `list` is a usage error (exit 2) that points at the
+  # `piggy pivy tool` escape hatch, NOT a silent hop to `pivy-tool`.
   run "$PIGGY" tool list
+  assert_failure 2
+  assert_output --partial "piggy pivy tool"
+  refute_output --partial "guid:"
+  # The full C surface stays reachable via the explicit passthrough, which
+  # execs `pivy-tool` from PATH (common.bash's mock in this lane).
+  run "$PIGGY" pivy tool list
   assert_success
   assert_output --partial "guid:"
 }

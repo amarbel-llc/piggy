@@ -60,14 +60,14 @@
 //!   (piggy is EC-only); an RSA/Ed25519 key errors, pointing to `piggy pivy
 //!   tool import`. Needs `-K` (mgmt) and a PIN. Ported for slots 9A/9C/9D/9E.
 //!
-//! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
-//! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
-//! and `None` for everything else, so `main.rs` execs the C `pivy-tool`
-//! for the rest (`list`, `pinfo`, `version`, `init`, the rest of the
-//! key surface). It also returns `None` the moment it sees an option it
-//! does not model, so a flag piggy would silently ignore is handled by C
-//! instead — the superset stays honest. `piggy pivy tool` always reaches
-//! C regardless.
+//! As of the 3.6 cutover (piggy#289, mirroring the `box` cutover in #165)
+//! `piggy tool` is Rust — NOT a superset that falls back to C. [`run`]
+//! returns the exit code directly; an unported op (`list`, `pinfo`,
+//! `version`, `init`, `req-cert`, `factory-reset`) or an unmodeled option
+//! (whatever [`parse`] rejects — e.g. an RSA/Ed25519 `-a`, a pivy debug
+//! flag) is a usage error (exit 2), not a silent hop to `pivy-tool`. The
+//! full C `pivy-tool` surface stays reachable via `piggy pivy tool` while
+//! C is shipped.
 
 use std::io::{Read, Write};
 
@@ -237,11 +237,16 @@ fn is_supported_cert_slot(s: &str) -> bool {
     matches!(u8::from_str_radix(hex, 16), Ok(0x9A | 0x9C | 0x9D | 0x9E))
 }
 
-/// Dispatch `piggy tool <args>`. `Some(code)` for a handled op; `None` to
-/// fall back to C `pivy-tool`.
-pub fn run(args: &[String]) -> Option<i32> {
-    let inv = parse(args)?;
-    Some(match inv.op.as_str() {
+/// Dispatch `piggy tool <args>`, returning the process exit code. As of the
+/// 3.6 cutover (piggy#289, mirroring the `box` cutover in #165) this is NOT a
+/// superset that falls back to C: an unported op or an unmodeled option
+/// (whatever [`parse`] rejects) is a usage error (exit 2), not a silent hop to
+/// `pivy-tool`. The full C surface stays reachable via `piggy pivy tool`.
+pub fn run(args: &[String]) -> i32 {
+    let Some(inv) = parse(args) else {
+        return usage();
+    };
+    match inv.op.as_str() {
         "pubkey" => cmd_pubkey(&inv),
         "cert" => cmd_cert(&inv),
         "attest" => cmd_attest(&inv),
@@ -258,7 +263,24 @@ pub fn run(args: &[String]) -> Option<i32> {
         "import" => cmd_import(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
-    })
+    }
+}
+
+/// Print the `piggy tool` usage banner and return exit code 2, for an
+/// operation or option the Rust port does not implement (piggy#289 3.6
+/// cutover). The full C `pivy-tool` surface is reachable via `piggy pivy
+/// tool` while C is shipped.
+fn usage() -> i32 {
+    eprintln!("piggy tool: unsupported operation or option");
+    eprintln!(
+        "supported: pubkey, cert, attest, sign, ecdh, change-pin, change-puk, \
+         reset-pin, set-admin, delete-cert, update-keyhist, write-cert, generate, import"
+    );
+    eprintln!(
+        "for the rest of the pivy-tool surface (list, pinfo, version, init, \
+         req-cert, factory-reset, RSA/Ed25519, …) use: piggy pivy tool <args>"
+    );
+    2
 }
 
 /// `piggy tool pubkey <slot>`: print the slot's public key in OpenSSH
