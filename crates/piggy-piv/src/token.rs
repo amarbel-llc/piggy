@@ -365,6 +365,40 @@ impl PivToken {
         Ok(slots)
     }
 
+    /// Read the existing PIV Key History object (`5FC10C`). An absent object
+    /// (`6A82`) is the fresh-card case and returns the default (all-zero, no
+    /// URL), mirroring how `pivy-tool update-keyhist` treats a card with no
+    /// prior key history.
+    pub fn read_keyhistory(&self) -> Result<crate::keyhist::KeyHistory, PivError> {
+        let apdu = Apdu::get_data(crate::keyhist::KEYHIST_TAG);
+        let (data, sw) = self.transmit(&apdu)?;
+        if sw.as_u16() == 0x6A82 {
+            return Ok(crate::keyhist::KeyHistory::default());
+        }
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+        Ok(crate::keyhist::parse_keyhistory(&data))
+    }
+
+    /// Count the on-card retired-slot certificates: the highest retired-slot
+    /// index (`1..20`, slots `82`..`95`) that holds a cert — what
+    /// `pivy-tool update-keyhist` records as `oncard`. A card with no retired
+    /// certs (every empty slot answering `6A82`) yields `0`. An unreadable
+    /// slot is treated as empty, matching `read_all_slots`' lenient skip;
+    /// counting reads the cert, so a retired slot holding a key algorithm
+    /// piggy cannot parse (e.g. RSA) would be undercounted — the full-fidelity
+    /// path is tracked in piggy#290.
+    pub fn count_oncard_retired(&self) -> u8 {
+        let mut oncard = 0u8;
+        for slot_id in 0x82..=0x95_u8 {
+            if self.read_slot(slot_id).is_ok() {
+                oncard = slot_id - 0x82 + 1;
+            }
+        }
+        oncard
+    }
+
     /// Read the configured PIN policy and touch policy for the given
     /// slot. Backed by an INS_ATTEST round-trip plus a walk of the
     /// returned attestation cert's `1.3.6.1.4.1.41482.3.8` extension.

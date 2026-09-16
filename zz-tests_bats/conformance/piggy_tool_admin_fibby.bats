@@ -2,23 +2,25 @@
 # bats file_tags=hardware
 #
 # Differential conformance for the state-modifying admin write ops
-# `piggy tool set-admin` (milestone 3.3a) and `delete-cert` (milestone
-# 3.3b) of piggy#289 Phase 3. Both mutate the card (the mgmt key / a slot
-# cert object), so each test gets its OWN fresh fibby card (setup ->
-# fibby_up, teardown -> fibby_down; factory 3DES admin key, seeded 9D
-# cert). The contract is checked BOTH ways:
+# `piggy tool set-admin` (milestone 3.3a), `delete-cert` (3.3b), and
+# `update-keyhist` (3.3b) of piggy#289 Phase 3. All mutate the card (the
+# mgmt key / a slot cert / the Key History object), so each test gets its
+# OWN fresh fibby card (setup -> fibby_up, teardown -> fibby_down; factory
+# 3DES admin key, seeded 9D cert). The contract is checked BOTH ways:
 #   - observable output: both C pivy-tool and piggy tool exit 0 and print
-#     nothing on a successful rotation/delete, and both fail on a wrong
-#     current admin key;
-#   - card state: after C rotates FACTORY -> KEY_A, piggy can only rotate
-#     KEY_A -> KEY_B if KEY_A is genuinely the active key (mgmt-key mutual
-#     auth); after either impl deletes the 9D cert, BOTH impls read it as
-#     gone.
+#     nothing on a successful rotation/delete/update, and both fail on a
+#     wrong current admin key;
+#   - card state / wire: after C rotates FACTORY -> KEY_A, piggy can only
+#     rotate KEY_A -> KEY_B if KEY_A is genuinely the active key; after
+#     either impl deletes the 9D cert, BOTH read it as gone; and both emit
+#     an identical PUT DATA 5FC10C on the wire for update-keyhist (the Key
+#     History object has no ported read-back path — piggy#290 — so the
+#     differential is on the write APDU bytes in fibby's wire trace).
 # set-admin is 3DES-only (AES/`random`/`@file`/`-R` fall through to C);
 # delete-cert is ported for the 9A/9C/9D/9E cert slots.
 #
 # Required env (set by test-bats-conformance-tool-admin-fibby):
-#   FIBBY_BIN, REAL_PIVY_TOOL, PIGGY.
+#   FIBBY_BIN, REAL_PIVY_TOOL, PIGGY, FIBBY_LOG.
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
@@ -121,4 +123,40 @@ function delete_cert_wrong_admin_key_fails { # @test
   # The 9D cert is still readable — the failed delete did not clear it.
   run "$PIGGY" tool cert 9d
   assert_success
+}
+
+# Extract the PUT DATA *data field* written to the Key History tag 5F C1 0C
+# from fibby's wire trace — the `5C 03 5F C1 0C 53 <len> <body>` object,
+# independent of the ISO 7816-4 length framing around it. (C pivy-tool frames
+# PUT DATA with extended-length `00 DB 3F FF 00 00 <Lc> …`, piggy with short
+# `00 DB 3F FF <Lc> …`; both are valid and the card stores the identical
+# object, so the meaningful differential is the data field, not the framing.)
+# The `53` distinguishes the PUT object from the bare `5C 03 5F C1 0C` GET
+# DATA request; the fresh-card body is 6 bytes (`C1 01 00 C2 01 00`).
+_keyhist_put_objects() {
+  sed -nE 's/^\[fibby:apdu>\] [0-9a-f]{4}  (.*) \|.*\|$/\1/p' "$FIBBY_LOG" \
+    | tr -d ' \n' | grep -oE '5c035fc10c5306[0-9a-f]{12}'
+}
+
+function update_keyhist_wire_matches_c { # @test
+  # update-keyhist has no ported read-back path (piggy#290), so the
+  # differential is on the write: run both impls against the same card and
+  # assert the Key History object each writes (the PUT DATA data field) is
+  # byte-identical.
+  run "$REAL_PIVY_TOOL" update-keyhist
+  assert_success
+  assert_output ""
+  run "$PIGGY" tool update-keyhist
+  assert_success
+  assert_output ""
+  local objs n uniq
+  objs=$(_keyhist_put_objects)
+  n=$(printf '%s\n' "$objs" | grep -c .)
+  uniq=$(printf '%s\n' "$objs" | sort -u | grep -c .)
+  [[ $n -ge 2 ]] || fail "expected >=2 keyhist PUT DATA objects (C + piggy), got $n: $objs"
+  [[ $uniq -eq 1 ]] || fail "C and piggy wrote different keyhist objects: $objs"
+  # And it is the expected fresh-card object: 53 06 C1 01 00 (oncard=0)
+  # C2 01 00 (offcard=0), no URL.
+  [[ $objs == *"5c035fc10c5306c10100c20100"* ]] \
+    || fail "unexpected keyhist object bytes: $objs"
 }

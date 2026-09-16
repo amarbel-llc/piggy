@@ -38,6 +38,11 @@
 //!   empty body; matches C `cmd_delete_cert`). The current key comes from
 //!   `-K` (`default` or hex). Ported for the cert-holding slots
 //!   9A/9C/9D/9E; retired and other slots fall through to C.
+//! - `piggy tool update-keyhist` — rescan the retired key slots and rewrite
+//!   the PIV Key History object (mgmt-key mutual auth, then PUT DATA at
+//!   `5FC10C`; matches C `cmd_update_keyhist`). `oncard` is recomputed from
+//!   the retired slots, `offcard`/URL preserved from the existing object.
+//!   The current key comes from `-K` (`default` or hex).
 //!
 //! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
 //! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
@@ -116,19 +121,24 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "reset-pin"
             | "set-admin"
             | "delete-cert"
+            | "update-keyhist"
     ) {
         return None;
     }
     let positionals = args[i + 1..].to_vec();
-    // The admin-key–gated write ops (`set-admin`, `delete-cert`) authenticate
-    // with `-K`; validate the modeled key form so `random`/`@file` fall
-    // through to C, keeping the superset honest.
-    if matches!(op.as_str(), "set-admin" | "delete-cert") {
+    // The admin-key–gated write ops authenticate with `-K`; validate the
+    // modeled key form so `random`/`@file` fall through to C, keeping the
+    // superset honest.
+    if matches!(op.as_str(), "set-admin" | "delete-cert" | "update-keyhist") {
         if let Some(k) = &admin_key {
             if !is_admin_key_arg(k) {
                 return None;
             }
         }
+    }
+    // `update-keyhist` takes no positionals (C errors "too many arguments").
+    if op == "update-keyhist" && !positionals.is_empty() {
+        return None;
     }
     // `set-admin` is 3DES-only in this port: the new key positional must be
     // `default` or a hex string (not `random`, `@file`, an AES `-N`, or `-R`).
@@ -186,6 +196,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         "reset-pin" => cmd_reset_pin(&inv),
         "set-admin" => cmd_set_admin(&inv),
         "delete-cert" => cmd_delete_cert(&inv),
+        "update-keyhist" => cmd_update_keyhist(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     })
@@ -781,6 +792,56 @@ fn cmd_delete_cert(inv: &Invocation) -> i32 {
     0
 }
 
+/// `piggy tool update-keyhist`: rescan the retired key slots and rewrite the
+/// PIV Key History object — matching C `pivy-tool`'s `cmd_update_keyhist`.
+/// The `oncard` count is recomputed from the retired slots (82..95); the
+/// `offcard` count and off-card URL are preserved from the existing object;
+/// then mgmt-key mutual auth (current key from `-K`, default factory 3DES)
+/// gates the PUT DATA at `5FC10C`. No stdout on success, matching C.
+fn cmd_update_keyhist(inv: &Invocation) -> i32 {
+    let op = "update-keyhist";
+    let admin_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("piggy tool {op}: current admin key: {e}");
+            return 2;
+        }
+    };
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    // Recompute oncard from the retired slots; preserve offcard/url from the
+    // existing Key History object (exactly what pivy's update-keyhist does).
+    let oncard = token.count_oncard_retired();
+    let existing = match token.read_keyhistory() {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("piggy tool {op}: failed to read the existing key history: {e}");
+            return 1;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: begin session: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.authenticate_admin(&admin_key, piggy_piv::apdu::alg::TDEA_3KEY) {
+        eprintln!("piggy tool {op}: failed to authenticate with current admin key: {e}");
+        return 1;
+    }
+    if let Err(e) = session.write_keyhistory(oncard, existing.offcard, existing.url.as_deref()) {
+        eprintln!("piggy tool {op}: failed to write the key history object: {e}");
+        return 1;
+    }
+    0
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -865,6 +926,8 @@ mod tests {
         assert!(parse(&argv(&["-K", "default", "set-admin", HEX24])).is_some());
         assert!(parse(&argv(&["delete-cert", "9d"])).is_some());
         assert!(parse(&argv(&["-K", "default", "delete-cert", "9a"])).is_some());
+        assert!(parse(&argv(&["update-keyhist"])).is_some());
+        assert!(parse(&argv(&["-K", "default", "update-keyhist"])).is_some());
         assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
@@ -884,6 +947,9 @@ mod tests {
         assert!(parse(&argv(&["delete-cert", "f9"])).is_none()); // attestation slot
         assert!(parse(&argv(&["delete-cert"])).is_none()); // missing slot
         assert!(parse(&argv(&["-K", "@keyfile", "delete-cert", "9d"])).is_none());
+        // update-keyhist takes no positionals.
+        assert!(parse(&argv(&["update-keyhist", "9d"])).is_none());
+        assert!(parse(&argv(&["-K", "@keyfile", "update-keyhist"])).is_none());
         // An option we don't model → C handles the whole invocation.
         assert!(parse(&argv(&["-d", "pubkey", "9d"])).is_none());
         // No op at all.

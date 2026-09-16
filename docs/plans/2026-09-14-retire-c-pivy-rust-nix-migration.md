@@ -485,6 +485,26 @@ intact. This completes the tractable admin ops; `init` stays deferred, and
 `update-keyhist` (deterministic Key History writer) is the remaining
 candidate before the 3.4 key surface.
 
+**Milestone 3.3b+ landed (`update-keyhist`).** Rescans the retired key slots
+and rewrites the PIV Key History object (tag `5FC10C`, body
+`C1 01 <oncard> C2 01 <offcard> [F3 <url>]`) — matching C's
+`cmd_update_keyhist` / `piv_write_keyhistory`. New `piggy-piv` surface: a
+`keyhist` module (encode/parse the object + `PinSession::write_keyhistory`)
+plus `PivToken::{read_keyhistory, count_oncard_retired}` (the latter reusing
+the existing retired-slot `read_slot` support). `piggy tool update-keyhist`
+recomputes `oncard` from the retired slots and preserves `offcard`/URL from
+the existing object, under mgmt-key auth (`-K`). The object encoding is
+pinned byte-exact in a `keyhist` unit test. **Observability note:** the Key
+History object has no ported read-back path, so the e2e differential
+compares the *write* — the PUT DATA data field C and piggy each emit in
+fibby's wire trace — which is byte-identical. This surfaced a benign framing
+difference worth recording: **C frames PUT DATA with extended-length
+(`00 DB 3F FF 00 00 <Lc>`), piggy with short-length (`00 DB 3F FF <Lc>`)**;
+both are valid ISO 7816-4 and the card stores the identical object, so the
+differential is on the data field, not the APDU framing. A fuller read-back
+differential (retired-cert seeding + a raw data-object read) is deferred to
+**piggy#290**.
+
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
 Independent of Phase 3 (they need no new `piggy-piv` surface: the key
