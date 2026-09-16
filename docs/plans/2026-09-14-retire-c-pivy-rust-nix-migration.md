@@ -443,6 +443,31 @@ Still deferred from 3.1's row: `list`/`pinfo`/`version`, scoped on their
 own (the large card-introspection surface that would fail the byte-exact
 differential contract).
 
+**Milestone 3.3a landed (`set-admin`, 3DES).** Rotates the PIV management
+key via mgmt-key mutual authentication with the current key (GENERAL
+AUTHENTICATE, INS 0x87 P1=0x03 P2=0x9B) then YubicoPIV SET MANAGEMENT KEY
+(INS 0xFF) — reusing `PinSession::{authenticate_admin, set_management_key_3des}`
+and fibby's existing mgmt-key + SET MGMT KEY handlers (no new card/piv
+surface; these are the same primitives `card init` exercises). The `piggy
+tool set-admin <newkey>` command reads the current key from `-K` (`default`
+or hex; default: the factory 3DES key) and the new key from the positional
+(`default` or hex). **3DES-only:** AES admin keys, `random`, `@file`, and
+`-R` PINFO-save fall through to C, rejected in `parse` so the superset stays
+honest. The new differential lane `test-bats-conformance-tool-admin-fibby`
+(fresh fibby per test) checks the rotate chain (C FACTORY→KEY_A, piggy
+KEY_A→KEY_B→default — each link only authenticates if the prior rotation
+took), wrong-current-key failure on both impls, and the no-`-K` default.
+The lane immediately caught a test-key subtlety worth recording: DES ignores
+the low (parity) bit of every key byte, so a "different" key that differs
+only there is the *same* effective key — the wrong-key test keys had to
+differ in real key bits. Scope decision for the rest of 3.3, mirroring the
+3.1 deferral: `init` randomizes the CHUID GUID and CardCap id per run, so it
+cannot be byte-differentiated against C and is deferred alongside
+`list`/`pinfo`. Remaining tractable admin ops: **3.3b** `delete-cert` (PUT
+DATA empty body under mgmt auth — one new `piggy-piv` clear-cert primitive;
+fibby's PUT DATA already covers it) and, if it proves cleanly differentiable,
+`update-keyhist`.
+
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
 Independent of Phase 3 (they need no new `piggy-piv` surface: the key

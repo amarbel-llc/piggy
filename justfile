@@ -315,7 +315,7 @@ test: validate-grammar test-grammar-vectors test-bats-default test-bats-conforma
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module test-nix-hm-secrets-module
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby
+_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -717,6 +717,37 @@ test-bats-conformance-tool-pin-fibby: build-rust
     {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
     zz-tests_bats/conformance/piggy_tool_pin_fibby.bats
+
+# Differential `piggy tool set-admin` against C pivy-tool (piggy#289 Phase
+# 3, milestone 3.3a). Rotates the card's PIV management key, so each test
+# brings up its OWN fresh fibby (fibby_up in setup). set-admin needs no PIN
+# (mgmt-key mutual auth, not the PIN), but the askpass safety net is set
+# anyway per piggy#35. --allow-local-binding is for the per-test pcsc
+# socket; fibby runs in-sandbox as a child of the test.
+#
+# run the fibby-backed differential piggy tool set-admin bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-tool-admin-fibby: build-rust
+  #!/usr/bin/env bash
+  set -uo pipefail
+  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+  pivy_tool="$pivy_out/bin/pivy-tool"
+  fibby_bin="$PWD/target/debug/fibby"
+  piggy_bin="$PWD/target/debug/piggy"
+  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
+  [[ -x $pivy_tool ]] || { echo "missing $pivy_tool (nix build .#pivy)"; exit 1; }
+  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+  FIBBY_BIN="$fibby_bin" \
+    REAL_PIVY_TOOL="$pivy_tool" \
+    PIGGY="$piggy_bin" \
+    SSH_ASKPASS="$askpass" \
+    SSH_ASKPASS_REQUIRE=force \
+    DISPLAY="" \
+    PIGGY_TEST_FIB_PIN=123456 \
+    {{ fence-tmpdir-linux }} \
+    BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
+    zz-tests_bats/conformance/piggy_tool_admin_fibby.bats
 
 # recipients add --all-attached against FIBBY — the fibby companion to
 # test-bats-conformance-recipients-add-attached, part of the fib→fibby

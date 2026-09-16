@@ -27,13 +27,19 @@
 //!   0x2C, matches C `piv_reset_pin`). The two repeated `-P` options are
 //!   the PUK then the new PIN, as C consumes them; piggy prompts via
 //!   `SSH_ASKPASS` when either is absent.
+//! - `piggy tool set-admin <newkey>` — rotate the PIV management (admin)
+//!   key (mgmt-key mutual auth with the current key, then SET MANAGEMENT
+//!   KEY; matches C `cmd_set_admin`). The current key comes from `-K`
+//!   (`default` or hex; default: the factory 3DES key), the new key from
+//!   the positional (`default` or hex). 3DES-only: AES admin keys,
+//!   `random`, `@file`, and `-R` PINFO-save fall through to C.
 //!
 //! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
 //! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
 //! and `None` for everything else, so `main.rs` execs the C `pivy-tool`
-//! for the rest (`list`, `pinfo`, `version`, the admin/key surface). It
-//! also returns `None` the moment it sees an option it does
-//! not model, so a flag piggy would silently ignore is handled by C
+//! for the rest (`list`, `pinfo`, `version`, `init`, the rest of the
+//! key surface). It also returns `None` the moment it sees an option it
+//! does not model, so a flag piggy would silently ignore is handled by C
 //! instead — the superset stays honest. `piggy pivy tool` always reaches
 //! C regardless.
 
@@ -50,6 +56,10 @@ struct Invocation {
     /// as the current PIN/PUK and the second as the new one (change-pin,
     /// change-puk); the single-secret ops (sign, ecdh) use only the first.
     pins: Vec<String>,
+    /// `-K <key>`: the CURRENT management (admin) key used to authenticate a
+    /// write op, as `default` or a hex string. pivy-tool's general admin-key
+    /// option; `set-admin` reads it as the old key to auth with.
+    admin_key: Option<String>,
     op: String,
     positionals: Vec<String>,
 }
@@ -60,6 +70,7 @@ struct Invocation {
 fn parse(args: &[String]) -> Option<Invocation> {
     let mut guid = None;
     let mut pins = Vec::new();
+    let mut admin_key = None;
     let mut i = 0;
     // Leading options (pivy-tool style: options precede the operation).
     while i < args.len() {
@@ -76,6 +87,10 @@ fn parse(args: &[String]) -> Option<Invocation> {
                 pins.push(args.get(i + 1)?.clone());
                 i += 2;
             }
+            "-K" => {
+                admin_key = Some(args.get(i + 1)?.clone());
+                i += 2;
+            }
             // Any other flag is not modeled here — let C handle the whole
             // invocation so behavior is never silently dropped.
             _ => return None,
@@ -86,16 +101,50 @@ fn parse(args: &[String]) -> Option<Invocation> {
     // through to C.
     if !matches!(
         op.as_str(),
-        "pubkey" | "cert" | "attest" | "sign" | "ecdh" | "change-pin" | "change-puk" | "reset-pin"
+        "pubkey"
+            | "cert"
+            | "attest"
+            | "sign"
+            | "ecdh"
+            | "change-pin"
+            | "change-puk"
+            | "reset-pin"
+            | "set-admin"
     ) {
         return None;
+    }
+    let positionals = args[i + 1..].to_vec();
+    // `set-admin` is 3DES-only in this port: claim it only for the
+    // differentiable key forms (`default` or a hex string, for both the new
+    // key positional and the `-K` current key). `random`, `@file`, an
+    // AES-algorithm `-N`, and `-R` PINFO-save all fall through to C, keeping
+    // the superset honest.
+    if op == "set-admin" {
+        let new_key = positionals.first()?;
+        if positionals.len() != 1 || !is_admin_key_arg(new_key) {
+            return None;
+        }
+        if let Some(k) = &admin_key {
+            if !is_admin_key_arg(k) {
+                return None;
+            }
+        }
     }
     Some(Invocation {
         guid,
         pins,
+        admin_key,
         op,
-        positionals: args[i + 1..].to_vec(),
+        positionals,
     })
+}
+
+/// Whether an admin-key argument is one this port models: the literal
+/// `default` (the factory 3DES key) or a plain hex string. `random`, an
+/// `@file` reference, and anything else fall through to C `pivy-tool`.
+fn is_admin_key_arg(s: &str) -> bool {
+    s == "default"
+        || (!s.is_empty() && s.len().is_multiple_of(2) && s.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 /// Dispatch `piggy tool <args>`. `Some(code)` for a handled op; `None` to
@@ -111,6 +160,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         "change-pin" => cmd_change_secret(&inv, Secret::Pin),
         "change-puk" => cmd_change_secret(&inv, Secret::Puk),
         "reset-pin" => cmd_reset_pin(&inv),
+        "set-admin" => cmd_set_admin(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     })
@@ -588,6 +638,79 @@ fn cmd_reset_pin(inv: &Invocation) -> i32 {
     }
 }
 
+/// `piggy tool set-admin <newkey>`: rotate the PIV management (admin) key —
+/// matching C `pivy-tool`'s `cmd_set_admin` (mgmt-key mutual authentication
+/// with the current key, then YubicoPIV SET MANAGEMENT KEY). The current key
+/// comes from `-K` (`default` or hex; default: the factory 3DES key); the new
+/// key is the positional (`default` or hex). 3DES-only in this port — AES
+/// admin keys, `random`, `@file`, and `-R` PINFO-save fall through to C
+/// (rejected in `parse`). No stdout on success, matching C.
+fn cmd_set_admin(inv: &Invocation) -> i32 {
+    let op = "set-admin";
+    let old_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("piggy tool {op}: current admin key: {e}");
+            return 2;
+        }
+    };
+    // parse() guaranteed exactly one positional in a modeled key form.
+    let new_key = match resolve_admin_key(&inv.positionals[0]) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("piggy tool {op}: new admin key: {e}");
+            return 2;
+        }
+    };
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: begin session: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.authenticate_admin(&old_key, piggy_piv::apdu::alg::TDEA_3KEY) {
+        eprintln!("piggy tool {op}: failed to authenticate with current admin key: {e}");
+        return 1;
+    }
+    if let Err(e) = session.set_management_key_3des(&new_key) {
+        eprintln!("piggy tool {op}: failed to set new admin key: {e}");
+        return 1;
+    }
+    0
+}
+
+/// Resolve an admin-key argument to its 24-byte 3DES value: `default` → the
+/// factory key, else a hex string decoded to bytes. Errors (like C's
+/// EXIT_BAD_ARGS) when the hex is malformed or not 24 bytes.
+fn resolve_admin_key(arg: &str) -> Result<Vec<u8>, String> {
+    if arg == "default" {
+        return Ok(piggy_piv::DEFAULT_ADMIN_KEY.to_vec());
+    }
+    if arg.is_empty() || !arg.len().is_multiple_of(2) || !arg.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(format!("{arg:?} is not a hex admin key"));
+    }
+    let bytes: Vec<u8> = (0..arg.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&arg[i..i + 2], 16).expect("validated hex"))
+        .collect();
+    if bytes.len() != 24 {
+        return Err(format!(
+            "admin key must be 24 bytes for 3DES ({} given)",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -649,11 +772,13 @@ fn select_token(guid_prefix: Option<&str>) -> Result<PivToken, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{is_admin_key_arg, parse};
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
     }
+
+    const HEX24: &str = "0102030405060708010203040506070801020304050607ff";
 
     #[test]
     fn parse_claims_only_the_ported_ops() {
@@ -665,6 +790,9 @@ mod tests {
         assert!(parse(&argv(&["change-pin"])).is_some());
         assert!(parse(&argv(&["change-puk"])).is_some());
         assert!(parse(&argv(&["reset-pin"])).is_some());
+        assert!(parse(&argv(&["set-admin", "default"])).is_some());
+        assert!(parse(&argv(&["set-admin", HEX24])).is_some());
+        assert!(parse(&argv(&["-K", "default", "set-admin", HEX24])).is_some());
         assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
@@ -673,12 +801,36 @@ mod tests {
         assert!(parse(&argv(&["list"])).is_none());
         assert!(parse(&argv(&["pinfo"])).is_none());
         assert!(parse(&argv(&["init"])).is_none());
+        // set-admin key forms this port does not model → C.
+        assert!(parse(&argv(&["set-admin", "random"])).is_none());
+        assert!(parse(&argv(&["set-admin", "@keyfile"])).is_none());
+        assert!(parse(&argv(&["-K", "@keyfile", "set-admin", "default"])).is_none());
+        assert!(parse(&argv(&["set-admin"])).is_none()); // missing new key
+        assert!(parse(&argv(&["set-admin", "default", "extra"])).is_none());
         // An option we don't model → C handles the whole invocation.
         assert!(parse(&argv(&["-d", "pubkey", "9d"])).is_none());
         // No op at all.
         assert!(parse(&argv(&[])).is_none());
         // `-g` with no value.
         assert!(parse(&argv(&["-g"])).is_none());
+    }
+
+    #[test]
+    fn parse_extracts_admin_key_for_set_admin() {
+        let inv = parse(&argv(&["-K", "default", "set-admin", HEX24])).unwrap();
+        assert_eq!(inv.admin_key.as_deref(), Some("default"));
+        assert_eq!(inv.op, "set-admin");
+        assert_eq!(inv.positionals, vec![HEX24.to_string()]);
+    }
+
+    #[test]
+    fn is_admin_key_arg_accepts_default_and_hex_only() {
+        assert!(is_admin_key_arg("default"));
+        assert!(is_admin_key_arg(HEX24));
+        assert!(!is_admin_key_arg("random"));
+        assert!(!is_admin_key_arg("@file"));
+        assert!(!is_admin_key_arg("0102030")); // odd length
+        assert!(!is_admin_key_arg("")); // empty
     }
 
     #[test]
