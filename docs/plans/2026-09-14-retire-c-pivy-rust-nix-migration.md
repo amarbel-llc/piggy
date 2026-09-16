@@ -468,6 +468,23 @@ DATA empty body under mgmt auth — one new `piggy-piv` clear-cert primitive;
 fibby's PUT DATA already covers it) and, if it proves cleanly differentiable,
 `update-keyhist`.
 
+**Milestone 3.3b landed (`delete-cert`).** Clears a slot's certificate
+object: mgmt-key mutual auth with the current key, then PUT DATA at the
+slot's cert tag with an empty body (`5C <tag> 53 00`) — matching C's
+`piv_write_cert(slot, NULL, 0)`. One new `piggy-piv` primitive,
+`PinSession::clear_cert(slot)`, atop the existing `put_data` /
+`cert_tag_for_slot`; fibby's PUT DATA already stores the empty object
+verbatim, so a subsequent read finds no `70` element and reports the slot
+as certless. Ported for the cert-holding slots 9A/9C/9D/9E (retired and
+other slots fall through to C). `piggy tool delete-cert <slot>` reads the
+current key from `-K` (`default` or hex). The differential lane (folded
+into `piggy_tool_admin_fibby.bats`) adds three tests: piggy deletes the 9D
+cert and BOTH impls then read it as gone; the mirror (C deletes, piggy sees
+it gone); and a wrong-admin-key delete that fails and leaves the cert
+intact. This completes the tractable admin ops; `init` stays deferred, and
+`update-keyhist` (deterministic Key History writer) is the remaining
+candidate before the 3.4 key surface.
+
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
 Independent of Phase 3 (they need no new `piggy-piv` surface: the key

@@ -117,6 +117,17 @@ impl PinSession<'_> {
         value.extend_from_slice(&[0x71, 0x01, 0x00]);
         self.put_data(tag, &value)
     }
+
+    /// Clear a slot's certificate object: PUT DATA at the slot's cert tag with
+    /// an empty value (`53 00`) — matching pivy's `piv_write_cert(slot, NULL,
+    /// 0)` (the wire half of `pivy-tool delete-cert`). After this, `read_slot`
+    /// finds no `70` element and reports the slot as having no certificate.
+    /// Requires a prior [`PinSession::authenticate_admin`] on real hardware.
+    pub fn clear_cert(&mut self, slot_id: u8) -> Result<(), PivError> {
+        let tag = cert_tag_for_slot(slot_id)
+            .ok_or_else(|| PivError::Other(format!("no cert tag for slot {slot_id:#04x}")))?;
+        self.put_data(tag, &[])
+    }
 }
 
 /// Append a BER-TLV length for `len` (short form, 0x81, or 0x82) — certs are a
@@ -228,5 +239,14 @@ mod tests {
         // 70 82 01 2C <300 bytes> 71 01 00
         assert_eq!(&value[..4], &[0x70, 0x82, 0x01, 0x2C]);
         assert_eq!(&value[value.len() - 3..], &[0x71, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn clear_cert_uses_empty_53_at_the_slot_tag() {
+        // The delete-cert wire form: PUT DATA 5C <cert-tag> 53 00 (empty
+        // value), matching pivy's piv_write_cert(slot, NULL, 0).
+        let apdu = Apdu::put_data(cert_tag_for_slot(0x9D).unwrap(), &[]);
+        assert_eq!(apdu.ins, 0xDB);
+        assert_eq!(apdu.data, vec![0x5C, 0x03, 0x5F, 0xC1, 0x0B, 0x53, 0x00]);
     }
 }

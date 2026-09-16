@@ -1,18 +1,21 @@
 #! /usr/bin/env bats
 # bats file_tags=hardware
 #
-# Differential conformance for the state-modifying `piggy tool set-admin`
-# (piggy#289 Phase 3, milestone 3.3a). This rotates the card's PIV
-# management (admin) key, so each test gets its OWN fresh fibby card
-# (setup -> fibby_up, teardown -> fibby_down; factory 3DES admin key at
-# start). The contract is checked BOTH ways:
+# Differential conformance for the state-modifying admin write ops
+# `piggy tool set-admin` (milestone 3.3a) and `delete-cert` (milestone
+# 3.3b) of piggy#289 Phase 3. Both mutate the card (the mgmt key / a slot
+# cert object), so each test gets its OWN fresh fibby card (setup ->
+# fibby_up, teardown -> fibby_down; factory 3DES admin key, seeded 9D
+# cert). The contract is checked BOTH ways:
 #   - observable output: both C pivy-tool and piggy tool exit 0 and print
-#     nothing on a successful rotation, and both fail when authenticating
-#     with the wrong current key;
+#     nothing on a successful rotation/delete, and both fail on a wrong
+#     current admin key;
 #   - card state: after C rotates FACTORY -> KEY_A, piggy can only rotate
 #     KEY_A -> KEY_B if KEY_A is genuinely the active key (mgmt-key mutual
-#     auth), so the chain itself proves each rotation took effect.
-# 3DES-only: AES admin keys, `random`, `@file`, and `-R` fall through to C.
+#     auth); after either impl deletes the 9D cert, BOTH impls read it as
+#     gone.
+# set-admin is 3DES-only (AES/`random`/`@file`/`-R` fall through to C);
+# delete-cert is ported for the 9A/9C/9D/9E cert slots.
 #
 # Required env (set by test-bats-conformance-tool-admin-fibby):
 #   FIBBY_BIN, REAL_PIVY_TOOL, PIGGY.
@@ -80,4 +83,42 @@ function set_admin_default_current_key_is_the_factory_key { # @test
   # And the factory key is no longer accepted afterwards.
   run "$PIGGY" tool -K default set-admin "$KEY_B"
   assert_failure
+}
+
+function delete_cert_clears_the_9d_slot_both_see_it_gone { # @test
+  # The seeded 9D cert is readable by both impls to start.
+  run "$PIGGY" tool cert 9d
+  assert_success
+  run "$REAL_PIVY_TOOL" cert 9d
+  assert_success
+  # piggy deletes the 9D cert (mgmt auth with the factory key, then PUT DATA
+  # empty at the cert tag). Silent success, matching C.
+  run "$PIGGY" tool delete-cert 9d
+  assert_success
+  assert_output ""
+  # Now BOTH impls read the slot as having no certificate — piggy's delete
+  # cleared the object in the same way C recognises as empty.
+  run "$PIGGY" tool cert 9d
+  assert_failure
+  run "$REAL_PIVY_TOOL" cert 9d
+  assert_failure
+}
+
+function delete_cert_c_delete_piggy_sees_it_gone { # @test
+  # The mirror: C deletes the 9D cert, piggy must then read it as gone.
+  run "$REAL_PIVY_TOOL" delete-cert 9d
+  assert_success
+  run "$PIGGY" tool cert 9d
+  assert_failure
+  run "$REAL_PIVY_TOOL" cert 9d
+  assert_failure
+}
+
+function delete_cert_wrong_admin_key_fails { # @test
+  # A wrong current admin key fails the mgmt auth, so the cert is untouched.
+  run "$PIGGY" tool -K "$KEY_A" delete-cert 9d
+  assert_failure
+  # The 9D cert is still readable — the failed delete did not clear it.
+  run "$PIGGY" tool cert 9d
+  assert_success
 }

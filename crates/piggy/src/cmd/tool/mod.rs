@@ -33,6 +33,11 @@
 //!   (`default` or hex; default: the factory 3DES key), the new key from
 //!   the positional (`default` or hex). 3DES-only: AES admin keys,
 //!   `random`, `@file`, and `-R` PINFO-save fall through to C.
+//! - `piggy tool delete-cert <slot>` — clear a slot's certificate object
+//!   (mgmt-key mutual auth, then PUT DATA at the slot's cert tag with an
+//!   empty body; matches C `cmd_delete_cert`). The current key comes from
+//!   `-K` (`default` or hex). Ported for the cert-holding slots
+//!   9A/9C/9D/9E; retired and other slots fall through to C.
 //!
 //! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
 //! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
@@ -110,24 +115,35 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "change-puk"
             | "reset-pin"
             | "set-admin"
+            | "delete-cert"
     ) {
         return None;
     }
     let positionals = args[i + 1..].to_vec();
-    // `set-admin` is 3DES-only in this port: claim it only for the
-    // differentiable key forms (`default` or a hex string, for both the new
-    // key positional and the `-K` current key). `random`, `@file`, an
-    // AES-algorithm `-N`, and `-R` PINFO-save all fall through to C, keeping
-    // the superset honest.
+    // The admin-key–gated write ops (`set-admin`, `delete-cert`) authenticate
+    // with `-K`; validate the modeled key form so `random`/`@file` fall
+    // through to C, keeping the superset honest.
+    if matches!(op.as_str(), "set-admin" | "delete-cert") {
+        if let Some(k) = &admin_key {
+            if !is_admin_key_arg(k) {
+                return None;
+            }
+        }
+    }
+    // `set-admin` is 3DES-only in this port: the new key positional must be
+    // `default` or a hex string (not `random`, `@file`, an AES `-N`, or `-R`).
     if op == "set-admin" {
         let new_key = positionals.first()?;
         if positionals.len() != 1 || !is_admin_key_arg(new_key) {
             return None;
         }
-        if let Some(k) = &admin_key {
-            if !is_admin_key_arg(k) {
-                return None;
-            }
+    }
+    // `delete-cert` claims only the slots this port maps a cert tag for
+    // (9A/9C/9D/9E); retired and other slots fall through to C.
+    if op == "delete-cert" {
+        let slot = positionals.first()?;
+        if positionals.len() != 1 || !is_supported_cert_slot(slot) {
+            return None;
         }
     }
     Some(Invocation {
@@ -147,6 +163,14 @@ fn is_admin_key_arg(s: &str) -> bool {
         || (!s.is_empty() && s.len().is_multiple_of(2) && s.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+/// Whether a slot argument names one of the key slots this port maps a cert
+/// data-object tag for (9A/9C/9D/9E). Retired slots (82..95) and others fall
+/// through to C `pivy-tool`, which handles the full range.
+fn is_supported_cert_slot(s: &str) -> bool {
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    matches!(u8::from_str_radix(hex, 16), Ok(0x9A | 0x9C | 0x9D | 0x9E))
+}
+
 /// Dispatch `piggy tool <args>`. `Some(code)` for a handled op; `None` to
 /// fall back to C `pivy-tool`.
 pub fn run(args: &[String]) -> Option<i32> {
@@ -161,6 +185,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         "change-puk" => cmd_change_secret(&inv, Secret::Puk),
         "reset-pin" => cmd_reset_pin(&inv),
         "set-admin" => cmd_set_admin(&inv),
+        "delete-cert" => cmd_delete_cert(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     })
@@ -711,6 +736,51 @@ fn resolve_admin_key(arg: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// `piggy tool delete-cert <slot>`: clear a slot's certificate object —
+/// matching C `pivy-tool`'s `cmd_delete_cert` (mgmt-key mutual auth with the
+/// current key, then PUT DATA at the slot's cert tag with an empty body). The
+/// current key comes from `-K` (`default` or hex; default: the factory 3DES
+/// key). Ported for the cert-holding slots 9A/9C/9D/9E; retired and other
+/// slots fall through to C. On a YubiKey <5.7 (fibby's model) this clears only
+/// the cert, not the private key, exactly as C does. No stdout on success.
+fn cmd_delete_cert(inv: &Invocation) -> i32 {
+    let op = "delete-cert";
+    let slot_id = match slot_arg(inv, op) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let admin_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("piggy tool {op}: current admin key: {e}");
+            return 2;
+        }
+    };
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: begin session: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.authenticate_admin(&admin_key, piggy_piv::apdu::alg::TDEA_3KEY) {
+        eprintln!("piggy tool {op}: failed to authenticate with current admin key: {e}");
+        return 1;
+    }
+    if let Err(e) = session.clear_cert(slot_id) {
+        eprintln!("piggy tool {op}: failed to clear the certificate for slot {slot_id:02X}: {e}");
+        return 1;
+    }
+    0
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -772,7 +842,7 @@ fn select_token(guid_prefix: Option<&str>) -> Result<PivToken, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_admin_key_arg, parse};
+    use super::{is_admin_key_arg, is_supported_cert_slot, parse};
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
@@ -793,6 +863,8 @@ mod tests {
         assert!(parse(&argv(&["set-admin", "default"])).is_some());
         assert!(parse(&argv(&["set-admin", HEX24])).is_some());
         assert!(parse(&argv(&["-K", "default", "set-admin", HEX24])).is_some());
+        assert!(parse(&argv(&["delete-cert", "9d"])).is_some());
+        assert!(parse(&argv(&["-K", "default", "delete-cert", "9a"])).is_some());
         assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
@@ -807,6 +879,11 @@ mod tests {
         assert!(parse(&argv(&["-K", "@keyfile", "set-admin", "default"])).is_none());
         assert!(parse(&argv(&["set-admin"])).is_none()); // missing new key
         assert!(parse(&argv(&["set-admin", "default", "extra"])).is_none());
+        // delete-cert only claims the cert-holding slots; others fall to C.
+        assert!(parse(&argv(&["delete-cert", "82"])).is_none()); // retired slot
+        assert!(parse(&argv(&["delete-cert", "f9"])).is_none()); // attestation slot
+        assert!(parse(&argv(&["delete-cert"])).is_none()); // missing slot
+        assert!(parse(&argv(&["-K", "@keyfile", "delete-cert", "9d"])).is_none());
         // An option we don't model → C handles the whole invocation.
         assert!(parse(&argv(&["-d", "pubkey", "9d"])).is_none());
         // No op at all.
@@ -831,6 +908,16 @@ mod tests {
         assert!(!is_admin_key_arg("@file"));
         assert!(!is_admin_key_arg("0102030")); // odd length
         assert!(!is_admin_key_arg("")); // empty
+    }
+
+    #[test]
+    fn is_supported_cert_slot_covers_9a_9c_9d_9e() {
+        for s in ["9a", "9A", "9c", "9d", "9e", "0x9d"] {
+            assert!(is_supported_cert_slot(s), "{s}");
+        }
+        for s in ["82", "95", "f9", "9b", "zz", ""] {
+            assert!(!is_supported_cert_slot(s), "{s}");
+        }
     }
 
     #[test]
