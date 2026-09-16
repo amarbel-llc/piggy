@@ -54,6 +54,11 @@
 //!   Modeled for the EC algorithms `eccp256`/`eccp384` on slots 9A/9C/9D/9E;
 //!   RSA/Ed25519 and other slots fall through to C. Needs `-K` (mgmt) and a
 //!   PIN (`-P` or askpass, for the self-sign).
+//! - `piggy tool import <slot>` — read an OpenSSH private key from stdin,
+//!   import it (YubicoPIV IMPORT ASYMMETRIC), self-sign a minimal cert
+//!   (PIN-gated), and write it (matches C `cmd_import`). EC P-256/P-384 only
+//!   (piggy is EC-only); an RSA/Ed25519 key errors, pointing to `piggy pivy
+//!   tool import`. Needs `-K` (mgmt) and a PIN. Ported for slots 9A/9C/9D/9E.
 //!
 //! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
 //! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
@@ -143,6 +148,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "update-keyhist"
             | "write-cert"
             | "generate"
+            | "import"
     ) {
         return None;
     }
@@ -152,7 +158,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
     // superset honest.
     if matches!(
         op.as_str(),
-        "set-admin" | "delete-cert" | "update-keyhist" | "write-cert" | "generate"
+        "set-admin" | "delete-cert" | "update-keyhist" | "write-cert" | "generate" | "import"
     ) {
         if let Some(k) = &admin_key {
             if !is_admin_key_arg(k) {
@@ -184,9 +190,11 @@ fn parse(args: &[String]) -> Option<Invocation> {
             return None;
         }
     }
-    // `delete-cert` and `write-cert` claim only the slots this port maps a
-    // cert tag for (9A/9C/9D/9E); retired and other slots fall through to C.
-    if matches!(op.as_str(), "delete-cert" | "write-cert") {
+    // `delete-cert`, `write-cert`, and `import` claim only the slots this port
+    // maps a cert tag for (9A/9C/9D/9E); retired and other slots fall through
+    // to C. (import's key TYPE is unknown until stdin is read, so a non-EC key
+    // is handled in cmd_import, not here.)
+    if matches!(op.as_str(), "delete-cert" | "write-cert" | "import") {
         let slot = positionals.first()?;
         if positionals.len() != 1 || !is_supported_cert_slot(slot) {
             return None;
@@ -247,6 +255,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         "update-keyhist" => cmd_update_keyhist(&inv),
         "write-cert" => cmd_write_cert(&inv),
         "generate" => cmd_generate(&inv),
+        "import" => cmd_import(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     })
@@ -1069,6 +1078,127 @@ fn cmd_generate(inv: &Invocation) -> i32 {
     }
 }
 
+/// The message directing an unsupported `import` key type to the C path.
+const IMPORT_UNSUPPORTED: &str =
+    "piggy tool import supports EC P-256/P-384 keys; use `piggy pivy tool import` for RSA/Ed25519";
+
+/// `piggy tool import <slot>`: read an OpenSSH private key from stdin, import
+/// it into the slot (YubicoPIV IMPORT ASYMMETRIC, INS 0xFE), self-sign a
+/// minimal cert for it (PIN-gated), and write it — matching C `cmd_import`.
+/// Modeled for EC P-256/P-384 keys (piggy is EC-only); an RSA/Ed25519 key
+/// errors and points at `piggy pivy tool import` for the C path. Needs `-K`
+/// (mgmt) and a PIN (`-P`/askpass, for the self-sign). Silent on success.
+fn cmd_import(inv: &Invocation) -> i32 {
+    let op = "import";
+    let slot_id = match slot_arg(inv, op) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let admin_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("piggy tool {op}: current admin key: {e}");
+            return 2;
+        }
+    };
+    let pin = match get_pin(inv, op) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("piggy tool {op}: {e}");
+            return 1;
+        }
+    };
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        eprintln!("piggy tool {op}: stdin: {e}");
+        return 1;
+    }
+    let (algorithm, alg_byte, scalar, point) = match parse_openssh_ec_private(&input) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("piggy tool {op}: {e}");
+            return 1;
+        }
+    };
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: begin session: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.authenticate_admin(&admin_key, piggy_piv::apdu::alg::TDEA_3KEY) {
+        eprintln!("piggy tool {op}: failed to authenticate with current admin key: {e}");
+        return 1;
+    }
+    if let Err(e) = session.import_ec_key(slot_id, alg_byte, &scalar) {
+        eprintln!("piggy tool {op}: failed to import the key into slot {slot_id:02X}: {e}");
+        return 1;
+    }
+    // The self-signed cert is signed by the freshly-imported slot key, which
+    // is PIN-gated — C's selfsign_slot does the same via assert_pin.
+    if let Err(e) = session.verify_pin(&pin) {
+        eprintln!("piggy tool {op}: PIN verification failed: {e}");
+        return 1;
+    }
+    let cert_der = match piggy_piv::cert_builder::build_self_signed_cert(
+        &point,
+        algorithm,
+        &format!("PIV slot {slot_id:02X}"),
+        |digest| session.sign_prehash(slot_id, digest),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("piggy tool {op}: self-signing the imported cert failed: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.put_cert(slot_id, &cert_der) {
+        eprintln!("piggy tool {op}: failed to write the cert to slot {slot_id:02X}: {e}");
+        return 1;
+    }
+    0
+}
+
+/// Parse an OpenSSH private key into `(algorithm, alg-byte, private scalar,
+/// SEC1 uncompressed public point)` for the EC curves this port imports
+/// (P-256/P-384). A non-EC key (RSA/Ed25519) is an error directing to the C
+/// path.
+#[allow(clippy::type_complexity)]
+fn parse_openssh_ec_private(input: &str) -> Result<(PivAlgorithm, u8, Vec<u8>, Vec<u8>), String> {
+    let key = ssh_key::private::PrivateKey::from_openssh(input.trim())
+        .map_err(|e| format!("failed to parse OpenSSH private key: {e}"))?;
+    // Public point (SEC1 uncompressed) from the key's public half.
+    let point = match key.public_key().key_data() {
+        ssh_key::public::KeyData::Ecdsa(ec) => ec.as_sec1_bytes().to_vec(),
+        _ => return Err(IMPORT_UNSUPPORTED.into()),
+    };
+    let (algorithm, alg_byte, scalar) = match key.key_data() {
+        ssh_key::private::KeypairData::Ecdsa(ec) => match ec {
+            ssh_key::private::EcdsaKeypair::NistP256 { private, .. } => (
+                PivAlgorithm::EcP256,
+                piggy_piv::apdu::alg::ECCP256,
+                private.as_slice().to_vec(),
+            ),
+            ssh_key::private::EcdsaKeypair::NistP384 { private, .. } => (
+                PivAlgorithm::EcP384,
+                piggy_piv::apdu::alg::ECCP384,
+                private.as_slice().to_vec(),
+            ),
+            _ => return Err(IMPORT_UNSUPPORTED.into()),
+        },
+        _ => return Err(IMPORT_UNSUPPORTED.into()),
+    };
+    Ok((algorithm, alg_byte, scalar, point))
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -1160,6 +1290,8 @@ mod tests {
         assert!(parse(&argv(&["-a", "eccp256", "generate", "9a"])).is_some());
         assert!(parse(&argv(&["-a", "eccp384", "generate", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "-a", "eccp256", "generate", "9c"])).is_some());
+        assert!(parse(&argv(&["import", "9c"])).is_some());
+        assert!(parse(&argv(&["-K", "default", "-P", "123456", "import", "9a"])).is_some());
         assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
@@ -1192,6 +1324,9 @@ mod tests {
         assert!(parse(&argv(&["-a", "ed25519", "generate", "9a"])).is_none()); // Ed25519 -> C
         assert!(parse(&argv(&["-a", "eccp256", "generate", "82"])).is_none()); // retired slot
         assert!(parse(&argv(&["-a", "eccp256", "generate"])).is_none()); // no slot
+        // import claims only cert slots (key type is checked in cmd_import).
+        assert!(parse(&argv(&["import", "82"])).is_none()); // retired slot
+        assert!(parse(&argv(&["import"])).is_none()); // no slot
         // An option we don't model → C handles the whole invocation.
         assert!(parse(&argv(&["-d", "pubkey", "9d"])).is_none());
         // No op at all.

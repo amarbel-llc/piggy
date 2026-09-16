@@ -553,6 +553,27 @@ completes Tier 1 of 3.4; the remaining ops are the Tier-2 decision (`import`,
 `factory-reset` — both need new INS 0xFE/0xFB wire on `piggy-piv` and fibby)
 and the Tier-3 deferrals (`req-cert`, RSA/Ed25519).
 
+**Milestone 3.4c landed (`import`, EC), operator split from `factory-reset`.**
+Reads an OpenSSH private key from stdin, imports it (YubicoPIV IMPORT
+ASYMMETRIC, INS 0xFE), self-signs a minimal cert (PIN-gated), and writes it —
+matching C's `cmd_import`. **New wire on both sides:** `PinSession::import_ec_key`
+(INS 0xFE, `06 <len> <scalar>`) in `piggy-piv`, and fibby's
+`handle_import_asymmetric` (P-256 only, normalizing the BER bignum scalar and
+installing it into the slot — the imported-key counterpart of GENERATE).
+`piggy tool import <slot>` parses the OpenSSH key via `ssh-key`, extracts the
+EC scalar + public point, and reuses `build_self_signed_cert`/`put_cert`. **EC
+P-256/P-384 only** (piggy is EC-only): an RSA/Ed25519 key errors with a
+message pointing to `piggy pivy tool import` (piggy cannot peek stdin at parse
+time, so this is a loud runtime error rather than a silent C fallthrough).
+Differential: on a fresh fibby, C and piggy each import the same throwaway
+P-256 key into 9A and both read back exactly the imported public key (compared
+as the key blob — the self-signed cert subject legitimately differs per impl).
+Slot note: 9A is the differentiable slot because C's 9C/9E cert templates
+require an `email` cert var the import path leaves unset. **`factory-reset` is
+split into its own pass** (operator call) and tracked in **piggy#291** (needs
+INS 0xFB on both sides plus a non-interactive confirmation gate to replace
+pivy-tool's tty `YES`). Tier-3 (`req-cert`, RSA/Ed25519) stays deferred.
+
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
 Independent of Phase 3 (they need no new `piggy-piv` surface: the key

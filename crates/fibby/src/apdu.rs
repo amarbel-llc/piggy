@@ -36,6 +36,14 @@ pub mod ins {
     /// keypair in the slot and returns the public key in a `7F49`
     /// template (`86 41 04 <X> <Y>` for ECCP256). mgmt-key gated.
     pub const GEN_ASYM: u8 = 0x47;
+    /// YubicoPIV IMPORT ASYMMETRIC KEY. `P1` is the PIV algorithm reference
+    /// (e.g. `0x11` = ECCP256), `P2` is the slot. The data field carries the
+    /// private-key material as BER-TLVs — for an EC key a single
+    /// `06 <len> <scalar>` (the big-endian private scalar). The card installs
+    /// the key into the slot (like GENERATE, but with caller-supplied key
+    /// material). mgmt-key gated. Mirrors yubico-piv-tool's
+    /// `YKPIV_INS_IMPORT_ASYM`.
+    pub const IMPORT_ASYM: u8 = 0xFE;
     /// YubiKey vendor GET VERSION. Returns 3 bytes encoding the
     /// firmware version (major, minor, patch) + SW 9000. `P1 P2 = 00 00`;
     /// no body. Not in SP 800-73-4 — it's a YubicoPIV extension that

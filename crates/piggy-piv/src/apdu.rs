@@ -27,6 +27,12 @@ pub mod ins {
     pub const GEN_AUTH: u8 = 0x87;
     pub const PUT_DATA: u8 = 0xDB;
     pub const GEN_ASYM: u8 = 0x47;
+    /// YubicoPIV vendor-specific: IMPORT ASYMMETRIC KEY. `P1` is the PIV
+    /// algorithm (e.g. `0x11` = ECCP256), `P2` is the slot. The data field
+    /// carries the private-key material as BER-TLVs — for an EC key a single
+    /// `06 <len> <scalar>`. Mirrors pivy's `ykpiv_import` (INS_IMPORT_ASYM).
+    /// mgmt-key gated.
+    pub const IMPORT_ASYM: u8 = 0xFE;
     pub const CONTINUE: u8 = 0xC0;
     pub const YK_ATTEST: u8 = 0xF9;
     /// YubicoPIV vendor-specific: read the YubiKey factory serial as

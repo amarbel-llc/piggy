@@ -1259,6 +1259,14 @@ impl Backend for VirtualCard {
             return Ok(self.handle_set_mgmt_key(apdu_body(command_apdu)));
         }
 
+        // IMPORT ASYMMETRIC (00 FE <alg> <slot> <Lc> 06 <len> <scalar>).
+        // YubicoPIV vendor instruction; installs caller-supplied key material
+        // into the slot (the imported-key counterpart of GENERATE). Gated on
+        // a prior mgmt-key GENERAL AUTHENTICATE this session.
+        if cla == 0x00 && ins == apdu::ins::IMPORT_ASYM {
+            return Ok(self.handle_import_asymmetric(p1, p2, apdu_body(command_apdu)));
+        }
+
         // YK ATTEST (00 F9 <slot> 00 ...). Real silicon returns a
         // YubicoPIV-signed cert when the slot key was generated on-
         // card and 6A80 when the key was imported. VirtualCard models
@@ -2038,6 +2046,98 @@ impl VirtualCard {
         );
         out
     }
+
+    /// Handle IMPORT ASYMMETRIC KEY (INS 0xFE, P1=alg, P2=slot): install the
+    /// caller-supplied EC private scalar (`06 <len> <scalar>`) into the slot —
+    /// the imported-key counterpart of GENERATE. P-256 (ECCP256, `0x11`) only,
+    /// since VirtualCard's slot key fields are 32-byte P-256 scalars.
+    ///
+    /// - `69 82` if the mgmt-key auth hasn't succeeded this session.
+    /// - `6A 80` on a malformed body, a non-ECCP256 algorithm, or an invalid
+    ///   scalar.
+    /// - `6A 86` if `slot` isn't one VirtualCard models (9A/9C/9D/9E).
+    /// - `90 00` on success (the slot can then sign / do ECDH with the key).
+    fn handle_import_asymmetric(&mut self, alg: u8, slot: u8, body: Option<&[u8]>) -> Vec<u8> {
+        use p256::ecdsa::SigningKey;
+
+        if !self.mgmt_authenticated {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("IMPORT slot={slot:#04x} -> 6982 (mgmt-key not authenticated)"),
+            );
+            return sw(0x69, 0x82);
+        }
+        if alg != 0x11 {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("IMPORT slot={slot:#04x} alg={alg:#04x} -> 6A80 (ECCP256 only)"),
+            );
+            return sw(0x6A, 0x80);
+        }
+        if !matches!(slot, 0x9A | 0x9C | 0x9D | 0x9E) {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("IMPORT slot={slot:#04x} -> 6A86 (unmodeled slot)"),
+            );
+            return sw(0x6A, 0x86);
+        }
+        let scalar = match body.and_then(parse_import_scalar) {
+            Some(s) => s,
+            None => {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "IMPORT -> 6A80 (malformed 06 scalar TLV)",
+                );
+                return sw(0x6A, 0x80);
+            }
+        };
+        if SigningKey::from_slice(&scalar).is_err() {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("IMPORT slot={slot:#04x} -> 6A80 (invalid scalar)"),
+            );
+            return sw(0x6A, 0x80);
+        }
+        match slot {
+            0x9A => self.slot_9a_priv = Some(scalar),
+            0x9C => self.slot_9c_priv = Some(scalar),
+            0x9D => self.slot_9d_priv = Some(scalar),
+            0x9E => self.slot_9e_priv = Some(scalar),
+            _ => unreachable!("slot validated above"),
+        }
+        trace::emit(
+            trace::DEBUG,
+            "vcard",
+            &format!("IMPORT slot={slot:#04x} ECCP256 -> 9000 (key installed)"),
+        );
+        sw(0x90, 0x00)
+    }
+}
+
+/// Parse an IMPORT data field's `06 <len> <scalar>` TLV and normalize the
+/// scalar to a 32-byte big-endian P-256 value. BER bignum encodings vary — a
+/// leading `0x00` sign byte (when the high bit is set) or stripped leading
+/// zeros — so trim leading zeros and left-pad to 32 bytes.
+fn parse_import_scalar(body: &[u8]) -> Option<[u8; 32]> {
+    if body.len() < 2 || body[0] != 0x06 {
+        return None;
+    }
+    let len = body[1] as usize;
+    let mut val = body.get(2..2 + len)?;
+    while val.len() > 32 && val[0] == 0x00 {
+        val = &val[1..];
+    }
+    if val.len() > 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out[32 - val.len()..].copy_from_slice(val);
+    Some(out)
 }
 
 /// Extract the data field from a case-3 or case-4 APDU. Handles both
@@ -3681,6 +3781,82 @@ mod tests {
             &sig[sig.len() - 2..],
             &[0x90, 0x00],
             "generated slot 9A signs"
+        );
+    }
+
+    /// Build an IMPORT ASYMMETRIC APDU: `00 FE 11 <slot> <Lc> 06 <len> <scalar>`.
+    fn import_apdu(slot: u8, scalar: &[u8]) -> Vec<u8> {
+        let mut data = vec![0x06, scalar.len() as u8];
+        data.extend_from_slice(scalar);
+        let mut a = vec![0x00, 0xFE, 0x11, slot, data.len() as u8];
+        a.extend_from_slice(&data);
+        a
+    }
+
+    #[test]
+    fn import_requires_mgmt_auth() {
+        let mut c = VirtualCard::new();
+        assert_eq!(
+            c.transmit(&import_apdu(0x9A, &RFC6979_SCALAR)).unwrap(),
+            vec![0x69, 0x82]
+        );
+    }
+
+    #[test]
+    fn import_installs_key_and_slot_signs() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        assert_eq!(
+            c.transmit(&import_apdu(0x9A, &RFC6979_SCALAR)).unwrap(),
+            vec![0x90, 0x00]
+        );
+        assert_eq!(c.slot_9a_priv, Some(RFC6979_SCALAR), "scalar installed");
+        // The imported slot now signs (9A "once" — PIN-verify then sign).
+        c.pin_verified = true;
+        let sig = c.transmit(&ga_sign_apdu(&[0x5A; 32])).unwrap();
+        assert_eq!(
+            &sig[sig.len() - 2..],
+            &[0x90, 0x00],
+            "imported slot 9A signs"
+        );
+    }
+
+    #[test]
+    fn import_strips_a_leading_sign_byte() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        // A 33-byte BER bignum: a leading 0x00 sign byte + the 32-byte scalar.
+        let mut padded = vec![0x00];
+        padded.extend_from_slice(&RFC6979_SCALAR);
+        assert_eq!(
+            c.transmit(&import_apdu(0x9A, &padded)).unwrap(),
+            vec![0x90, 0x00]
+        );
+        assert_eq!(
+            c.slot_9a_priv,
+            Some(RFC6979_SCALAR),
+            "leading sign byte normalized away"
+        );
+    }
+
+    #[test]
+    fn import_unsupported_alg_returns_6a80() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        // alg 0x07 (RSA2048) instead of 0x11 (ECCP256).
+        let mut a = import_apdu(0x9A, &RFC6979_SCALAR);
+        a[2] = 0x07;
+        assert_eq!(c.transmit(&a).unwrap(), vec![0x6A, 0x80]);
+    }
+
+    #[test]
+    fn import_unmodeled_slot_returns_6a86() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        // Slot 0x82 (retired) isn't one VirtualCard models.
+        assert_eq!(
+            c.transmit(&import_apdu(0x82, &RFC6979_SCALAR)).unwrap(),
+            vec![0x6A, 0x86]
         );
     }
 

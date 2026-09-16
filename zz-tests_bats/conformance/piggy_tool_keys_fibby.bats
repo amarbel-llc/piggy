@@ -22,6 +22,10 @@
 # RFC 6979 §A.2.5 P-256 private scalar — a known test key with a known pubkey.
 GEN_9A_SCALAR=c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721
 
+# Expected public key (ecdsa-sha2-nistp256 type + base64, no comment) of the
+# throwaway P-256 test key embedded in import_installs_same_key_as_c.
+IMPORT_PUB="ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBC6+EqXFg1uIJbWoqn6xLnMzWvCZapGuw72uZB5Y/lRkDOXkqwomEj+zFr/bRhjDLhlh8eJv2XYHIeOI81eoNOA="
+
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   load "$PIGGY_BATS_DIR/lib/fibby.bash"
@@ -110,4 +114,43 @@ function generate_9a_matches_c { # @test
   # Sanity: a P-256 pubkey line with the bare slot/GUID comment (no subject).
   [[ "$output" == "ecdsa-sha2-nistp256 "*" PIV_slot_9A@"* ]] \
     || fail "unexpected generate output: $output"
+}
+
+function import_installs_same_key_as_c { # @test
+  # A throwaway (non-secret) OpenSSH P-256 test key. Both impls import it and
+  # self-sign; the resulting slot public key must match each other and the
+  # key's known public half.
+  local keyfile="$BATS_TEST_TMPDIR/import_key"
+  cat >"$keyfile" <<'EOF'
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS
+1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQQuvhKlxYNbiCW1qKp+sS5zM1rwmWqR
+rsO9rmQeWP5UZAzl5KsKJhI/sxa/20YYwy4ZYfHib9l2ByHjiPNXqDTgAAAAsC4Q+wUuEP
+sFAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBC6+EqXFg1uIJbWo
+qn6xLnMzWvCZapGuw72uZB5Y/lRkDOXkqwomEj+zFr/bRhjDLhlh8eJv2XYHIeOI81eoNO
+AAAAAhANElI+A+9hPHp5bGZiB3v/rs7w8+8AgFzGJYWlE1mxLTAAAAEXBpZ2d5LXRlc3Qt
+aW1wb3J0AQIDBAUG
+-----END OPENSSH PRIVATE KEY-----
+EOF
+  chmod 600 "$keyfile"
+  # Import into 9A: C's slot-9C/9E cert templates require an `email` cert var
+  # that pivy-tool's import path leaves unset, so 9A (PIV Auth, no such
+  # requirement — see the generate lane) is the differentiable slot. Its
+  # generate-override seed is unused by IMPORT (which installs the key
+  # directly). Capture the resulting slot public key (key blob only — the
+  # self-signed cert subject naturally differs per impl).
+  run bash -c "'$REAL_PIVY_TOOL' -P 123456 import 9a < '$keyfile'"
+  assert_success
+  local c_key
+  c_key=$("$REAL_PIVY_TOOL" pubkey 9a | awk '{print $1, $2}')
+  # piggy imports the SAME key into 9A (overwriting); the slot key must match.
+  run bash -c "'$PIGGY' tool -P 123456 import 9a < '$keyfile'"
+  assert_success
+  assert_output ""
+  local p_key
+  p_key=$("$REAL_PIVY_TOOL" pubkey 9a | awk '{print $1, $2}')
+  [[ -n $c_key && "$c_key" == "$p_key" ]] \
+    || fail "import key mismatch: C=[$c_key] piggy=[$p_key]"
+  # And it is exactly the imported key's public key.
+  [[ "$p_key" == "$IMPORT_PUB" ]] || fail "unexpected imported key: $p_key"
 }

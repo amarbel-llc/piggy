@@ -48,6 +48,31 @@ impl PinSession<'_> {
         }
         parse_generated_pubkey(&resp)
     }
+
+    /// Import a raw EC private scalar into `slot_id` (YubicoPIV IMPORT
+    /// ASYMMETRIC, INS 0xFE) with PIV algorithm byte `key_alg`. `scalar` is
+    /// the big-endian private key (32 bytes for P-256, 48 for P-384), sent as
+    /// a single `06 <len> <scalar>` TLV — the EC arm of pivy's `ykpiv_import`.
+    /// Requires a prior [`PinSession::authenticate_admin`] in this session.
+    pub fn import_ec_key(
+        &mut self,
+        slot_id: u8,
+        key_alg: u8,
+        scalar: &[u8],
+    ) -> Result<(), PivError> {
+        // Scalars are ≤48 bytes, so a short-form BER length always fits.
+        let mut data = Vec::with_capacity(scalar.len() + 2);
+        data.push(0x06);
+        data.push(scalar.len() as u8);
+        data.extend_from_slice(scalar);
+        let mut apdu = Apdu::new(0x00, crate::apdu::ins::IMPORT_ASYM, key_alg, slot_id);
+        apdu.data = data;
+        let (_resp, sw) = self.transmit(&apdu)?;
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+        Ok(())
+    }
 }
 
 /// Extract the public-key bytes from a GENERATE ASYMMETRIC response:
