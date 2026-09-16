@@ -505,6 +505,35 @@ differential is on the data field, not the APDU framing. A fuller read-back
 differential (retired-cert seeding + a raw data-object read) is deferred to
 **piggy#290**.
 
+**Milestone 3.4 scope (key surface).** The 3.4 ops split by differentiability
+and required new surface:
+
+- **Tier 1 — clean differential, primitives already exist:** `write-cert`
+  (reuses `put_cert` + fibby PUT DATA) and `generate` (P-256; random key, but
+  fibby's `--generate-slot-{9a,9c,9d}-priv` pins the scalar, so both impls emit
+  the same pubkey — `generate_key`/`build_self_signed_cert`/`put_cert`/
+  `sign_prehash` all exist).
+- **Tier 2 — differentiable but needs NEW INS wire on both `piggy-piv` AND
+  fibby:** `import` (YubicoPIV IMPORT, INS 0xFE) and `factory-reset`
+  (YubicoPIV RESET, INS 0xFB).
+- **Tier 3 — deferred:** `req-cert` (PKCS#10 CSR builder; randomized ECDSA
+  signing) and the RSA/Ed25519 algorithms (fibby is P-256-only — import and
+  generate are scoped to EC P-256).
+
+**Milestone 3.4a landed (`write-cert`).** Reads an X.509 cert (DER or PEM)
+from stdin and writes it to a slot's cert object: mgmt-key mutual auth, then
+PUT DATA wrapping the DER as `70 <cert> 71 00` — matching C's
+`cmd_write_cert` / `piv_write_cert`. Reuses `PinSession::put_cert` (delete-cert's
+write twin) and fibby's existing PUT DATA — no new card/piv surface. `piggy
+tool write-cert <slot>` reads the current key from `-K`, ported for the
+cert-holding slots 9A/9C/9D/9E. The new differential lane
+`test-bats-conformance-tool-keys-fibby` (fresh fibby per test) does a
+round-trip: capture the seeded 9D cert, delete it, write it back via one
+impl, and confirm BOTH impls read back exactly that cert — plus the mirror
+(C writes, piggy reads) and a wrong-admin-key failure that leaves the slot
+intact. Remaining in 3.4: `generate` (3.4b, Tier 1), then the Tier-2 decision
+(`import`, `factory-reset`).
+
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
 Independent of Phase 3 (they need no new `piggy-piv` surface: the key

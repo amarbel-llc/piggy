@@ -43,6 +43,11 @@
 //!   `5FC10C`; matches C `cmd_update_keyhist`). `oncard` is recomputed from
 //!   the retired slots, `offcard`/URL preserved from the existing object.
 //!   The current key comes from `-K` (`default` or hex).
+//! - `piggy tool write-cert <slot>` — read an X.509 cert (DER or PEM) from
+//!   stdin and write it to the slot's cert object (mgmt-key mutual auth,
+//!   then PUT DATA; matches C `cmd_write_cert`). The current key comes from
+//!   `-K` (`default` or hex). Ported for the cert-holding slots 9A/9C/9D/9E;
+//!   retired and other slots fall through to C.
 //!
 //! Like `cmd::pivy_box`, this is a SUPERSET-by-fallback while the port is
 //! incomplete: [`run`] returns `Some(exit_code)` for the ops it handles
@@ -122,6 +127,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "set-admin"
             | "delete-cert"
             | "update-keyhist"
+            | "write-cert"
     ) {
         return None;
     }
@@ -129,7 +135,10 @@ fn parse(args: &[String]) -> Option<Invocation> {
     // The admin-key–gated write ops authenticate with `-K`; validate the
     // modeled key form so `random`/`@file` fall through to C, keeping the
     // superset honest.
-    if matches!(op.as_str(), "set-admin" | "delete-cert" | "update-keyhist") {
+    if matches!(
+        op.as_str(),
+        "set-admin" | "delete-cert" | "update-keyhist" | "write-cert"
+    ) {
         if let Some(k) = &admin_key {
             if !is_admin_key_arg(k) {
                 return None;
@@ -148,9 +157,9 @@ fn parse(args: &[String]) -> Option<Invocation> {
             return None;
         }
     }
-    // `delete-cert` claims only the slots this port maps a cert tag for
-    // (9A/9C/9D/9E); retired and other slots fall through to C.
-    if op == "delete-cert" {
+    // `delete-cert` and `write-cert` claim only the slots this port maps a
+    // cert tag for (9A/9C/9D/9E); retired and other slots fall through to C.
+    if matches!(op.as_str(), "delete-cert" | "write-cert") {
         let slot = positionals.first()?;
         if positionals.len() != 1 || !is_supported_cert_slot(slot) {
             return None;
@@ -197,6 +206,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         "set-admin" => cmd_set_admin(&inv),
         "delete-cert" => cmd_delete_cert(&inv),
         "update-keyhist" => cmd_update_keyhist(&inv),
+        "write-cert" => cmd_write_cert(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     })
@@ -842,6 +852,78 @@ fn cmd_update_keyhist(inv: &Invocation) -> i32 {
     0
 }
 
+/// `piggy tool write-cert <slot>`: read an X.509 certificate (DER or PEM)
+/// from stdin and write it to the slot's cert object — matching C
+/// `pivy-tool`'s `cmd_write_cert` (mgmt-key mutual auth, then PUT DATA at the
+/// slot's cert tag wrapping the DER as `70 <cert> 71 00`). The current key
+/// comes from `-K` (`default` or hex). Ported for the cert-holding slots
+/// 9A/9C/9D/9E; retired and other slots fall through to C. No stdout on
+/// success, matching C.
+fn cmd_write_cert(inv: &Invocation) -> i32 {
+    let op = "write-cert";
+    let slot_id = match slot_arg(inv, op) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let admin_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("piggy tool {op}: current admin key: {e}");
+            return 2;
+        }
+    };
+    let mut input = Vec::new();
+    if let Err(e) = std::io::stdin().read_to_end(&mut input) {
+        eprintln!("piggy tool {op}: stdin: {e}");
+        return 1;
+    }
+    let cert_der = match parse_cert_input(&input) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("piggy tool {op}: {e}");
+            return 1;
+        }
+    };
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: begin session: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.authenticate_admin(&admin_key, piggy_piv::apdu::alg::TDEA_3KEY) {
+        eprintln!("piggy tool {op}: failed to authenticate with current admin key: {e}");
+        return 1;
+    }
+    if let Err(e) = session.put_cert(slot_id, &cert_der) {
+        eprintln!("piggy tool {op}: failed to write the certificate to slot {slot_id:02X}: {e}");
+        return 1;
+    }
+    0
+}
+
+/// Parse an X.509 certificate from stdin bytes, accepting DER or PEM (C
+/// `pivy-tool`'s `cmd_write_cert` tries DER first, then PEM). Returns the
+/// canonical DER the card stores.
+fn parse_cert_input(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if let Ok(x509) = openssl::x509::X509::from_der(bytes) {
+        return x509
+            .to_der()
+            .map_err(|e| format!("re-encode cert DER: {e}"));
+    }
+    let x509 = openssl::x509::X509::from_pem(bytes)
+        .map_err(|_| "invalid certificate input (expected DER or PEM on stdin)".to_string())?;
+    x509.to_der()
+        .map_err(|e| format!("re-encode cert DER: {e}"))
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -928,6 +1010,8 @@ mod tests {
         assert!(parse(&argv(&["-K", "default", "delete-cert", "9a"])).is_some());
         assert!(parse(&argv(&["update-keyhist"])).is_some());
         assert!(parse(&argv(&["-K", "default", "update-keyhist"])).is_some());
+        assert!(parse(&argv(&["write-cert", "9d"])).is_some());
+        assert!(parse(&argv(&["-K", "default", "write-cert", "9a"])).is_some());
         assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
@@ -950,6 +1034,10 @@ mod tests {
         // update-keyhist takes no positionals.
         assert!(parse(&argv(&["update-keyhist", "9d"])).is_none());
         assert!(parse(&argv(&["-K", "@keyfile", "update-keyhist"])).is_none());
+        // write-cert only claims the cert-holding slots.
+        assert!(parse(&argv(&["write-cert", "82"])).is_none()); // retired slot
+        assert!(parse(&argv(&["write-cert"])).is_none()); // missing slot
+        assert!(parse(&argv(&["-K", "@keyfile", "write-cert", "9d"])).is_none());
         // An option we don't model → C handles the whole invocation.
         assert!(parse(&argv(&["-d", "pubkey", "9d"])).is_none());
         // No op at all.
