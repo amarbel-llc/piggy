@@ -381,6 +381,19 @@ impl PivToken {
         Ok(crate::keyhist::parse_keyhistory(&data))
     }
 
+    /// Read and parse the PIV Printed Information object (`5FC109`). On a card
+    /// whose PINFO read is PIN-gated this surfaces the raw `6982`/`6A82` status
+    /// in `PivError::Apdu`; the PIN-gated read retry is a follow-up (piggy#292,
+    /// fibby models the object PIN-free).
+    pub fn read_pinfo(&self) -> Result<crate::pinfo::Pinfo, PivError> {
+        let apdu = Apdu::get_data(crate::pinfo::PINFO_TAG);
+        let (data, sw) = self.transmit(&apdu)?;
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+        Ok(crate::pinfo::parse_pinfo(&data))
+    }
+
     /// Count the on-card retired-slot certificates: the highest retired-slot
     /// index (`1..20`, slots `82`..`95`) that holds a cert — what
     /// `pivy-tool update-keyhist` records as `oncard`. A card with no retired

@@ -577,7 +577,7 @@ pivy-tool's tty `YES`). Tier-3 (`req-cert`, RSA/Ed25519) stays deferred.
 **Milestone 3.6 landed (cutover).** `piggy tool` is now Rust, not a
 superset-by-fallback — mirroring the Phase 2 `box` cutover (#165). The
 `None => exec_pivy("tool", …)` arm in `main.rs` is gone; `cmd::tool::run`
-returns `i32`, and an unported op (`list`, `pinfo`, `version`, `init`,
+returns `i32`, and an unported op (`list`, `version`, `init`,
 `req-cert`, `factory-reset`) or an unmodeled option (whatever `parse`
 rejects — an RSA/Ed25519 `-a`, a pivy debug flag) prints a usage banner and
 exits 2, pointing at the `piggy pivy tool` escape hatch rather than silently
@@ -587,10 +587,23 @@ deletes it). The fibby lane's old `unported_op_falls_through_to_c` test is
 rewritten to assert the usage error (exit 2, names `piggy pivy tool`, no card
 output) and that `piggy pivy tool list` still reaches C. AGENTS.md's
 exec-to-C bullet is updated: only `piggy pivy <tool>` execs C now.
-**Phase 3 is complete** except the deliberately-deferred `list`/`pinfo`
-(their own later pass) and factory-reset (piggy#291); the differentiable
-`pivy-tool` surface is ported and C is reachable only through the explicit
-passthrough.
+**Phase 3 is complete** except the deliberately-deferred `list` (its own
+later pass) and factory-reset (piggy#291); the differentiable `pivy-tool`
+surface is ported and C is reachable only through the explicit passthrough.
+
+**Milestone 3.7 landed (pinfo).** `piggy tool pinfo` reads the PIV Printed
+Information object (tag `5FC109`) and prints it byte-for-byte like C's
+`cmd_pinfo` (`%12s: %s` per field — `name`/`affiliation`/`expiry`/`serial`/
+`issuer`, an optional two-line `organization`, and a `yubico: contains admin
+key` line when the YubicoPIV `88 { 89 … }` escrow is present; absent fields
+render `(null)` as glibc `%s` does). New `piggy-piv` surface: `pinfo.rs`
+(`Pinfo` struct + `parse_pinfo`, tolerant TLV walk) and `PivToken::read_pinfo`
+in `token.rs` (the private `transmit` lives there). fibby grows `--seed-pinfo`,
+which installs a canonical PINFO (deterministic non-secret test fields) so the
+tool-fibby lane's new `pinfo_matches_c` test is a byte-exact differential
+against C. The seeded object is modelled **PIN-free**; a real card gates the
+Printed Information read behind the PIN, tracked as piggy#292. This leaves
+`list` as the only deferred read op.
 
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 

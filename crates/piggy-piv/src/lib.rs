@@ -9,6 +9,7 @@ pub mod guid;
 pub mod keygen;
 pub mod keyhist;
 pub mod pin_mgmt;
+pub mod pinfo;
 pub mod policy;
 pub mod put_data;
 pub mod slot;

@@ -573,6 +573,10 @@ const FIBBY_SLOT_9C_CERT_OBJECT: &[u8] = &[
 /// per SP 800-73-4 §3.1.2: `5F C1 02`.
 const TAG_CHUID: &[u8] = &[0x5F, 0xC1, 0x02];
 
+/// PIV tag for the Printed Information data object, per SP 800-73-4 §3.1.6:
+/// `5F C1 09`. Read by `pivy-tool pinfo` / piggy's `read_pinfo`.
+const TAG_PINFO: &[u8] = &[0x5F, 0xC1, 0x09];
+
 /// Canonical CHUID object, captured from the YubiKey 4 throwaway during
 /// the 2026-05-31 wet-env init (`tests/fixtures/apdu/yk4-init.fixture`,
 /// the GET DATA 5F C1 02 response). A real CHUID is needed because
@@ -814,6 +818,30 @@ impl VirtualCard {
     /// `pivy-tool init` PUT DATA would require).
     pub fn seed_chuid(&mut self) {
         self.seed_data_object(TAG_CHUID.to_vec(), CANONICAL_REAL_CARD_CHUID.to_vec());
+    }
+
+    /// Install a canonical Printed Information object under PIV tag `5F C1 09`,
+    /// so `pivy-tool pinfo` / piggy's `read_pinfo` return deterministic fields
+    /// (name/affiliation/expiry/serial/issuer). Modelled PIN-free (readable
+    /// like the CHUID) so the pinfo differential needs no PIN dance; a real
+    /// card's PIN-gated PINFO read is a follow-up. Test scaffolding, like
+    /// [`Self::seed_chuid`].
+    pub fn seed_pinfo(&mut self) {
+        let mut body = Vec::new();
+        for (tag, val) in [
+            (0x01u8, "piggy-test cardholder"),
+            (0x02, "Engineering"),
+            (0x04, "20301231"),
+            (0x05, "PIGGY-TEST-0001"),
+            (0x06, "piggy fibby CA"),
+        ] {
+            body.push(tag);
+            body.push(val.len() as u8);
+            body.extend_from_slice(val.as_bytes());
+        }
+        let mut obj = vec![0x53, body.len() as u8];
+        obj.extend_from_slice(&body);
+        self.seed_data_object(TAG_PINFO.to_vec(), obj);
     }
 
     /// Override the reader name this card's backend advertises. Needed by

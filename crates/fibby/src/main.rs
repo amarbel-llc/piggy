@@ -60,6 +60,9 @@ struct SeedSpec {
     /// as *initialized* with empty slots — the starting state for an on-card
     /// GENERATE (`pivy-tool` needs the CHUID to find the card).
     seed_chuid: bool,
+    /// Install a canonical Printed Information object (`5F C1 09`) so
+    /// `pivy-tool pinfo` / piggy's `read_pinfo` return deterministic fields.
+    seed_pinfo: bool,
     /// Override the CHUID's 16-byte GUID (piggy#242): multi-card setups
     /// need distinct GUIDs, since clients identify cards by GUID. Implies
     /// installing a CHUID. Cards after the first that seed a CHUID and
@@ -173,6 +176,7 @@ fn parse_args() -> Result<Args, String> {
             "--seed-slot-9c-cert" => seeds(&mut args).seed_slot_9c_cert = true,
             "--seed-rfc6979-slot-9e-cert" => seeds(&mut args).seed_rfc6979_slot_9e_cert = true,
             "--seed-chuid" => seeds(&mut args).seed_chuid = true,
+            "--seed-pinfo" => seeds(&mut args).seed_pinfo = true,
             "--seed-chuid-guid" => {
                 seeds(&mut args).seed_chuid_guid = Some(parse_hex_array(
                     &value("--seed-chuid-guid")?,
@@ -548,6 +552,9 @@ fn build_virtual_card(
     }
     if seeds.seed_chuid {
         card.seed_chuid();
+    }
+    if seeds.seed_pinfo {
+        card.seed_pinfo();
     }
     // GUID override AFTER the cert bundles (which install the canonical
     // CHUID as a side effect): an explicit --seed-chuid-guid always wins;

@@ -59,11 +59,15 @@
 //!   (PIN-gated), and write it (matches C `cmd_import`). EC P-256/P-384 only
 //!   (piggy is EC-only); an RSA/Ed25519 key errors, pointing to `piggy pivy
 //!   tool import`. Needs `-K` (mgmt) and a PIN. Ported for slots 9A/9C/9D/9E.
+//! - `piggy tool pinfo` — read and print the PIV Printed Information object
+//!   (`name`/`affiliation`/`expiry`/`serial`/`issuer`, optional
+//!   `organization`, `yubico`; matches C `cmd_pinfo`). The card models the
+//!   object PIN-free; a real card's PIN-gated read is a tracked follow-up.
 //!
 //! As of the 3.6 cutover (piggy#289, mirroring the `box` cutover in #165)
 //! `piggy tool` is Rust — NOT a superset that falls back to C. [`run`]
-//! returns the exit code directly; an unported op (`list`, `pinfo`,
-//! `version`, `init`, `req-cert`, `factory-reset`) or an unmodeled option
+//! returns the exit code directly; an unported op (`list`, `version`,
+//! `init`, `req-cert`, `factory-reset`) or an unmodeled option
 //! (whatever [`parse`] rejects — e.g. an RSA/Ed25519 `-a`, a pivy debug
 //! flag) is a usage error (exit 2), not a silent hop to `pivy-tool`. The
 //! full C `pivy-tool` surface stays reachable via `piggy pivy tool` while
@@ -93,9 +97,10 @@ struct Invocation {
     positionals: Vec<String>,
 }
 
-/// Parse `piggy tool <args>` into an [`Invocation`], or `None` if the op
-/// is unrecognized OR an unmodeled option is present — in both cases the
-/// caller falls back to C `pivy-tool`.
+/// Parse `piggy tool <args>` into an [`Invocation`], or `None` if the op is
+/// unrecognized OR an unmodeled option is present. Since the 3.6 cutover
+/// [`run`] maps `None` to a usage error (exit 2) — no C fallback — so `None`
+/// means "not part of the Rust port; direct the user to `piggy pivy tool`".
 fn parse(args: &[String]) -> Option<Invocation> {
     let mut guid = None;
     let mut pins = Vec::new();
@@ -125,8 +130,8 @@ fn parse(args: &[String]) -> Option<Invocation> {
                 alg = Some(args.get(i + 1)?.clone());
                 i += 2;
             }
-            // Any other flag is not modeled here — let C handle the whole
-            // invocation so behavior is never silently dropped.
+            // Any other flag is not modeled here — `None` becomes a usage
+            // error in `run` (the 3.6 cutover; no C fallback).
             _ => return None,
         }
     }
@@ -149,6 +154,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "write-cert"
             | "generate"
             | "import"
+            | "pinfo"
     ) {
         return None;
     }
@@ -178,8 +184,9 @@ fn parse(args: &[String]) -> Option<Invocation> {
             return None;
         }
     }
-    // `update-keyhist` takes no positionals (C errors "too many arguments").
-    if op == "update-keyhist" && !positionals.is_empty() {
+    // `update-keyhist` and `pinfo` take no positionals (C errors "too many
+    // arguments").
+    if matches!(op.as_str(), "update-keyhist" | "pinfo") && !positionals.is_empty() {
         return None;
     }
     // `set-admin` is 3DES-only in this port: the new key positional must be
@@ -261,6 +268,7 @@ pub fn run(args: &[String]) -> i32 {
         "write-cert" => cmd_write_cert(&inv),
         "generate" => cmd_generate(&inv),
         "import" => cmd_import(&inv),
+        "pinfo" => cmd_pinfo(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     }
@@ -1221,6 +1229,48 @@ fn parse_openssh_ec_private(input: &str) -> Result<(PivAlgorithm, u8, Vec<u8>, V
     Ok((algorithm, alg_byte, scalar, point))
 }
 
+/// `piggy tool pinfo`: read and print the PIV Printed Information object —
+/// matching C `pivy-tool`'s `cmd_pinfo` (`%12s: %s` per field, an optional
+/// two-line `organization`, and a `yubico: contains admin key` line). Absent
+/// fields render as `(null)`, matching C's `printf("%s", NULL)`. The card
+/// models the object PIN-free; a real card's PIN-gated PINFO read (C's
+/// `assert_pin` retry) is a tracked follow-up.
+fn cmd_pinfo(inv: &Invocation) -> i32 {
+    let op = "pinfo";
+    let token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let pi = match token.read_pinfo() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("piggy tool {op}: failed to read printed info: {e}");
+            return 1;
+        }
+    };
+    let field = |v: &Option<String>| v.clone().unwrap_or_else(|| "(null)".to_string());
+    println!("{:>12}: {}", "name", field(&pi.name));
+    println!("{:>12}: {}", "affiliation", field(&pi.affiliation));
+    println!("{:>12}: {}", "expiry", field(&pi.expiry));
+    println!("{:>12}: {}", "serial", field(&pi.serial));
+    println!("{:>12}: {}", "issuer", field(&pi.issuer));
+    if pi.org_1.is_some() || pi.org_2.is_some() {
+        println!(
+            "{:>12}: {}",
+            "organization",
+            pi.org_1.as_deref().unwrap_or("")
+        );
+        println!("{:>12}  {}", "", pi.org_2.as_deref().unwrap_or(""));
+    }
+    if pi.has_admin_key {
+        println!("{:>12}: contains admin key", "yubico");
+    }
+    0
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -1314,14 +1364,16 @@ mod tests {
         assert!(parse(&argv(&["-P", "123456", "-a", "eccp256", "generate", "9c"])).is_some());
         assert!(parse(&argv(&["import", "9c"])).is_some());
         assert!(parse(&argv(&["-K", "default", "-P", "123456", "import", "9a"])).is_some());
+        assert!(parse(&argv(&["pinfo"])).is_some());
+        assert!(parse(&argv(&["-g", "ABCD", "pinfo"])).is_some());
         assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "-P", "654321", "change-pin"])).is_some());
-        // Unported ops fall through to C.
+        // Still-unported ops are rejected (run() maps None to a usage error).
         assert!(parse(&argv(&["list"])).is_none());
-        assert!(parse(&argv(&["pinfo"])).is_none());
         assert!(parse(&argv(&["init"])).is_none());
+        assert!(parse(&argv(&["version"])).is_none());
         // set-admin key forms this port does not model → C.
         assert!(parse(&argv(&["set-admin", "random"])).is_none());
         assert!(parse(&argv(&["set-admin", "@keyfile"])).is_none());
@@ -1349,6 +1401,8 @@ mod tests {
         // import claims only cert slots (key type is checked in cmd_import).
         assert!(parse(&argv(&["import", "82"])).is_none()); // retired slot
         assert!(parse(&argv(&["import"])).is_none()); // no slot
+        // pinfo takes no positionals.
+        assert!(parse(&argv(&["pinfo", "9d"])).is_none());
         // An option we don't model → C handles the whole invocation.
         assert!(parse(&argv(&["-d", "pubkey", "9d"])).is_none());
         // No op at all.

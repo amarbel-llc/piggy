@@ -154,3 +154,19 @@ function unported_op_is_a_usage_error_not_a_c_fallthrough { # @test
   assert_success
   assert_output --partial "guid:"
 }
+
+function pinfo_matches_c { # @test
+  # fibby seeds a canonical Printed Information object (--seed-pinfo); both
+  # impls read and print the same fields, so `pinfo` output is byte-identical.
+  # -P is passed for C (its assert_pin path) and ignored by piggy's PIN-free
+  # read; the seeded PINFO is readable without a PIN either way.
+  run "$REAL_PIVY_TOOL" -P 123456 pinfo
+  assert_success
+  local c_out="$output"
+  run "$PIGGY" tool pinfo
+  assert_success
+  [[ "$output" == "$c_out" ]] || fail "pinfo differs: C=[$c_out] piggy=[$output]"
+  # Sanity: the seeded fields render.
+  assert_output --partial "piggy-test cardholder"
+  assert_output --partial "Engineering"
+}

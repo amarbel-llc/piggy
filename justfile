@@ -665,9 +665,9 @@ test-bats-conformance-tool-fibby: build-rust
   cleanup() { [[ -n "$fibby_pid" ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
   trap cleanup EXIT
 
-  echo "=== Starting fibby (virtual, slots 9A + 9D seeded) ==="
+  echo "=== Starting fibby (virtual, slots 9A + 9D + PINFO seeded) ==="
   FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
-    --seed-rfc6979-slot-9a-cert --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
+    --seed-rfc6979-slot-9a-cert --seed-rfc5903-slot-9d-cert --seed-pinfo >"$fibby_log" 2>&1 &
   fibby_pid=$!
   for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
   [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
