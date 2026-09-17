@@ -63,11 +63,16 @@
 //!   (`name`/`affiliation`/`expiry`/`serial`/`issuer`, optional
 //!   `organization`, `yubico`; matches C `cmd_pinfo`). The card models the
 //!   object PIN-free; a real card's PIN-gated read is a tracked follow-up.
+//! - `piggy tool -j list` — the JSON card listing (matches C `cmd_list`'s `-j`
+//!   branch byte-for-byte). Only the JSON mode is ported; bare `list` (human)
+//!   and `list -p` (parseable) stay usage errors → `piggy pivy tool list`. The
+//!   `-j`/`--json` flag must precede `list` (options-first, like piggy's other
+//!   `tool` ops).
 //!
 //! As of the 3.6 cutover (piggy#289, mirroring the `box` cutover in #165)
 //! `piggy tool` is Rust — NOT a superset that falls back to C. [`run`]
-//! returns the exit code directly; an unported op (`list`, `version`,
-//! `init`, `req-cert`, `factory-reset`) or an unmodeled option
+//! returns the exit code directly; an unported op (`list` without `-j`,
+//! `version`, `init`, `req-cert`, `factory-reset`) or an unmodeled option
 //! (whatever [`parse`] rejects — e.g. an RSA/Ed25519 `-a`, a pivy debug
 //! flag) is a usage error (exit 2), not a silent hop to `pivy-tool`. The
 //! full C `pivy-tool` surface stays reachable via `piggy pivy tool` while
@@ -106,6 +111,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
     let mut pins = Vec::new();
     let mut admin_key = None;
     let mut alg = None;
+    let mut json = false;
     let mut i = 0;
     // Leading options (pivy-tool style: options precede the operation).
     while i < args.len() {
@@ -129,6 +135,12 @@ fn parse(args: &[String]) -> Option<Invocation> {
             "-a" => {
                 alg = Some(args.get(i + 1)?.clone());
                 i += 2;
+            }
+            // pivy-tool's global JSON flag. Only `list` consumes it; other ops
+            // ignore it (as C does), so accepting it here is never an error.
+            "-j" | "--json" => {
+                json = true;
+                i += 1;
             }
             // Any other flag is not modeled here — `None` becomes a usage
             // error in `run` (the 3.6 cutover; no C fallback).
@@ -155,7 +167,14 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "generate"
             | "import"
             | "pinfo"
+            | "list"
     ) {
+        return None;
+    }
+    // Only the JSON list mode is ported: bare `list` (human) and `list -p`
+    // (parseable) stay a usage error pointing at `piggy pivy tool list`, so an
+    // unmodeled `-p` and a no-`-j` `list` both fall through here.
+    if op == "list" && !json {
         return None;
     }
     let positionals = args[i + 1..].to_vec();
@@ -184,9 +203,9 @@ fn parse(args: &[String]) -> Option<Invocation> {
             return None;
         }
     }
-    // `update-keyhist` and `pinfo` take no positionals (C errors "too many
-    // arguments").
-    if matches!(op.as_str(), "update-keyhist" | "pinfo") && !positionals.is_empty() {
+    // `update-keyhist`, `pinfo`, and `list` take no positionals (C errors "too
+    // many arguments").
+    if matches!(op.as_str(), "update-keyhist" | "pinfo" | "list") && !positionals.is_empty() {
         return None;
     }
     // `set-admin` is 3DES-only in this port: the new key positional must be
@@ -269,6 +288,7 @@ pub fn run(args: &[String]) -> i32 {
         "generate" => cmd_generate(&inv),
         "import" => cmd_import(&inv),
         "pinfo" => cmd_pinfo(&inv),
+        "list" => cmd_list(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     }
@@ -1271,6 +1291,191 @@ fn cmd_pinfo(inv: &Invocation) -> i32 {
     0
 }
 
+/// pivy-tool's `escape_qstr` (`vendor/pivy/src/pivy-tool.c`): backslash-escape
+/// `"`, `\`, and `'`, and render a newline as `\n`. Applied to the cert
+/// subject/issuer before they go inside a JSON string, matching C's `-j list`
+/// (whose output is therefore not strict JSON — a `'` in a DN becomes `\'`).
+fn escape_qstr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\n' {
+            out.push_str("\\n");
+            continue;
+        }
+        if c == '"' || c == '\\' || c == '\'' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Lowercase hex of a byte slice (C's `buf_to_hex(_, _, B_FALSE)`), used for the
+/// CHUID cardholder UUID. Note: the case is not verified against C here — the
+/// fibby differential card carries no cardholder UUID, so this path is
+/// exercised only on real cards that populate CHUID tag `0x36`.
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// `piggy tool list -j`: emit one JSON object per PIV token, byte-for-byte like
+/// C `pivy-tool -j list` (`cmd_list`'s JSON branch). Read-only and PIN-free.
+///
+/// Only the JSON mode is ported; bare `list` (human) and `list -p` (parseable)
+/// stay usage errors → `piggy pivy tool list`. The token-capability fields
+/// (`auth`, `vci_supported`, `algorithms`) use the no-Discovery-object defaults,
+/// which are what a YubiKey reports (its SELECT FCI is AID-only and it publishes
+/// no Discovery object); a non-YubiKey PIV card that publishes a Discovery
+/// object or advertises an algorithm list is a documented follow-up.
+fn cmd_list(inv: &Invocation) -> i32 {
+    let op = "list";
+    let ctx = match PivContext::new() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("piggy tool {op}: PC/SC: {e}");
+            return 1;
+        }
+    };
+    let tokens = match ctx.enumerate_tokens() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("piggy tool {op}: enumerate tokens: {e}");
+            return 1;
+        }
+    };
+    // `-g <hex>` filters to tokens whose GUID starts with the (uppercase) prefix,
+    // like C. An invalid hex prefix is a clear error rather than a silent no-match.
+    let prefix = match inv.guid.as_deref() {
+        Some(p) => {
+            let p = p.to_ascii_uppercase();
+            if !p.chars().all(|c| c.is_ascii_hexdigit()) {
+                eprintln!("piggy tool {op}: -g {p:?}: not a hex GUID prefix");
+                return 1;
+            }
+            Some(p)
+        }
+        None => None,
+    };
+    let mut out = String::new();
+    for token in &tokens {
+        if let Some(p) = &prefix {
+            if !token.guid().to_hex().starts_with(p) {
+                continue;
+            }
+        }
+        match list_json_for_token(token) {
+            Ok(line) => {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            Err(e) => {
+                eprintln!("piggy tool {op}: {e}");
+                return 1;
+            }
+        }
+    }
+    print!("{out}");
+    0
+}
+
+/// Build one token's `-j list` JSON object, matching C's `cmd_list` field order
+/// and conditional fields exactly.
+fn list_json_for_token(token: &PivToken) -> Result<String, piggy_piv::PivError> {
+    let guid_hex = token.guid().to_hex();
+    let short_id = &guid_hex[..guid_hex.len().min(8)];
+
+    let mut s = String::new();
+    s.push('{');
+    s.push_str(&format!("\"short_id\":\"{short_id}\""));
+    s.push_str(&format!(",\"guid\":\"{guid_hex}\""));
+    s.push_str(&format!(",\"reader\":\"{}\"", token.reader_name()));
+
+    // chuid (piggy's enumerate_tokens only returns initialized tokens, so the
+    // object is always present — never the JSON `null` C emits for a blank card).
+    let chuid = token.chuid();
+    s.push_str(",\"chuid\":{");
+    s.push_str(&format!("\"signed\":{}", chuid.signed));
+    if let Some(ch) = &chuid.cardholder {
+        s.push_str(&format!(",\"cardholder\":\"{}\"", hex_lower(ch)));
+    }
+    let fascn = chuid
+        .fascn
+        .as_ref()
+        .map(|f| f.to_pivy_string())
+        .unwrap_or_default();
+    s.push_str(&format!(",\"fasc-n\":\"{fascn}\""));
+    s.push_str(&format!(
+        ",\"expiry\":\"{}\"",
+        chuid.expiry.as_deref().unwrap_or("")
+    ));
+    // C's piv_chuid_is_expired is a stub returning B_FALSE — always false.
+    s.push_str(",\"expired\":false");
+    s.push('}');
+
+    // ykpiv: a GET VERSION that answers marks a YubicoPIV token. When it is one,
+    // the PIV-applet serial (if the applet exposes it) and the version follow.
+    let version = token.read_ykpiv_version();
+    let is_ykpiv = version.is_some();
+    s.push_str(&format!(",\"ykpiv\":{is_ykpiv}"));
+    if let Some(v) = version {
+        if let Some(serial) = token.read_ykpiv_piv_serial() {
+            s.push_str(&format!(",\"serial\":{serial}"));
+        }
+        s.push_str(&format!(
+            ",\"ykpiv_version\":\"{}.{}.{}\"",
+            v[0], v[1], v[2]
+        ));
+    }
+
+    // applet_uri/applet: omitted (piggy does not parse the SELECT FCI's optional
+    // label/uri tags; a YubiKey advertises neither, and C omits an absent field).
+    // auth/vci_supported/algorithms: the no-Discovery-object defaults a YubiKey
+    // reports (see cmd_list docs).
+    s.push_str(
+        ",\"auth\":{\"pin\":{\"supported\":true,\"default\":true},\
+         \"global_pin\":{\"supported\":false,\"default\":false},\
+         \"biometrics\":{\"supported\":false,\"default\":false}}",
+    );
+    s.push_str(",\"vci_supported\":false");
+    s.push_str(",\"algorithms\":[]");
+
+    // slots: keyed by lowercase `%02x` slot id, over the standard slots only
+    // (9A, 9C, 9D, 9E) — matching C's default `list`, which reads the standard
+    // certs and enumerates retired slots 82..95 ONLY under an explicit flag
+    // (`enum_all_retired`). Empty slots are skipped, like C's piv_slot_next.
+    s.push_str(",\"slots\":{");
+    let mut first = true;
+    for &slot_id in piggy_piv::slot::STANDARD_SLOTS {
+        let slot = match token.read_slot(slot_id) {
+            Ok(slot) => slot,
+            Err(_) => continue,
+        };
+        if !first {
+            s.push(',');
+        }
+        first = false;
+        let (subject, issuer, serial) = slot.cert_display_fields()?;
+        s.push_str(&format!("\"{:02x}\":{{", slot.id()));
+        s.push_str(&format!("\"name\":\"{}\"", slot.slot_name()));
+        s.push_str(&format!(",\"algorithm\":\"{}\"", slot.algorithm_label()));
+        s.push_str(&format!(",\"key_type\":\"{}\"", slot.key_type()));
+        s.push_str(&format!(",\"key_size\":{}", slot.key_bits()));
+        s.push_str(&format!(",\"subject\":\"{}\"", escape_qstr(&subject)));
+        s.push_str(&format!(",\"issuer\":\"{}\"", escape_qstr(&issuer)));
+        s.push_str(&format!(",\"cert_serial\":\"{serial}\""));
+        s.push_str(&format!(",\"pubkey\":\"{}\"", slot.ssh_public_key_string()));
+        s.push('}');
+    }
+    s.push('}');
+
+    s.push('}');
+    Ok(s)
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -1366,12 +1571,18 @@ mod tests {
         assert!(parse(&argv(&["-K", "default", "-P", "123456", "import", "9a"])).is_some());
         assert!(parse(&argv(&["pinfo"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pinfo"])).is_some());
+        // `list` is ported only in its JSON mode; `-j`/`--json` must precede it.
+        assert!(parse(&argv(&["-j", "list"])).is_some());
+        assert!(parse(&argv(&["--json", "list"])).is_some());
+        assert!(parse(&argv(&["-g", "ABCD", "-j", "list"])).is_some());
         assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "-P", "654321", "change-pin"])).is_some());
         // Still-unported ops are rejected (run() maps None to a usage error).
+        // Bare `list` (human) and `list -p` (parseable) are NOT ported.
         assert!(parse(&argv(&["list"])).is_none());
+        assert!(parse(&argv(&["-j", "list", "9a"])).is_none()); // list takes no positionals
         assert!(parse(&argv(&["init"])).is_none());
         assert!(parse(&argv(&["version"])).is_none());
         // set-admin key forms this port does not model → C.

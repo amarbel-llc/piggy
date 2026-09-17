@@ -605,6 +605,33 @@ against C. The seeded object is modelled **PIN-free**; a real card gates the
 Printed Information read behind the PIN, tracked as piggy#292. This leaves
 `list` as the only deferred read op.
 
+**Milestone 3.8 landed (`list -j`).** `piggy tool -j list` emits the JSON card
+listing byte-for-byte like C's `cmd_list` `-j` branch — `short_id`/`guid`/
+`reader`, the full CHUID (`signed`, `fasc-n`, `expiry`, `expired`; `cardholder`
+when present), `ykpiv`/`serial`/`ykpiv_version`, the `auth`/`vci_supported`/
+`algorithms` capability block, and every seeded slot's `name`/`algorithm`/
+`key_type`/`key_size`/`subject`/`issuer`/`cert_serial`/`pubkey`. New `piggy-piv`
+surface: `fascn.rs` (a faithful port of the ISO-7811 5-bit-BCD FASC-N reader —
+parity, SS/FS/ES sentinels, LRC — plus the org/assoc maps, unit-tested against
+the real card's FASC-N bytes), `chuid.rs` (the CHUID fields the GUID-only
+`read_chuid` dropped), `PivToken::{chuid,read_ykpiv_version,read_ykpiv_piv_serial}`,
+and per-slot `slot_name`/`algorithm_label`/`key_type`/`key_bits`/
+`cert_display_fields`. The two byte-exact fields reuse the `openssl` crate that
+already backs piggy-piv: `cert_serial` is `BigNum::to_hex_str` (= C's
+`BN_bn2hex`) and `subject`/`issuer` reproduce `X509_NAME_oneline` (exact for the
+printable-DN case). A `list_json_matches_c` differential in the tool-fibby lane
+compares C and piggy against the same fibby (no new seeding needed — the
+existing seeds already produce the whole object).
+
+Scope: **only the JSON mode is ported.** Bare `list` (human) and `list -p`
+(parseable) stay usage errors → `piggy pivy tool list`. The `auth`/`vci`/
+`algorithms` fields use the no-Discovery-object defaults, which are what a
+YubiKey reports (its SELECT FCI is AID-only and it publishes no Discovery
+object); a non-YubiKey PIV card that publishes a Discovery object or advertises
+an algorithm list — and the CHUID `cardholder` hex case — are a documented
+follow-up. This completes the differentiable `pivy-tool` read surface; only
+factory-reset (piggy#291) and the human/parseable `list` modes remain on C.
+
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
 Independent of Phase 3 (they need no new `piggy-piv` surface: the key

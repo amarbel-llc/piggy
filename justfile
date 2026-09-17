@@ -4186,6 +4186,53 @@ debug-fibby-generate:
       exit 1
     fi
 
+# piggy#289 list-port inspection recipe: dump C `pivy-tool -j list`, C's human
+# `list`, and `piggy tool -j list` side by side against the SAME fibby the
+# tool-fibby differential lane uses, for eyeballing the JSON when iterating on
+# the list port. The byte-exact regression check is the `list_json_matches_c`
+# bats test; this is the manual-inspection companion. No hardware.
+# NOTE: run this in-session via `!` (it backgrounds a fibby daemon, which wedges
+# just-us / subagent tool-runners on the inherited stdout fd; an interactive `!`
+# shell returns in seconds). See the fibby-debug-recipes memory.
+#
+# capture C pivy-tool -j list JSON against fibby (list-port inspection)
+[group('debug')]
+debug-tool-list-capture:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+    pivy_tool="$pivy_out/bin/pivy-tool"
+    fibby_bin="$PWD/target/debug/fibby"
+    piggy_bin="$PWD/target/debug/piggy"
+    [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (just build-rust)"; exit 1; }
+    [[ -x $pivy_tool ]] || { echo "missing $pivy_tool (nix build .#pivy)"; exit 1; }
+
+    workdir=$(mktemp -d /tmp/tool-list-XXXXXX)
+    fibby_sock="$workdir/pcscd.comm"
+    fibby_log="$workdir/fibby.log"
+    fibby_pid=""
+    cleanup() {
+      [[ -n $fibby_pid ]] && kill "$fibby_pid" 2>/dev/null || true
+      rm -rf "$workdir"
+    }
+    trap cleanup EXIT
+
+    echo "=== Starting fibby (virtual, slots 9A + 9D + PINFO seeded, tool-fibby lane) ==="
+    FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
+      --seed-rfc6979-slot-9a-cert --seed-rfc5903-slot-9d-cert --seed-pinfo >"$fibby_log" 2>&1 &
+    fibby_pid=$!
+    for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
+    [[ -S $fibby_sock ]] || { echo "fibby socket never appeared:"; cat "$fibby_log"; exit 1; }
+
+    echo "=== C: pivy-tool -j list (THE SPEC) ==="
+    PCSCLITE_CSOCK_NAME="$fibby_sock" timeout 30 "$pivy_tool" -j list </dev/null
+    echo
+    echo "=== C: pivy-tool list (human, for reference) ==="
+    PCSCLITE_CSOCK_NAME="$fibby_sock" timeout 30 "$pivy_tool" list </dev/null
+    echo
+    echo "=== piggy: piggy tool list -j (once ported; usage error until then) ==="
+    PCSCLITE_CSOCK_NAME="$fibby_sock" timeout 30 "$piggy_bin" tool list -j </dev/null || true
+
 # piggy#248 event-driven wake dev-loop: prove fibby's new WAIT_READER_STATE_CHANGE
 # (register + reader-state array + async 8-byte notify on `fibby ctl`) actually
 # unblocks a REAL SCardGetStatusChange client. fib-wait-ready is the oracle (a

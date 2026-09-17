@@ -59,6 +59,65 @@ impl PivSlot {
     pub fn cert_der(&self) -> &[u8] {
         &self.cert_der
     }
+
+    /// pivy `piv_alg_to_string` label for this slot's key algorithm — the
+    /// `algorithm` field in `pivy-tool list`.
+    pub fn algorithm_label(&self) -> &'static str {
+        match self.algorithm {
+            PivAlgorithm::Rsa1024 => "RSA1024",
+            PivAlgorithm::Rsa2048 => "RSA2048",
+            PivAlgorithm::EcP256 => "ECCP256",
+            PivAlgorithm::EcP384 => "ECCP384",
+            PivAlgorithm::Ed25519 => "ED25519",
+        }
+    }
+
+    /// OpenSSH `sshkey_type` label — the `key_type` field in `pivy-tool list`
+    /// (the generic key family, not the curve).
+    pub fn key_type(&self) -> &'static str {
+        match self.algorithm {
+            PivAlgorithm::Rsa1024 | PivAlgorithm::Rsa2048 => "RSA",
+            PivAlgorithm::EcP256 | PivAlgorithm::EcP384 => "ECDSA",
+            PivAlgorithm::Ed25519 => "ED25519",
+        }
+    }
+
+    /// OpenSSH `sshkey_size` — the `key_size` field in `pivy-tool list` (bits).
+    pub fn key_bits(&self) -> u32 {
+        match self.algorithm {
+            PivAlgorithm::Rsa1024 => 1024,
+            PivAlgorithm::Rsa2048 => 2048,
+            PivAlgorithm::EcP256 => 256,
+            PivAlgorithm::EcP384 => 384,
+            PivAlgorithm::Ed25519 => 256,
+        }
+    }
+
+    /// pivy `piv_slotid_to_string` name — the slot's `name` field in
+    /// `pivy-tool list`.
+    pub fn slot_name(&self) -> String {
+        slot_id_to_string(self.id)
+    }
+
+    /// Certificate subject, issuer (both `X509_NAME_oneline`), and serial
+    /// (`BN_bn2hex`) for `pivy-tool list`, parsed from this slot's cert DER.
+    pub fn cert_display_fields(&self) -> Result<(String, String, String), crate::error::PivError> {
+        crate::cert::display_fields(&self.cert_der)
+    }
+}
+
+/// Map a PIV slot ID to pivy's `piv_slotid_to_string` name: the four standard
+/// slots have mnemonic names, retired slots `82`..`95` are `retired-N`
+/// (`N = id - 0x81`, so `82`→`retired-1`), and anything else is `0x%02x`.
+pub fn slot_id_to_string(id: u8) -> String {
+    match id {
+        0x9A => "piv-auth".to_string(),
+        0x9C => "piv-sign".to_string(),
+        0x9D => "key-mgmt".to_string(),
+        0x9E => "card-auth".to_string(),
+        0x82..=0x95 => format!("retired-{}", id - 0x81),
+        _ => format!("0x{id:02x}"),
+    }
 }
 
 /// Map PIV slot ID to the data object tag for its certificate

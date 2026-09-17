@@ -155,6 +155,39 @@ function unported_op_is_a_usage_error_not_a_c_fallthrough { # @test
   assert_output --partial "guid:"
 }
 
+function list_json_matches_c { # @test
+  # C `pivy-tool -j list` and `piggy tool -j list` read the SAME fibby card and
+  # emit byte-identical JSON (short_id/guid/reader, the full CHUID incl. the
+  # BCD-decoded fasc-n, ykpiv+version, the auth/vci/algorithms defaults, and
+  # every seeded slot's cert subject/issuer/serial/pubkey). list is PIN-free.
+  # The `-j` flag precedes `list` (piggy's tool ops are options-first).
+  run "$REAL_PIVY_TOOL" -j list
+  assert_success
+  local c_out="$output"
+  run "$PIGGY" tool -j list
+  assert_success
+  [[ "$output" == "$c_out" ]] || fail "list -j differs:
+C=[$c_out]
+piggy=[$output]"
+  # Sanity: the JSON shape rendered (guard against both emitting the same empty).
+  assert_output --partial '"short_id":"191755CF"'
+  assert_output --partial '"fasc-n":"0000-0000-000000-0-1/commercial:0000/employee:0000000000"'
+  assert_output --partial '"slots":{"9a":{"name":"piv-auth"'
+}
+
+# Bare `list` (human) and `list -p` (parseable) are NOT ported: only the JSON
+# mode is. They must be usage errors (exit 2) pointing at `piggy pivy tool`,
+# never a silent hop to C.
+function list_non_json_is_a_usage_error { # @test
+  run "$PIGGY" tool list
+  assert_failure 2
+  assert_output --partial "piggy pivy tool"
+  refute_output --partial '"short_id"'
+  run "$PIGGY" tool -p list
+  assert_failure 2
+  assert_output --partial "piggy pivy tool"
+}
+
 function pinfo_matches_c { # @test
   # fibby seeds a canonical Printed Information object (--seed-pinfo); both
   # impls read and print the same fields, so `pinfo` output is byte-identical.

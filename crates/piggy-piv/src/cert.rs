@@ -147,6 +147,49 @@ pub fn extract_public_key(cert_der: &[u8]) -> Result<(PivAlgorithm, PublicKey), 
     }
 }
 
+/// Render an X.509 Name in OpenSSL's `X509_NAME_oneline` slash form
+/// (`/CN=.../O=...`) — what C pivy's `piv_slot_subject`/`piv_slot_issuer` carry
+/// (they store `X509_NAME_oneline(...)`). Each RDN is `/<short-name>=<value>`;
+/// printable ASCII (`0x20..=0x7e`) is emitted verbatim and any other byte is
+/// escaped `\xHH`. Standard RDN types use their OpenSSL short name (CN, O, OU,
+/// C, …); an OID with no short name falls back to its text form. Byte-exact
+/// with C for the common printable-DN case (the only case the fibby differential
+/// and virtually all real certs exercise); exotic-byte DNs are approximated.
+fn name_oneline(name: &openssl::x509::X509NameRef) -> String {
+    let mut out = String::new();
+    for entry in name.entries() {
+        out.push('/');
+        let obj = entry.object();
+        let label = obj
+            .nid()
+            .short_name()
+            .map(str::to_string)
+            .unwrap_or_else(|_| obj.to_string());
+        out.push_str(&label);
+        out.push('=');
+        for &b in entry.data().as_slice() {
+            if (0x20..=0x7e).contains(&b) {
+                out.push(b as char);
+            } else {
+                out.push_str(&format!("\\x{b:02X}"));
+            }
+        }
+    }
+    out
+}
+
+/// Subject, issuer (both `X509_NAME_oneline`), and cert serial (`BN_bn2hex` —
+/// uppercase, even-length) from a DER cert, for the `piggy tool list` port.
+/// The serial goes through the same `BN_bn2hex` as C (`BigNum::to_hex_str`), so
+/// it is byte-identical; the DNs are byte-identical for printable names.
+pub fn display_fields(cert_der: &[u8]) -> Result<(String, String, String), PivError> {
+    let cert = X509::from_der(cert_der)?;
+    let subject = name_oneline(cert.subject_name());
+    let issuer = name_oneline(cert.issuer_name());
+    let serial = cert.serial_number().to_bn()?.to_hex_str()?.to_string();
+    Ok((subject, issuer, serial))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

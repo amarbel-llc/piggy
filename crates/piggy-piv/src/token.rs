@@ -77,6 +77,10 @@ pub struct PivToken {
     /// `require_chuid = false` can yield `false` here; the strict `connect`
     /// errors instead, so existing callers never see an uninitialized token.
     initialized: bool,
+    /// The raw `53`-wrapped CHUID GET DATA response, retained at connect for
+    /// the `piggy tool list` port (which reports the CHUID's signed flag,
+    /// cardholder UUID, FASC-N, and expiry). `None` on an uninitialized card.
+    chuid_raw: Option<Vec<u8>>,
 }
 
 /// Parse a 4-byte big-endian serial from a vendor serial-read response, or
@@ -129,6 +133,7 @@ impl PivToken {
             yk_serial: None,
             yk_serial_diag: None,
             initialized: false,
+            chuid_raw: None,
         };
         token.select_piv()?;
         match token.read_chuid() {
@@ -170,6 +175,9 @@ impl PivToken {
         if !sw.is_success() {
             return Err(PivError::Apdu { sw: sw.as_u16() });
         }
+        // Retain the raw object for the list port's fuller CHUID read; the GUID
+        // walk below stays the connect-critical path.
+        self.chuid_raw = Some(data.clone());
 
         // Response is wrapped in tag 0x53
         let mut reader = TlvReader::new(&data);
@@ -392,6 +400,45 @@ impl PivToken {
             return Err(PivError::Apdu { sw: sw.as_u16() });
         }
         Ok(crate::pinfo::parse_pinfo(&data))
+    }
+
+    /// The card's CHUID fields for the `list` port (signed flag, cardholder
+    /// UUID, FASC-N, expiry), parsed from the response retained at connect.
+    /// Returns the default (all-`None`, unsigned) for an uninitialized card.
+    pub fn chuid(&self) -> crate::chuid::Chuid {
+        match &self.chuid_raw {
+            Some(raw) => crate::chuid::parse_chuid(raw),
+            None => crate::chuid::Chuid::default(),
+        }
+    }
+
+    /// Read the YubiKey firmware version (`[major, minor, patch]`) via the
+    /// YubicoPIV GET VERSION vendor INS (`0xFD`). `None` for a card that rejects
+    /// it (a non-YubiKey PIV card) — matching how `pivy-tool list` omits
+    /// `ykpiv_version` for a non-ykpiv token.
+    pub fn read_ykpiv_version(&self) -> Option<[u8; 3]> {
+        let apdu = Apdu::new(0x00, crate::apdu::ins::YK_GET_VERSION, 0x00, 0x00);
+        match self.transmit(&apdu) {
+            Ok((data, sw)) if sw.is_success() && data.len() >= 3 => {
+                Some([data[0], data[1], data[2]])
+            }
+            _ => None,
+        }
+    }
+
+    /// Read the YubiKey serial via the PIV-applet vendor INS (`0xF8`) ONLY — no
+    /// OTP-applet fallback. `pivy-tool list` reports `serial` only when the PIV
+    /// applet answers (`ykpiv_token_has_serial`); a YubiKey 4, whose PIV applet
+    /// returns `0x6D00`, has no `serial` in the listing even though its serial
+    /// is reachable over the OTP applet. This deliberately differs from
+    /// [`Self::yk_serial`] (which does fall back to OTP) so the list JSON is
+    /// byte-identical to C.
+    pub fn read_ykpiv_piv_serial(&self) -> Option<u32> {
+        let apdu = Apdu::new(0x00, crate::apdu::ins::YK_GET_SERIAL, 0x00, 0x00);
+        match self.transmit(&apdu) {
+            Ok((data, sw)) => parse_serial_response(&data, sw),
+            Err(_) => None,
+        }
     }
 
     /// Count the on-card retired-slot certificates: the highest retired-slot
