@@ -68,11 +68,16 @@
 //!   and `list -p` (parseable) stay usage errors → `piggy pivy tool list`. The
 //!   `-j`/`--json` flag must precede `list` (options-first, like piggy's other
 //!   `tool` ops).
+//! - `piggy tool factory-reset` — wipe the PIV applet via YubicoPIV RESET
+//!   (INS 0xFB; the card requires the PIN and PUK both blocked first, else
+//!   SW 6985). Gated by a confirmation: a typed `YES` on the controlling tty,
+//!   or `--yes`/`--force` to skip it non-interactively (a piggy-native gate —
+//!   pivy-tool's tty-only prompt isn't scriptable — outside the differential).
 //!
 //! As of the 3.6 cutover (piggy#289, mirroring the `box` cutover in #165)
 //! `piggy tool` is Rust — NOT a superset that falls back to C. [`run`]
 //! returns the exit code directly; an unported op (`list` without `-j`,
-//! `version`, `init`, `req-cert`, `factory-reset`) or an unmodeled option
+//! `version`, `init`, `req-cert`) or an unmodeled option
 //! (whatever [`parse`] rejects — e.g. an RSA/Ed25519 `-a`, a pivy debug
 //! flag) is a usage error (exit 2), not a silent hop to `pivy-tool`. The
 //! full C `pivy-tool` surface stays reachable via `piggy pivy tool` while
@@ -98,6 +103,10 @@ struct Invocation {
     /// `-a <alg>`: pivy-tool's algorithm option (e.g. `eccp256`). Required by
     /// `generate`; this port models the EC algorithms only.
     alg: Option<String>,
+    /// `--yes`/`--force`: piggy-native skip of the `factory-reset` confirmation
+    /// prompt (pivy-tool has no scriptable equivalent). Only `factory-reset`
+    /// reads it.
+    force: bool,
     op: String,
     positionals: Vec<String>,
 }
@@ -112,6 +121,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
     let mut admin_key = None;
     let mut alg = None;
     let mut json = false;
+    let mut force = false;
     let mut i = 0;
     // Leading options (pivy-tool style: options precede the operation).
     while i < args.len() {
@@ -142,6 +152,12 @@ fn parse(args: &[String]) -> Option<Invocation> {
                 json = true;
                 i += 1;
             }
+            // piggy-native: skip the `factory-reset` confirmation. Only
+            // `factory-reset` consumes it; accepting it here is never an error.
+            "--yes" | "--force" => {
+                force = true;
+                i += 1;
+            }
             // Any other flag is not modeled here — `None` becomes a usage
             // error in `run` (the 3.6 cutover; no C fallback).
             _ => return None,
@@ -168,6 +184,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "import"
             | "pinfo"
             | "list"
+            | "factory-reset"
     ) {
         return None;
     }
@@ -203,9 +220,13 @@ fn parse(args: &[String]) -> Option<Invocation> {
             return None;
         }
     }
-    // `update-keyhist`, `pinfo`, and `list` take no positionals (C errors "too
-    // many arguments").
-    if matches!(op.as_str(), "update-keyhist" | "pinfo" | "list") && !positionals.is_empty() {
+    // `update-keyhist`, `pinfo`, `list`, and `factory-reset` take no positionals
+    // (C errors "too many arguments").
+    if matches!(
+        op.as_str(),
+        "update-keyhist" | "pinfo" | "list" | "factory-reset"
+    ) && !positionals.is_empty()
+    {
         return None;
     }
     // `set-admin` is 3DES-only in this port: the new key positional must be
@@ -231,6 +252,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
         pins,
         admin_key,
         alg,
+        force,
         op,
         positionals,
     })
@@ -289,6 +311,7 @@ pub fn run(args: &[String]) -> i32 {
         "import" => cmd_import(&inv),
         "pinfo" => cmd_pinfo(&inv),
         "list" => cmd_list(&inv),
+        "factory-reset" => cmd_factory_reset(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     }
@@ -1476,6 +1499,83 @@ fn list_json_for_token(token: &PivToken) -> Result<String, piggy_piv::PivError> 
     Ok(s)
 }
 
+/// Confirm a destructive `factory-reset`. `--yes`/`--force` skips the prompt.
+/// Otherwise require the operator to type `YES` on the controlling tty — like C
+/// `pivy-tool`'s `RPP_REQUIRE_TTY` prompt. There is deliberately NO stdin
+/// fallback: a reset that erases every key needs either a real tty or the
+/// explicit `--yes` flag, so a stray piped `YES` cannot trigger it. This is a
+/// piggy-native gate (pivy-tool has no scriptable confirmation), documented in
+/// piggy(1) / #291 and outside the differential contract.
+fn confirm_factory_reset(force: bool) -> bool {
+    if force {
+        return true;
+    }
+    eprintln!("WARNING: factory-reset erases ALL keys and certificates on this card.");
+    let mut tty = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+    {
+        Ok(t) => t,
+        Err(_) => {
+            eprintln!(
+                "piggy tool factory-reset: no controlling tty for confirmation; \
+                 pass --yes to confirm non-interactively."
+            );
+            return false;
+        }
+    };
+    if write!(tty, "Type 'YES' to continue: ")
+        .and_then(|()| tty.flush())
+        .is_err()
+    {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    let n = match tty.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    String::from_utf8_lossy(&buf[..n]).trim() == "YES"
+}
+
+/// `piggy tool factory-reset`: wipe the PIV applet to factory state via
+/// YubicoPIV RESET (INS 0xFB), after a confirmation gate. The card only permits
+/// the reset once BOTH the PIN and the PUK are blocked (else SW 6985). Ports C
+/// `pivy-tool`'s `cmd_factory_reset` wire, with a scriptable confirmation gate
+/// in place of C's tty-only `YES` prompt (piggy#291).
+fn cmd_factory_reset(inv: &Invocation) -> i32 {
+    let op = "factory-reset";
+    if !confirm_factory_reset(inv.force) {
+        eprintln!("piggy tool {op}: aborted (confirmation not given)");
+        return 1;
+    }
+    let token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    match token.factory_reset() {
+        Ok(()) => {
+            eprintln!("piggy tool {op}: PIV applet reset to factory state.");
+            0
+        }
+        Err(piggy_piv::PivError::Apdu { sw: 0x6985 }) => {
+            eprintln!(
+                "piggy tool {op}: the card refused the reset — both the PIN and the PUK \
+                 must be blocked first (SW 6985)."
+            );
+            1
+        }
+        Err(e) => {
+            eprintln!("piggy tool {op}: reset failed: {e}");
+            1
+        }
+    }
+}
+
 /// The slot positional (`9a`, `9d`, `9e`, `9c`, `82`..`95`, `f9`),
 /// parsed as a hex byte and validated as a PIV slot that can hold a cert.
 fn slot_arg(inv: &Invocation, op: &str) -> Result<u8, i32> {
@@ -1575,6 +1675,11 @@ mod tests {
         assert!(parse(&argv(&["-j", "list"])).is_some());
         assert!(parse(&argv(&["--json", "list"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "-j", "list"])).is_some());
+        // `factory-reset` is claimed with or without the confirmation bypass.
+        assert!(parse(&argv(&["factory-reset"])).is_some());
+        assert!(parse(&argv(&["--yes", "factory-reset"])).is_some());
+        assert!(parse(&argv(&["--force", "factory-reset"])).is_some());
+        assert!(parse(&argv(&["-g", "ABCD", "--yes", "factory-reset"])).is_some());
         assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
@@ -1614,6 +1719,8 @@ mod tests {
         assert!(parse(&argv(&["import"])).is_none()); // no slot
         // pinfo takes no positionals.
         assert!(parse(&argv(&["pinfo", "9d"])).is_none());
+        // factory-reset takes no positionals.
+        assert!(parse(&argv(&["factory-reset", "9a"])).is_none());
         // An option we don't model → C handles the whole invocation.
         assert!(parse(&argv(&["-d", "pubkey", "9d"])).is_none());
         // No op at all.
@@ -1628,6 +1735,14 @@ mod tests {
         assert_eq!(inv.admin_key.as_deref(), Some("default"));
         assert_eq!(inv.op, "set-admin");
         assert_eq!(inv.positionals, vec![HEX24.to_string()]);
+    }
+
+    #[test]
+    fn parse_extracts_force_for_factory_reset() {
+        assert!(parse(&argv(&["--yes", "factory-reset"])).unwrap().force);
+        assert!(parse(&argv(&["--force", "factory-reset"])).unwrap().force);
+        // Without the flag, factory-reset still parses (the tty prompt gates it).
+        assert!(!parse(&argv(&["factory-reset"])).unwrap().force);
     }
 
     #[test]

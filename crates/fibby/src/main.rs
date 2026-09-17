@@ -63,6 +63,10 @@ struct SeedSpec {
     /// Install a canonical Printed Information object (`5F C1 09`) so
     /// `pivy-tool pinfo` / piggy's `read_pinfo` return deterministic fields.
     seed_pinfo: bool,
+    /// Start the card with both the PIN and PUK retry counters blocked (at 0),
+    /// the precondition YubicoPIV RESET requires — so a `factory-reset` test can
+    /// reset directly without first exhausting both counters.
+    seed_pin_puk_blocked: bool,
     /// Override the CHUID's 16-byte GUID (piggy#242): multi-card setups
     /// need distinct GUIDs, since clients identify cards by GUID. Implies
     /// installing a CHUID. Cards after the first that seed a CHUID and
@@ -177,6 +181,7 @@ fn parse_args() -> Result<Args, String> {
             "--seed-rfc6979-slot-9e-cert" => seeds(&mut args).seed_rfc6979_slot_9e_cert = true,
             "--seed-chuid" => seeds(&mut args).seed_chuid = true,
             "--seed-pinfo" => seeds(&mut args).seed_pinfo = true,
+            "--seed-pin-puk-blocked" => seeds(&mut args).seed_pin_puk_blocked = true,
             "--seed-chuid-guid" => {
                 seeds(&mut args).seed_chuid_guid = Some(parse_hex_array(
                     &value("--seed-chuid-guid")?,
@@ -555,6 +560,9 @@ fn build_virtual_card(
     }
     if seeds.seed_pinfo {
         card.seed_pinfo();
+    }
+    if seeds.seed_pin_puk_blocked {
+        card.seed_pin_puk_blocked();
     }
     // GUID override AFTER the cert bundles (which install the canonical
     // CHUID as a side effect): an explicit --seed-chuid-guid always wins;

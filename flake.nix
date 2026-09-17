@@ -946,6 +946,11 @@
               # `batman` invocations from justfile recipes resolve.
               bats.packages.${system}.batman
               bats.packages.${system}.bats
+              # `expect` drives the interactive tty confirmation prompt in the
+              # `piggy tool factory-reset` bats lane (piggy#291): the reset gate
+              # reads a typed `YES` from /dev/tty, so a headless test needs a pty
+              # to answer it.
+              pkgs.expect
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
               # `just load-fib` needs pcscd + opensc-tool on PATH; it runs

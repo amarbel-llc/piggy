@@ -46,6 +46,13 @@ pub mod ins {
     /// Mirrors pivy's `INS_GET_VERSION` (`ykpiv_read_version`); `pivy-tool list`
     /// prints it as `ykpiv_version`. Non-YubiKey cards reject the INS.
     pub const YK_GET_VERSION: u8 = 0xFD;
+    /// YubicoPIV vendor-specific: RESET the PIV applet to factory state
+    /// (`00 FB 00 00`, no data). Wipes every slot key/cert, restores the
+    /// factory PIN/PUK/management key and their retry counters. The applet
+    /// only permits it once BOTH the PIN and the PUK are blocked; otherwise it
+    /// answers `0x6985` (conditions not satisfied). Mirrors pivy's `INS_RESET`
+    /// (`ykpiv_reset`, vendor/pivy/src/piv.c).
+    pub const YK_RESET: u8 = 0xFB;
     /// YubicoPIV vendor-specific: set the PIV management key. Data is
     /// `<alg> <0x9B ref> <key_len> <key>`. Mirrors yubico-piv-tool's
     /// `YKPIV_INS_SET_MGMKEY`.

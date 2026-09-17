@@ -632,6 +632,23 @@ an algorithm list — and the CHUID `cardholder` hex case — are a documented
 follow-up. This completes the differentiable `pivy-tool` read surface; only
 factory-reset (piggy#291) and the human/parseable `list` modes remain on C.
 
+**Milestone 3.9 landed (`factory-reset`, closes piggy#291).** `piggy tool
+factory-reset` wipes the PIV applet via YubicoPIV RESET (INS 0xFB). New
+`piggy-piv` `PivToken::factory_reset` (the applet permits it only once both PIN
+and PUK are blocked, else SW 6985, surfaced with a clear message). fibby grows
+an INS-0xFB RESET handler (refuses with `6985` unless both counters are at 0,
+else wipes every slot key + data object and restores the factory
+PIN/PUK/mgmt-key + counters) and a `--seed-pin-puk-blocked` flag. `piggy tool`
+gains a **piggy-native confirmation gate** — a typed `YES` on `/dev/tty` (like
+C's `RPP_REQUIRE_TTY` prompt) or `--yes`/`--force` to skip it non-interactively;
+there is no stdin fallback, so a stray piped `YES` can't trigger a wipe. Because
+C's factory-reset is tty-only and can't run headless, the bats lane is a **state
+differential** (piggy resets, then both C and piggy read the card blank) plus
+precondition (`6985` when not blocked) and gate checks, with `expect` (added to
+the devShell) driving the interactive tty prompt. This leaves only `req-cert`,
+RSA/Ed25519, and the human/parseable `list` modes on C — the destructive and
+differentiable `pivy-tool` surface piggy needs is now ported.
+
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 
 Independent of Phase 3 (they need no new `piggy-piv` surface: the key

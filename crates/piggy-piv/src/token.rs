@@ -441,6 +441,24 @@ impl PivToken {
         }
     }
 
+    /// Factory-reset the PIV applet via the YubicoPIV RESET vendor INS
+    /// (`0xFB`): wipe every slot key/cert and restore the factory PIN, PUK, and
+    /// management key with their retry counters. The applet only permits this
+    /// once BOTH the PIN and the PUK are blocked; otherwise it answers `0x6985`,
+    /// surfaced here as `PivError::Apdu { sw: 0x6985 }` so the caller can
+    /// explain the precondition. Takes no PIN or management-key auth — the
+    /// blocked-credentials state IS the authorization. Destructive and
+    /// irreversible; mirrors pivy's `ykpiv_reset`.
+    pub fn factory_reset(&self) -> Result<(), PivError> {
+        let apdu = Apdu::new(0x00, crate::apdu::ins::YK_RESET, 0x00, 0x00);
+        let (_, sw) = self.transmit(&apdu)?;
+        if sw.is_success() {
+            Ok(())
+        } else {
+            Err(PivError::Apdu { sw: sw.as_u16() })
+        }
+    }
+
     /// Count the on-card retired-slot certificates: the highest retired-slot
     /// index (`1..20`, slots `82`..`95`) that holds a cert — what
     /// `pivy-tool update-keyhist` records as `oncard`. A card with no retired

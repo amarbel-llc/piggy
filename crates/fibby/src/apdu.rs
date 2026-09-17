@@ -44,6 +44,13 @@ pub mod ins {
     /// material). mgmt-key gated. Mirrors yubico-piv-tool's
     /// `YKPIV_INS_IMPORT_ASYM`.
     pub const IMPORT_ASYM: u8 = 0xFE;
+    /// YubicoPIV vendor RESET (factory-reset the PIV applet). `P1 P2 = 00 00`;
+    /// no body. Wipes every slot key/cert and data object and restores the
+    /// factory PIN/PUK/mgmt-key + retry counters. The applet permits it ONLY
+    /// once both the PIN and the PUK are blocked, else answers `0x6985`. Not in
+    /// SP 800-73-4 — mirrors yubico-piv-tool's `YKPIV_INS_RESET` / pivy's
+    /// `INS_RESET`.
+    pub const YK_RESET: u8 = 0xFB;
     /// YubiKey vendor GET VERSION. Returns 3 bytes encoding the
     /// firmware version (major, minor, patch) + SW 9000. `P1 P2 = 00 00`;
     /// no body. Not in SP 800-73-4 — it's a YubicoPIV extension that

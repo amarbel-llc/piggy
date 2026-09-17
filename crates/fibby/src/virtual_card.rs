@@ -880,6 +880,15 @@ impl VirtualCard {
         self.pin_retries = retries;
     }
 
+    /// Start the card with both the PIN and the PUK retry counters blocked (at
+    /// 0), the precondition YubicoPIV RESET requires. Lets a test drive
+    /// `factory-reset` directly without first exhausting both counters with
+    /// wrong VERIFYs. Test scaffolding, like [`Self::seed_pin_retries`].
+    pub fn seed_pin_puk_blocked(&mut self) {
+        self.pin_retries = 0;
+        self.puk_retries = 0;
+    }
+
     /// Like [`Self::seed_chuid`], but with `guid` substituted into the
     /// CHUID's GUID TLV (tag `0x34`). The multi-card server needs this
     /// (piggy#242): clients (piggy's agent, `pivy-tool list`) identify
@@ -1225,6 +1234,12 @@ impl Backend for VirtualCard {
                 return Ok(sw(0x6A, 0x80));
             }
             return Ok(self.handle_reset_retry_counter(apdu_body(command_apdu)));
+        }
+
+        // YubicoPIV RESET (00 FB 00 00), the factory-reset. Wipes the card once
+        // both the PIN and PUK are blocked; any other P1/P2 is not this op.
+        if cla == 0x00 && ins == apdu::ins::YK_RESET && p1 == 0x00 && p2 == 0x00 {
+            return Ok(self.handle_factory_reset());
         }
 
         // GENERAL AUTHENTICATE (00 87 <alg> <slot> <Lc> 7C ...). Slot 9D
@@ -1630,6 +1645,48 @@ impl VirtualCard {
             trace::DEBUG,
             "vcard",
             "RESET RETRY COUNTER -> 9000 (PIN reset, counters unblocked)",
+        );
+        sw(0x90, 0x00)
+    }
+
+    /// Handle YubicoPIV RESET (INS 0xFB): the factory reset. Real silicon
+    /// permits it ONLY once both the PIN and the PUK retry counters are blocked
+    /// (at 0) — otherwise it answers `0x6985` (conditions not satisfied). When
+    /// permitted, wipe every slot key, clear every data object (certs, CHUID,
+    /// PINFO, key history), and restore the factory PIN/PUK/management key and
+    /// their retry counters. Status words:
+    ///
+    /// - `69 85` when the PIN or PUK is not yet blocked (no state change).
+    /// - `90 00` on success (card is now factory-blank).
+    fn handle_factory_reset(&mut self) -> Vec<u8> {
+        if self.pin_retries != 0 || self.puk_retries != 0 {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!(
+                    "RESET -> 6985 (PIN/PUK not blocked: pin_retries={}, puk_retries={})",
+                    self.pin_retries, self.puk_retries
+                ),
+            );
+            return sw(0x69, 0x85);
+        }
+        // Wipe every slot key and every stored object, then restore factory
+        // credentials — the card is indistinguishable from a fresh applet.
+        self.slot_9a_priv = None;
+        self.slot_9c_priv = None;
+        self.slot_9d_priv = None;
+        self.slot_9e_priv = None;
+        self.data_objects.clear();
+        self.pin = DEFAULT_PIN.to_vec();
+        self.pin_retries = DEFAULT_PIN_RETRIES;
+        self.puk = DEFAULT_PUK.to_vec();
+        self.puk_retries = DEFAULT_PUK_RETRIES;
+        self.mgmt_key = DEFAULT_MGMT_KEY;
+        self.pin_verified = false;
+        trace::emit(
+            trace::DEBUG,
+            "vcard",
+            "RESET -> 9000 (PIV applet wiped to factory state)",
         );
         sw(0x90, 0x00)
     }
@@ -4046,6 +4103,75 @@ mod tests {
             "correct old PUK -> 9000"
         );
         assert_eq!(c.puk, new.to_vec(), "PUK rotated");
+    }
+
+    /// The YubicoPIV RESET APDU: `00 FB 00 00` (no body).
+    fn factory_reset_apdu() -> Vec<u8> {
+        vec![0x00, 0xFB, 0x00, 0x00]
+    }
+
+    #[test]
+    fn factory_reset_wipes_card_when_pin_and_puk_blocked() {
+        let mut c = VirtualCard::new();
+        c.seed_rfc6979_slot_9a_cert(); // 9A key + cert + canonical CHUID
+        c.seed_pin("999999"); // rotate PIN off the factory default
+        c.mgmt_key = [0xAB; 24]; // rotate mgmt-key off the factory default
+        c.seed_pin_puk_blocked();
+        assert!(c.slot_9a_priv.is_some(), "precondition: 9A key present");
+        assert!(!c.data_objects.is_empty(), "precondition: objects present");
+
+        assert_eq!(
+            c.transmit(&factory_reset_apdu()).unwrap(),
+            vec![0x90, 0x00],
+            "RESET succeeds once both PIN and PUK are blocked"
+        );
+
+        assert_eq!(c.slot_9a_priv, None, "9A key wiped");
+        assert_eq!(c.slot_9c_priv, None, "9C key wiped");
+        assert_eq!(c.slot_9d_priv, None, "9D key wiped");
+        assert_eq!(c.slot_9e_priv, None, "9E key wiped");
+        assert!(c.data_objects.is_empty(), "all data objects wiped");
+        assert_eq!(c.pin, DEFAULT_PIN.to_vec(), "PIN back to factory default");
+        assert_eq!(c.pin_retries, DEFAULT_PIN_RETRIES, "PIN counter restored");
+        assert_eq!(c.puk, DEFAULT_PUK.to_vec(), "PUK back to factory default");
+        assert_eq!(c.puk_retries, DEFAULT_PUK_RETRIES, "PUK counter restored");
+        assert_eq!(
+            c.mgmt_key, DEFAULT_MGMT_KEY,
+            "mgmt-key back to factory default"
+        );
+    }
+
+    #[test]
+    fn factory_reset_refused_when_not_blocked() {
+        let mut c = VirtualCard::new();
+        c.seed_rfc6979_slot_9a_cert();
+        // PIN and PUK are at their factory defaults — neither is blocked.
+        assert_eq!(
+            c.transmit(&factory_reset_apdu()).unwrap(),
+            vec![0x69, 0x85],
+            "RESET refused: conditions not satisfied"
+        );
+        assert!(
+            c.slot_9a_priv.is_some(),
+            "card unchanged: 9A key still present"
+        );
+        assert!(
+            !c.data_objects.is_empty(),
+            "card unchanged: objects still present"
+        );
+    }
+
+    #[test]
+    fn factory_reset_refused_when_only_pin_blocked() {
+        let mut c = VirtualCard::new();
+        c.seed_rfc6979_slot_9a_cert();
+        c.pin_retries = 0; // PIN blocked, but PUK still at its default
+        assert_eq!(
+            c.transmit(&factory_reset_apdu()).unwrap(),
+            vec![0x69, 0x85],
+            "RESET needs BOTH blocked, not just the PIN"
+        );
+        assert!(c.slot_9a_priv.is_some(), "card unchanged");
     }
 
     /// Build a RESET RETRY COUNTER APDU: `00 2C 00 80 10 <puk8> <newpin8>`.
