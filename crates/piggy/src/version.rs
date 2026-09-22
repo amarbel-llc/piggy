@@ -1,8 +1,10 @@
 //! `piggy version` — eng-versioning(7) hybrid output.
 //!
 //! Emits the self-identification line `piggy <version>+<commit>`, a blank
-//! line, then a table of the pinned downstream components piggy
-//! orchestrates (pivy) and depends on at runtime (pcsclite).
+//! line, then a table of the pinned downstream components piggy depends on at
+//! runtime (pcsclite). (C pivy was removed from this table when it stopped
+//! being bundled — piggy#289 Phase 4; it survives only as a differential-test
+//! input, `.#pivy`, not a runtime component.)
 //!
 //! All values are read from the environment that `flake.nix`'s makeWrapper
 //! bakes into the wrapped binary (`PIGGY_VERSION`, `PIGGY_COMMIT`,
@@ -62,18 +64,11 @@ pub fn run() -> i32 {
         "PIGGY_COMMIT",
         option_env!("PIGGY_COMMIT").unwrap_or("unknown"),
     );
-    let components = [
-        Component {
-            name: "pivy",
-            version: env_or("PIGGY_PIVY_VERSION", "unknown"),
-            rev: env_or("PIGGY_PIVY_REV", "unknown"),
-        },
-        Component {
-            name: "pcsclite",
-            version: env_or("PIGGY_PCSCLITE_VERSION", "unknown"),
-            rev: env_or("PIGGY_PCSCLITE_REV", "unknown"),
-        },
-    ];
+    let components = [Component {
+        name: "pcsclite",
+        version: env_or("PIGGY_PCSCLITE_VERSION", "unknown"),
+        rev: env_or("PIGGY_PCSCLITE_REV", "unknown"),
+    }];
     print!("{}", render(&version, &commit, &components));
     0
 }
@@ -82,19 +77,12 @@ pub fn run() -> i32 {
 mod tests {
     use super::*;
 
-    fn sample() -> [Component; 2] {
-        [
-            Component {
-                name: "pivy",
-                version: "0.15.0".into(),
-                rev: "vendored".into(),
-            },
-            Component {
-                name: "pcsclite",
-                version: "2.4.1".into(),
-                rev: "d233902".into(),
-            },
-        ]
+    fn sample() -> [Component; 1] {
+        [Component {
+            name: "pcsclite",
+            version: "2.4.1".into(),
+            rev: "d233902".into(),
+        }]
     }
 
     #[test]
@@ -120,15 +108,14 @@ mod tests {
             let f: Vec<&str> = l.split_whitespace().collect();
             f == ["COMPONENT", "VERSION", "REV"]
         }));
-        // Each component renders name/version/rev in order.
-        assert!(lines
-            .iter()
-            .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["pivy", "0.15.0", "vendored"]));
+        // The pcsclite component renders name/version/rev in order.
         assert!(
             lines
                 .iter()
                 .any(|l| l.split_whitespace().collect::<Vec<_>>()
                     == ["pcsclite", "2.4.1", "d233902"])
         );
+        // pivy is no longer a bundled component (Phase 4).
+        assert!(!lines.iter().any(|l| l.starts_with("pivy ")));
     }
 }

@@ -10,15 +10,15 @@
 //!   `recipients list-available` subcommand, kept for namespace
 //!   stability). Present to dodge the `piggy list` vs
 //!   `piggy pass list` name collision, not as a port stopgap.
-//! - [`exec_pivy`] runs `pivy-<tool>` for the `piggy tool` shortcut,
-//!   the `piggy box` subcommands the Rust impl doesn't cover, and the
-//!   `piggy pivy <tool>` passthrough. All three are transitional: the
-//!   C pivy stack is being retired (piggy#289,
-//!   `docs/plans/2026-09-14-retire-c-pivy-rust-nix-migration.md`) —
-//!   `tool` ports in Phase 3, the box residual is dropped in Phase 2,
-//!   and `piggy pivy` dies with the C binaries in Phase 5. The former
-//!   `ca`/`luks`/`zfs` shortcuts exec'd binaries the nix build never
-//!   installed and were removed in Phase 0 (piggy#265).
+//! - [`exec_pivy`] runs `pivy-<tool>` for the `piggy pivy <tool>` passthrough
+//!   — the ONLY remaining caller. The `piggy tool` shortcut is now Rust (the
+//!   #289 Phase 3 3.6 cutover) and the `piggy box` C fallback was dropped in
+//!   #165, so neither reaches here anymore. As of #289 Phase 4 the C pivy
+//!   binaries are no longer bundled in the piggy runtime closure (they survive
+//!   only as the test-only `.#pivy` input), so this passthrough normally hits
+//!   the "not bundled" message below; its code is removed with the C build in
+//!   Phase 5. The former `ca`/`luks`/`zfs` shortcuts exec'd binaries the nix
+//!   build never installed and were removed in Phase 0 (piggy#265).
 //!
 //! Top-level dispatch is exhaustive in clap; this module owns no
 //! subcommand-name routing and has no catch-all. Every reachable
@@ -53,9 +53,10 @@ pub fn exec_piggy_ids(subcmd: &str, rest: &[String]) -> ! {
     std::process::exit(127);
 }
 
-/// Exec `pivy-<tool> <rest...>`. Used by the `piggy tool` shortcut, the
-/// `piggy box` C fallback, and the `piggy pivy <tool>` passthrough.
-/// Never returns on success.
+/// Exec `pivy-<tool> <rest...>`. The `piggy pivy <tool>` passthrough is the
+/// only caller (the `tool`/`box` C fallbacks are gone). As of #289 Phase 4 the
+/// C binaries are not bundled, so a bare `piggy pivy <tool>` usually hits the
+/// `NotFound` branch below. Never returns on success.
 ///
 /// `tool` is rejected if it contains a path separator, a NUL, or
 /// shell-meaningful characters that have no business being part of a
@@ -69,7 +70,19 @@ pub fn exec_pivy(tool: &str, rest: &[String]) -> ! {
     }
     let binary = format!("pivy-{}", tool);
     let err = Command::new(&binary).args(rest).exec();
-    eprintln!("piggy: failed to launch {}: {}", binary, err);
+    // Since the piggy#289 Phase 4 cutover the C pivy binaries are no longer
+    // bundled in the piggy runtime closure (they survive only as the test-only
+    // `.#pivy` input), so `pivy-*` is normally absent from PATH — surface that
+    // plainly instead of a bare "No such file or directory".
+    if err.kind() == std::io::ErrorKind::NotFound {
+        eprintln!(
+            "piggy: {binary} not found — the C pivy binaries are no longer bundled \
+             (piggy#289 C-pivy retirement). Install pivy separately and put it on PATH \
+             to use the `piggy pivy {tool}` escape hatch."
+        );
+    } else {
+        eprintln!("piggy: failed to launch {binary}: {err}");
+    }
     std::process::exit(127);
 }
 
@@ -91,9 +104,10 @@ mod tests {
 
     #[test]
     fn accepts_known_pivy_tool_names() {
-        // The three the nix build installs plus the escape hatch's own
-        // spelling of them; `ca`/`luks`/`zfs` are no longer shortcuts
-        // (piggy#265) but stay valid `piggy pivy <tool>` names.
+        // The three C pivy tools the `piggy pivy <tool>` passthrough accepts
+        // (no longer bundled at runtime as of Phase 4, but still valid names);
+        // `ca`/`luks`/`zfs` are no longer shortcuts (piggy#265) but stay valid
+        // `piggy pivy <tool>` names.
         for name in ["box", "tool", "agent"] {
             assert!(is_safe_pivy_tool_name(name), "{name} should be accepted");
         }

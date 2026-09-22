@@ -262,8 +262,13 @@
         # (piggy#164) and needs nothing from it.
         # `openssh` provides `ssh-copy-id`, which `piggy ssh-copy-id`
         # (crates/piggy/src/ssh_copy_id.rs) execs to install the 9A keys.
+        # C pivy is NO LONGER a runtime dep (piggy#289 Phase 4): every op piggy
+        # needs is Rust, so `pivyPkg` is demoted to a test-only input (`.#pivy`,
+        # the differential oracle) and kept OUT of the shipped closure —
+        # enforced by the `lint-closure-no-pivy` check below. The
+        # `piggy pivy <tool>` escape hatch therefore finds no `pivy-*` on PATH
+        # and says so clearly (exec.rs); its code is removed in Phase 5.
         runtimeDeps = [
-          pivyPkg
           pkgs.git
           pkgs.tree
           pkgs.qrencode
@@ -542,8 +547,6 @@
                 --set PIGGY_IDS_PATH $out/libexec/piggy/piggy-ids \
                 --set PIGGY_VERSION ${piggyVersion} \
                 --set PIGGY_COMMIT ${piggyCommit} \
-                --set PIGGY_PIVY_VERSION ${pivyPkg.version} \
-                --set PIGGY_PIVY_REV vendored \
                 --set PIGGY_PCSCLITE_VERSION ${pkgs-master.pcsclite.version} \
                 --set PIGGY_PCSCLITE_REV ${pcscliteRev} \
                 --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
@@ -881,6 +884,25 @@
           # file-based linters, and fails if any file would change. Driven
           # from `just lint-fmt` and surfaced under `nix flake check`.
           formatting = conformistEval.config.build.check self;
+          # piggy#289 Phase 4: the shipped `piggy` runtime closure must NOT
+          # contain the C pivy package. pivy is a test-only input (`.#pivy`, the
+          # differential oracle) now, not a runtime dep — this fails the build if
+          # any reference re-introduces it into the closure. Driven from
+          # `just lint-closure-no-pivy`.
+          lint-closure-no-pivy =
+            let
+              ci = pkgs.closureInfo { rootPaths = [ piggy ]; };
+            in
+            pkgs.runCommand "lint-closure-no-pivy" { } ''
+              if grep -qF '${pivyPkg}' ${ci}/store-paths; then
+                echo "FAIL: C pivy (${pivyPkg}) is in the piggy runtime closure" >&2
+                echo "  piggy#289 Phase 4 demoted pivy to a test-only input; it must not ship." >&2
+                echo "  Something re-introduced a runtime reference to it." >&2
+                exit 1
+              fi
+              echo "ok: no C pivy in the piggy runtime closure"
+              touch "$out"
+            '';
         }
         // vmTests;
 

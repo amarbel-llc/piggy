@@ -696,20 +696,35 @@ each; 3b.3 to be estimated when scoped.
 
 ### Phase 4: demote C pivy to a test-only nix input
 
-Once Phases 1 to 3 are green:
+**Landed 2026-09-22.** C pivy is out of the shipped `piggy` runtime
+closure — it survives only as the test-only `.#pivy` output the
+differential bats lanes build. What changed:
 
-- Drop `pivyPkg` from `runtimeDeps` in `flake.nix`; the wrapped
+- Dropped `pivyPkg` from `runtimeDeps` in `flake.nix`; the wrapped
   `piggy` no longer has any `pivy-*` on PATH.
-- Drop `PIGGY_PIVY_VERSION` from the version table.
-- HM module: remove the `pname == "pivy"` branch and its assertions;
-  `package` must be piggy.
-- Keep `.#pivy` as a flake output consumed only by the oracle bats
-  lanes and debug recipes.
-- Delete the `Pivy` clap arm (`piggy pivy <tool>`) and
-  `piggy_pivy.bats`; delete `exec_pivy` if nothing else uses it.
+- Dropped `PIGGY_PIVY_VERSION`/`_REV` from the wrapper and removed the
+  `pivy` row from `piggy version` (`version.rs`); only `pcsclite`
+  remains as a runtime component (operator decision 2026-09-22).
+- `exec_pivy` (the sole `piggy pivy <tool>` path) now reports the
+  binaries-not-bundled case plainly instead of a bare `ENOENT`, and
+  points at installing pivy separately.
+- `.#pivy` stays a flake output consumed only by the oracle bats lanes
+  and debug recipes.
 
-Gate: a `lint-closure-no-pivy` recipe that fails if
-`nix why-depends .#default .#pivy` finds a path; wired into `lint`.
+Gate: `checks.lint-closure-no-pivy` (a `closureInfo`-based check —
+cleaner than the originally-sketched `nix why-depends`, and buildable in
+a pure derivation) greps the `piggy` closure's store-paths for the
+`pivyPkg` path and fails the build if it reappears; wired into `lint`
+via the `lint-closure-no-pivy` recipe.
+
+**Revised phase boundary.** The C *code* deletions this section originally
+listed — the `Pivy` clap arm / `piggy_pivy.bats` / `exec_pivy`, and the
+HM module's `pname == "pivy"` C-agent branch — are **moved to Phase 5**,
+alongside deleting the C *build*. Rationale: Phase 4 is "stop shipping C
+and enforce it"; deleting the now-graceful-degrading passthrough and the
+HM opt-in is part of "delete all C code" (Phase 5). This also keeps the
+"install pivy separately + use the `piggy pivy` escape hatch" path working
+through the soak.
 
 Soak: as with FDR 0001, the operator runs the pivy-free `piggy` on
 every host for about a week, watching `piggy health` and the
@@ -724,8 +739,13 @@ Effort: one cycle plus the soak.
   flag that stores C's outputs, then rewrite those tests as replays
   against the stored outputs. `pivy_agent_hardware.bats` and
   `pivy_tool_admin_key.bats` are deleted outright (they test C).
+- Delete the C-code seams Phase 4 left degrading-but-present: the
+  `Pivy` clap arm (`piggy pivy <tool>`), `exec_pivy` + its
+  `piggy_pivy.bats`, and the HM module's `pname == "pivy"` C-agent
+  branch (`nix/hm/piggy-agent.nix`) with its `eval-test.nix` cases.
 - Delete `vendor/pivy/`, `nix/pivy.nix`, `vendor/pivy/openssh.patch`,
-  the libressl/openssh source pins, the `.#pivy` output, the ~20
+  the libressl/openssh source pins, the `.#pivy` output, the
+  `lint-closure-no-pivy` check (moot once the C build is gone), the ~20
   `debug-*`/`explore-*` recipes that drive C binaries, and
   `pivy_*.bats.skip`.
 - Close #3, #28/#42/#43 (patch-upstreaming is moot), #105 to #111

@@ -49,13 +49,14 @@ function pivy_invalid_tool_name_with_metachar_fails { # @test
 }
 
 function pivy_nonexistent_tool_errors_clearly { # @test
-  # Tool name is well-formed but no `pivy-<thiswillneverexist>` binary
-  # is installed — we expect a clean failure-to-launch message and the
-  # standard 127 ("command not found") exit code, NOT a panic or empty
-  # output. Use `run -127` so bats does not flag the exit code via
-  # BW01.
+  # Tool name is well-formed but no `pivy-<thiswillneverexist>` binary is on
+  # PATH. As of the piggy#289 Phase 4 cutover the C pivy binaries are no longer
+  # bundled with piggy, so a missing `pivy-*` reports the not-bundled case
+  # clearly (still the standard 127 "command not found" exit code), NOT a panic
+  # or empty output. `run -127` so bats does not flag the exit code via BW01.
   run -127 "$PIGGY" pivy "thiswillneverexist"
-  assert_output --partial "failed to launch pivy-thiswillneverexist"
+  assert_output --partial "pivy-thiswillneverexist not found"
+  assert_output --partial "no longer bundled"
 }
 
 # --- removed shortcuts (piggy#265) ---

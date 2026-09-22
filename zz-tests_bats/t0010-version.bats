@@ -23,12 +23,14 @@ function version_emits_component_table_header { # @test
   assert_line --regexp '^COMPONENT[[:space:]]+VERSION[[:space:]]+REV$'
 }
 
-function version_lists_pivy_and_pcsclite_rows { # @test
+function version_lists_pcsclite_row_but_not_pivy { # @test
   run "$PIGGY" version
   assert_success
-  # name, non-empty version field, non-empty rev field.
-  assert_line --regexp '^pivy[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+$'
+  # pcsclite: name, non-empty version field, non-empty rev field.
   assert_line --regexp '^pcsclite[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+$'
+  # C pivy is no longer a bundled/runtime component (piggy#289 Phase 4), so it
+  # is not listed in the version table.
+  refute_line --regexp '^pivy[[:space:]]'
 }
 
 function help_header_is_self_line_without_component_table { # @test

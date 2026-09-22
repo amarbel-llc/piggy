@@ -2,7 +2,7 @@
 default: lint build test
 
 [group('pre-build')]
-lint: lint-fmt lint-rust lint-worktree
+lint: lint-fmt lint-rust lint-worktree lint-closure-no-pivy
 
 # --- build ---
 
@@ -2377,6 +2377,18 @@ lint-fmt:
     set -euo pipefail
     system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
     nix build ".#checks.${system}.formatting" --no-link --print-build-logs
+
+# piggy#289 Phase 4: assert C pivy is NOT in the shipped `piggy` runtime
+# closure. pivy is a test-only input now (`.#pivy`, the differential oracle),
+# not a runtime dep; this builds the `checks.lint-closure-no-pivy` derivation,
+# which greps the piggy closure's store-paths for the pivy store path and fails
+# if a reference ever re-introduces it. The retirement's enforcement gate.
+[group('pre-build')]
+lint-closure-no-pivy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
+    nix build ".#checks.${system}.lint-closure-no-pivy" --no-link --print-build-logs
 
 # Impure lane: the eng-convention checks that need the live worktree (git
 # remotes / default branch / sweatfile / agents-md) PLUS the go/ facade

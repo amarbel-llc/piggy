@@ -75,12 +75,16 @@ commands:
   *<slot>@<short-guid>*); it is EC-only. Any unported op or unmodeled option
   is a usage error; the rest of the *pivy-tool*(1) surface (*list*
   human/parseable modes, *version*, *init*, and the RSA/Ed25519 key ops —
-  piggy is EC-only) is reachable only through *piggy pivy tool* while the C
-  binary is still shipped (see the C-pivy retirement plan in _docs/plans_).
+  piggy is EC-only) is reachable only through *piggy pivy tool* (see below,
+  and the C-pivy retirement plan in _docs/plans_).
 - *piggy pivy* _TOOL_ is the explicit escape hatch to the C binaries:
-  *piggy pivy box* always runs *pivy-box*(1) and *piggy pivy agent*
-  always runs *pivy-agent*(1), bypassing the Rust re-implementations.
-  See *pivy-box*(1) etc. for their own documentation.
+  *piggy pivy box* runs *pivy-box*(1), *piggy pivy tool* runs *pivy-tool*(1),
+  and *piggy pivy agent* runs *pivy-agent*(1), bypassing the Rust
+  re-implementations. As of the piggy#289 Phase 4 cutover the C pivy binaries
+  are **no longer bundled** with piggy — they survive only as a differential
+  test input — so these subcommands find no *pivy-\** on _$PATH_ and report
+  that plainly unless you install pivy separately. Their code is removed with
+  the C build in Phase 5.
 
 # COMMANDS
 
