@@ -188,6 +188,42 @@ function list_non_json_is_a_usage_error { # @test
   assert_output --partial "piggy pivy tool"
 }
 
+function req_cert_valid_csr_carries_same_key_as_c { # @test
+  # `piggy tool req-cert 9a` builds a minimal PKCS#10 CSR for slot 9A's EC key,
+  # signed by that key on the card (PIN via -P). piggy's CSR is intentionally
+  # minimal (no template extensions), NOT a byte clone of C's cert-template
+  # output — so this is a structural + semantic differential: piggy's CSR is a
+  # valid PKCS#10 whose self-signature verifies, and it embeds the SAME public
+  # key C's req-cert does (slot 9A's key). openssl is on the devShell PATH.
+  local pcsr="$BATS_TEST_TMPDIR/piggy.csr" ccsr="$BATS_TEST_TMPDIR/c.csr"
+  "$PIGGY" tool -P 123456 req-cert 9a >"$pcsr" || fail "piggy req-cert failed"
+  "$REAL_PIVY_TOOL" -P 123456 req-cert 9a >"$ccsr" || fail "pivy-tool req-cert failed"
+  # Valid PKCS#10 whose self-signature verifies.
+  run openssl req -in "$pcsr" -noout -verify
+  assert_success
+  # Semantic differential: piggy's CSR carries the same SPKI as C's.
+  local ppub cpub
+  ppub="$(openssl req -in "$pcsr" -noout -pubkey)" || fail "piggy CSR has no pubkey"
+  cpub="$(openssl req -in "$ccsr" -noout -pubkey)" || fail "C CSR has no pubkey"
+  assert_equal "$ppub" "$cpub"
+  # Default subject is <slot-name>@<short-guid> for the seeded card.
+  run openssl req -in "$pcsr" -noout -subject
+  assert_success
+  assert_output --partial "piv-auth@191755CF"
+}
+
+function req_cert_honors_explicit_cn { # @test
+  # -n sets the CSR subject CN; the result is still a valid, verifiable CSR.
+  local csr="$BATS_TEST_TMPDIR/n.csr"
+  "$PIGGY" tool -n "example.piggy.test" -P 123456 req-cert 9a >"$csr" \
+    || fail "piggy req-cert -n failed"
+  run openssl req -in "$csr" -noout -verify
+  assert_success
+  run openssl req -in "$csr" -noout -subject
+  assert_success
+  assert_output --partial "example.piggy.test"
+}
+
 function pinfo_matches_c { # @test
   # fibby seeds a canonical Printed Information object (--seed-pinfo); both
   # impls read and print the same fields, so `pinfo` output is byte-identical.

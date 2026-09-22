@@ -19,8 +19,10 @@ use const_oid::ObjectIdentifier;
 use der::asn1::{BitString, GeneralizedTime};
 use der::{Any, DateTime, Encode};
 use spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
+use x509_cert::attr::Attributes;
 use x509_cert::certificate::{Certificate, TbsCertificate, Version};
 use x509_cert::name::Name;
+use x509_cert::request::{CertReq, CertReqInfo, Version as CsrVersion};
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::time::{Time, Validity};
 
@@ -48,31 +50,8 @@ pub fn build_self_signed_cert(
     common_name: &str,
     sign_digest: impl FnOnce(&[u8]) -> Result<Vec<u8>, PivError>,
 ) -> Result<Vec<u8>, PivError> {
-    let (curve_oid, sig_oid, md) = match algorithm {
-        PivAlgorithm::EcP256 => (
-            OID_PRIME256V1,
-            OID_ECDSA_SHA256,
-            openssl::hash::MessageDigest::sha256(),
-        ),
-        PivAlgorithm::EcP384 => (
-            OID_SECP384R1,
-            OID_ECDSA_SHA384,
-            openssl::hash::MessageDigest::sha384(),
-        ),
-        other => {
-            return Err(PivError::Other(format!(
-                "self-signed cert only supports ECDSA P-256/P-384, not {other:?}"
-            )));
-        }
-    };
-
-    let spki = SubjectPublicKeyInfoOwned {
-        algorithm: AlgorithmIdentifierOwned {
-            oid: OID_EC_PUBLIC_KEY,
-            parameters: Some(Any::from(&curve_oid)),
-        },
-        subject_public_key: BitString::from_bytes(pubkey_point).map_err(der_err)?,
-    };
+    let (curve_oid, sig_oid, md) = ec_params(algorithm)?;
+    let spki = ec_spki(pubkey_point, curve_oid)?;
 
     let sig_alg = AlgorithmIdentifierOwned {
         oid: sig_oid,
@@ -115,8 +94,104 @@ pub fn build_self_signed_cert(
     cert.to_der().map_err(der_err)
 }
 
+/// Build a minimal PKCS#10 certificate signing request (CSR) over
+/// `pubkey_point` (the SEC1 uncompressed point of the slot's EC key), with
+/// subject `CN=<common_name>`, signed by that slot key on the card.
+///
+/// Like [`build_self_signed_cert`] this is intentionally minimal — subject +
+/// SubjectPublicKeyInfo + signature, no requested extensions (matching piggy's
+/// self-signed-cert minimalism; a CA fills in usage on the issued cert). C
+/// `pivy-tool req-cert` populates KeyUsage/EKU from its cert-template engine, so
+/// piggy's CSR is a *valid, equivalent* CSR carrying the same key rather than a
+/// byte-for-byte clone (piggy#289 milestone 3.10).
+///
+/// `sign_digest` is handed the SHA-256 (P-256) / SHA-384 (P-384) digest of the
+/// DER-encoded CertificationRequestInfo and must return the card's **DER**
+/// ECDSA signature — i.e. `PinSession::sign_prehash(slot, digest)`. Returns the
+/// full CSR DER; PEM-wrap it as `CERTIFICATE REQUEST` for output.
+pub fn build_csr(
+    pubkey_point: &[u8],
+    algorithm: PivAlgorithm,
+    common_name: &str,
+    sign_digest: impl FnOnce(&[u8]) -> Result<Vec<u8>, PivError>,
+) -> Result<Vec<u8>, PivError> {
+    let (curve_oid, sig_oid, md) = ec_params(algorithm)?;
+    let spki = ec_spki(pubkey_point, curve_oid)?;
+
+    let sig_alg = AlgorithmIdentifierOwned {
+        oid: sig_oid,
+        parameters: None,
+    };
+
+    let subject: Name = format!("CN={common_name}").parse().map_err(der_err)?;
+
+    let info = CertReqInfo {
+        // PKCS#10 CertificationRequestInfo version is 0 (V1 in the crate's enum).
+        version: CsrVersion::V1,
+        subject,
+        public_key: spki,
+        attributes: Attributes::default(),
+    };
+
+    let info_der = info.to_der().map_err(der_err)?;
+    let digest = openssl::hash::hash(md, &info_der)?;
+    let sig_der = sign_digest(&digest)?;
+
+    let csr = CertReq {
+        info,
+        algorithm: sig_alg,
+        signature: BitString::from_bytes(&sig_der).map_err(der_err)?,
+    };
+    csr.to_der().map_err(der_err)
+}
+
 fn der_err<E: std::fmt::Display>(e: E) -> PivError {
     PivError::Other(format!("x509 build: {e}"))
+}
+
+/// The ASN.1 parameters an EC cert/CSR needs: the named-curve OID, the
+/// ECDSA-with-SHA signature OID, and the matching digest. EC-only (P-256/P-384)
+/// — the cert and CSR builders share this so a non-EC key is rejected once.
+fn ec_params(
+    algorithm: PivAlgorithm,
+) -> Result<
+    (
+        ObjectIdentifier,
+        ObjectIdentifier,
+        openssl::hash::MessageDigest,
+    ),
+    PivError,
+> {
+    match algorithm {
+        PivAlgorithm::EcP256 => Ok((
+            OID_PRIME256V1,
+            OID_ECDSA_SHA256,
+            openssl::hash::MessageDigest::sha256(),
+        )),
+        PivAlgorithm::EcP384 => Ok((
+            OID_SECP384R1,
+            OID_ECDSA_SHA384,
+            openssl::hash::MessageDigest::sha384(),
+        )),
+        other => Err(PivError::Other(format!(
+            "cert/CSR building only supports ECDSA P-256/P-384, not {other:?}"
+        ))),
+    }
+}
+
+/// The SubjectPublicKeyInfo for an EC `pubkey_point` (SEC1 uncompressed), shared
+/// by the cert and CSR builders.
+fn ec_spki(
+    pubkey_point: &[u8],
+    curve_oid: ObjectIdentifier,
+) -> Result<SubjectPublicKeyInfoOwned, PivError> {
+    Ok(SubjectPublicKeyInfoOwned {
+        algorithm: AlgorithmIdentifierOwned {
+            oid: OID_EC_PUBLIC_KEY,
+            parameters: Some(Any::from(&curve_oid)),
+        },
+        subject_public_key: BitString::from_bytes(pubkey_point).map_err(der_err)?,
+    })
 }
 
 #[cfg(test)]
@@ -166,6 +241,44 @@ mod tests {
     fn rejects_non_ec_algorithm() {
         let err = build_self_signed_cert(&[0x04; 65], PivAlgorithm::Rsa2048, "x", |_| Ok(vec![]))
             .unwrap_err();
+        assert!(format!("{err}").contains("P-256/P-384"));
+    }
+
+    /// Build a CSR with a HOST P-256 key acting as the card, then prove it is a
+    /// well-formed PKCS#10 request: it parses, its self-signature verifies, and
+    /// its subject + embedded public key are the ones we passed in.
+    #[test]
+    fn p256_csr_parses_and_self_verifies() {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = EcKey::generate(&group).unwrap();
+        let mut ctx = BigNumContext::new().unwrap();
+        let point = key
+            .public_key()
+            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+            .unwrap();
+
+        let key_for_sign = key.clone();
+        let csr_der = build_csr(&point, PivAlgorithm::EcP256, "piggy-test", |digest| {
+            let sig = EcdsaSig::sign(digest, &key_for_sign).unwrap();
+            Ok(sig.to_der().unwrap())
+        })
+        .unwrap();
+
+        let req = openssl::x509::X509Req::from_der(&csr_der).unwrap();
+        let pkey = req.public_key().unwrap();
+        assert!(req.verify(&pkey).unwrap(), "CSR self-signature verifies");
+        // Subject carries our CN.
+        let cn = req
+            .subject_name()
+            .entries_by_nid(Nid::COMMONNAME)
+            .next()
+            .unwrap();
+        assert_eq!(cn.data().as_utf8().unwrap().to_string(), "piggy-test");
+    }
+
+    #[test]
+    fn csr_rejects_non_ec_algorithm() {
+        let err = build_csr(&[0x04; 65], PivAlgorithm::Ed25519, "x", |_| Ok(vec![])).unwrap_err();
         assert!(format!("{err}").contains("P-256/P-384"));
     }
 

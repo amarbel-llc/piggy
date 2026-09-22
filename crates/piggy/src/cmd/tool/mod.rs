@@ -73,11 +73,17 @@
 //!   SW 6985). Gated by a confirmation: a typed `YES` on the controlling tty,
 //!   or `--yes`/`--force` to skip it non-interactively (a piggy-native gate —
 //!   pivy-tool's tty-only prompt isn't scriptable — outside the differential).
+//! - `piggy tool req-cert <slot>` — build a minimal PKCS#10 CSR for the slot's
+//!   EC key, signed by that key on the card (PIN-gated). EC-only; a non-EC slot
+//!   errors → `piggy pivy tool req-cert`. The CSR is minimal (no template
+//!   extensions), a valid/equivalent CSR rather than a byte clone of C's
+//!   cert-template output — mirroring `cert_builder`'s self-signed minimalism.
+//!   Subject CN from `-n`, else `<slot-name>@<short-guid>`.
 //!
 //! As of the 3.6 cutover (piggy#289, mirroring the `box` cutover in #165)
 //! `piggy tool` is Rust — NOT a superset that falls back to C. [`run`]
 //! returns the exit code directly; an unported op (`list` without `-j`,
-//! `version`, `init`, `req-cert`) or an unmodeled option
+//! `version`, `init`) or an unmodeled option
 //! (whatever [`parse`] rejects — e.g. an RSA/Ed25519 `-a`, a pivy debug
 //! flag) is a usage error (exit 2), not a silent hop to `pivy-tool`. The
 //! full C `pivy-tool` surface stays reachable via `piggy pivy tool` while
@@ -107,6 +113,9 @@ struct Invocation {
     /// prompt (pivy-tool has no scriptable equivalent). Only `factory-reset`
     /// reads it.
     force: bool,
+    /// `-n <cn>`: the CSR subject common name for `req-cert`. Only `req-cert`
+    /// reads it; when absent it defaults to `<slot-name>@<short-guid>`.
+    cn: Option<String>,
     op: String,
     positionals: Vec<String>,
 }
@@ -122,6 +131,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
     let mut alg = None;
     let mut json = false;
     let mut force = false;
+    let mut cn = None;
     let mut i = 0;
     // Leading options (pivy-tool style: options precede the operation).
     while i < args.len() {
@@ -158,6 +168,12 @@ fn parse(args: &[String]) -> Option<Invocation> {
                 force = true;
                 i += 1;
             }
+            // pivy-tool's subject option; only `req-cert` consumes it (sets the
+            // CSR subject CN). Ignored by other ops.
+            "-n" => {
+                cn = Some(args.get(i + 1)?.clone());
+                i += 2;
+            }
             // Any other flag is not modeled here — `None` becomes a usage
             // error in `run` (the 3.6 cutover; no C fallback).
             _ => return None,
@@ -185,6 +201,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "pinfo"
             | "list"
             | "factory-reset"
+            | "req-cert"
     ) {
         return None;
     }
@@ -237,11 +254,15 @@ fn parse(args: &[String]) -> Option<Invocation> {
             return None;
         }
     }
-    // `delete-cert`, `write-cert`, and `import` claim only the slots this port
-    // maps a cert tag for (9A/9C/9D/9E); retired and other slots fall through
-    // to C. (import's key TYPE is unknown until stdin is read, so a non-EC key
-    // is handled in cmd_import, not here.)
-    if matches!(op.as_str(), "delete-cert" | "write-cert" | "import") {
+    // `delete-cert`, `write-cert`, `import`, and `req-cert` claim only the slots
+    // this port maps a cert tag for (9A/9C/9D/9E); retired and other slots fall
+    // through to C. (import's key TYPE is unknown until stdin is read, so a
+    // non-EC key is handled in cmd_import, not here; req-cert's non-EC rejection
+    // is likewise in cmd_req_cert once the slot key is read.)
+    if matches!(
+        op.as_str(),
+        "delete-cert" | "write-cert" | "import" | "req-cert"
+    ) {
         let slot = positionals.first()?;
         if positionals.len() != 1 || !is_supported_cert_slot(slot) {
             return None;
@@ -253,6 +274,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
         admin_key,
         alg,
         force,
+        cn,
         op,
         positionals,
     })
@@ -312,6 +334,7 @@ pub fn run(args: &[String]) -> i32 {
         "pinfo" => cmd_pinfo(&inv),
         "list" => cmd_list(&inv),
         "factory-reset" => cmd_factory_reset(&inv),
+        "req-cert" => cmd_req_cert(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
     }
@@ -560,6 +583,96 @@ fn cmd_sign(inv: &Invocation) -> i32 {
     };
     if let Err(e) = std::io::stdout().write_all(&sig) {
         eprintln!("piggy tool sign: write: {e}");
+        return 1;
+    }
+    0
+}
+
+/// `piggy tool req-cert <slot>`: build a minimal PKCS#10 CSR for the slot's EC
+/// key, sign it with that key on the card (PIN-gated), and print it as PEM.
+///
+/// EC-only (piggy is EC): a non-EC slot key errors, pointing at `piggy pivy
+/// tool req-cert`. The CSR is minimal (subject + SPKI + signature, no requested
+/// extensions) — a valid, equivalent CSR carrying the slot key, NOT a byte-for-
+/// byte clone of C's cert-template output (piggy#289 milestone 3.10; mirrors
+/// `cert_builder`'s self-signed-cert minimalism). The subject CN comes from
+/// `-n`, else defaults to `<slot-name>@<short-guid>`.
+fn cmd_req_cert(inv: &Invocation) -> i32 {
+    let op = "req-cert";
+    let slot_id = match slot_arg(inv, op) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let slot = match token.read_slot(slot_id) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: failed to read the key in slot {slot_id:02X}: {e}");
+            return 1;
+        }
+    };
+    let algorithm = slot.algorithm();
+    if !matches!(algorithm, PivAlgorithm::EcP256 | PivAlgorithm::EcP384) {
+        eprintln!(
+            "piggy tool {op}: slot {slot_id:02X} key algorithm {algorithm:?} is not EC; \
+             piggy req-cert is EC-only — use: piggy pivy tool req-cert {slot_id:02x}"
+        );
+        return 1;
+    }
+    let point = match slot.ec_sec1_point() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("piggy tool {op}: {e}");
+            return 1;
+        }
+    };
+    let cn = inv.cn.clone().unwrap_or_else(|| {
+        let guid = token.guid().to_hex();
+        format!("{}@{}", slot.slot_name(), &guid[..guid.len().min(8)])
+    });
+    let pin = match get_pin(inv, op) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("piggy tool {op}: {e}");
+            return 1;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: begin session: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.verify_pin(&pin) {
+        eprintln!("piggy tool {op}: PIN verification failed: {e}");
+        return 1;
+    }
+    let csr_der = match piggy_piv::cert_builder::build_csr(&point, algorithm, &cn, |digest| {
+        session.sign_prehash(slot_id, digest)
+    }) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("piggy tool {op}: failed to build CSR: {e}");
+            return 1;
+        }
+    };
+    // DER -> PEM ("CERTIFICATE REQUEST"), via openssl for the standard framing.
+    let pem = match openssl::x509::X509Req::from_der(&csr_der).and_then(|r| r.to_pem()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("piggy tool {op}: PEM encode: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = std::io::stdout().write_all(&pem) {
+        eprintln!("piggy tool {op}: write: {e}");
         return 1;
     }
     0
@@ -1680,6 +1793,11 @@ mod tests {
         assert!(parse(&argv(&["--yes", "factory-reset"])).is_some());
         assert!(parse(&argv(&["--force", "factory-reset"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "--yes", "factory-reset"])).is_some());
+        // `req-cert` claims the EC cert slots; the PIN may come via askpass, and
+        // `-n` sets the subject CN.
+        assert!(parse(&argv(&["req-cert", "9a"])).is_some());
+        assert!(parse(&argv(&["-P", "123456", "req-cert", "9c"])).is_some());
+        assert!(parse(&argv(&["-n", "example", "-P", "123456", "req-cert", "9a"])).is_some());
         assert!(parse(&argv(&["-P", "12345678", "-P", "654321", "reset-pin"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pubkey", "9d"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
@@ -1721,6 +1839,10 @@ mod tests {
         assert!(parse(&argv(&["pinfo", "9d"])).is_none());
         // factory-reset takes no positionals.
         assert!(parse(&argv(&["factory-reset", "9a"])).is_none());
+        // req-cert claims only the EC cert slots.
+        assert!(parse(&argv(&["req-cert", "82"])).is_none()); // retired slot
+        assert!(parse(&argv(&["req-cert", "f9"])).is_none()); // attestation slot
+        assert!(parse(&argv(&["req-cert"])).is_none()); // no slot
         // An option we don't model → C handles the whole invocation.
         assert!(parse(&argv(&["-d", "pubkey", "9d"])).is_none());
         // No op at all.
@@ -1743,6 +1865,16 @@ mod tests {
         assert!(parse(&argv(&["--force", "factory-reset"])).unwrap().force);
         // Without the flag, factory-reset still parses (the tty prompt gates it).
         assert!(!parse(&argv(&["factory-reset"])).unwrap().force);
+    }
+
+    #[test]
+    fn parse_extracts_cn_for_req_cert() {
+        let inv = parse(&argv(&["-n", "my cn", "req-cert", "9a"])).unwrap();
+        assert_eq!(inv.cn.as_deref(), Some("my cn"));
+        assert_eq!(inv.op, "req-cert");
+        assert_eq!(inv.positionals, vec!["9a".to_string()]);
+        // Absent -n leaves cn None (cmd_req_cert then defaults it).
+        assert_eq!(parse(&argv(&["req-cert", "9a"])).unwrap().cn, None);
     }
 
     #[test]

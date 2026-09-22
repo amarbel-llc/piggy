@@ -646,8 +646,32 @@ C's factory-reset is tty-only and can't run headless, the bats lane is a **state
 differential** (piggy resets, then both C and piggy read the card blank) plus
 precondition (`6985` when not blocked) and gate checks, with `expect` (added to
 the devShell) driving the interactive tty prompt. This leaves only `req-cert`,
-RSA/Ed25519, and the human/parseable `list` modes on C — the destructive and
-differentiable `pivy-tool` surface piggy needs is now ported.
+RSA/Ed25519, and the human/parseable `list` modes on C.
+
+**Milestone 3.10 landed (`req-cert`, EC-only).** `piggy tool req-cert <slot>`
+prints a minimal PKCS#10 CSR for the slot's EC key, signed by that key on the
+card (PIN-gated). New `piggy-piv` `cert_builder::build_csr` (the PKCS#10 sibling
+of `build_self_signed_cert`, via the `x509-cert` `request` types) and
+`cert::ec_sec1_point` / `PivSlot::ec_sec1_point`. Subject CN from `-n`, else
+`<slot-name>@<short-guid>`. Following `cert_builder`'s established minimalism,
+the CSR carries only subject + SPKI + signature — **no template extensions** —
+so it is a *valid, equivalent* CSR rather than a byte-for-byte clone of C's
+cert-template output (C's `req-cert` populates KeyUsage/EKU from the pivy-ca
+template engine, which stays deferred to Phase 3b.3). The differential is
+therefore **structural + semantic** (openssl verifies the CSR self-signature,
+and its embedded SPKI equals C's for the same slot key), not byte-exact — the
+right bar for a *generated* credential, matching how piggy's own self-signed
+slot certs already differ from pivy's. Added to the shared tool-fibby lane
+(req-cert mutates no card state); fibby needed no changes.
+
+**Operator decision (2026-09-22): RSA and Ed25519 are dropped, not ported.**
+piggy is EC-only by design (RFC 0002 is P-256 ECDH), and RSA/Ed25519 key
+generation/signing would be a large expansion of both `piggy-piv` and the
+P-256-only fibby. So Phase 4 removes them with the runtime C rather than porting
+them; the differential-test oracle (`.#pivy`) survives as a test-only input, so
+they could still be ported later if ever needed. With `req-cert` ported, **no
+piggy-relevant op depends on the runtime `piggy pivy tool` escape hatch**, which
+clears the way for Phase 4.
 
 ### Phase 3b: Rust `luks`, `zfs`, `ca` (operator decision 2026-09-15)
 

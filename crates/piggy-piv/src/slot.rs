@@ -104,6 +104,13 @@ impl PivSlot {
     pub fn cert_display_fields(&self) -> Result<(String, String, String), crate::error::PivError> {
         crate::cert::display_fields(&self.cert_der)
     }
+
+    /// The SEC1 uncompressed EC point (`04 || X || Y`) of this slot's public
+    /// key — what the CSR/cert builders embed as the SubjectPublicKeyInfo.
+    /// Errors if the slot key is not EC (`req-cert` is EC-only).
+    pub fn ec_sec1_point(&self) -> Result<Vec<u8>, crate::error::PivError> {
+        crate::cert::ec_sec1_point(&self.cert_der)
+    }
 }
 
 /// Map a PIV slot ID to pivy's `piv_slotid_to_string` name: the four standard

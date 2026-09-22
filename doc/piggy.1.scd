@@ -68,13 +68,15 @@ commands:
   operations piggy uses (as of the piggy#289 3.6 cutover it is Rust, not a
   passthrough): *pubkey*, *cert*, *attest*, *sign*, *ecdh*, the PIN/PUK ops,
   *set-admin*, *delete-cert*, *update-keyhist*, *write-cert*, *generate*,
-  *import*, *pinfo*, *list -j*, and *factory-reset*. *factory-reset* wipes the
-  PIV applet (YubicoPIV RESET) and is gated by a typed *YES* on the tty or the
-  *--yes*/*--force* flag. Any unported op or unmodeled option is a usage error;
-  the rest of the *pivy-tool*(1) surface (*list* human/parseable modes,
-  *version*, *init*, *req-cert*, RSA/Ed25519) is reachable only through
-  *piggy pivy tool* while the C binary is still shipped (see the C-pivy
-  retirement plan in _docs/plans_).
+  *import*, *pinfo*, *list -j*, *factory-reset*, and *req-cert*.
+  *factory-reset* wipes the PIV applet (YubicoPIV RESET) and is gated by a
+  typed *YES* on the tty or the *--yes*/*--force* flag. *req-cert* prints a
+  minimal EC PKCS#10 CSR for the slot's key (subject *CN* from *-n*, else
+  *<slot>@<short-guid>*); it is EC-only. Any unported op or unmodeled option
+  is a usage error; the rest of the *pivy-tool*(1) surface (*list*
+  human/parseable modes, *version*, *init*, and the RSA/Ed25519 key ops —
+  piggy is EC-only) is reachable only through *piggy pivy tool* while the C
+  binary is still shipped (see the C-pivy retirement plan in _docs/plans_).
 - *piggy pivy* _TOOL_ is the explicit escape hatch to the C binaries:
   *piggy pivy box* always runs *pivy-box*(1) and *piggy pivy agent*
   always runs *pivy-agent*(1), bypassing the Rust re-implementations.

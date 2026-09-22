@@ -178,6 +178,25 @@ fn name_oneline(name: &openssl::x509::X509NameRef) -> String {
     out
 }
 
+/// The SEC1 uncompressed EC point (`04 || X || Y`) of a DER cert's public key —
+/// the SubjectPublicKeyInfo bytes a CSR/cert builder needs. Errors if the cert's
+/// key is not EC. Reuses the same openssl EC path as [`extract_public_key`].
+pub fn ec_sec1_point(cert_der: &[u8]) -> Result<Vec<u8>, PivError> {
+    let cert = X509::from_der(cert_der)?;
+    let pkey = cert.public_key()?;
+    let ec = pkey
+        .ec_key()
+        .map_err(|_| PivError::UnsupportedAlgorithm("certificate key is not EC".into()))?;
+    let group = ec.group();
+    let mut ctx = openssl::bn::BigNumContext::new()?;
+    let point = ec.public_key().to_bytes(
+        group,
+        openssl::ec::PointConversionForm::UNCOMPRESSED,
+        &mut ctx,
+    )?;
+    Ok(point)
+}
+
 /// Subject, issuer (both `X509_NAME_oneline`), and cert serial (`BN_bn2hex` —
 /// uppercase, even-length) from a DER cert, for the `piggy tool list` port.
 /// The serial goes through the same `BN_bn2hex` as C (`BigNum::to_hex_str`), so
