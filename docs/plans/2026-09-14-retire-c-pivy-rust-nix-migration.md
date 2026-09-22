@@ -40,6 +40,38 @@ Phase 3 (`piggy tool`) is the only large port; Phase 3b re-lands
 packaging: first demote C pivy to a test-only nix input, then delete
 it.
 
+## Current status (2026-09-22)
+
+**Phase 3 (`piggy tool`) is complete, and Phase 4 has landed.** A fresh
+session picking this up should know:
+
+- **`piggy tool` is a Rust re-implementation, not a C superset** (the 3.6
+  cutover): every op piggy needs is ported, and an unported op or unmodeled
+  option is a usage error (exit 2), not a hop to C. Ported ops: `pubkey`,
+  `cert`, `attest`, `sign`, `ecdh`, `change-pin`/`change-puk`/`reset-pin`,
+  `set-admin`, `delete-cert`, `update-keyhist`, `write-cert`, `generate`,
+  `import` (EC), `pinfo`, `list -j`, `factory-reset`, `req-cert`. See the
+  milestone landed-notes below (3.8 `list -j`, 3.9 `factory-reset`, 3.10
+  `req-cert`) and FDR 0005 for the interface + design decisions.
+- **piggy is EC-only.** RSA and Ed25519 key ops were deliberately **dropped**,
+  not ported (operator decision 2026-09-22); they leave with the runtime C.
+- **Phase 4 landed 2026-09-22:** C pivy is out of the shipped `piggy` runtime
+  closure (test-only `.#pivy` remains), enforced by `checks.lint-closure-no-pivy`.
+- **Next is the Phase 4 soak, not code:** run the pivy-free `piggy` on every
+  host for ~1 week before Phase 5 (delete the C stack). The soak's statsd
+  counter-watch is blocked on a finding — the stats-me instance carries **no
+  piggy telemetry** (only the statsd daemon's self-metrics), so either
+  `STATSD_HOST`/`STATSD_PORT` need wiring on the piggy hosts, or the soak runs
+  on `piggy health` alone. Resolve this before/at the start of the soak.
+- **Phase 5** (post-soak): delete `vendor/pivy`, `nix/pivy.nix`, the `.#pivy`
+  output, the `piggy pivy` clap arm + `exec_pivy`, the HM `pname == "pivy"`
+  C-agent branch, and freeze the oracle bats lanes into replay fixtures.
+
+Follow-ups filed this cycle: #291 (factory-reset — closed), #290
+(update-keyhist read-back differential), #292 (PIN-gated PINFO read), #293
+(list JSON fidelity gaps: discovery-object auth/vci, algorithms, cardholder
+hex, human/parseable modes).
+
 ## Where things stand
 
 ### Rust already owns
