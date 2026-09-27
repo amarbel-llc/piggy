@@ -90,7 +90,7 @@ let
     # fibby at FIBBY_LOG=wire logs every APDU hexdump line; journald's
     # default per-service rate limit (10000 msgs / 30s) could suppress
     # a burst and swallow the `GA … -> 9000` lines the asserts count.
-    services.journald.extraConfig = "RateLimitIntervalSec=0";
+    services.journald.settings.Journal.RateLimitIntervalSec = 0;
     # World-writable: the daemons run as piggy-agent / DynamicUser and
     # the backdoor shell as root all write profiles here.
     systemd.tmpfiles.rules = pkgs.lib.optionals coverage [ "d /coverage 1777 root root -" ];
