@@ -14,7 +14,7 @@
     # fence-sandboxed fibby lanes pass `--expose-host-path-rw "$workdir"`
     # (see the justfile note by fence-tmpdir-linux) — so the pin is gone.
     igloo.url = "https://code.linenisgreat.com/igloo/archive/master.tar.gz";
-    nixpkgs-master.url = "github:NixOS/nixpkgs/7a0f122f5090cf4c2ade2a13a0e229d4e19ba71f";
+    nixpkgs-master.url = "github:NixOS/nixpkgs/b4fd65b198c599cbe814fcb9f42d25d021595ec9";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
 
     bats = {
