@@ -47,13 +47,15 @@ var DecodeWithHRPOverride = internal.DecodeWithHRPOverride
 
 // Encode encodes the HRP and a bytes slice to Blech32. If the HRP is uppercase,
 // the output will be uppercase.
-var Encode = internal.Encode
-var EncodeDataOnly = internal.EncodeDataOnly
-var EncodeHRPAsData = internal.EncodeHRPAsData
-var ErrEmptyHRP = internal.ErrEmptyHRP
-var ErrInvalidChecksum = internal.ErrInvalidChecksum
-var ErrMixedCase = internal.ErrMixedCase
-var ErrSeparatorMissing = internal.ErrSeparatorMissing
+var (
+	Encode              = internal.Encode
+	EncodeDataOnly      = internal.EncodeDataOnly
+	EncodeHRPAsData     = internal.EncodeHRPAsData
+	ErrEmptyHRP         = internal.ErrEmptyHRP
+	ErrInvalidChecksum  = internal.ErrInvalidChecksum
+	ErrMixedCase        = internal.ErrMixedCase
+	ErrSeparatorMissing = internal.ErrSeparatorMissing
+)
 
 // ErrUppercase signals an all-uppercase input. RFC 0011 §3.5
 // (linenisgreat/madder#273 ruling 6) narrows bech32's
@@ -66,9 +68,11 @@ var ErrSeparatorMissing = internal.ErrSeparatorMissing
 // never be QR-alphanumeric-encoded regardless of payload case. The
 // uppercase allowance buys markl-ids nothing, and costs one spelling
 // per identifier.
-var ErrUppercase = internal.ErrUppercase
-var MakeValue = internal.MakeValue
-var MakeValueWithExpectedHRP = internal.MakeValueWithExpectedHRP
+var (
+	ErrUppercase             = internal.ErrUppercase
+	MakeValue                = internal.MakeValue
+	MakeValueWithExpectedHRP = internal.MakeValueWithExpectedHRP
+)
 
 // VerifyChecksumWithHRPOverride checks the blech32 checksum of `body`
 // against `hrp` instead of the leading segment in `body`'s own

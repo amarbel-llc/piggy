@@ -31,13 +31,15 @@ var DiscoverAgentECDHKeysVerbose = internal.DiscoverAgentECDHKeysVerbose
 // whose unix socket path is held in the named environment variable (e.g.
 // PIGGY_AUTH_SOCK to target piggy-agent instead of the agent fronted by
 // SSH_AUTH_SOCK).
-var DiscoverAgentEd25519KeysVerbose = internal.DiscoverAgentEd25519KeysVerbose
-var DiscoverPivyAgentECDHKeys = internal.DiscoverPivyAgentECDHKeys
-var DiscoverPivyAgentECDHKeysVerbose = internal.DiscoverPivyAgentECDHKeysVerbose
-var DiscoverSSHAgentECDHKeys = internal.DiscoverSSHAgentECDHKeys
-var DiscoverSSHAgentECDHKeysVerbose = internal.DiscoverSSHAgentECDHKeysVerbose
-var DiscoverSSHAgentEd25519Keys = internal.DiscoverSSHAgentEd25519Keys
-var DiscoverSSHAgentEd25519KeysVerbose = internal.DiscoverSSHAgentEd25519KeysVerbose
+var (
+	DiscoverAgentEd25519KeysVerbose    = internal.DiscoverAgentEd25519KeysVerbose
+	DiscoverPivyAgentECDHKeys          = internal.DiscoverPivyAgentECDHKeys
+	DiscoverPivyAgentECDHKeysVerbose   = internal.DiscoverPivyAgentECDHKeysVerbose
+	DiscoverSSHAgentECDHKeys           = internal.DiscoverSSHAgentECDHKeys
+	DiscoverSSHAgentECDHKeysVerbose    = internal.DiscoverSSHAgentECDHKeysVerbose
+	DiscoverSSHAgentEd25519Keys        = internal.DiscoverSSHAgentEd25519Keys
+	DiscoverSSHAgentEd25519KeysVerbose = internal.DiscoverSSHAgentEd25519KeysVerbose
+)
 
 // PivyEcdhP256GetIOWrapper builds a pivy IOWrapper that decrypts to a
 // PIV slot-9D ECDH recipient (the pivy_ecdh_p256_pub pubkey carried by

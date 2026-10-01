@@ -11,9 +11,9 @@
 # to the retired treefmt behavior. The one-time `-ci` reflow of the existing
 # shell/bats tree lands in the migration commit.
 # Go is deliberately NOT formatted here — go/'s hand-written sources are
-# gofmt'd by `just codemod-fmt-go`, and its pkgs/ facades are formatted by the
-# dagnabit facade lane (flake.nix conformistFacadeModule), not by a conformist
-# Go formatter. `nix fmt` runs the generated wrapper; `just lint-fmt` runs the
+# gofmt'd by `just codemod-fmt-go`, and its pkgs/ facades are excluded below and
+# formatted (goimports+gofumpt) by dagnabit itself via the facade lane (flake.nix
+# conformistFacadeFormatEval / conformistFacadeModule). `nix fmt` runs the generated wrapper; `just lint-fmt` runs the
 # sandboxed `checks.formatting` derivation against the same generated config.
 # See conformist-nix(7).
 { ... }:
@@ -48,5 +48,11 @@
     ".tmp/**"
     "*.lock"
     "*.md"
+    # dagnabit-generated facades belong to the generator: dagnabit formats
+    # them itself with the formatters-only facade config (flake.nix
+    # conformistFacadeFormatEval), so this repo-wide pass must never touch
+    # them. The dewey-facade-export lane is a whole-tree linter and is exempt
+    # from global excludes, so facade changes still trigger it.
+    "go/pkgs/**"
   ];
 }

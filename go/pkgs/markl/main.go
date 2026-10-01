@@ -26,8 +26,10 @@ type ErrFormatOperationNotSupported = internal.ErrFormatOperationNotSupported
 // charset NARROWED on 2026-07-20 (linenisgreat/madder#273 ruling 1)
 // from the former open "anything but `@` and whitespace"; quoting is
 // what preserves reachability for everything the narrowing excluded.
-type ErrInvalidPurposeCharset = internal.ErrInvalidPurposeCharset
-type ErrIsNull = internal.ErrIsNull
+type (
+	ErrInvalidPurposeCharset = internal.ErrInvalidPurposeCharset
+	ErrIsNull                = internal.ErrIsNull
+)
 
 // ErrLegacyCombinedHRPWireForm signals that a markl-id wire string
 // failed checksum verification under the canonical split-HRP rule
@@ -61,40 +63,46 @@ type ErrIsNull = internal.ErrIsNull
 // secret. Error() MUST NOT render Data; Raw rendering will be
 // redacted when #169 ships. SplitHRPChecksum is derived public
 // material and is safe to render unredacted.
-type ErrLegacyCombinedHRPWireForm = internal.ErrLegacyCombinedHRPWireForm
-type ErrNotEqual = internal.ErrNotEqual
-type ErrNotEqualBytes = internal.ErrNotEqualBytes
-type ErrUnsupportedIdFormat = internal.ErrUnsupportedIdFormat
+type (
+	ErrLegacyCombinedHRPWireForm = internal.ErrLegacyCombinedHRPWireForm
+	ErrNotEqual                  = internal.ErrNotEqual
+	ErrNotEqualBytes             = internal.ErrNotEqualBytes
+	ErrUnsupportedIdFormat       = internal.ErrUnsupportedIdFormat
+)
 
 // ErrUnterminatedQuotedPurpose signals a purpose slot that opens with a
 // quote rune but does not close with the matching one (RFC 0011 §2.1's
 // `quoted-string`).
-type ErrUnterminatedQuotedPurpose = internal.ErrUnterminatedQuotedPurpose
-type Format = internal.Format
-type FormatHash = internal.FormatHash
-type FormatId = internal.FormatId
-type FormatPub = internal.FormatPub
-type FormatSec = internal.FormatSec
-type FuncFormatPubVerify = internal.FuncFormatPubVerify
+type (
+	ErrUnterminatedQuotedPurpose = internal.ErrUnterminatedQuotedPurpose
+	Format                       = internal.Format
+	FormatHash                   = internal.FormatHash
+	FormatId                     = internal.FormatId
+	FormatPub                    = internal.FormatPub
+	FormatSec                    = internal.FormatSec
+	FuncFormatPubVerify          = internal.FuncFormatPubVerify
+)
 
 // TODO switch to accepting bytes?
-type FuncFormatSecGenerate = internal.FuncFormatSecGenerate
-type FuncFormatSecGetIOWrapper = internal.FuncFormatSecGetIOWrapper
-type FuncFormatSecGetPublicKey = internal.FuncFormatSecGetPublicKey
-type FuncFormatSecSign = internal.FuncFormatSecSign
-type Hash = internal.Hash
-type Id = internal.Id
-type IdBinaryDecodingFormatTypeData = internal.IdBinaryDecodingFormatTypeData
-type IdBinaryDecodingTypeData = internal.IdBinaryDecodingTypeData
-type IdBinaryEncodingFormatTypeData = internal.IdBinaryEncodingFormatTypeData
-type IdBinaryEncodingTypeData = internal.IdBinaryEncodingTypeData
-type IdBroken = internal.IdBroken
-type IdFormat = internal.IdFormat
-type Lock[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]] = internal.Lock[KEY, KEY_PTR]
-type LockBinaryMarshaler[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]] = internal.LockBinaryMarshaler[KEY, KEY_PTR]
-type MutableLockBinaryMarshaler[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]] = internal.MutableLockBinaryMarshaler[KEY, KEY_PTR]
-type Purpose = internal.Purpose
-type PurposeType = internal.PurposeType
+type (
+	FuncFormatSecGenerate                                                              = internal.FuncFormatSecGenerate
+	FuncFormatSecGetIOWrapper                                                          = internal.FuncFormatSecGetIOWrapper
+	FuncFormatSecGetPublicKey                                                          = internal.FuncFormatSecGetPublicKey
+	FuncFormatSecSign                                                                  = internal.FuncFormatSecSign
+	Hash                                                                               = internal.Hash
+	Id                                                                                 = internal.Id
+	IdBinaryDecodingFormatTypeData                                                     = internal.IdBinaryDecodingFormatTypeData
+	IdBinaryDecodingTypeData                                                           = internal.IdBinaryDecodingTypeData
+	IdBinaryEncodingFormatTypeData                                                     = internal.IdBinaryEncodingFormatTypeData
+	IdBinaryEncodingTypeData                                                           = internal.IdBinaryEncodingTypeData
+	IdBroken                                                                           = internal.IdBroken
+	IdFormat                                                                           = internal.IdFormat
+	Lock[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]]                       = internal.Lock[KEY, KEY_PTR]
+	LockBinaryMarshaler[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]]        = internal.LockBinaryMarshaler[KEY, KEY_PTR]
+	MutableLockBinaryMarshaler[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]] = internal.MutableLockBinaryMarshaler[KEY, KEY_PTR]
+	Purpose                                                                            = internal.Purpose
+	PurposeType                                                                        = internal.PurposeType
+)
 
 // RegisterPurposeOpts is the public registration shape for purposes.
 //
@@ -102,21 +110,25 @@ type PurposeType = internal.PurposeType
 // validated lazily: lookups via Purpose.GetRelated succeed for any registered
 // role, and a downstream caller passing the result to GetPurpose is what
 // surfaces typos.
-type RegisterPurposeOpts = internal.RegisterPurposeOpts
-type Slice = internal.Slice
+type (
+	RegisterPurposeOpts = internal.RegisterPurposeOpts
+	Slice               = internal.Slice
+)
 
-var AssertEqual = internal.AssertEqual
-var AssertIdIsNotNull = internal.AssertIdIsNotNull
-var AssertIdIsNotNullWithPurpose = internal.AssertIdIsNotNullWithPurpose
-var AssertIdIsNull = internal.AssertIdIsNull
-var Clone = internal.Clone
-var CompareToReader = internal.CompareToReader
-var CompareToReaderAt = internal.CompareToReaderAt
-var Equals = internal.Equals
-var EqualsReader = internal.EqualsReader
-var ErrAgeX25519NotConnected = internal.ErrAgeX25519NotConnected
-var ErrEcdsaP256SSHAgentNotConnected = internal.ErrEcdsaP256SSHAgentNotConnected
-var ErrEd25519SSHAgentNotConnected = internal.ErrEd25519SSHAgentNotConnected
+var (
+	AssertEqual                      = internal.AssertEqual
+	AssertIdIsNotNull                = internal.AssertIdIsNotNull
+	AssertIdIsNotNullWithPurpose     = internal.AssertIdIsNotNullWithPurpose
+	AssertIdIsNull                   = internal.AssertIdIsNull
+	Clone                            = internal.Clone
+	CompareToReader                  = internal.CompareToReader
+	CompareToReaderAt                = internal.CompareToReaderAt
+	Equals                           = internal.Equals
+	EqualsReader                     = internal.EqualsReader
+	ErrAgeX25519NotConnected         = internal.ErrAgeX25519NotConnected
+	ErrEcdsaP256SSHAgentNotConnected = internal.ErrEcdsaP256SSHAgentNotConnected
+	ErrEd25519SSHAgentNotConnected   = internal.ErrEd25519SSHAgentNotConnected
+)
 
 // ErrEd25519SeedNotPrivateKey signals that Ed25519GetPublicKey received a
 // 32-byte value. RFC 8032 uses a 32-byte seed as the canonical private key,
@@ -124,43 +136,53 @@ var ErrEd25519SSHAgentNotConnected = internal.ErrEd25519SSHAgentNotConnected
 // and so does madder (see FormatSec{Id: FormatIdEd25519Sec, Size:
 // ed25519.PrivateKeySize}). Callers with a seed must explicitly expand it
 // via ed25519.NewKeyFromSeed before presenting it as a private-key MarklId.
-var ErrEd25519SeedNotPrivateKey = internal.ErrEd25519SeedNotPrivateKey
-var ErrEmptyType = internal.ErrEmptyType
+var (
+	ErrEd25519SeedNotPrivateKey = internal.ErrEd25519SeedNotPrivateKey
+	ErrEmptyType                = internal.ErrEmptyType
+)
 
 // ErrNilFormat signals that an Id mutation requires a non-nil MarklFormat
 // but received nil. Raised via panic from resetDataForFormat — the sole
 // mutation primitive — so any in-package bug that tries to populate an Id
 // without first supplying a format surfaces at the point of mutation.
-var ErrNilFormat = internal.ErrNilFormat
-var ErrPivyEcdhP256NotConnected = internal.ErrPivyEcdhP256NotConnected
+var (
+	ErrNilFormat                = internal.ErrNilFormat
+	ErrPivyEcdhP256NotConnected = internal.ErrPivyEcdhP256NotConnected
+)
 
 // Creates a human-readable string representation of a digest.
 // TODO add type information
-var FormatBytesAsHex = internal.FormatBytesAsHex
-var FormatHashBlake2b256 = internal.FormatHashBlake2b256
+var (
+	FormatBytesAsHex     = internal.FormatBytesAsHex
+	FormatHashBlake2b256 = internal.FormatHashBlake2b256
+)
 
 // TODO remove unnecessary references
-var FormatHashSha256 = internal.FormatHashSha256
-var FormatOrEmptyOnNull = internal.FormatOrEmptyOnNull
-var GetDigestTypeForSigType = internal.GetDigestTypeForSigType
-var GetFormatHashOrError = internal.GetFormatHashOrError
-var GetFormatOrError = internal.GetFormatOrError
+var (
+	FormatHashSha256        = internal.FormatHashSha256
+	FormatOrEmptyOnNull     = internal.FormatOrEmptyOnNull
+	GetDigestTypeForSigType = internal.GetDigestTypeForSigType
+	GetFormatHashOrError    = internal.GetFormatHashOrError
+	GetFormatOrError        = internal.GetFormatOrError
+)
 
 // move to Id
-var GetFormatSecOrError = internal.GetFormatSecOrError
-var GetId = internal.GetId
-var GetMotherSigTypeForSigType = internal.GetMotherSigTypeForSigType
-var GetPurpose = internal.GetPurpose
-var IsErrAgeX25519NotConnected = internal.IsErrAgeX25519NotConnected
-var IsErrEcdsaP256SSHAgentNotConnected = internal.IsErrEcdsaP256SSHAgentNotConnected
-var IsErrEd25519SSHAgentNotConnected = internal.IsErrEd25519SSHAgentNotConnected
-var IsErrNull = internal.IsErrNull
-var IsErrPivyEcdhP256NotConnected = internal.IsErrPivyEcdhP256NotConnected
-var IsNull = internal.IsNull
-var MakeErrEmptyType = internal.MakeErrEmptyType
-var MakeErrNotEqualBytes = internal.MakeErrNotEqualBytes
-var MakeErrWrongHasher = internal.MakeErrWrongHasher
-var MakeErrWrongType = internal.MakeErrWrongType
+var (
+	GetFormatSecOrError                = internal.GetFormatSecOrError
+	GetId                              = internal.GetId
+	GetMotherSigTypeForSigType         = internal.GetMotherSigTypeForSigType
+	GetPurpose                         = internal.GetPurpose
+	IsErrAgeX25519NotConnected         = internal.IsErrAgeX25519NotConnected
+	IsErrEcdsaP256SSHAgentNotConnected = internal.IsErrEcdsaP256SSHAgentNotConnected
+	IsErrEd25519SSHAgentNotConnected   = internal.IsErrEd25519SSHAgentNotConnected
+	IsErrNull                          = internal.IsErrNull
+	IsErrPivyEcdhP256NotConnected      = internal.IsErrPivyEcdhP256NotConnected
+	IsNull                             = internal.IsNull
+	MakeErrEmptyType                   = internal.MakeErrEmptyType
+	MakeErrNotEqualBytes               = internal.MakeErrNotEqualBytes
+	MakeErrWrongHasher                 = internal.MakeErrWrongHasher
+	MakeErrWrongType                   = internal.MakeErrWrongType
+)
 
 // MarklIdGrammar is the langlang-validated PEG grammar formalizing the
 // markl-id text form (RFC 0002 §2, §2.1). See marklid.peg for the
@@ -168,8 +190,10 @@ var MakeErrWrongType = internal.MakeErrWrongType
 // `just validate-grammar` (well-formedness) and `just
 // test-grammar-vectors` (real conformance vectors parse via the
 // intended production, piggy#220).
-var MarklIdGrammar = internal.MarklIdGrammar
-var ReadFrom = internal.ReadFrom
+var (
+	MarklIdGrammar = internal.MarklIdGrammar
+	ReadFrom       = internal.ReadFrom
+)
 
 // RegisterFormat installs a MarklFormat in the package-global registry.
 // Panics on nil format, empty format id, or duplicate registration. Returns
@@ -186,13 +210,15 @@ var RegisterPurpose = internal.RegisterPurpose
 // stability convention. The aliased formatId is not validated at
 // registration time — GetFormatOrError surfaces an unknown target via its
 // usual "unknown format id" error.
-var RegisterPurposeIdAlias = internal.RegisterPurposeIdAlias
-var SetDigester = internal.SetDigester
-var SetFromPath = internal.SetFromPath
-var SetHexBytes = internal.SetHexBytes
-var SetHexStringFromAbsolutePath = internal.SetHexStringFromAbsolutePath
-var SetHexStringFromRelPath = internal.SetHexStringFromRelPath
-var SetMarklIdWithFormatBlech32 = internal.SetMarklIdWithFormatBlech32
+var (
+	RegisterPurposeIdAlias       = internal.RegisterPurposeIdAlias
+	SetDigester                  = internal.SetDigester
+	SetFromPath                  = internal.SetFromPath
+	SetHexBytes                  = internal.SetHexBytes
+	SetHexStringFromAbsolutePath = internal.SetHexStringFromAbsolutePath
+	SetHexStringFromRelPath      = internal.SetHexStringFromRelPath
+	SetMarklIdWithFormatBlech32  = internal.SetMarklIdWithFormatBlech32
+)
 
 // TODO remove
 var SetMaybeSha256 = internal.SetMaybeSha256
@@ -210,46 +236,58 @@ var SwapFormat = internal.SwapFormat
 func LockEquals[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](left domaininterfaces.Lock[KEY, KEY_PTR], right domaininterfaces.Lock[KEY, KEY_PTR]) bool {
 	return internal.LockEquals[KEY, KEY_PTR](left, right)
 }
+
 func MakeErrLength[INTEGER constraints.Integer](expected INTEGER, actual INTEGER) error {
 	return internal.MakeErrLength[INTEGER](expected, actual)
 }
+
 func MakeLock[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]]() internal.Lock[KEY, KEY_PTR] {
 	return internal.MakeLock[KEY, KEY_PTR]()
 }
+
 func MakeLockCoder[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](lock domaininterfaces.Lock[KEY, KEY_PTR], requireValue bool) internal.LockBinaryMarshaler[KEY, KEY_PTR] {
 	return internal.MakeLockCoder[KEY, KEY_PTR](lock, requireValue)
 }
+
 func MakeLockCoderValueNotRequired[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](lock domaininterfaces.Lock[KEY, KEY_PTR]) internal.LockBinaryMarshaler[KEY, KEY_PTR] {
 	return internal.MakeLockCoderValueNotRequired[KEY, KEY_PTR](lock)
 }
+
 func MakeLockWith[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](key KEY, value domaininterfaces.MarklId) internal.Lock[KEY, KEY_PTR] {
 	return internal.MakeLockWith[KEY, KEY_PTR](key, value)
 }
+
 func MakeMutableLockCoder[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](lock domaininterfaces.LockMutable[KEY, KEY_PTR], requireValue bool) internal.MutableLockBinaryMarshaler[KEY, KEY_PTR] {
 	return internal.MakeMutableLockCoder[KEY, KEY_PTR](lock, requireValue)
 }
+
 func MakeMutableLockCoderValueNotRequired[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](lock domaininterfaces.LockMutable[KEY, KEY_PTR]) internal.MutableLockBinaryMarshaler[KEY, KEY_PTR] {
 	return internal.MakeMutableLockCoderValueNotRequired[KEY, KEY_PTR](lock)
 }
+
 func MakeMutableLockCoderValueRequired[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]](lock domaininterfaces.LockMutable[KEY, KEY_PTR]) internal.MutableLockBinaryMarshaler[KEY, KEY_PTR] {
 	return internal.MakeMutableLockCoderValueRequired[KEY, KEY_PTR](lock)
 }
 
-const FormatIdAgeX25519Pub = internal.FormatIdAgeX25519Pub
-const FormatIdAgeX25519Sec = internal.FormatIdAgeX25519Sec
-const FormatIdEcdsaP256Pub = internal.FormatIdEcdsaP256Pub
-const FormatIdEcdsaP256SSH = internal.FormatIdEcdsaP256SSH
-const FormatIdEcdsaP256Sig = internal.FormatIdEcdsaP256Sig
+const (
+	FormatIdAgeX25519Pub = internal.FormatIdAgeX25519Pub
+	FormatIdAgeX25519Sec = internal.FormatIdAgeX25519Sec
+	FormatIdEcdsaP256Pub = internal.FormatIdEcdsaP256Pub
+	FormatIdEcdsaP256SSH = internal.FormatIdEcdsaP256SSH
+	FormatIdEcdsaP256Sig = internal.FormatIdEcdsaP256Sig
+)
 
 // keep sorted
-const FormatIdEd25519Pub = internal.FormatIdEd25519Pub
-const FormatIdEd25519SSH = internal.FormatIdEd25519SSH
-const FormatIdEd25519Sec = internal.FormatIdEd25519Sec
-const FormatIdEd25519Sig = internal.FormatIdEd25519Sig
-const FormatIdHashBlake2b256 = internal.FormatIdHashBlake2b256
-const FormatIdHashSha256 = internal.FormatIdHashSha256
-const FormatIdNonceSec = internal.FormatIdNonceSec
-const FormatIdPivyEcdhP256Pub = internal.FormatIdPivyEcdhP256Pub
+const (
+	FormatIdEd25519Pub      = internal.FormatIdEd25519Pub
+	FormatIdEd25519SSH      = internal.FormatIdEd25519SSH
+	FormatIdEd25519Sec      = internal.FormatIdEd25519Sec
+	FormatIdEd25519Sig      = internal.FormatIdEd25519Sig
+	FormatIdHashBlake2b256  = internal.FormatIdHashBlake2b256
+	FormatIdHashSha256      = internal.FormatIdHashSha256
+	FormatIdNonceSec        = internal.FormatIdNonceSec
+	FormatIdPivyEcdhP256Pub = internal.FormatIdPivyEcdhP256Pub
+)
 
 // SEC1-compressed P-256 public key (33 bytes), surfaced via the SSH
 // agent from a PIV authentication/signature slot (9A/9C/9E). Byte
@@ -257,43 +295,55 @@ const FormatIdPivyEcdhP256Pub = internal.FormatIdPivyEcdhP256Pub
 // purpose distinguish piggy PIV SSH-auth keys from recipient pubkeys
 // of the same shape. Owned jointly with amarbel-llc/piggy (mirrored
 // in its piggy-markl crate). See RFC 0002 §5.
-const FormatIdSshEcdsaNistp256Pub = internal.FormatIdSshEcdsaNistp256Pub
-const FormatIdSshEcdsaNistp384Pub = internal.FormatIdSshEcdsaNistp384Pub
+const (
+	FormatIdSshEcdsaNistp256Pub = internal.FormatIdSshEcdsaNistp256Pub
+	FormatIdSshEcdsaNistp384Pub = internal.FormatIdSshEcdsaNistp384Pub
+)
 
 // SSH-suitable Ed25519 (raw 32-byte) and ECDSA P-384 (49-byte
 // SEC1-compressed) public keys from PIV slots 9A/9C/9E (piggy#86).
 // Distinct ids let a piggy-piv_* purpose carry an Ed25519 or P-384
 // auth key alongside the P-256 form. Added to the Go core for parity
 // with the Rust piggy-markl. See RFC 0002 §5.
-const FormatIdSshEd25519Pub = internal.FormatIdSshEd25519Pub
-const IdFormatBlech32 = internal.IdFormatBlech32
-const IdFormatDefault = internal.IdFormatDefault
-const IdFormatHex = internal.IdFormatHex
+const (
+	FormatIdSshEd25519Pub = internal.FormatIdSshEd25519Pub
+	IdFormatBlech32       = internal.IdFormatBlech32
+	IdFormatDefault       = internal.IdFormatDefault
+	IdFormatHex           = internal.IdFormatHex
+)
 
 // Blob Digests
 const PurposeBlobDigestV1 = internal.PurposeBlobDigestV1
 
 // Blob-Store-Config Digests
-const PurposeBlobStoreConfigDigestV1 = internal.PurposeBlobStoreConfigDigestV1
-const PurposeMadderPrivateKeyV0 = internal.PurposeMadderPrivateKeyV0
-const PurposeMadderPrivateKeyV1 = internal.PurposeMadderPrivateKeyV1
-const PurposeMadderPubKeyV1 = internal.PurposeMadderPubKeyV1
+const (
+	PurposeBlobStoreConfigDigestV1 = internal.PurposeBlobStoreConfigDigestV1
+	PurposeMadderPrivateKeyV0      = internal.PurposeMadderPrivateKeyV0
+	PurposeMadderPrivateKeyV1      = internal.PurposeMadderPrivateKeyV1
+	PurposeMadderPubKeyV1          = internal.PurposeMadderPubKeyV1
+)
 
 // Object Digests
-const PurposeObjectDigestV1 = internal.PurposeObjectDigestV1
-const PurposeObjectDigestV2 = internal.PurposeObjectDigestV2
-const PurposeObjectDigestV3 = internal.PurposeObjectDigestV3
+const (
+	PurposeObjectDigestV1 = internal.PurposeObjectDigestV1
+	PurposeObjectDigestV2 = internal.PurposeObjectDigestV2
+	PurposeObjectDigestV3 = internal.PurposeObjectDigestV3
+)
 
 // Object Mother Sigs
-const PurposeObjectMotherSigV1 = internal.PurposeObjectMotherSigV1
-const PurposeObjectMotherSigV2 = internal.PurposeObjectMotherSigV2
-const PurposeObjectMotherSigV3 = internal.PurposeObjectMotherSigV3
+const (
+	PurposeObjectMotherSigV1 = internal.PurposeObjectMotherSigV1
+	PurposeObjectMotherSigV2 = internal.PurposeObjectMotherSigV2
+	PurposeObjectMotherSigV3 = internal.PurposeObjectMotherSigV3
+)
 
 // Object Sigs
-const PurposeObjectSigV0 = internal.PurposeObjectSigV0
-const PurposeObjectSigV1 = internal.PurposeObjectSigV1
-const PurposeObjectSigV2 = internal.PurposeObjectSigV2
-const PurposeObjectSigV3 = internal.PurposeObjectSigV3
+const (
+	PurposeObjectSigV0 = internal.PurposeObjectSigV0
+	PurposeObjectSigV1 = internal.PurposeObjectSigV1
+	PurposeObjectSigV2 = internal.PurposeObjectSigV2
+	PurposeObjectSigV3 = internal.PurposeObjectSigV3
+)
 
 // Papi signature purposes (jointly owned with amarbel-llc/papi; RFC
 // 0002 §6.1, RFC-0001 §9–§10). Both carry a slot-9A ECDSA-P256
@@ -312,37 +362,47 @@ const PurposeObjectSigV3 = internal.PurposeObjectSigV3
 // own purposes consumer-side via RegisterPurpose (ADR 0006). The wire
 // strings stay stable across the move.
 // keep sorted
-const PurposePapiDocSigV1 = internal.PurposePapiDocSigV1
-const PurposePapiProofSigV1 = internal.PurposePapiProofSigV1
+const (
+	PurposePapiDocSigV1   = internal.PurposePapiDocSigV1
+	PurposePapiProofSigV1 = internal.PurposePapiProofSigV1
+)
 
 // Piggy keys (jointly owned with amarbel-llc/piggy; see RFC 0002 §6.1
 // and the piggy-markl crate). The piggy-piv_* purposes carry a PIV
 // slot's SSH-suitable public key; piggy-recipient-v1 carries an
 // encryption recipient pubkey (PIV slot 9D or an age recipient).
 // keep sorted
-const PurposePiggyPivAuthV1 = internal.PurposePiggyPivAuthV1
-const PurposePiggyPivCardAuthV1 = internal.PurposePiggyPivCardAuthV1
-const PurposePiggyPivSigV1 = internal.PurposePiggyPivSigV1
-const PurposePiggyRecipientV1 = internal.PurposePiggyRecipientV1
+const (
+	PurposePiggyPivAuthV1     = internal.PurposePiggyPivAuthV1
+	PurposePiggyPivCardAuthV1 = internal.PurposePiggyPivCardAuthV1
+	PurposePiggyPivSigV1      = internal.PurposePiggyPivSigV1
+	PurposePiggyRecipientV1   = internal.PurposePiggyRecipientV1
+)
 
 // PrivateKeys
 const PurposeRepoPrivateKeyV1 = internal.PurposeRepoPrivateKeyV1
 
 // PubKeys
-const PurposeRepoPubKeyV1 = internal.PurposeRepoPubKeyV1
-const PurposeRequestAuthChallengeV1 = internal.PurposeRequestAuthChallengeV1
+const (
+	PurposeRepoPubKeyV1           = internal.PurposeRepoPubKeyV1
+	PurposeRequestAuthChallengeV1 = internal.PurposeRequestAuthChallengeV1
+)
 
 // Request Auth
-const PurposeRequestAuthResponseV1 = internal.PurposeRequestAuthResponseV1
-const PurposeRequestRepoSigV1 = internal.PurposeRequestRepoSigV1
-const PurposeTypeBlobDigest = internal.PurposeTypeBlobDigest
+const (
+	PurposeRequestAuthResponseV1 = internal.PurposeRequestAuthResponseV1
+	PurposeRequestRepoSigV1      = internal.PurposeRequestRepoSigV1
+	PurposeTypeBlobDigest        = internal.PurposeTypeBlobDigest
+)
 
 // PurposeTypeDodderObjectSig was madder's PurposeTypeObjectSig; renamed
 // under piggy#183 since its purpose VALUES are dodder-specific
 // (dodder-object-sig-v2). Label-only — nothing branches on the byte.
-const PurposeTypeDodderObjectSig = internal.PurposeTypeDodderObjectSig
-const PurposeTypeObjectDigest = internal.PurposeTypeObjectDigest
-const PurposeTypeObjectMotherSig = internal.PurposeTypeObjectMotherSig
+const (
+	PurposeTypeDodderObjectSig = internal.PurposeTypeDodderObjectSig
+	PurposeTypeObjectDigest    = internal.PurposeTypeObjectDigest
+	PurposeTypeObjectMotherSig = internal.PurposeTypeObjectMotherSig
+)
 
 // PurposeTypePapiSig — the amarbel-llc/papi signature purposes
 // (papi-doc-sig-v1, papi-proof-sig-v1). Distinct from the dodder
@@ -350,13 +410,15 @@ const PurposeTypeObjectMotherSig = internal.PurposeTypeObjectMotherSig
 // papi-doc-sig-v1 landed under ObjectSig; piggy, as the canonical
 // holder, overrides it to this dedicated type. Transitional — moves
 // down to papi with the papi purposes (#186).
-const PurposeTypePapiSig = internal.PurposeTypePapiSig
-const PurposeTypePrivateKey = internal.PurposeTypePrivateKey
-const PurposeTypePubKey = internal.PurposeTypePubKey
-const PurposeTypeRepoPubKey = internal.PurposeTypeRepoPubKey
-const PurposeTypeRequestAuth = internal.PurposeTypeRequestAuth
-const PurposeTypeUnknown = internal.PurposeTypeUnknown
-const PurposeV5MetadataDigestWithoutTai = internal.PurposeV5MetadataDigestWithoutTai
-const RelatedRoleDigest = internal.RelatedRoleDigest
-const RelatedRoleMotherSig = internal.RelatedRoleMotherSig
-const RelatedRolePublicKey = internal.RelatedRolePublicKey
+const (
+	PurposeTypePapiSig                = internal.PurposeTypePapiSig
+	PurposeTypePrivateKey             = internal.PurposeTypePrivateKey
+	PurposeTypePubKey                 = internal.PurposeTypePubKey
+	PurposeTypeRepoPubKey             = internal.PurposeTypeRepoPubKey
+	PurposeTypeRequestAuth            = internal.PurposeTypeRequestAuth
+	PurposeTypeUnknown                = internal.PurposeTypeUnknown
+	PurposeV5MetadataDigestWithoutTai = internal.PurposeV5MetadataDigestWithoutTai
+	RelatedRoleDigest                 = internal.RelatedRoleDigest
+	RelatedRoleMotherSig              = internal.RelatedRoleMotherSig
+	RelatedRolePublicKey              = internal.RelatedRolePublicKey
+)

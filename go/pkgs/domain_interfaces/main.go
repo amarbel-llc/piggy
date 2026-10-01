@@ -7,13 +7,15 @@ import (
 	interfaces "code.linenisgreat.com/purse-first/libs/dewey/pkgs/interfaces"
 )
 
-type DigestWriteMap = internal.DigestWriteMap
-type FormatHash = internal.FormatHash
-type Hash = internal.Hash
-type Lock[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]] = internal.Lock[KEY, KEY_PTR]
-type LockMutable[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]] = internal.LockMutable[KEY, KEY_PTR]
-type MarklFormat = internal.MarklFormat
-type MarklFormatGetter = internal.MarklFormatGetter
-type MarklId = internal.MarklId
-type MarklIdGetter = internal.MarklIdGetter
-type MarklIdMutable = internal.MarklIdMutable
+type (
+	DigestWriteMap                                                      = internal.DigestWriteMap
+	FormatHash                                                          = internal.FormatHash
+	Hash                                                                = internal.Hash
+	Lock[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]]        = internal.Lock[KEY, KEY_PTR]
+	LockMutable[KEY interfaces.Value, KEY_PTR interfaces.ValuePtr[KEY]] = internal.LockMutable[KEY, KEY_PTR]
+	MarklFormat                                                         = internal.MarklFormat
+	MarklFormatGetter                                                   = internal.MarklFormatGetter
+	MarklId                                                             = internal.MarklId
+	MarklIdGetter                                                       = internal.MarklIdGetter
+	MarklIdMutable                                                      = internal.MarklIdMutable
+)

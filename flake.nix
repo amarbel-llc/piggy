@@ -724,17 +724,25 @@
         # The dewey pkgs/ facade-export lane, CONSUMED from purse-first's
         # published module (purse-first#163) rather than hand-wired: the module
         # owns the `dagnabit export` invocation + the DAGNABIT_CONFORMIST_CONFIG
-        # threading, fed the PURE formatter config so its facade-format pass
-        # matches `nix fmt`. The tier opt-ins are layered on here (the upstream
-        # module ships the check/repair commands but not the stage-mutation
-        # flags). Shared by BOTH the impure merge-gate CHECK
-        # (conformistImpureEval) and the pre-commit REPAIR
-        # (conformistCodegenEval).
+        # threading, fed the formatters-only FACADE config below. The tier
+        # opt-ins are layered on here (the upstream module ships the
+        # check/repair commands but not the stage-mutation flags). Shared by
+        # BOTH the impure merge-gate CHECK (conformistImpureEval) and the
+        # pre-commit REPAIR (conformistCodegenEval).
         #
-        # conformistConfig = conformistEval.config.build.configFile is the PURE
-        # eval's output, referenced from a SEPARATE eval — so it is not a
-        # self-reference: the facade linter does not live in the eval that
-        # produces the config it bakes. Same cycle-free shape madder uses.
+        # Generated facades belong to the generator (purse-first
+        # docs/plans/2026-09-30-dagnabit-conformist-tree-root.md): piggy's own
+        # config excludes go/pkgs/** (./conformist.nix), and dagnabit formats
+        # the facades with this dedicated goimports+gofumpt config, so the
+        # committed bytes are a function of the dagnabit version and this config
+        # alone. dagnabit refuses a facade config that carries linters, excludes
+        # matching a facade, or a formatter working-dir — which is why the
+        # repo's own presets.eng config can no longer be passed here.
+        conformistFacadeFormatEval = conformist.lib.evalModule pkgs {
+          imports = [ purse-first.lib.conformistModules.dagnabit-facade ];
+          package = conformist.packages.${system}.default;
+        };
+
         conformistFacadeModule =
           { ... }:
           {
@@ -746,7 +754,7 @@
             linters.dewey-facade-export.library = false;
             # Pinned package ⇒ hermetic, PATH-independent dagnabit.
             linters.dewey-facade-export.dagnabitPackage = purse-first.packages.${system}.dagnabit;
-            linters.dewey-facade-export.conformistConfig = conformistEval.config.build.configFile;
+            linters.dewey-facade-export.conformistConfig = conformistFacadeFormatEval.config.build.configFile;
             # Layer the stage-mutation tiers (conformist#55/#56/#57) onto the
             # module's generated linter so the pre-commit hook regenerates AND
             # stages drift into the commit.
