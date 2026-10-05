@@ -24,9 +24,9 @@ promotion-criteria: >
 > provenance" (`docs/features/0032-principals-handles-and-provenance.md`
 > in spinclass; status `proposed`, on branch `swift-elder`, not yet on
 > `master`). This record was drafted against commit `777b3a8`; the
-> spinclass session reports that commit `3d52e6f` revises it to match
-> the departures listed below. This session has not read either commit
-> and relies on that session's quotations. This record is downstream of
+> spinclass session reports that commits up to `98782c7` revise it to
+> match the departures listed below. This session has not read any of
+> those commits and relies on that session's quotations. This record is downstream of
 > FDR 0032. Where the two disagree, the disagreement is reconciled in
 > FDR 0032 first. Tracking issue: piggy#297.
 
@@ -206,7 +206,10 @@ The VM lanes already run this shape without hardening: fibby under
 The agent reads the caller's peer credentials and cgroup on that
 connection, asks fibby to create a card, records the binding, and
 returns the public key. A sign request for that key is honoured only
-from the bound scope. Mints beyond the card cap are refused.
+from the bound scope. Mints beyond the card cap are refused, with an
+error the caller can tell apart from every other mint failure: FDR 0032
+turns that refusal into a refused session start that names the cap, and
+never into a fallback to a tier-1 key.
 
 **Teardown.** A card is wiped when its bound cgroup disappears or when
 the owner sends `retire@piggy`, whichever comes first. The holder has no
@@ -346,9 +349,10 @@ A session minting and using a holder key (phase (d)), by request:
 ## Departures from FDR 0032
 
 This design departed from FDR 0032 as it stood at `777b3a8` in the four
-ways below. The spinclass session reports that the operator confirmed
-each in that session and that FDR 0032 at `3d52e6f` (unmerged) now
-records them. That is a report, not something this session read.
+ways below, plus a fifth found while reconciling. The spinclass session
+reports that the operator confirmed each in that session and that FDR
+0032 at `98782c7` (unmerged) now records them. That is a report, not
+something this session read.
 
 1. **The service and fibby are one tier.** The service is never built
    without fibby, so the separate-uid property arrives only after phases
@@ -367,17 +371,17 @@ records them. That is a report, not something this session read.
    therefore costs the operator a PIN and a touch.
 4. **A 16-principal cap per holder instance** exists in the first
    phases. The operator session key counts against it. Reported outcome:
-   recorded in FDR 0032 as a limitation, with what a refused principal
-   does left undecided there (see Open questions).
-
-Not yet reconciled:
-
-5. **Two accounts, not one.** FDR 0032 D14 has the record store and the
+   recorded in FDR 0032 as a limitation, described as a first-phase
+   number that is expected to change and that nothing there depends on.
+   D3 adds that a refused mint refuses the session start or spawn,
+   "with an error naming the cap: nothing runs at lower assurance, and
+   there is no fallback to a tier-1 key or to an uncertified session".
+5. **Two accounts, not one.** FDR 0032 D14 had the record store and the
    signer "share one service account". Here fibby runs under a second
-   account of its own and only the holder agent shares the record
-   store's account. The operator chose this layout in this record's
-   design session; the spinclass session has not had it confirmed and
-   D14 is unchanged.
+   account of its own. Reported outcome: D14 now says the shared account
+   is the holder agent's, that fibby runs as a second unit under its own
+   account, and that the holder agent's account is the only one allowed
+   on fibby's socket.
 
 ## Limitations
 
@@ -419,7 +423,7 @@ Not yet reconciled:
 
 | Lever | Current | Rationale | Change signal |
 |---|---|---|---|
-| live cards per fibby instance | 16, mints beyond are refused | the pcsc-lite reader table; no transport work needed to ship | a mint is refused in normal use, or FDR 0032 slice 3 (subagents become principals) is scheduled; then build the direct agent-to-fibby transport |
+| live cards per fibby instance | 16, mints beyond are refused; a first-phase number the operator expects to change | the pcsc-lite reader table; no transport work needed to ship | a mint is refused in normal use, or FDR 0032 slice 3 (subagents become principals) is scheduled; then build the direct agent-to-fibby transport |
 | guarded-memory backing | anonymous locked pages | available everywhere the holder runs | a decision to defend against root reading process memory; then add `memfd_secret` with fallback |
 | holder key lifetime | none; scope exit or retire only | validity lives in the certificate chain; a second clock can disagree with it | cards observed outliving their sessions, or a leaked binding found in use |
 | minted-key PIN policy | `never` | only the service account reaches fibby; a PIN would be a second secret in the same account | in-fibby per-key enforcement is taken up |
@@ -434,12 +438,11 @@ Not yet reconciled:
   principal's key include processes in the agent scope (git commit
   signing, clown's hooks). If troupe sends the mint, the peer on that
   connection is not the scope that will sign. The mint request probably
-  has to name a target scope, with a rule for who may mint for it. This
-  is unsettled between the two records and is with the operator.
-- **What does a principal do when its mint is refused at the cap?**
-  Neither record decides it. Falling back to a tier-1 key is the obvious
-  candidate, and it would make the tier of a principal's key something
-  a verifier has to check rather than assume.
+  has to name a target scope, with a rule for who may mint for it. The
+  spinclass session reports the operator's answer as "Leave open for
+  now", until clown#244 defines the two scopes. The mint extension's
+  wire format must not assume an answer; this blocks RFC part 2, not
+  phases (a) to (c).
 - **How is a cgroup classified as frontend or agent scope?** No naming
   rule or unit property exists yet; FDR 0032 assigns it to clown#244.
   Phases (d) and (e) depend on it.
