@@ -525,6 +525,13 @@ func testAttest(client agent.ExtendedAgent, keys []*agent.Key, hardware bool) {
 func main() {
 	var hardware bool
 	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "pigpen-open" {
+		if len(args) != 2 {
+			pigpenOpenUsage()
+			os.Exit(2)
+		}
+		os.Exit(runPigpenOpen(args[1]))
+	}
 	for i, a := range args {
 		if a == "--hardware" {
 			hardware = true

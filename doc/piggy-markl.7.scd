@@ -101,7 +101,12 @@ _internal/echo/pigpen_resolve_
 _cmd/piggy-agent-conformance_, _cmd/piggy-test-sshd_
 	The two Go test binaries the bats lanes need: the SSH-agent
 	wire-protocol conformance tester and a test-only SSH server. Plain
-	_package main_, not registry consumers.
+	_package main_, not registry consumers. The conformance binary's
+	_pigpen-open <socket>_ mode is the exception: it seals a pigpen
+	document to the agent's P-256 keys and opens it with *Document.Open*
+	and *AgentECDHOracle*, which is how
+	_just test-bats-conformance-pigpen-open-fibby_ runs that surface
+	against the real Rust agent and a virtual card.
 
 # PRODUCER AND CONSUMERS
 

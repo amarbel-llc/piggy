@@ -33,6 +33,19 @@ type X25519Identity = internal.X25519Identity
 // 0003 equality.
 var CanonicalRecipientSet = internal.CanonicalRecipientSet
 
+// ErrHeaderMAC: a wrap opened, but the header is not the one that was
+// sealed (a recipient added or removed, a changed description).
+var ErrHeaderMAC = internal.ErrHeaderMAC
+
+// ErrNoUsableRecipient: no wrap opened with the identities given,
+// because none matched or because a matching wrap did not
+// authenticate.
+var ErrNoUsableRecipient = internal.ErrNoUsableRecipient
+
+// ErrPayload: the header is authentic, but the payload is truncated or
+// altered.
+var ErrPayload = internal.ErrPayload
+
 // NewRecipientSet builds a payload-less pigpen document — the drop-in for
 // a piggy-ids file (RFC 0008 §2.2).
 var NewRecipientSet = internal.NewRecipientSet

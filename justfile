@@ -330,7 +330,7 @@ test: validate-grammar test-grammar-vectors test-bats-default test-bats-conforma
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-module test-nix-hm-secrets-module
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby
+_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -1107,6 +1107,30 @@ test-bats-conformance-agent-concurrent-sign:
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_agent_concurrent_sign_fibby.bats
+
+# piggy#299: a sealed pigpen document opens through the real Rust `piggy
+# agent` over fibby's slot 9D, driven by the Go surface a consumer uses
+# (pigpen.Document.Open + agent.AgentECDHOracle, via the conformance
+# binary's `pigpen-open` mode). The Go unit tests only reach an in-process
+# stand-in agent. [linux]-only like the other fibby lanes.
+#
+# run the fibby-backed pigpen Open-through-the-agent bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-pigpen-open-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    conformance_out=$(nix build .#piggy.tests.conformance --no-link --print-out-paths)
+    # PIGGY satisfies the parent common.bash loader without a cargo build;
+    # the test itself drives PIGGY_BIN only.
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      CONFORMANCE_BIN="$conformance_out/bin/piggy-agent-conformance" \
+      BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/pigpen_open_agent_fibby.bats
 
 # piggy#215 step 3: `piggy agent --upstream` end to end — fibby-backed
 # native 9A keys AND a proxied stock OpenSSH ssh-agent on one socket.
