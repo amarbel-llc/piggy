@@ -24,6 +24,7 @@ mod hyphence;
 
 pub use document::{
     Document, EcdhOracle, Pointer, Recipient, SealInputs, X25519Identity, recipient_id,
+    validate_pointer_kind,
 };
 
 /// Errors produced by this crate.

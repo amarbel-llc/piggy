@@ -210,6 +210,22 @@ hard failures; only the message text distinguishes them, so an operator
 can immediately tell "the plugin isn't installed" from "the plugin ran
 and rejected the locator."
 
+A resolver is another party's program, so an implementation MUST bound
+the run, and each of these is the same hard failure (piggy#302):
+
+- the resolver does not finish within a deadline. The Rust CLI allows 30
+  seconds (`PIGGY_PIGPEN_RESOLVER_TIMEOUT`); the Go library uses the
+  caller's context. Processes the resolver started MUST NOT keep the
+  caller waiting once it has exited or been stopped;
+- the resolver prints more than 1 MiB;
+- the output is a sealed document, or a recipient set with no encryption
+  recipient (RFC 0008 §2.3). A failed answer MUST NOT be cached.
+
+The resolver's stderr is untrusted text: it MUST be bounded and quoted
+or otherwise stripped of control characters before it reaches a
+terminal. An implementation SHOULD NOT run a resolver found through a
+relative or empty `$PATH` entry; both reference implementations refuse.
+
 ## 6. Security considerations
 
 Piggy performs **zero trust evaluation** of either the resolved bytes or

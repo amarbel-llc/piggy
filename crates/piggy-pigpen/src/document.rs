@@ -140,6 +140,14 @@ impl Document {
         Ok(doc)
     }
 
+    /// The recipients a file key can be wrapped to (RFC 0008 §2.3), in
+    /// document order. Lines under other purposes or formats are skipped.
+    pub fn encryption_recipients(&self) -> impl Iterator<Item = &Recipient> {
+        self.recipients
+            .iter()
+            .filter(|r| is_encryption_recipient(&r.id))
+    }
+
     /// Recover the plaintext, trying each recipient against the supplied
     /// X25519 identities and, for P-256 recipients, the oracle.
     pub fn open(

@@ -50,6 +50,9 @@ pub(crate) fn resolve_piggy_ids_path(piggy_ids: &Path) -> Result<PathBuf, String
                     ptr.locator
                 )
             })?;
+            // Check the answer before caching it: a bad one must not be
+            // served for the next CACHE_TTL.
+            resolved_recipient_set(&bytes, &ptr)?;
             if let Some(parent) = cache_file.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("create {}: {e}", parent.display()))?;
@@ -58,8 +61,7 @@ pub(crate) fn resolve_piggy_ids_path(piggy_ids: &Path) -> Result<PathBuf, String
                 .map_err(|e| format!("writing cache {}: {e}", cache_file.display()))?;
             bytes
         };
-        let doc = piggy_pigpen::Document::parse(&resolved_bytes)
-            .map_err(|e| format!("parsing resolved bytes as a pigpen document: {e}"))?;
+        let doc = resolved_recipient_set(&resolved_bytes, &ptr)?;
         return recipient_set_doc_to_rfc0003_cache(piggy_ids, doc);
     }
 
@@ -77,6 +79,32 @@ pub(crate) fn resolve_piggy_ids_path(piggy_ids: &Path) -> Result<PathBuf, String
         }
     })?;
     recipient_set_doc_to_rfc0003_cache(piggy_ids, doc)
+}
+
+/// What a resolver may answer with (RFC 0010 §3, §5): a recipient-set
+/// document naming at least one encryption recipient. A sealed document
+/// and an empty set are failures, as in the Go resolver.
+fn resolved_recipient_set(
+    bytes: &[u8],
+    ptr: &piggy_pigpen::Pointer,
+) -> Result<piggy_pigpen::Document, String> {
+    let fail = |cause: String| {
+        format!(
+            "pointer (kind={:?}, locator={:?}) {cause}",
+            ptr.kind, ptr.locator
+        )
+    };
+    let doc = piggy_pigpen::Document::parse(bytes)
+        .map_err(|e| fail(format!("did not resolve to a pigpen recipient set: {e}")))?;
+    if doc.sealed() {
+        return Err(fail(
+            "resolved to a sealed document, want a recipient set".into(),
+        ));
+    }
+    if doc.encryption_recipients().next().is_none() {
+        return Err(fail("resolved to no encryption recipients".into()));
+    }
+    Ok(doc)
 }
 
 /// Whether the bytes carry the pointer type line, valid pointer or not.
@@ -209,8 +237,22 @@ fn cache_disabled() -> bool {
 /// `resolve <locator>`, returning its stdout on success (exit 0) or an
 /// error folding in its stderr on failure. Mirrors the age-plugin-*
 /// PATH-discovery convention already used by `age-plugin-piggy`.
+///
+/// The resolver is somebody else's program talking to somebody else's
+/// server, so the run is bounded (piggy#302): a deadline, a cap on what it
+/// may print, and its own process group, which is killed whole when either
+/// is exceeded. Its stderr reaches the error quoted, so it cannot write
+/// control sequences to the terminal.
 fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+
+    piggy_pigpen::validate_pointer_kind(kind).map_err(|e| e.to_string())?;
     let binary = format!("pigpen-resolver-{kind}");
+    let path = find_on_absolute_path(&binary).ok_or_else(|| {
+        format!("{binary} not found on PATH (relative and empty PATH entries are not searched)")
+    })?;
+
     // Retry on ETXTBSY ("Text file busy", os error 26): on Linux, exec fails
     // this way while any process holds the target file open for writing. In a
     // multi-threaded program a concurrent fork can transiently inherit a
@@ -220,28 +262,163 @@ fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
     // installed resolver never hits it, so production behaviour is unchanged.
     const MAX_RETRIES: u32 = 5;
     let mut attempts = 0u32;
-    let output = loop {
-        match std::process::Command::new(&binary)
+    let mut child = loop {
+        match std::process::Command::new(&path)
             .arg("resolve")
             .arg(locator)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
         {
-            Ok(out) => break out,
+            Ok(child) => break child,
             Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempts < MAX_RETRIES => {
                 attempts += 1;
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            Err(e) => return Err(format!("{binary} not found on PATH: {e}")),
+            Err(e) => return Err(format!("running {}: {e}", path.display())),
         }
     };
-    if !output.status.success() {
+
+    // The child leads its own process group, so this reaches whatever it
+    // started as well.
+    let group = child.id() as libc::pid_t;
+    let kill_group = || {
+        // SAFETY: kill(2) with a negative pid signals a process group; it
+        // touches no memory of ours.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+    };
+
+    let stdout = read_capped(
+        child.stdout.take().expect("piped"),
+        MAX_RESOLVER_STDOUT,
+        PastLimit::Close,
+    );
+    let stderr = read_capped(
+        child.stderr.take().expect("piped"),
+        MAX_RESOLVER_STDERR,
+        PastLimit::Discard,
+    );
+
+    let timeout = resolver_timeout();
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                kill_group();
+                let _ = child.wait();
+                return Err(format!(
+                    "{binary} did not finish within {}s",
+                    timeout.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(e) => {
+                kill_group();
+                return Err(format!("waiting for {binary}: {e}"));
+            }
+        }
+    };
+
+    // The resolver has exited; anything it left running still holds the
+    // pipes. Give the readers a moment, then end the group.
+    let collect = |reader: std::sync::mpsc::Receiver<CappedOutput>| {
+        reader.recv_timeout(RESOLVER_WAIT_DELAY).or_else(|_| {
+            kill_group();
+            reader.recv_timeout(RESOLVER_WAIT_DELAY)
+        })
+    };
+    let (Ok(stdout), Ok(stderr)) = (collect(stdout), collect(stderr)) else {
+        return Err(format!("{binary} left a process holding its output open"));
+    };
+
+    if stdout.overflowed {
         return Err(format!(
-            "{binary} resolve {locator} exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            "{binary} printed more than the {MAX_RESOLVER_STDOUT}-byte recipient-set size limit"
         ));
     }
-    Ok(output.stdout)
+    if !status.success() {
+        return Err(format!(
+            "{binary} exited {status}: {:?}",
+            String::from_utf8_lossy(&stderr.bytes).trim()
+        ));
+    }
+    Ok(stdout.bytes)
+}
+
+/// A recipient set is a few hundred bytes per recipient; a megabyte is
+/// thousands of them.
+const MAX_RESOLVER_STDOUT: usize = 1 << 20;
+const MAX_RESOLVER_STDERR: usize = 4 << 10;
+const RESOLVER_WAIT_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+const DEFAULT_RESOLVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `PIGGY_PIGPEN_RESOLVER_TIMEOUT` (whole seconds, at least 1) overrides
+/// the 30-second default; anything else is ignored.
+fn resolver_timeout() -> std::time::Duration {
+    std::env::var("PIGGY_PIGPEN_RESOLVER_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map_or(DEFAULT_RESOLVER_TIMEOUT, std::time::Duration::from_secs)
+}
+
+struct CappedOutput {
+    bytes: Vec<u8>,
+    overflowed: bool,
+}
+
+/// What a reader does once it has `limit` bytes.
+#[derive(Clone, Copy)]
+enum PastLimit {
+    /// Close the pipe: the writer gets EPIPE and the run is over. For
+    /// stdout, where more than the limit is an error anyway.
+    Close,
+    /// Keep reading and throw it away, so a chatty but working resolver
+    /// is not killed for what it logs. For stderr.
+    Discard,
+}
+
+/// Collect up to `limit` bytes of `source` on a thread.
+fn read_capped<R: std::io::Read + Send + 'static>(
+    mut source: R,
+    limit: usize,
+    past_limit: PastLimit,
+) -> std::sync::mpsc::Receiver<CappedOutput> {
+    use std::io::Read as _;
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        // One byte past the limit tells "exactly the limit" from "more".
+        let _ = source
+            .by_ref()
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes);
+        let overflowed = bytes.len() > limit;
+        bytes.truncate(limit);
+        if overflowed && matches!(past_limit, PastLimit::Discard) {
+            let _ = std::io::copy(&mut source, &mut std::io::sink());
+        }
+        let _ = send.send(CappedOutput { bytes, overflowed });
+    });
+    receive
+}
+
+/// The first executable regular file named `binary` in an ABSOLUTE `PATH`
+/// entry. A relative or empty entry means "the working directory", which
+/// for a store is not a place to run programs from.
+fn find_on_absolute_path(binary: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(binary))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
 }
 
 #[cfg(test)]
@@ -275,6 +452,225 @@ mod tests {
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// A valid encryption-recipient line for resolver fixtures.
+    fn test_recipient() -> String {
+        piggy_markl::Id::new(
+            Some(piggy_markl::PurposeId::PiggyRecipientV1),
+            piggy_markl::FormatId::AgeX25519Pub,
+            vec![1u8; 32],
+        )
+        .unwrap()
+        .to_wire()
+    }
+
+    fn one_recipient_resolver_script() -> String {
+        format!(
+            "#!/bin/sh\nprintf -- '---\\n- {}\\n! pigpen-v1\\n---\\n'\n",
+            test_recipient()
+        )
+    }
+
+    /// Install `pigpen-resolver-<kind>` with `script` in a fresh directory,
+    /// put that directory first on PATH, run `body`, restore PATH. Holds
+    /// env_lock for the duration.
+    fn with_resolver<T>(kind: &str, script: &str, body: impl FnOnce(&Path) -> T) -> T {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = env_lock();
+        let dir = tempdir();
+        let resolver = dir.join(format!("pigpen-resolver-{kind}"));
+        std::fs::write(&resolver, script).unwrap();
+        std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let saved_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                dir.display(),
+                saved_path
+                    .as_ref()
+                    .map_or_else(String::new, |p| p.to_string_lossy().into_owned())
+            ),
+        );
+        let out = body(&dir);
+        match saved_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        out
+    }
+
+    /// Resolve a pointer of `kind` through the full path, with the cache
+    /// in the fixture directory.
+    fn resolve_pointer_of_kind(dir: &Path, kind: &str) -> Result<PathBuf, String> {
+        let ids = dir.join("piggy-ids");
+        std::fs::write(
+            &ids,
+            format!("---\n- kind=\"{kind}\"\n- locator=\"unused\"\n! pigpen-pointer-v1\n---\n"),
+        )
+        .unwrap();
+        let saved_cache = std::env::var_os("XDG_CACHE_HOME");
+        std::env::set_var("XDG_CACHE_HOME", dir.join("xdg-cache"));
+        let resolved = resolve_piggy_ids_path(&ids);
+        match saved_cache {
+            Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+            None => std::env::remove_var("XDG_CACHE_HOME"),
+        }
+        resolved
+    }
+
+    // --- piggy#302: the resolver run is bounded ---------------------------
+
+    #[test]
+    fn resolver_that_never_exits_is_stopped_at_the_deadline() {
+        let started = std::time::Instant::now();
+        let err = with_resolver("hangs", "#!/bin/sh\nexec sleep 60\n", |_| {
+            std::env::set_var("PIGGY_PIGPEN_RESOLVER_TIMEOUT", "1");
+            let out = invoke_resolver("hangs", "l");
+            std::env::remove_var("PIGGY_PIGPEN_RESOLVER_TIMEOUT");
+            out
+        })
+        .unwrap_err();
+        assert!(err.contains("did not finish"), "got: {err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "took {:?}; the deadline did not stop the resolver",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn resolver_child_holding_the_output_does_not_hold_the_caller() {
+        // The resolver exits at once; the sleep it started keeps stdout.
+        let started = std::time::Instant::now();
+        let out = with_resolver("forks", "#!/bin/sh\nsleep 60 &\nexit 0\n", |_| {
+            invoke_resolver("forks", "l")
+        });
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "took {:?}; a grandchild held the caller",
+            started.elapsed()
+        );
+        // Killing the group closes the pipe, so the (empty) output arrives.
+        assert_eq!(out.unwrap(), b"");
+    }
+
+    #[test]
+    fn resolver_output_past_the_size_limit_is_refused() {
+        let err = with_resolver(
+            "floods",
+            "#!/bin/sh\nwhile :; do echo 0123456789abcdef0123456789abcdef; done\n",
+            |_| invoke_resolver("floods", "l"),
+        )
+        .unwrap_err();
+        assert!(err.contains("size limit"), "got: {err}");
+    }
+
+    #[test]
+    fn resolver_stderr_is_quoted_and_bounded() {
+        let err = with_resolver(
+            "noisy",
+            "#!/bin/sh\nprintf '\\033[31mred\\033[0m' >&2\ni=0\nwhile [ $i -lt 2000 ]; do echo 0123456789abcdef >&2; i=$((i+1)); done\nexit 1\n",
+            |_| invoke_resolver("noisy", "l"),
+        )
+        .unwrap_err();
+        assert!(!err.contains('\x1b'), "raw escape sequence in: {err:?}");
+        assert!(
+            err.len() < 4 * MAX_RESOLVER_STDERR,
+            "error is {} bytes; stderr was not bounded",
+            err.len()
+        );
+    }
+
+    #[test]
+    fn resolver_logging_past_the_stderr_limit_still_succeeds() {
+        let out = with_resolver(
+            "chatty",
+            "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do echo 0123456789abcdef >&2; i=$((i+1)); done\nprintf ok\n",
+            |_| invoke_resolver("chatty", "l"),
+        );
+        assert_eq!(out.unwrap(), b"ok");
+    }
+
+    #[test]
+    fn resolver_in_a_relative_path_entry_is_not_run() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = env_lock();
+        let dir = tempdir();
+        let resolver = dir.join("pigpen-resolver-cwd-only");
+        std::fs::write(&resolver, one_recipient_resolver_script()).unwrap();
+        std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // A relative spelling of `dir`, built by climbing out of the working
+        // directory, so the test need not change it (it is process-wide and
+        // other tests run in parallel).
+        let cwd = std::env::current_dir().unwrap();
+        let climb = "../".repeat(cwd.components().count());
+        let relative = format!("{climb}{}", dir.strip_prefix("/").unwrap().display());
+        assert!(
+            Path::new(&relative)
+                .join("pigpen-resolver-cwd-only")
+                .exists(),
+            "the relative entry does not reach the fixture"
+        );
+
+        let saved_path = std::env::var_os("PATH");
+        // The relative entry, and the empty entry that means the working
+        // directory.
+        std::env::set_var("PATH", format!("{relative}::/nonexistent-piggy-test-dir"));
+        let out = invoke_resolver("cwd-only", "l");
+        match saved_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let err = out.unwrap_err();
+        assert!(err.contains("not found on PATH"), "got: {err}");
+    }
+
+    #[test]
+    fn pointer_resolving_to_no_recipients_is_refused_and_not_cached() {
+        let (first, cached) = with_resolver(
+            "empty",
+            "#!/bin/sh\nprintf -- '---\\n! pigpen-v1\\n---\\n'\n",
+            |dir| {
+                let first = resolve_pointer_of_kind(dir, "empty");
+                let cached = dir.join("xdg-cache").join("piggy").exists()
+                    && std::fs::read_dir(dir.join("xdg-cache").join("piggy"))
+                        .unwrap()
+                        .next()
+                        .is_some();
+                (first, cached)
+            },
+        );
+        let err = first.unwrap_err();
+        assert!(err.contains("no encryption recipients"), "got: {err}");
+        assert!(!cached, "a refused answer was written to the cache");
+    }
+
+    #[test]
+    fn pointer_resolving_to_a_sealed_document_is_refused() {
+        // Any X25519 u-coordinate that is not a low-order point will do:
+        // nobody opens this document.
+        let sealed_to =
+            piggy_pigpen::recipient_id(piggy_markl::FormatId::AgeX25519Pub, vec![9u8; 32]).unwrap();
+        let sealed = piggy_pigpen::Document::seal(b"piggy-test: not a recipient set", &[sealed_to])
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+
+        let err = with_resolver(
+            "sealed",
+            "#!/bin/sh\ncat \"$(dirname \"$0\")/sealed.pigpen\"\n",
+            |dir| {
+                std::fs::write(dir.join("sealed.pigpen"), &sealed).unwrap();
+                resolve_pointer_of_kind(dir, "sealed")
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("sealed document"), "got: {err}");
     }
 
     #[test]
@@ -606,11 +1002,7 @@ mod tests {
         let _guard = env_lock();
         let dir = tempdir();
         let resolver = dir.join("pigpen-resolver-fixture-kind");
-        std::fs::write(
-            &resolver,
-            b"#!/bin/sh\nprintf -- '---\\n! pigpen-v1\\n---\\n'\n",
-        )
-        .unwrap();
+        std::fs::write(&resolver, one_recipient_resolver_script()).unwrap();
         std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let ids = dir.join("piggy-ids");
@@ -651,7 +1043,10 @@ mod tests {
         }
 
         let resolved = resolved.unwrap();
-        assert_eq!(std::fs::read_to_string(&resolved).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(&resolved).unwrap().trim(),
+            test_recipient()
+        );
     }
 
     #[test]
@@ -674,8 +1069,9 @@ mod tests {
         std::fs::write(
             &resolver,
             format!(
-                "#!/bin/sh\nprintf x >> {}\nprintf -- '---\\n! pigpen-v1\\n---\\n'\n",
-                call_count_file.display()
+                "#!/bin/sh\nprintf x >> {}\nprintf -- '---\\n- {}\\n! pigpen-v1\\n---\\n'\n",
+                call_count_file.display(),
+                test_recipient()
             ),
         )
         .unwrap();
