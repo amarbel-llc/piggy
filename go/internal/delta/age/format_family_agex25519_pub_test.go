@@ -3,6 +3,7 @@ package age
 import (
 	"bytes"
 	"crypto/ecdh"
+	"encoding/hex"
 	"io"
 	"strings"
 	"testing"
@@ -132,19 +133,37 @@ func TestAgeX25519PubIsNotReadableByAnotherIdentity(t *testing.T) {
 	}
 }
 
-// An all-zero X25519 "public key" is a low-order point: anything encrypted
-// to it is readable by anyone. It must not be usable as a recipient.
+// A low-order X25519 "public key" yields the same shared secret for every
+// sender, so anything encrypted to it is readable by anyone. None may be
+// usable as a recipient. These are the small-order points of Curve25519,
+// the non-canonical encodings among them (libsodium's blocklist).
 func TestAgeX25519PubRefusesALowOrderKey(t *testing.T) {
-	var id markl.Id
-	if err := id.SetMarklId(markl.FormatIdAgeX25519Pub, make([]byte, 32)); err != nil {
-		t.Fatal(err)
-	}
+	for label, point := range map[string]string{
+		"zero":            "0000000000000000000000000000000000000000000000000000000000000000",
+		"one":             "0100000000000000000000000000000000000000000000000000000000000000",
+		"order 8":         "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+		"order 8, twin":   "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+		"p - 1":           "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"p (zero)":        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"p + 1 (one)":     "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"zero, high bit":  "0000000000000000000000000000000000000000000000000000000000000080",
+		"p - 1, high bit": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	} {
+		key, err := hex.DecodeString(point)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var id markl.Id
+		if err := id.SetMarklId(markl.FormatIdAgeX25519Pub, key); err != nil {
+			t.Fatal(err)
+		}
 
-	wrapper, err := id.GetIOWrapper()
-	if err == nil {
-		_, err = wrapper.WrapWriter(io.Discard)
-	}
-	if err == nil {
-		t.Fatal("encrypting to the all-zero key was allowed")
+		wrapper, err := id.GetIOWrapper()
+		if err == nil {
+			_, err = wrapper.WrapWriter(io.Discard)
+		}
+		if err == nil {
+			t.Errorf("%s: encrypting to a low-order key was allowed", label)
+		}
 	}
 }

@@ -26,7 +26,7 @@ pub use document::{
     Document, EcdhOracle, Pointer, Recipient, SealInputs, X25519Identity, recipient_id,
 };
 
-/// Errors produced by the pigpen prototype.
+/// Errors produced by this crate.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("hyphence framing: {0}")]
@@ -43,6 +43,10 @@ pub enum Error {
     Malformed(String),
     #[error("no usable recipient (no matching identity/oracle)")]
     NoRecipient,
+    /// No recipient opened and the ECDH oracle failed for at least one:
+    /// an agent or card problem, not a wrong-recipient one.
+    #[error("no recipient could be opened; the ECDH oracle failed: {0}")]
+    Oracle(String),
     #[error("header MAC mismatch")]
     MacMismatch,
 }

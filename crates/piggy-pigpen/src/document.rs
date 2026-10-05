@@ -153,8 +153,17 @@ impl Document {
             ));
         }
         let mac = self.mac.as_ref().unwrap();
+        let mut oracle_failures: Vec<String> = Vec::new();
+        let mut tried: Vec<&[u8]> = Vec::new();
         for r in &self.recipients {
             let Some(wrap) = &r.wrap else { continue };
+            // One attempt per distinct key: a well-formed document names
+            // each recipient once, and a crafted one repeating a key must
+            // not buy one card operation (a touch, a PIN) per repeat.
+            if tried.contains(&r.id.data()) {
+                continue;
+            }
+            tried.push(r.id.data());
             let file_key = match r.id.format() {
                 FormatId::AgeX25519Pub => {
                     let Some(id) = x25519.iter().find(|i| i.public == r.id.data()) else {
@@ -165,8 +174,15 @@ impl Document {
                 FormatId::PivyEcdhP256Pub => {
                     let Some(oracle) = oracle else { continue };
                     let epk = crypto::p256_wrap_epk(wrap)?;
-                    let shared = oracle.ecdh(&r.id, epk)?;
-                    crypto::unwrap_p256_with_shared(wrap, r.id.data(), &shared)
+                    match oracle.ecdh(&r.id, epk) {
+                        Ok(shared) => crypto::unwrap_p256_with_shared(wrap, r.id.data(), &shared),
+                        // An oracle that could not answer is not "not our
+                        // key": remember it and try the other recipients.
+                        Err(e) => {
+                            oracle_failures.push(e.to_string());
+                            continue;
+                        }
+                    }
                 }
                 _ => continue,
             };
@@ -177,6 +193,9 @@ impl Document {
                 return Err(Error::MacMismatch);
             }
             return crypto::open_payload(&file_key, &self.payload);
+        }
+        if !oracle_failures.is_empty() {
+            return Err(Error::Oracle(oracle_failures.join("; ")));
         }
         Err(Error::NoRecipient)
     }
@@ -334,8 +353,15 @@ impl Pointer {
         // mirroring Document::build's guard on description/comment.
         // locator in particular will eventually carry externally-supplied
         // strings (Task 7's resolver dispatch).
-        reject_control("kind", &self.kind)?;
-        reject_control("locator", &self.locator)?;
+        validate_pointer_kind(&self.kind)?;
+        for (field, value) in [("kind", &self.kind), ("locator", &self.locator)] {
+            reject_control(field, value)?;
+            if value.contains('"') {
+                return Err(Error::Malformed(format!(
+                    "pointer {field} must not contain a double quote"
+                )));
+            }
+        }
         let h = HyphenceDoc {
             meta: vec![
                 MetaLine {
@@ -358,14 +384,29 @@ impl Pointer {
 
     pub fn parse(raw: &[u8]) -> Result<Pointer> {
         let h = crate::hyphence::parse(raw)?;
-        let is_pointer = h
-            .meta
-            .iter()
-            .any(|l| l.prefix == b'!' && l.body == POINTER_TYPE_TAG);
-        if !is_pointer {
-            return Err(Error::Malformed(format!(
-                "not a {POINTER_TYPE_TAG} document"
-            )));
+        let mut type_lines = 0;
+        for l in h.meta.iter().filter(|l| l.prefix == b'!') {
+            type_lines += 1;
+            if l.body != POINTER_TYPE_TAG {
+                return Err(Error::Malformed(format!(
+                    "not a {POINTER_TYPE_TAG} document (type {:?})",
+                    l.body
+                )));
+            }
+        }
+        match type_lines {
+            0 => {
+                return Err(Error::Malformed(format!(
+                    "not a {POINTER_TYPE_TAG} document (no '!' type line)"
+                )));
+            }
+            1 => {}
+            _ => return Err(Error::Malformed("more than one '!' type line".into())),
+        }
+        if !h.body.is_empty() {
+            return Err(Error::Malformed(
+                "a pointer document carries no body".into(),
+            ));
         }
         let mut kind = None;
         let mut locator = None;
@@ -373,27 +414,44 @@ impl Pointer {
             if l.prefix != b'-' {
                 continue;
             }
-            if let Some(v) = parse_quoted_kv(&l.body, "kind") {
-                kind = Some(v);
-            } else if let Some(v) = parse_quoted_kv(&l.body, "locator") {
-                locator = Some(v);
-            } else {
-                // RFC 0008 §2.2: a pigpen-pointer-v1 document carrying a `-`
-                // line that isn't a recognized kind/locator tag — e.g. an
-                // actual recipient line — is a mixed-state document and
-                // MUST be rejected. Mirrors Document::validate()'s
-                // equivalent check for its own two faces.
-                return Err(Error::Malformed(format!(
-                    "unexpected '-' line in {POINTER_TYPE_TAG} document: {:?}",
-                    l.body
-                )));
+            match (
+                parse_quoted_kv(&l.body, "kind"),
+                parse_quoted_kv(&l.body, "locator"),
+            ) {
+                (Some(v), _) if kind.is_none() => kind = Some(v),
+                (_, Some(v)) if locator.is_none() => locator = Some(v),
+                // A recipient line, a repeated tag, or anything else: a
+                // mixed-state document (RFC 0008 §2.2).
+                _ => {
+                    return Err(Error::Malformed(format!(
+                        "unexpected '-' line in {POINTER_TYPE_TAG} document: {:?}",
+                        l.body
+                    )));
+                }
             }
         }
         let kind = kind.ok_or_else(|| Error::Malformed("pointer missing kind tag".into()))?;
         let locator =
             locator.ok_or_else(|| Error::Malformed("pointer missing locator tag".into()))?;
+        validate_pointer_kind(&kind)?;
         Ok(Pointer { kind, locator })
     }
+}
+
+/// RFC 0010 §2's one constraint on a kind: it names an executable looked
+/// up on PATH, so it must not be empty and must not contain a path
+/// separator or a NUL byte. A kind with a `/` would make the resolver
+/// spawn a cwd-relative path instead of a PATH lookup.
+pub fn validate_pointer_kind(kind: &str) -> Result<()> {
+    if kind.is_empty() {
+        return Err(Error::Malformed("pointer kind is empty".into()));
+    }
+    if kind.contains(['/', '\0']) {
+        return Err(Error::Malformed(format!(
+            "pointer kind {kind:?} contains a path separator or NUL"
+        )));
+    }
+    Ok(())
 }
 
 /// Parse a `key="value"` tag body, e.g. `kind="papi-http"` with
@@ -672,6 +730,65 @@ mod tests {
 
         assert_eq!(doc.open(None, &[xident]).unwrap(), plaintext);
         assert_eq!(doc.open(Some(&oracle), &[]).unwrap(), plaintext);
+    }
+
+    /// An oracle that cannot answer (agent unreachable, card refused),
+    /// counting how often it was asked.
+    struct FailingOracle {
+        calls: std::cell::Cell<u32>,
+    }
+    impl EcdhOracle for FailingOracle {
+        fn ecdh(&self, _self: &Id, _partner_epk: &[u8]) -> Result<[u8; 32]> {
+            self.calls.set(self.calls.get() + 1);
+            Err(Error::Crypto("agent unreachable".into()))
+        }
+    }
+
+    #[test]
+    fn oracle_failure_does_not_stop_a_software_recipient_from_opening() {
+        let (ppub, _) = new_p256();
+        let (xpub, xident) = new_x25519();
+        // The P-256 recipient comes first, so the oracle is asked first.
+        let ids = vec![
+            recipient_id(FormatId::PivyEcdhP256Pub, ppub).unwrap(),
+            recipient_id(FormatId::AgeX25519Pub, xpub).unwrap(),
+        ];
+        let doc = Document::seal(b"either key suffices", &ids).unwrap();
+        let oracle = FailingOracle { calls: 0.into() };
+        assert_eq!(
+            doc.open(Some(&oracle), &[xident]).unwrap(),
+            b"either key suffices"
+        );
+    }
+
+    #[test]
+    fn oracle_failure_is_reported_as_such_when_nothing_opens() {
+        let (ppub, _) = new_p256();
+        let id = recipient_id(FormatId::PivyEcdhP256Pub, ppub).unwrap();
+        let doc = Document::seal(b"secret", &[id]).unwrap();
+        let oracle = FailingOracle { calls: 0.into() };
+        match doc.open(Some(&oracle), &[]) {
+            Err(Error::Oracle(detail)) => assert!(detail.contains("agent unreachable")),
+            other => panic!("want Error::Oracle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_repeated_recipient_key_costs_one_oracle_call() {
+        let (ppub, _) = new_p256();
+        let id = recipient_id(FormatId::PivyEcdhP256Pub, ppub).unwrap();
+        let mut doc = Document::seal(b"secret", &[id]).unwrap();
+        for _ in 0..2 {
+            let repeat = Recipient {
+                id: doc.recipients[0].id.clone(),
+                comment: None,
+                wrap: doc.recipients[0].wrap.clone(),
+            };
+            doc.recipients.push(repeat);
+        }
+        let oracle = FailingOracle { calls: 0.into() };
+        assert!(doc.open(Some(&oracle), &[]).is_err());
+        assert_eq!(oracle.calls.get(), 1);
     }
 
     #[test]
@@ -1101,6 +1218,73 @@ mod tests {
         // equivalent mixed-state check for its own two faces.
         let raw = b"---\n- kind=\"papi-http\"\n- locator=\"https://example.com\"\n- piggy-recipient-v1@age_x25519_pub-q73he0q5yzfu3d64msd3p6rvksnrwjk3d2598mgtmlqt9wrdr37q0vdmee\n! pigpen-pointer-v1\n---\n";
         assert!(Pointer::parse(raw).is_err());
+    }
+
+    // The same rejections go/internal/delta/pigpen's ParsePointer makes: the
+    // two readers must agree on what a pointer is, because the kind names a
+    // binary that gets run.
+    #[test]
+    fn pointer_parse_rejects_what_the_go_reader_rejects() {
+        for (label, raw) in [
+            (
+                "a missing kind",
+                "---\n- locator=\"l\"\n! pigpen-pointer-v1\n---\n",
+            ),
+            (
+                "a repeated kind",
+                "---\n- kind=\"k\"\n- kind=\"other\"\n- locator=\"l\"\n! pigpen-pointer-v1\n---\n",
+            ),
+            (
+                "a repeated locator",
+                "---\n- kind=\"k\"\n- locator=\"l\"\n- locator=\"m\"\n! pigpen-pointer-v1\n---\n",
+            ),
+            (
+                "a kind with a slash",
+                "---\n- kind=\"../evil\"\n- locator=\"l\"\n! pigpen-pointer-v1\n---\n",
+            ),
+            (
+                "an empty kind",
+                "---\n- kind=\"\"\n- locator=\"l\"\n! pigpen-pointer-v1\n---\n",
+            ),
+            (
+                "an unquoted kind",
+                "---\n- kind=k\n- locator=\"l\"\n! pigpen-pointer-v1\n---\n",
+            ),
+            (
+                "two type lines",
+                "---\n- kind=\"k\"\n- locator=\"l\"\n! pigpen-pointer-v1\n! pigpen-pointer-v1\n---\n",
+            ),
+            (
+                "a second type line of another type",
+                "---\n- kind=\"k\"\n- locator=\"l\"\n! pigpen-pointer-v1\n! pigpen-v1\n---\n",
+            ),
+            (
+                "a body",
+                "---\n- kind=\"k\"\n- locator=\"l\"\n! pigpen-pointer-v1\n---\n\nbody\n",
+            ),
+            ("no type line", "---\n- kind=\"k\"\n- locator=\"l\"\n---\n"),
+            ("not hyphence", "kind=k\n"),
+        ] {
+            assert!(
+                Pointer::parse(raw.as_bytes()).is_err(),
+                "{label}: accepted, want rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_to_bytes_refuses_what_would_not_round_trip() {
+        for (label, kind, locator) in [
+            ("a quote in the locator", "k", "a\"b"),
+            ("a slash in the kind", "a/b", "l"),
+            ("an empty kind", "", "l"),
+        ] {
+            let ptr = Pointer {
+                kind: kind.into(),
+                locator: locator.into(),
+            };
+            assert!(ptr.to_bytes().is_err(), "{label}: serialized, want refusal");
+        }
     }
 
     #[test]

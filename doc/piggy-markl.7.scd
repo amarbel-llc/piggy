@@ -69,7 +69,14 @@ _internal/delta/agent_, _delta/age_, _delta/pigpen_
 	*AgentECDHOracle*, which opens a sealed document through an agent's
 	_ecdh@joyent.com_ extension, and *ResolveAuthSock*
 	(_PIGGY_AUTH_SOCK_, then _SSH_AUTH_SOCK_, then the legacy
-	_PIVY_AUTH_SOCK_).
+	_PIVY_AUTH_SOCK_). An agent that could not be asked or that refused
+	is reported as *agent.ErrAgent*; test with *agent.IsErrAgent*, which
+	holds for a failed *Document.Open* and for a failed read through the
+	_pivy_ecdh_p256_pub_ wrapper alike. It is distinct from a wrap or blob
+	that is simply not readable with the agent's answer. *Document.Open*
+	asks the oracle once per distinct recipient key, so a document
+	repeating a key costs one card operation, and an oracle failure does
+	not stop the remaining recipients from being tried.
 
 	Importing _pkgs/agent_ and _pkgs/age_ is what makes
 	*markl.Id.GetIOWrapper* work for the recipient formats.
@@ -84,7 +91,11 @@ _internal/echo/pigpen_resolve_
 	Facade _pkgs/pigpen_resolve_: RFC 0010 pointer resolution. *Resolve*
 	runs _pigpen-resolver-<kind> resolve <locator>_ from PATH under the
 	caller's context; *LoadRecipients* reads any of the three _piggy-ids_
-	forms. It does not cache. Kept out of _delta/pigpen_ because it runs a
+	forms and fails when a pointer resolves to no encryption recipients.
+	It does not cache. The context ends the resolver, and anything the
+	resolver left holding its output is abandoned two seconds later;
+	stdout past 1 MiB is an error, and stderr is truncated and quoted
+	into the error. Kept out of _delta/pigpen_ because it runs a
 	subprocess.
 
 _cmd/piggy-agent-conformance_, _cmd/piggy-test-sshd_

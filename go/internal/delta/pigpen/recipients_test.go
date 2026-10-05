@@ -161,8 +161,8 @@ func TestSealRefusesWhatIsNotAnEncryptionRecipient(t *testing.T) {
 	foreignPurpose := purposedID(t, "someone-elses-key-v1", formatAgeX25519, xpub)
 
 	for label, id := range map[string]markl.Id{
-		"the null id":               {},
-		"an ssh-auth key":           sshAuth,
+		"the null id":                 {},
+		"an ssh-auth key":             sshAuth,
 		"a key under another purpose": foreignPurpose,
 	} {
 		func() {

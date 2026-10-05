@@ -51,11 +51,15 @@ func Resolve(ctx context.Context, p *pigpen.Pointer) (*pigpen.Document, error) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fail(fmt.Sprintf("%s did not finish: %v", binary, ctxErr))
 		}
-		detail := strings.TrimSpace(stderr)
-		if detail == "" {
-			detail = err.Error()
+		if errors.Is(err, errResolverOutputTooLarge) {
+			return nil, fail(fmt.Sprintf("%s: %v", binary, err))
 		}
-		return nil, fail(fmt.Sprintf("%s: %s", binary, detail))
+		// stderr is the resolver's own text: quote it, so it cannot write
+		// control sequences to whoever prints this error.
+		if detail := strings.TrimSpace(stderr); detail != "" {
+			return nil, fail(fmt.Sprintf("%s: %q", binary, detail))
+		}
+		return nil, fail(fmt.Sprintf("%s: %v", binary, err))
 	}
 
 	doc, err := pigpen.ParseDocument(stdout)
@@ -75,17 +79,67 @@ func Resolve(ctx context.Context, p *pigpen.Pointer) (*pigpen.Document, error) {
 func runResolver(ctx context.Context, path, locator string) (stdout []byte, stderr string, err error) {
 	const maxAttempts = 5
 	for attempt := 1; ; attempt++ {
-		var out, errOut bytes.Buffer
+		out := cappedBuffer{limit: maxResolverStdout}
+		errOut := cappedBuffer{limit: maxResolverStderr, truncate: true}
 		cmd := exec.CommandContext(ctx, path, "resolve", locator)
 		cmd.Stdout, cmd.Stderr = &out, &errOut
+		// The context kills only the resolver itself. Without a wait
+		// delay, a child of the resolver that keeps the output pipes open
+		// would hold Run, and so Resolve, past the deadline.
+		cmd.WaitDelay = resolverWaitDelay
 		err = cmd.Run()
 		if errors.Is(err, syscall.ETXTBSY) && attempt < maxAttempts {
 			time.Sleep(20 * time.Millisecond)
 			continue
 		}
+		if out.overflowed {
+			// Closing the pipe on it usually kills the resolver first, so
+			// Run reports the signal, not the cause.
+			err = errResolverOutputTooLarge
+		}
 		return out.Bytes(), errOut.String(), err
 	}
 }
+
+const (
+	// A recipient set is a few hundred bytes per recipient; a megabyte is
+	// thousands of them.
+	maxResolverStdout = 1 << 20
+	maxResolverStderr = 4 << 10
+
+	resolverWaitDelay = 2 * time.Second
+)
+
+var errResolverOutputTooLarge = errors.New("printed more than the recipient-set size limit")
+
+// cappedBuffer collects up to limit bytes. Past the limit it either fails
+// the write, which ends the resolver's run, or (truncate) drops the rest.
+//
+// The bytes.Buffer is a named field on purpose: embedded, its ReadFrom
+// would be promoted and io.Copy would use that and never call Write.
+type cappedBuffer struct {
+	collected bytes.Buffer
+	limit     int
+	truncate  bool
+
+	overflowed bool
+}
+
+func (buffer *cappedBuffer) Write(p []byte) (int, error) {
+	room := buffer.limit - buffer.collected.Len()
+	if len(p) <= room {
+		return buffer.collected.Write(p)
+	}
+	if !buffer.truncate {
+		buffer.overflowed = true
+		return 0, errResolverOutputTooLarge
+	}
+	buffer.collected.Write(p[:room])
+	return len(p), nil
+}
+
+func (buffer *cappedBuffer) Bytes() []byte  { return buffer.collected.Bytes() }
+func (buffer *cappedBuffer) String() string { return buffer.collected.String() }
 
 // LoadRecipients returns the encryption recipients a piggy-ids file
 // names, whichever of its three forms it takes: RFC 0003 lines, a pigpen
@@ -103,7 +157,16 @@ func LoadRecipients(ctx context.Context, raw []byte) ([]markl.Id, error) {
 	if err != nil {
 		return nil, err
 	}
-	return doc.EncryptionRecipients(), nil
+	recipients := doc.EncryptionRecipients()
+	if len(recipients) == 0 {
+		// Failure is hard (RFC 0010 §5): an empty answer is not a
+		// recipient set anyone can encrypt to.
+		return nil, fmt.Errorf(
+			"pigpen: pointer (kind=%q, locator=%q) resolved to no encryption recipients",
+			pointer.Kind, pointer.Locator,
+		)
+	}
+	return recipients, nil
 }
 
 // IsPointer reports whether raw is a hyphence document whose type line

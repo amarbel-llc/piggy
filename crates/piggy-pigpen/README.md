@@ -1,6 +1,6 @@
-# piggy-pigpen (prototype)
+# piggy-pigpen
 
-Reference prototype for the **pigpen** encrypted-document format —
+The Rust implementation of the **pigpen** encrypted-document format —
 [piggy RFC 0008](../../docs/rfcs/0008-pigpen-encrypted-document.md).
 
 A pigpen document is a hyphence document (madder RFC 0001) carrying a
@@ -12,16 +12,21 @@ recipient file (RFC 0003).
 
 ## Status
 
-**Prototype.** Excluded from the piggy cargo workspace on purpose: it
-uses the pure-Rust RustCrypto stack (so a `wasm32` build is possible)
-instead of the OpenSSL-backed `piggy-box`, and carries its own
-`Cargo.lock`. Promotion into the workspace is a cutover step (RFC 0008
-"Compatibility").
+RFC 0008 is accepted. This crate and `go/internal/delta/pigpen` both
+replay the normative vectors in `docs/rfcs/0008-pigpen-vectors.txt`
+(`tests/vectors.rs`), so the two readers agree on what parses, what
+opens, and what is rejected.
+
+Excluded from the piggy cargo workspace on purpose: it uses the
+pure-Rust RustCrypto stack (so a `wasm32` build is possible) instead of
+the OpenSSL-backed `piggy-box`, and carries its own `Cargo.lock`. The
+`piggy` crate depends on it by path. Promotion into the workspace is a
+cutover step (RFC 0009).
 
 ## Build & test
 
 ```sh
-cargo test -p piggy-pigpen --manifest-path crates/piggy-pigpen/Cargo.toml
+just test-pigpen
 
 # wasm library build (the headline deliverable)
 rustup target add wasm32-unknown-unknown
@@ -39,4 +44,4 @@ cargo build --manifest-path crates/piggy-pigpen/Cargo.toml --target wasm32-unkno
 Card-bound P-256 decryption is abstracted behind the `EcdhOracle` trait,
 so a wasm host supplies the scalar multiplication (piggy-agent's
 `ecdh@joyent.com`) without the module linking any card transport. The
-sibling Go prototype lives at `go/internal/delta/pigpen/`.
+sibling Go implementation lives at `go/internal/delta/pigpen/`.

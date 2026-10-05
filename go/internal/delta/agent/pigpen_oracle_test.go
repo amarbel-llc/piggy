@@ -24,10 +24,10 @@ var _ pigpen.ECDHOracle = AgentECDHOracle{}
 
 func TestResolveAuthSockPrefersPiggyThenSSHThenPivy(t *testing.T) {
 	for _, tc := range []struct {
-		label                  string
-		piggy, sshSock, pivy   string
-		want                   string
-		wantErr                bool
+		label                string
+		piggy, sshSock, pivy string
+		want                 string
+		wantErr              bool
 	}{
 		{label: "all three set", piggy: "/p", sshSock: "/s", pivy: "/v", want: "/p"},
 		{label: "ssh and pivy", sshSock: "/s", pivy: "/v", want: "/s"},
@@ -269,6 +269,44 @@ func TestOpenSurfacesAnUnreachableAgentAsAnAgentError(t *testing.T) {
 	}
 	if !IsErrAgent(err) {
 		t.Fatalf("Open reported an unreachable agent as %v", err)
+	}
+}
+
+func TestParseECDHResponse(t *testing.T) {
+	sshString := func(value []byte) []byte {
+		return append(binary.BigEndian.AppendUint32(nil, uint32(len(value))), value...)
+	}
+	secret := bytes.Repeat([]byte{0xab}, 32)
+	name := sshString([]byte(ecdhExtension))
+	join := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+
+	for label, response := range map[string][]byte{
+		"piggy-agent framing": join([]byte{29}, name, sshString(secret)),
+		"bare success":        join([]byte{6}, sshString(secret)),
+	} {
+		got, err := parseECDHResponse(response)
+		if err != nil || !bytes.Equal(got, secret) {
+			t.Errorf("%s: %x / %v", label, got, err)
+		}
+	}
+
+	for label, response := range map[string][]byte{
+		"empty":                          nil,
+		"a failure message":              {5},
+		"an unknown message type":        join([]byte{12}, sshString(secret)),
+		"another extension's name":       join([]byte{29}, sshString([]byte("other@example.com")), sshString(secret)),
+		"a truncated extension name":     join([]byte{29}, name[:len(name)-1]),
+		"no secret after the name":       join([]byte{29}, name),
+		"a truncated secret":             join([]byte{6}, sshString(secret)[:20]),
+		"trailing bytes":                 join([]byte{6}, sshString(secret), []byte{0}),
+		"a short secret":                 join([]byte{6}, sshString(secret[:31])),
+		"a long secret":                  join([]byte{6}, sshString(append(secret, 0))),
+		"a length field near 2^32":       join([]byte{6}, []byte{0xff, 0xff, 0xff, 0xff}, secret),
+		"a length field of only 3 bytes": {6, 0, 0, 32},
+	} {
+		if got, err := parseECDHResponse(response); err == nil {
+			t.Errorf("%s: accepted, secret %x", label, got)
+		}
 	}
 }
 

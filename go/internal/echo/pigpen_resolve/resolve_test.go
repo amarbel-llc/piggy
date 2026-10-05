@@ -179,6 +179,67 @@ func TestResolveStopsWhenTheContextEnds(t *testing.T) {
 	}
 }
 
+// The context kills the resolver, not what the resolver started. A child
+// that inherits the output pipes must not hold Resolve past the deadline.
+func TestResolveStopsWhenAGrandchildHoldsTheOutputOpen(t *testing.T) {
+	installResolver(t, "forks", "sleep 30 &\nwait\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := Resolve(ctx, &pigpen.Pointer{Kind: "forks", Locator: "l"})
+	if err == nil {
+		t.Fatal("a resolver that never finishes resolved")
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("Resolve returned after %v; a grandchild held it open", elapsed)
+	}
+}
+
+func TestResolveRefusesOutputPastTheSizeLimit(t *testing.T) {
+	installResolver(t, "floods", "while :; do echo 0123456789abcdef0123456789abcdef; done\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := Resolve(ctx, &pigpen.Pointer{Kind: "floods", Locator: "l"})
+	if err == nil {
+		t.Fatal("a resolver printing without end resolved")
+	}
+	if !strings.Contains(err.Error(), "size limit") {
+		t.Errorf("error %q does not name the size limit", err)
+	}
+}
+
+func TestResolverStderrIsQuotedAndBounded(t *testing.T) {
+	installResolver(t, "noisy",
+		`printf '\033[31mred\033[0m' >&2; i=0; while [ $i -lt 2000 ]; do echo 0123456789abcdef >&2; i=$((i+1)); done; exit 1`)
+
+	_, err := Resolve(context.Background(), &pigpen.Pointer{Kind: "noisy", Locator: "l"})
+	if err == nil {
+		t.Fatal("a failing resolver resolved")
+	}
+	if strings.ContainsRune(err.Error(), '\x1b') {
+		t.Error("the error carries the resolver's raw escape sequence")
+	}
+	if len(err.Error()) > 4*maxResolverStderr {
+		t.Errorf("the error is %d bytes; stderr was not bounded", len(err.Error()))
+	}
+}
+
+func TestLoadRecipientsRefusesAPointerThatResolvesToNoRecipients(t *testing.T) {
+	installResolver(t, "empty", "printf -- '---\\n! pigpen-v1\\n---\\n'\n")
+
+	got, err := LoadRecipients(context.Background(), pointerText(t, "empty", "nowhere"))
+	if err == nil {
+		t.Fatalf("resolved to %v, want an error", got)
+	}
+	if !strings.Contains(err.Error(), "no encryption recipients") {
+		t.Errorf("error %q does not say the set was empty", err)
+	}
+}
+
 func TestIsPointerLooksOnlyAtTheMetadataSection(t *testing.T) {
 	if !IsPointer(pointerText(t, "k", "l")) {
 		t.Error("a pointer document was not recognized")

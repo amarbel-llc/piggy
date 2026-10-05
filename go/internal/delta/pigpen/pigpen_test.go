@@ -6,6 +6,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"strings"
 	"testing"
 
 	"code.linenisgreat.com/piggy/go/internal/alfa/blech32"
@@ -254,6 +256,51 @@ func TestMultiRecipientAnyOneOpens(t *testing.T) {
 	// Open with only the P-256 oracle (no x25519 identity).
 	if got, err := d.Open(oracle, nil); err != nil || !bytes.Equal(got, plaintext) {
 		t.Fatalf("p256 open: %v / %q", err, got)
+	}
+}
+
+// failingOracle cannot answer (agent unreachable, card refused) and counts
+// how often it was asked.
+type failingOracle struct{ calls int }
+
+func (o *failingOracle) ECDH(markl.Id, []byte) ([]byte, error) {
+	o.calls++
+	return nil, errors.New("agent unreachable")
+}
+
+func TestOracleFailureDoesNotStopASoftwareRecipientFromOpening(t *testing.T) {
+	ppub, _ := newP256(t)
+	xpub, xident := newX25519(t)
+	// The P-256 recipient comes first, so the oracle is asked first.
+	d, err := Seal([]byte("either key suffices"), []markl.Id{
+		mustRecipientID(t, formatPivyP256, ppub),
+		mustRecipientID(t, formatAgeX25519, xpub),
+	}, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.Open(&failingOracle{}, []X25519Identity{xident})
+	if err != nil || string(got) != "either key suffices" {
+		t.Fatalf("open: %v / %q", err, got)
+	}
+}
+
+func TestARepeatedRecipientKeyCostsOneOracleCall(t *testing.T) {
+	ppub, _ := newP256(t)
+	d, err := Seal([]byte("secret"), []markl.Id{mustRecipientID(t, formatPivyP256, ppub)}, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Recipients = append(d.Recipients, d.Recipients[0], d.Recipients[0])
+
+	oracle := &failingOracle{}
+	if _, err := d.Open(oracle, nil); err == nil {
+		t.Fatal("opened with an oracle that cannot answer")
+	} else if !strings.Contains(err.Error(), "agent unreachable") {
+		t.Errorf("error %q does not carry the oracle's failure", err)
+	}
+	if oracle.calls != 1 {
+		t.Fatalf("the oracle was asked %d times for one key, want 1", oracle.calls)
 	}
 }
 

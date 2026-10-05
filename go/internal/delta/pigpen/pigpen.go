@@ -207,10 +207,19 @@ func (d *Document) Open(oracle ECDHOracle, x25519 []X25519Identity) ([]byte, err
 		return nil, errors.New("pigpen: document is a recipient set, not sealed")
 	}
 	var oracleFailures []error
+	tried := make(map[string]bool, len(d.Recipients))
 	for _, r := range d.Recipients {
 		if r.Wrap == nil {
 			continue
 		}
+		// One attempt per distinct key: a well-formed document names each
+		// recipient once, and a crafted one repeating a key must not buy
+		// one card operation (a touch, a PIN) per repeat.
+		key := string(r.ID.GetBytes())
+		if tried[key] {
+			continue
+		}
+		tried[key] = true
 		var fileKey []byte
 		var err error
 		switch r.format() {

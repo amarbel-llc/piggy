@@ -112,6 +112,15 @@ func agentECDH(socketPath string, recipientCompressed, partnerEpk []byte) (secre
 
 	response, err := client.Extension(ecdhExtension, ecdhRequest(cardKey, partnerKey))
 	if err != nil {
+		// x/crypto reports every SSH_AGENT_FAILURE as "extension
+		// unsupported", which misnames the usual causes.
+		if errors.Is(err, agent.ErrExtensionUnsupported) {
+			err = errors.Errorf(
+				"the agent refused %s: it does not hold the key, the card was not unlocked, or it does not serve the extension",
+				ecdhExtension,
+			)
+			return secret, err
+		}
 		err = errors.Wrapf(err, "%s extension call", ecdhExtension)
 		return secret, err
 	}
