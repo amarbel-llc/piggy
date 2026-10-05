@@ -142,16 +142,15 @@ func parseRecipientLine(body string) (Recipient, error) {
 	// leading '#'; checking it first (and not trimming its body) keeps those
 	// characters intact instead of mistaking a comment for a key wrap or
 	// eating a leading '#'. The id and blech32 wrap never contain "  # ".
+	var wrapStr string
+	hasWrap := false
 	if i := strings.Index(body, "  # "); i >= 0 {
 		idStr = strings.TrimSpace(body[:i])
 		r.Comment = body[i+4:]
 	} else if i := strings.Index(body, " < "); i >= 0 {
 		idStr = strings.TrimSpace(body[:i])
-		wrap, err := decodeWrap(strings.TrimSpace(body[i+3:]))
-		if err != nil {
-			return r, err
-		}
-		r.Wrap = wrap
+		wrapStr = strings.TrimSpace(body[i+3:])
+		hasWrap = true
 	} else {
 		idStr = strings.TrimSpace(body)
 	}
@@ -160,6 +159,15 @@ func parseRecipientLine(body string) (Recipient, error) {
 		return r, fmt.Errorf("pigpen: bad recipient %q: %w", idStr, err)
 	}
 	r.ID = id
+	if hasWrap {
+		// The wrap format is a function of the recipient's, so the
+		// recipient is decoded first (RFC 0008 §2.4).
+		wrap, err := decodeWrap(r.format(), wrapStr)
+		if err != nil {
+			return r, err
+		}
+		r.Wrap = wrap
+	}
 	return r, nil
 }
 

@@ -14,11 +14,12 @@
 //     "Compatibility".
 //   - Recipient lines use the real markl codec (go/markl/pkgs/markl) and
 //     the registered pivy_ecdh_p256_pub / age_x25519_pub formats.
-//   - The pigpen-specific blobs (wrapped keys, header MAC, payload
-//     digest) are encoded with the blech32 codec directly under their
-//     own HRPs (pigpen_wrap_p256, pigpen_wrap_x25519, pigpen_header_mac).
-//     RFC 0008 §5 registers these as real markl formats at cutover; the
-//     prototype uses the codec without mutating the gated registry.
+//   - The pigpen-specific blobs (wrapped keys, header MAC) are markl IDs
+//     in the registered pigpen_wrap_p256, pigpen_wrap_x25519 and
+//     pigpen_header_mac formats (RFC 0008 §5), so the registry enforces
+//     their sizes and the pigpen-wrap-v1 purpose pairing. A wrap lock
+//     must carry that purpose and the wrap format matching its
+//     recipient's family; the header MAC lock is bare.
 //
 // Crypto dependency choice (RFC 0008 §7): only stdlib crypto
 // (crypto/ecdh, crypto/elliptic, crypto/hkdf, crypto/hmac, crypto/sha256)

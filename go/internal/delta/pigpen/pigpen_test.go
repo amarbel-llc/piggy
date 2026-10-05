@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"code.linenisgreat.com/piggy/go/internal/alfa/blech32"
 	"code.linenisgreat.com/piggy/go/internal/bravo/markl"
 )
 
@@ -329,5 +330,126 @@ func TestNonUTF8MetadataRejected(t *testing.T) {
 	raw := []byte("---\n# \xff\xfe not utf8\n! pigpen-v1\n---\n")
 	if _, err := ParseDocument(raw); err == nil {
 		t.Fatal("expected rejection of non-UTF-8 metadata body")
+	}
+}
+
+// --- markl-codec strictness (RFC 0008 §2.4, §2.6, §5) --------------------
+
+func sealedVector(t *testing.T, hexv string) []byte {
+	t.Helper()
+	wire, err := hex.DecodeString(hexv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+// Moving the wrap and MAC ids onto the markl codec must not move a byte:
+// both implementations' sealed vectors re-serialize exactly.
+func TestSealedVectorsReserializeByteIdentically(t *testing.T) {
+	for _, tc := range []struct{ label, hexv string }{
+		{"rust", sealedByRust},
+		{"go", sealedByGo},
+	} {
+		wire := sealedVector(t, tc.hexv)
+		doc, err := ParseDocument(wire)
+		if err != nil {
+			t.Fatalf("parse %s-sealed vector: %v", tc.label, err)
+		}
+		out, err := doc.MarshalText()
+		if err != nil {
+			t.Fatalf("marshal %s-sealed vector: %v", tc.label, err)
+		}
+		if !bytes.Equal(out, wire) {
+			t.Fatalf("%s-sealed vector changed on re-serialization:\n got %x\nwant %x",
+				tc.label, out, wire)
+		}
+	}
+}
+
+func TestWrapLockMustCarryTheWrapPurpose(t *testing.T) {
+	wire := sealedVector(t, sealedByGo)
+	lock := []byte(" < " + markl.PurposePigpenWrapV1 + "@")
+	if !bytes.Contains(wire, lock) {
+		t.Fatal("vector has no wrap lock to rewrite")
+	}
+
+	for _, tc := range []struct{ label, replacement string }{
+		{"recipient purpose", " < " + markl.PurposePiggyRecipientV1 + "@"},
+		{"doc purpose", " < " + markl.PurposePigpenDocV1 + "@"},
+		{"unknown purpose", " < someone-elses-wrap-v9@"},
+		{"no purpose", " < "},
+	} {
+		tampered := bytes.Replace(wire, lock, []byte(tc.replacement), 1)
+		if _, err := ParseDocument(tampered); err == nil {
+			t.Errorf("%s: wrap lock accepted, want rejection", tc.label)
+		}
+	}
+}
+
+func TestWrapLockMustMatchTheRecipientFamily(t *testing.T) {
+	xpub, _ := newX25519(t)
+	ppub, _ := newP256(t)
+
+	sealedToP256, err := Seal([]byte("x"), []markl.Id{mustRecipientID(t, formatPivyP256, ppub)}, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p256Wrap := sealedToP256.Recipients[0].Wrap
+
+	// An X25519 recipient carrying a P-256-shaped wrap cannot serialize...
+	crossed := &Document{
+		Recipients: []Recipient{{ID: mustRecipientID(t, formatAgeX25519, xpub), Wrap: p256Wrap}},
+		Payload:    sealedToP256.Payload,
+		MAC:        sealedToP256.MAC,
+	}
+	if _, err := crossed.MarshalText(); err == nil {
+		t.Fatal("marshal accepted a P-256 wrap on an X25519 recipient")
+	}
+
+	// ...and is rejected on parse when written by hand.
+	wire, err := sealedToP256.MarshalText()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p256Recipient := sealedToP256.Recipients[0].ID.StringWithFormat()
+	x25519Recipient := mustRecipientID(t, formatAgeX25519, xpub).StringWithFormat()
+	tampered := bytes.Replace(wire, []byte(p256Recipient), []byte(x25519Recipient), 1)
+	if _, err := ParseDocument(tampered); err == nil {
+		t.Fatal("parse accepted a P-256 wrap on an X25519 recipient")
+	}
+}
+
+func TestHeaderMACLockIsBareAndFixedSize(t *testing.T) {
+	wire := sealedVector(t, sealedByGo)
+	typeLine := []byte("! " + typeTag + "@")
+	if !bytes.Contains(wire, typeLine) {
+		t.Fatal("vector has no MAC lock to rewrite")
+	}
+
+	// A purpose on the MAC lock is not the RFC 0008 §2.6 wire form.
+	withPurpose := bytes.Replace(
+		wire, typeLine, []byte("! "+typeTag+"@"+markl.PurposePigpenDocV1+"@"), 1,
+	)
+	if _, err := ParseDocument(withPurpose); err == nil {
+		t.Error("MAC lock carrying a purpose accepted, want rejection")
+	}
+
+	// A MAC of the wrong length is malformed at parse, not only at open.
+	short, err := blech32.Encode(markl.FormatIdPigpenHeaderMac, make([]byte, 31))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := ParseDocument(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goodMAC, err := encodeMAC(doc.MAC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	truncated := bytes.Replace(wire, []byte(goodMAC), short, 1)
+	if _, err := ParseDocument(truncated); err == nil {
+		t.Error("31-byte MAC accepted, want rejection")
 	}
 }

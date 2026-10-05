@@ -1,6 +1,6 @@
 //! pigpen document model, hyphence codec, and seal/open (RFC 0008 §2).
 
-use piggy_markl::{FormatId, Id, PurposeId, blech32};
+use piggy_markl::{FormatId, Id, PurposeId};
 
 use crate::crypto;
 use crate::hyphence::{HyphenceDoc, MetaLine};
@@ -8,10 +8,6 @@ use crate::{Error, Result};
 
 const TYPE_TAG: &str = "pigpen-v1";
 const POINTER_TYPE_TAG: &str = "pigpen-pointer-v1";
-const HRP_WRAP_P256: &str = "pigpen_wrap_p256";
-const HRP_WRAP_X25519: &str = "pigpen_wrap_x25519";
-const HRP_HEADER_MAC: &str = "pigpen_header_mac";
-const PURPOSE_WRAP: &str = "pigpen-wrap-v1";
 
 /// Card-bound ECDH for a P-256 recipient (RFC 0008 §4.3, §7). A wasm host
 /// wires this to piggy-agent's `ecdh@joyent.com`; the slot-9D scalar
@@ -345,35 +341,75 @@ fn parse_quoted_kv(body: &str, key: &str) -> Option<String> {
     Some(inner.to_string())
 }
 
-fn encode_wrap(format: FormatId, blob: &[u8]) -> Result<String> {
-    let hrp = match format {
-        FormatId::PivyEcdhP256Pub => HRP_WRAP_P256,
-        FormatId::AgeX25519Pub => HRP_WRAP_X25519,
-        other => return Err(Error::UnsupportedFormat(format!("{other:?}"))),
-    };
-    let body = blech32::encode(hrp, blob).map_err(|e| Error::Blech32(format!("{e}")))?;
-    Ok(format!("{PURPOSE_WRAP}@{body}"))
+// The wrap lock is `pigpen-wrap-v1@<wrap-format>-<blech32>` and the header
+// MAC lock is the bare `pigpen_header_mac-<blech32>` (RFC 0008 §2.4, §2.6).
+// Both go through the markl codec, so the registry enforces the blob size
+// and the (purpose, format) pairing.
+
+/// The wrap format that locks a recipient of the given format. A recipient
+/// format with no wrap format is not an encryption recipient and carries no
+/// wrap lock (RFC 0008 §2.3).
+fn wrap_format_for(recipient: FormatId) -> Result<FormatId> {
+    match recipient {
+        FormatId::PivyEcdhP256Pub => Ok(FormatId::PigpenWrapP256),
+        FormatId::AgeX25519Pub => Ok(FormatId::PigpenWrapX25519),
+        other => Err(Error::UnsupportedFormat(format!(
+            "{other} is not an encryption recipient format and carries no wrap lock"
+        ))),
+    }
 }
 
-fn decode_wrap(s: &str) -> Result<Vec<u8>> {
-    let body = s.split_once('@').map(|(_, b)| b).unwrap_or(s);
-    let (hrp, data) = blech32::decode(body).map_err(|e| Error::Blech32(format!("{e}")))?;
-    if hrp != HRP_WRAP_P256 && hrp != HRP_WRAP_X25519 {
-        return Err(Error::Blech32(format!("unexpected wrap HRP {hrp}")));
+fn encode_wrap(recipient: FormatId, blob: &[u8]) -> Result<String> {
+    let wrap_format = wrap_format_for(recipient)?;
+    let id = Id::new(Some(PurposeId::PigpenWrapV1), wrap_format, blob.to_vec()).map_err(|e| {
+        Error::Markl(format!(
+            "bad {wrap_format} wrap for a {recipient} recipient: {e}"
+        ))
+    })?;
+    Ok(id.to_wire())
+}
+
+fn decode_wrap(recipient: FormatId, s: &str) -> Result<Vec<u8>> {
+    let wrap_format = wrap_format_for(recipient)?;
+    let id = Id::parse(s).map_err(|e| Error::Markl(format!("bad wrap lock {s:?}: {e}")))?;
+    if id.purpose() != Some(&PurposeId::PigpenWrapV1) {
+        return Err(Error::Malformed(format!(
+            "wrap lock has purpose {:?}, want {:?}",
+            id.purpose().map(PurposeId::as_str),
+            PurposeId::PigpenWrapV1.as_str()
+        )));
     }
-    Ok(data)
+    if id.format() != wrap_format {
+        return Err(Error::Malformed(format!(
+            "a {recipient} recipient is locked with a {} wrap, want {wrap_format}",
+            id.format()
+        )));
+    }
+    Ok(id.data().to_vec())
 }
 
 fn encode_mac(mac: &[u8]) -> Result<String> {
-    blech32::encode(HRP_HEADER_MAC, mac).map_err(|e| Error::Blech32(format!("{e}")))
+    let id = Id::new(None, FormatId::PigpenHeaderMac, mac.to_vec())
+        .map_err(|e| Error::Markl(format!("bad header MAC: {e}")))?;
+    Ok(id.to_wire())
 }
 
 fn decode_mac(s: &str) -> Result<Vec<u8>> {
-    let (hrp, data) = blech32::decode(s).map_err(|e| Error::Blech32(format!("{e}")))?;
-    if hrp != HRP_HEADER_MAC {
-        return Err(Error::Blech32(format!("unexpected MAC HRP {hrp}")));
+    let id = Id::parse(s).map_err(|e| Error::Markl(format!("bad header MAC lock {s:?}: {e}")))?;
+    if let Some(purpose) = id.purpose() {
+        return Err(Error::Malformed(format!(
+            "header MAC lock carries purpose {:?}, want none",
+            purpose.as_str()
+        )));
     }
-    Ok(data)
+    if id.format() != FormatId::PigpenHeaderMac {
+        return Err(Error::Malformed(format!(
+            "header MAC lock has format {}, want {}",
+            id.format(),
+            FormatId::PigpenHeaderMac
+        )));
+    }
+    Ok(id.data().to_vec())
 }
 
 fn parse_type_line(doc: &mut Document, body: &str) -> Result<()> {
@@ -392,7 +428,7 @@ fn parse_type_line(doc: &mut Document, body: &str) -> Result<()> {
 
 fn parse_recipient_line(body: &str) -> Result<Recipient> {
     let mut comment = None;
-    let mut wrap = None;
+    let mut wrap_str = None;
     // Split the comment on the exact "  # " delimiter (two spaces, hash,
     // space) and take the remainder verbatim, BEFORE looking for the " < "
     // wrap delimiter. A comment is free text that MAY contain " < " or a
@@ -405,12 +441,15 @@ fn parse_recipient_line(body: &str) -> Result<Recipient> {
         }
         left.trim().to_string()
     } else if let Some((left, right)) = body.split_once(" < ") {
-        wrap = Some(decode_wrap(right.trim())?);
+        wrap_str = Some(right.trim());
         left.trim().to_string()
     } else {
         body.trim().to_string()
     };
     let id = Id::parse(&id_str).map_err(|e| Error::Markl(format!("{e}")))?;
+    // The wrap format is a function of the recipient's, so the recipient is
+    // decoded first (RFC 0008 §2.4).
+    let wrap = wrap_str.map(|s| decode_wrap(id.format(), s)).transpose()?;
     Ok(Recipient { id, comment, wrap })
 }
 
@@ -436,6 +475,7 @@ pub fn recipient_id(format: FormatId, bytes: Vec<u8>) -> Result<Id> {
 mod tests {
     use super::*;
     use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use piggy_markl::blech32;
     use rand_core::OsRng;
 
     fn new_x25519() -> (Vec<u8>, X25519Identity) {
@@ -672,6 +712,94 @@ mod tests {
         // captured), so the deterministic recipient-set face round-trips
         // identically across implementations.
         assert_eq!(hex::encode(doc.to_bytes().unwrap()), RECIPIENT_SET);
+    }
+
+    // --- markl-codec strictness (RFC 0008 §2.4, §2.6, §5) -----------------
+
+    fn replace_once(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+        let at = haystack
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .unwrap_or_else(|| panic!("{:?} not found", String::from_utf8_lossy(needle)));
+        let mut out = haystack[..at].to_vec();
+        out.extend_from_slice(replacement);
+        out.extend_from_slice(&haystack[at + needle.len()..]);
+        out
+    }
+
+    #[test]
+    fn sealed_vectors_reserialize_byte_identically() {
+        // Moving the wrap and MAC ids onto the markl codec must not move a
+        // byte: both implementations' sealed vectors re-serialize exactly.
+        for (label, hexv) in [("rust", SEALED_BY_RUST), ("go", SEALED_BY_GO)] {
+            let wire = hex::decode(hexv).unwrap();
+            let doc = Document::parse(&wire).unwrap();
+            assert_eq!(
+                hex::encode(doc.to_bytes().unwrap()),
+                hexv,
+                "{label}-sealed vector changed on re-serialization"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_lock_must_carry_the_wrap_purpose() {
+        let wire = hex::decode(SEALED_BY_GO).unwrap();
+        for (label, replacement) in [
+            ("recipient purpose", " < piggy-recipient-v1@"),
+            ("doc purpose", " < pigpen-doc-v1@"),
+            ("unknown purpose", " < someone-elses-wrap-v9@"),
+            ("no purpose", " < "),
+        ] {
+            let tampered = replace_once(&wire, b" < pigpen-wrap-v1@", replacement.as_bytes());
+            assert!(
+                Document::parse(&tampered).is_err(),
+                "{label}: wrap lock accepted, want rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_lock_must_match_the_recipient_family() {
+        let (xpub, _) = new_x25519();
+        let (ppub, _) = new_p256();
+        let x_id = recipient_id(FormatId::AgeX25519Pub, xpub).unwrap();
+        let p_id = recipient_id(FormatId::PivyEcdhP256Pub, ppub).unwrap();
+        let sealed = Document::seal(b"x", std::slice::from_ref(&p_id)).unwrap();
+
+        // An X25519 recipient carrying a P-256-shaped wrap cannot serialize...
+        let crossed = Document {
+            description: None,
+            recipients: vec![Recipient {
+                id: x_id.clone(),
+                comment: None,
+                wrap: sealed.recipients[0].wrap.clone(),
+            }],
+            payload: sealed.payload.clone(),
+            mac: sealed.mac.clone(),
+        };
+        assert!(crossed.to_bytes().is_err());
+
+        // ...and is rejected on parse when written by hand.
+        let wire = sealed.to_bytes().unwrap();
+        let tampered = replace_once(&wire, p_id.to_wire().as_bytes(), x_id.to_wire().as_bytes());
+        assert!(Document::parse(&tampered).is_err());
+    }
+
+    #[test]
+    fn header_mac_lock_is_bare_and_fixed_size() {
+        let wire = hex::decode(SEALED_BY_GO).unwrap();
+
+        // A purpose on the MAC lock is not the RFC 0008 §2.6 wire form.
+        let with_purpose = replace_once(&wire, b"! pigpen-v1@", b"! pigpen-v1@pigpen-doc-v1@");
+        assert!(Document::parse(&with_purpose).is_err());
+
+        // A MAC of the wrong length is malformed at parse, not only at open.
+        let doc = Document::parse(&wire).unwrap();
+        let good = encode_mac(doc.mac.as_ref().unwrap()).unwrap();
+        let short = blech32::encode("pigpen_header_mac", &[0u8; 31]).unwrap();
+        let truncated = replace_once(&wire, good.as_bytes(), short.as_bytes());
+        assert!(Document::parse(&truncated).is_err());
     }
 
     #[test]

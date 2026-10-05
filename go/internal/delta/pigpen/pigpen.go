@@ -8,27 +8,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
-	"code.linenisgreat.com/piggy/go/internal/alfa/blech32"
 	"code.linenisgreat.com/piggy/go/internal/bravo/markl"
 
-	// Blank-import the native registrations so pivy_ecdh_p256_pub and
-	// age_x25519_pub are present before we build/parse recipient IDs.
+	// Blank-import the native registrations so the recipient formats and
+	// the pigpen wrap / header-MAC formats and purposes are present before
+	// we build or parse any id.
 	_ "code.linenisgreat.com/piggy/go/internal/charlie/markl_registrations"
 )
 
 const (
 	typeTag = "pigpen-v1"
 
-	formatPivyP256  = "pivy_ecdh_p256_pub"
-	formatAgeX25519 = "age_x25519_pub"
-
-	hrpWrapP256      = "pigpen_wrap_p256"
-	hrpWrapX25519    = "pigpen_wrap_x25519"
-	hrpHeaderMAC     = "pigpen_header_mac"
-	purposeWrap      = "pigpen-wrap-v1"
-	purposeRecipient = "piggy-recipient-v1"
+	formatPivyP256   = markl.FormatIdPivyEcdhP256Pub
+	formatAgeX25519  = markl.FormatIdAgeX25519Pub
+	purposeRecipient = markl.PurposePiggyRecipientV1
 )
 
 // markIdentity aliases the markl Id so crypto.go can name the oracle's
@@ -171,56 +165,89 @@ func (d *Document) Open(oracle ECDHOracle, x25519 []X25519Identity) ([]byte, err
 }
 
 // --- markl-ID encoding for the pigpen blobs ------------------------------
+//
+// The wrap lock is `pigpen-wrap-v1@<wrap-format>-<blech32>` and the header
+// MAC lock is the bare `pigpen_header_mac-<blech32>` (RFC 0008 §2.4, §2.6).
+// Both go through the markl codec, so the registry enforces the blob size
+// and the (purpose, format) pairing.
 
-func encodeWrap(format string, blob []byte) (string, error) {
-	var hrp string
-	switch format {
+// wrapFormatFor names the wrap format that locks a recipient of the given
+// format. A recipient format with no wrap format is not an encryption
+// recipient and carries no wrap lock (RFC 0008 §2.3).
+func wrapFormatFor(recipientFormat string) (string, error) {
+	switch recipientFormat {
 	case formatPivyP256:
-		hrp = hrpWrapP256
+		return markl.FormatIdPigpenWrapP256, nil
 	case formatAgeX25519:
-		hrp = hrpWrapX25519
+		return markl.FormatIdPigpenWrapX25519, nil
 	default:
-		return "", fmt.Errorf("pigpen: no wrap HRP for %q", format)
+		return "", fmt.Errorf(
+			"pigpen: %q is not an encryption recipient format and carries no wrap lock",
+			recipientFormat,
+		)
 	}
-	s, err := blech32.Encode(hrp, blob)
+}
+
+func encodeWrap(recipientFormat string, blob []byte) (string, error) {
+	wrapFormat, err := wrapFormatFor(recipientFormat)
 	if err != nil {
 		return "", err
 	}
-	return purposeWrap + "@" + string(s), nil
+	var id markl.Id
+	if err := id.SetPurposeId(markl.PurposePigpenWrapV1); err != nil {
+		return "", err
+	}
+	if err := id.SetMarklId(wrapFormat, blob); err != nil {
+		return "", fmt.Errorf("pigpen: bad %s wrap for a %s recipient: %w", wrapFormat, recipientFormat, err)
+	}
+	return id.StringWithFormat(), nil
 }
 
-func decodeWrap(s string) ([]byte, error) {
-	body := s
-	if i := strings.IndexByte(s, '@'); i >= 0 {
-		body = s[i+1:]
-	}
-	hrp, data, err := blech32.DecodeString(body)
+func decodeWrap(recipientFormat, s string) ([]byte, error) {
+	wrapFormat, err := wrapFormatFor(recipientFormat)
 	if err != nil {
 		return nil, err
 	}
-	if hrp != hrpWrapP256 && hrp != hrpWrapX25519 {
-		return nil, fmt.Errorf("pigpen: unexpected wrap HRP %q", hrp)
+	var id markl.Id
+	if err := id.Set(s); err != nil {
+		return nil, fmt.Errorf("pigpen: bad wrap lock %q: %w", s, err)
 	}
-	return data, nil
+	if got := id.GetPurposeId(); got != markl.PurposePigpenWrapV1 {
+		return nil, fmt.Errorf(
+			"pigpen: wrap lock has purpose %q, want %q", got, markl.PurposePigpenWrapV1,
+		)
+	}
+	if got := id.GetMarklFormat().GetMarklFormatId(); got != wrapFormat {
+		return nil, fmt.Errorf(
+			"pigpen: a %s recipient is locked with a %s wrap, want %s",
+			recipientFormat, got, wrapFormat,
+		)
+	}
+	return bytes.Clone(id.GetBytes()), nil
 }
 
 func encodeMAC(mac []byte) (string, error) {
-	s, err := blech32.Encode(hrpHeaderMAC, mac)
-	if err != nil {
-		return "", err
+	var id markl.Id
+	if err := id.SetMarklId(markl.FormatIdPigpenHeaderMac, mac); err != nil {
+		return "", fmt.Errorf("pigpen: bad header MAC: %w", err)
 	}
-	return string(s), nil
+	return id.StringWithFormat(), nil
 }
 
 func decodeMAC(s string) ([]byte, error) {
-	hrp, data, err := blech32.DecodeString(s)
-	if err != nil {
-		return nil, err
+	var id markl.Id
+	if err := id.Set(s); err != nil {
+		return nil, fmt.Errorf("pigpen: bad header MAC lock %q: %w", s, err)
 	}
-	if hrp != hrpHeaderMAC {
-		return nil, fmt.Errorf("pigpen: unexpected MAC HRP %q", hrp)
+	if got := id.GetPurposeId(); got != "" {
+		return nil, fmt.Errorf("pigpen: header MAC lock carries purpose %q, want none", got)
 	}
-	return data, nil
+	if got := id.GetMarklFormat().GetMarklFormatId(); got != markl.FormatIdPigpenHeaderMac {
+		return nil, fmt.Errorf(
+			"pigpen: header MAC lock has format %q, want %q", got, markl.FormatIdPigpenHeaderMac,
+		)
+	}
+	return bytes.Clone(id.GetBytes()), nil
 }
 
 func findX25519(ids []X25519Identity, pub []byte) *X25519Identity {
