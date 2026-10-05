@@ -153,7 +153,7 @@ Go's `Seal` already takes an `rng`. Rust's `Document::seal`, `wrap_x25519`, `wra
 
 **Step 2: Run** `just test-pigpen`. Expected: FAIL to compile.
 
-**Step 3: Implement** `seal_with_rng(plaintext, recipients, rng: &mut impl RngCore + CryptoRng)` and thread the rng through the four functions above; `seal` becomes a call with `OsRng`. The draw order must match Go's `Seal` exactly: file key, then per recipient in order the ephemeral key, then the payload nonce. Read `go/internal/delta/pigpen/pigpen.go:85-126` and write the order in a comment on both sides. Zeroize the file key in the Rust seal path (the #210 item 3 asymmetry) while here.
+**Step 3: Implement** `seal_with_rng(plaintext, recipients, rng: &mut impl RngCore + CryptoRng)` and thread the rng through the four functions above; `seal` becomes a call with `OsRng`. The draw order must match Go's `Seal` exactly: file key, then per recipient in order the ephemeral key, then the payload nonce. Read `go/internal/delta/pigpen/pigpen.go:85-126` and write the order in a comment on both sides. (The Rust seal path already wraps the file key in `Zeroizing`; #210 item 3 was done before this plan, so there is nothing to add there.)
 
 **Step 4: Run** `just test-pigpen`. Expected: PASS.
 
@@ -271,6 +271,8 @@ func CanonicalRecipientSet(ids []markl.Id) []byte
 **Step 1: Write failing tests:** `CanonicalRecipientSet` is order-independent, collapses a bare-format id and its `piggy-recipient-v1@` form to one line, and `SameRecipientSet` agrees with byte equality on every pair in the test table. Also: a pigpen recipient set with one P-256, one X25519, one `piggy-piv_auth-v1@ssh_…` and one unknown-purpose line yields exactly two ids; the same two recipients as RFC 0003 lines (with a `#` comment line, a trailing comment and a bare-format id) yield the same set; a sealed document passed to `ParseRecipients` is accepted and yields its recipients; a pointer document is an error naming RFC 0010; `SameRecipientSet` ignores order.
 
 For the RFC 0003 grammar read piggy-ids(5) GRAMMAR and CANONICAL FORM first. Check whether the current parser tolerates unknown-purpose lines at all (`parseRecipientLine` in `codec.go:136` calls `id.Set`, which may reject an unregistered purpose). RFC 0008 §2.3 requires tolerance; if it rejects, fix it here with its own test.
+
+Also fix here, in BOTH languages with a vector for it: `Document.validate()` (`codec.go`, `document.rs`) counts every line without a wrap as "unwrapped", so a sealed document that also carries an SSH-auth or unknown-purpose line is rejected as "mixed sealed/unsealed recipients". RFC 0008 §2.3 allows such lines in a sealed document and says they carry no wrap. Only encryption recipients may count toward the mixed-state check.
 
 **Step 2: Run** `just test-go`. Expected: FAIL.
 
