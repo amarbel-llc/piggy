@@ -72,7 +72,16 @@ func (oracle AgentECDHOracle) ECDH(self markl.Id, partnerEpk []byte) (secret []b
 		return secret, err
 	}
 
-	cardKey, err := p256SSHKeyBlob(self.GetBytes())
+	return agentECDH(oracle.SocketPath, self.GetBytes(), partnerEpk)
+}
+
+// agentECDH asks the agent at socketPath for the ECDH of the card key
+// whose SEC1-compressed public half is recipientCompressed against the
+// SEC1-compressed partnerEpk. It is the one ecdh@joyent.com client in this
+// module: the pigpen oracle and the pivy_ecdh_p256_pub IO wrapper both
+// call it.
+func agentECDH(socketPath string, recipientCompressed, partnerEpk []byte) (secret []byte, err error) {
+	cardKey, err := p256SSHKeyBlob(recipientCompressed)
 	if err != nil {
 		err = errors.Wrapf(err, "recipient key")
 		return secret, err
@@ -84,9 +93,9 @@ func (oracle AgentECDHOracle) ECDH(self markl.Id, partnerEpk []byte) (secret []b
 		return secret, err
 	}
 
-	conn, err := net.Dial("unix", oracle.SocketPath)
+	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		err = errors.Wrapf(err, "connecting to the agent at %s", oracle.SocketPath)
+		err = errors.Wrapf(err, "connecting to the agent at %s", socketPath)
 		return secret, err
 	}
 	defer errors.DeferredCloser(&err, conn)

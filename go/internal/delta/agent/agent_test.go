@@ -43,8 +43,8 @@ func TestParseSSHEcdsaSignatureBlob(t *testing.T) {
 // TestPivyEcdhSwappedAtInit verifies this package's init() swapped the
 // real pivy GetIOWrapper over the core's erroring pivy_ecdh_p256 stub:
 // the format no longer returns the ErrPivyEcdhP256NotConnected sentinel.
-// (It still errors — on an invalid dummy point / absent agent — just not
-// with the not-connected sentinel, which is the proof the swap happened.)
+// (It still errors — 33 zero bytes are not a P-256 point — just not with
+// the not-connected sentinel, which is the proof the swap happened.)
 func TestPivyEcdhSwappedAtInit(t *testing.T) {
 	format, err := markl.GetFormatOrError(markl.FormatIdPivyEcdhP256Pub)
 	if err != nil {
@@ -63,8 +63,9 @@ func TestPivyEcdhSwappedAtInit(t *testing.T) {
 
 	_, err = fs.GetIOWrapper(id)
 	if err == nil {
-		// A bare 33-zero-byte point is not a valid P-256 point and there
-		// is no agent in the test env, so a real GetIOWrapper must error.
+		// 33 zero bytes are not a valid P-256 point, so a real
+		// GetIOWrapper must error. (An absent agent no longer does it:
+		// the socket is resolved at decrypt time.)
 		t.Fatal("expected GetIOWrapper to error on a dummy point")
 	}
 	if markl.IsErrPivyEcdhP256NotConnected(err) {

@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"bytes"
+	"crypto/elliptic"
+	"fmt"
 	"sync"
 
 	domain_interfaces "code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
@@ -10,15 +13,37 @@ import (
 	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/pivy"
 )
 
-// PivyEcdhP256GetIOWrapper builds a pivy IOWrapper that decrypts to a
-// PIV slot-9D ECDH recipient (the pivy_ecdh_p256_pub pubkey carried by
-// id), delegating the on-card ECDH to the agent resolved from the
-// environment. Lifted verbatim (modulo imports) from madder's
-// format_family_pivyecdhp256.go.
+// PivyEcdhP256GetIOWrapper builds a pivy IOWrapper that encrypts to, and
+// decrypts for, a PIV slot-9D ECDH recipient (the pivy_ecdh_p256_pub
+// pubkey carried by id).
+//
+// The age stanza format is dewey's pivy.IOWrapper, unchanged, so blobs
+// already written stay readable. The on-card ECDH is NOT dewey's agent
+// client: it is this package's agentECDH. dewey v0.5.0's client reads
+// only the reply framing of the C pivy-agent and takes piggy-agent's
+// echoed extension name for the shared secret, so nothing decrypted
+// through piggy-agent (confirmed by madder's bats lane over fibby at
+// madder 0ee2def).
+//
+// The agent socket is resolved at decrypt time with ResolveAuthSock
+// (PIGGY_AUTH_SOCK, then SSH_AUTH_SOCK, then PIVY_AUTH_SOCK). Building
+// the wrapper and encrypting need no agent and no socket variable.
+//
+// A failure to reach the agent or to get a usable reply is reported as
+// dewey's typed agent error, so callers keep telling it apart from a
+// wrong-recipient AEAD failure with pivy.IsErrAgent.
 func PivyEcdhP256GetIOWrapper(
 	id domain_interfaces.MarklId,
 ) (ioWrapper interfaces.IOWrapper, err error) {
-	compressed := id.GetBytes()
+	compressed := bytes.Clone(id.GetBytes())
+
+	// Check the point here. Now that the socket is resolved lazily, this
+	// is the only thing that can fail at construction, and dewey's
+	// DecompressP256Point alone lets 33 zero bytes through.
+	if x, _ := elliptic.UnmarshalCompressed(elliptic.P256(), compressed); x == nil {
+		err = errors.Errorf("%q is not a compressed P-256 point", id)
+		return ioWrapper, err
+	}
 
 	pubkey, err := pivy.DecompressP256Point(compressed)
 	if err != nil {
@@ -26,18 +51,36 @@ func PivyEcdhP256GetIOWrapper(
 		return ioWrapper, err
 	}
 
-	socketPath, err := pivy.ResolveAgentSocketPath()
-	if err != nil {
-		err = errors.Wrap(err)
-		return ioWrapper, err
-	}
-
 	ioWrapper = &pivy.IOWrapper{
 		RecipientPubkey: pubkey,
-		DecryptECDH:     pivy.AgentECDHFunc(socketPath, pubkey),
+		DecryptECDH:     agentDecryptECDH(compressed),
 	}
 
 	return ioWrapper, err
+}
+
+// agentDecryptECDH is the pivy.ECDHFunc behind the IO wrapper: resolve the
+// socket now, not when the wrapper was built, and ask the agent.
+func agentDecryptECDH(recipientCompressed []byte) pivy.ECDHFunc {
+	return func(ephemeralPubkey []byte) ([]byte, error) {
+		socketPath, err := ResolveAuthSock()
+		if err != nil {
+			return nil, asPivyAgentError(err)
+		}
+
+		secret, err := agentECDH(socketPath, recipientCompressed, ephemeralPubkey)
+		if err != nil {
+			return nil, asPivyAgentError(err)
+		}
+
+		return secret, nil
+	}
+}
+
+// asPivyAgentError marks err as dewey's pivy agent error (pivy.IsErrAgent)
+// while keeping its own message and chain.
+func asPivyAgentError(err error) error {
+	return fmt.Errorf("%w: %w", pivy.ErrAgent, err)
 }
 
 var pivyEcdhP256FormatOnce sync.Once

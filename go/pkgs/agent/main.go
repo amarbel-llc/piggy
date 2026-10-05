@@ -57,11 +57,25 @@ var (
 	DiscoverSSHAgentEd25519KeysVerbose = internal.DiscoverSSHAgentEd25519KeysVerbose
 )
 
-// PivyEcdhP256GetIOWrapper builds a pivy IOWrapper that decrypts to a
-// PIV slot-9D ECDH recipient (the pivy_ecdh_p256_pub pubkey carried by
-// id), delegating the on-card ECDH to the agent resolved from the
-// environment. Lifted verbatim (modulo imports) from madder's
-// format_family_pivyecdhp256.go.
+// PivyEcdhP256GetIOWrapper builds a pivy IOWrapper that encrypts to, and
+// decrypts for, a PIV slot-9D ECDH recipient (the pivy_ecdh_p256_pub
+// pubkey carried by id).
+//
+// The age stanza format is dewey's pivy.IOWrapper, unchanged, so blobs
+// already written stay readable. The on-card ECDH is NOT dewey's agent
+// client: it is this package's agentECDH. dewey v0.5.0's client reads
+// only the reply framing of the C pivy-agent and takes piggy-agent's
+// echoed extension name for the shared secret, so nothing decrypted
+// through piggy-agent (confirmed by madder's bats lane over fibby at
+// madder 0ee2def).
+//
+// The agent socket is resolved at decrypt time with ResolveAuthSock
+// (PIGGY_AUTH_SOCK, then SSH_AUTH_SOCK, then PIVY_AUTH_SOCK). Building
+// the wrapper and encrypting need no agent and no socket variable.
+//
+// A failure to reach the agent or to get a usable reply is reported as
+// dewey's typed agent error, so callers keep telling it apart from a
+// wrong-recipient AEAD failure with pivy.IsErrAgent.
 var PivyEcdhP256GetIOWrapper = internal.PivyEcdhP256GetIOWrapper
 
 // RegisterEcdsaP256SSHFormat swaps the real, agent-backed signer over the
