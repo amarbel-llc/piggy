@@ -1,5 +1,5 @@
 ---
-status: draft
+status: accepted
 date: 2026-06-24
 provenance: |
   Scopes a new piggy-owned encrypted-document format, "pigpen", that is
@@ -50,12 +50,21 @@ of `piggy-ids` and is intended to subsume it.
 
 ## Status and Provenance
 
-Draft. This RFC scopes the format and pins the wire model; the
-reference prototypes (`go/internal/delta/pigpen`, `crates/piggy-pigpen`)
-accompany it but are explicitly marked **prototype** and are not yet on
-any user-facing dispatch path. Nothing in piggy reads or writes
-`pigpen-v1` documents in production until a follow-up cutover RFC
-promotes it (see [Compatibility](#compatibility)).
+Accepted 2026-10-05. The `pigpen-v1` bytes are frozen: the markl formats
+and purposes of §5 are registered in both registries, and the normative
+vector file [`0008-pigpen-vectors.txt`](0008-pigpen-vectors.txt) is
+replayed byte for byte by both reference implementations
+(`go/internal/delta/pigpen`, `crates/piggy-pigpen`). Any change to what a
+conforming writer emits or a conforming reader accepts is a `pigpen-v2`
+(§3), not an edit to this document.
+
+What is accepted is the wire format and its reader rules. The product
+cutover is still RFC 0009's: the Rust CLI reads pigpen recipient sets and
+pointers (`piggy-ids` sniffing) but does not yet write or open sealed
+`.pigpen` files, and the `@`-referenced payload form (§2.5) is specified
+here but implemented by neither reference implementation, which accept
+inline payloads only. The first consumer of sealed documents is madder,
+through the Go module (piggy#299).
 
 The normative referents are:
 
@@ -160,8 +169,27 @@ The accepted `(purpose, format)` pairs are precisely those of RFC 0003
 
 As in RFC 0003, bare-format recipient IDs (no purpose) MUST be accepted
 on input and canonicalised to the `piggy-recipient-v1@` form on rewrite.
-Recipient *order* is preserved by writers but is NOT semantically
-significant.
+The promotion happens at parse and at seal, so the canonical header of
+§4.6, and with it the header MAC, has exactly one spelling of each
+recipient. A recipient line whose purpose slot is quoted and empty
+(`""@…`) MUST be rejected: it cannot be told apart from a bare id once
+decoded. Recipient *order* is preserved by writers but is NOT
+semantically significant.
+
+**Encryption recipients.** A `-` line is an *encryption recipient* when
+its markl format is `pivy_ecdh_p256_pub` or `age_x25519_pub` and its
+purpose is `piggy-recipient-v1` (or absent, before promotion). Sealing
+MUST refuse any other id, and MUST refuse an `age_x25519_pub` key that
+is a low-order point (the exchange would yield an all-zero secret that
+anyone can compute, RFC 7748 §6.1).
+
+**Canonical recipient set.** The identity of a recipient set, for
+comparing two sets or detecting that one changed, is the following byte
+string: every encryption recipient in its `piggy-recipient-v1@` text
+form, de-duplicated, sorted bytewise, one per line, each line terminated
+by LF. The empty set is zero bytes. Comments, order, duplicates and
+lines that are not encryption recipients do not reach it. Two sets are
+equal exactly when these bytes are equal.
 
 SSH-authentication entries (`piggy-piv_auth-v1@ssh_*_pub`, RFC 0003
 §"SSH-Authentication Entries") MAY also appear as `-` lines. They are
@@ -200,6 +228,16 @@ the wrapped key that only that recipient can open — exactly the meaning
 hyphence locks already carry. The wrap markl ID encodes the recipient's
 ephemeral public key and the AEAD-wrapped file key; see §4.
 
+A reader MUST reject a wrap lock that does not carry the
+`pigpen-wrap-v1` purpose (a bare wrap included), whose format is not the
+one for its recipient's key family (`pigpen_wrap_p256` for
+`pivy_ecdh_p256_pub`, `pigpen_wrap_x25519` for `age_x25519_pub`), or
+whose blob is not the registered size. A line that is not an encryption
+recipient MUST NOT carry a wrap lock. A wrap purpose written quoted
+(`"pigpen-wrap-v1"@…`) is accepted and re-serialized bare, following
+markl's quoting rule; the header MAC is unaffected because it covers the
+canonical re-serialization (§4.6), not the literal bytes read.
+
 ### 2.5 Payload
 
 The ciphertext payload is either:
@@ -229,6 +267,11 @@ suite version to the file key, preventing recipient-stripping and
 payload-substitution attacks (§6). A recipient-set (payload-less) pigpen
 has no file key and therefore no MAC: its type line is the bare
 `! pigpen-v1`.
+
+The MAC lock is a bare markl ID: a reader MUST reject one that carries
+any purpose slot, is empty, or is not exactly 32 bytes of
+`pigpen_header_mac`. A document MUST carry exactly one `!` type line. A
+sealed document MUST have at least one wrapped recipient.
 
 ### 2.7 Descriptions and comments
 
@@ -559,10 +602,17 @@ A conforming `pigpen-v1` implementation MUST:
   information of the equivalent `piggy-ids` file and convert losslessly
   to and from it.
 
-A normative test-vector file (analogous to RFC 0002 Appendix A and the
-hyphence `rfc_vectors.txt`) is **deferred to the cutover RFC**; the
-prototypes ship round-trip and known-answer unit tests in the interim
-(`go/internal/delta/pigpen/*_test.go`, `crates/piggy-pigpen/src/**` `#[test]`s).
+The normative test vectors are
+[`0008-pigpen-vectors.txt`](0008-pigpen-vectors.txt), whose header
+documents its record format. A conforming implementation MUST satisfy
+every record: reproduce each sealed document byte for byte from its
+recorded file key, payload nonce and ephemeral scalars; re-serialize
+every accepted document as recorded; open what must open; refuse to
+seal what must not be sealed; and reject each `reject` record at the
+stage it names. The file is generated (`just codemod-pigpen-vectors`)
+and replayed by `go/internal/delta/pigpen/vectors_test.go` and
+`crates/piggy-pigpen/tests/vectors.rs`. Both read the one file, so the
+two implementations cannot drift from it or from each other.
 
 ## Compatibility
 

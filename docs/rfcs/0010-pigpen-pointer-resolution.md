@@ -177,6 +177,12 @@ the `--no-cache` flag or the `PIGGY_PIGPEN_NO_CACHE` environment variable
 (any non-empty value). This is useful when a recipient set is known to
 have just changed and the caller does not want to wait out the TTL.
 
+The Go library (`go/pkgs/pigpen_resolve`, piggy#299) does not cache at
+all and runs the resolver under the caller's context, so a deadline or
+cancellation stops it. Its consumers want a changed recipient set
+noticed on use, which a time-based cache would hide; whether to cache is
+left to them. The Rust CLI's behavior above is unchanged.
+
 ## 5. Failure semantics
 
 Resolution failure is **hard**: there is no fallback to a stale cache

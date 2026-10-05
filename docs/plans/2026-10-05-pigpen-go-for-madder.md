@@ -24,6 +24,17 @@ Given by Sasha on 2026-10-05:
 
 Decisions 2 to 4 reached this session relayed by `madder/brave-sycamore/bozo`; 1 and 5 came from Sasha directly.
 
+## Status (2026-10-05)
+
+Landed: tasks 1 to 7, task 8 except its end-to-end step, task 9, and task 10's document edits. Two independent reviews ran, after tasks 1 to 3 and after tasks 4 to 8; what they found is in the commits `6003a61` and `5cf9c01`.
+
+Still open:
+
+- **Task 8, step 5.** The Go oracle has not been run against the real Rust agent over fibby. No existing lane does Go ECDH against fibby (the conformance binary's ECDH case needs `--hardware`), so this needs a new bats test and a small Go entry point. Until it runs, the reading that dewey v0.5.0's `parseECDHResponse` mis-parses piggy-agent's reply (it would take the echoed extension name as the secret) is unconfirmed.
+- **Task 9a.** Blocked as agreed: dewey v0.5.0's `age` package exports `Identity`, `MultiIdentity`, `Recipient` and `Recipients`, but only the identity types implement the IO wrapper, so there is no recipient-only wrapper to register. That part goes to the dewey owner. (piggy could instead build one directly on `filippo.io/age`, which is already in its closure; not done, pending Sasha's call.)
+- **Not addressed from the second review:** `open`-stage reject vectors pass on any error and do not pin which one; there is no truncation-at-a-chunk-boundary vector (it would put about 130 KB of hex in the file); and a mutation check that the low-order X25519 vectors fail without the Rust fix was not run.
+- **Rust pointer parser.** `piggy_pigpen::Pointer::parse` is laxer than the new Go `ParsePointer` (it accepts a repeated tag, a second type line and a body). Aligning it is a follow-up.
+
 ## Triage of #210 (done, no blocker)
 
 #210 is closed. Its one wire-affecting item, non-UTF-8 metadata, is resolved: both parsers reject it (`go/internal/delta/pigpen/hyphence.go:116`, `crates/piggy-pigpen/src/hyphence.rs:96`) and RFC 0008 §2.7 makes that normative. Cross-language interop vectors already exist as duplicated hex in both test suites (`pigpen_test.go:14`, `document.rs:619`), X25519 only. What is still missing is the RFC-level vector file, P-256 coverage, and a single source both languages replay. So the bytes can be frozen as they are.

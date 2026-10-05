@@ -273,6 +273,23 @@ are reproducible across languages and pin the construction end-to-end
 (KDF info strings, STREAM nonce layout, all-zero wrap nonce, MAC
 pre-image, blech32 of each blob).
 
+**As landed (piggy#299).** Phase 4 took a simpler shape than the two
+bullets above describe, and RFC 0008 §10 is the authority for it:
+
+- One file, `docs/rfcs/0008-pigpen-vectors.txt`, holds every case:
+  sealed documents, recipient sets, accept-and-normalize cases, documents
+  a reader must reject (at parse or at open), and inputs sealing must
+  refuse. There is no separate RFC appendix to keep in step with it.
+- Each sealed record fixes the file key, the payload nonce and one
+  ephemeral scalar per recipient. An RNG byte stream was rejected as a
+  vector input: how many bytes a library draws to make a key is not
+  portable, and Go's `crypto/ecdh` does not draw ephemeral keys from a
+  caller-supplied reader at all.
+- Drift is prevented by construction rather than detected: the Go and
+  Rust replays read the same file, and both are in the `test` aggregate.
+  The Go tests reach it through a `testdata/` symlink, because the go
+  test cache does not track files outside the module root.
+
 ## 9. WASM productionization
 
 - **Promote `crates/piggy-pigpen` into the workspace** (`members`), with
@@ -302,9 +319,9 @@ Each phase is an independently-mergeable PR under piggy#69:
 |---|---|---|
 | **0** (done, PR #207) | RFC 0008 + prototypes | prototype tests + module gate green |
 | **1** | `crates/piggy-hyphence` + Go sibling, RFC-0001-conforming | madder `rfc_vectors.txt` pass; wasm32 build |
-| **2** | markl registrations promoted (§6) | `lint-facades`; RFC-0002 fixture unchanged; Rust + Go tests |
+| **2** (done, piggy#299) | markl registrations promoted (§6) | `lint-facades`; RFC-0002 fixture regenerated with the new rows; Rust + Go tests |
 | **3** | `piggy-pigpen` into workspace + native `EcdhOracle` (§9) | `just test-rust --workspace`; nix `sharedCargoLock` updated |
-| **4** | normative vectors + CI drift gate (§8) | bit-exact replay in both languages |
+| **4** (done, piggy#299) | normative vectors + drift gate (§8) | bit-exact replay in both languages |
 | **5** | `piggy pigpen seal/open/inspect/convert-ids/migrate`; `pass`/`recipients` pigpen-awareness; recipient-set sniff | bats (sandbox + fibby) |
 | **6** | store marker + `piggy init --format=pigpen`; default flip | bats; docs |
 | **7** | WASM artifact published in CI | `wasm-pack` job green |

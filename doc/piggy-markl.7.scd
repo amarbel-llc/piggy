@@ -60,6 +60,24 @@ _internal/delta/agent_, _delta/age_, _delta/pigpen_
 	internal layers directly and carry _//go:generate dagnabit export_;
 	external consumers import only the facades.
 
+	_pkgs/pigpen_ is what a consumer sealing to a recipient set uses:
+	*Seal* / *Document.Open*, *ParseRecipients* and
+	*Document.EncryptionRecipients* (either _piggy-ids_ form, encryption
+	recipients only), *CanonicalRecipientSet* / *SameRecipientSet* (the
+	bytes to hash to notice a changed set), and *ParsePointer*. It imports
+	no _os/exec_ and stays wasm-buildable. _pkgs/agent_ adds
+	*AgentECDHOracle*, which opens a sealed document through an agent's
+	_ecdh@joyent.com_ extension, and *ResolveAuthSock*
+	(_PIGGY_AUTH_SOCK_, then _SSH_AUTH_SOCK_, then the legacy
+	_PIVY_AUTH_SOCK_).
+
+_internal/echo/pigpen_resolve_
+	Facade _pkgs/pigpen_resolve_: RFC 0010 pointer resolution. *Resolve*
+	runs _pigpen-resolver-<kind> resolve <locator>_ from PATH under the
+	caller's context; *LoadRecipients* reads any of the three _piggy-ids_
+	forms. It does not cache. Kept out of _delta/pigpen_ because it runs a
+	subprocess.
+
 _cmd/piggy-agent-conformance_, _cmd/piggy-test-sshd_
 	The two Go test binaries the bats lanes need: the SSH-agent
 	wire-protocol conformance tester and a test-only SSH server. Plain
@@ -77,8 +95,13 @@ _go/gomod2nix.toml_ pins the module's externals for consumers
 
 # GATES
 
-*just build-go* and *just test-go* (compile, _go test -tags test_) are in
-the *build* and *test* aggregates. The two _cmd/_ binaries build with
+*just build-go* and *just test-go* (compile, _go test -count=1 -tags test_)
+are in the *build* and *test* aggregates. _-count=1_ is deliberate: the
+go test cache tracks only files opened under the module root, and it
+answered "ok (cached)" after a vector file under _docs/rfcs/_ changed.
+For the same reason the tests read their vector files through
+_testdata/_ symlinks that point at _docs/rfcs/_; a new test that reads a
+file outside _go/_ must do the same. The two _cmd/_ binaries build with
 *buildGoApplication* self-consuming _go-pkgs-test_; the conformance
 binary's check phase runs _go vet -tags test ./..._ over the whole
 module, so a source-filter regression or a stale _gomod2nix.toml_ fails
@@ -98,6 +121,16 @@ grammars, any divergence recorded in §7.4), and the @import contract.
 The recipe's _-run_ alternation must be extended when a fourth test is
 added, or it silently never runs.
 
+*Pigpen vectors.* _docs/rfcs/0008-pigpen-vectors.txt_ is the normative
+pigpen-v1 vector file (RFC 0008 §10). *just test-go* replays it in Go and
+*just test-pigpen* replays the same file in Rust, including byte-exact
+re-sealing from each record's file key, payload nonce and ephemeral
+scalars, so the two implementations cannot drift from it or from each
+other. *just codemod-pigpen-vectors* regenerates it from the fixed public
+test secrets in _vectors_generate_test.go_; run it only for an intended
+reader or writer change, which RFC 0008 §3 makes a _pigpen-v2_ matter
+once it alters what conforming implementations emit or accept.
+
 # GRAMMAR EXPORT SURFACE
 
 piggy is the root of the ecosystem's langlang @import chain (piggy →
@@ -116,8 +149,8 @@ digest shape, because a frozen export with no in-repo consumer has
 nothing keeping it honest. Producer conformance pattern: RFC 0011 §7.5.
 
 Recipes: *build-go*, *test-go*, *update-go*, *update-gomod2nix*,
-*codemod-fmt-go*, *codemod-rfc0002-fixture*, *validate-grammar*,
-*test-grammar-vectors*.
+*codemod-fmt-go*, *codemod-rfc0002-fixture*, *codemod-pigpen-vectors*,
+*validate-grammar*, *test-grammar-vectors*.
 
 # SEE ALSO
 
