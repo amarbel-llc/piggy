@@ -4,6 +4,22 @@ package agent
 
 import internal "code.linenisgreat.com/piggy/go/internal/delta/agent"
 
+// AgentECDHOracle performs the card-bound P-256 scalar multiplication
+// through an ssh-agent's ecdh@joyent.com extension, which piggy-agent
+// serves for the PIV slot-9D key and forwards to its upstreams. The private
+// scalar never leaves the card.
+//
+// It satisfies pigpen's ECDHOracle interface structurally, so a sealed
+// pigpen document opens with:
+//
+//	sock, err := agent.ResolveAuthSock()
+//	plaintext, err := doc.Open(agent.AgentECDHOracle{SocketPath: sock}, nil)
+//
+// The extension call is implemented here, not through dewey's pivy
+// client, because the two agents frame the reply differently and this
+// client reads both (see parseECDHResponse).
+type AgentECDHOracle = internal.AgentECDHOracle
+
 // DiscoveredKey is one agent-resident key surfaced by the Discover*
 // helpers: its markl Id (stamped under the appropriate format) plus the
 // SSH key type and comment for display.
@@ -72,3 +88,7 @@ var RegisterPivyEcdhP256Format = internal.RegisterPivyEcdhP256Format
 // formats map (the stub is registered by this package's blank import of
 // markl_registrations).
 var RegisterSSHEd25519Format = internal.RegisterSSHEd25519Format
+
+// ResolveAuthSock returns the agent socket a decrypt should use:
+// PIGGY_AUTH_SOCK, else SSH_AUTH_SOCK, else PIVY_AUTH_SOCK.
+var ResolveAuthSock = internal.ResolveAuthSock
