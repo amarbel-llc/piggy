@@ -175,6 +175,21 @@ codemod-facades:
 codemod-rfc0002-fixture:
     cd go && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
 
+# Regenerate the normative pigpen-v1 vector file, docs/rfcs/0008-pigpen-vectors.txt
+# (RFC 0008 §10, RFC 0009 §8), from the fixed public test secrets in the Go
+# generator. Run after an intended pigpen wire or reader change. The committed
+# file is the normative artifact: test-go replays it in Go and test-pigpen
+# replays the SAME file in Rust, so the two implementations cannot drift from
+# it or from each other. Output is deterministic; a no-op run leaves no diff.
+# `-count=1` defeats the go test cache: the generator's effect is the file it
+# writes, and a cached "ok" would skip the write and leave a stale or
+# hand-edited file in place.
+#
+# regenerate the normative pigpen-v1 vector file
+[group('codemod')]
+codemod-pigpen-vectors:
+    cd go && go test -count=1 -tags 'test pigpen_vectors_generate' -run TestGeneratePigpenVectors ./internal/delta/pigpen/...
+
 # Capture the pivy-oracle differential corpus (piggy#164 Phase 1 item 2).
 # Encrypt a matrix of plaintexts to fibby's RFC 5903 slot-9D key with the
 # Rust `piggy-ids encrypt`, decrypt each ebox with BOTH the C `pivy-box
@@ -2331,7 +2346,7 @@ debug-conformance-run-hw: build-rust
 # --- format / lint ---
 
 [group('codemod')]
-codemod: codemod-fmt codemod-fmt-go codemod-rfc0002-fixture codemod-facades codemod-diagrams
+codemod: codemod-fmt codemod-fmt-go codemod-rfc0002-fixture codemod-pigpen-vectors codemod-facades codemod-diagrams
 
 # Format the tree in place via `nix fmt`, which runs the conformist wrapper
 # (formatter.${system}) — nixfmt + shfmt + rustfmt under one CLI. See
