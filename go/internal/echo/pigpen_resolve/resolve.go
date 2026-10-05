@@ -169,18 +169,6 @@ func LoadRecipients(ctx context.Context, raw []byte) ([]markl.Id, error) {
 	return recipients, nil
 }
 
-// IsPointer reports whether raw is a hyphence document whose type line
-// names the pointer face. It does not validate the pointer.
-func IsPointer(raw []byte) bool {
-	const boundary = "---\n"
-	if !bytes.HasPrefix(raw, []byte(boundary)) {
-		return false
-	}
-	// Look only inside the metadata section: a sealed document's body is
-	// arbitrary bytes and must not be searched for a type line.
-	metadata := raw[len(boundary)-1:] // keep the leading "\n"
-	if end := bytes.Index(metadata, []byte("\n"+boundary)); end >= 0 {
-		metadata = metadata[:end+1]
-	}
-	return bytes.Contains(metadata, []byte("\n! pigpen-pointer-v1\n"))
-}
+// IsPointer is pigpen.IsPointer, kept here for callers that already hold
+// this package.
+func IsPointer(raw []byte) bool { return pigpen.IsPointer(raw) }

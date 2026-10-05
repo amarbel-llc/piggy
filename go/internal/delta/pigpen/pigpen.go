@@ -254,7 +254,7 @@ func (d *Document) Open(oracle ECDHOracle, x25519 []X25519Identity) ([]byte, err
 			return nil, err
 		}
 		if !hmac.Equal(headerMAC(fileKey, canon), d.MAC) {
-			return nil, errors.New("pigpen: header MAC mismatch")
+			return nil, ErrHeaderMAC
 		}
 		return openPayload(fileKey, d.Payload)
 	}
@@ -264,8 +264,23 @@ func (d *Document) Open(oracle ECDHOracle, x25519 []X25519Identity) ([]byte, err
 			errors.Join(oracleFailures...),
 		)
 	}
-	return nil, errors.New("pigpen: no usable recipient (no matching identity/oracle)")
+	return nil, ErrNoUsableRecipient
 }
+
+// Why Open refused, for errors.Is. An oracle failure is none of these: it
+// carries the oracle's own error (see agent.IsErrAgent).
+var (
+	// ErrNoUsableRecipient: no wrap opened with the identities given,
+	// because none matched or because a matching wrap did not
+	// authenticate.
+	ErrNoUsableRecipient = errors.New("pigpen: no usable recipient (no matching identity/oracle)")
+	// ErrHeaderMAC: a wrap opened, but the header is not the one that was
+	// sealed (a recipient added or removed, a changed description).
+	ErrHeaderMAC = errors.New("pigpen: header MAC mismatch")
+	// ErrPayload: the header is authentic, but the payload is truncated or
+	// altered.
+	ErrPayload = errors.New("pigpen: payload is truncated or altered")
+)
 
 // --- markl-ID encoding for the pigpen blobs ------------------------------
 //

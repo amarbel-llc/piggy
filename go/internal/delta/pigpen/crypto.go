@@ -224,7 +224,7 @@ func sealPayload(fileKey, plaintext, nonce []byte) ([]byte, error) {
 
 func openPayload(fileKey, payload []byte) ([]byte, error) {
 	if len(payload) < payloadNonceLen {
-		return nil, errors.New("pigpen: payload shorter than nonce")
+		return nil, fmt.Errorf("%w: shorter than its nonce", ErrPayload)
 	}
 	nonce, body := payload[:payloadNonceLen], payload[payloadNonceLen:]
 	streamKey := hkdf32(fileKey, nonce, infoPayload)
@@ -238,7 +238,7 @@ func openPayload(fileKey, payload []byte) ([]byte, error) {
 		start := i * encChunk
 		if start >= len(body) {
 			// We consumed everything but never saw a "last" chunk.
-			return nil, errors.New("pigpen: truncated payload (no final chunk)")
+			return nil, fmt.Errorf("%w: no final chunk", ErrPayload)
 		}
 		end := start + encChunk
 		last := end >= len(body)
@@ -251,7 +251,7 @@ func openPayload(fileKey, payload []byte) ([]byte, error) {
 			// Retry as a non-final chunk only matters when our "last"
 			// guess was wrong; with fixed-size chunking the guess is
 			// exact except at the boundary, so a failure here is real.
-			return nil, fmt.Errorf("pigpen: chunk %d auth failed: %w", i, err)
+			return nil, fmt.Errorf("%w: chunk %d did not authenticate", ErrPayload, i)
 		}
 		out = append(out, plain...)
 		if last {

@@ -217,7 +217,7 @@ pub fn seal_payload(
 
 pub fn open_payload(file_key: &[u8], payload: &[u8]) -> Result<Vec<u8>> {
     if payload.len() < PAYLOAD_NONCE_LEN {
-        return Err(Error::Crypto("payload shorter than nonce".into()));
+        return Err(Error::Payload("shorter than its nonce".into()));
     }
     let (nonce, body) = payload.split_at(PAYLOAD_NONCE_LEN);
     let stream_key = hkdf32(file_key, nonce, INFO_PAYLOAD);
@@ -229,14 +229,14 @@ pub fn open_payload(file_key: &[u8], payload: &[u8]) -> Result<Vec<u8>> {
     loop {
         let start = i * enc_chunk;
         if start >= body.len() {
-            return Err(Error::Crypto("truncated payload (no final chunk)".into()));
+            return Err(Error::Payload("no final chunk".into()));
         }
         let end = (start + enc_chunk).min(body.len());
         let last = end >= body.len();
         let chunk = &body[start..end];
         let plain = aead
             .decrypt(Nonce::from_slice(&stream_nonce(i as u64, last)), chunk)
-            .map_err(|e| Error::Crypto(format!("payload chunk {i}: {e}")))?;
+            .map_err(|_| Error::Payload(format!("chunk {i} did not authenticate")))?;
         out.extend_from_slice(&plain);
         if last {
             break;

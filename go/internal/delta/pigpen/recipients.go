@@ -73,7 +73,7 @@ func ParseRecipients(raw []byte) ([]markl.Id, error) {
 	if !bytes.HasPrefix(raw, []byte(boundary)) {
 		return parseRFC0003Recipients(raw)
 	}
-	if isPointerDocument(raw) {
+	if IsPointer(raw) {
 		return nil, errors.New(
 			"pigpen: this is a pointer document; resolve it into a recipient set first (RFC 0010)",
 		)
@@ -85,9 +85,11 @@ func ParseRecipients(raw []byte) ([]markl.Id, error) {
 	return doc.EncryptionRecipients(), nil
 }
 
-// isPointerDocument reports whether a hyphence document's type line names
-// the pointer face (RFC 0008 §2.2).
-func isPointerDocument(raw []byte) bool {
+// IsPointer reports whether raw is a hyphence document whose type line
+// names the pointer face (RFC 0008 §2.2). It does not validate the
+// pointer; ParsePointer does. Only the metadata section is consulted, so
+// a sealed document's body cannot pass for a type line.
+func IsPointer(raw []byte) bool {
 	h, err := parseHyphence(raw)
 	if err != nil {
 		return false

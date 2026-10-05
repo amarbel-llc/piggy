@@ -303,8 +303,26 @@ fn replay_seal_reject(r: &Record) {
 
 /// A `reject` record must fail at its `stage`: `parse`, or `open` for a
 /// document that is well-formed but must not release plaintext.
+///
+/// An open-stage record names, in `error`, the check that must stop it. A
+/// record with `truncated-to` instead of `document` is the output of sealing
+/// with its inputs, cut to that many bytes, and names the result by digest.
 fn replay_reject(r: &Record) {
-    let parsed = Document::parse(&r.hex("document"));
+    let wire = if r.has("truncated-to") {
+        let keep: usize = r.text("truncated-to").parse().unwrap();
+        let mut wire = r.reseal();
+        wire.truncate(keep);
+        assert_eq!(
+            hex::encode(Sha256::digest(&wire)),
+            r.text("document-sha256"),
+            "{}: truncated document digest",
+            r.name()
+        );
+        wire
+    } else {
+        r.hex("document")
+    };
+    let parsed = Document::parse(&wire);
     match r.text("stage") {
         "parse" => assert!(
             parsed.is_err(),
@@ -318,10 +336,21 @@ fn replay_reject(r: &Record) {
                     r.name()
                 )
             });
+            let err = match r.open(&doc) {
+                Ok(_) => panic!("{}: open released plaintext, want rejection", r.name()),
+                Err(err) => err,
+            };
+            let as_expected = match r.text("error") {
+                "no-recipient" => matches!(err, Error::NoRecipient),
+                "header-mac" => matches!(err, Error::MacMismatch),
+                "payload" => matches!(err, Error::Payload(_)),
+                other => panic!("{}: unknown error {other:?}", r.name()),
+            };
             assert!(
-                r.open(&doc).is_err(),
-                "{}: open released plaintext, want rejection",
-                r.name()
+                as_expected,
+                "{}: open failed with {err:?}, want {}",
+                r.name(),
+                r.text("error")
             );
         }
         other => panic!("{}: unknown stage {other:?}", r.name()),

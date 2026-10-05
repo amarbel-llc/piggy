@@ -49,6 +49,9 @@ pub enum Error {
     Oracle(String),
     #[error("header MAC mismatch")]
     MacMismatch,
+    /// The header is authentic, but the payload is truncated or altered.
+    #[error("payload is truncated or altered: {0}")]
+    Payload(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

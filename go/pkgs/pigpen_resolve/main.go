@@ -4,8 +4,8 @@ package pigpen_resolve
 
 import internal "code.linenisgreat.com/piggy/go/internal/echo/pigpen_resolve"
 
-// IsPointer reports whether raw is a hyphence document whose type line
-// names the pointer face. It does not validate the pointer.
+// IsPointer is pigpen.IsPointer, kept here for callers that already hold
+// this package.
 var IsPointer = internal.IsPointer
 
 // LoadRecipients returns the encryption recipients a piggy-ids file

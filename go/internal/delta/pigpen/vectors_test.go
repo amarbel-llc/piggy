@@ -8,6 +8,7 @@ import (
 	"crypto/ecdh"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -338,8 +339,27 @@ func replaySealRejectVector(t *testing.T, r vectorRecord) {
 
 // A `reject` record must fail at its `stage`: `parse`, or `open` for a
 // document that is well-formed but must not release plaintext.
+//
+// An open-stage record names, in `error`, the check that must stop it:
+// `no-recipient` (no wrap opens), `header-mac`, or `payload`. A record with
+// `truncated-to` instead of `document` is the output of sealing with its
+// inputs, cut to that many bytes, and names the result by digest.
 func replayRejectVector(t *testing.T, r vectorRecord) {
-	doc, err := parseWithoutPanicking(t, r.hex(t, "document"))
+	var wire []byte
+	if _, ok := r["truncated-to"]; ok {
+		keep, err := strconv.Atoi(r["truncated-to"])
+		if err != nil {
+			t.Fatalf("truncated-to: %v", err)
+		}
+		wire = r.reseal(t)[:keep]
+		sum := sha256.Sum256(wire)
+		if !bytes.Equal(sum[:], r.hex(t, "document-sha256")) {
+			t.Fatalf("truncated document digest: got %x, want %s", sum, r["document-sha256"])
+		}
+	} else {
+		wire = r.hex(t, "document")
+	}
+	doc, err := parseWithoutPanicking(t, wire)
 
 	switch r["stage"] {
 	case "parse":
@@ -351,8 +371,20 @@ func replayRejectVector(t *testing.T, r vectorRecord) {
 			t.Fatalf("parse rejected a document that must fail only at open: %v", err)
 		}
 		oracle, x25519 := r.identities(t)
-		if _, err := doc.Open(oracle, x25519); err == nil {
+		_, err := doc.Open(oracle, x25519)
+		if err == nil {
 			t.Fatal("open released plaintext, want rejection")
+		}
+		want, ok := map[string]error{
+			"no-recipient": ErrNoUsableRecipient,
+			"header-mac":   ErrHeaderMAC,
+			"payload":      ErrPayload,
+		}[r["error"]]
+		if !ok {
+			t.Fatalf("unknown or missing error %q on an open-stage record", r["error"])
+		}
+		if !errors.Is(err, want) {
+			t.Fatalf("open failed with %v, want %s (%v)", err, r["error"], want)
 		}
 	default:
 		t.Fatalf("unknown stage %q", r["stage"])

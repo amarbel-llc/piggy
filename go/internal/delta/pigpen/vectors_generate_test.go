@@ -45,6 +45,13 @@ const pigpenVectorsHeader = `# pigpen-v1 normative test vectors.
 #                      output of sealing with the record's inputs
 #   normalized         (normalize) the bytes a reader re-serializes to
 #   stage              (reject) parse | open: where the document must fail
+#   error              (reject, stage open) the check that must stop the
+#                      open: no-recipient (no wrap opens with the identities
+#                      given) | header-mac | payload
+#   truncated-to       (reject) decimal byte count, INSTEAD of "document":
+#                      the document is the output of sealing with the
+#                      record's inputs, cut to this many bytes, and
+#                      "document-sha256" is the digest of the result
 #   plaintext          the sealed plaintext
 #   plaintext-zeros    decimal count of zero bytes, INSTEAD of "plaintext"
 #   recipients         markl ids to seal to, in document order (text, not hex)
@@ -402,12 +409,43 @@ func TestGeneratePigpenVectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// An open-stage record names the check that must stop it.
+	failsAt := func(check string) []string {
+		return append([]string{"error", check}, xOpener...)
+	}
+
 	reject("reject/flipped-header-mac", "open",
-		replaceOnce(t, xWire, macLock, flippedLock), xOpener...)
+		replaceOnce(t, xWire, macLock, flippedLock), failsAt("header-mac")...)
 
 	flippedPayload := bytes.Clone(xWire)
 	flippedPayload[len(flippedPayload)-1] ^= 0x01
-	reject("reject/flipped-payload-byte", "open", flippedPayload, xOpener...)
+	reject("reject/flipped-payload-byte", "open", flippedPayload, failsAt("payload")...)
+
+	// The payload cut down to its 16-byte nonce: no chunk at all, not even
+	// the empty final one an empty plaintext seals to.
+	reject("reject/payload-is-only-its-nonce", "open",
+		xWire[:len(xWire)-len(plaintext)-streamTagLen], failsAt("payload")...)
+
+	// The two-chunk document with its final chunk (one byte and a tag)
+	// cut off, so the payload ends exactly on a chunk boundary. The
+	// remaining chunk authenticates only as a non-final one; a reader
+	// that released it would accept a truncated file.
+	truncatedTo := len(twoChunksWire) - 1 - streamTagLen
+	truncatedDigest := sha256.Sum256(twoChunksWire[:truncatedTo])
+	w.record(
+		"name", "reject/payload-truncated-at-a-chunk-boundary",
+		"outcome", "reject",
+		"stage", "open",
+		"error", "payload",
+		"recipients", idList(xID),
+		"file-key", hex.EncodeToString(fileKey),
+		"payload-nonce", hex.EncodeToString(nonce),
+		"ephemeral-secrets", hexList(xEphemeral),
+		"x25519-secrets", hex.EncodeToString(xSecret),
+		"plaintext-zeros", fmt.Sprint(len(twoChunks)),
+		"truncated-to", fmt.Sprint(truncatedTo),
+		"document-sha256", hex.EncodeToString(truncatedDigest[:]),
+	)
 
 	// One flipped byte in the wrapped file key.
 	tamperedWrap := bytes.Clone(xDoc.Recipients[0].Wrap)
@@ -421,7 +459,7 @@ func TestGeneratePigpenVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	reject("reject/flipped-wrap-byte", "open",
-		replaceOnce(t, xWire, goodWrapLock, tamperedWrapLock), xOpener...)
+		replaceOnce(t, xWire, goodWrapLock, tamperedWrapLock), failsAt("no-recipient")...)
 
 	// A complete, self-consistent document whose wrap uses the all-zero
 	// (low-order) ephemeral key. The exchange then yields an all-zero
@@ -451,7 +489,7 @@ func TestGeneratePigpenVectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reject("reject/wrap-with-low-order-ephemeral-key", "open", forgedWire, xOpener...)
+	reject("reject/wrap-with-low-order-ephemeral-key", "open", forgedWire, failsAt("no-recipient")...)
 
 	reject("reject/recipient-with-empty-quoted-purpose", "parse",
 		[]byte("---\n- \"\"@"+bareX+"\n! "+typeTag+"\n---\n"))
@@ -463,7 +501,7 @@ func TestGeneratePigpenVectors(t *testing.T) {
 	pLineStart := bytes.Index(bothWire, []byte("- "+pID.StringWithFormat()))
 	pLineEnd := pLineStart + bytes.IndexByte(bothWire[pLineStart:], '\n') + 1
 	reject("reject/stripped-recipient-breaks-header-mac", "open",
-		append(bytes.Clone(bothWire[:pLineStart]), bothWire[pLineEnd:]...), xOpener...)
+		append(bytes.Clone(bothWire[:pLineStart]), bothWire[pLineEnd:]...), failsAt("header-mac")...)
 
 	reject("reject/mixed-sealed-and-unsealed-recipients", "parse",
 		replaceOnce(t, xWire, "\n"+typeLine, "\n- "+pID.StringWithFormat()+"\n"+typeLine))

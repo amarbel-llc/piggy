@@ -76,7 +76,9 @@ _internal/delta/agent_, _delta/age_, _delta/pigpen_
 	that is simply not readable with the agent's answer. *Document.Open*
 	asks the oracle once per distinct recipient key, so a document
 	repeating a key costs one card operation, and an oracle failure does
-	not stop the remaining recipients from being tried.
+	not stop the remaining recipients from being tried. Its other
+	refusals are *pigpen.ErrNoUsableRecipient*, *pigpen.ErrHeaderMAC*
+	and *pigpen.ErrPayload* (truncated or altered), for *errors.Is*.
 
 	Importing _pkgs/agent_ and _pkgs/age_ is what makes
 	*markl.Id.GetIOWrapper* work for the recipient formats.

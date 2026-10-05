@@ -46,6 +46,12 @@ var ErrNoUsableRecipient = internal.ErrNoUsableRecipient
 // altered.
 var ErrPayload = internal.ErrPayload
 
+// IsPointer reports whether raw is a hyphence document whose type line
+// names the pointer face (RFC 0008 §2.2). It does not validate the
+// pointer; ParsePointer does. Only the metadata section is consulted, so
+// a sealed document's body cannot pass for a type line.
+var IsPointer = internal.IsPointer
+
 // NewRecipientSet builds a payload-less pigpen document — the drop-in for
 // a piggy-ids file (RFC 0008 §2.2).
 var NewRecipientSet = internal.NewRecipientSet
