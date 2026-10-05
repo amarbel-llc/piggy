@@ -17,6 +17,30 @@ var AgeX25519GetIOWrapper = internal.AgeX25519GetIOWrapper
 // TODO verify if this is correct
 var AgeX25519GetPublicKey = internal.AgeX25519GetPublicKey
 
+// AgeX25519PubGetIOWrapper builds an encrypt-only IO wrapper for the age
+// X25519 recipient carried by public (an age_x25519_pub markl id). It is
+// how a consumer encrypts to a key whose secret half it does not hold at
+// write time.
+//
+// It is built directly on filippo.io/age: dewey's age package has no
+// recipient-only wrapper, only identities.
+var AgeX25519PubGetIOWrapper = internal.AgeX25519PubGetIOWrapper
+
+// ErrNoIdentity is what decrypting through an age_x25519_pub IO wrapper
+// returns: a public recipient can encrypt and nothing else. Decryption is
+// the job of the matching age_x25519_sec identity.
+var ErrNoIdentity = internal.ErrNoIdentity
+
+// IsErrNoIdentity reports whether err is, or wraps, ErrNoIdentity.
+var IsErrNoIdentity = internal.IsErrNoIdentity
+
+// RegisterAgeX25519PubFormat swaps an encrypt-capable registration over
+// the core's plain age_x25519_pub format (idempotent via sync.Once). The
+// core registers it as a bare markl.Format, which markl.Id.GetIOWrapper
+// cannot use; importing this package makes an age public recipient
+// encryptable the same way every other key type is. Fired at init().
+var RegisterAgeX25519PubFormat = internal.RegisterAgeX25519PubFormat
+
 // RegisterAgeX25519SecFormat swaps the real age-backed Generate +
 // GetIOWrapper over the core's erroring age_x25519_sec stub (idempotent
 // via sync.Once). Fired at init() below — it needs no connected signer

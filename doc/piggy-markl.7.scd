@@ -71,6 +71,15 @@ _internal/delta/agent_, _delta/age_, _delta/pigpen_
 	(_PIGGY_AUTH_SOCK_, then _SSH_AUTH_SOCK_, then the legacy
 	_PIVY_AUTH_SOCK_).
 
+	Importing _pkgs/agent_ and _pkgs/age_ is what makes
+	*markl.Id.GetIOWrapper* work for the recipient formats.
+	_pivy_ecdh_p256_pub_ encrypts in software and decrypts through the
+	agent, using this module's own extension client (dewey's reads only
+	the C pivy-agent's reply framing) and resolving the socket at decrypt
+	time. _age_x25519_pub_ is encrypt-only, built directly on
+	_filippo.io/age_; reading through it returns *ErrNoIdentity*, and the
+	matching _age_x25519_sec_ identity does the decrypting.
+
 _internal/echo/pigpen_resolve_
 	Facade _pkgs/pigpen_resolve_: RFC 0010 pointer resolution. *Resolve*
 	runs _pigpen-resolver-<kind> resolve <locator>_ from PATH under the

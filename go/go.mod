@@ -16,12 +16,12 @@ go 1.26
 // "expected a set but found a string" at buildGoApplication eval.
 require (
 	code.linenisgreat.com/purse-first/libs/dewey v0.5.0
+	filippo.io/age v1.3.1
 	golang.org/x/crypto v0.50.0
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
 )
 
 require (
-	filippo.io/age v1.3.1 // indirect
 	filippo.io/hpke v0.4.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect

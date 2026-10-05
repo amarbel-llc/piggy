@@ -31,7 +31,8 @@ Landed: tasks 1 to 7, task 8 except its end-to-end step, task 9, and task 10's d
 Still open:
 
 - **Task 8, step 5.** The Go oracle has not been run against the real Rust agent over fibby. No existing lane does Go ECDH against fibby (the conformance binary's ECDH case needs `--hardware`), so this needs a new bats test and a small Go entry point. Until it runs, the reading that dewey v0.5.0's `parseECDHResponse` mis-parses piggy-agent's reply (it would take the echoed extension name as the secret) is unconfirmed.
-- **Task 9a.** Blocked as agreed: dewey v0.5.0's `age` package exports `Identity`, `MultiIdentity`, `Recipient` and `Recipients`, but only the identity types implement the IO wrapper, so there is no recipient-only wrapper to register. That part goes to the dewey owner. (piggy could instead build one directly on `filippo.io/age`, which is already in its closure; not done, pending Sasha's call.)
+- **Task 9a: done, differently.** dewey v0.5.0's `age` package has no recipient-only IO wrapper, so on Sasha's decision piggy builds one directly on `filippo.io/age` (`go/internal/delta/age/format_family_agex25519_pub.go`). It is encrypt-only; reading through it returns `ErrNoIdentity`.
+- **`pivy_ecdh_p256_pub` IO wrapper: switched to piggy's ECDH client**, also on Sasha's decision, after madder confirmed by run that dewey's client cannot read piggy-agent's reply. A request to remove dewey's agent ECDH client is filed against purse-first.
 - **Not addressed from the second review:** `open`-stage reject vectors pass on any error and do not pin which one; there is no truncation-at-a-chunk-boundary vector (it would put about 130 KB of hex in the file); and a mutation check that the low-order X25519 vectors fail without the Rust fix was not run.
 - **Rust pointer parser.** `piggy_pigpen::Pointer::parse` is laxer than the new Go `ParsePointer` (it accepts a repeated tag, a second type line and a body). Aligning it is a follow-up.
 
