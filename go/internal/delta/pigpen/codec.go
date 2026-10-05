@@ -158,12 +158,26 @@ func parseRecipientLine(body string) (Recipient, error) {
 		idStr = strings.TrimSpace(body)
 	}
 	var id markl.Id
-	if err := id.Set(idStr); err != nil {
+	var err error
+	if err = id.Set(idStr); err != nil {
 		return r, fmt.Errorf("pigpen: bad recipient %q: %w", idStr, err)
 	}
 	// markl.Id.Set treats "" as the null id; a `-` line must name one.
 	if id.IsEmpty() {
 		return r, errors.New("pigpen: recipient line has no markl id")
+	}
+	// A quoted empty purpose decodes to the same value as no purpose at
+	// all, so it cannot round-trip; refuse it rather than guess.
+	if strings.HasPrefix(idStr, `""@`) || strings.HasPrefix(idStr, `''@`) {
+		return r, fmt.Errorf("pigpen: recipient %q has an empty purpose", idStr)
+	}
+	// A bare recipient id is accepted and promoted to the
+	// piggy-recipient-v1@ form (RFC 0008 §2.3), so the canonical header —
+	// and with it the header MAC — has exactly one spelling.
+	if isEncryptionRecipient(id) {
+		if id, err = canonicalRecipient(id); err != nil {
+			return r, err
+		}
 	}
 	r.ID = id
 	if hasWrap {

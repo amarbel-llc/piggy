@@ -113,6 +113,9 @@ impl Document {
 
         let mut recs = Vec::with_capacity(recipients.len());
         for (id, ephemeral) in recipients.iter().zip(&inputs.ephemeral) {
+            // An id under a foreign purpose is not a key to wrap to; a bare
+            // id is promoted (RFC 0008 §2.3).
+            let id = &promote_recipient(id)?;
             let wrap = match id.format() {
                 FormatId::PivyEcdhP256Pub => crypto::wrap_p256(file_key, id.data(), ephemeral)?,
                 FormatId::AgeX25519Pub => crypto::wrap_x25519(file_key, id.data(), ephemeral)?,
@@ -417,6 +420,19 @@ fn is_encryption_recipient(id: &Id) -> bool {
     ) && matches!(id.purpose(), None | Some(PurposeId::PiggyRecipientV1))
 }
 
+/// An encryption recipient under the `piggy-recipient-v1` purpose, the one
+/// spelling the canonical header (and so the header MAC) uses. Errors for
+/// an id that is not an encryption recipient.
+fn promote_recipient(id: &Id) -> Result<Id> {
+    if !is_encryption_recipient(id) {
+        return Err(Error::UnsupportedFormat(format!(
+            "{} is not an encryption recipient",
+            id.to_wire()
+        )));
+    }
+    recipient_id(id.format(), id.data().to_vec())
+}
+
 /// The wrap format that locks a recipient of the given format. A recipient
 /// format with no wrap format is not an encryption recipient and carries no
 /// wrap lock (RFC 0008 §2.3).
@@ -517,7 +533,20 @@ fn parse_recipient_line(body: &str) -> Result<Recipient> {
     } else {
         body.trim().to_string()
     };
-    let id = Id::parse(&id_str).map_err(|e| Error::Markl(format!("{e}")))?;
+    let mut id = Id::parse(&id_str).map_err(|e| Error::Markl(format!("{e}")))?;
+    // A quoted empty purpose cannot round-trip (it reads as "no purpose"
+    // in the Go implementation); refuse it rather than guess.
+    if id.purpose().is_some_and(|p| p.as_str().is_empty()) {
+        return Err(Error::Malformed(format!(
+            "recipient {id_str:?} has an empty purpose"
+        )));
+    }
+    // A bare recipient id is accepted and promoted to the
+    // piggy-recipient-v1@ form (RFC 0008 §2.3), so the canonical header —
+    // and with it the header MAC — has exactly one spelling.
+    if is_encryption_recipient(&id) {
+        id = promote_recipient(&id)?;
+    }
     // The wrap format is a function of the recipient's, so the recipient is
     // decoded first (RFC 0008 §2.4).
     let wrap = wrap_str.map(|s| decode_wrap(id.format(), s)).transpose()?;

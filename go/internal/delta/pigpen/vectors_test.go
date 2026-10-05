@@ -215,6 +215,8 @@ func TestNormativePigpenVectors(t *testing.T) {
 				replayRecipientSetVector(t, r)
 			case "reject":
 				replayRejectVector(t, r)
+			case "seal-reject":
+				replaySealRejectVector(t, r)
 			default:
 				t.Fatalf("unknown outcome %q", r["outcome"])
 			}
@@ -288,7 +290,11 @@ func replayNormalizeVector(t *testing.T, r vectorRecord) {
 	if want := r.hex(t, "normalized"); !bytes.Equal(out, want) {
 		t.Fatalf("normalized form:\n got %x\nwant %x", out, want)
 	}
+	checkRecipientFields(t, r, doc)
 
+	if _, sealed := r["plaintext"]; !sealed {
+		return
+	}
 	oracle, x25519 := r.identities(t)
 	got, err := doc.Open(oracle, x25519)
 	if err != nil {
@@ -316,6 +322,18 @@ func replayRecipientSetVector(t *testing.T, r vectorRecord) {
 		t.Fatalf("recipient set changed on re-serialization:\n got %s\nwant %s", out, wire)
 	}
 	checkRecipientFields(t, r, doc)
+}
+
+// A `seal-reject` record carries seal inputs that sealing must refuse.
+func replaySealRejectVector(t *testing.T, r vectorRecord) {
+	_, err := sealWith(r.plaintext(t), r.recipients(t), sealInputs{
+		fileKey:      r.hex(t, "file-key"),
+		payloadNonce: r.hex(t, "payload-nonce"),
+		ephemeral:    r.hexList(t, "ephemeral-secrets"),
+	})
+	if err == nil {
+		t.Fatal("sealing succeeded, want refusal")
+	}
 }
 
 // A `reject` record must fail at its `stage`: `parse`, or `open` for a

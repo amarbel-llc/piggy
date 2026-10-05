@@ -106,12 +106,25 @@ func isPointerDocument(raw []byte) bool {
 // skipped; any other non-recipient id is an error.
 func parseRFC0003Recipients(raw []byte) ([]markl.Id, error) {
 	var out []markl.Id
+	const wsp = " \t" // the grammar's WSP; a CR before the LF is tolerated
 	for n, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
+		line = strings.Trim(strings.TrimSuffix(line, "\r"), wsp)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		idStr := strings.Fields(line)[0]
+		idStr, rest := line, ""
+		if i := strings.IndexAny(line, wsp); i >= 0 {
+			idStr, rest = line[:i], strings.TrimLeft(line[i:], wsp)
+		}
+		// After the id the grammar allows only a `#` comment. A second
+		// token is most likely a second recipient on one line; dropping it
+		// silently would lose a recipient the author meant to add.
+		if rest != "" && !strings.HasPrefix(rest, "#") {
+			return nil, fmt.Errorf(
+				"pigpen: piggy-ids line %d: unexpected %q after the markl id (one id per line, then an optional # comment)",
+				n+1, rest,
+			)
+		}
 		var id markl.Id
 		if err := id.Set(idStr); err != nil {
 			return nil, fmt.Errorf("pigpen: piggy-ids line %d: bad markl id %q: %w", n+1, idStr, err)

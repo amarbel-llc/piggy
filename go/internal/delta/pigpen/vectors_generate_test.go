@@ -38,7 +38,7 @@ const pigpenVectorsHeader = `# pigpen-v1 normative test vectors.
 # are lowercase hex unless noted. Lists are space-separated.
 #
 #   name               record name
-#   outcome            open | normalize | recipient-set | reject
+#   outcome            open | normalize | recipient-set | reject | seal-reject
 #   document           the complete document bytes
 #   document-sha256    SHA-256 of the document, used INSTEAD of "document"
 #                      when the document is large; the document is then the
@@ -67,7 +67,10 @@ const pigpenVectorsHeader = `# pigpen-v1 normative test vectors.
 #
 # An "open" record with seal inputs must reproduce its document exactly
 # when sealed with them, must re-serialize unchanged after a parse, and
-# must open to its plaintext. Every secret here is a public test value.
+# must open to its plaintext. A "normalize" record must parse and
+# re-serialize to "normalized", and open to its plaintext when it has one.
+# A "seal-reject" record carries seal inputs that sealing must refuse.
+# Every secret here is a public test value.
 `
 
 type vectorWriter struct {
@@ -225,6 +228,23 @@ func TestGeneratePigpenVectors(t *testing.T) {
 		"document-sha256", hex.EncodeToString(twoChunksDigest[:]),
 	)
 
+	// Exactly one STREAM chunk of plaintext: one full final chunk, with no
+	// empty chunk trailing it.
+	oneChunk := make([]byte, streamChunkSize)
+	_, oneChunkWire := seal(oneChunk, []markl.Id{xID}, xEphemeral)
+	oneChunkDigest := sha256.Sum256(oneChunkWire)
+	w.record(
+		"name", "sealed/one-full-stream-chunk",
+		"outcome", "open",
+		"recipients", idList(xID),
+		"file-key", hex.EncodeToString(fileKey),
+		"payload-nonce", hex.EncodeToString(nonce),
+		"ephemeral-secrets", hexList(xEphemeral),
+		"x25519-secrets", hex.EncodeToString(xSecret),
+		"plaintext-zeros", fmt.Sprint(len(oneChunk)),
+		"document-sha256", hex.EncodeToString(oneChunkDigest[:]),
+	)
+
 	// A sealed document may carry lines that are not encryption recipients
 	// (RFC 0008 §2.3). They hold no wrap, and the header MAC covers them.
 	besideAuth, err := sealWith(plaintext, []markl.Id{xID}, sealInputs{
@@ -280,6 +300,46 @@ func TestGeneratePigpenVectors(t *testing.T) {
 		"plaintext", hex.EncodeToString(plaintext),
 		"document", hex.EncodeToString(replaceOnce(t, xWire, wrapLock, ` < "`+markl.PurposePigpenWrapV1+`"@`)),
 		"normalized", hex.EncodeToString(xWire),
+	)
+
+	// A recipient set written with a bare id, out of canonical-set order and
+	// with a duplicate: the bare id is promoted on rewrite (RFC 0008 §2.3),
+	// document order and the duplicate are kept, and the canonical set is
+	// sorted and de-duplicated.
+	bareX := mustBlech32(t, formatAgeX25519, xKey.PublicKey().Bytes())
+	unsorted := "---\n- " + pID.StringWithFormat() + "\n- " + bareX + "\n- " + xID.StringWithFormat() + "\n! " + typeTag + "\n---\n"
+	promoted := "---\n- " + pID.StringWithFormat() + "\n- " + xID.StringWithFormat() + "\n- " + xID.StringWithFormat() + "\n! " + typeTag + "\n---\n"
+	w.record(
+		"name", "normalize/bare-recipient-promoted-set-sorted-and-deduplicated",
+		"outcome", "normalize",
+		"encryption-recipients", idList(pID, xID, xID),
+		"canonical-set", hex.EncodeToString([]byte(xID.StringWithFormat()+"\n"+pID.StringWithFormat()+"\n")),
+		"document", hex.EncodeToString([]byte(unsorted)),
+		"normalized", hex.EncodeToString([]byte(promoted)),
+	)
+
+	// --- sealing refused --------------------------------------------------
+	// An all-zero X25519 "public key" is a low-order point: every exchange
+	// with it gives the same all-zero secret, so a document sealed to it
+	// would be readable by anyone (RFC 7748 §6.1).
+	lowOrderID := mustID(t, purposeRecipient, formatAgeX25519, make([]byte, 32))
+	w.record(
+		"name", "seal-reject/low-order-x25519-recipient",
+		"outcome", "seal-reject",
+		"recipients", idList(lowOrderID),
+		"file-key", hex.EncodeToString(fileKey),
+		"payload-nonce", hex.EncodeToString(nonce),
+		"ephemeral-secrets", hexList(xEphemeral),
+		"plaintext", hex.EncodeToString(plaintext),
+	)
+	w.record(
+		"name", "seal-reject/recipient-under-a-foreign-purpose",
+		"outcome", "seal-reject",
+		"recipients", idList(mustID(t, "someone-elses-key-v1", formatAgeX25519, xKey.PublicKey().Bytes())),
+		"file-key", hex.EncodeToString(fileKey),
+		"payload-nonce", hex.EncodeToString(nonce),
+		"ephemeral-secrets", hexList(xEphemeral),
+		"plaintext", hex.EncodeToString(plaintext),
 	)
 
 	// --- recipient sets --------------------------------------------------
@@ -348,6 +408,55 @@ func TestGeneratePigpenVectors(t *testing.T) {
 	flippedPayload := bytes.Clone(xWire)
 	flippedPayload[len(flippedPayload)-1] ^= 0x01
 	reject("reject/flipped-payload-byte", "open", flippedPayload, xOpener...)
+
+	// One flipped byte in the wrapped file key.
+	tamperedWrap := bytes.Clone(xDoc.Recipients[0].Wrap)
+	tamperedWrap[len(tamperedWrap)-1] ^= 0x01
+	goodWrapLock, err := encodeWrap(formatAgeX25519, xDoc.Recipients[0].Wrap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedWrapLock, err := encodeWrap(formatAgeX25519, tamperedWrap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reject("reject/flipped-wrap-byte", "open",
+		replaceOnce(t, xWire, goodWrapLock, tamperedWrapLock), xOpener...)
+
+	// A complete, self-consistent document whose wrap uses the all-zero
+	// (low-order) ephemeral key. The exchange then yields an all-zero
+	// secret whatever the recipient's key is, so anyone can build this
+	// without knowing the recipient; an implementation that does not
+	// reject the low-order point opens it.
+	lowOrderEpk := make([]byte, 32)
+	forgedWrapKey := hkdf32(make([]byte, 32), concat(lowOrderEpk, xKey.PublicKey().Bytes()), infoX25519)
+	forgedCiphertext, err := aeadSeal(forgedWrapKey, zeroNonce, fileKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedPayload, err := sealPayload(fileKey, plaintext, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := &Document{
+		Recipients: []Recipient{{ID: xID, Wrap: append(bytes.Clone(lowOrderEpk), forgedCiphertext...)}},
+		Payload:    forgedPayload,
+	}
+	forgedHeader, err := forged.canonicalHeader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged.MAC = headerMAC(fileKey, forgedHeader)
+	forgedWire, err := forged.MarshalText()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reject("reject/wrap-with-low-order-ephemeral-key", "open", forgedWire, xOpener...)
+
+	reject("reject/recipient-with-empty-quoted-purpose", "parse",
+		[]byte("---\n- \"\"@"+bareX+"\n! "+typeTag+"\n---\n"))
+	reject("reject/header-mac-lock-with-empty-quoted-purpose", "parse",
+		replaceOnce(t, xWire, typeLine, typeLine+`""@`))
 
 	// Strip the P-256 recipient's whole line. The X25519 wrap still
 	// unwraps, but the header MAC covers the recipient set (RFC 0008 §6.1).

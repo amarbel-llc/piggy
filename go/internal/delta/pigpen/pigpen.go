@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"code.linenisgreat.com/piggy/go/internal/bravo/markl"
 
@@ -88,10 +89,10 @@ func Seal(plaintext []byte, recipients []markl.Id, rng io.Reader) (*Document, er
 		rng = defaultRand
 	}
 	in, err := drawSealInputs(recipients, rng)
+	defer in.zero() // also scrubs what a failed draw got as far as reading
 	if err != nil {
 		return nil, err
 	}
-	defer in.zero()
 	return sealWith(plaintext, recipients, in)
 }
 
@@ -116,14 +117,15 @@ func drawSealInputs(recipients []markl.Id, rng io.Reader) (in sealInputs, err er
 		return in, err
 	}
 	for _, id := range recipients {
+		if !isEncryptionRecipient(id) {
+			return in, notAnEncryptionRecipient(id)
+		}
 		var curve ecdh.Curve
-		switch f := id.GetMarklFormat().GetMarklFormatId(); f {
+		switch id.GetMarklFormat().GetMarklFormatId() {
 		case formatPivyP256:
 			curve = ecdh.P256()
-		case formatAgeX25519:
-			curve = ecdh.X25519()
 		default:
-			return in, fmt.Errorf("pigpen: unsupported recipient format %q", f)
+			curve = ecdh.X25519()
 		}
 		esk, err := curve.GenerateKey(rng)
 		if err != nil {
@@ -135,6 +137,13 @@ func drawSealInputs(recipients []markl.Id, rng io.Reader) (in sealInputs, err er
 		return in, err
 	}
 	return in, nil
+}
+
+func notAnEncryptionRecipient(id markl.Id) error {
+	return fmt.Errorf(
+		"pigpen: %q is not an encryption recipient (want a %s or %s key, bare or under %s)",
+		id.StringWithFormat(), formatPivyP256, formatAgeX25519, purposeRecipient,
+	)
 }
 
 // sealWith is Seal with every secret supplied by the caller.
@@ -154,6 +163,14 @@ func sealWith(plaintext []byte, recipients []markl.Id, in sealInputs) (*Document
 	d := &Document{}
 	var err error
 	for i, id := range recipients {
+		// A null id has no format, and an id under a foreign purpose is
+		// not a key to wrap to; a bare id is promoted (RFC 0008 §2.3).
+		if !isEncryptionRecipient(id) {
+			return nil, notAnEncryptionRecipient(id)
+		}
+		if id, err = canonicalRecipient(id); err != nil {
+			return nil, err
+		}
 		r := Recipient{ID: id}
 		switch f := id.GetMarklFormat().GetMarklFormatId(); f {
 		case formatPivyP256:
@@ -306,6 +323,11 @@ func encodeMAC(mac []byte) (string, error) {
 }
 
 func decodeMAC(s string) ([]byte, error) {
+	// The lock is a bare id. Refuse any purpose slot outright: a quoted
+	// empty one (`""@…`) would otherwise decode to "no purpose".
+	if strings.Contains(s, "@") {
+		return nil, fmt.Errorf("pigpen: header MAC lock %q carries a purpose, want none", s)
+	}
 	var id markl.Id
 	if err := id.Set(s); err != nil {
 		return nil, fmt.Errorf("pigpen: bad header MAC lock %q: %w", s, err)

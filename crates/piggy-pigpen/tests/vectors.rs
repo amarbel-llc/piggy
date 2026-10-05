@@ -192,6 +192,7 @@ fn replay_open(r: &Record) {
         "{}: document changed on re-serialization",
         r.name()
     );
+    check_recipient_fields(r, &doc);
     let got = r
         .open(&doc)
         .unwrap_or_else(|e| panic!("{}: open: {e:?}", r.name()));
@@ -209,6 +210,10 @@ fn replay_normalize(r: &Record) {
         "{}: normalized form",
         r.name()
     );
+    check_recipient_fields(r, &doc);
+    if !r.has("plaintext") {
+        return;
+    }
     let got = r
         .open(&doc)
         .unwrap_or_else(|e| panic!("{}: open: {e:?}", r.name()));
@@ -227,6 +232,71 @@ fn replay_recipient_set(r: &Record) {
         hex::encode(doc.to_bytes().unwrap()),
         hex::encode(&wire),
         "{}: recipient set changed on re-serialization",
+        r.name()
+    );
+    check_recipient_fields(r, &doc);
+}
+
+/// Check the record's `encryption-recipients` and `canonical-set` fields
+/// against the parsed document. This crate has no helper for either, so the
+/// rule is restated here from the vector file's header; that makes it an
+/// independent check of the Go helpers that generated the fields.
+fn check_recipient_fields(r: &Record, doc: &Document) {
+    use piggy_markl::{FormatId, PurposeId};
+
+    let recipients: Vec<String> = doc
+        .recipients
+        .iter()
+        .filter(|rec| {
+            matches!(
+                rec.id.format(),
+                FormatId::PivyEcdhP256Pub | FormatId::AgeX25519Pub
+            ) && matches!(rec.id.purpose(), None | Some(PurposeId::PiggyRecipientV1))
+        })
+        .map(|rec| {
+            piggy_pigpen::recipient_id(rec.id.format(), rec.id.data().to_vec())
+                .unwrap()
+                .to_wire()
+        })
+        .collect();
+
+    if r.has("encryption-recipients") {
+        assert_eq!(
+            recipients.join(" "),
+            r.text("encryption-recipients"),
+            "{}: encryption recipients",
+            r.name()
+        );
+    }
+
+    if r.has("canonical-set") {
+        let mut lines = recipients.clone();
+        lines.sort();
+        lines.dedup();
+        let canonical: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        assert_eq!(
+            hex::encode(canonical),
+            r.text("canonical-set"),
+            "{}: canonical recipient set",
+            r.name()
+        );
+    }
+}
+
+/// A `seal-reject` record carries seal inputs that sealing must refuse.
+fn replay_seal_reject(r: &Record) {
+    let inputs = SealInputs {
+        file_key: r.hex("file-key").try_into().unwrap(),
+        payload_nonce: r.hex("payload-nonce").try_into().unwrap(),
+        ephemeral: r
+            .hex_list("ephemeral-secrets")
+            .into_iter()
+            .map(|s| s.try_into().unwrap())
+            .collect(),
+    };
+    assert!(
+        Document::seal_with(&r.plaintext(), &r.recipients(), &inputs).is_err(),
+        "{}: sealing succeeded, want refusal",
         r.name()
     );
 }
@@ -268,6 +338,7 @@ fn normative_pigpen_vectors() {
             "normalize" => replay_normalize(r),
             "recipient-set" => replay_recipient_set(r),
             "reject" => replay_reject(r),
+            "seal-reject" => replay_seal_reject(r),
             other => panic!("{}: unknown outcome {other:?}", r.name()),
         }
     }

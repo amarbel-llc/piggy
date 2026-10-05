@@ -136,6 +136,70 @@ func TestParseRecipientsRejectsWhatItCannotResolve(t *testing.T) {
 	}
 }
 
+// One id per line. A second token is most likely a second recipient, and
+// dropping it silently would lose a recipient the author meant to add.
+func TestParseRecipientsRejectsASecondTokenOnALine(t *testing.T) {
+	x, p, _, _ := recipientFixtures(t)
+	for label, line := range map[string]string{
+		"two ids":          x.StringWithFormat() + " " + p.StringWithFormat(),
+		"an id and a word": x.StringWithFormat() + "\tlaptop",
+	} {
+		if _, err := ParseRecipients([]byte(line + "\n")); err == nil {
+			t.Errorf("%s: accepted, want rejection", label)
+		}
+	}
+	// A tab before the comment and a CRLF line ending are fine.
+	got, err := ParseRecipients([]byte(x.StringWithFormat() + "\t# laptop\r\n"))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("id, tab, comment, CRLF: %v / %v", err, idTexts(got))
+	}
+}
+
+func TestSealRefusesWhatIsNotAnEncryptionRecipient(t *testing.T) {
+	_, _, sshAuth, _ := recipientFixtures(t)
+	xpub, _ := newX25519(t)
+	foreignPurpose := purposedID(t, "someone-elses-key-v1", formatAgeX25519, xpub)
+
+	for label, id := range map[string]markl.Id{
+		"the null id":               {},
+		"an ssh-auth key":           sshAuth,
+		"a key under another purpose": foreignPurpose,
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: Seal panicked: %v", label, r)
+				}
+			}()
+			if _, err := Seal([]byte("x"), []markl.Id{id}, nil); err == nil {
+				t.Errorf("%s: sealed, want refusal", label)
+			}
+		}()
+	}
+}
+
+func TestSealPromotesABareRecipient(t *testing.T) {
+	xpub, xident := newX25519(t)
+	doc, err := Seal([]byte("x"), []markl.Id{bareID(t, formatAgeX25519, xpub)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := doc.Recipients[0].ID.GetPurposeId(); got != markl.PurposePiggyRecipientV1 {
+		t.Fatalf("sealed recipient purpose = %q, want piggy-recipient-v1", got)
+	}
+	wire, err := doc.MarshalText()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseDocument(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parsed.Open(nil, []X25519Identity{xident}); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+}
+
 func TestCanonicalRecipientSetIsOrderAndSpellingIndependent(t *testing.T) {
 	x, p, _, _ := recipientFixtures(t)
 	bareX := bareID(t, formatAgeX25519, x.GetBytes())

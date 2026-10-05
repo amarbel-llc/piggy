@@ -71,6 +71,18 @@ pub fn random_p256_secret() -> [u8; 32] {
 
 // --- X25519 wrap (RFC 0008 §4.4) ----------------------------------------
 
+/// An X25519 exchange with a low-order point yields an all-zero shared
+/// secret that anyone can compute: sealing to such a "recipient" would
+/// produce a document readable by everyone. Go's `crypto/ecdh` refuses
+/// that exchange, so this implementation must too (RFC 7748 §6.1).
+fn reject_low_order(shared: &x25519_dalek::SharedSecret, what: &str) -> Result<()> {
+    if shared.was_contributory() {
+        Ok(())
+    } else {
+        Err(Error::Crypto(format!("x25519 {what} is a low-order point")))
+    }
+}
+
 pub fn wrap_x25519(
     file_key: &[u8],
     recipient_pub: &[u8],
@@ -84,6 +96,7 @@ pub fn wrap_x25519(
     let esk = x25519_dalek::StaticSecret::from(*ephemeral_secret);
     let epk = x25519_dalek::PublicKey::from(&esk);
     let shared = esk.diffie_hellman(&recipient);
+    reject_low_order(&shared, "recipient public key")?;
 
     let mut salt = Vec::with_capacity(64);
     salt.extend_from_slice(epk.as_bytes());
@@ -109,6 +122,7 @@ pub fn unwrap_x25519(blob: &[u8], recipient_pub: &[u8], recipient_sec: &[u8]) ->
 
     let sk = x25519_dalek::StaticSecret::from(sec);
     let shared = sk.diffie_hellman(&x25519_dalek::PublicKey::from(epk));
+    reject_low_order(&shared, "ephemeral public key")?;
 
     let mut salt = Vec::with_capacity(64);
     salt.extend_from_slice(&epk);
