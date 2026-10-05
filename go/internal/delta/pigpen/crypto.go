@@ -67,11 +67,11 @@ var zeroNonce = make([]byte, chacha20poly1305.NonceSize)
 
 // --- X25519 wrap (RFC 0008 §4.4) -----------------------------------------
 
-func wrapX25519(fileKey, recipientPub []byte, rng io.Reader) (blob []byte, err error) {
+func wrapX25519(fileKey, recipientPub, ephemeralSecret []byte) (blob []byte, err error) {
 	curve := ecdh.X25519()
-	esk, err := curve.GenerateKey(rng)
+	esk, err := curve.NewPrivateKey(ephemeralSecret)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("pigpen: bad x25519 ephemeral secret: %w", err)
 	}
 	rpk, err := curve.NewPublicKey(recipientPub)
 	if err != nil {
@@ -120,11 +120,11 @@ func unwrapX25519(blob, recipientPub, recipientSec []byte) (fileKey []byte, err 
 // ECDHOracle (a card via piggy-agent), so the slot-9D scalar never
 // materialises and the WASM module does no PCSC I/O.
 
-func wrapP256(fileKey, recipientCompressed []byte, rng io.Reader) (blob []byte, err error) {
+func wrapP256(fileKey, recipientCompressed, ephemeralSecret []byte) (blob []byte, err error) {
 	curve := ecdh.P256()
-	esk, err := curve.GenerateKey(rng)
+	esk, err := curve.NewPrivateKey(ephemeralSecret)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("pigpen: bad p256 ephemeral secret: %w", err)
 	}
 	rpk, err := p256PublicFromCompressed(recipientCompressed)
 	if err != nil {
@@ -184,10 +184,9 @@ func p256PublicFromCompressed(compressed []byte) (*ecdh.PublicKey, error) {
 
 // --- Payload STREAM (RFC 0008 §4.5) --------------------------------------
 
-func sealPayload(fileKey, plaintext []byte, rng io.Reader) ([]byte, error) {
-	nonce := make([]byte, payloadNonceLen)
-	if _, err := io.ReadFull(rng, nonce); err != nil {
-		return nil, err
+func sealPayload(fileKey, plaintext, nonce []byte) ([]byte, error) {
+	if len(nonce) != payloadNonceLen {
+		return nil, fmt.Errorf("pigpen: payload nonce is %d bytes, want %d", len(nonce), payloadNonceLen)
 	}
 	streamKey := hkdf32(fileKey, nonce, infoPayload)
 	aead, err := chacha20poly1305.New(streamKey)
@@ -272,10 +271,10 @@ func headerMAC(fileKey, canonicalHeader []byte) []byte {
 	return m.Sum(nil)
 }
 
-func randomFileKey(rng io.Reader) ([]byte, error) {
-	fk := make([]byte, fileKeyLen)
-	_, err := io.ReadFull(rng, fk)
-	return fk, err
+func randomBytes(rng io.Reader, n int) ([]byte, error) {
+	out := make([]byte, n)
+	_, err := io.ReadFull(rng, out)
+	return out, err
 }
 
 // defaultRand is the package CSPRNG; tests may inject a deterministic one.

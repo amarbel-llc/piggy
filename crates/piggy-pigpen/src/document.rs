@@ -38,6 +38,26 @@ pub struct Document {
     pub mac: Option<Vec<u8>>,
 }
 
+/// Every secret a seal consumes (RFC 0008 §4.1, §4.3–§4.5): the file key,
+/// the payload nonce, and one ephemeral private scalar per recipient, in
+/// recipient order (a 32-byte X25519 secret, or a 32-byte big-endian P-256
+/// scalar). Scrubbed on drop.
+pub struct SealInputs {
+    pub file_key: [u8; crypto::FILE_KEY_LEN],
+    pub payload_nonce: [u8; crypto::PAYLOAD_NONCE_LEN],
+    pub ephemeral: Vec<[u8; 32]>,
+}
+
+impl Drop for SealInputs {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.file_key.zeroize();
+        for secret in &mut self.ephemeral {
+            secret.zeroize();
+        }
+    }
+}
+
 impl Document {
     pub fn sealed(&self) -> bool {
         self.mac.is_some()
@@ -56,21 +76,46 @@ impl Document {
     /// Encrypt `plaintext` to `recipients`, producing a sealed document.
     /// All wraps are pure software (P-256 encrypt needs no card).
     pub fn seal(plaintext: &[u8], recipients: &[Id]) -> Result<Document> {
+        let mut ephemeral = Vec::with_capacity(recipients.len());
+        for id in recipients {
+            ephemeral.push(match id.format() {
+                FormatId::PivyEcdhP256Pub => crypto::random_p256_secret(),
+                FormatId::AgeX25519Pub => crypto::random_x25519_secret(),
+                other => return Err(Error::UnsupportedFormat(format!("{other:?}"))),
+            });
+        }
+        let inputs = SealInputs {
+            file_key: crypto::random_file_key(),
+            payload_nonce: crypto::random_payload_nonce(),
+            ephemeral,
+        };
+        Document::seal_with(plaintext, recipients, &inputs)
+    }
+
+    /// [`Document::seal`] with every secret supplied by the caller. This is
+    /// the seam the normative vectors replay through (RFC 0009 §8);
+    /// production callers use `seal`, which draws the inputs from the OS
+    /// CSPRNG and calls this, so both paths share all the crypto.
+    pub fn seal_with(plaintext: &[u8], recipients: &[Id], inputs: &SealInputs) -> Result<Document> {
         if recipients.is_empty() {
             return Err(Error::Malformed(
                 "at least one recipient is required".into(),
             ));
         }
-        // Wrap in Zeroizing so the file key is scrubbed from memory when it
-        // drops — including on any early `?` return below — matching the Go
-        // impl's `defer zero(fileKey)`.
-        let file_key = zeroize::Zeroizing::new(crypto::random_file_key());
+        if inputs.ephemeral.len() != recipients.len() {
+            return Err(Error::Malformed(format!(
+                "{} ephemeral secrets for {} recipients",
+                inputs.ephemeral.len(),
+                recipients.len()
+            )));
+        }
+        let file_key = &inputs.file_key[..];
 
         let mut recs = Vec::with_capacity(recipients.len());
-        for id in recipients {
+        for (id, ephemeral) in recipients.iter().zip(&inputs.ephemeral) {
             let wrap = match id.format() {
-                FormatId::PivyEcdhP256Pub => crypto::wrap_p256(&file_key[..], id.data())?,
-                FormatId::AgeX25519Pub => crypto::wrap_x25519(&file_key[..], id.data())?,
+                FormatId::PivyEcdhP256Pub => crypto::wrap_p256(file_key, id.data(), ephemeral)?,
+                FormatId::AgeX25519Pub => crypto::wrap_x25519(file_key, id.data(), ephemeral)?,
                 other => return Err(Error::UnsupportedFormat(format!("{other:?}"))),
             };
             recs.push(Recipient {
@@ -80,7 +125,7 @@ impl Document {
             });
         }
 
-        let payload = crypto::seal_payload(&file_key[..], plaintext)?;
+        let payload = crypto::seal_payload(file_key, plaintext, &inputs.payload_nonce)?;
         let mut doc = Document {
             description: None,
             recipients: recs,
@@ -88,7 +133,7 @@ impl Document {
             mac: None,
         };
         let canon = doc.canonical_header()?;
-        doc.mac = Some(crypto::header_mac(&file_key[..], &canon).to_vec());
+        doc.mac = Some(crypto::header_mac(file_key, &canon).to_vec());
         Ok(doc)
     }
 
@@ -715,6 +760,69 @@ mod tests {
         // captured), so the deterministic recipient-set face round-trips
         // identically across implementations.
         assert_eq!(hex::encode(doc.to_bytes().unwrap()), RECIPIENT_SET);
+    }
+
+    // --- explicit-input seal (RFC 0009 §8) --------------------------------
+
+    fn fixed_bytes<const N: usize>(seed: u8) -> [u8; N] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
+    /// A valid P-256 private scalar for any seed: the high byte stays far
+    /// below the group order.
+    fn fixed_p256_scalar(seed: u8) -> [u8; 32] {
+        let mut out = fixed_bytes::<32>(seed);
+        out[0] = 0x01;
+        out
+    }
+
+    fn fixed_inputs() -> SealInputs {
+        SealInputs {
+            file_key: fixed_bytes(0x10),
+            payload_nonce: fixed_bytes(0x40),
+            ephemeral: vec![fixed_bytes(0x70), fixed_p256_scalar(0xa0)],
+        }
+    }
+
+    #[test]
+    fn seal_with_explicit_inputs_is_deterministic() {
+        let (xpub, xident) = new_x25519();
+        let (ppub, oracle) = new_p256();
+        let recipients = [
+            recipient_id(FormatId::AgeX25519Pub, xpub).unwrap(),
+            recipient_id(FormatId::PivyEcdhP256Pub, ppub).unwrap(),
+        ];
+        let plaintext = b"the same inputs give the same bytes";
+        let marshal = |inputs: &SealInputs| {
+            Document::seal_with(plaintext, &recipients, inputs)
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+        };
+
+        let first = marshal(&fixed_inputs());
+        assert_eq!(first, marshal(&fixed_inputs()));
+
+        let mut changed = fixed_inputs();
+        changed.ephemeral[0] = fixed_bytes(0x71);
+        assert_ne!(first, marshal(&changed));
+
+        let doc = Document::parse(&first).unwrap();
+        assert_eq!(doc.open(None, &[xident]).unwrap(), plaintext);
+        assert_eq!(doc.open(Some(&oracle), &[]).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn seal_with_rejects_a_mismatched_ephemeral_count() {
+        let (xpub, _) = new_x25519();
+        let recipients = [recipient_id(FormatId::AgeX25519Pub, xpub).unwrap()];
+
+        let mut none = fixed_inputs();
+        none.ephemeral.clear();
+        assert!(Document::seal_with(b"x", &recipients, &none).is_err());
+
+        // fixed_inputs carries two scalars; one recipient is one too few.
+        assert!(Document::seal_with(b"x", &recipients, &fixed_inputs()).is_err());
     }
 
     // --- markl-codec strictness (RFC 0008 §2.4, §2.6, §5) -----------------

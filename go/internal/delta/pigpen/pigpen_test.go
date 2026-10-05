@@ -333,6 +333,137 @@ func TestNonUTF8MetadataRejected(t *testing.T) {
 	}
 }
 
+// --- explicit-input seal (RFC 0009 §8) -----------------------------------
+
+type countingReader struct{ next byte }
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	for i := range p {
+		r.next++
+		p[i] = r.next
+	}
+	return len(p), nil
+}
+
+func fixedBytes(n int, seed byte) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = seed + byte(i)
+	}
+	return out
+}
+
+// fixedP256Scalar is a valid P-256 private scalar for any seed: the high
+// byte stays far below the group order.
+func fixedP256Scalar(seed byte) []byte {
+	out := fixedBytes(32, seed)
+	out[0] = 0x01
+	return out
+}
+
+func TestSealWithExplicitInputsIsDeterministic(t *testing.T) {
+	xpub, xident := newX25519(t)
+	ppub, oracle := newP256(t)
+	recipients := []markl.Id{
+		mustRecipientID(t, formatAgeX25519, xpub),
+		mustRecipientID(t, formatPivyP256, ppub),
+	}
+	plaintext := []byte("the same inputs give the same bytes")
+	inputs := func() sealInputs {
+		return sealInputs{
+			fileKey:      fixedBytes(fileKeyLen, 0x10),
+			payloadNonce: fixedBytes(payloadNonceLen, 0x40),
+			ephemeral:    [][]byte{fixedBytes(32, 0x70), fixedP256Scalar(0xa0)},
+		}
+	}
+
+	marshal := func(in sealInputs) []byte {
+		t.Helper()
+		d, err := sealWith(plaintext, recipients, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, err := d.MarshalText()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wire
+	}
+
+	first, second := marshal(inputs()), marshal(inputs())
+	if !bytes.Equal(first, second) {
+		t.Fatal("the same explicit inputs produced different documents")
+	}
+
+	changed := inputs()
+	changed.ephemeral[0] = fixedBytes(32, 0x71)
+	if bytes.Equal(first, marshal(changed)) {
+		t.Fatal("changing an ephemeral scalar did not change the document")
+	}
+
+	doc, err := ParseDocument(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := doc.Open(nil, []X25519Identity{xident}); err != nil || !bytes.Equal(got, plaintext) {
+		t.Fatalf("x25519 open: %v / %q", err, got)
+	}
+	if got, err := doc.Open(oracle, nil); err != nil || !bytes.Equal(got, plaintext) {
+		t.Fatalf("p256 open: %v / %q", err, got)
+	}
+}
+
+func TestSealWithRejectsMismatchedInputs(t *testing.T) {
+	xpub, _ := newX25519(t)
+	recipients := []markl.Id{mustRecipientID(t, formatAgeX25519, xpub)}
+	good := sealInputs{
+		fileKey:      fixedBytes(fileKeyLen, 0x10),
+		payloadNonce: fixedBytes(payloadNonceLen, 0x40),
+		ephemeral:    [][]byte{fixedBytes(32, 0x70)},
+	}
+
+	for _, tc := range []struct {
+		label  string
+		mutate func(*sealInputs)
+	}{
+		{"no ephemeral scalars", func(in *sealInputs) { in.ephemeral = nil }},
+		{"too many ephemeral scalars", func(in *sealInputs) {
+			in.ephemeral = append(in.ephemeral, fixedBytes(32, 0x71))
+		}},
+		{"short file key", func(in *sealInputs) { in.fileKey = in.fileKey[:fileKeyLen-1] }},
+		{"short payload nonce", func(in *sealInputs) { in.payloadNonce = in.payloadNonce[:payloadNonceLen-1] }},
+	} {
+		in := sealInputs{
+			fileKey:      bytes.Clone(good.fileKey),
+			payloadNonce: bytes.Clone(good.payloadNonce),
+			ephemeral:    [][]byte{bytes.Clone(good.ephemeral[0])},
+		}
+		tc.mutate(&in)
+		if _, err := sealWith([]byte("x"), recipients, in); err == nil {
+			t.Errorf("%s: accepted, want rejection", tc.label)
+		}
+	}
+}
+
+// Seal with a caller-supplied reader still round-trips. It is NOT
+// asserted to be reproducible: measured on go 1.26 (2026-10-05), two
+// seals fed the same deterministic reader differ, because crypto/ecdh
+// does not draw ephemeral keys from the reader. Reproducible output is
+// sealWith's job.
+func TestSealWithCallerReaderRoundTrips(t *testing.T) {
+	xpub, xident := newX25519(t)
+	recipients := []markl.Id{mustRecipientID(t, formatAgeX25519, xpub)}
+	plaintext := []byte("round trip")
+
+	d, err := Seal(plaintext, recipients, &countingReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.Open(nil, []X25519Identity{xident}); err != nil || !bytes.Equal(got, plaintext) {
+		t.Fatalf("open: %v / %q", err, got)
+	}
+}
+
 // --- markl-codec strictness (RFC 0008 §2.4, §2.6, §5) --------------------
 
 func sealedVector(t *testing.T, hexv string) []byte {

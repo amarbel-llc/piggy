@@ -50,15 +50,38 @@ pub fn random_file_key() -> [u8; FILE_KEY_LEN] {
     fk
 }
 
+pub fn random_payload_nonce() -> [u8; PAYLOAD_NONCE_LEN] {
+    let mut nonce = [0u8; PAYLOAD_NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce);
+    nonce
+}
+
+/// A fresh X25519 ephemeral secret. Any 32 bytes are a valid secret; the
+/// curve clamps them at use (RFC 7748 §5).
+pub fn random_x25519_secret() -> [u8; 32] {
+    let mut secret = [0u8; 32];
+    OsRng.fill_bytes(&mut secret);
+    secret
+}
+
+/// A fresh P-256 ephemeral private scalar, big-endian, in [1, n).
+pub fn random_p256_secret() -> [u8; 32] {
+    p256::NonZeroScalar::random(&mut OsRng).to_bytes().into()
+}
+
 // --- X25519 wrap (RFC 0008 §4.4) ----------------------------------------
 
-pub fn wrap_x25519(file_key: &[u8], recipient_pub: &[u8]) -> Result<Vec<u8>> {
+pub fn wrap_x25519(
+    file_key: &[u8],
+    recipient_pub: &[u8],
+    ephemeral_secret: &[u8; 32],
+) -> Result<Vec<u8>> {
     let rpub: [u8; 32] = recipient_pub
         .try_into()
         .map_err(|_| Error::Crypto("x25519 recipient pubkey must be 32 bytes".into()))?;
     let recipient = x25519_dalek::PublicKey::from(rpub);
 
-    let esk = x25519_dalek::EphemeralSecret::random_from_rng(OsRng);
+    let esk = x25519_dalek::StaticSecret::from(*ephemeral_secret);
     let epk = x25519_dalek::PublicKey::from(&esk);
     let shared = esk.diffie_hellman(&recipient);
 
@@ -96,14 +119,19 @@ pub fn unwrap_x25519(blob: &[u8], recipient_pub: &[u8], recipient_sec: &[u8]) ->
 
 // --- P-256 wrap (RFC 0008 §4.3) -----------------------------------------
 
-pub fn wrap_p256(file_key: &[u8], recipient_compressed: &[u8]) -> Result<Vec<u8>> {
+pub fn wrap_p256(
+    file_key: &[u8],
+    recipient_compressed: &[u8],
+    ephemeral_secret: &[u8; 32],
+) -> Result<Vec<u8>> {
     let recipient = p256::PublicKey::from_sec1_bytes(recipient_compressed)
         .map_err(|e| Error::Crypto(format!("bad P-256 recipient: {e}")))?;
 
-    let esk = p256::ecdh::EphemeralSecret::random(&mut OsRng);
-    let epk = esk.public_key();
+    let esk = p256::NonZeroScalar::try_from(ephemeral_secret.as_slice())
+        .map_err(|e| Error::Crypto(format!("bad P-256 ephemeral secret: {e}")))?;
+    let epk = p256::PublicKey::from_secret_scalar(&esk);
     let epk_compressed = epk.to_encoded_point(true);
-    let shared = esk.diffie_hellman(&recipient);
+    let shared = p256::ecdh::diffie_hellman(esk, recipient.as_affine());
 
     let mut salt = Vec::with_capacity(66);
     salt.extend_from_slice(epk_compressed.as_bytes());
@@ -146,10 +174,12 @@ pub fn p256_wrap_epk(blob: &[u8]) -> Result<&[u8]> {
 
 // --- Payload STREAM (RFC 0008 §4.5) -------------------------------------
 
-pub fn seal_payload(file_key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    let mut nonce = [0u8; PAYLOAD_NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
-    let stream_key = hkdf32(file_key, &nonce, INFO_PAYLOAD);
+pub fn seal_payload(
+    file_key: &[u8],
+    plaintext: &[u8],
+    nonce: &[u8; PAYLOAD_NONCE_LEN],
+) -> Result<Vec<u8>> {
+    let stream_key = hkdf32(file_key, nonce, INFO_PAYLOAD);
     let aead = ChaCha20Poly1305::new(Key::from_slice(&stream_key));
 
     let mut out = nonce.to_vec();

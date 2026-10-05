@@ -29,4 +29,9 @@ var ParseDocument = internal.ParseDocument
 // Seal encrypts plaintext to the given recipients, producing a sealed
 // pigpen document. All wraps are computed in pure software (the P-256
 // encrypt side needs no card). rng may be nil to use the package CSPRNG.
+//
+// A caller-supplied rng does NOT make the output reproducible: the file
+// key and payload nonce are read from it, but crypto/ecdh generates the
+// per-recipient ephemeral keys from the system CSPRNG regardless
+// (measured on go 1.26). Supply an rng only as an entropy source.
 var Seal = internal.Seal

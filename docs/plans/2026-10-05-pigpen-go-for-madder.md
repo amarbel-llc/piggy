@@ -142,22 +142,33 @@ Add `PurposePigpenWrapV1Opts` and `PurposePigpenDocV1Opts` to `purposes.go` and 
 
 ### Task 4: Deterministic sealing seam in Rust
 
-Go's `Seal` already takes an `rng`. Rust's `Document::seal`, `wrap_x25519`, `wrap_p256`, `seal_payload` and `random_file_key` draw from the OS RNG internally (`crates/piggy-pigpen/src/crypto.rs:47-149`), so Rust cannot reproduce a fixed vector.
+Neither implementation can reproduce a fixed vector today. Rust's `Document::seal`, `wrap_x25519`, `wrap_p256`, `seal_payload` and `random_file_key` draw from the OS RNG internally (`crates/piggy-pigpen/src/crypto.rs:47-149`). Go's `Seal` takes an `rng`, but see the design change below.
 
 **Promotion criteria:** N/A.
 
 **Files:**
 - Modify: `crates/piggy-pigpen/src/crypto.rs`, `crates/piggy-pigpen/src/document.rs`
 
-**Step 1: Write the failing test.** Seal the same plaintext to the same X25519 recipient twice through a new `Document::seal_with_rng` fed the same fixed byte stream; assert identical output. Seal once through `Document::seal`; assert it differs from both.
+**Design change made while starting this task (2026-10-05).** The seam takes EXPLICIT secrets, not an RNG byte stream, and it is added to BOTH languages:
 
-**Step 2: Run** `just test-pigpen`. Expected: FAIL to compile.
+- An RNG stream is not a portable vector input. How many bytes a library draws to make an ephemeral key, and whether it rejection-samples, is an implementation detail that differs between Go's `crypto/ecdh` and RustCrypto. It is also not established that Go's `ecdh.GenerateKey` honours its `rand` argument on the toolchain this module pins (`go 1.26`); recent Go releases have been moving key generation onto the system RNG regardless of that argument. Step 1 measures this.
+- Explicit inputs are what RFC 0009 §8 already asks for: "fixed file key, ephemeral scalars, payload nonce".
 
-**Step 3: Implement** `seal_with_rng(plaintext, recipients, rng: &mut impl RngCore + CryptoRng)` and thread the rng through the four functions above; `seal` becomes a call with `OsRng`. The draw order must match Go's `Seal` exactly: file key, then per recipient in order the ephemeral key, then the payload nonce. Read `go/internal/delta/pigpen/pigpen.go:85-126` and write the order in a comment on both sides. (The Rust seal path already wraps the file key in `Zeroizing`; #210 item 3 was done before this plan, so there is nothing to add there.)
+So both sides gain an internal (test-reachable, not exported from the Go facade) function taking: the 16-byte file key, the 16-byte payload nonce, and one ephemeral private scalar per recipient. Go builds each ephemeral key with `ecdh.X25519().NewPrivateKey` / `ecdh.P256().NewPrivateKey`; Rust with `x25519_dalek::StaticSecret::from` and `p256::NonZeroScalar` plus `p256::ecdh::diffie_hellman`. The production `Seal` / `seal` draw those values from the CSPRNG and call the same function, so the vector path and the production path share all the crypto.
 
-**Step 4: Run** `just test-pigpen`. Expected: PASS.
+**Files (revised):** `go/internal/delta/pigpen/pigpen.go`, `crypto.go`; `crates/piggy-pigpen/src/crypto.rs`, `document.rs`.
 
-**Step 5: Commit.** `piggy-pigpen: deterministic seal seam; zeroize the file key`
+**Step 1: Measure the Go `rng` parameter.** Write a Go test that seals the same plaintext to the same recipients twice with the same deterministic reader. If the outputs differ, the public `Seal`'s `rng` parameter does not control the ephemeral keys; record that in the function's doc comment (do not change the exported signature in this plan; madder is coding against it) and tell Sasha.
+
+**Step 2: Write the failing tests (both languages).** Seal through the new explicit-input function twice with the same inputs: identical bytes. Change one ephemeral scalar: different bytes. Open the result with the matching identity: plaintext round-trips. Wrong number of ephemeral scalars for the recipient list: error.
+
+**Step 3: Run** `just test-go`, `just test-pigpen`. Expected: FAIL to compile.
+
+**Step 4: Implement** as described. (The Rust seal path already wraps the file key in `Zeroizing`; #210 item 3 was done before this plan.)
+
+**Step 5: Run** `just test-go`, `just test-pigpen`. Expected: PASS.
+
+**Step 6: Commit.** `pigpen: explicit-input deterministic seal seam in Go and Rust`
 
 ---
 
@@ -172,7 +183,7 @@ Go's `Seal` already takes an `rng`. Rust's `Document::seal`, `wrap_x25519`, `wra
 - Modify: `justfile` (a `codemod-pigpen-vectors` recipe beside `codemod-rfc0002-fixture`)
 - Modify: `go/internal/delta/pigpen/pigpen_test.go`
 
-**Vector file format.** One record per blank-line-separated block, `key: value` lines, values hex. Fields: `name`, `outcome` (`open` | `recipient-set` | `reject`), `rng` (the exact byte stream fed to `Seal`), `plaintext`, `recipients` (space-separated markl ids), `x25519-secret` / `p256-secret` (test identities), `document` (the full document bytes), `error-contains` for rejects. A header comment states that the file is normative for RFC 0008 and that both implementations replay it.
+**Vector file format.** One record per blank-line-separated block, `key: value` lines, values hex. Fields: `name`, `outcome` (`open` | `recipient-set` | `reject`), `file-key`, `payload-nonce`, `ephemeral-secrets` (space-separated, one per recipient, in recipient order; see Task 4), `plaintext`, `recipients` (space-separated markl ids), `x25519-secret` / `p256-secret` (test identities), `document` (the full document bytes), `error-contains` for rejects. A header comment states that the file is normative for RFC 0008 and that both implementations replay it.
 
 **Cases:**
 1. sealed, one X25519 recipient
@@ -198,11 +209,11 @@ Go's `Seal` already takes an `rng`. Rust's `Document::seal`, `wrap_x25519`, `wra
 
 Cases 14 to 20 come from the task 3 review, which found Go/Rust divergences on empty ids and repeated type lines (fixed in task 3). They pin the stricter reader in both languages.
 
-**Step 1: Write the failing replay test.** It reads the file by relative path the way `markl_registrations/identifier_vectors_test.go` reads `docs/rfcs/0011-identifier-vectors.txt`. For `open` cases: parse `document`, open with the given identity (a software `ECDHOracle` built from `p256-secret`), compare plaintext; then re-seal with `rng` and compare bytes to `document`. For `recipient-set`: parse, marshal, compare. For `reject`: parse or open must fail with `error-contains`.
+**Step 1: Write the failing replay test.** It reads the file by relative path the way `markl_registrations/identifier_vectors_test.go` reads `docs/rfcs/0011-identifier-vectors.txt`. For `open` cases: parse `document`, open with the given identity (a software `ECDHOracle` built from `p256-secret`), compare plaintext; then re-seal through the Task 4 explicit-input function with the record's `file-key`, `payload-nonce` and `ephemeral-secrets` and compare bytes to `document`. For `recipient-set`: parse, marshal, compare. For `reject`: parse or open must fail with `error-contains`.
 
 **Step 2: Run** `just test-go`. Expected: FAIL, file missing.
 
-**Step 3: Generate the file** with the new recipe from fixed inputs written in the generator (fixed `rng` streams, fixed secrets). No independent hand computation is required here; cross-language agreement in Task 6 is the independent check.
+**Step 3: Generate the file** with the new recipe from fixed inputs written in the generator (fixed file keys, payload nonces, ephemeral scalars and identity secrets). No independent hand computation is required here; cross-language agreement in Task 6 is the independent check.
 
 **Step 4: Run** `just test-go`. Expected: PASS. Delete the duplicated hex block and its tests from `pigpen_test.go`; run again.
 
@@ -218,7 +229,7 @@ Cases 14 to 20 come from the task 3 review, which found Go/Rust divergences on e
 - Create: `crates/piggy-pigpen/tests/vectors.rs`
 - Modify: `crates/piggy-pigpen/src/document.rs`
 
-**Step 1: Write the replay test.** `include_str!("../../../docs/rfcs/0008-pigpen-vectors.txt")`, same parser, same three outcomes, re-seal through `seal_with_rng` with a reader over the `rng` bytes.
+**Step 1: Write the replay test.** `include_str!("../../../docs/rfcs/0008-pigpen-vectors.txt")`, same parser, same three outcomes, re-seal through the Task 4 explicit-input function with the record's `file-key`, `payload-nonce` and `ephemeral-secrets`.
 
 **Step 2: Run** `just test-pigpen`. Expected: this is the real cross-language check. Any mismatch is a wire divergence between the two implementations. Diagnose it with eng:systematic-debugging, and do not edit the vector file to make it pass without understanding which side is wrong against RFC 0008 §4.
 

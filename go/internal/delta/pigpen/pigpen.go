@@ -4,6 +4,7 @@ package pigpen
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/hmac"
 	"errors"
 	"fmt"
@@ -76,29 +77,90 @@ func NewRecipientSet(recipients []Recipient) *Document {
 // Seal encrypts plaintext to the given recipients, producing a sealed
 // pigpen document. All wraps are computed in pure software (the P-256
 // encrypt side needs no card). rng may be nil to use the package CSPRNG.
+//
+// A caller-supplied rng does NOT make the output reproducible: the file
+// key and payload nonce are read from it, but crypto/ecdh generates the
+// per-recipient ephemeral keys from the system CSPRNG regardless
+// (measured on go 1.26). Supply an rng only as an entropy source.
 func Seal(plaintext []byte, recipients []markl.Id, rng io.Reader) (*Document, error) {
 	if rng == nil {
 		rng = defaultRand
 	}
-	if len(recipients) == 0 {
-		return nil, errors.New("pigpen: at least one recipient is required")
-	}
-	fileKey, err := randomFileKey(rng)
+	in, err := drawSealInputs(recipients, rng)
 	if err != nil {
 		return nil, err
 	}
-	defer zero(fileKey)
+	defer in.zero()
+	return sealWith(plaintext, recipients, in)
+}
+
+// sealInputs are every secret a seal consumes (RFC 0008 §4.1, §4.3–§4.5).
+// Seal draws them from a CSPRNG; the normative vectors (RFC 0009 §8) fix
+// them, so the production path and the vector path share all the crypto.
+type sealInputs struct {
+	fileKey      []byte   // fileKeyLen bytes
+	payloadNonce []byte   // payloadNonceLen bytes
+	ephemeral    [][]byte // one ephemeral private scalar per recipient, in order
+}
+
+func (in sealInputs) zero() {
+	zero(in.fileKey)
+	for _, secret := range in.ephemeral {
+		zero(secret)
+	}
+}
+
+func drawSealInputs(recipients []markl.Id, rng io.Reader) (in sealInputs, err error) {
+	if in.fileKey, err = randomBytes(rng, fileKeyLen); err != nil {
+		return in, err
+	}
+	for _, id := range recipients {
+		var curve ecdh.Curve
+		switch f := id.GetMarklFormat().GetMarklFormatId(); f {
+		case formatPivyP256:
+			curve = ecdh.P256()
+		case formatAgeX25519:
+			curve = ecdh.X25519()
+		default:
+			return in, fmt.Errorf("pigpen: unsupported recipient format %q", f)
+		}
+		esk, err := curve.GenerateKey(rng)
+		if err != nil {
+			return in, err
+		}
+		in.ephemeral = append(in.ephemeral, esk.Bytes())
+	}
+	if in.payloadNonce, err = randomBytes(rng, payloadNonceLen); err != nil {
+		return in, err
+	}
+	return in, nil
+}
+
+// sealWith is Seal with every secret supplied by the caller.
+func sealWith(plaintext []byte, recipients []markl.Id, in sealInputs) (*Document, error) {
+	if len(recipients) == 0 {
+		return nil, errors.New("pigpen: at least one recipient is required")
+	}
+	if len(in.ephemeral) != len(recipients) {
+		return nil, fmt.Errorf(
+			"pigpen: %d ephemeral secrets for %d recipients", len(in.ephemeral), len(recipients),
+		)
+	}
+	if len(in.fileKey) != fileKeyLen {
+		return nil, fmt.Errorf("pigpen: file key is %d bytes, want %d", len(in.fileKey), fileKeyLen)
+	}
 
 	d := &Document{}
-	for _, id := range recipients {
+	var err error
+	for i, id := range recipients {
 		r := Recipient{ID: id}
 		switch f := id.GetMarklFormat().GetMarklFormatId(); f {
 		case formatPivyP256:
-			if r.Wrap, err = wrapP256(fileKey, id.GetBytes(), rng); err != nil {
+			if r.Wrap, err = wrapP256(in.fileKey, id.GetBytes(), in.ephemeral[i]); err != nil {
 				return nil, err
 			}
 		case formatAgeX25519:
-			if r.Wrap, err = wrapX25519(fileKey, id.GetBytes(), rng); err != nil {
+			if r.Wrap, err = wrapX25519(in.fileKey, id.GetBytes(), in.ephemeral[i]); err != nil {
 				return nil, err
 			}
 		default:
@@ -107,7 +169,7 @@ func Seal(plaintext []byte, recipients []markl.Id, rng io.Reader) (*Document, er
 		d.Recipients = append(d.Recipients, r)
 	}
 
-	if d.Payload, err = sealPayload(fileKey, plaintext, rng); err != nil {
+	if d.Payload, err = sealPayload(in.fileKey, plaintext, in.payloadNonce); err != nil {
 		return nil, err
 	}
 
@@ -115,7 +177,7 @@ func Seal(plaintext []byte, recipients []markl.Id, rng io.Reader) (*Document, er
 	if err != nil {
 		return nil, err
 	}
-	d.MAC = headerMAC(fileKey, canon)
+	d.MAC = headerMAC(in.fileKey, canon)
 	return d, nil
 }
 
