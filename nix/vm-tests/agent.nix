@@ -67,7 +67,41 @@ let
       done
     }
 
+    # The driver's command shell (nixos test-instrumentation: `bash --norc
+    # /dev/hvc0`). The first hang caught with this watchdog (2026-10-05)
+    # had NO long-lived command in the guest: the ssh step had finished
+    # and the driver was still waiting for its result. So the shell
+    # sitting idle with no child, once the driver has started using it, is
+    # the other state worth a dump: the driver never leaves it idle for
+    # long in a healthy run. "Idle" is "has read nothing new": the bytes
+    # the shell has read (its commands) stopped growing.
+    backdoor_idle_checks=0
+    backdoor_was_used=0
+    backdoor_read_before=
+    backdoor_idle() {
+      shell=$(pgrep -f 'bash --norc /dev/hvc0' | head -n1)
+      [ -n "$shell" ] || return 1
+      read_now=$(sed -n 's/^rchar: //p' "/proc/$shell/io" 2>/dev/null)
+      [ -n "$read_now" ] || return 1
+      if [ "$read_now" != "$backdoor_read_before" ]; then
+        [ -z "$backdoor_read_before" ] || backdoor_was_used=1
+        backdoor_read_before=$read_now
+        backdoor_idle_checks=0
+        return 1
+      fi
+      [ "$backdoor_was_used" -eq 1 ] || return 1
+      backdoor_idle_checks=$((backdoor_idle_checks + 1))
+      [ "$backdoor_idle_checks" -ge 3 ] || return 1
+      echo "=== HANG WATCHDOG: backdoor shell $shell idle for $((backdoor_idle_checks * 15)) seconds ==="
+      describe "$shell"
+      echo "hvc0 termios: $(stty -a -F /dev/hvc0 2>&1 | tr '\n' ' ')"
+      echo "=== HANG WATCHDOG: end ==="
+      backdoor_idle_checks=0
+      return 0
+    }
+
     while sleep 15; do
+      backdoor_idle
       found=$(oldest_stuck) || continue
       echo "=== HANG WATCHDOG: $found (pid name seconds) ==="
       ps -eo pid,ppid,pgid,sid,tty,stat,etimes,wchan:24,args --forest
@@ -94,6 +128,7 @@ in
         pkgs.procps
         pkgs.coreutils
         pkgs.gnugrep
+        pkgs.gnused
       ];
       serviceConfig = {
         Type = "simple";
@@ -175,9 +210,14 @@ in
       SOFT = "${softSock}"
       PIV = "${pivSock}"
       FRONT = "${frontSock}"
+      # -n: ssh must not read standard input. A command run from the test
+      # driver inherits the driver's own command channel (/dev/hvc0) as its
+      # stdin, and ssh reads stdin by default. Without -n this lane hung
+      # at an ssh step in 2 of 28 runs, the guest idle and the driver
+      # waiting for an exit status; with it, 0 of 40 (piggy#296, #300).
       SSH = (
           "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-          "-o IdentitiesOnly=yes -o BatchMode=yes"
+          "-o IdentitiesOnly=yes -o BatchMode=yes -n"
       )
 
       wait_for_units(["soft-ssh-agent.service", "piggy-front.service", "sshd.service"])

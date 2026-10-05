@@ -215,6 +215,24 @@ once the guest closure is cached; do not judge a lane by wall time on a
 loaded host — read the driver log (_nix log_ on the check's derivation).
 Never launch several lanes by hand in parallel there.
 
+*A command that reads standard input can hang a lane.* The test driver
+sends its commands to a shell in the guest over _/dev/hvc0_, and every
+command that shell runs inherits that device as its standard input. A
+program that reads stdin by default competes with the shell for what the
+driver sends next. _ssh_ does: without _-n_ the agent lane hung at an ssh
+step in 2 of 28 runs, the guest idle and the driver waiting for an exit
+status until the global timeout; with _-n_, 0 of 40 (piggy#296). Give
+such a command _-n_ or _</dev/null_.
+
+The agent lane carries a guest-side watchdog unit for this class of
+hang. It is silent on a healthy run. When a command has been alive for
+45 seconds, or the driver's shell has read nothing new for 45 seconds,
+it writes what is running and what each process is blocked on to the
+journal and console, so it reaches the build log (search for _HANG
+WATCHDOG_). The lane's global timeout is 15 minutes. *just debug-vm-loop*
+_CHECK_ _RUNS_ re-runs a lane and keeps a log per run, for catching an
+intermittent failure.
+
 *Coverage.* *just test-vm-coverage* re-runs the same lanes on an
 instrumented piggy (_.#piggy-cov_, _.#vm-piggy-\*-cov_; each guest ships
 its _.profraw_ files) and _.#coverage-report_ merges them with the
