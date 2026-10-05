@@ -43,6 +43,9 @@ func TestResolveAuthSockPrefersPiggyThenSSHThenPivy(t *testing.T) {
 		switch {
 		case tc.wantErr && err == nil:
 			t.Errorf("%s: resolved %q, want an error", tc.label, got)
+		case tc.wantErr && !IsErrAgent(err):
+			t.Errorf("%s: %v is not an agent error", tc.label, err)
+		case tc.wantErr:
 		case !tc.wantErr && err != nil:
 			t.Errorf("%s: %v", tc.label, err)
 		case got != tc.want:

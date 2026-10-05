@@ -66,7 +66,7 @@ func agentDecryptECDH(recipientCompressed []byte) pivy.ECDHFunc {
 	return func(ephemeralPubkey []byte) ([]byte, error) {
 		socketPath, err := ResolveAuthSock()
 		if err != nil {
-			return nil, asAgentError(err)
+			return nil, err
 		}
 
 		secret, err := agentECDH(socketPath, recipientCompressed, ephemeralPubkey)

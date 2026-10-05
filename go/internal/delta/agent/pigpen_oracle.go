@@ -19,16 +19,17 @@ import (
 var authSockEnvVars = []string{"PIGGY_AUTH_SOCK", "SSH_AUTH_SOCK", "PIVY_AUTH_SOCK"}
 
 // ResolveAuthSock returns the agent socket a decrypt should use:
-// PIGGY_AUTH_SOCK, else SSH_AUTH_SOCK, else PIVY_AUTH_SOCK.
+// PIGGY_AUTH_SOCK, else SSH_AUTH_SOCK, else PIVY_AUTH_SOCK. With none set
+// there is no agent to ask, which is an agent error (IsErrAgent).
 func ResolveAuthSock() (string, error) {
 	for _, name := range authSockEnvVars {
 		if path := os.Getenv(name); path != "" {
 			return path, nil
 		}
 	}
-	return "", errors.Errorf(
+	return "", asAgentError(errors.Errorf(
 		"no agent socket: none of PIGGY_AUTH_SOCK, SSH_AUTH_SOCK or PIVY_AUTH_SOCK is set",
-	)
+	))
 }
 
 const (

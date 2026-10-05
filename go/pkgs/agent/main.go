@@ -118,5 +118,6 @@ var RegisterPivyEcdhP256Format = internal.RegisterPivyEcdhP256Format
 var RegisterSSHEd25519Format = internal.RegisterSSHEd25519Format
 
 // ResolveAuthSock returns the agent socket a decrypt should use:
-// PIGGY_AUTH_SOCK, else SSH_AUTH_SOCK, else PIVY_AUTH_SOCK.
+// PIGGY_AUTH_SOCK, else SSH_AUTH_SOCK, else PIVY_AUTH_SOCK. With none set
+// there is no agent to ask, which is an agent error (IsErrAgent).
 var ResolveAuthSock = internal.ResolveAuthSock
