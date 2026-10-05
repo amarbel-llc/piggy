@@ -36,4 +36,11 @@ const (
 	// holder, overrides it to this dedicated type. Transitional — moves
 	// down to papi with the papi purposes (#186).
 	PurposeTypePapiSig
+	// PurposeTypePigpenWrap and PurposeTypePigpenDoc — the pigpen
+	// sealed-document purposes (piggy RFC 0008 §5): a per-recipient
+	// wrapped file key, and the document-level header MAC / payload
+	// digest. Neither is a key, a signature or an object digest, so each
+	// gets its own label, following the PurposeTypePapiSig precedent.
+	PurposeTypePigpenWrap
+	PurposeTypePigpenDoc
 )

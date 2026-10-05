@@ -43,6 +43,8 @@ var rfc0002StablePurposes = []string{
 	markl.PurposePiggyPivSigV1,
 	markl.PurposePiggyPivCardAuthV1,
 	markl.PurposePiggyRecipientV1,
+	markl.PurposePigpenWrapV1,
+	markl.PurposePigpenDocV1,
 }
 
 // rfc0002StableFormats lists every format ID piggy registers. Sizes are
@@ -66,6 +68,9 @@ var rfc0002StableFormats = []string{
 	markl.FormatIdAgeX25519Pub,
 	markl.FormatIdAgeX25519Sec,
 	markl.FormatIdPivyEcdhP256Pub,
+	markl.FormatIdPigpenWrapP256,
+	markl.FormatIdPigpenWrapX25519,
+	markl.FormatIdPigpenHeaderMac,
 	markl.FormatIdNonceSec,
 }
 

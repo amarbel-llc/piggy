@@ -55,6 +55,28 @@ var (
 			markl.FormatIdAgeX25519Pub,
 		},
 	}
+
+	// pigpen-wrap-v1 — a sealed pigpen document's per-recipient wrapped
+	// file key (piggy RFC 0008 §2.4, §5).
+	PurposePigpenWrapV1Opts = markl.RegisterPurposeOpts{
+		Id:   markl.PurposePigpenWrapV1,
+		Type: markl.PurposeTypePigpenWrap,
+		FormatIds: []string{
+			markl.FormatIdPigpenWrapP256,
+			markl.FormatIdPigpenWrapX25519,
+		},
+	}
+
+	// pigpen-doc-v1 — a sealed pigpen document's header MAC, or the
+	// content digest of its `@`-referenced payload (piggy RFC 0008 §5).
+	PurposePigpenDocV1Opts = markl.RegisterPurposeOpts{
+		Id:   markl.PurposePigpenDocV1,
+		Type: markl.PurposeTypePigpenDoc,
+		FormatIds: []string{
+			markl.FormatIdPigpenHeaderMac,
+			markl.FormatIdHashBlake2b256,
+		},
+	}
 )
 
 // AllPurposes is the ordered list of piggy's own purpose registrations.
@@ -65,6 +87,8 @@ var AllPurposes = []markl.RegisterPurposeOpts{
 	PurposePiggyPivSigV1Opts,
 	PurposePiggyPivCardAuthV1Opts,
 	PurposePiggyRecipientV1Opts,
+	PurposePigpenWrapV1Opts,
+	PurposePigpenDocV1Opts,
 }
 
 func init() {

@@ -105,6 +105,29 @@ func init() {
 	// PivyEcdhP256
 	makeStubPivyEcdhP256Format()
 
+	// Pigpen (piggy RFC 0008 §5): fixed-size opaque blobs. The crypto
+	// that produces and consumes them lives in the pigpen package.
+	markl.RegisterFormat(
+		markl.Format{
+			Id:   markl.FormatIdPigpenWrapP256,
+			Size: 65,
+		},
+	)
+
+	markl.RegisterFormat(
+		markl.Format{
+			Id:   markl.FormatIdPigpenWrapX25519,
+			Size: 64,
+		},
+	)
+
+	markl.RegisterFormat(
+		markl.Format{
+			Id:   markl.FormatIdPigpenHeaderMac,
+			Size: 32,
+		},
+	)
+
 	// Nonce
 	markl.RegisterFormat(
 		markl.FormatSec{

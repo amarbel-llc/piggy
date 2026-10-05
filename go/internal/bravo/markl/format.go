@@ -40,6 +40,14 @@ const (
 
 	FormatIdPivyEcdhP256Pub = "pivy_ecdh_p256_pub"
 
+	// Pigpen sealed-document blobs (piggy RFC 0008 §5). The wraps are a
+	// recipient's ephemeral public key followed by the AEAD-wrapped file
+	// key: Epk_compressed(33)‖AEAD(32) for P-256, Epk(32)‖AEAD(32) for
+	// X25519. The header MAC is an HMAC-SHA256 output.
+	FormatIdPigpenHeaderMac  = "pigpen_header_mac"
+	FormatIdPigpenWrapP256   = "pigpen_wrap_p256"
+	FormatIdPigpenWrapX25519 = "pigpen_wrap_x25519"
+
 	FormatIdHashSha256     = "sha256"
 	FormatIdHashBlake2b256 = "blake2b256"
 

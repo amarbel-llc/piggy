@@ -40,3 +40,11 @@ var (
 // piggy-recipient-v1 — the encryption recipient pubkey (PIV slot 9D
 // ECDH key, or an age recipient) piggy encrypts blobs to.
 var PurposePiggyRecipientV1Opts = internal.PurposePiggyRecipientV1Opts
+
+// pigpen-doc-v1 — a sealed pigpen document's header MAC, or the
+// content digest of its `@`-referenced payload (piggy RFC 0008 §5).
+var PurposePigpenDocV1Opts = internal.PurposePigpenDocV1Opts
+
+// pigpen-wrap-v1 — a sealed pigpen document's per-recipient wrapped
+// file key (piggy RFC 0008 §2.4, §5).
+var PurposePigpenWrapV1Opts = internal.PurposePigpenWrapV1Opts

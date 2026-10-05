@@ -279,14 +279,24 @@ const (
 
 // keep sorted
 const (
-	FormatIdEd25519Pub      = internal.FormatIdEd25519Pub
-	FormatIdEd25519SSH      = internal.FormatIdEd25519SSH
-	FormatIdEd25519Sec      = internal.FormatIdEd25519Sec
-	FormatIdEd25519Sig      = internal.FormatIdEd25519Sig
-	FormatIdHashBlake2b256  = internal.FormatIdHashBlake2b256
-	FormatIdHashSha256      = internal.FormatIdHashSha256
-	FormatIdNonceSec        = internal.FormatIdNonceSec
-	FormatIdPivyEcdhP256Pub = internal.FormatIdPivyEcdhP256Pub
+	FormatIdEd25519Pub     = internal.FormatIdEd25519Pub
+	FormatIdEd25519SSH     = internal.FormatIdEd25519SSH
+	FormatIdEd25519Sec     = internal.FormatIdEd25519Sec
+	FormatIdEd25519Sig     = internal.FormatIdEd25519Sig
+	FormatIdHashBlake2b256 = internal.FormatIdHashBlake2b256
+	FormatIdHashSha256     = internal.FormatIdHashSha256
+	FormatIdNonceSec       = internal.FormatIdNonceSec
+)
+
+// Pigpen sealed-document blobs (piggy RFC 0008 §5). The wraps are a
+// recipient's ephemeral public key followed by the AEAD-wrapped file
+// key: Epk_compressed(33)‖AEAD(32) for P-256, Epk(32)‖AEAD(32) for
+// X25519. The header MAC is an HMAC-SHA256 output.
+const (
+	FormatIdPigpenHeaderMac  = internal.FormatIdPigpenHeaderMac
+	FormatIdPigpenWrapP256   = internal.FormatIdPigpenWrapP256
+	FormatIdPigpenWrapX25519 = internal.FormatIdPigpenWrapX25519
+	FormatIdPivyEcdhP256Pub  = internal.FormatIdPivyEcdhP256Pub
 )
 
 // SEC1-compressed P-256 public key (33 bytes), surfaced via the SSH
@@ -379,6 +389,15 @@ const (
 	PurposePiggyRecipientV1   = internal.PurposePiggyRecipientV1
 )
 
+// Pigpen sealed-document purposes (piggy RFC 0008 §5).
+// pigpen-wrap-v1 carries a per-recipient wrapped file key;
+// pigpen-doc-v1 carries the header MAC or the payload digest.
+// keep sorted
+const (
+	PurposePigpenDocV1  = internal.PurposePigpenDocV1
+	PurposePigpenWrapV1 = internal.PurposePigpenWrapV1
+)
+
 // PrivateKeys
 const PurposeRepoPrivateKeyV1 = internal.PurposeRepoPrivateKeyV1
 
@@ -411,7 +430,17 @@ const (
 // holder, overrides it to this dedicated type. Transitional — moves
 // down to papi with the papi purposes (#186).
 const (
-	PurposeTypePapiSig                = internal.PurposeTypePapiSig
+	PurposeTypePapiSig   = internal.PurposeTypePapiSig
+	PurposeTypePigpenDoc = internal.PurposeTypePigpenDoc
+)
+
+// PurposeTypePigpenWrap and PurposeTypePigpenDoc — the pigpen
+// sealed-document purposes (piggy RFC 0008 §5): a per-recipient
+// wrapped file key, and the document-level header MAC / payload
+// digest. Neither is a key, a signature or an object digest, so each
+// gets its own label, following the PurposeTypePapiSig precedent.
+const (
+	PurposeTypePigpenWrap             = internal.PurposeTypePigpenWrap
 	PurposeTypePrivateKey             = internal.PurposeTypePrivateKey
 	PurposeTypePubKey                 = internal.PurposeTypePubKey
 	PurposeTypeRepoPubKey             = internal.PurposeTypeRepoPubKey

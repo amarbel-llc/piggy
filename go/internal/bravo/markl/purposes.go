@@ -57,6 +57,13 @@ const (
 	PurposePiggyPivSigV1      = "piggy-piv_sig-v1"       // PIV slot 9C
 	PurposePiggyRecipientV1   = "piggy-recipient-v1"     // PIV slot 9D / age
 
+	// Pigpen sealed-document purposes (piggy RFC 0008 §5).
+	// pigpen-wrap-v1 carries a per-recipient wrapped file key;
+	// pigpen-doc-v1 carries the header MAC or the payload digest.
+	// keep sorted
+	PurposePigpenDocV1  = "pigpen-doc-v1"
+	PurposePigpenWrapV1 = "pigpen-wrap-v1"
+
 	// Papi signature purposes (jointly owned with amarbel-llc/papi; RFC
 	// 0002 §6.1, RFC-0001 §9–§10). Both carry a slot-9A ECDSA-P256
 	// (ecdsa-sha2-nistp256) signature as the 64-byte r‖s payload once
