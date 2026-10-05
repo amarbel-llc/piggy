@@ -165,6 +165,29 @@ func (r vectorRecord) reseal(t *testing.T) []byte {
 	return wire
 }
 
+// checkRecipientFields compares the document's encryption recipients and
+// their canonical-set bytes against the record, when it carries them.
+func checkRecipientFields(t *testing.T, r vectorRecord, doc *Document) {
+	t.Helper()
+	recipients := doc.EncryptionRecipients()
+
+	if want, ok := r["encryption-recipients"]; ok {
+		got := make([]string, len(recipients))
+		for i, id := range recipients {
+			got[i] = id.StringWithFormat()
+		}
+		if strings.Join(got, " ") != want {
+			t.Fatalf("encryption recipients:\n got %s\nwant %s", strings.Join(got, " "), want)
+		}
+	}
+
+	if _, ok := r["canonical-set"]; ok {
+		if got, want := CanonicalRecipientSet(recipients), r.hex(t, "canonical-set"); !bytes.Equal(got, want) {
+			t.Fatalf("canonical recipient set:\n got %q\nwant %q", got, want)
+		}
+	}
+}
+
 func parseWithoutPanicking(t *testing.T, raw []byte) (doc *Document, err error) {
 	t.Helper()
 	defer func() {
@@ -239,6 +262,7 @@ func replayOpenVector(t *testing.T, r vectorRecord) {
 	if !bytes.Equal(out, wire) {
 		t.Fatalf("document changed on re-serialization:\n got %x\nwant %x", out, wire)
 	}
+	checkRecipientFields(t, r, doc)
 
 	oracle, x25519 := r.identities(t)
 	got, err := doc.Open(oracle, x25519)
@@ -291,6 +315,7 @@ func replayRecipientSetVector(t *testing.T, r vectorRecord) {
 	if !bytes.Equal(out, wire) {
 		t.Fatalf("recipient set changed on re-serialization:\n got %s\nwant %s", out, wire)
 	}
+	checkRecipientFields(t, r, doc)
 }
 
 // A `reject` record must fail at its `stage`: `parse`, or `open` for a

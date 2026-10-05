@@ -19,12 +19,30 @@ type Recipient = internal.Recipient
 // path (RFC 0008 §4.4): both halves of an X25519 keypair.
 type X25519Identity = internal.X25519Identity
 
+// CanonicalRecipientSet returns the bytes a consumer hashes to detect a
+// changed recipient set: each id in its piggy-recipient-v1@ text form,
+// de-duplicated, sorted bytewise, one per line, each line ending in "\n".
+// The empty set is zero bytes. Ids that are not encryption recipients are
+// ignored. Comments and order never reach this form, which makes it RFC
+// 0003 equality.
+var CanonicalRecipientSet = internal.CanonicalRecipientSet
+
 // NewRecipientSet builds a payload-less pigpen document — the drop-in for
 // a piggy-ids file (RFC 0008 §2.2).
 var NewRecipientSet = internal.NewRecipientSet
 
 // ParseDocument decodes a pigpen document from hyphence bytes.
 var ParseDocument = internal.ParseDocument
+
+// ParseRecipients reads a piggy-ids file in either form and returns its
+// encryption recipients: a pigpen document (leading "---\n", RFC 0009
+// §3.2) or RFC 0003 lines. A pointer document is an error here; resolve
+// it first (RFC 0010).
+var ParseRecipients = internal.ParseRecipients
+
+// SameRecipientSet reports whether a and b name the same encryption
+// recipients: exactly equality of their CanonicalRecipientSet bytes.
+var SameRecipientSet = internal.SameRecipientSet
 
 // Seal encrypts plaintext to the given recipients, producing a sealed
 // pigpen document. All wraps are computed in pure software (the P-256

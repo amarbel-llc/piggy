@@ -192,13 +192,16 @@ func rejectControl(field, s string) error {
 // validate enforces the structural rules of RFC 0008 §2.2: a document is
 // either a pure recipient set (no wraps, no MAC, no body) or fully sealed
 // (every encryption recipient wrapped, MAC present). Mixed states are
-// rejected.
+// rejected. Lines that are not encryption recipients (SSH-auth entries,
+// unknown purposes) never carry a wrap and do not make a sealed document
+// mixed (§2.3).
 func (d *Document) validate() error {
 	wrapped, unwrapped := 0, 0
 	for _, r := range d.Recipients {
-		if r.Wrap != nil {
+		switch {
+		case r.Wrap != nil:
 			wrapped++
-		} else {
+		case isEncryptionRecipient(r.ID):
 			unwrapped++
 		}
 	}
@@ -208,6 +211,9 @@ func (d *Document) validate() error {
 	}
 	if unwrapped > 0 {
 		return errors.New("pigpen: mixed sealed/unsealed recipients")
+	}
+	if wrapped == 0 {
+		return errors.New("pigpen: sealed document has no wrapped recipient")
 	}
 	if d.MAC == nil {
 		return errors.New("pigpen: sealed document missing header MAC")

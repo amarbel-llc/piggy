@@ -47,7 +47,15 @@ const pigpenVectorsHeader = `# pigpen-v1 normative test vectors.
 #   stage              (reject) parse | open: where the document must fail
 #   plaintext          the sealed plaintext
 #   plaintext-zeros    decimal count of zero bytes, INSTEAD of "plaintext"
-#   recipients         markl ids, in document order (text, not hex)
+#   recipients         markl ids to seal to, in document order (text, not hex)
+#   encryption-recipients
+#                      the document's encryption recipients, in document
+#                      order, each under piggy-recipient-v1 (text, not hex);
+#                      lines that are not encryption recipients are absent
+#   canonical-set      the canonical recipient-set bytes a consumer hashes
+#                      to detect a changed set: each encryption recipient in
+#                      piggy-recipient-v1@ text form, de-duplicated, sorted
+#                      bytewise, one per line, each line ending in LF
 #   file-key           16-byte file key (RFC 0008 section 4.1)
 #   payload-nonce      16-byte payload nonce (section 4.5)
 #   ephemeral-secrets  one ephemeral private scalar per recipient, in
@@ -217,6 +225,36 @@ func TestGeneratePigpenVectors(t *testing.T) {
 		"document-sha256", hex.EncodeToString(twoChunksDigest[:]),
 	)
 
+	// A sealed document may carry lines that are not encryption recipients
+	// (RFC 0008 §2.3). They hold no wrap, and the header MAC covers them.
+	besideAuth, err := sealWith(plaintext, []markl.Id{xID}, sealInputs{
+		fileKey:      bytes.Clone(fileKey),
+		payloadNonce: bytes.Clone(nonce),
+		ephemeral:    [][]byte{xEphemeral},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	besideAuth.Recipients = append(besideAuth.Recipients,
+		Recipient{ID: sshAuthID}, Recipient{ID: foreignSigID})
+	besideAuthHeader, err := besideAuth.canonicalHeader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	besideAuth.MAC = headerMAC(fileKey, besideAuthHeader)
+	besideAuthWire, err := besideAuth.MarshalText()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.record(
+		"name", "sealed/beside-non-encryption-lines",
+		"outcome", "open",
+		"x25519-secrets", hex.EncodeToString(xSecret),
+		"plaintext", hex.EncodeToString(plaintext),
+		"encryption-recipients", idList(xID),
+		"document", hex.EncodeToString(besideAuthWire),
+	)
+
 	// The two #210 cross-language interop documents, sealed independently
 	// by each implementation with ephemeral keys nobody recorded: they pin
 	// that documents written before these vectors existed still open.
@@ -251,7 +289,14 @@ func TestGeneratePigpenVectors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		w.record("name", name, "outcome", "recipient-set", "document", hex.EncodeToString(wire))
+		recipients := doc.EncryptionRecipients()
+		w.record(
+			"name", name,
+			"outcome", "recipient-set",
+			"encryption-recipients", idList(recipients...),
+			"canonical-set", hex.EncodeToString(CanonicalRecipientSet(recipients)),
+			"document", hex.EncodeToString(wire),
+		)
 	}
 	recipientSet("recipient-set/description-and-comments", &Document{
 		Description: "recipients for a normative vector",
@@ -313,6 +358,12 @@ func TestGeneratePigpenVectors(t *testing.T) {
 
 	reject("reject/mixed-sealed-and-unsealed-recipients", "parse",
 		replaceOnce(t, xWire, "\n"+typeLine, "\n- "+pID.StringWithFormat()+"\n"+typeLine))
+	// The only recipient line swapped for an unwrapped ssh-auth line: a MAC
+	// and a payload, but nobody the file key is wrapped to.
+	xLineStart := bytes.Index(xWire, []byte("- "+xRecipient))
+	xLineEnd := xLineStart + bytes.IndexByte(xWire[xLineStart:], '\n')
+	reject("reject/sealed-without-a-wrapped-recipient", "parse",
+		append(append(bytes.Clone(xWire[:xLineStart]), "- "+sshAuthID.StringWithFormat()...), xWire[xLineEnd:]...))
 	reject("reject/sealed-without-header-mac", "parse",
 		replaceOnce(t, xWire, typeLine+macLock, "! "+typeTag))
 	reject("reject/non-utf8-description", "parse",

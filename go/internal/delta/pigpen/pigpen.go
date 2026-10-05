@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	typeTag = "pigpen-v1"
+	typeTag        = "pigpen-v1"
+	pointerTypeTag = "pigpen-pointer-v1"
 
 	formatPivyP256   = markl.FormatIdPivyEcdhP256Pub
 	formatAgeX25519  = markl.FormatIdAgeX25519Pub

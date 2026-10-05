@@ -280,15 +280,28 @@ impl Document {
         Ok(doc)
     }
 
+    /// RFC 0008 §2.2: a document is either a pure recipient set or fully
+    /// sealed. Lines that are not encryption recipients (SSH-auth entries,
+    /// unknown purposes) never carry a wrap and do not make a sealed
+    /// document mixed (§2.3).
     fn validate(&self) -> Result<()> {
         let wrapped = self.recipients.iter().filter(|r| r.wrap.is_some()).count();
-        let unwrapped = self.recipients.len() - wrapped;
+        let unwrapped = self
+            .recipients
+            .iter()
+            .filter(|r| r.wrap.is_none() && is_encryption_recipient(&r.id))
+            .count();
         let sealed = self.mac.is_some() || !self.payload.is_empty() || wrapped > 0;
         if !sealed {
             return Ok(());
         }
         if unwrapped > 0 {
             return Err(Error::Malformed("mixed sealed/unsealed recipients".into()));
+        }
+        if wrapped == 0 {
+            return Err(Error::Malformed(
+                "sealed document has no wrapped recipient".into(),
+            ));
         }
         if self.mac.is_none() {
             return Err(Error::Malformed(
@@ -393,6 +406,16 @@ fn parse_quoted_kv(body: &str, key: &str) -> Option<String> {
 // MAC lock is the bare `pigpen_header_mac-<blech32>` (RFC 0008 §2.4, §2.6).
 // Both go through the markl codec, so the registry enforces the blob size
 // and the (purpose, format) pairing.
+
+/// Whether `id` names a key a file key can be wrapped to: a
+/// `pivy_ecdh_p256_pub` or `age_x25519_pub` key, bare or under
+/// `piggy-recipient-v1` (RFC 0008 §2.3).
+fn is_encryption_recipient(id: &Id) -> bool {
+    matches!(
+        id.format(),
+        FormatId::PivyEcdhP256Pub | FormatId::AgeX25519Pub
+    ) && matches!(id.purpose(), None | Some(PurposeId::PiggyRecipientV1))
+}
 
 /// The wrap format that locks a recipient of the given format. A recipient
 /// format with no wrap format is not an encryption recipient and carries no
