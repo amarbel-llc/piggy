@@ -37,31 +37,32 @@ pub(crate) fn resolve_piggy_ids_path(piggy_ids: &Path) -> Result<PathBuf, String
         // within the TTL window would then try to parse already-converted
         // RFC 0003 text as a pigpen document and fail. See
         // resolved_pointer_cache_path_for's doc comment.
-        let cache_file = resolved_pointer_cache_path_for(piggy_ids)?;
-        let resolved_bytes = if !cache_disabled() && cache_is_fresh(&cache_file, CACHE_TTL) {
-            std::fs::read(&cache_file)
-                .map_err(|e| format!("reading cache {}: {e}", cache_file.display()))?
-        } else {
-            let bytes = invoke_resolver(&ptr.kind, &ptr.locator).map_err(|e| {
-                format!(
-                    "{}: resolving pointer (kind={:?}, locator={:?}): {e}",
-                    piggy_ids.display(),
-                    ptr.kind,
-                    ptr.locator
-                )
-            })?;
-            // Check the answer before caching it: a bad one must not be
-            // served for the next CACHE_TTL.
-            resolved_recipient_set(&bytes, &ptr)?;
-            if let Some(parent) = cache_file.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        let cache_file = resolved_pointer_cache_path_for(piggy_ids, &ptr)?;
+        // A cached answer that no longer passes (written by an older
+        // piggy, or cut short) is a miss, not an error to serve until the
+        // TTL runs out.
+        let cached = (!cache_disabled() && cache_is_fresh(&cache_file, CACHE_TTL))
+            .then(|| std::fs::read(&cache_file).ok())
+            .flatten()
+            .and_then(|bytes| resolved_recipient_set(&bytes, &ptr).ok());
+        let doc = match cached {
+            Some(doc) => doc,
+            None => {
+                let bytes = invoke_resolver(&ptr.kind, &ptr.locator).map_err(|e| {
+                    format!(
+                        "{}: resolving pointer (kind={:?}, locator={:?}): {e}",
+                        piggy_ids.display(),
+                        ptr.kind,
+                        ptr.locator
+                    )
+                })?;
+                // Check the answer before caching it: a bad one must not
+                // be served for the next CACHE_TTL.
+                let doc = resolved_recipient_set(&bytes, &ptr)?;
+                write_cache_file(&cache_file, &bytes)?;
+                doc
             }
-            std::fs::write(&cache_file, &bytes)
-                .map_err(|e| format!("writing cache {}: {e}", cache_file.display()))?;
-            bytes
         };
-        let doc = resolved_recipient_set(&resolved_bytes, &ptr)?;
         return recipient_set_doc_to_rfc0003_cache(piggy_ids, doc);
     }
 
@@ -140,12 +141,26 @@ fn recipient_set_doc_to_rfc0003_cache(
     let rendered = piggy_ids::RecipientFile::new(recipients?).render();
 
     let cache_path = cache_path_for(piggy_ids)?;
-    if let Some(parent) = cache_path.parent() {
+    write_cache_file(&cache_path, rendered.as_bytes())?;
+    Ok(cache_path)
+}
+
+/// Write a cache file whole or not at all: a reader in another process
+/// (a concurrent piggy, the `piggy-ids` subprocess) must never see it
+/// half-written and take that for a recipient set.
+fn write_cache_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    std::fs::write(&cache_path, rendered)
-        .map_err(|e| format!("writing {}: {e}", cache_path.display()))?;
-    Ok(cache_path)
+    let mut staging = path.as_os_str().to_owned();
+    staging.push(format!(".{}.tmp", std::process::id()));
+    let staging = PathBuf::from(staging);
+    std::fs::write(&staging, contents)
+        .and_then(|()| std::fs::rename(&staging, path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&staging);
+            format!("writing {}: {e}", path.display())
+        })
 }
 
 /// Like [`resolve_piggy_ids_path`], but for callers that intend to WRITE
@@ -201,9 +216,19 @@ fn cache_path_for(piggy_ids: &Path) -> Result<PathBuf, String> {
 /// [`cache_path_for`]'s final RFC 0003-rendered cache so the two writes
 /// don't clobber each other. See the call site's comment in
 /// [`resolve_piggy_ids_path`].
-fn resolved_pointer_cache_path_for(piggy_ids: &Path) -> Result<PathBuf, String> {
+///
+/// The name also depends on the pointer's kind and locator: an edited or
+/// freshly pulled pointer must not be answered from what the previous
+/// one resolved to.
+fn resolved_pointer_cache_path_for(
+    piggy_ids: &Path,
+    ptr: &piggy_pigpen::Pointer,
+) -> Result<PathBuf, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&ptr.kind, &ptr.locator).hash(&mut hasher);
     let mut path = cache_path_for(piggy_ids)?;
-    path.set_extension("piggy-pointer-raw");
+    path.set_extension(format!("{:016x}.piggy-pointer-raw", hasher.finish()));
     Ok(path)
 }
 
@@ -239,12 +264,17 @@ fn cache_disabled() -> bool {
 /// PATH-discovery convention already used by `age-plugin-piggy`.
 ///
 /// The resolver is somebody else's program talking to somebody else's
-/// server, so the run is bounded (piggy#302): a deadline, a cap on what it
-/// may print, and its own process group, which is killed whole when either
-/// is exceeded. Its stderr reaches the error quoted, so it cannot write
-/// control sequences to the terminal.
+/// server, so the run is bounded (piggy#302): a deadline and a cap on what
+/// it may print, and it is killed when either is exceeded. Its stderr
+/// reaches the error quoted, so it cannot write control sequences to the
+/// terminal.
+///
+/// The resolver stays in piggy's process group and keeps the terminal: a
+/// resolver may prompt (RFC 0010 §3), and Ctrl-C must reach it. The price
+/// is that only the resolver itself is killed. A process it started that
+/// outlives it and holds its stdout is a failure after a short wait; one
+/// holding only stderr (a multiplexed ssh master does) is ignored.
 fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
-    use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
     piggy_pigpen::validate_pointer_kind(kind).map_err(|e| e.to_string())?;
@@ -269,7 +299,6 @@ fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0)
             .spawn()
         {
             Ok(child) => break child,
@@ -279,15 +308,6 @@ fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
             }
             Err(e) => return Err(format!("running {}: {e}", path.display())),
         }
-    };
-
-    // The child leads its own process group, so this reaches whatever it
-    // started as well.
-    let group = child.id() as libc::pid_t;
-    let kill_group = || {
-        // SAFETY: kill(2) with a negative pid signals a process group; it
-        // touches no memory of ours.
-        unsafe { libc::kill(-group, libc::SIGKILL) };
     };
 
     let stdout = read_capped(
@@ -301,13 +321,32 @@ fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
         PastLimit::Discard,
     );
 
+    let too_large = || {
+        format!(
+            "{binary} printed more than the {MAX_RESOLVER_STDOUT}-byte recipient-set size limit"
+        )
+    };
+
     let timeout = resolver_timeout();
     let deadline = std::time::Instant::now() + timeout;
+    // The stdout reader finishes before the resolver does when the
+    // resolver closes stdout early, or when it has printed too much.
+    let mut stdout_early: Option<CappedOutput> = None;
     let status = loop {
+        if stdout_early.is_none() {
+            stdout_early = stdout.try_recv().ok();
+        }
+        if stdout_early.as_ref().is_some_and(|out| out.overflowed) {
+            // Its pipe is closed already; a resolver that ignores SIGPIPE
+            // would otherwise run on to the deadline.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(too_large());
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if std::time::Instant::now() >= deadline => {
-                kill_group();
+                let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
                     "{binary} did not finish within {}s",
@@ -316,33 +355,36 @@ fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
             Err(e) => {
-                kill_group();
+                let _ = child.kill();
                 return Err(format!("waiting for {binary}: {e}"));
             }
         }
     };
 
-    // The resolver has exited; anything it left running still holds the
-    // pipes. Give the readers a moment, then end the group.
-    let collect = |reader: std::sync::mpsc::Receiver<CappedOutput>| {
-        reader.recv_timeout(RESOLVER_WAIT_DELAY).or_else(|_| {
-            kill_group();
-            reader.recv_timeout(RESOLVER_WAIT_DELAY)
-        })
+    // The resolver has exited. Whatever it left running may still hold the
+    // pipes; do not wait on that for long.
+    let stdout = match stdout_early {
+        Some(out) => out,
+        None => stdout
+            .recv_timeout(RESOLVER_WAIT_DELAY)
+            .map_err(|_| format!("{binary} exited but left a process holding its output open"))?,
     };
-    let (Ok(stdout), Ok(stderr)) = (collect(stdout), collect(stderr)) else {
-        return Err(format!("{binary} left a process holding its output open"));
-    };
-
     if stdout.overflowed {
-        return Err(format!(
-            "{binary} printed more than the {MAX_RESOLVER_STDOUT}-byte recipient-set size limit"
-        ));
+        return Err(too_large());
     }
+    // Only needed to explain a failure, so a held stderr is not one.
+    let stderr = stderr
+        .recv_timeout(if status.success() {
+            std::time::Duration::ZERO
+        } else {
+            RESOLVER_WAIT_DELAY
+        })
+        .map(|out| out.bytes)
+        .unwrap_or_default();
     if !status.success() {
         return Err(format!(
             "{binary} exited {status}: {:?}",
-            String::from_utf8_lossy(&stderr.bytes).trim()
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
     Ok(stdout.bytes)
@@ -356,13 +398,16 @@ const RESOLVER_WAIT_DELAY: std::time::Duration = std::time::Duration::from_secs(
 const DEFAULT_RESOLVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `PIGGY_PIGPEN_RESOLVER_TIMEOUT` (whole seconds, at least 1) overrides
-/// the 30-second default; anything else is ignored.
+/// the 30-second default, up to a day; anything else is ignored.
 fn resolver_timeout() -> std::time::Duration {
+    const ONE_DAY: u64 = 24 * 60 * 60;
     std::env::var("PIGGY_PIGPEN_RESOLVER_TIMEOUT")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
-        .map_or(DEFAULT_RESOLVER_TIMEOUT, std::time::Duration::from_secs)
+        .map_or(DEFAULT_RESOLVER_TIMEOUT, |secs| {
+            std::time::Duration::from_secs(secs.min(ONE_DAY))
+        })
 }
 
 struct CappedOutput {
@@ -543,18 +588,105 @@ mod tests {
 
     #[test]
     fn resolver_child_holding_the_output_does_not_hold_the_caller() {
-        // The resolver exits at once; the sleep it started keeps stdout.
+        // The resolver exits at once; the sleep it started keeps stdout,
+        // so its output never ends. (Short sleep: nothing kills it.)
         let started = std::time::Instant::now();
-        let out = with_resolver("forks", "#!/bin/sh\nsleep 60 &\nexit 0\n", |_| {
+        let out = with_resolver("forks", "#!/bin/sh\nsleep 8 &\nexit 0\n", |_| {
             invoke_resolver("forks", "l")
         });
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(20),
+            started.elapsed() < std::time::Duration::from_secs(6),
             "took {:?}; a grandchild held the caller",
             started.elapsed()
         );
-        // Killing the group closes the pipe, so the (empty) output arrives.
-        assert_eq!(out.unwrap(), b"");
+        let err = out.unwrap_err();
+        assert!(err.contains("holding its output open"), "got: {err}");
+    }
+
+    #[test]
+    fn resolver_child_holding_only_stderr_is_not_a_failure() {
+        // What a multiplexed ssh master does: the answer is complete on
+        // stdout, and something long-lived keeps stderr.
+        let started = std::time::Instant::now();
+        let out = with_resolver(
+            "daemonizes",
+            "#!/bin/sh\nsleep 8 >/dev/null &\nprintf ok\n",
+            |_| invoke_resolver("daemonizes", "l"),
+        );
+        assert_eq!(out.unwrap(), b"ok");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(6),
+            "took {:?}; a held stderr delayed a successful resolve",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn resolver_timeout_override_is_clamped_not_overflowed() {
+        let _guard = env_lock();
+        std::env::set_var("PIGGY_PIGPEN_RESOLVER_TIMEOUT", u64::MAX.to_string());
+        let timeout = resolver_timeout();
+        std::env::remove_var("PIGGY_PIGPEN_RESOLVER_TIMEOUT");
+        // Must be addable to an Instant.
+        assert!(std::time::Instant::now().checked_add(timeout).is_some());
+    }
+
+    #[test]
+    fn edited_pointer_is_not_answered_from_the_previous_pointers_cache() {
+        let script = format!(
+            "#!/bin/sh\nprintf x >> \"$(dirname \"$0\")/calls\"\nprintf -- '---\\n- {}\\n! pigpen-v1\\n---\\n'\n",
+            test_recipient()
+        );
+        let calls = with_resolver("relocates", &script, |dir| {
+            let ids = dir.join("piggy-ids");
+            let saved_cache = std::env::var_os("XDG_CACHE_HOME");
+            std::env::set_var("XDG_CACHE_HOME", dir.join("xdg-cache"));
+            for locator in ["first", "first", "second"] {
+                std::fs::write(
+                    &ids,
+                    format!(
+                        "---\n- kind=\"relocates\"\n- locator=\"{locator}\"\n! pigpen-pointer-v1\n---\n"
+                    ),
+                )
+                .unwrap();
+                resolve_piggy_ids_path(&ids).unwrap();
+            }
+            match saved_cache {
+                Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+                None => std::env::remove_var("XDG_CACHE_HOME"),
+            }
+            std::fs::read_to_string(dir.join("calls")).unwrap()
+        });
+        assert_eq!(
+            calls.len(),
+            2,
+            "want one resolve per distinct locator (the repeat is cached)"
+        );
+    }
+
+    #[test]
+    fn cached_answer_that_no_longer_passes_is_resolved_again() {
+        let out = with_resolver("heals", &one_recipient_resolver_script(), |dir| {
+            let ids = dir.join("piggy-ids");
+            std::fs::write(
+                &ids,
+                "---\n- kind=\"heals\"\n- locator=\"unused\"\n! pigpen-pointer-v1\n---\n",
+            )
+            .unwrap();
+            let saved_cache = std::env::var_os("XDG_CACHE_HOME");
+            std::env::set_var("XDG_CACHE_HOME", dir.join("xdg-cache"));
+            // What an older piggy cached: an empty recipient set.
+            let ptr = piggy_pigpen::Pointer::parse(&std::fs::read(&ids).unwrap()).unwrap();
+            let stale = resolved_pointer_cache_path_for(&ids, &ptr).unwrap();
+            write_cache_file(&stale, b"---\n! pigpen-v1\n---\n").unwrap();
+            let resolved = resolve_piggy_ids_path(&ids);
+            match saved_cache {
+                Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+                None => std::env::remove_var("XDG_CACHE_HOME"),
+            }
+            resolved.map(|path| std::fs::read_to_string(path).unwrap())
+        });
+        assert_eq!(out.unwrap().trim(), test_recipient());
     }
 
     #[test]

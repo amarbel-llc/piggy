@@ -180,8 +180,10 @@ pub fn unwrap_p256_with_shared(
 /// The compressed ephemeral pubkey carried in a P-256 wrap blob — the
 /// `partner_epk` an [`crate::EcdhOracle`] needs.
 pub fn p256_wrap_epk(blob: &[u8]) -> Result<&[u8]> {
-    if blob.len() < 33 {
-        return Err(Error::Crypto("p256 wrap too short".into()));
+    // The whole wrap, not just the key: a wrap of the wrong size must be
+    // turned away before the oracle (a card operation) is asked about it.
+    if blob.len() != 33 + FILE_KEY_LEN + TAG_LEN {
+        return Err(Error::Crypto("bad p256 wrap length".into()));
     }
     Ok(&blob[..33])
 }

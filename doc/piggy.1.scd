@@ -829,11 +829,13 @@ _PIGGY_PIGPEN_NO_CACHE_
 	skips the cache and runs _pigpen-resolver-<kind>_ every time.
 
 _PIGGY_PIGPEN_RESOLVER_TIMEOUT_
-	Seconds a _pigpen-resolver-<kind>_ may run before it and everything it
-	started are killed and the command fails, by default _30_. A resolver
-	is looked up only in absolute _PATH_ entries, may print at most 1 MiB,
-	and must answer with a recipient set naming at least one encryption
-	recipient.
+	Seconds a _pigpen-resolver-<kind>_ may run before it is killed and the
+	command fails, by default _30_. The resolver keeps the terminal, so it
+	may prompt, and Ctrl-C reaches it. A resolver is looked up only in
+	absolute _PATH_ entries, may print at most 1 MiB, and must answer with
+	a recipient set naming at least one encryption recipient. A process it
+	leaves behind holding its standard output fails the command after two
+	seconds; processes it starts are not killed.
 
 _PIGGY_GETOPT_
 	Override the path to GNU *getopt*(1). Useful in Nix environments where
