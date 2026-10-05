@@ -12,6 +12,12 @@ type Document = internal.Document
 // ecdh@joyent.com extension; the slot-9D scalar never leaves the card.
 type ECDHOracle = internal.ECDHOracle
 
+// Pointer is the pointer face of a pigpen document (RFC 0008 §2.2): it
+// names a resolver by kind and an opaque locator instead of carrying
+// recipients. Locator is never interpreted here; it is handed verbatim to
+// whatever runs the resolver (RFC 0010).
+type Pointer = internal.Pointer
+
 // Recipient is one recipient line of a pigpen document.
 type Recipient = internal.Recipient
 
@@ -34,6 +40,11 @@ var NewRecipientSet = internal.NewRecipientSet
 // ParseDocument decodes a pigpen document from hyphence bytes.
 var ParseDocument = internal.ParseDocument
 
+// ParsePointer decodes a pigpen-pointer-v1 document. A document of any
+// other type, a pointer missing its kind or locator, and a pointer
+// carrying any other `-` line (a recipient, say) are all errors.
+var ParsePointer = internal.ParsePointer
+
 // ParseRecipients reads a piggy-ids file in either form and returns its
 // encryption recipients: a pigpen document (leading "---\n", RFC 0009
 // §3.2) or RFC 0003 lines. A pointer document is an error here; resolve
@@ -53,3 +64,8 @@ var SameRecipientSet = internal.SameRecipientSet
 // per-recipient ephemeral keys from the system CSPRNG regardless
 // (measured on go 1.26). Supply an rng only as an entropy source.
 var Seal = internal.Seal
+
+// ValidatePointerKind enforces RFC 0010 §2's one constraint on a kind: it
+// names an executable looked up on PATH, so it must not be empty and must
+// not contain a path separator or a NUL byte.
+var ValidatePointerKind = internal.ValidatePointerKind
