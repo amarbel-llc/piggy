@@ -22,10 +22,13 @@ promotion-criteria: >
 
 > **Parent record:** spinclass FDR 0032, "Principals, handles, and
 > provenance" (`docs/features/0032-principals-handles-and-provenance.md`
-> in spinclass; status `proposed`, on branch `swift-elder` at commit
-> `777b3a8` when this was written, not yet on `master`). This record is
-> downstream of it. Where the two disagree, the disagreement is
-> reconciled in FDR 0032 first. Tracking issue: piggy#297.
+> in spinclass; status `proposed`, on branch `swift-elder`, not yet on
+> `master`). This record was drafted against commit `777b3a8`; the
+> spinclass session reports that commit `3d52e6f` revises it to match
+> the departures listed below. This session has not read either commit
+> and relies on that session's quotations. This record is downstream of
+> FDR 0032. Where the two disagree, the disagreement is reconciled in
+> FDR 0032 first. Tracking issue: piggy#297.
 
 > **Evidence standard.** Every statement about existing code below was
 > read at piggy commit `be3da3f`. Nothing was built, run, or measured for
@@ -88,7 +91,10 @@ record (working names; the RFC fixes the final ones):
 
 ### Tiers
 
-FDR 0032 names three tiers. This record implements them as two steps:
+FDR 0032 has two tiers as revised at `3d52e6f`. Its earlier text listed
+three, with the service as tier 2 and fibby inside it as tier 3; this
+record's design is what collapsed them, and "tier 2" below always means
+the collapsed tier:
 
 - **Tier 1: software key in a stock ssh-agent upstream.** troupe
   generates an ed25519 key per principal and adds it with an ordinary
@@ -100,11 +106,9 @@ FDR 0032 names three tiers. This record implements them as two steps:
   `nix/vm-tests/agent.nix` already exercises that routing. On darwin the
   launchd agent plays the upstream role. The property is only what FDR
   0032 states for tier 1: the key is not in a file.
-- **Tiers 2 and 3, collapsed: the holder service.** A separate-uid
-  service whose only key store is fibby. There is no interim service
-  that keeps keys anywhere else. This is a departure from FDR 0032,
-  which lists tier 2 (the service) and tier 3 (fibby inside it) as
-  separate steps.
+- **Tier 2: the holder service.** A separate-uid service whose only key
+  store is fibby, one virtual card per principal. There is no interim
+  service that keeps keys anywhere else.
 
 ### The holder: fibby as a virtual PIV card
 
@@ -278,8 +282,8 @@ refuse the wrong binary.
 | (a) | tier 1 home-manager wiring; `operator-act@piggy` and its CLI client; card-init policy flags, 9A/9C defaults, health policy report, attestation export; RFC part 1 | spinclass slice 1 |
 | (b) | guarded-memory crate; agent PIN cache adopts it; process non-dumpable | parity with the retired C agent |
 | (c) | fibby holder build: test lockout, ed25519, guarded keys, policies and metadata, attestation key, runtime card create and destroy | the holder |
-| (d) | holder agent mode: `mint@piggy`, `retire@piggy`, caller binding, teardown, agent honours PIN policy; native NixOS module with hardened units; VM lane; RFC part 2 | tiers 2 and 3 |
-| (e) | touch approver in a frontend scope; pluggable approval interface | tier 3's approval prompt |
+| (d) | holder agent mode: `mint@piggy`, `retire@piggy`, caller binding, teardown, agent honours PIN policy; native NixOS module with hardened units; VM lane; RFC part 2 | tier 2 |
+| (e) | touch approver in a frontend scope; pluggable approval interface | tier 2's approval prompt |
 | (f) | 9C blesses the holder's attestation key once per holder start; approval by real card | hardware-anchored provenance |
 | (g) | X25519 key agreement in fibby and in the agent's ECDH extension, opened by a throughput measurement; sealed durable keys | madder |
 
@@ -341,23 +345,39 @@ A session minting and using a holder key (phase (d)), by request:
 
 ## Departures from FDR 0032
 
-These need matching edits in FDR 0032. The spinclass session has them
-and is confirming each with the operator before editing.
+This design departed from FDR 0032 as it stood at `777b3a8` in the four
+ways below. The spinclass session reports that the operator confirmed
+each in that session and that FDR 0032 at `3d52e6f` (unmerged) now
+records them. That is a report, not something this session read.
 
-1. **Tiers 2 and 3 are one step.** The service is never built without
-   fibby. The separate-uid property therefore arrives only after phases
-   (b) to (d).
+1. **The service and fibby are one tier.** The service is never built
+   without fibby, so the separate-uid property arrives only after phases
+   (b) to (d). Reported outcome: FDR 0032 D3 now has two tiers, and what
+   was tier 3 is tier 2.
 2. **Operator-act text is bound by an agent extension**, not by a
    sidecar beside an ordinary sign request. Callers send text, not a
-   pre-built sshsig.
+   pre-built sshsig. Reported outcome: D10 and D11 adopt the extension
+   for the root certificate, the quote fallback and escalation grants.
 3. **A holder key does not survive leaving its scope.** A
    `clown --resume` that lands in a new systemd scope gets a new key and
-   needs a new certificate. FDR 0032 D1 has the principal survive
-   resume, D4 has one certificate record per principal, and D5 allows a
-   new link for the same key; a new key for the same principal is a case
-   it does not yet have.
+   needs a new certificate. Reported outcome: D1 says the principal
+   survives a resume but its tier-2 key does not; D4 becomes one record
+   per principal and key; a resumed principal's certificate is reissued
+   by its parent, "or for a root by one more 9C touch". A resumed root
+   therefore costs the operator a PIN and a touch.
 4. **A 16-principal cap per holder instance** exists in the first
-   phases. The operator session key counts against it.
+   phases. The operator session key counts against it. Reported outcome:
+   recorded in FDR 0032 as a limitation, with what a refused principal
+   does left undecided there (see Open questions).
+
+Not yet reconciled:
+
+5. **Two accounts, not one.** FDR 0032 D14 has the record store and the
+   signer "share one service account". Here fibby runs under a second
+   account of its own and only the holder agent shares the record
+   store's account. The operator chose this layout in this record's
+   design session; the spinclass session has not had it confirmed and
+   D14 is unchanged.
 
 ## Limitations
 
@@ -416,6 +436,10 @@ and is confirming each with the operator before editing.
   connection is not the scope that will sign. The mint request probably
   has to name a target scope, with a rule for who may mint for it. This
   is unsettled between the two records and is with the operator.
+- **What does a principal do when its mint is refused at the cap?**
+  Neither record decides it. Falling back to a tier-1 key is the obvious
+  candidate, and it would make the tier of a principal's key something
+  a verifier has to check rather than assume.
 - **How is a cgroup classified as frontend or agent scope?** No naming
   rule or unit property exists yet; FDR 0032 assigns it to clown#244.
   Phases (d) and (e) depend on it.
@@ -449,7 +473,7 @@ operator's words.
 | - | record shape | one FDR, phased |
 | 1 | platform | Linux only; "in the future I would like to examine how hard darwin support would be" |
 | 2 | key origin | generated inside; and "fibby should be able to generate a pigpen document + cyphertext key that becomes durable, and fibby could accept a pigpen doc and cyphertext key to boostrap as well (all of that being later classes)" |
-| 3 | tier 2 store | collapse: fibby from day one |
+| 3 | where the service keeps keys before fibby is ready | nowhere: collapse the service and fibby into one tier |
 | 4 | mint mapping | card per principal, 16-card cap accepted |
 | 5 | mint request | agent extension |
 | 6 | teardown | scope exit or retire |
