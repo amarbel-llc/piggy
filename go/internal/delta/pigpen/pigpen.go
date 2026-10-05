@@ -215,7 +215,7 @@ func (d *Document) Open(oracle ECDHOracle, x25519 []X25519Identity) ([]byte, err
 		// One attempt per distinct key: a well-formed document names each
 		// recipient once, and a crafted one repeating a key must not buy
 		// one card operation (a touch, a PIN) per repeat.
-		key := string(r.ID.GetBytes())
+		key := r.format() + "\x00" + string(r.ID.GetBytes())
 		if tried[key] {
 			continue
 		}

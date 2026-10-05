@@ -154,16 +154,17 @@ impl Document {
         }
         let mac = self.mac.as_ref().unwrap();
         let mut oracle_failures: Vec<String> = Vec::new();
-        let mut tried: Vec<&[u8]> = Vec::new();
+        let mut tried: Vec<(FormatId, &[u8])> = Vec::new();
         for r in &self.recipients {
             let Some(wrap) = &r.wrap else { continue };
             // One attempt per distinct key: a well-formed document names
             // each recipient once, and a crafted one repeating a key must
             // not buy one card operation (a touch, a PIN) per repeat.
-            if tried.contains(&r.id.data()) {
+            let key = (r.id.format(), r.id.data());
+            if tried.contains(&key) {
                 continue;
             }
-            tried.push(r.id.data());
+            tried.push(key);
             let file_key = match r.id.format() {
                 FormatId::AgeX25519Pub => {
                     let Some(id) = x25519.iter().find(|i| i.public == r.id.data()) else {
@@ -173,7 +174,11 @@ impl Document {
                 }
                 FormatId::PivyEcdhP256Pub => {
                     let Some(oracle) = oracle else { continue };
-                    let epk = crypto::p256_wrap_epk(wrap)?;
+                    // A wrap of the wrong size is not ours to open; parse
+                    // rejects one, so this is an in-memory document only.
+                    let Ok(epk) = crypto::p256_wrap_epk(wrap) else {
+                        continue;
+                    };
                     match oracle.ecdh(&r.id, epk) {
                         Ok(shared) => crypto::unwrap_p256_with_shared(wrap, r.id.data(), &shared),
                         // An oracle that could not answer is not "not our

@@ -63,9 +63,27 @@ pub(crate) fn resolve_piggy_ids_path(piggy_ids: &Path) -> Result<PathBuf, String
         return recipient_set_doc_to_rfc0003_cache(piggy_ids, doc);
     }
 
-    let doc = piggy_pigpen::Document::parse(&raw)
-        .map_err(|e| format!("parsing {} as a pigpen document: {e}", piggy_ids.display()))?;
+    let doc = piggy_pigpen::Document::parse(&raw).map_err(|e| {
+        // A document that says it is a pointer but is not a valid one gets
+        // the pointer parser's reason, not "unexpected type".
+        match piggy_pigpen::Pointer::parse(&raw) {
+            Err(pointer_err) if names_pointer_type(&raw) => {
+                format!(
+                    "parsing {} as a pigpen pointer: {pointer_err}",
+                    piggy_ids.display()
+                )
+            }
+            _ => format!("parsing {} as a pigpen document: {e}", piggy_ids.display()),
+        }
+    })?;
     recipient_set_doc_to_rfc0003_cache(piggy_ids, doc)
+}
+
+/// Whether the bytes carry the pointer type line, valid pointer or not.
+/// Only chooses which parser's error to report.
+fn names_pointer_type(raw: &[u8]) -> bool {
+    raw.split(|&b| b == b'\n')
+        .any(|line| line == b"! pigpen-pointer-v1")
 }
 
 /// Shared tail of [`resolve_piggy_ids_path`]'s two document-bearing
@@ -445,6 +463,22 @@ mod tests {
             !err.contains("resolving pointer") && !err.contains("not found on PATH"),
             "resolver must never be invoked when refusing mutation on a \
              pointer-backed piggy-ids; got: {err}"
+        );
+    }
+
+    #[test]
+    fn malformed_pointer_reports_the_pointer_parsers_reason() {
+        let dir = tempdir();
+        let path = dir.join("piggy-ids");
+        std::fs::write(
+            &path,
+            "---\n- kind=\"../evil\"\n- locator=\"l\"\n! pigpen-pointer-v1\n---\n",
+        )
+        .unwrap();
+        let err = resolve_piggy_ids_path(&path).unwrap_err();
+        assert!(
+            err.contains("path separator"),
+            "error does not say what is wrong with the pointer: {err}"
         );
     }
 
