@@ -116,7 +116,7 @@ build-go:
 # run the go/ module's test suite
 [group('post-build')]
 test-go:
-    cd go && go test -tags test ./...
+    cd go && go test -count=1 -tags test ./...
 
 # piggy-pigpen (RFC 0008/0009 prototype): a pure-RustCrypto, wasm-buildable
 # crate INTENTIONALLY excluded from the cargo workspace (root Cargo.toml
@@ -173,7 +173,7 @@ codemod-facades:
 # regenerate the piggy-scoped RFC 0002 conformance fixture
 [group('codemod')]
 codemod-rfc0002-fixture:
-    cd go && go test -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
+    cd go && go test -count=1 -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
 
 # Regenerate the normative pigpen-v1 vector file, docs/rfcs/0008-pigpen-vectors.txt
 # (RFC 0008 §10, RFC 0009 §8), from the fixed public test secrets in the Go
@@ -1674,7 +1674,7 @@ test-grammar-vectors:
     #!/usr/bin/env bash
     set -euo pipefail
     langlang_bin=$(nix build .#langlang --no-link --print-out-paths)/bin/langlang
-    cd go && LANGLANG_BIN="$langlang_bin" go test -tags test \
+    cd go && LANGLANG_BIN="$langlang_bin" go test -count=1 -tags test \
       ./internal/charlie/markl_registrations/... \
       -run 'TestGrammarVectors|TestIdentifierVectors|TestGrammarImportSurface' -v
 

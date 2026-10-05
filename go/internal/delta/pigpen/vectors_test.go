@@ -21,7 +21,11 @@ import (
 // RFC 0009 §8), relative to this package. The Rust crate replays the same
 // file (crates/piggy-pigpen/tests/vectors.rs), so there is one source and
 // no second copy to drift. Regenerate with `just codemod-pigpen-vectors`.
-const pigpenVectorsPath = "../../../../docs/rfcs/0008-pigpen-vectors.txt"
+//
+// testdata/ holds a symlink to the file's home, docs/rfcs/. The go test
+// cache only tracks files opened under the module root, so reading
+// docs/rfcs/ directly let a changed vector file hide behind a cached pass.
+const pigpenVectorsPath = "testdata/0008-pigpen-vectors.txt"
 
 // vectorRecord is one blank-line-separated block of `key: value` lines.
 type vectorRecord map[string]string

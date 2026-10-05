@@ -11,8 +11,11 @@ import (
 )
 
 // identifierVectorsPath is RFC 0011 §7.3's identifier conformance-vector
-// corpus, relative to this package.
-const identifierVectorsPath = "../../../../docs/rfcs/0011-identifier-vectors.txt"
+// corpus, relative to this package. testdata/ holds a symlink to the
+// file's home in docs/rfcs/: the go test cache only tracks files opened
+// under the module root, so reading docs/rfcs/ directly let a changed
+// corpus hide behind a cached pass.
+const identifierVectorsPath = "testdata/0011-identifier-vectors.txt"
 
 // identifierVectorDigest is an arbitrary valid bare digest slot. The
 // corpus scopes itself to the PURPOSE slot, but marklid.peg's start rule
