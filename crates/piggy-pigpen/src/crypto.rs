@@ -271,3 +271,96 @@ pub fn verify_mac(file_key: &[u8], canonical_header: &[u8], expected: &[u8]) -> 
     mac.update(canonical_header);
     mac.verify_slice(expected).is_ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The small-order points of Curve25519, non-canonical encodings among
+    /// them (libsodium's blocklist), and two with the ignored high bit set.
+    /// An exchange with any of them gives the same secret for every sender.
+    /// The same list is tested against the Go age_x25519_pub wrapper.
+    const LOW_ORDER_POINTS: [(&str, &str); 9] = [
+        (
+            "zero",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ),
+        (
+            "one",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+        ),
+        (
+            "order 8",
+            "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        ),
+        (
+            "order 8, twin",
+            "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        ),
+        (
+            "p - 1",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ),
+        (
+            "p (zero)",
+            "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ),
+        (
+            "p + 1 (one)",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ),
+        (
+            "zero, high bit",
+            "0000000000000000000000000000000000000000000000000000000000000080",
+        ),
+        (
+            "p - 1, high bit",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        ),
+    ];
+
+    fn is_low_order_refusal(result: Result<Vec<u8>>) -> bool {
+        matches!(result, Err(Error::Crypto(reason)) if reason.contains("low-order"))
+    }
+
+    #[test]
+    fn sealing_to_a_low_order_recipient_is_refused() {
+        for (label, point) in LOW_ORDER_POINTS {
+            let recipient = hex::decode(point).unwrap();
+            assert!(
+                is_low_order_refusal(wrap_x25519(&[0x10; FILE_KEY_LEN], &recipient, &[0x70; 32])),
+                "{label}: wrapped a file key to a low-order recipient"
+            );
+        }
+    }
+
+    // A wrap whose ephemeral key is low-order would fail to open anyway,
+    // on the AEAD tag, unless it was forged for exactly this weakness (the
+    // `reject/wrap-with-low-order-ephemeral-key` vector). So this asserts
+    // the reason, not just the failure: the point check itself must fire.
+    #[test]
+    fn opening_a_wrap_with_a_low_order_ephemeral_key_is_refused_as_such() {
+        let secret = [0x01; 32];
+        let public = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret));
+        for (label, point) in LOW_ORDER_POINTS {
+            let mut blob = hex::decode(point).unwrap();
+            blob.extend_from_slice(&[0u8; FILE_KEY_LEN + TAG_LEN]);
+            assert!(
+                is_low_order_refusal(unwrap_x25519(&blob, public.as_bytes(), &secret)),
+                "{label}: the low-order check did not stop the unwrap"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_key_is_not_mistaken_for_a_low_order_point() {
+        let secret = [0x01; 32];
+        let public = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret));
+        let file_key = [0x10; FILE_KEY_LEN];
+        let blob = wrap_x25519(&file_key, public.as_bytes(), &[0x70; 32]).unwrap();
+        assert_eq!(
+            unwrap_x25519(&blob, public.as_bytes(), &secret).unwrap(),
+            file_key
+        );
+    }
+}

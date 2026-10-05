@@ -614,7 +614,20 @@ check that must stop it — no wrap opens, the header MAC, or the payload
 — and an implementation MUST be able to tell its callers which of the
 three it was: a truncated payload is not a wrong key. A reader MUST
 reject a payload that ends on a chunk boundary without a final chunk
-(§4.5); the vectors include one. The file is generated (`just codemod-pigpen-vectors`)
+(§4.5); the vectors include one.
+
+A reader MUST make at most one unwrap attempt per distinct recipient
+key, using the first line that names it. A well-formed document names
+each recipient once; without this rule a crafted document repeating a
+card-backed recipient costs its holder one card operation — a touch, a
+PIN — per repeated line. Such a document never opens, since the header
+MAC covers every recipient line, so the rule changes only how it fails
+and how much it costs; the vectors pin both. An ECDH oracle that fails
+(an unreachable agent, a card that refuses) MUST NOT stop the remaining
+recipients from being tried, and when nothing opens the failure MUST be
+reported as the oracle's, not as a missing recipient.
+
+The file is generated (`just codemod-pigpen-vectors`)
 and replayed by `go/internal/delta/pigpen/vectors_test.go` and
 `crates/piggy-pigpen/tests/vectors.rs`. Both read the one file, so the
 two implementations cannot drift from it or from each other.

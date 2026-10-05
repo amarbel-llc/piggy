@@ -511,6 +511,27 @@ func TestGeneratePigpenVectors(t *testing.T) {
 	xLineEnd := xLineStart + bytes.IndexByte(xWire[xLineStart:], '\n')
 	reject("reject/sealed-without-a-wrapped-recipient", "parse",
 		append(append(bytes.Clone(xWire[:xLineStart]), "- "+sshAuthID.StringWithFormat()...), xWire[xLineEnd:]...))
+	// A recipient named twice. A reader makes one attempt per distinct
+	// recipient key, the first line's (RFC 0008 §10), so a document cannot
+	// buy one card operation per repeated line.
+	//
+	// Repeated verbatim: the first line's wrap opens, and the header MAC,
+	// which covers every recipient line, does not match.
+	xLine := xWire[xLineStart : xLineEnd+1]
+	reject("reject/recipient-line-repeated", "open",
+		bytes.Join([][]byte{xWire[:xLineEnd+1], xLine, xWire[xLineEnd+1:]}, nil),
+		failsAt("header-mac")...)
+	// Repeated with a wrap that does not open put first: that is the one
+	// attempt, so no wrap opens. A reader that went on to the second line
+	// would report the header MAC instead.
+	reject("reject/recipient-line-repeated-behind-an-unopenable-wrap", "open",
+		bytes.Join([][]byte{
+			xWire[:xLineStart],
+			replaceOnce(t, xLine, goodWrapLock, tamperedWrapLock),
+			xWire[xLineStart:],
+		}, nil),
+		failsAt("no-recipient")...)
+
 	reject("reject/sealed-without-header-mac", "parse",
 		replaceOnce(t, xWire, typeLine+macLock, "! "+typeTag))
 	reject("reject/non-utf8-description", "parse",
