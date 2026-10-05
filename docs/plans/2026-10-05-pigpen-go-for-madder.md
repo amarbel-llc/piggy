@@ -188,6 +188,15 @@ Go's `Seal` already takes an `rng`. Rust's `Document::seal`, `wrap_x25519`, `wra
 11. reject: non-UTF-8 description
 12. reject: unknown markl format on a `-` line
 13. reject: `@` line together with a body
+14. reject: wrap lock without the `pigpen-wrap-v1` purpose (bare, and under another purpose)
+15. reject: a P-256 recipient locked with an X25519-format wrap, and the reverse
+16. reject: a non-encryption recipient (`piggy-piv_auth-v1@ssh_…`) carrying a wrap lock
+17. reject: a wrap of the wrong length under the right purpose and format
+18. reject: empty MAC lock (`! pigpen-v1@`), empty recipient line, MAC lock carrying a purpose
+19. reject: a second `!` type line
+20. accept and normalize: a wrap lock whose purpose is written quoted (`"pigpen-wrap-v1"@…`) parses and re-serializes bare
+
+Cases 14 to 20 come from the task 3 review, which found Go/Rust divergences on empty ids and repeated type lines (fixed in task 3). They pin the stricter reader in both languages.
 
 **Step 1: Write the failing replay test.** It reads the file by relative path the way `markl_registrations/identifier_vectors_test.go` reads `docs/rfcs/0011-identifier-vectors.txt`. For `open` cases: parse `document`, open with the given identity (a software `ECDHOracle` built from `p256-secret`), compare plaintext; then re-seal with `rng` and compare bytes to `document`. For `recipient-set`: parse, marshal, compare. For `reject`: parse or open must fail with `error-contains`.
 

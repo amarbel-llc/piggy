@@ -420,6 +420,73 @@ func TestWrapLockMustMatchTheRecipientFamily(t *testing.T) {
 	}
 }
 
+// An empty id is the markl null value, not a recipient, a wrap or a MAC.
+// It must be a parse error (never a panic) and must not serialize.
+func TestEmptyIdsAreRejectedNotPanickedOn(t *testing.T) {
+	wire := sealedVector(t, sealedByGo)
+	doc, err := ParseDocument(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient := doc.Recipients[0].ID.StringWithFormat()
+	goodMAC, err := encodeMAC(doc.MAC)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		label string
+		raw   []byte
+	}{
+		{"empty MAC lock", bytes.Replace(wire, []byte(goodMAC), nil, 1)},
+		{"empty recipient with a wrap", bytes.Replace(wire, []byte(recipient), nil, 1)},
+		{"empty recipient", []byte("---\n- \n! pigpen-v1\n---\n")},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: parse panicked: %v", tc.label, r)
+				}
+			}()
+			if _, err := ParseDocument(tc.raw); err == nil {
+				t.Errorf("%s: accepted, want rejection", tc.label)
+			}
+		}()
+	}
+
+	emptyWrap := &Document{
+		Recipients: []Recipient{{ID: doc.Recipients[0].ID, Wrap: []byte{}}},
+		Payload:    doc.Payload,
+		MAC:        doc.MAC,
+	}
+	if _, err := emptyWrap.MarshalText(); err == nil {
+		t.Error("marshal accepted an empty wrap")
+	}
+
+	emptyMAC := &Document{Recipients: doc.Recipients, Payload: doc.Payload, MAC: []byte{}}
+	if _, err := emptyMAC.MarshalText(); err == nil {
+		t.Error("marshal accepted an empty header MAC")
+	}
+}
+
+func TestSecondTypeLineRejected(t *testing.T) {
+	wire := sealedVector(t, sealedByGo)
+	boundary := []byte("\n---\n")
+	for _, extra := range []string{"\n! " + typeTag, "\n! " + typeTag + "@"} {
+		doubled := bytes.Replace(wire, boundary, append([]byte(extra), boundary...), 1)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("second type line %q: parse panicked: %v", extra, r)
+				}
+			}()
+			if _, err := ParseDocument(doubled); err == nil {
+				t.Errorf("second type line %q accepted, want rejection", extra)
+			}
+		}()
+	}
+}
+
 func TestHeaderMACLockIsBareAndFixedSize(t *testing.T) {
 	wire := sealedVector(t, sealedByGo)
 	typeLine := []byte("! " + typeTag + "@")

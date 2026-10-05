@@ -193,6 +193,11 @@ func encodeWrap(recipientFormat string, blob []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// markl.Id treats empty data as the null id and renders it as "";
+	// an empty wrap must fail here, not serialize as a missing lock.
+	if len(blob) == 0 {
+		return "", fmt.Errorf("pigpen: empty wrap for a %s recipient", recipientFormat)
+	}
 	var id markl.Id
 	if err := id.SetPurposeId(markl.PurposePigpenWrapV1); err != nil {
 		return "", err
@@ -227,6 +232,9 @@ func decodeWrap(recipientFormat, s string) ([]byte, error) {
 }
 
 func encodeMAC(mac []byte) (string, error) {
+	if len(mac) == 0 {
+		return "", errors.New("pigpen: empty header MAC")
+	}
 	var id markl.Id
 	if err := id.SetMarklId(markl.FormatIdPigpenHeaderMac, mac); err != nil {
 		return "", fmt.Errorf("pigpen: bad header MAC: %w", err)
@@ -238,6 +246,10 @@ func decodeMAC(s string) ([]byte, error) {
 	var id markl.Id
 	if err := id.Set(s); err != nil {
 		return nil, fmt.Errorf("pigpen: bad header MAC lock %q: %w", s, err)
+	}
+	// markl.Id.Set treats "" as the null id, which has no format.
+	if id.IsEmpty() {
+		return nil, errors.New("pigpen: empty header MAC lock")
 	}
 	if got := id.GetPurposeId(); got != "" {
 		return nil, fmt.Errorf("pigpen: header MAC lock carries purpose %q, want none", got)

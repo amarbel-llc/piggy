@@ -218,6 +218,9 @@ impl Document {
                     ));
                 }
                 b'!' => {
+                    if saw_type {
+                        return Err(Error::Malformed("more than one '!' type line".into()));
+                    }
                     parse_type_line(&mut doc, &l.body)?;
                     saw_type = true;
                 }
@@ -784,6 +787,55 @@ mod tests {
         let wire = sealed.to_bytes().unwrap();
         let tampered = replace_once(&wire, p_id.to_wire().as_bytes(), x_id.to_wire().as_bytes());
         assert!(Document::parse(&tampered).is_err());
+    }
+
+    #[test]
+    fn empty_ids_are_rejected() {
+        // An empty id is not a recipient, a wrap or a MAC: a parse error on
+        // the way in, and it must not serialize on the way out.
+        let wire = hex::decode(SEALED_BY_GO).unwrap();
+        let doc = Document::parse(&wire).unwrap();
+        let recipient = doc.recipients[0].id.to_wire();
+        let good_mac = encode_mac(doc.mac.as_ref().unwrap()).unwrap();
+
+        let empty_mac_lock = replace_once(&wire, good_mac.as_bytes(), b"");
+        assert!(Document::parse(&empty_mac_lock).is_err());
+        let empty_recipient_with_wrap = replace_once(&wire, recipient.as_bytes(), b"");
+        assert!(Document::parse(&empty_recipient_with_wrap).is_err());
+        assert!(Document::parse(b"---\n- \n! pigpen-v1\n---\n").is_err());
+
+        let empty_wrap = Document {
+            description: None,
+            recipients: vec![Recipient {
+                id: doc.recipients[0].id.clone(),
+                comment: None,
+                wrap: Some(Vec::new()),
+            }],
+            payload: doc.payload.clone(),
+            mac: doc.mac.clone(),
+        };
+        assert!(empty_wrap.to_bytes().is_err());
+
+        let empty_mac = Document {
+            description: None,
+            recipients: doc.recipients,
+            payload: doc.payload,
+            mac: Some(Vec::new()),
+        };
+        assert!(empty_mac.to_bytes().is_err());
+    }
+
+    #[test]
+    fn second_type_line_rejected() {
+        let wire = hex::decode(SEALED_BY_GO).unwrap();
+        for extra in ["\n! pigpen-v1", "\n! pigpen-v1@"] {
+            let replacement = format!("{extra}\n---\n");
+            let doubled = replace_once(&wire, b"\n---\n", replacement.as_bytes());
+            assert!(
+                Document::parse(&doubled).is_err(),
+                "second type line {extra:?} accepted, want rejection"
+            );
+        }
     }
 
     #[test]

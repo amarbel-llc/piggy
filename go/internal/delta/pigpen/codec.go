@@ -101,6 +101,9 @@ func ParseDocument(raw []byte) (*Document, error) {
 		case '@':
 			return nil, errors.New("pigpen: '@'-referenced payload not supported in prototype (inline only)")
 		case '!':
+			if sawType {
+				return nil, errors.New("pigpen: more than one '!' type line")
+			}
 			if err := d.parseTypeLine(l.body); err != nil {
 				return nil, err
 			}
@@ -157,6 +160,10 @@ func parseRecipientLine(body string) (Recipient, error) {
 	var id markl.Id
 	if err := id.Set(idStr); err != nil {
 		return r, fmt.Errorf("pigpen: bad recipient %q: %w", idStr, err)
+	}
+	// markl.Id.Set treats "" as the null id; a `-` line must name one.
+	if id.IsEmpty() {
+		return r, errors.New("pigpen: recipient line has no markl id")
 	}
 	r.ID = id
 	if hasWrap {
