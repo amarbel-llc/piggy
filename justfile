@@ -1562,6 +1562,42 @@ test-vm-coverage:
 debug-vm-dry-run check="vm-piggy-luks":
     nix build .#checks.{{ vm-check-system }}.{{ check }} --dry-run --show-trace
 
+# Re-run one VM lane RUNS times to catch an intermittent failure
+# (piggy#296/#300: vm-piggy-agent hangs in an ssh step about once in a
+# few dozen runs). Each run is a forced rebuild of the already-built
+# check; every log is kept under LOGDIR and a line per run reports
+# pass/fail and seconds. A failing log carries the guest's
+# "HANG WATCHDOG" dump (nix/vm-tests/agent.nix). The lane's 15-minute
+# global timeout bounds a hung run.
+#
+# re-run a nix/vm-tests check N times and keep the logs of every run
+[group('debug')]
+[linux]
+debug-vm-loop check="vm-piggy-agent" runs="10" logdir="":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    attr=".#checks.{{ vm-check-system }}.{{ check }}"
+    logdir="{{ logdir }}"
+    [[ -n $logdir ]] || logdir="${TMPDIR:-/tmp}/vm-loop-{{ check }}-$(date +%Y%m%dT%H%M%S)"
+    mkdir -p "$logdir"
+    echo "logs: $logdir"
+    # --rebuild needs the output to exist already.
+    nix build "$attr" --no-link --show-trace >"$logdir/run-00-prime.log" 2>&1 \
+      || echo "run 00 (prime): FAIL, see $logdir/run-00-prime.log"
+    failures=0
+    for i in $(seq 1 {{ runs }}); do
+      log=$(printf '%s/run-%02d.log' "$logdir" "$i")
+      start=$(date +%s)
+      if nix build "$attr" --rebuild --no-link --print-build-logs --show-trace >"$log" 2>&1; then
+        verdict=pass
+      else
+        verdict=FAIL
+        failures=$((failures + 1))
+      fi
+      echo "run $(printf '%02d' "$i"): $verdict $(( $(date +%s) - start ))s $(grep -c 'HANG WATCHDOG:.*seconds' "$log" || true) watchdog dump(s)"
+    done
+    echo "$failures of {{ runs }} runs failed; logs in $logdir"
+
 # Rust card-integration tests against FIBBY — the consolidated fibby
 # companion to test-rust-agent-ecdh / -agent-unlock / -card-unlock, part of
 # the fib→fibby retirement (docs/plans/2026-06-15-retire-fib-for-fibby.md,

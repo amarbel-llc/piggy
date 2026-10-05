@@ -27,9 +27,82 @@ let
   softSock = "/run/upstream/agent.sock";
   pivSock = "/run/piggy/agent.sock";
   frontSock = "/run/piggy-front/agent.sock";
+
+  # piggy#296 / #300: this lane intermittently hangs in an `ssh` step until
+  # the global timeout, and the driver's own log cannot say why: it shows
+  # only that the command's result never arrived. This runs INSIDE the
+  # guest and reports on the journal (mirrored to the serial console, so it
+  # reaches the build log even if the driver's command channel is what is
+  # stuck). It stays silent unless a command has been running far longer
+  # than any step of this lane takes, then dumps what is alive and what it
+  # is blocked on, once a minute.
+  hangWatchdog = pkgs.writeShellScript "piggy-vm-hang-watchdog" ''
+    stuck_after=45
+    watched="ssh base64 timeout"
+
+    oldest_stuck() {
+      for name in $watched; do
+        for pid in $(pgrep -x "$name"); do
+          age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ') || continue
+          if [ -n "$age" ] && [ "$age" -ge "$stuck_after" ]; then
+            echo "$pid $name $age"
+            return 0
+          fi
+        done
+      done
+      return 1
+    }
+
+    describe() {
+      pid=$1
+      [ -d "/proc/$pid" ] || return 0
+      echo "--- pid $pid: $(tr '\0' ' ' < "/proc/$pid/cmdline")"
+      grep -E '^(State|PPid|SigBlk|SigIgn|SigCgt|SigPnd|ShdPnd):' "/proc/$pid/status"
+      echo "wchan: $(cat "/proc/$pid/wchan" 2>/dev/null)"
+      echo "syscall: $(cat "/proc/$pid/syscall" 2>/dev/null)"
+      cat "/proc/$pid/stack" 2>/dev/null
+      for fd in "/proc/$pid/fd"/*; do
+        n=''${fd##*/}
+        echo "fd $n -> $(readlink "$fd") $(grep -E '^flags:' "/proc/$pid/fdinfo/$n" 2>/dev/null)"
+      done
+    }
+
+    while sleep 15; do
+      found=$(oldest_stuck) || continue
+      echo "=== HANG WATCHDOG: $found (pid name seconds) ==="
+      ps -eo pid,ppid,pgid,sid,tty,stat,etimes,wchan:24,args --forest
+      for name in ssh sshd base64 timeout bash piggy ssh-agent fibby; do
+        for pid in $(pgrep -x "$name"); do
+          describe "$pid"
+        done
+      done
+      echo "=== HANG WATCHDOG: end ==="
+      sleep 45
+    done
+  '';
 in
 {
+  # The lane takes two to three minutes. A hang used to cost the full
+  # hour of the default global timeout (piggy#296).
+  globalTimeout = lib.mkForce 900;
+
   nodes.machine = {
+    systemd.services.hang-watchdog = {
+      description = "report what is blocked when a test command hangs (piggy#300)";
+      wantedBy = [ "multi-user.target" ];
+      path = [
+        pkgs.procps
+        pkgs.coreutils
+        pkgs.gnugrep
+      ];
+      serviceConfig = {
+        Type = "simple";
+        ExecStart = hangWatchdog;
+        StandardOutput = "journal+console";
+        StandardError = "journal+console";
+      };
+    };
+
     services.openssh = {
       enable = true;
       settings.PermitRootLogin = "prohibit-password";
