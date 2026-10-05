@@ -206,6 +206,7 @@ func (d *Document) Open(oracle ECDHOracle, x25519 []X25519Identity) ([]byte, err
 	if !d.Sealed() {
 		return nil, errors.New("pigpen: document is a recipient set, not sealed")
 	}
+	var oracleFailures []error
 	for _, r := range d.Recipients {
 		if r.Wrap == nil {
 			continue
@@ -228,6 +229,13 @@ func (d *Document) Open(oracle ECDHOracle, x25519 []X25519Identity) ([]byte, err
 			continue
 		}
 		if err != nil {
+			// An oracle that could not answer is not "not our key": keep
+			// it, so a caller is not told a reachable-agent problem is a
+			// wrong-recipient one.
+			var oracleFailure oracleError
+			if errors.As(err, &oracleFailure) {
+				oracleFailures = append(oracleFailures, oracleFailure.cause)
+			}
 			continue // not our key (or tampered); try the next recipient
 		}
 		defer zero(fileKey)
@@ -240,6 +248,12 @@ func (d *Document) Open(oracle ECDHOracle, x25519 []X25519Identity) ([]byte, err
 			return nil, errors.New("pigpen: header MAC mismatch")
 		}
 		return openPayload(fileKey, d.Payload)
+	}
+	if len(oracleFailures) > 0 {
+		return nil, fmt.Errorf(
+			"pigpen: no recipient could be opened; the ECDH oracle failed: %w",
+			errors.Join(oracleFailures...),
+		)
 	}
 	return nil, errors.New("pigpen: no usable recipient (no matching identity/oracle)")
 }

@@ -242,8 +242,33 @@ func TestAgentECDHOracleFailsForAKeyTheAgentDoesNotHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sealed.Open(AgentECDHOracle{SocketPath: socketPath}, nil); err == nil {
+	_, err = sealed.Open(AgentECDHOracle{SocketPath: socketPath}, nil)
+	if err == nil {
 		t.Fatal("opened a document sealed to a key the agent does not hold")
+	}
+	if !IsErrAgent(err) {
+		t.Fatalf("Open hid the agent's refusal behind %v", err)
+	}
+}
+
+// When the agent cannot be reached, Open must say so. "No usable
+// recipient" would send the user looking at the recipient list.
+func TestOpenSurfacesAnUnreachableAgentAsAnAgentError(t *testing.T) {
+	key, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := pigpen.Seal([]byte("x"), []markl.Id{p256RecipientID(t, key)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = sealed.Open(AgentECDHOracle{SocketPath: "/nonexistent/agent.sock"}, nil)
+	if err == nil {
+		t.Fatal("opened a document with no agent to ask")
+	}
+	if !IsErrAgent(err) {
+		t.Fatalf("Open reported an unreachable agent as %v", err)
 	}
 }
 

@@ -72,7 +72,11 @@ func (oracle AgentECDHOracle) ECDH(self markl.Id, partnerEpk []byte) (secret []b
 		return secret, err
 	}
 
-	return agentECDH(oracle.SocketPath, self.GetBytes(), partnerEpk)
+	if secret, err = agentECDH(oracle.SocketPath, self.GetBytes(), partnerEpk); err != nil {
+		return nil, asAgentError(err)
+	}
+
+	return secret, nil
 }
 
 // agentECDH asks the agent at socketPath for the ECDH of the card key

@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"crypto/elliptic"
+	stderrors "errors"
 	"fmt"
 	"sync"
 
@@ -29,9 +30,9 @@ import (
 // (PIGGY_AUTH_SOCK, then SSH_AUTH_SOCK, then PIVY_AUTH_SOCK). Building
 // the wrapper and encrypting need no agent and no socket variable.
 //
-// A failure to reach the agent or to get a usable reply is reported as
-// dewey's typed agent error, so callers keep telling it apart from a
-// wrong-recipient AEAD failure with pivy.IsErrAgent.
+// A failure to reach the agent or to get a usable reply is an ErrAgent
+// (test with IsErrAgent), so a caller can tell it apart from a
+// wrong-recipient AEAD failure.
 func PivyEcdhP256GetIOWrapper(
 	id domain_interfaces.MarklId,
 ) (ioWrapper interfaces.IOWrapper, err error) {
@@ -65,22 +66,56 @@ func agentDecryptECDH(recipientCompressed []byte) pivy.ECDHFunc {
 	return func(ephemeralPubkey []byte) ([]byte, error) {
 		socketPath, err := ResolveAuthSock()
 		if err != nil {
-			return nil, asPivyAgentError(err)
+			return nil, asAgentError(err)
 		}
 
 		secret, err := agentECDH(socketPath, recipientCompressed, ephemeralPubkey)
 		if err != nil {
-			return nil, asPivyAgentError(err)
+			return nil, asAgentError(err)
 		}
 
 		return secret, nil
 	}
 }
 
-// asPivyAgentError marks err as dewey's pivy agent error (pivy.IsErrAgent)
-// while keeping its own message and chain.
-func asPivyAgentError(err error) error {
-	return fmt.Errorf("%w: %w", pivy.ErrAgent, err)
+// ErrAgent marks a failure to get an answer out of the agent: no socket
+// variable set, a socket nobody listens on, a key the agent does not hold,
+// a card or PIN failure the agent reported, or a reply this client could
+// not use. Test for it with IsErrAgent.
+//
+// It is what tells "the agent could not be asked" apart from "this
+// ciphertext is not for this key", which an AEAD failure means. A reader
+// that masks the first as the second sends the user looking in the wrong
+// place.
+var ErrAgent = stderrors.New("agent error")
+
+// IsErrAgent reports whether err is, or wraps, ErrAgent.
+func IsErrAgent(err error) bool {
+	return stderrors.Is(err, ErrAgent)
+}
+
+// agentError carries a cause as both this package's ErrAgent and dewey's
+// pivy.ErrAgent.
+//
+// The second is not for consumers: dewey's pivy.Identity.Unwrap decides
+// with its own pivy.IsErrAgent whether an ECDHFunc failure is surfaced or
+// skipped as a wrong recipient, so until dewey stops keying on that
+// predicate (purse-first#205) an error that lacked it would be swallowed
+// into age's "incorrect identity". Consumers test IsErrAgent.
+type agentError struct {
+	cause error
+}
+
+func (err agentError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrAgent, err.cause)
+}
+
+func (err agentError) Unwrap() []error {
+	return []error{ErrAgent, pivy.ErrAgent, err.cause}
+}
+
+func asAgentError(err error) error {
+	return agentError{cause: err}
 }
 
 var pivyEcdhP256FormatOnce sync.Once

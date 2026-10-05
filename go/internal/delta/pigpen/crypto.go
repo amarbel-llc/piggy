@@ -147,6 +147,16 @@ func wrapP256(fileKey, recipientCompressed, ephemeralSecret []byte) (blob []byte
 	return append(epkCompressed, ct...), nil // 33 + 32
 }
 
+// oracleError marks a failure of the ECDH oracle itself (the agent could
+// not be reached, the card refused), as opposed to a wrap that simply is
+// not for this key. Open reports the former and skips the latter.
+type oracleError struct {
+	cause error
+}
+
+func (err oracleError) Error() string { return err.cause.Error() }
+func (err oracleError) Unwrap() error { return err.cause }
+
 func unwrapP256(blob, recipientCompressed []byte, oracle ECDHOracle, self markIdentity) (fileKey []byte, err error) {
 	if len(blob) != 33+fileKeyLen+streamTagLen {
 		return nil, fmt.Errorf("pigpen: bad p256 wrap length %d", len(blob))
@@ -154,7 +164,7 @@ func unwrapP256(blob, recipientCompressed []byte, oracle ECDHOracle, self markId
 	epkCompressed, ct := blob[:33], blob[33:]
 	shared, err := oracle.ECDH(self, epkCompressed) // 32-byte X-coordinate from the card
 	if err != nil {
-		return nil, err
+		return nil, oracleError{cause: err}
 	}
 	salt := concat(epkCompressed, recipientCompressed)
 	kw := hkdf32(shared, salt, infoP256)

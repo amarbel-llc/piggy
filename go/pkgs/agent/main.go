@@ -57,6 +57,20 @@ var (
 	DiscoverSSHAgentEd25519KeysVerbose = internal.DiscoverSSHAgentEd25519KeysVerbose
 )
 
+// ErrAgent marks a failure to get an answer out of the agent: no socket
+// variable set, a socket nobody listens on, a key the agent does not hold,
+// a card or PIN failure the agent reported, or a reply this client could
+// not use. Test for it with IsErrAgent.
+//
+// It is what tells "the agent could not be asked" apart from "this
+// ciphertext is not for this key", which an AEAD failure means. A reader
+// that masks the first as the second sends the user looking in the wrong
+// place.
+var ErrAgent = internal.ErrAgent
+
+// IsErrAgent reports whether err is, or wraps, ErrAgent.
+var IsErrAgent = internal.IsErrAgent
+
 // PivyEcdhP256GetIOWrapper builds a pivy IOWrapper that encrypts to, and
 // decrypts for, a PIV slot-9D ECDH recipient (the pivy_ecdh_p256_pub
 // pubkey carried by id).
@@ -73,9 +87,9 @@ var (
 // (PIGGY_AUTH_SOCK, then SSH_AUTH_SOCK, then PIVY_AUTH_SOCK). Building
 // the wrapper and encrypting need no agent and no socket variable.
 //
-// A failure to reach the agent or to get a usable reply is reported as
-// dewey's typed agent error, so callers keep telling it apart from a
-// wrong-recipient AEAD failure with pivy.IsErrAgent.
+// A failure to reach the agent or to get a usable reply is an ErrAgent
+// (test with IsErrAgent), so a caller can tell it apart from a
+// wrong-recipient AEAD failure.
 var PivyEcdhP256GetIOWrapper = internal.PivyEcdhP256GetIOWrapper
 
 // RegisterEcdsaP256SSHFormat swaps the real, agent-backed signer over the

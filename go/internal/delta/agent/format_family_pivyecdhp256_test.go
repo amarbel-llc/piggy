@@ -131,9 +131,7 @@ func TestPivyIOWrapperReportsAgentFailuresAsAgentErrors(t *testing.T) {
 			t.Errorf("%s: decrypted, want an agent error", label)
 			continue
 		}
-		if !pivy.IsErrAgent(err) {
-			t.Errorf("%s: %v is not a pivy agent error", label, err)
-		}
+		assertAgentError(t, label, err)
 	}
 }
 
@@ -165,7 +163,48 @@ func TestPivyIOWrapperReportsAnUnknownKeyAsAnAgentError(t *testing.T) {
 	if err == nil {
 		t.Fatal("decrypted with a key the agent does not hold")
 	}
+	assertAgentError(t, "a key the agent does not hold", err)
+}
+
+// assertAgentError checks the predicate consumers use, IsErrAgent, and the
+// one dewey's pivy.Identity.Unwrap keys on to decide whether to surface
+// the failure (see agentError).
+func assertAgentError(t *testing.T, label string, err error) {
+	t.Helper()
+	if !IsErrAgent(err) {
+		t.Errorf("%s: %v is not an agent error (IsErrAgent)", label, err)
+	}
 	if !pivy.IsErrAgent(err) {
-		t.Fatalf("%v is not a pivy agent error", err)
+		t.Errorf("%s: %v would be swallowed by dewey's stanza unwrap (pivy.IsErrAgent)", label, err)
+	}
+}
+
+// An AEAD failure is not an agent error: the agent answered, the
+// ciphertext just is not readable with that answer.
+func TestPivyIOWrapperDoesNotCallADecryptFailureAnAgentError(t *testing.T) {
+	clearAuthSockEnv(t)
+	key, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	socketPath, _ := serveSoftwareECDHAgent(t, key, framingPiggyAgent)
+
+	wrapper, err := PivyEcdhP256GetIOWrapper(p256RecipientID(t, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext := encryptThrough(t, wrapper, []byte("a blob whose last byte gets flipped"))
+	ciphertext[len(ciphertext)-1] ^= 0x01
+	t.Setenv("PIGGY_AUTH_SOCK", socketPath)
+
+	reader, err := wrapper.WrapReader(bytes.NewReader(ciphertext))
+	if err == nil {
+		_, err = io.ReadAll(reader)
+	}
+	if err == nil {
+		t.Fatal("decrypted a tampered blob")
+	}
+	if IsErrAgent(err) {
+		t.Fatalf("a payload authentication failure was reported as an agent error: %v", err)
 	}
 }
