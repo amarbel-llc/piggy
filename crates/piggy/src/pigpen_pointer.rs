@@ -356,6 +356,7 @@ fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
             Err(e) => {
                 let _ = child.kill();
+                let _ = child.wait();
                 return Err(format!("waiting for {binary}: {e}"));
             }
         }
@@ -363,6 +364,22 @@ fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
 
     // The resolver has exited. Whatever it left running may still hold the
     // pipes; do not wait on that for long.
+    //
+    // A failure is reported as the resolver's own, exit status and stderr,
+    // before anything about its output: stdout is not needed for that, and
+    // a helper holding it open must not hide the reason.
+    if !status.success() {
+        let stderr = stderr
+            .recv_timeout(RESOLVER_WAIT_DELAY)
+            .map(|out| out.bytes)
+            .unwrap_or_default();
+        return Err(format!(
+            "{binary} exited {status}: {:?}",
+            String::from_utf8_lossy(&stderr).trim()
+        ));
+    }
+    // On success stderr is not needed, so a helper holding only that (a
+    // multiplexed ssh master) costs nothing.
     let stdout = match stdout_early {
         Some(out) => out,
         None => stdout
@@ -371,21 +388,6 @@ fn invoke_resolver(kind: &str, locator: &str) -> Result<Vec<u8>, String> {
     };
     if stdout.overflowed {
         return Err(too_large());
-    }
-    // Only needed to explain a failure, so a held stderr is not one.
-    let stderr = stderr
-        .recv_timeout(if status.success() {
-            std::time::Duration::ZERO
-        } else {
-            RESOLVER_WAIT_DELAY
-        })
-        .map(|out| out.bytes)
-        .unwrap_or_default();
-    if !status.success() {
-        return Err(format!(
-            "{binary} exited {status}: {:?}",
-            String::from_utf8_lossy(&stderr).trim()
-        ));
     }
     Ok(stdout.bytes)
 }
@@ -619,6 +621,17 @@ mod tests {
             "took {:?}; a held stderr delayed a successful resolve",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn failing_resolver_reports_its_own_reason_even_with_stdout_held() {
+        let err = with_resolver(
+            "fails-holding",
+            "#!/bin/sh\nsleep 8 2>/dev/null &\necho 'papi unreachable' >&2\nexit 1\n",
+            |_| invoke_resolver("fails-holding", "l"),
+        )
+        .unwrap_err();
+        assert!(err.contains("papi unreachable"), "got: {err}");
     }
 
     #[test]
