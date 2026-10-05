@@ -41,6 +41,14 @@ pub enum FormatId {
     /// SSH-suitable ECDSA P-384 public key, SEC1-compressed (49 bytes).
     /// Mirrors `ssh_ecdsa_nistp256_pub` one curve up (#86).
     SshEcdsaNistp384Pub,
+    /// Pigpen per-recipient wrapped file key for a P-256 recipient:
+    /// `Epk_compressed(33) ‖ AEAD(32)` (piggy RFC 0008 §4.3, §5).
+    PigpenWrapP256,
+    /// Pigpen per-recipient wrapped file key for an X25519 recipient:
+    /// `Epk(32) ‖ AEAD(32)` (piggy RFC 0008 §4.4, §5).
+    PigpenWrapX25519,
+    /// Pigpen header MAC, an HMAC-SHA256 output (piggy RFC 0008 §4.6).
+    PigpenHeaderMac,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -67,6 +75,9 @@ impl FormatId {
             FormatId::SshEcdsaNistp256Pub => "ssh_ecdsa_nistp256_pub",
             FormatId::SshEd25519Pub => "ssh_ed25519_pub",
             FormatId::SshEcdsaNistp384Pub => "ssh_ecdsa_nistp384_pub",
+            FormatId::PigpenWrapP256 => "pigpen_wrap_p256",
+            FormatId::PigpenWrapX25519 => "pigpen_wrap_x25519",
+            FormatId::PigpenHeaderMac => "pigpen_header_mac",
         }
     }
 
@@ -87,10 +98,16 @@ impl FormatId {
             | FormatId::AgeX25519Sec
             | FormatId::Nonce
             | FormatId::Ed25519Ssh
-            | FormatId::SshEd25519Pub => 32,
-            FormatId::Ed25519Sec | FormatId::Ed25519Sig | FormatId::EcdsaP256Sig => 64,
+            | FormatId::SshEd25519Pub
+            | FormatId::PigpenHeaderMac => 32,
+            FormatId::Ed25519Sec
+            | FormatId::Ed25519Sig
+            | FormatId::EcdsaP256Sig
+            | FormatId::PigpenWrapX25519 => 64,
             // P-384 compressed point: 1-byte y-parity + 48-byte x-coord.
             FormatId::SshEcdsaNistp384Pub => 49,
+            // 33-byte compressed ephemeral point + 32-byte wrapped key.
+            FormatId::PigpenWrapP256 => 65,
         }
     }
 
@@ -112,6 +129,9 @@ impl FormatId {
             "ssh_ecdsa_nistp256_pub" => Ok(FormatId::SshEcdsaNistp256Pub),
             "ssh_ed25519_pub" => Ok(FormatId::SshEd25519Pub),
             "ssh_ecdsa_nistp384_pub" => Ok(FormatId::SshEcdsaNistp384Pub),
+            "pigpen_wrap_p256" => Ok(FormatId::PigpenWrapP256),
+            "pigpen_wrap_x25519" => Ok(FormatId::PigpenWrapX25519),
+            "pigpen_header_mac" => Ok(FormatId::PigpenHeaderMac),
             other => Err(UnknownFormat(other.to_string())),
         }
     }
@@ -146,6 +166,9 @@ mod tests {
             FormatId::SshEcdsaNistp256Pub,
             FormatId::SshEd25519Pub,
             FormatId::SshEcdsaNistp384Pub,
+            FormatId::PigpenWrapP256,
+            FormatId::PigpenWrapX25519,
+            FormatId::PigpenHeaderMac,
         ] {
             let s = f.as_str();
             let parsed = FormatId::parse(s).unwrap();
@@ -169,6 +192,21 @@ mod tests {
     fn ssh_ecdsa_nistp384_pub_size_is_49() {
         // P-384 compressed point: 1-byte y-parity + 48-byte x-coord.
         assert_eq!(FormatId::SshEcdsaNistp384Pub.size(), 49);
+    }
+
+    #[test]
+    fn pigpen_blob_formats_have_their_rfc_0008_sizes() {
+        // RFC 0008 §5: Epk_compressed(33)‖AEAD(32), Epk(32)‖AEAD(32),
+        // and an HMAC-SHA256 output.
+        for (format, name, size) in [
+            (FormatId::PigpenWrapP256, "pigpen_wrap_p256", 65),
+            (FormatId::PigpenWrapX25519, "pigpen_wrap_x25519", 64),
+            (FormatId::PigpenHeaderMac, "pigpen_header_mac", 32),
+        ] {
+            assert_eq!(format.as_str(), name);
+            assert_eq!(FormatId::parse(name).unwrap(), format);
+            assert_eq!(format.size(), size, "{name}");
+        }
     }
 
     #[test]

@@ -52,6 +52,14 @@ pub enum PurposeId {
     /// `b852d42`) and mirrored here; piggy#183 re-homes the registry
     /// to piggy as the source of truth.
     PapiDocSigV1,
+    /// `pigpen-wrap-v1` — a sealed pigpen document's per-recipient
+    /// wrapped file key (piggy RFC 0008 §2.4, §5). Accepts
+    /// `pigpen_wrap_p256` and `pigpen_wrap_x25519`.
+    PigpenWrapV1,
+    /// `pigpen-doc-v1` — a sealed pigpen document's header MAC, or the
+    /// content digest of its `@`-referenced payload (piggy RFC 0008
+    /// §5). Accepts `pigpen_header_mac` and `blake2b256`.
+    PigpenDocV1,
     /// `dodder-blob-digest-sha256-v1` — blob content hash. Piggy does
     /// not produce these, but accepts them for round-trip purposes.
     DodderBlobDigestSha256V1,
@@ -344,6 +352,8 @@ impl PurposeId {
             PurposeId::PiggyPivSigV1 => "piggy-piv_sig-v1",
             PurposeId::PiggyPivCardAuthV1 => "piggy-piv_card_auth-v1",
             PurposeId::PapiDocSigV1 => "papi-doc-sig-v1",
+            PurposeId::PigpenWrapV1 => "pigpen-wrap-v1",
+            PurposeId::PigpenDocV1 => "pigpen-doc-v1",
             PurposeId::DodderBlobDigestSha256V1 => "dodder-blob-digest-sha256-v1",
             PurposeId::DodderObjectDigestV2 => "dodder-object-digest-v2",
             PurposeId::DodderObjectSigV2 => "dodder-object-sig-v2",
@@ -360,6 +370,8 @@ impl PurposeId {
             "piggy-piv_sig-v1" => PurposeId::PiggyPivSigV1,
             "piggy-piv_card_auth-v1" => PurposeId::PiggyPivCardAuthV1,
             "papi-doc-sig-v1" => PurposeId::PapiDocSigV1,
+            "pigpen-wrap-v1" => PurposeId::PigpenWrapV1,
+            "pigpen-doc-v1" => PurposeId::PigpenDocV1,
             "dodder-blob-digest-sha256-v1" => PurposeId::DodderBlobDigestSha256V1,
             "dodder-object-digest-v2" => PurposeId::DodderObjectDigestV2,
             "dodder-object-sig-v2" => PurposeId::DodderObjectSigV2,
@@ -399,6 +411,15 @@ impl PurposeId {
                 )
             }
             PurposeId::PapiDocSigV1 => matches!(format, FormatId::EcdsaP256Sig),
+            PurposeId::PigpenWrapV1 => {
+                matches!(
+                    format,
+                    FormatId::PigpenWrapP256 | FormatId::PigpenWrapX25519
+                )
+            }
+            PurposeId::PigpenDocV1 => {
+                matches!(format, FormatId::PigpenHeaderMac | FormatId::Blake2b256)
+            }
             PurposeId::DodderBlobDigestSha256V1 => {
                 matches!(format, FormatId::Sha256 | FormatId::Blake2b256)
             }
@@ -485,6 +506,40 @@ mod tests {
         );
         assert!(p.validate_format(FormatId::Sha256).is_err());
         assert!(p.validate_format(FormatId::EcdsaP256Pub).is_err());
+    }
+
+    #[test]
+    fn pigpen_wrap_v1_accepts_only_the_wrap_formats() {
+        let p = PurposeId::PigpenWrapV1;
+        assert_eq!(p.as_str(), "pigpen-wrap-v1");
+        assert_eq!(PurposeId::parse("pigpen-wrap-v1"), p);
+        assert!(p.validate_format(FormatId::PigpenWrapP256).is_ok());
+        assert!(p.validate_format(FormatId::PigpenWrapX25519).is_ok());
+        assert!(
+            p.validate_format(FormatId::PigpenHeaderMac).is_err(),
+            "the header MAC belongs to pigpen-doc-v1"
+        );
+        assert!(
+            p.validate_format(FormatId::PivyEcdhP256Pub).is_err(),
+            "a recipient pubkey is not a wrapped file key"
+        );
+        assert!(
+            PurposeId::PiggyRecipientV1
+                .validate_format(FormatId::PigpenWrapP256)
+                .is_err(),
+            "a wrapped file key is not a recipient"
+        );
+    }
+
+    #[test]
+    fn pigpen_doc_v1_accepts_the_header_mac_and_payload_digest() {
+        let p = PurposeId::PigpenDocV1;
+        assert_eq!(p.as_str(), "pigpen-doc-v1");
+        assert_eq!(PurposeId::parse("pigpen-doc-v1"), p);
+        assert!(p.validate_format(FormatId::PigpenHeaderMac).is_ok());
+        assert!(p.validate_format(FormatId::Blake2b256).is_ok());
+        assert!(p.validate_format(FormatId::PigpenWrapP256).is_err());
+        assert!(p.validate_format(FormatId::Sha256).is_err());
     }
 
     #[test]
