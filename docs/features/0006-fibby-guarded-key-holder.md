@@ -22,11 +22,12 @@ promotion-criteria: >
 
 > **Parent record:** spinclass FDR 0032, "Principals, handles, and
 > provenance" (`docs/features/0032-principals-handles-and-provenance.md`
-> in spinclass; status `proposed`, on branch `swift-elder`, not yet on
-> `master`). This record was drafted against commit `777b3a8`; the
-> spinclass session reports that commits up to `98782c7` revise it to
-> match the departures listed below. This session has not read any of
-> those commits and relies on that session's quotations. This record is downstream of
+> in spinclass; status `proposed`; on spinclass `master` at
+> `c6bf2eb1bb76`, where this session confirmed the file exists). This
+> record was drafted against branch commit `777b3a8`; the spinclass
+> session reports that the revisions up to `c6bf2eb1bb76` match the
+> departures listed below. This session has not read the record's text
+> and relies on that session's quotations. This record is downstream of
 > FDR 0032. Where the two disagree, the disagreement is reconciled in
 > FDR 0032 first. Tracking issue: piggy#297.
 
@@ -351,8 +352,8 @@ A session minting and using a holder key (phase (d)), by request:
 This design departed from FDR 0032 as it stood at `777b3a8` in the four
 ways below, plus a fifth found while reconciling. The spinclass session
 reports that the operator confirmed each in that session and that FDR
-0032 at `98782c7` (unmerged) now records them. That is a report, not
-something this session read.
+0032 on `master` at `c6bf2eb1bb76` now records them. That is a report,
+not something this session read.
 
 1. **The service and fibby are one tier.** The service is never built
    without fibby, so the separate-uid property arrives only after phases
@@ -443,6 +444,15 @@ something this session read.
   now", until clown#244 defines the two scopes. The mint extension's
   wire format must not assume an answer; this blocks RFC part 2, not
   phases (a) to (c).
+- **Which tier does a service principal's key need?** The spinclass
+  session reports that FDR 0032 (D2, D10, D15) added service principals
+  for trees no human starts, such as one spawned from a webhook: the
+  card enrols a long-lived service key once, and the service certifies a
+  fresh root principal per tree. Such a key is bound to a service unit,
+  not a session scope, so the teardown-on-scope-exit rule and the mint
+  binding above do not fit it as written. FDR 0032 leaves the tier to
+  piggy. Not designed here; a candidate is the durable sealed-key class
+  of phase (g).
 - **How is a cgroup classified as frontend or agent scope?** No naming
   rule or unit property exists yet; FDR 0032 assigns it to clown#244.
   Phases (d) and (e) depend on it.
