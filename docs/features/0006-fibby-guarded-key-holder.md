@@ -1,6 +1,14 @@
 ---
 status: proposed
-date: 2026-10-05
+date: 2026-10-07
+approved: 2026-10-07
+approval-note: >
+  Design approved by the operator on 2026-10-07 after review of the
+  draft, with three asks folded in: a top-level definition of the
+  frontend and agent scopes to be captured in manpages; a comparison of
+  the guarded-memory guarantees against C pivy and the state of the
+  art; and the direct agent-to-fibby transport promoted from a
+  conditional lift to committed phase (h).
 promotion-criteria: >
   proposed -> experimental when phase (a) has landed and all four hold:
   (1) on one host, a software ed25519 key added through the piggy agent
@@ -72,6 +80,42 @@ etc -- like the original pivy)", run "via special systemd units that
 provide further guards", and that it is the key holder FDR 0032 calls
 for. A second consumer, madder, wants a blob-store key held outside its
 own process.
+
+## Scopes: frontend and agent
+
+This record relies on a split of the operator's processes into two
+systemd scopes. The split itself is clown's to define (spinclass FDR
+0032 D7 assigns it to clown#244, and no naming rule or unit property
+exists yet); what follows is the meaning piggy depends on, so that the
+holder can be built against a stated contract and so that clown's
+definition can be checked against it.
+
+- **Frontend scope.** The processes the operator drives directly and
+  that run no untrusted instructions: the harness frontend, troupe's
+  connection owner, and the approver this record adds. Only a peer in a
+  frontend scope may approve a touch-policy operation, and only a
+  frontend-scope caller may obtain an operator act (the 9C prompt is
+  shown to it). Processes here are trusted to show the operator the
+  truth.
+- **Agent scope.** The tree under `claude` (or another agent runtime)
+  and everything it spawns: tool calls, hooks, git commit signing. An
+  injected instruction can make any process here send any request.
+  Processes here may sign with the principal's own key, and may ask the
+  holder for nothing they could not already do by signing: in
+  particular they may not approve, mint for another scope, or obtain an
+  operator act.
+
+The holder agent classifies a peer by reading its cgroup on the
+connection and mapping it to one of the two scopes. Until clown#244
+defines that mapping, the mapping is an input to the holder's
+configuration, not something the holder infers. A peer that maps to
+neither scope is refused.
+
+These definitions and the holder's behaviour per scope are captured in
+manpages when the code lands: a new `piggy-holder(7)` describing the
+service, the scopes and the mint, retire and approval flows (phase (d)),
+and a SCOPES section in `piggy-agent(1)` for the operator-act extension
+(phase (a)).
 
 ## Interface
 
@@ -290,6 +334,11 @@ refuse the wrong binary.
 | (e) | touch approver in a frontend scope; pluggable approval interface | tier 2's approval prompt |
 | (f) | 9C blesses the holder's attestation key once per holder start; approval by real card | hardware-anchored provenance |
 | (g) | X25519 key agreement in fibby and in the agent's ECDH extension, opened by a throughput measurement; sealed durable keys | madder |
+| (h) | direct agent-to-fibby transport: the agent speaks fibby's protocol itself instead of through the platform PC/SC library; lifts the 16-card cap and is the seam darwin support needs | capacity, darwin |
+
+Phase (h) is committed, not conditional; the operator has said it will
+be needed. Its position is last because nothing earlier depends on it,
+and the cap lever below can pull it forward.
 
 Deleting `vendor/pivy` (epic #289 phase 5) is independent of all of
 this. The C behaviour worth keeping is recorded at the end of this
@@ -396,9 +445,9 @@ not something this session read.
 - **16 live cards per fibby instance.** The pcsc-lite protocol fibby
   mirrors has a fixed table of 16 readers
   (`crates/fibby/src/proto.rs:376`). Whether a larger table can be
-  negotiated was not verified. The lift is the agent speaking fibby's
-  protocol directly instead of through the platform PC/SC library, which
-  is also the seam darwin support would need.
+  negotiated was not verified. The lift is phase (h): the agent speaking
+  fibby's protocol directly instead of through the platform PC/SC
+  library, which is also the seam darwin support needs.
 - **One PC/SC endpoint per agent process.** A host with a real YubiKey
   and a holder runs a card agent for each, joined by a proxy-only front
   (the FDR 0001 shape).
@@ -412,7 +461,38 @@ not something this session read.
   card is the answer when that is not good enough.
 - **Guarded memory does not cover transient copies.** The dalek crates
   expand and use key material in ordinary stack and heap memory during
-  an operation. The guarantee is for the key at rest.
+  an operation. The guarantee is for the key at rest. Three points of
+  comparison, so the strength of this is not overstated:
+  - *C pivy did not hold private keys at all.* Its keys lived on the
+    YubiKey; the only secrets in its memory were the PIN and, briefly,
+    ECDH shared secrets and box plaintexts, which it kept in concealed
+    allocations and cleared after use (`vendor/pivy/src/ebox.c` has
+    many such `explicit_bzero` sites). Its PIN page was readable for
+    the life of the process. So on the software side this design
+    exceeds pivy's (sealed at rest, wipe on fork, non-dumpable process,
+    zero core limit, separate uid, hardened units), but a holder key
+    is software and is strictly weaker than a key in hardware. Phase
+    (f)'s blessing records which is which; it does not close the gap.
+  - *Transient copies are a known, partly mitigated problem.* The
+    holder must build the dalek crates with their `zeroize` feature so
+    expanded key material is cleared when dropped; the workspace lock
+    at `be3da3f` does not enable it (`ed25519-dalek` 2.2.0's
+    dependency list there has no `zeroize`). Stack copies made inside
+    the arithmetic are not reachable from Rust and remain exposed for
+    the duration of one signature.
+  - *State of the art, as this session understands it and has not
+    verified against sources:* libsodium's guarded allocations (guard
+    pages, canary, no-access at rest, lock and no-dump), which this
+    crate copies; OpenSSH's key shielding, where ssh-agent keeps each
+    private key encrypted in memory under a large random prekey and
+    unshields it only for one operation, which bounds what a memory
+    read at rest reveals; Linux `memfd_secret`, which removes pages
+    from the kernel's direct map; and hardware or enclave isolation,
+    which is the only thing that defends a key during use. Of these,
+    the crate ships the first; `memfd_secret` is a named lever; key
+    shielding is worth adding to the crate if a memory-read-at-rest
+    attacker is in scope, since it costs one decrypt per operation and
+    no new primitive; enclaves are out of scope.
 - **Holder attestation is host-trust until phase (f).** Before 9C
   blesses the attestation key, the claim "this key lives in the holder"
   is only as good as trusting the host.
@@ -424,7 +504,7 @@ not something this session read.
 
 | Lever | Current | Rationale | Change signal |
 |---|---|---|---|
-| live cards per fibby instance | 16, mints beyond are refused; a first-phase number the operator expects to change | the pcsc-lite reader table; no transport work needed to ship | a mint is refused in normal use, or FDR 0032 slice 3 (subagents become principals) is scheduled; then build the direct agent-to-fibby transport |
+| live cards per fibby instance | 16, mints beyond are refused; a first-phase number the operator expects to change | the pcsc-lite reader table; no transport work needed to ship | a mint is refused in normal use, or FDR 0032 slice 3 (subagents become principals) is scheduled; then pull phase (h) forward |
 | guarded-memory backing | anonymous locked pages | available everywhere the holder runs | a decision to defend against root reading process memory; then add `memfd_secret` with fallback |
 | holder key lifetime | none; scope exit or retire only | validity lives in the certificate chain; a second clock can disagree with it | cards observed outliving their sessions, or a leaked binding found in use |
 | minted-key PIN policy | `never` | only the service account reaches fibby; a PIN would be a second secret in the same account | in-fibby per-key enforcement is taken up |
@@ -455,7 +535,8 @@ not something this session read.
   of phase (g).
 - **How is a cgroup classified as frontend or agent scope?** No naming
   rule or unit property exists yet; FDR 0032 assigns it to clown#244.
-  Phases (d) and (e) depend on it.
+  Phases (d) and (e) depend on it. The section "Scopes: frontend and
+  agent" states what piggy needs from the answer.
 - **Does `ssh-agent-lib` 0.5 expose the peer socket?** The agent hands
   `listen` a cloneable session today
   (`crates/piggy/src/cmd/agent/mod.rs:596`). Reading peer credentials
