@@ -658,8 +658,19 @@ is scheduled, not before.
   cgroup tree until clown moves to a frontend scope and the master is
   held there or by posh. Whether posh's session model can be that
   frontend-scope renderer is a posh question, assigned by clown#244's
-  research note. piggy's part is unchanged: the card agent and its
-  askpass run as the operator's user service, never under `claude`.
+  research note. The operator added (2026-10-12) that "the operator's
+  tty may be accessible via posh, which also permits local binding": a
+  roaming session's pty master is posh's, and posh exposes attach
+  surfaces on the same host (its UDP transport, the per-client-host
+  agent socket and status socket posh-server(1) binds, and whatever
+  local attach the operator means by local binding). Every such surface
+  is part of the tty write side and falls under the same requirement:
+  an agent scope must not be able to attach to, or write through, the
+  operator's posh session. Which surfaces posh has and how it would
+  refuse an agent-scope peer is posh's to answer; piggy records only
+  that the requirement reaches it. piggy's part is unchanged: the card
+  agent and its askpass run as the operator's user service, never under
+  `claude`.
 - **What does a quote's `ledger` line name?** RFC 0012 requires a
   `piggy-quote-v1` text to name the transcript stanza the quoted input
   came from. No such identifier exists yet (same report: operator input

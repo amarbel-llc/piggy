@@ -446,7 +446,11 @@ draw on the operator's terminal or graphical session could paint a
 convincing fake prompt over the real one, or overwrite the text after
 the operator read it. piggy does not and cannot provide that isolation
 from inside the agent; it is a property of how clown and posh arrange
-the operator's session. Until it holds, the defence is that the real
+the operator's session. posh is a real path to that surface, not a
+hypothetical one: a roaming session's pty master is posh's, and posh
+binds same-host attach surfaces (the operator notes it "also permits
+local binding"), so the requirement extends to posh refusing an
+agent-scope peer on every one of them. Until it holds, the defence is that the real
 prompt comes only from the card agent's own askpass, visibly classed
 (`PIGGY_ASKPASS_KIND`), and that the card never signs anything the card
 agent did not hash. FDR 0006 ("Scopes: frontend and agent") states the
