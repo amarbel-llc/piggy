@@ -468,3 +468,335 @@ fn control_socket_toggles_card_presence() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&control);
 }
+
+// --- simulated touch (FDR 0006) -------------------------------------------
+
+/// The mgmt-key witness the yk4-init capture shows, and the two GENERAL
+/// AUTHENTICATE APDUs that authenticate against it with the factory
+/// management key (the vectors `virtual_card.rs`'s own tests use).
+const MGMT_WITNESS: [u8; 8] = [0xCA, 0xB1, 0x8C, 0x96, 0xB5, 0x49, 0x7D, 0xAE];
+const MGMT_AUTH_PHASE_1: &[u8] = &[
+    0x00, 0x87, 0x03, 0x9B, 0x00, 0x00, 0x04, 0x7C, 0x02, 0x81, 0x00, 0x00, 0x00,
+];
+const MGMT_AUTH_PHASE_2: &[u8] = &[
+    0x00, 0x87, 0x03, 0x9B, 0x00, 0x00, 0x0C, 0x7C, 0x0A, 0x82, 0x08, 0x73, 0x1E, 0xFC, 0x2B, 0x4B,
+    0xD5, 0x86, 0x10, 0x00,
+];
+
+/// GENERATE in slot 9A, ECCP256, PIN policy never (`AA 01 01`) and the
+/// given touch policy (`AB 01 <touch>`).
+fn generate_9a_pin_never_apdu(touch_policy: u8) -> Vec<u8> {
+    vec![
+        0x00,
+        0x47,
+        0x00,
+        0x9A,
+        0x0B,
+        0xAC,
+        0x09,
+        0x80,
+        0x01,
+        0x11,
+        0xAA,
+        0x01,
+        0x01,
+        0xAB,
+        0x01,
+        touch_policy,
+    ]
+}
+
+/// GA ECDSA sign of a 32-byte prehash on slot 9A.
+fn sign_9a_apdu() -> Vec<u8> {
+    let mut apdu = vec![
+        0x00, 0x87, 0x11, 0x9A, 0x26, 0x7C, 0x24, 0x82, 0x00, 0x81, 0x20,
+    ];
+    apdu.extend_from_slice(&[0x5A; 32]);
+    apdu
+}
+
+const TOUCH_ALWAYS: u8 = 0x02;
+
+/// A virtual card named `reader` holding a 9A key generated on it with
+/// PIN never and touch always, waiting `touch_timeout` for a touch.
+fn card_with_touch_always_key(reader: &str, touch_timeout: Duration) -> VirtualCard {
+    use fibby::backend::Backend;
+    let mut card = VirtualCard::new();
+    card.set_reader_name(reader);
+    card.set_touch_timeout(touch_timeout);
+    card.seed_mgmt_key_witness(MGMT_WITNESS);
+    card.transmit(MGMT_AUTH_PHASE_1).unwrap();
+    assert_eq!(card.transmit(MGMT_AUTH_PHASE_2).unwrap(), [0x90, 0x00]);
+    let generated = card
+        .transmit(&generate_9a_pin_never_apdu(TOUCH_ALWAYS))
+        .unwrap();
+    assert!(generated.ends_with(&[0x90, 0x00]), "GENERATE -> 9000");
+    card
+}
+
+/// Connect, do the version handshake, and establish a context.
+fn open_session(path: &std::path::Path) -> (Client, u32) {
+    let mut c = Client {
+        stream: UnixStream::connect(path).unwrap(),
+    };
+    c.send(
+        Command::Version,
+        &VersionStruct {
+            major: PROTOCOL_VERSION_MAJOR,
+            minor: PROTOCOL_VERSION_MINOR,
+            rv: 0,
+        }
+        .to_bytes(),
+    );
+    let _ = c.recv(VersionStruct::WIRE_LEN);
+    c.send(
+        Command::EstablishContext,
+        &EstablishStruct {
+            dw_scope: scope::SYSTEM,
+            h_context: 0,
+            rv: 0,
+        }
+        .to_bytes(),
+    );
+    let est = EstablishStruct::from_bytes(&c.recv(EstablishStruct::WIRE_LEN)).unwrap();
+    (c, est.h_context)
+}
+
+/// The touch path end to end over real sockets. A sign on a touch-always
+/// slot blocks in TRANSMIT. While it is blocked, a second client reads
+/// the reader table (which locks EVERY card, the blocked one included)
+/// and talks to another card, and the control socket's `touch` verb
+/// reaches the blocked card: none of that could happen if the waiting
+/// connection held the card's lock. The sign then completes. On a card
+/// with a short timeout and no touch, the sign fails with 6982.
+#[test]
+fn control_socket_touch_releases_a_blocked_sign_without_stalling_other_clients() {
+    const READER_A: &str = "Virtual PCD fibby touch A 00 00";
+    const READER_B: &str = "Virtual PCD fibby touch B 00 00";
+    let path = unique_socket_path();
+    let control = unique_socket_path();
+    start_server_with_control(
+        &path,
+        &control,
+        vec![
+            card_with_touch_always_key(READER_A, Duration::from_secs(30)),
+            card_with_touch_always_key(READER_B, Duration::from_millis(120)),
+        ],
+    );
+
+    let (mut c, h_context) = open_session(&path);
+    let con_a = c.connect_reader(h_context, READER_A);
+    assert_eq!(con_a.rv, 0);
+
+    let other_client = {
+        let (path, control) = (path.clone(), control.clone());
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let started = Instant::now();
+            let (mut c2, h_context2) = open_session(&path);
+            let slot0 = first_reader(&mut c2); // locks every backend in turn
+            assert_eq!(slot0.reader_name, READER_A);
+            let con_b = c2.connect_reader(h_context2, READER_B);
+            assert_eq!(con_b.rv, 0);
+            let selected = c2.transmit(con_b.h_card, &select_piv_apdu());
+            assert!(selected.ends_with(&[0x90, 0x00]));
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "card B and the reader table were served while card A waited"
+            );
+            assert_eq!(
+                ctl_command(&control, &format!("touch {READER_A}")).trim_end(),
+                "ok pending=1"
+            );
+        })
+    };
+
+    let started = Instant::now();
+    let signed = c.transmit(con_a.h_card, &sign_9a_apdu());
+    let waited = started.elapsed();
+    other_client.join().unwrap();
+    assert!(
+        signed.ends_with(&[0x90, 0x00]),
+        "signed once touched: {signed:02X?}"
+    );
+    assert!(
+        waited >= Duration::from_millis(200),
+        "the sign waited for the touch ({waited:?})"
+    );
+    assert!(
+        waited < Duration::from_secs(30),
+        "ended by the touch, not the timeout ({waited:?})"
+    );
+
+    // Card B: nobody touches it, so its 120 ms timeout answers 6982.
+    let con_b = c.connect_reader(h_context, READER_B);
+    assert_eq!(con_b.rv, 0);
+    let started = Instant::now();
+    let refused = c.transmit(con_b.h_card, &sign_9a_apdu());
+    assert_eq!(refused, [0x69, 0x82], "touch timeout status word");
+    assert!(started.elapsed() >= Duration::from_millis(120));
+
+    assert!(
+        ctl_command(&control, "touch No Such Reader 00 00").starts_with("err no such reader"),
+        "touch names its card by reader name, like insert/remove"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&control);
+}
+
+/// A running `fibby` binary, killed when the test ends.
+struct FibbyProcess {
+    child: std::process::Child,
+    socket: std::path::PathBuf,
+    control: std::path::PathBuf,
+    log: std::path::PathBuf,
+}
+
+impl FibbyProcess {
+    /// Start `fibby` with a control socket, the mgmt-key witness the auth
+    /// vectors need, `FIBBY_LOG=info` captured to a file, and
+    /// `extra_args`.
+    fn start(extra_args: &[&str]) -> Self {
+        let socket = unique_socket_path();
+        let control = unique_socket_path();
+        let log = unique_socket_path().with_extension("log");
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_fibby"))
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--control-socket")
+            .arg(&control)
+            .args(["--seed-mgmt-key-witness", "cab18c96b5497dae"])
+            .args(extra_args)
+            .env("FIBBY_LOG", "info")
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap();
+        let fibby = FibbyProcess {
+            child,
+            socket,
+            control,
+            log,
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(fibby.socket.exists() && fibby.control.exists()) {
+            assert!(Instant::now() < deadline, "fibby sockets never appeared");
+            thread::sleep(Duration::from_millis(10));
+        }
+        fibby
+    }
+
+    /// Connect to the one card and generate its touch-always 9A key over
+    /// the wire. Returns the client, the card handle and the reader name.
+    fn session_with_touch_always_key(&self) -> (Client, i32, String) {
+        let (mut c, h_context) = open_session(&self.socket);
+        let reader = first_reader(&mut c).reader_name;
+        let con = c.connect_reader(h_context, &reader);
+        assert_eq!(con.rv, 0);
+        c.transmit(con.h_card, MGMT_AUTH_PHASE_1);
+        assert_eq!(c.transmit(con.h_card, MGMT_AUTH_PHASE_2), [0x90, 0x00]);
+        let generated = c.transmit(con.h_card, &generate_9a_pin_never_apdu(TOUCH_ALWAYS));
+        assert!(generated.ends_with(&[0x90, 0x00]), "GENERATE -> 9000");
+        (c, con.h_card, reader)
+    }
+
+    /// Run `fibby ctl --socket <control> <args>`; returns (success, stdout).
+    fn ctl(&self, args: &[&str]) -> (bool, String) {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_fibby"))
+            .args(["ctl", "--socket"])
+            .arg(&self.control)
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    }
+
+    fn log_text(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap()
+    }
+}
+
+impl Drop for FibbyProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        for path in [&self.socket, &self.control, &self.log] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// The command-line surface, against the real binary: `--touch-timeout-ms`
+/// bounds the wait, `fibby ctl touch <reader>` grants a touch, and the
+/// TOUCH log lines a bats test would grep are emitted.
+#[test]
+fn fibby_binary_touch_timeout_flag_ctl_touch_and_log_lines() {
+    let fibby = FibbyProcess::start(&["--touch-timeout-ms", "150"]);
+    let (mut c, h_card, reader) = fibby.session_with_touch_always_key();
+
+    let started = Instant::now();
+    assert_eq!(c.transmit(h_card, &sign_9a_apdu()), [0x69, 0x82]);
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(150) && waited < Duration::from_secs(10),
+        "--touch-timeout-ms 150 bounded the wait ({waited:?})"
+    );
+
+    let (ok, stdout) = fibby.ctl(&["touch", &reader]);
+    assert!(ok, "fibby ctl touch exits 0");
+    assert_eq!(stdout, "ok pending=1\n");
+    assert!(c.transmit(h_card, &sign_9a_apdu()).ends_with(&[0x90, 0x00]));
+
+    let (ok, stdout) = fibby.ctl(&["touch", "No Such Reader 00 00"]);
+    assert!(!ok, "an unknown reader is an error exit");
+    assert!(stdout.starts_with("err no such reader"), "got: {stdout}");
+
+    let log = fibby.log_text();
+    for line in [
+        "[fibby:vcard] TOUCH needed 9A (waiting up to 150 ms)",
+        "[fibby:vcard] TOUCH timeout 9A -> 6982",
+        &format!("[fibby:ctl] touch queued for '{reader}' (pending=1)"),
+        "[fibby:vcard] TOUCH granted 9A",
+    ] {
+        assert!(log.contains(line), "log lacks {line:?}:\n{log}");
+    }
+}
+
+/// `--auto-touch`: a touch-always sign succeeds at once with no `ctl
+/// touch`, and says so in the log.
+#[test]
+fn fibby_binary_auto_touch_flag_grants_without_ctl() {
+    let fibby = FibbyProcess::start(&["--auto-touch", "--touch-timeout-ms=30000"]);
+    let (mut c, h_card, _reader) = fibby.session_with_touch_always_key();
+
+    let started = Instant::now();
+    assert!(c.transmit(h_card, &sign_9a_apdu()).ends_with(&[0x90, 0x00]));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "no wait under --auto-touch"
+    );
+
+    let log = fibby.log_text();
+    assert!(
+        log.contains("[fibby:vcard] TOUCH auto-granted 9A (--auto-touch)"),
+        "log:\n{log}"
+    );
+    assert!(!log.contains("TOUCH needed"), "log:\n{log}");
+}
+
+#[test]
+fn fibby_binary_rejects_a_non_numeric_touch_timeout() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fibby"))
+        .args(["--touch-timeout-ms", "soon"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--touch-timeout-ms: want a whole number"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

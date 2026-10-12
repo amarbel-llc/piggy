@@ -96,6 +96,28 @@ satisfied) or 6A82 (no such object) is asserted deterministically;
 reader-state wait so the agent's event-driven presence path runs
 against it.
 
+fibby stores the PIN and touch policy a key is generated or imported
+with and enforces it (piggy#303). A slot whose touch policy is _always_
+or _cached_ does not sign or do ECDH until the card is touched:
+*fibby ctl --socket* _PATH_ *touch* _READER_ grants that card one touch,
+which its next touch-requiring operation consumes. A _cached_ slot then
+needs no further touch for 15 seconds; a touch is never carried over to
+an _always_ slot. With no touch granted the operation waits
+*--touch-timeout-ms* _MILLIS_ (default 15000) and then answers 6982.
+*--auto-touch* grants every such operation at once, for lanes that are
+not about touch. Both flags are global: they apply to every card the
+fibby serves. The lines a lane can grep, written at every enabled
+_FIBBY_LOG_ level and shown here for slot 9A, are _TOUCH needed 9A_ (the
+operation is waiting, so this is when to deliver the touch), _TOUCH
+granted 9A_, _TOUCH cached 9A_, _TOUCH auto-granted 9A_ and _TOUCH
+timeout 9A -> 6982_. *piggy card init* and *piggy card add-key* give 9A
+and 9C a touch policy by default and sign each new certificate with the
+new key, so a lane that provisions with the default policies must spawn
+fibby with *--auto-touch* or deliver each touch. fibby attests only a
+key generated on the card, and the attestation is where *piggy list*
+reads a slot's _pin_policy_ and _touch_policy_ from: a seeded or
+imported key reports neither.
+
 *--hardware-proxy* relays a real card and keeps the wire trace; that is
 how APDU fixtures for new client code are captured.
 

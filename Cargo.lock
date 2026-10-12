@@ -604,11 +604,15 @@ name = "fibby"
 version = "0.1.0"
 dependencies = [
  "cipher",
+ "const-oid",
+ "der",
  "des",
  "ecdsa",
  "p256",
  "pcsc",
  "rand_core 0.6.4",
+ "spki",
+ "x509-cert",
 ]
 
 [[package]]

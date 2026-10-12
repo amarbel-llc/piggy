@@ -20,6 +20,8 @@ holding the rest in your head.
 | `trace.rs` | `FIBBY_LOG`-gated logging + hex dumps (the debugging firehose). |
 | `backend.rs` | the `Backend` trait — the seam between protocol and card. |
 | `virtual_card.rs` | in-Rust PIV card. **Stub today**: SELECT→9000, else 6D00. Real applet is phase-5. |
+| `touch.rs` | simulated touch for touch-policy slots: `fibby ctl touch <reader>` grants one, `--touch-timeout-ms` bounds the wait, `--auto-touch` skips it. |
+| `attest.rs` | the per-card attestation key, its F9 certificate, and the slot attestations INS 0xF9 returns. |
 | `hardware_proxy.rs` | forwards to a real pcscd/YubiKey via the `pcsc` crate. Feature `hardware-proxy`. The validation oracle. |
 | `server.rs` | listen loop + per-command dispatch + handle table. |
 
@@ -91,6 +93,13 @@ hardware will confirm or correct:
   reader-state array; the round-trip only carries hCard + rv.
 - `virtual_card.rs` `YUBIKEY5_ATR` — replace with the captured ATR.
 - `hardware_proxy.rs` `map_err` — pcsc→SCARD code mapping.
+- `virtual_card.rs` `SW_TOUCH_TIMEOUT` — `6982` for a touch that never
+  came; no capture of a touch-policy slot exists yet.
+- `virtual_card.rs` `handle_get_metadata` — the origin byte values (tag
+  `03`), and answering INS 0xF7 at all on the 4.3.5 / 5.2.7 firmware
+  profiles (real firmware has it from 5.3).
+- `virtual_card.rs` `parse_import_request` — `AA`/`AB` policy tags on
+  IMPORT ASYMMETRIC, placed by analogy with GENERATE.
 
 ## Status
 

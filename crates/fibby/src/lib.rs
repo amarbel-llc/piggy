@@ -12,6 +12,9 @@
 //! - [`backend`] — the `Backend` trait (the card seam).
 //! - [`virtual_card`] — the in-Rust PIV card (stub today; real applet is
 //!   phase-5 work).
+//! - [`touch`] — simulated physical touch for touch-policy slots.
+//! - [`attest`] — the per-card attestation key and the certificates it
+//!   signs.
 //! - [`hardware_proxy`] — forwards to a real pcscd/YubiKey (feature
 //!   `hardware-proxy`); the validation oracle.
 //! - [`server`] — the listen loop + command dispatch.
@@ -19,11 +22,13 @@
 //! See docs/plans/2026-05-29-fibby-virtual-piv-rust-design.md.
 
 pub mod apdu;
+pub mod attest;
 pub mod backend;
 pub mod error;
 pub mod frame;
 pub mod proto;
 pub mod server;
+pub mod touch;
 pub mod trace;
 pub mod virtual_card;
 

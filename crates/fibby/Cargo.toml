@@ -60,3 +60,13 @@ cipher = "0.4"
 rand_core = { version = "0.6", default-features = false, features = [
   "getrandom",
 ] }
+# X.509 building for the attestation surface (FDR 0006, pulled forward from
+# phase (c)): the per-start attestation key's self-signed F9 certificate and
+# the per-slot attestation certificates INS 0xF9 returns. Same crates and
+# majors piggy-piv's cert_builder uses, so all four are already in the
+# lockfile; the ECDSA-SHA256 signature itself comes from `p256` above (its
+# `ecdsa` feature carries SHA-256), so no hash crate is added.
+x509-cert = "0.2"
+der = "0.7"
+spki = "0.7"
+const-oid = "0.9"

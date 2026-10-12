@@ -20,6 +20,16 @@
 /// response, or an `SCARD_*` code to put on the wire verbatim.
 pub type ScardResult<T> = Result<T, u32>;
 
+/// Outcome of [`Backend::transmit_or_await_touch`].
+pub enum TransmitOutcome {
+    /// The full response (data ‖ SW1 SW2), exactly as `transmit` returns.
+    Done(Vec<u8>),
+    /// The operation needs a touch that has not been granted. Nothing on
+    /// the card changed; the caller releases the backend lock, waits on
+    /// the pad, and transmits the same APDU again.
+    AwaitTouch(crate::touch::TouchWait),
+}
+
 pub trait Backend: Send {
     /// Reader name advertised to clients (the string `SCardListReaders`
     /// returns). pcsc-lite reader names conventionally end with a
@@ -75,4 +85,22 @@ pub trait Backend: Send {
     /// SW2). The protocol layer streams this straight back to the
     /// client; the backend does no framing of its own.
     fn transmit(&mut self, command_apdu: &[u8]) -> ScardResult<Vec<u8>>;
+
+    /// Like [`Self::transmit`], but an operation blocked on a touch-policy
+    /// slot reports [`TransmitOutcome::AwaitTouch`] instead of failing, so
+    /// the server can wait for the touch WITHOUT holding this backend's
+    /// lock (see `server::transmit_waiting_for_touch`). Default: no
+    /// backend-side touch gate, so always `Done` — the hardware proxy's
+    /// touch is the real card's button and blocks inside `transmit`.
+    fn transmit_or_await_touch(&mut self, command_apdu: &[u8]) -> ScardResult<TransmitOutcome> {
+        self.transmit(command_apdu).map(TransmitOutcome::Done)
+    }
+
+    /// Grant one simulated touch, driven by the control socket (`fibby ctl
+    /// touch`); the next touch-requiring operation on this card consumes
+    /// it. Returns how many touches are now pending. Default: refused — a
+    /// backend fronting real silicon has a real button.
+    fn grant_touch(&mut self) -> Result<u32, String> {
+        Err("this backend does not support simulated touch".into())
+    }
 }

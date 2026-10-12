@@ -47,6 +47,12 @@ struct Args {
     /// Optional control socket (piggy#130) for runtime insert/remove of a
     /// card by reader name, driven by `fibby ctl`. Unset by default.
     control_socket: Option<String>,
+    /// `--auto-touch`: every virtual card grants touch-requiring
+    /// operations immediately instead of waiting for `fibby ctl touch`.
+    auto_touch: bool,
+    /// `--touch-timeout-ms`: how long a touch-requiring operation waits
+    /// for a touch on every virtual card. `None` keeps the 15 s default.
+    touch_timeout: Option<std::time::Duration>,
 }
 
 /// One virtual card's seed configuration (the per-card slice of the CLI).
@@ -127,6 +133,8 @@ fn parse_args() -> Result<Args, String> {
         seeds: SeedSpec::default(),
         cards: Vec::new(),
         control_socket: None,
+        auto_touch: false,
+        touch_timeout: None,
     };
     let mut reader_flag_given = false;
     let mut global_seed_flag: Option<String> = None;
@@ -165,6 +173,13 @@ fn parse_args() -> Result<Args, String> {
                 reader_flag_given = true;
             }
             "--model" => args.model = value("--model")?,
+            "--auto-touch" => args.auto_touch = true,
+            "--touch-timeout-ms" => {
+                let millis: u64 = value("--touch-timeout-ms")?
+                    .parse()
+                    .map_err(|_| "--touch-timeout-ms: want a whole number of milliseconds")?;
+                args.touch_timeout = Some(std::time::Duration::from_millis(millis));
+            }
             "--card" => {
                 let name = value("--card")?;
                 if name.is_empty() {
@@ -316,6 +331,8 @@ fn print_help() {
          \n\
          USAGE: fibby [--socket PATH] [--backend virtual|hardware]\n\
                       [--reader SUBSTR] [--model yk4|yk5]\n\
+                      [--control-socket PATH]\n\
+                      [--auto-touch] [--touch-timeout-ms MILLIS]\n\
                       [--card NAME [seed flags…]]…\n\
                       [--seed-rfc6979-slot-9a-cert]\n\
                       [--seed-rfc5903-slot-9d-cert] [--seed-slot-9c-cert]\n\
@@ -385,6 +402,19 @@ fn print_help() {
          per card with --seed-chuid-guid HEX32 (16 bytes, implies a\n\
          CHUID).\n\
          \n\
+         Touch policy. A key GENERATEd or IMPORTed with touch policy\n\
+         'always' or 'cached' does not sign or do ECDH until the card is\n\
+         touched: `fibby ctl --socket CTL touch READER` grants that card\n\
+         one touch, which its next touch-requiring operation consumes (a\n\
+         'cached' slot then needs no further touch for 15 seconds). An\n\
+         operation with no touch available waits; --touch-timeout-ms\n\
+         MILLIS sets how long (default 15000) before it fails with status\n\
+         word 6982. --auto-touch grants every such operation at once, for\n\
+         tests that are not about touch. Both flags apply to every\n\
+         virtual card. FIBBY_LOG lines to grep: `TOUCH needed <slot>`,\n\
+         `TOUCH granted <slot>`, `TOUCH cached <slot>`,\n\
+         `TOUCH auto-granted <slot>`, `TOUCH timeout <slot> -> 6982`.\n\
+         \n\
          Point clients at the socket via PCSCLITE_CSOCK_NAME.\n\
          Set FIBBY_LOG=info|debug|wire for logging."
     );
@@ -394,9 +424,10 @@ fn main() {
     proto_sanity();
     trace::init_from_env();
 
-    // piggy#130: `fibby ctl --socket <ctl-path> <insert|remove|list|fault> …`
+    // piggy#130: `fibby ctl --socket <ctl-path> <insert|remove|list|touch|fault> …`
     // is the control client — it talks to a running fibby's control socket to
-    // toggle a card's runtime presence or queue an injected fault (piggy#284).
+    // toggle a card's runtime presence, grant a simulated touch, or queue an
+    // injected fault (piggy#284).
     if std::env::args().nth(1).as_deref() == Some("ctl") {
         std::process::exit(run_ctl_client());
     }
@@ -441,7 +472,8 @@ fn main() {
 /// piggy#130 control client: connect to a running fibby's `--control-socket`,
 /// send one command, print the reply. Returns a process exit code (0 on an
 /// `ok` reply). Usage: `fibby ctl --socket <path> <insert|remove|list>
-/// [<reader-name>]`, or `fibby ctl --socket <path> fault <INS|*>
+/// [<reader-name>]`, `fibby ctl --socket <path> touch <reader-name>` (grant
+/// one simulated touch), or `fibby ctl --socket <path> fault <INS|*>
 /// <SW>[x<count>] <reader-name>` / `fault clear <reader-name>` (piggy#284) —
 /// the reader name may contain spaces (quoted or not).
 fn run_ctl_client() -> i32 {
@@ -468,7 +500,7 @@ fn run_ctl_client() -> i32 {
     };
     if rest.is_empty() {
         eprintln!(
-            "fibby ctl: want <insert|remove|list> [<reader-name>] | fault <INS|*> <SW>[x<count>] <reader-name> | fault clear <reader-name>"
+            "fibby ctl: want <insert|remove|list> [<reader-name>] | touch <reader-name> | fault <INS|*> <SW>[x<count>] <reader-name> | fault clear <reader-name>"
         );
         return 2;
     }
@@ -500,8 +532,17 @@ fn make_backends(args: &Args) -> Result<Vec<SharedBackend>, String> {
     match args.backend.as_str() {
         "virtual" => {
             let model = Model::parse_arg(&args.model)?;
+            // The touch flags are global: they configure every virtual
+            // card this fibby serves.
+            let with_touch_flags = |mut card: VirtualCard| {
+                card.set_auto_touch(args.auto_touch);
+                if let Some(timeout) = args.touch_timeout {
+                    card.set_touch_timeout(timeout);
+                }
+                into_shared(card)
+            };
             if args.cards.is_empty() {
-                return Ok(vec![into_shared(build_virtual_card(
+                return Ok(vec![with_touch_flags(build_virtual_card(
                     model,
                     &args.seeds,
                     None,
@@ -512,7 +553,7 @@ fn make_backends(args: &Args) -> Result<Vec<SharedBackend>, String> {
                 .iter()
                 .enumerate()
                 .map(|(idx, (name, seeds))| {
-                    Ok(into_shared(build_virtual_card(
+                    Ok(with_touch_flags(build_virtual_card(
                         model,
                         seeds,
                         Some(name),

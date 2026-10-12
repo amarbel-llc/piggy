@@ -115,7 +115,14 @@ pub mod ins {
     /// SW 9000 in a single extended-length response; **imported-key
     /// slots return `6A 80`**, because attestation has nothing to
     /// sign without the on-card-generation provenance. VirtualCard
-    /// only models the imported-key case (it has no factory
-    /// attestation key) and returns `6A 80` for any F9 probe.
+    /// has no Yubico factory key; it signs with a per-card attestation
+    /// key of its own (`attest.rs`) for keys GENERATEd on it and
+    /// returns `6A 80` for imported, seeded and empty slots.
     pub const YK_ATTEST: u8 = 0xF9;
+    /// YubiKey vendor GET METADATA. `P1 = 00`, `P2` is the slot. The
+    /// response is a TLV list: `01` algorithm, `02` `[pin_policy,
+    /// touch_policy]`, `03` origin, `04` public key. Real firmware
+    /// implements it from 5.3 (pivy `ykpiv_get_metadata` refuses to send
+    /// it to anything older); VirtualCard answers it on every model.
+    pub const YK_GET_METADATA: u8 = 0xF7;
 }

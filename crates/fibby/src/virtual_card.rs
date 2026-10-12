@@ -11,19 +11,29 @@
 //! - GENERAL AUTHENTICATE: ECDH on slot 9D (alg 0x11; the piggy decrypt
 //!   path), ECDSA sign on slot 9A (alg 0x11; the SSH-auth path, RFC 6979
 //!   deterministic), and the 3DES mgmt-key challenge-response (alg 0x03).
-//! - YubiKey ATTEST (INS 0xF9 — `6A80` for imported/empty slots).
+//! - GENERATE / IMPORT ASYMMETRIC with the YubicoPIV `AA`/`AB` PIN and
+//!   touch policy tags, stored per slot and enforced on sign and ECDH
+//!   (a touch-`always`/`cached` slot waits for `fibby ctl touch`; see
+//!   `touch.rs`).
+//! - YubiKey GET METADATA (INS 0xF7) and ATTEST (INS 0xF9 — a certificate
+//!   signed by the card's own attestation key for keys generated on this
+//!   card, `6A80` for imported, seeded and empty slots; see `attest.rs`).
 //!
-//! Not yet implemented (returns `6D00`, INS not supported): GENERATE
-//! ASYMMETRIC (on-card keygen), slot 9C signing, and the rest of the
-//! phase-5 surface in the design doc. Keep the card honest: an
-//! unimplemented instruction must return `6D00`, never *look* like it
-//! did crypto it didn't.
+//! The policy, metadata and attestation surface is the minimal cut of
+//! FDR 0006 phase (c), pulled forward as test surface.
+//!
+//! Keep the card honest: an unimplemented instruction must return `6D00`,
+//! never *look* like it did crypto it didn't.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::apdu;
-use crate::backend::{Backend, ScardResult};
+use crate::attest::AttestationAuthority;
+use crate::backend::{Backend, ScardResult, TransmitOutcome};
 use crate::proto::protocol;
+use crate::touch::{self, TouchPad, TouchPass, TouchWait};
 use crate::trace;
 
 /// YubiKey 4 firmware 4.3.5 ATR, captured against real silicon on
@@ -333,7 +343,77 @@ pub struct VirtualCard {
     /// whole different card. Set through the control socket (`fibby ctl
     /// fault`). Config, not session state: survives `disconnect()`.
     faults: Vec<Fault>,
+    /// Per-slot YubicoPIV `[pin_policy, touch_policy]` exactly as GENERATE
+    /// or IMPORT configured it (their `AA`/`AB` tags; an absent tag is
+    /// `default`, 0). A slot with no entry — every seeded key — is
+    /// `[default, default]`. This is what GET METADATA and the attestation
+    /// certificate report; behaviour follows the EFFECTIVE policy
+    /// ([`Self::effective_pin_policy`] / [`Self::effective_touch_policy`]).
+    slot_policies: HashMap<u8, [u8; 2]>,
+    /// How each slot's key came to be, for keys that arrived over the
+    /// wire. A slot with no entry is empty or was seeded from the command
+    /// line. Only [`KeyOrigin::Generated`] slots are attestable.
+    slot_origins: HashMap<u8, KeyOrigin>,
+    /// This card's attestation key and its self-signed F9 certificate,
+    /// generated once at construction. Survives a factory reset, as the
+    /// factory key does on hardware.
+    attestation: AttestationAuthority,
+    /// Simulated touch for touch-policy slots. Shared with the connection
+    /// threads waiting on it; see `touch.rs` for the locking.
+    touch: Arc<TouchPad>,
+    /// How long a touch-requiring operation waits for a touch
+    /// (`--touch-timeout-ms`).
+    touch_timeout: Duration,
+    /// `--auto-touch`: every touch-requiring operation is granted at once.
+    auto_touch: bool,
+    /// Added to the wall clock when judging the touch-`cached` window, so
+    /// a test can step past the 15 seconds without sleeping
+    /// ([`Self::advance_touch_clock`]). Zero outside tests.
+    touch_clock_skew: Duration,
+    /// Set by the touch gate when the operation in flight needs a touch
+    /// that is not available; carries the slot label and the pad
+    /// generation to wait on. Taken by `transmit` /
+    /// `transmit_or_await_touch` once the dispatch returns.
+    touch_blocked: Option<(String, u64)>,
 }
+
+/// How a slot key arrived (YubicoPIV GET METADATA tag 03 values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyOrigin {
+    /// GENERATE ASYMMETRIC on this card.
+    Generated = 0x01,
+    /// IMPORT ASYMMETRIC.
+    Imported = 0x02,
+}
+
+/// YubicoPIV PIN policy bytes (`AA` tag; vendor/pivy/src/piv.h
+/// `enum ykpiv_pin_policy`, mirrored by piggy-piv's `policy.rs`).
+pub mod pin_policy {
+    pub const DEFAULT: u8 = 0x00;
+    pub const NEVER: u8 = 0x01;
+    pub const ONCE: u8 = 0x02;
+    pub const ALWAYS: u8 = 0x03;
+}
+
+/// YubicoPIV touch policy bytes (`AB` tag; `enum ykpiv_touch_policy`).
+pub mod touch_policy {
+    pub const DEFAULT: u8 = 0x00;
+    pub const NEVER: u8 = 0x01;
+    pub const ALWAYS: u8 = 0x02;
+    pub const CACHED: u8 = 0x03;
+}
+
+/// Status word for a touch-requiring operation whose touch never came:
+/// `6982`, security status not satisfied. NOT verified against a capture:
+/// no fixture under tests/fixtures exercises a touch-policy slot and
+/// vendor/pivy names no touch-timeout status word, so this is the value
+/// FDR 0006's design session specified. Kept as one constant so a capture
+/// that shows otherwise changes one line.
+const SW_TOUCH_TIMEOUT: [u8; 2] = [0x69, 0x82];
+
+/// PIV tag of the YubiKey attestation certificate object (slot F9):
+/// `5F FF 01` (pivy `PIV_TAG_CERT_YK_ATTESTATION`).
+const TAG_ATTESTATION_CERT: &[u8] = &[0x5F, 0xFF, 0x01];
 
 /// One injected fault (piggy#284): `remaining` command APDUs whose INS
 /// matches `ins` (`None` = any INS) answer `sw` verbatim.
@@ -685,7 +765,153 @@ impl VirtualCard {
             mgmt_authenticated: false,
             generate_overrides: HashMap::new(),
             faults: Vec::new(),
+            slot_policies: HashMap::new(),
+            slot_origins: HashMap::new(),
+            attestation: AttestationAuthority::generate(),
+            touch: Arc::new(TouchPad::default()),
+            touch_timeout: touch::DEFAULT_TOUCH_TIMEOUT,
+            auto_touch: false,
+            touch_clock_skew: Duration::ZERO,
+            touch_blocked: None,
         }
+    }
+
+    /// The key in `slot`, if it is a slot VirtualCard models and holds one.
+    fn slot_priv(&self, slot: u8) -> Option<[u8; 32]> {
+        match slot {
+            0x9A => self.slot_9a_priv,
+            0x9C => self.slot_9c_priv,
+            0x9D => self.slot_9d_priv,
+            0x9E => self.slot_9e_priv,
+            _ => None,
+        }
+    }
+
+    /// Put a key that arrived over the wire into `slot` with the policy
+    /// and origin it came with. `slot` must be one of the four key slots
+    /// (9A, 9C, 9D, 9E); the handlers validate it first.
+    fn install_slot_key(&mut self, slot: u8, scalar: [u8; 32], policy: [u8; 2], origin: KeyOrigin) {
+        match slot {
+            0x9A => self.slot_9a_priv = Some(scalar),
+            0x9C => self.slot_9c_priv = Some(scalar),
+            0x9D => self.slot_9d_priv = Some(scalar),
+            0x9E => self.slot_9e_priv = Some(scalar),
+            _ => unreachable!("install_slot_key: slot {slot:#04x} is not a key slot"),
+        }
+        self.slot_policies.insert(slot, policy);
+        self.slot_origins.insert(slot, origin);
+    }
+
+    /// A seeded key replaces whatever the slot held: it carries no
+    /// configured policy and no on-card origin.
+    fn forget_slot_provenance(&mut self, slot: u8) {
+        self.slot_policies.remove(&slot);
+        self.slot_origins.remove(&slot);
+    }
+
+    /// `[pin, touch]` as configured for `slot` (`default` when never set).
+    fn stored_policy(&self, slot: u8) -> [u8; 2] {
+        self.slot_policies
+            .get(&slot)
+            .copied()
+            .unwrap_or([pin_policy::DEFAULT, touch_policy::DEFAULT])
+    }
+
+    /// The PIN policy `slot` actually enforces: its configured policy, or
+    /// for `default` the slot's own default — 9C (Digital Signature)
+    /// `always`, 9E (Card Authentication) `never`, every other slot
+    /// `once`. Those defaults are what VirtualCard hard-coded before
+    /// policies were configurable, so a default-policy slot behaves
+    /// exactly as it always has.
+    fn effective_pin_policy(&self, slot: u8) -> u8 {
+        match self.stored_policy(slot)[0] {
+            pin_policy::DEFAULT => match slot {
+                0x9C => pin_policy::ALWAYS,
+                0x9E => pin_policy::NEVER,
+                _ => pin_policy::ONCE,
+            },
+            configured => configured,
+        }
+    }
+
+    /// The touch policy `slot` actually enforces: `default` means `never`.
+    fn effective_touch_policy(&self, slot: u8) -> u8 {
+        match self.stored_policy(slot)[1] {
+            touch_policy::DEFAULT => touch_policy::NEVER,
+            configured => configured,
+        }
+    }
+
+    /// The touch gate, run by a private-key operation once every other
+    /// check has passed and before it touches the key. True when `slot`
+    /// needs no touch or a touch is available (and now consumed). False
+    /// when the operation must wait: `touch_blocked` is set and the caller
+    /// answers [`SW_TOUCH_TIMEOUT`] having changed nothing, which
+    /// `transmit_or_await_touch` turns into a wait and plain `transmit`
+    /// into an immediate timeout.
+    fn pass_touch_gate(&mut self, slot: u8, slot_label: &str) -> bool {
+        let cached_policy = match self.effective_touch_policy(slot) {
+            touch_policy::ALWAYS => false,
+            touch_policy::CACHED => true,
+            _ => return true,
+        };
+        if self.auto_touch {
+            trace::emit(
+                trace::INFO,
+                "vcard",
+                &format!("TOUCH auto-granted {slot_label} (--auto-touch)"),
+            );
+            return true;
+        }
+        let now = Instant::now() + self.touch_clock_skew;
+        match self.touch.try_consume(cached_policy, now) {
+            Ok(TouchPass::Granted) => {
+                trace::emit(trace::INFO, "vcard", &format!("TOUCH granted {slot_label}"));
+                true
+            }
+            Ok(TouchPass::Cached) => {
+                trace::emit(
+                    trace::INFO,
+                    "vcard",
+                    &format!("TOUCH cached {slot_label} (inside the 15 s window)"),
+                );
+                true
+            }
+            Err(generation) => {
+                self.touch_blocked = Some((slot_label.to_string(), generation));
+                false
+            }
+        }
+    }
+
+    /// `--auto-touch`: grant every touch-requiring operation immediately
+    /// (and log that it was auto-granted). Test convenience.
+    pub fn set_auto_touch(&mut self, auto_touch: bool) {
+        self.auto_touch = auto_touch;
+    }
+
+    /// `--touch-timeout-ms`: how long a touch-requiring operation waits
+    /// for `fibby ctl touch` before answering the timeout status word.
+    pub fn set_touch_timeout(&mut self, timeout: Duration) {
+        self.touch_timeout = timeout;
+    }
+
+    /// Move this card's notion of "now" forward for the touch-`cached`
+    /// window, so a test can step past the 15 seconds without sleeping.
+    pub fn advance_touch_clock(&mut self, by: Duration) {
+        self.touch_clock_skew += by;
+    }
+
+    /// The SEC1 uncompressed public point (`04 ‖ X ‖ Y`) of a slot scalar,
+    /// or `None` if the scalar is not a valid P-256 key.
+    fn public_point(scalar: &[u8; 32]) -> Option<Vec<u8>> {
+        let key = p256::ecdsa::SigningKey::from_slice(scalar).ok()?;
+        Some(
+            key.verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+        )
     }
 
     /// Consume the first queued fault matching `ins`, if any, returning
@@ -914,6 +1140,7 @@ impl VirtualCard {
     /// scaffolding (or the CLI seed flag, piggy#135).
     pub fn seed_slot_9a_priv(&mut self, scalar: [u8; 32]) {
         self.slot_9a_priv = Some(scalar);
+        self.forget_slot_provenance(0x9A);
     }
 
     /// Install a P-256 scalar into slot 9D. The scalar is the 32-byte
@@ -929,6 +1156,7 @@ impl VirtualCard {
     /// capture matches VirtualCard's response byte-for-byte.
     pub fn seed_slot_9d_priv(&mut self, scalar: [u8; 32]) {
         self.slot_9d_priv = Some(scalar);
+        self.forget_slot_provenance(0x9D);
     }
 
     /// Install a P-256 scalar into slot 9C (Digital Signature). The scalar
@@ -938,6 +1166,7 @@ impl VirtualCard {
     /// time (PIN-always policy). Mirrors [`Self::seed_slot_9a_priv`].
     pub fn seed_slot_9c_priv(&mut self, scalar: [u8; 32]) {
         self.slot_9c_priv = Some(scalar);
+        self.forget_slot_provenance(0x9C);
     }
 
     /// Install a P-256 private key into slot 9E (Card Authentication). The
@@ -948,6 +1177,7 @@ impl VirtualCard {
     /// Mirrors [`Self::seed_slot_9a_priv`].
     pub fn seed_slot_9e_priv(&mut self, scalar: [u8; 32]) {
         self.slot_9e_priv = Some(scalar);
+        self.forget_slot_provenance(0x9E);
     }
 
     /// Pin the P-256 scalar that GENERATE ASYMMETRIC (INS 0x47) will
@@ -980,6 +1210,8 @@ impl Backend for VirtualCard {
             self.pin_verified = false;
             self.pending_mgmt_witness = None;
             self.mgmt_authenticated = false;
+            // A touch cached on the card does not outlive pulling it out.
+            self.touch.clear_cache();
         }
         // piggy#248: bump the reader-event counter on an ACTUAL toggle so an
         // event-driven SCardGetStatusChange client sees the change (a no-op
@@ -1035,7 +1267,45 @@ impl Backend for VirtualCard {
         Ok(())
     }
 
+    /// Direct transmit never waits: an operation blocked on a touch
+    /// answers the timeout status word at once. The server uses
+    /// [`Self::transmit_or_await_touch`] (through
+    /// `server::transmit_waiting_for_touch`) to get the waiting
+    /// behaviour a real client sees.
     fn transmit(&mut self, command_apdu: &[u8]) -> ScardResult<Vec<u8>> {
+        let response = self.dispatch(command_apdu)?;
+        if let Some((slot_label, _)) = self.touch_blocked.take() {
+            touch::log_touch_needed(&slot_label, "direct transmit, not waiting");
+            touch::log_touch_timeout(&slot_label, &response);
+        }
+        Ok(response)
+    }
+
+    fn transmit_or_await_touch(&mut self, command_apdu: &[u8]) -> ScardResult<TransmitOutcome> {
+        let response = self.dispatch(command_apdu)?;
+        Ok(match self.touch_blocked.take() {
+            Some((slot_label, seen)) => TransmitOutcome::AwaitTouch(TouchWait {
+                pad: Arc::clone(&self.touch),
+                seen,
+                timeout: self.touch_timeout,
+                slot_label,
+                timeout_response: response,
+            }),
+            None => TransmitOutcome::Done(response),
+        })
+    }
+
+    fn grant_touch(&mut self) -> Result<u32, String> {
+        Ok(self.touch.grant())
+    }
+}
+
+impl VirtualCard {
+    /// Process one command APDU. Never blocks: a touch-requiring operation
+    /// with no touch available sets `touch_blocked` and returns the
+    /// timeout status word, having changed nothing.
+    fn dispatch(&mut self, command_apdu: &[u8]) -> ScardResult<Vec<u8>> {
+        self.touch_blocked = None;
         if command_apdu.len() < 4 {
             return Ok(sw(0x6F, 0x00)); // no precise diagnosis
         }
@@ -1254,10 +1524,10 @@ impl Backend for VirtualCard {
             // during provisioning, CHALLENGE/0x81), mirroring real YubiKey
             // behavior — the "key management" designation does not block GENERAL
             // AUTHENTICATE sign. Route by which dynamic-auth tag the request
-            // carries. 9D sign is PIN-gated, policy "once" (consume_pin=false).
+            // carries. Either way the slot's PIN and touch policy apply
+            // (default for 9D: PIN "once", no touch).
             if body.is_some_and(|b| parse_ga_sign_request(b).is_some()) {
-                let scalar = self.slot_9d_priv;
-                return Ok(self.sign_ecdsa_slot(body, scalar, "9D", true, false));
+                return Ok(self.sign_ecdsa_slot(body, 0x9D));
             }
             return Ok(self.handle_general_authenticate_ecdh_slot_9d(body));
         }
@@ -1266,22 +1536,18 @@ impl Backend for VirtualCard {
         // carries the host-computed prehash in the 81 (CHALLENGE) tag; we
         // return the DER ECDSA signature in the 82 (RESPONSE) tag. This is
         // pivy/piggy-agent's KEYREQ_SIGN path; see piv.c::piv_sign_prehash.
-        // Slot 9A (SSH auth) is PIN policy "once"; slot 9C (Digital
-        // Signature) is PIN policy "always" — each sign consumes the PIN
-        // verification (consume_pin = true).
-        if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9A {
-            let scalar = self.slot_9a_priv;
-            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), scalar, "9A", true, false));
-        }
-        if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9C {
-            let scalar = self.slot_9c_priv;
-            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), scalar, "9C", true, true));
-        }
-        // Slot 9E (Card Authentication) is PIN-never: it answers the CAK
-        // challenge/response (`piggy agent -K`, piggy#143) without a VERIFY.
-        if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && p2 == 0x9E {
-            let scalar = self.slot_9e_priv;
-            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), scalar, "9E", false, false));
+        // PIN and touch requirements follow the slot's effective policy:
+        // by default slot 9A (SSH auth) is PIN "once", slot 9C (Digital
+        // Signature) PIN "always" — each sign consumes the PIN
+        // verification — and slot 9E (Card Authentication) PIN "never":
+        // it answers the CAK challenge/response (`piggy agent -K`,
+        // piggy#143) without a VERIFY.
+        if cla == 0x00
+            && ins == apdu::ins::GENERAL_AUTHENTICATE
+            && p1 == 0x11
+            && matches!(p2, 0x9A | 0x9C | 0x9E)
+        {
+            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), p2));
         }
 
         // GENERAL AUTHENTICATE mgmt-key challenge-response (00 87 03
@@ -1312,19 +1578,17 @@ impl Backend for VirtualCard {
 
         // YK ATTEST (00 F9 <slot> 00 ...). Real silicon returns a
         // YubicoPIV-signed cert when the slot key was generated on-
-        // card and 6A80 when the key was imported. VirtualCard models
-        // only imported / empty slots (no factory attestation key,
-        // no on-card generate flow yet), so 6A80 is the byte-correct
-        // response in every case VirtualCard actually exercises today
-        // — matches both test-vector fixtures' F9 pair. P1 carries
-        // the slot reference; P2 must be 00.
+        // card and 6A80 when the key was imported (both test-vector
+        // fixtures' F9 pair). VirtualCard does the same with its own
+        // per-card attestation key. P1 carries the slot reference; P2
+        // must be 00.
         if cla == 0x00 && ins == apdu::ins::YK_ATTEST && p2 == 0x00 {
-            trace::emit(
-                trace::DEBUG,
-                "vcard",
-                &format!("YK ATTEST slot={p1:#04x} -> 6A80 (imported-key default)"),
-            );
-            return Ok(sw(0x6A, 0x80));
+            return Ok(self.handle_attest(p1));
+        }
+
+        // YK GET METADATA (00 F7 00 <slot>). P1 must be 00; P2 is the slot.
+        if cla == 0x00 && ins == apdu::ins::YK_GET_METADATA && p1 == 0x00 {
+            return Ok(self.handle_get_metadata(p2));
         }
 
         trace::emit(
@@ -1424,14 +1688,23 @@ impl VirtualCard {
                 return sw(0x6A, 0x80);
             }
         };
-        match self.data_objects.get(&tag) {
+        // The attestation certificate (slot F9) is not a stored object: it
+        // belongs to the card's attestation key, so it is there on a blank
+        // card and after a factory reset. A PUT DATA to its tag still wins,
+        // as replacing the certificate does on hardware.
+        let stored = self
+            .data_objects
+            .get(&tag)
+            .cloned()
+            .or_else(|| (tag == TAG_ATTESTATION_CERT).then(|| self.attestation.cert_object()));
+        match stored {
             Some(value) => {
                 trace::emit(
                     trace::DEBUG,
                     "vcard",
                     &format!("GET DATA tag={} -> {} bytes", hex_tag(&tag), value.len()),
                 );
-                let mut out = value.clone();
+                let mut out = value;
                 out.extend_from_slice(&sw(0x90, 0x00));
                 out
             }
@@ -1676,6 +1949,11 @@ impl VirtualCard {
         self.slot_9c_priv = None;
         self.slot_9d_priv = None;
         self.slot_9e_priv = None;
+        // The keys' policies and origins go with them. The attestation key
+        // stays, as the factory attestation key does on hardware.
+        self.slot_policies.clear();
+        self.slot_origins.clear();
+        self.touch.clear_cache();
         self.data_objects.clear();
         self.pin = DEFAULT_PIN.to_vec();
         self.pin_retries = DEFAULT_PIN_RETRIES;
@@ -1761,7 +2039,10 @@ impl VirtualCard {
         use p256::elliptic_curve::sec1::FromEncodedPoint;
         use p256::{EncodedPoint, NonZeroScalar, PublicKey};
 
-        if !self.pin_verified {
+        // Default policy for 9D is PIN "once": a verified PIN is needed and
+        // left in place.
+        let pin = self.effective_pin_policy(0x9D);
+        if pin != pin_policy::NEVER && !self.pin_verified {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
@@ -1823,7 +2104,13 @@ impl VirtualCard {
                 return sw(0x6A, 0x88);
             }
         };
+        if !self.pass_touch_gate(0x9D, "9D") {
+            return SW_TOUCH_TIMEOUT.to_vec();
+        }
         let shared = p256::ecdh::diffie_hellman(scalar, eph_pub.as_affine());
+        if pin == pin_policy::ALWAYS {
+            self.pin_verified = false;
+        }
         let x = shared.raw_secret_bytes();
         debug_assert_eq!(x.len(), 32);
         let mut out = Vec::with_capacity(2 + 2 + 32 + 2);
@@ -1847,17 +2134,25 @@ impl VirtualCard {
     /// tag; we return the DER-encoded ECDSA signature in the `82`
     /// (RESPONSE) tag. Wire shape mirrors `piv.c::piv_sign_prehash`.
     ///
-    /// `scalar` is the slot's key (read by the dispatcher); `slot_label` is
-    /// the trace label ("9A" / "9C"); `consume_pin` selects the PIN policy:
-    /// - `false` (slot 9A, policy "once"): leave `pin_verified` set.
-    /// - `true` (slot 9C, policy "always"): clear `pin_verified` after a
-    ///   successful sign, so the next PIN-gated op needs a fresh VERIFY.
-    ///   This is the conservative model of YubiKey's "always" policy —
-    ///   exact global-vs-per-slot semantics on real silicon are unverified;
-    ///   here the verification is treated as consumed by the sign.
+    /// `slot` is the PIV slot id; its effective PIN policy
+    /// ([`Self::effective_pin_policy`]) decides the PIN handling:
+    /// - "never" (slot 9E by default): no VERIFY needed.
+    /// - "once" (slots 9A and 9D by default): needs `pin_verified`, leaves
+    ///   it set.
+    /// - "always" (slot 9C by default): needs `pin_verified` and clears it
+    ///   after a successful sign, so the next PIN-gated op needs a fresh
+    ///   VERIFY. This is the conservative model of YubiKey's "always"
+    ///   policy — exact global-vs-per-slot semantics on real silicon are
+    ///   unverified; here the verification is treated as consumed by the
+    ///   sign.
+    ///
+    /// A touch-"always"/"cached" slot also passes the touch gate
+    /// ([`Self::pass_touch_gate`]) after every other check and before the
+    /// key is used.
     ///
     /// Returns:
-    /// - `69 82` if the PIN is not verified.
+    /// - `69 82` if the PIN is required and not verified, or a required
+    ///   touch did not arrive ([`SW_TOUCH_TIMEOUT`]).
     /// - `6A 88` if the slot is empty (no scalar seeded) or the scalar is
     ///   invalid.
     /// - `6A 80` on a missing/malformed request body.
@@ -1867,21 +2162,14 @@ impl VirtualCard {
     /// VirtualCard's output is reproducible. Real silicon randomizes `k`,
     /// so a sign capture is *not* byte-replayable — tests verify the
     /// signature against the public key instead (piggy#135).
-    fn sign_ecdsa_slot(
-        &mut self,
-        body: Option<&[u8]>,
-        scalar: Option<[u8; 32]>,
-        slot_label: &str,
-        pin_required: bool,
-        consume_pin: bool,
-    ) -> Vec<u8> {
+    fn sign_ecdsa_slot(&mut self, body: Option<&[u8]>, slot: u8) -> Vec<u8> {
         use p256::ecdsa::signature::hazmat::PrehashSigner;
         use p256::ecdsa::{Signature, SigningKey};
 
-        // `pin_required` is false only for slot 9E (Card Authentication),
-        // which is PIN-never — it answers a CAK challenge without a prior
-        // VERIFY (piggy#143). 9A/9C require a verified PIN.
-        if pin_required && !self.pin_verified {
+        let slot_label = &format!("{slot:02X}");
+        let scalar = self.slot_priv(slot);
+        let pin = self.effective_pin_policy(slot);
+        if pin != pin_policy::NEVER && !self.pin_verified {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
@@ -1933,6 +2221,9 @@ impl VirtualCard {
                 return sw(0x6A, 0x88);
             }
         };
+        if !self.pass_touch_gate(slot, slot_label) {
+            return SW_TOUCH_TIMEOUT.to_vec();
+        }
         let sig: Signature = match signing_key.sign_prehash(challenge) {
             Ok(s) => s,
             Err(_) => {
@@ -1961,8 +2252,9 @@ impl VirtualCard {
         out.extend_from_slice(&inner);
         out.extend_from_slice(&sw(0x90, 0x00));
 
-        // PIN-always (slot 9C): the sign consumes the PIN verification.
-        if consume_pin {
+        // PIN-always (slot 9C by default): the sign consumes the PIN
+        // verification.
+        if pin == pin_policy::ALWAYS {
             self.pin_verified = false;
         }
 
@@ -2025,9 +2317,11 @@ impl VirtualCard {
     /// - `7F 49 43 86 41 04 ‖ X ‖ Y` + `90 00` on success.
     ///
     /// Keygen is random (`rand_core::OsRng`) unless
-    /// [`Self::set_generate_override`] pinned a scalar for `slot`. The new
-    /// key inherits fibby's hardcoded per-slot PIN policy (9A "once", 9C
-    /// "always") — the request's YubiKey `AA`/`AB` policy tags are ignored.
+    /// [`Self::set_generate_override`] pinned a scalar for `slot`. The
+    /// request's YubiKey `AA` (PIN) / `AB` (touch) policy tags are stored
+    /// for the slot (an absent tag is `default`; a byte outside `00..=03`
+    /// is `6A 80`) and the key is recorded as generated on this card, which
+    /// is what makes it attestable.
     /// Any existing cert object in the slot is left untouched (a real card
     /// doesn't auto-clear it; the client writes a fresh cert via PUT DATA).
     fn handle_generate_asymmetric(&mut self, slot: u8, body: Option<&[u8]>) -> Vec<u8> {
@@ -2048,8 +2342,8 @@ impl VirtualCard {
                 return sw(0x6A, 0x80);
             }
         };
-        let alg = match parse_generate_request(body) {
-            Some(a) => a,
+        let request = match parse_generate_request(body) {
+            Some(r) => r,
             None => {
                 trace::emit(
                     trace::DEBUG,
@@ -2059,6 +2353,7 @@ impl VirtualCard {
                 return sw(0x6A, 0x80);
             }
         };
+        let alg = request.alg;
         if alg != 0x11 {
             trace::emit(
                 trace::DEBUG,
@@ -2075,6 +2370,17 @@ impl VirtualCard {
             );
             return sw(0x6A, 0x86);
         }
+        let Some(policy) = validated_policy(request.pin_policy, request.touch_policy) else {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!(
+                    "GENERATE slot={slot:#04x} -> 6A80 (policy out of range: AA={:02X?} AB={:02X?})",
+                    request.pin_policy, request.touch_policy
+                ),
+            );
+            return sw(0x6A, 0x80);
+        };
 
         // Pick the scalar: a pinned override for reproducibility, else a
         // fresh random P-256 key.
@@ -2103,12 +2409,7 @@ impl VirtualCard {
         let point = signing_key.verifying_key().to_encoded_point(false);
         let pt = point.as_bytes(); // 04 ‖ X ‖ Y (65 bytes)
 
-        match slot {
-            0x9A => self.slot_9a_priv = Some(scalar),
-            0x9C => self.slot_9c_priv = Some(scalar),
-            0x9D => self.slot_9d_priv = Some(scalar),
-            _ => unreachable!("slot validated above"),
-        }
+        self.install_slot_key(slot, scalar, policy, KeyOrigin::Generated);
 
         // Response template: 7F49 <len> [ 86 <ptlen> <point> ].
         let mut inner = Vec::with_capacity(2 + pt.len());
@@ -2125,8 +2426,10 @@ impl VirtualCard {
             trace::DEBUG,
             "vcard",
             &format!(
-                "GENERATE slot={slot:#04x} ECCP256 -> 9000 ({}-byte pubkey)",
-                pt.len()
+                "GENERATE slot={slot:#04x} ECCP256 -> 9000 ({}-byte pubkey, policy pin={:02X} touch={:02X})",
+                pt.len(),
+                policy[0],
+                policy[1]
             ),
         );
         out
@@ -2169,8 +2472,8 @@ impl VirtualCard {
             );
             return sw(0x6A, 0x86);
         }
-        let scalar = match body.and_then(parse_import_scalar) {
-            Some(s) => s,
+        let request = match body.and_then(parse_import_request) {
+            Some(r) => r,
             None => {
                 trace::emit(
                     trace::DEBUG,
@@ -2180,6 +2483,7 @@ impl VirtualCard {
                 return sw(0x6A, 0x80);
             }
         };
+        let scalar = request.scalar;
         if SigningKey::from_slice(&scalar).is_err() {
             trace::emit(
                 trace::DEBUG,
@@ -2188,13 +2492,18 @@ impl VirtualCard {
             );
             return sw(0x6A, 0x80);
         }
-        match slot {
-            0x9A => self.slot_9a_priv = Some(scalar),
-            0x9C => self.slot_9c_priv = Some(scalar),
-            0x9D => self.slot_9d_priv = Some(scalar),
-            0x9E => self.slot_9e_priv = Some(scalar),
-            _ => unreachable!("slot validated above"),
-        }
+        let Some(policy) = validated_policy(request.pin_policy, request.touch_policy) else {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!(
+                    "IMPORT slot={slot:#04x} -> 6A80 (policy out of range: AA={:02X?} AB={:02X?})",
+                    request.pin_policy, request.touch_policy
+                ),
+            );
+            return sw(0x6A, 0x80);
+        };
+        self.install_slot_key(slot, scalar, policy, KeyOrigin::Imported);
         trace::emit(
             trace::DEBUG,
             "vcard",
@@ -2202,13 +2511,124 @@ impl VirtualCard {
         );
         sw(0x90, 0x00)
     }
+
+    /// Handle YK ATTEST (INS 0xF9, P1=`slot`, P2=0x00). For a key this card
+    /// generated, returns an X.509 certificate over the slot's public key,
+    /// signed by the card's attestation key and carrying the slot's stored
+    /// policy (see `attest.rs`), bare — not wrapped in a `53`/`70` object.
+    /// For every other slot — empty, imported, seeded from the command
+    /// line, or not a key slot — returns `6A 80`, which is what a YubiKey
+    /// answers for a key it did not generate (the wet-env F9 pair in both
+    /// test-vector fixtures).
+    fn handle_attest(&mut self, slot: u8) -> Vec<u8> {
+        let generated_point = (self.slot_origins.get(&slot) == Some(&KeyOrigin::Generated))
+            .then(|| self.slot_priv(slot))
+            .flatten()
+            .and_then(|scalar| Self::public_point(&scalar));
+        let Some(point) = generated_point else {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("YK ATTEST slot={slot:#04x} -> 6A80 (no key generated on this card)"),
+            );
+            return sw(0x6A, 0x80);
+        };
+        let mut out = self.attestation.attest_slot(
+            slot,
+            &point,
+            self.stored_policy(slot),
+            self.model.firmware_version(),
+        );
+        trace::emit(
+            trace::DEBUG,
+            "vcard",
+            &format!(
+                "YK ATTEST slot={slot:#04x} -> 9000 ({}-byte cert)",
+                out.len()
+            ),
+        );
+        out.extend_from_slice(&sw(0x90, 0x00));
+        out
+    }
+
+    /// Handle YK GET METADATA (INS 0xF7, P1=0x00, P2=`slot`). For a
+    /// populated key slot returns the TLV list
+    ///
+    /// - `01 01 <alg>` — algorithm (`11`, ECCP256);
+    /// - `02 02 <pin> <touch>` — the policy as STORED (configured), not
+    ///   the effective one;
+    /// - `03 01 <origin>` — `01` generated on this card, `02` imported
+    ///   (a seeded key reports imported);
+    /// - `04 43 86 41 04 ‖ X ‖ Y` — the public key, in the encoding
+    ///   GENERATE returns inside its `7F49` template;
+    ///
+    /// and `90 00`. An empty slot, or one that is not a key slot, is
+    /// `6A 88` (referenced data not found).
+    ///
+    /// Tag numbers 01/02/04 and the two-byte policy are those C pivy reads
+    /// (`ykpiv_get_metadata`, vendor/pivy/src/piv.c) and the fib capture
+    /// shows (tests/fixtures/apdu/fib-yk54-roundtrip.fixture, `00 F7 00
+    /// 9D`). The origin VALUES are Yubico's documented ones and are not
+    /// confirmed by anything in this repository: that fib capture reports
+    /// `03 01 00` for a generated key.
+    fn handle_get_metadata(&mut self, slot: u8) -> Vec<u8> {
+        let point = self
+            .slot_priv(slot)
+            .and_then(|scalar| Self::public_point(&scalar));
+        let Some(point) = point else {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("GET METADATA slot={slot:#04x} -> 6A88 (no key in slot)"),
+            );
+            return sw(0x6A, 0x88);
+        };
+        let [pin, touch] = self.stored_policy(slot);
+        let origin = self
+            .slot_origins
+            .get(&slot)
+            .copied()
+            .unwrap_or(KeyOrigin::Imported);
+        let mut out = vec![0x01, 0x01, 0x11, 0x02, 0x02, pin, touch, 0x03, 0x01];
+        out.push(origin as u8);
+        out.push(0x04);
+        push_ber_len(&mut out, 2 + point.len());
+        out.push(0x86);
+        push_ber_len(&mut out, point.len());
+        out.extend_from_slice(&point);
+        out.extend_from_slice(&sw(0x90, 0x00));
+        trace::emit(
+            trace::DEBUG,
+            "vcard",
+            &format!(
+                "GET METADATA slot={slot:#04x} -> 9000 (pin={pin:02X} touch={touch:02X} origin={:02X})",
+                origin as u8
+            ),
+        );
+        out
+    }
 }
 
-/// Parse an IMPORT data field's `06 <len> <scalar>` TLV and normalize the
-/// scalar to a 32-byte big-endian P-256 value. BER bignum encodings vary — a
-/// leading `0x00` sign byte (when the high bit is set) or stripped leading
-/// zeros — so trim leading zeros and left-pad to 32 bytes.
-fn parse_import_scalar(body: &[u8]) -> Option<[u8; 32]> {
+/// The key material and optional policy tags of an IMPORT ASYMMETRIC data
+/// field.
+struct ImportRequest {
+    scalar: [u8; 32],
+    pin_policy: Option<u8>,
+    touch_policy: Option<u8>,
+}
+
+/// Parse an IMPORT data field: a leading `06 <len> <scalar>` TLV, then
+/// optionally `AA 01 <pin_policy>` / `AB 01 <touch_policy>` tags, the same
+/// two tags GENERATE carries. No client in this repository sends them on
+/// import (C pivy's `ykpiv_import` takes the policies and writes only the
+/// `06` TLV; piggy-piv's import sends none), so their placement after the
+/// key material is by analogy with GENERATE, not from a capture.
+/// The scalar is normalized to a 32-byte big-endian P-256 value: BER bignum
+/// encodings vary — a leading `0x00` sign byte (when the high bit is set) or
+/// stripped leading zeros — so trim leading zeros and left-pad to 32 bytes.
+/// Bytes after the scalar that are not well-formed TLVs are ignored, as
+/// they were before policies were read.
+fn parse_import_request(body: &[u8]) -> Option<ImportRequest> {
     if body.len() < 2 || body[0] != 0x06 {
         return None;
     }
@@ -2220,9 +2640,46 @@ fn parse_import_scalar(body: &[u8]) -> Option<[u8; 32]> {
     if val.len() > 32 {
         return None;
     }
-    let mut out = [0u8; 32];
-    out[32 - val.len()..].copy_from_slice(val);
-    Some(out)
+    let mut scalar = [0u8; 32];
+    scalar[32 - val.len()..].copy_from_slice(val);
+
+    let mut request = ImportRequest {
+        scalar,
+        pin_policy: None,
+        touch_policy: None,
+    };
+    let mut cur = &body[2 + len..];
+    while let Some((tag, value, rest)) = split_tlv(cur) {
+        match (tag, value) {
+            (0xAA, [p]) => request.pin_policy = Some(*p),
+            (0xAB, [t]) => request.touch_policy = Some(*t),
+            // A policy tag that is not exactly one byte is a malformed
+            // request, not something to skip.
+            (0xAA | 0xAB, _) => return None,
+            _ => {}
+        }
+        cur = rest;
+    }
+    Some(request)
+}
+
+/// Split one `<tag> <len> <value>` off the front of `bytes` (one-byte tag,
+/// [`ber_len`] length forms), returning `(tag, value, rest)`.
+fn split_tlv(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let tag = *bytes.first()?;
+    let (len_offset, len) = ber_len(&bytes[1..])?;
+    let value_start = 1 + len_offset;
+    let value = bytes.get(value_start..value_start + len)?;
+    Some((tag, value, &bytes[value_start + len..]))
+}
+
+/// Turn a request's optional `AA`/`AB` bytes into the `[pin, touch]` pair
+/// to store: an absent tag is `default`, a byte outside the four defined
+/// values of its policy is `None` (the caller answers `6A 80`).
+fn validated_policy(pin: Option<u8>, touch: Option<u8>) -> Option<[u8; 2]> {
+    let pin = pin.unwrap_or(pin_policy::DEFAULT);
+    let touch = touch.unwrap_or(touch_policy::DEFAULT);
+    (pin <= pin_policy::ALWAYS && touch <= touch_policy::CACHED).then_some([pin, touch])
 }
 
 /// Extract the data field from a case-3 or case-4 APDU. Handles both
@@ -2341,12 +2798,24 @@ fn parse_ga_sign_request(body: &[u8]) -> Option<&[u8]> {
     None
 }
 
+/// The fields of a GENERATE ASYMMETRIC request's `AC` template.
+struct GenerateRequest {
+    /// `80`: the algorithm byte (e.g. `0x11` = ECCP256).
+    alg: u8,
+    /// `AA`: YubicoPIV PIN policy, if the request carried one.
+    pin_policy: Option<u8>,
+    /// `AB`: YubicoPIV touch policy, if the request carried one.
+    touch_policy: Option<u8>,
+}
+
 /// Parse a GENERATE ASYMMETRIC request body: an `AC` control-reference
 /// template (SP 800-73-4 §3.3.2) carrying `80 01 <alg>` plus optional
-/// YubiKey `AA`/`AB` PIN/touch-policy tags (which fibby ignores). Returns
-/// the algorithm byte (e.g. `0x11` = ECCP256), or `None` on structural
-/// error. Same TLV-walk discipline as [`parse_ga_sign_request`].
-fn parse_generate_request(body: &[u8]) -> Option<u8> {
+/// YubiKey `AA 01 <pin_policy>` / `AB 01 <touch_policy>` tags. Returns
+/// `None` on structural error, a missing algorithm, or a policy tag that
+/// is not exactly one byte. Same TLV-walk discipline as
+/// [`parse_ga_sign_request`]; range-checking the policy bytes is the
+/// caller's ([`validated_policy`]).
+fn parse_generate_request(body: &[u8]) -> Option<GenerateRequest> {
     if body.first()? != &0xAC {
         return None;
     }
@@ -2356,22 +2825,25 @@ fn parse_generate_request(body: &[u8]) -> Option<u8> {
         return None;
     }
     let mut cur = &body[inner_start..inner_start + inner_len];
+    let (mut alg, mut pin_policy, mut touch_policy) = (None, None, None);
     while !cur.is_empty() {
-        let tag = *cur.first()?;
-        let (len_offset, len) = ber_len(&cur[1..])?;
-        let value_start = 1 + len_offset;
-        if cur.len() < value_start + len {
-            return None;
-        }
-        let value = &cur[value_start..value_start + len];
-        if tag == 0x80 {
+        let (tag, value, rest) = split_tlv(cur)?;
+        match (tag, value) {
             // Algorithm reference. pivy writes it minimal-width; ECCP256 is
             // the single byte 0x11. Take the last byte of the value.
-            return value.last().copied();
+            (0x80, _) => alg = Some(*value.last()?),
+            (0xAA, [p]) => pin_policy = Some(*p),
+            (0xAB, [t]) => touch_policy = Some(*t),
+            (0xAA | 0xAB, _) => return None,
+            _ => {}
         }
-        cur = &cur[value_start + len..];
+        cur = rest;
     }
-    None
+    Some(GenerateRequest {
+        alg: alg?,
+        pin_policy,
+        touch_policy,
+    })
 }
 
 /// Append a BER-TLV definite length to `out`: short form for `len < 128`,
@@ -4303,8 +4775,8 @@ mod tests {
     /// Real YK4 silicon's response to `00 F9 9D 00 00 00 00` when slot
     /// 9D holds an *imported* key is `6A 80` — attestation refuses
     /// imported keys (no on-card-generation provenance to sign).
-    /// VirtualCard mirrors this for every F9 9D probe, since it has
-    /// no factory attestation key to sign anything with anyway.
+    /// VirtualCard mirrors this for every slot it did not GENERATE a
+    /// key in, an empty one included.
     /// Captured wire from both `yk4-test-vector-roundtrip*.fixture`
     /// files.
     #[test]
@@ -4316,14 +4788,761 @@ mod tests {
 
     /// Sanity: the same 6A80 response is returned regardless of
     /// whether VirtualCard's slot 9D has been seeded with a test-
-    /// vector scalar or not. The attestation refusal path is purely
-    /// a function of "we don't have a YubicoPIV factory key".
+    /// vector scalar or not: a seeded key was not generated on the
+    /// card, so there is nothing to attest.
     #[test]
     fn yk_attest_slot_9d_returns_6a80_even_when_slot_seeded() {
         let mut c = VirtualCard::new();
         c.seed_slot_9d_priv(RFC6979_SCALAR);
         let req = hex_to_bytes("00f99d00000000");
         assert_eq!(c.transmit(&req).unwrap(), vec![0x6A, 0x80]);
+    }
+
+    // -- per-slot PIN / touch policy (GENERATE AA/AB tags) ----------------
+
+    /// GENERATE for `slot`, ECCP256, with the YubicoPIV policy tags a
+    /// client asks for: `AC { 80 01 11 [AA 01 <pin>] [AB 01 <touch>] }` —
+    /// the shape piggy-piv's `Apdu::generate_asym` writes.
+    fn generate_apdu_with_policy(slot: u8, pin: Option<u8>, touch: Option<u8>) -> Vec<u8> {
+        let mut template = vec![0x80, 0x01, 0x11];
+        if let Some(p) = pin {
+            template.extend_from_slice(&[0xAA, 0x01, p]);
+        }
+        if let Some(t) = touch {
+            template.extend_from_slice(&[0xAB, 0x01, t]);
+        }
+        let mut apdu = vec![
+            0x00,
+            0x47,
+            0x00,
+            slot,
+            template.len() as u8 + 2,
+            0xAC,
+            template.len() as u8,
+        ];
+        apdu.extend_from_slice(&template);
+        apdu
+    }
+
+    /// A card with a key GENERATEd in `slot` under the given policy. The
+    /// key is the RFC 6979 scalar, so its public point is known.
+    fn card_with_generated_key(slot: u8, pin: Option<u8>, touch: Option<u8>) -> VirtualCard {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        c.set_generate_override(slot, RFC6979_SCALAR);
+        let resp = c
+            .transmit(&generate_apdu_with_policy(slot, pin, touch))
+            .unwrap();
+        assert_eq!(&resp[resp.len() - 2..], &[0x90, 0x00], "GENERATE -> 9000");
+        c
+    }
+
+    fn is_success(resp: &[u8]) -> bool {
+        resp.ends_with(&[0x90, 0x00])
+    }
+
+    /// `04 ‖ X ‖ Y` of the RFC 6979 scalar.
+    fn rfc6979_point() -> Vec<u8> {
+        VirtualCard::public_point(&RFC6979_SCALAR).unwrap()
+    }
+
+    #[test]
+    fn generate_stores_the_aa_and_ab_policy_tags() {
+        let c = card_with_generated_key(0x9A, Some(pin_policy::ALWAYS), Some(touch_policy::CACHED));
+        assert_eq!(c.slot_policies.get(&0x9A), Some(&[0x03, 0x03]));
+        assert_eq!(c.slot_origins.get(&0x9A), Some(&KeyOrigin::Generated));
+    }
+
+    #[test]
+    fn generate_without_policy_tags_stores_default_for_both() {
+        let c = card_with_generated_key(0x9C, None, None);
+        assert_eq!(c.slot_policies.get(&0x9C), Some(&[0x00, 0x00]));
+
+        // One tag present, the other absent.
+        let c = card_with_generated_key(0x9C, None, Some(touch_policy::ALWAYS));
+        assert_eq!(c.slot_policies.get(&0x9C), Some(&[0x00, 0x02]));
+    }
+
+    #[test]
+    fn generate_rejects_an_out_of_range_policy_byte_and_installs_nothing() {
+        for (pin, touch) in [
+            (Some(0x04), None),
+            (None, Some(0x04)),
+            (Some(0xFF), Some(0x01)),
+        ] {
+            let mut c = VirtualCard::new();
+            c.mgmt_authenticated = true;
+            assert_eq!(
+                c.transmit(&generate_apdu_with_policy(0x9A, pin, touch))
+                    .unwrap(),
+                vec![0x6A, 0x80],
+                "pin={pin:?} touch={touch:?}"
+            );
+            assert_eq!(c.slot_9a_priv, None, "no key was generated");
+            assert!(c.slot_policies.is_empty() && c.slot_origins.is_empty());
+        }
+    }
+
+    #[test]
+    fn generate_rejects_a_policy_tag_that_is_not_one_byte() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        // AC { 80 01 11, AA 02 02 02 }.
+        let apdu = vec![
+            0x00, 0x47, 0x00, 0x9A, 0x09, 0xAC, 0x07, 0x80, 0x01, 0x11, 0xAA, 0x02, 0x02, 0x02,
+        ];
+        assert_eq!(c.transmit(&apdu).unwrap(), vec![0x6A, 0x80]);
+    }
+
+    /// IMPORT with trailing `AA`/`AB` tags after the `06` scalar TLV.
+    fn import_apdu_with_policy(slot: u8, pin: u8, touch: u8) -> Vec<u8> {
+        let mut data = vec![0x06, 0x20];
+        data.extend_from_slice(&RFC6979_SCALAR);
+        data.extend_from_slice(&[0xAA, 0x01, pin, 0xAB, 0x01, touch]);
+        let mut a = vec![0x00, 0xFE, 0x11, slot, data.len() as u8];
+        a.extend_from_slice(&data);
+        a
+    }
+
+    #[test]
+    fn import_stores_policy_tags_when_present_and_default_otherwise() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        assert_eq!(
+            c.transmit(&import_apdu_with_policy(0x9A, 0x01, 0x02))
+                .unwrap(),
+            vec![0x90, 0x00]
+        );
+        assert_eq!(c.slot_policies.get(&0x9A), Some(&[0x01, 0x02]));
+        assert_eq!(c.slot_origins.get(&0x9A), Some(&KeyOrigin::Imported));
+
+        assert_eq!(
+            c.transmit(&import_apdu(0x9C, &RFC6979_SCALAR)).unwrap(),
+            vec![0x90, 0x00]
+        );
+        assert_eq!(c.slot_policies.get(&0x9C), Some(&[0x00, 0x00]));
+
+        assert_eq!(
+            c.transmit(&import_apdu_with_policy(0x9D, 0x09, 0x00))
+                .unwrap(),
+            vec![0x6A, 0x80],
+            "out-of-range PIN policy"
+        );
+        assert_eq!(c.slot_9d_priv, None);
+    }
+
+    #[test]
+    fn seeding_a_slot_resets_its_policy_and_origin() {
+        let mut c =
+            card_with_generated_key(0x9A, Some(pin_policy::NEVER), Some(touch_policy::ALWAYS));
+        c.seed_slot_9a_priv(RFC6979_SCALAR);
+        assert_eq!(c.stored_policy(0x9A), [0x00, 0x00]);
+        assert!(!c.slot_origins.contains_key(&0x9A));
+    }
+
+    /// The slot defaults that were hard-coded before policies existed,
+    /// reached now through `default` policy on GENERATEd keys: 9A and 9D
+    /// PIN once, 9C PIN always.
+    #[test]
+    fn default_policy_keeps_the_per_slot_pin_behaviour() {
+        let digest = [0x5A; 32];
+
+        // 9A: once — needs the PIN, keeps it.
+        let mut c = card_with_generated_key(0x9A, None, None);
+        assert_eq!(
+            c.transmit(&ga_sign_apdu(&digest)).unwrap(),
+            vec![0x69, 0x82]
+        );
+        c.pin_verified = true;
+        assert!(is_success(&c.transmit(&ga_sign_apdu(&digest)).unwrap()));
+        assert!(c.pin_verified, "9A leaves the PIN verified");
+        assert!(is_success(&c.transmit(&ga_sign_apdu(&digest)).unwrap()));
+
+        // 9C: always — needs the PIN, consumes it.
+        let mut c = card_with_generated_key(0x9C, None, None);
+        let sign_9c = ga_sign_apdu_slot(0x9C, &digest);
+        assert_eq!(c.transmit(&sign_9c).unwrap(), vec![0x69, 0x82]);
+        c.pin_verified = true;
+        assert!(is_success(&c.transmit(&sign_9c).unwrap()));
+        assert!(!c.pin_verified, "9C consumes the PIN");
+        assert_eq!(c.transmit(&sign_9c).unwrap(), vec![0x69, 0x82]);
+
+        // 9D: once, for sign and for ECDH alike.
+        let mut c = card_with_generated_key(0x9D, None, None);
+        let sign_9d = ga_sign_apdu_slot(0x9D, &digest);
+        assert_eq!(c.transmit(&sign_9d).unwrap(), vec![0x69, 0x82]);
+        assert_eq!(c.transmit(&ecdh_9d_apdu()).unwrap(), vec![0x69, 0x82]);
+        c.pin_verified = true;
+        assert!(is_success(&c.transmit(&sign_9d).unwrap()));
+        assert!(is_success(&c.transmit(&ecdh_9d_apdu()).unwrap()));
+        assert!(c.pin_verified, "9D leaves the PIN verified");
+    }
+
+    #[test]
+    fn pin_always_on_9a_consumes_the_pin_after_each_sign() {
+        let mut c = card_with_generated_key(0x9A, Some(pin_policy::ALWAYS), None);
+        let apdu = ga_sign_apdu(&[0x11; 32]);
+        for round in 0..2 {
+            assert_eq!(
+                c.transmit(&apdu).unwrap(),
+                vec![0x69, 0x82],
+                "round {round}: no PIN"
+            );
+            c.pin_verified = true;
+            assert!(is_success(&c.transmit(&apdu).unwrap()), "round {round}");
+            assert!(!c.pin_verified, "round {round}: the sign consumed the PIN");
+        }
+    }
+
+    #[test]
+    fn pin_never_signs_without_verify() {
+        // On 9A, which defaults to once, and on 9C, which defaults to always.
+        for slot in [0x9A, 0x9C] {
+            let mut c = card_with_generated_key(slot, Some(pin_policy::NEVER), None);
+            assert!(!c.pin_verified);
+            let resp = c.transmit(&ga_sign_apdu_slot(slot, &[0x22; 32])).unwrap();
+            assert!(is_success(&resp), "slot {slot:02X} signs with no VERIFY");
+        }
+    }
+
+    #[test]
+    fn pin_once_on_9c_overrides_the_slot_default_of_always() {
+        let mut c = card_with_generated_key(0x9C, Some(pin_policy::ONCE), None);
+        c.pin_verified = true;
+        let apdu = ga_sign_apdu_slot(0x9C, &[0x33; 32]);
+        assert!(is_success(&c.transmit(&apdu).unwrap()));
+        assert!(c.pin_verified, "once: the PIN stays verified");
+        assert!(is_success(&c.transmit(&apdu).unwrap()));
+    }
+
+    #[test]
+    fn pin_policy_applies_to_9d_ecdh() {
+        // never: ECDH with no VERIFY.
+        let mut c = card_with_generated_key(0x9D, Some(pin_policy::NEVER), None);
+        assert!(is_success(&c.transmit(&ecdh_9d_apdu()).unwrap()));
+
+        // always: each ECDH consumes the PIN.
+        let mut c = card_with_generated_key(0x9D, Some(pin_policy::ALWAYS), None);
+        c.pin_verified = true;
+        assert!(is_success(&c.transmit(&ecdh_9d_apdu()).unwrap()));
+        assert!(!c.pin_verified);
+        assert_eq!(c.transmit(&ecdh_9d_apdu()).unwrap(), vec![0x69, 0x82]);
+    }
+
+    // -- touch policy ------------------------------------------------------
+
+    /// The GA ECDH request of wet-env capture #1 (slot 9D).
+    fn ecdh_9d_apdu() -> Vec<u8> {
+        hex_to_bytes(
+            "0087119d0000477c458200854104b3ef72daa94a55f409e495f654f234fb8f9730fa66923e7e45a910bb9773535e5d9a77be8d9f0968e7fb008cf9c156d7d468fbecb573e17801e2d441486b9f860000",
+        )
+    }
+
+    /// A 9A key with PIN never and the given touch policy, shared the way
+    /// the server shares a backend, plus a typed handle to inspect it.
+    fn shared_touch_card(
+        touch: u8,
+        timeout: Duration,
+    ) -> (
+        crate::server::SharedBackend,
+        Arc<std::sync::Mutex<VirtualCard>>,
+    ) {
+        let mut c = card_with_generated_key(0x9A, Some(pin_policy::NEVER), Some(touch));
+        c.set_touch_timeout(timeout);
+        let typed = Arc::new(std::sync::Mutex::new(c));
+        (typed.clone(), typed)
+    }
+
+    #[test]
+    fn default_and_never_touch_policy_need_no_touch() {
+        for touch in [None, Some(touch_policy::NEVER)] {
+            let mut c = card_with_generated_key(0x9A, Some(pin_policy::NEVER), touch);
+            assert!(is_success(&c.transmit(&ga_sign_apdu(&[0x44; 32])).unwrap()));
+        }
+    }
+
+    /// Plain `transmit` never waits: without a touch a touch-always slot
+    /// answers the timeout status word at once, and a granted touch
+    /// serves exactly one operation.
+    #[test]
+    fn touch_always_direct_transmit_fails_at_once_then_takes_one_touch_per_op() {
+        let mut c =
+            card_with_generated_key(0x9A, Some(pin_policy::NEVER), Some(touch_policy::ALWAYS));
+        let apdu = ga_sign_apdu(&[0x55; 32]);
+        assert_eq!(c.transmit(&apdu).unwrap(), SW_TOUCH_TIMEOUT.to_vec());
+
+        assert_eq!(c.grant_touch(), Ok(1));
+        assert!(is_success(&c.transmit(&apdu).unwrap()));
+        assert_eq!(
+            c.transmit(&apdu).unwrap(),
+            SW_TOUCH_TIMEOUT.to_vec(),
+            "the touch was consumed by the first sign"
+        );
+    }
+
+    /// The waiting path: the operation blocks, another thread locks the
+    /// SAME card to grant the touch (which would deadlock if the waiter
+    /// held the card's mutex), and the operation then completes.
+    #[test]
+    fn touch_always_blocks_until_a_touch_is_granted_from_another_thread() {
+        let (shared, typed) = shared_touch_card(touch_policy::ALWAYS, Duration::from_secs(20));
+        let granter = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                // Other backend calls get through while the sign waits...
+                assert!(shared.lock().unwrap().card_present());
+                // ...and so does the touch.
+                shared.lock().unwrap().grant_touch().unwrap();
+            })
+        };
+
+        let start = Instant::now();
+        let resp =
+            crate::server::transmit_waiting_for_touch(&shared, &ga_sign_apdu(&[0x66; 32])).unwrap();
+        let waited = start.elapsed();
+        granter.join().unwrap();
+
+        assert!(is_success(&resp), "signed once touched: {resp:02X?}");
+        assert!(
+            waited >= Duration::from_millis(150),
+            "the sign waited for the touch ({waited:?})"
+        );
+        assert!(
+            waited < Duration::from_secs(20),
+            "it was the touch, not the timeout, that ended the wait ({waited:?})"
+        );
+        assert_eq!(typed.lock().unwrap().touch.pending(), 0, "touch consumed");
+    }
+
+    #[test]
+    fn touch_always_times_out_with_6982_when_no_touch_arrives() {
+        let (shared, typed) = shared_touch_card(touch_policy::ALWAYS, Duration::from_millis(80));
+        let apdu = ga_sign_apdu(&[0x77; 32]);
+
+        let start = Instant::now();
+        let resp = crate::server::transmit_waiting_for_touch(&shared, &apdu).unwrap();
+        assert_eq!(resp, vec![0x69, 0x82], "touch timeout status word");
+        assert!(
+            start.elapsed() >= Duration::from_millis(80),
+            "it waited the configured timeout first"
+        );
+
+        // The failed wait left the card usable: a touch now lets it sign.
+        typed.lock().unwrap().grant_touch().unwrap();
+        let resp = crate::server::transmit_waiting_for_touch(&shared, &apdu).unwrap();
+        assert!(is_success(&resp));
+    }
+
+    /// A touch that times out must not burn a PIN-always verification.
+    #[test]
+    fn touch_timeout_leaves_the_pin_verification_in_place() {
+        let mut c =
+            card_with_generated_key(0x9C, Some(pin_policy::ALWAYS), Some(touch_policy::ALWAYS));
+        let apdu = ga_sign_apdu_slot(0x9C, &[0x78; 32]);
+        assert_eq!(
+            c.transmit(&apdu).unwrap(),
+            vec![0x69, 0x82],
+            "the PIN is checked before the touch"
+        );
+        assert_eq!(c.touch_blocked, None, "refused for the PIN, not the touch");
+
+        c.pin_verified = true;
+        assert_eq!(c.transmit(&apdu).unwrap(), SW_TOUCH_TIMEOUT.to_vec());
+        assert!(c.pin_verified, "no touch, no sign, PIN not consumed");
+
+        c.grant_touch().unwrap();
+        assert!(is_success(&c.transmit(&apdu).unwrap()));
+        assert!(!c.pin_verified, "the sign that happened consumed the PIN");
+    }
+
+    #[test]
+    fn auto_touch_grants_immediately_without_a_pending_touch() {
+        let mut c =
+            card_with_generated_key(0x9A, Some(pin_policy::NEVER), Some(touch_policy::ALWAYS));
+        c.set_auto_touch(true);
+        let apdu = ga_sign_apdu(&[0x88; 32]);
+        assert!(is_success(&c.transmit(&apdu).unwrap()));
+        assert!(is_success(&c.transmit(&apdu).unwrap()));
+
+        // And it leaves a real grant alone.
+        c.grant_touch().unwrap();
+        assert!(is_success(&c.transmit(&apdu).unwrap()));
+        assert_eq!(c.touch.pending(), 1, "auto-touch consumes no granted touch");
+
+        // The waiting path returns at once too.
+        c.set_touch_timeout(Duration::from_secs(20));
+        let shared: crate::server::SharedBackend = Arc::new(std::sync::Mutex::new(c));
+        let start = Instant::now();
+        let resp = crate::server::transmit_waiting_for_touch(&shared, &apdu).unwrap();
+        assert!(is_success(&resp));
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn touch_cached_serves_15_seconds_from_one_touch() {
+        let mut c =
+            card_with_generated_key(0x9A, Some(pin_policy::NEVER), Some(touch_policy::CACHED));
+        let apdu = ga_sign_apdu(&[0x99; 32]);
+        assert_eq!(c.transmit(&apdu).unwrap(), SW_TOUCH_TIMEOUT.to_vec());
+
+        c.grant_touch().unwrap();
+        assert!(is_success(&c.transmit(&apdu).unwrap()), "fresh touch");
+        assert!(is_success(&c.transmit(&apdu).unwrap()), "cached touch");
+
+        c.advance_touch_clock(Duration::from_secs(14));
+        assert!(
+            is_success(&c.transmit(&apdu).unwrap()),
+            "still inside the window at 14 s"
+        );
+
+        c.advance_touch_clock(Duration::from_secs(2));
+        assert_eq!(
+            c.transmit(&apdu).unwrap(),
+            SW_TOUCH_TIMEOUT.to_vec(),
+            "the window closed at 15 s"
+        );
+
+        c.grant_touch().unwrap();
+        assert!(
+            is_success(&c.transmit(&apdu).unwrap()),
+            "a new touch reopens it"
+        );
+    }
+
+    #[test]
+    fn removing_the_card_drops_a_cached_touch() {
+        let mut c =
+            card_with_generated_key(0x9A, Some(pin_policy::NEVER), Some(touch_policy::CACHED));
+        let apdu = ga_sign_apdu(&[0x9A; 32]);
+        c.grant_touch().unwrap();
+        assert!(is_success(&c.transmit(&apdu).unwrap()));
+        c.set_present(false);
+        c.set_present(true);
+        assert_eq!(c.transmit(&apdu).unwrap(), SW_TOUCH_TIMEOUT.to_vec());
+    }
+
+    #[test]
+    fn touch_policy_gates_9d_ecdh() {
+        let mut c = card_with_generated_key(0x9D, None, Some(touch_policy::ALWAYS));
+        c.pin_verified = true;
+        assert_eq!(
+            c.transmit(&ecdh_9d_apdu()).unwrap(),
+            SW_TOUCH_TIMEOUT.to_vec()
+        );
+        c.grant_touch().unwrap();
+        // Same scalar and ephemeral point as wet-env capture #1, so the
+        // touched ECDH returns the captured shared secret.
+        assert_eq!(
+            c.transmit(&ecdh_9d_apdu()).unwrap(),
+            hex_to_bytes(
+                "7c22822047e03668154b982a23f935f0ac074cb306cb94860073ebc10b92ddcc289e96f29000"
+            )
+        );
+    }
+
+    // -- YK GET METADATA (INS 0xF7) tests ---------------------------------
+
+    fn metadata_apdu(slot: u8) -> Vec<u8> {
+        vec![0x00, 0xF7, 0x00, slot]
+    }
+
+    /// `01 01 11 | 02 02 <pin> <touch> | 03 01 <origin> | 04 43 86 41
+    /// <point> | 90 00` for the RFC 6979 key.
+    fn expected_metadata(pin: u8, touch: u8, origin: u8) -> Vec<u8> {
+        let mut out = vec![
+            0x01, 0x01, 0x11, 0x02, 0x02, pin, touch, 0x03, 0x01, origin, 0x04, 0x43, 0x86, 0x41,
+        ];
+        out.extend_from_slice(&rfc6979_point());
+        out.extend_from_slice(&[0x90, 0x00]);
+        out
+    }
+
+    #[test]
+    fn get_metadata_for_a_generated_slot_reports_stored_policy_and_origin_01() {
+        let mut c =
+            card_with_generated_key(0x9C, Some(pin_policy::ALWAYS), Some(touch_policy::ALWAYS));
+        assert_eq!(
+            c.transmit(&metadata_apdu(0x9C)).unwrap(),
+            expected_metadata(0x03, 0x02, 0x01)
+        );
+    }
+
+    /// Tag 02 is the policy as configured, not as enforced: a default-
+    /// policy 9C key reports `00 00` although it behaves as PIN always.
+    #[test]
+    fn get_metadata_reports_the_configured_policy_not_the_effective_one() {
+        let mut c = card_with_generated_key(0x9C, None, None);
+        assert_eq!(
+            c.transmit(&metadata_apdu(0x9C)).unwrap(),
+            expected_metadata(0x00, 0x00, 0x01)
+        );
+    }
+
+    #[test]
+    fn get_metadata_for_an_imported_slot_reports_origin_02() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        c.transmit(&import_apdu_with_policy(0x9A, 0x02, 0x03))
+            .unwrap();
+        assert_eq!(
+            c.transmit(&metadata_apdu(0x9A)).unwrap(),
+            expected_metadata(0x02, 0x03, 0x02)
+        );
+    }
+
+    #[test]
+    fn get_metadata_for_a_seeded_slot_reports_default_policy_and_origin_02() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9e_priv(RFC6979_SCALAR);
+        assert_eq!(
+            c.transmit(&metadata_apdu(0x9E)).unwrap(),
+            expected_metadata(0x00, 0x00, 0x02)
+        );
+    }
+
+    #[test]
+    fn get_metadata_for_an_empty_or_unmodeled_slot_is_6a88() {
+        let mut c = VirtualCard::new();
+        for slot in [0x9A, 0x9C, 0x9D, 0x9E, 0x9B, 0x82] {
+            assert_eq!(
+                c.transmit(&metadata_apdu(slot)).unwrap(),
+                vec![0x6A, 0x88],
+                "slot {slot:02X}"
+            );
+        }
+    }
+
+    // -- YK ATTEST (INS 0xF9), generated keys ------------------------------
+
+    fn attest_apdu(slot: u8) -> Vec<u8> {
+        vec![0x00, 0xF9, slot, 0x00]
+    }
+
+    /// Split one DER TLV off `bytes`: `(tag, value, rest)`. One-byte tags,
+    /// short / `81` / `82` lengths — all a P-256 certificate needs.
+    fn der_tlv(bytes: &[u8]) -> (u8, &[u8], &[u8]) {
+        let (len, header) = match bytes[1] {
+            n if n < 0x80 => (usize::from(n), 2),
+            0x81 => (usize::from(bytes[2]), 3),
+            0x82 => (usize::from(bytes[2]) << 8 | usize::from(bytes[3]), 4),
+            other => panic!("unexpected DER length byte {other:#04x}"),
+        };
+        (
+            bytes[0],
+            &bytes[header..header + len],
+            &bytes[header + len..],
+        )
+    }
+
+    /// The two policy bytes of an attestation certificate, extracted the
+    /// way `piggy-piv`'s `attest::parse_policy` does it — re-implemented
+    /// here because fibby does not depend on piggy-piv: outer SEQUENCE →
+    /// TBSCertificate SEQUENCE → the `[3]` (`A3`) extensions wrapper →
+    /// SEQUENCE OF Extension → the Extension whose OID body is
+    /// 1.3.6.1.4.1.41482.3.8 → (optional BOOLEAN) → OCTET STRING of exactly
+    /// two bytes.
+    fn policy_bytes_as_piggy_piv_reads_them(cert_der: &[u8]) -> [u8; 2] {
+        const YK_POLICY_OID_BODY: &[u8] =
+            &[0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xC4, 0x0A, 0x03, 0x08];
+        let (tag, cert_body, _) = der_tlv(cert_der);
+        assert_eq!(tag, 0x30, "outer SEQUENCE");
+        let (tag, mut tbs, _) = der_tlv(cert_body);
+        assert_eq!(tag, 0x30, "TBSCertificate SEQUENCE");
+        let extensions_wrapper = loop {
+            let (tag, value, rest) = der_tlv(tbs);
+            if tag == 0xA3 {
+                break value;
+            }
+            assert!(!rest.is_empty(), "TBSCertificate has no [3] extensions");
+            tbs = rest;
+        };
+        let (tag, mut extensions, _) = der_tlv(extensions_wrapper);
+        assert_eq!(tag, 0x30, "Extensions SEQUENCE");
+        while !extensions.is_empty() {
+            let (tag, extension, rest) = der_tlv(extensions);
+            assert_eq!(tag, 0x30, "Extension SEQUENCE");
+            extensions = rest;
+            let (tag, oid, after_oid) = der_tlv(extension);
+            assert_eq!(tag, 0x06, "extnID");
+            if oid != YK_POLICY_OID_BODY {
+                continue;
+            }
+            let (tag, value, _) = der_tlv(after_oid);
+            assert_eq!(
+                tag, 0x04,
+                "non-critical: the OCTET STRING follows the OID directly"
+            );
+            return value.try_into().expect("extnValue is exactly two bytes");
+        }
+        panic!("no YubicoPIV policy extension in the certificate");
+    }
+
+    /// The F9 certificate DER, read the way a client does: GET DATA
+    /// `5F FF 01`, then unwrap `53 { 70 <cert> 71 01 00 FE 00 }`.
+    fn read_attestation_cert(c: &mut VirtualCard) -> Vec<u8> {
+        let resp = c.transmit(&get_data_apdu(TAG_ATTESTATION_CERT)).unwrap();
+        assert!(is_success(&resp), "GET DATA 5FFF01 -> 9000");
+        let (tag, object, rest) = der_tlv(&resp[..resp.len() - 2]);
+        assert_eq!(tag, 0x53);
+        assert!(rest.is_empty());
+        let (tag, cert, trailer) = der_tlv(object);
+        assert_eq!(tag, 0x70);
+        assert_eq!(trailer, &[0x71, 0x01, 0x00, 0xFE, 0x00]);
+        cert.to_vec()
+    }
+
+    #[test]
+    fn attest_refuses_empty_imported_and_seeded_slots() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        for slot in [0x9A, 0x9C, 0x9D, 0x9E, 0xF9] {
+            assert_eq!(
+                c.transmit(&attest_apdu(slot)).unwrap(),
+                vec![0x6A, 0x80],
+                "empty slot {slot:02X}"
+            );
+        }
+        c.transmit(&import_apdu(0x9A, &RFC6979_SCALAR)).unwrap();
+        assert_eq!(
+            c.transmit(&attest_apdu(0x9A)).unwrap(),
+            vec![0x6A, 0x80],
+            "imported key"
+        );
+        c.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
+        assert_eq!(
+            c.transmit(&attest_apdu(0x9C)).unwrap(),
+            vec![0x6A, 0x80],
+            "seeded key"
+        );
+    }
+
+    /// A key imported or seeded over a generated one is no longer
+    /// attestable: the origin follows the key, not the slot.
+    #[test]
+    fn attest_refuses_a_generated_slot_once_its_key_is_replaced() {
+        let mut c = card_with_generated_key(0x9A, None, None);
+        assert!(is_success(&c.transmit(&attest_apdu(0x9A)).unwrap()));
+        c.transmit(&import_apdu(0x9A, &RFC6979_SCALAR)).unwrap();
+        assert_eq!(c.transmit(&attest_apdu(0x9A)).unwrap(), vec![0x6A, 0x80]);
+
+        let mut c = card_with_generated_key(0x9A, None, None);
+        c.seed_slot_9a_priv(RFC6979_SCALAR);
+        assert_eq!(c.transmit(&attest_apdu(0x9A)).unwrap(), vec![0x6A, 0x80]);
+    }
+
+    #[test]
+    fn attest_for_a_generated_slot_returns_a_cert_chained_to_f9_with_the_policy() {
+        use der::{Decode, Encode};
+        use p256::ecdsa::signature::Verifier;
+        use p256::ecdsa::{Signature, VerifyingKey};
+        use x509_cert::Certificate;
+
+        let mut c =
+            card_with_generated_key(0x9C, Some(pin_policy::ALWAYS), Some(touch_policy::ALWAYS));
+        let resp = c.transmit(&attest_apdu(0x9C)).unwrap();
+        assert!(is_success(&resp));
+        let cert_der = &resp[..resp.len() - 2];
+        assert_eq!(
+            cert_der[0], 0x30,
+            "bare certificate, not wrapped in a 53/70 object"
+        );
+
+        // (i) It parses as X.509, over the slot's key.
+        let cert = Certificate::from_der(cert_der).unwrap();
+        assert_eq!(
+            cert.tbs_certificate
+                .subject_public_key_info
+                .subject_public_key
+                .raw_bytes(),
+            rfc6979_point(),
+            "subject public key is the slot key"
+        );
+
+        // (ii) It verifies under the F9 certificate's public key, and names
+        // that certificate's subject as its issuer.
+        let f9 = Certificate::from_der(&read_attestation_cert(&mut c)).unwrap();
+        assert_eq!(cert.tbs_certificate.issuer, f9.tbs_certificate.subject);
+        assert_eq!(
+            f9.tbs_certificate.subject.to_string(),
+            "CN=fibby attestation"
+        );
+        let f9_key = VerifyingKey::from_sec1_bytes(
+            f9.tbs_certificate
+                .subject_public_key_info
+                .subject_public_key
+                .raw_bytes(),
+        )
+        .unwrap();
+        let signature = Signature::from_der(cert.signature.raw_bytes()).unwrap();
+        f9_key
+            .verify(&cert.tbs_certificate.to_der().unwrap(), &signature)
+            .expect("the attestation is signed by the F9 key");
+
+        // (iii) It carries the stored policy bytes where piggy-piv looks.
+        assert_eq!(policy_bytes_as_piggy_piv_reads_them(cert_der), [0x03, 0x02]);
+
+        // And the firmware version GET VERSION reports.
+        let firmware = cert
+            .tbs_certificate
+            .extensions
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.extn_id == crate::attest::OID_YK_FIRMWARE_VERSION)
+            .expect("firmware version extension");
+        assert_eq!(
+            firmware.extn_value.as_bytes(),
+            c.model.firmware_version().as_slice()
+        );
+    }
+
+    /// The extension carries the policy as stored: `default` stays `00`.
+    #[test]
+    fn attest_reports_default_policy_as_zero_bytes() {
+        let mut c = card_with_generated_key(0x9A, None, None);
+        let resp = c.transmit(&attest_apdu(0x9A)).unwrap();
+        assert_eq!(
+            policy_bytes_as_piggy_piv_reads_them(&resp[..resp.len() - 2]),
+            [0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn attestation_cert_object_is_served_on_a_blank_card_and_is_per_card() {
+        let mut a = VirtualCard::new();
+        let mut b = VirtualCard::new();
+        let cert_a = read_attestation_cert(&mut a);
+        assert_eq!(cert_a, read_attestation_cert(&mut a), "stable per card");
+        assert_ne!(
+            cert_a,
+            read_attestation_cert(&mut b),
+            "each card generates its own attestation key"
+        );
+    }
+
+    #[test]
+    fn factory_reset_clears_policies_and_origins_but_keeps_the_attestation_key() {
+        let mut c =
+            card_with_generated_key(0x9A, Some(pin_policy::NEVER), Some(touch_policy::ALWAYS));
+        let f9_before = read_attestation_cert(&mut c);
+        c.seed_pin_puk_blocked();
+        assert_eq!(c.transmit(&factory_reset_apdu()).unwrap(), vec![0x90, 0x00]);
+
+        assert!(c.slot_policies.is_empty(), "policies cleared");
+        assert!(c.slot_origins.is_empty(), "origins cleared");
+        assert_eq!(c.transmit(&attest_apdu(0x9A)).unwrap(), vec![0x6A, 0x80]);
+        assert_eq!(c.transmit(&metadata_apdu(0x9A)).unwrap(), vec![0x6A, 0x88]);
+        assert_eq!(
+            read_attestation_cert(&mut c),
+            f9_before,
+            "the attestation key survives the reset"
+        );
+
+        // A key generated afterwards starts from default policy.
+        c.mgmt_authenticated = true;
+        c.transmit(&generate_apdu(0x9A)).unwrap();
+        assert_eq!(c.stored_policy(0x9A), [0x00, 0x00]);
     }
 
     // -- GA mgmt-key challenge-response (slot 9B, 3DES) tests -------------

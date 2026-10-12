@@ -6,6 +6,10 @@
 //! This is sized for the validation use case — one `pivy-tool`/`piggy`
 //! at a time against the cards. Multi-client sharing/transactions are
 //! left as a clearly-marked extension point rather than half-built.
+//! A backend mutex is held only for the length of one backend call. An
+//! operation that has to wait for a simulated touch waits with the mutex
+//! released ([`transmit_waiting_for_touch`]); holding it there would stop
+//! the control socket from reaching the card to deliver the touch.
 //!
 //! Multi-card (piggy#242): `serve` takes a LIST of backends — one per
 //! reader. `CMD_GET_READERS_STATE` reports them all; `SCardConnect`
@@ -226,7 +230,9 @@ fn handle_control(
 /// `fault <INS|*> <SW>[x<count>] <reader-name>` queues an injected fault
 /// (piggy#284: the next `count` APDUs with that INS — `*` for any — answer
 /// `SW`, e.g. `fault 20 63C2 …` makes one VERIFY report a wrong PIN with 2
-/// retries left) and `fault clear <reader-name>` drops them. Replies
+/// retries left) and `fault clear <reader-name>` drops them;
+/// `touch <reader-name>` grants that card one simulated touch, consumed by
+/// its next touch-requiring operation (replies `ok pending=<n>`). Replies
 /// `ok[ ...]` or `err <reason>`.
 fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> String {
     let (verb, name) = match line.split_once(' ') {
@@ -235,6 +241,24 @@ fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> 
     };
     match verb {
         "fault" => control_fault(backends, name),
+        "touch" => match find_backend(backends, name) {
+            // Locking the card here cannot deadlock against a client
+            // waiting for this very touch: that client parks on the
+            // card's touch pad with the card unlocked (see
+            // `transmit_waiting_for_touch`).
+            Some(b) => match b.lock().unwrap().grant_touch() {
+                Ok(pending) => {
+                    trace::emit(
+                        trace::INFO,
+                        "ctl",
+                        &format!("touch queued for '{name}' (pending={pending})"),
+                    );
+                    format!("ok pending={pending}")
+                }
+                Err(e) => format!("err {e}"),
+            },
+            None => format!("err no such reader: {name}"),
+        },
         "insert" | "remove" => {
             let present = verb == "insert";
             for b in backends.iter() {
@@ -330,13 +354,22 @@ fn find_backend<'a>(backends: &'a SharedBackends, name: &str) -> Option<&'a Shar
         .find(|b| b.lock().unwrap().reader_name() == name)
 }
 
-/// Per-connection handle bookkeeping. Handles are minted monotonically;
-/// each card handle records the protocol it negotiated and WHICH backend
-/// (reader-table index) it connected to, so transmit/reconnect/
-/// disconnect route to the right card (piggy#242).
+/// Context and card handle values, minted monotonically for the whole
+/// server, not per connection. One client process may hold several
+/// connections (libpcsclite opens one per `SCardEstablishContext`) and
+/// libpcsclite looks a card handle up across all of that process's
+/// contexts: if two connections were both handed `hCard=1`, releasing one
+/// would invalidate the other on the client side, and the next call on it
+/// fails with "the supplied handle was invalid" before reaching fibby. A
+/// real pcscd never repeats a live handle value (piggy#303).
+static NEXT_CONTEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static NEXT_CARD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
+
+/// Per-connection handle bookkeeping. Each card handle records the
+/// protocol it negotiated and WHICH backend (reader-table index) it
+/// connected to, so transmit/reconnect/disconnect route to the right card
+/// (piggy#242).
 struct ConnState {
-    next_context: u32,
-    next_card: i32,
     contexts: HashMap<u32, ()>,
     card_protocols: HashMap<i32, u32>,
     card_backends: HashMap<i32, usize>,
@@ -345,22 +378,18 @@ struct ConnState {
 impl ConnState {
     fn new() -> Self {
         ConnState {
-            next_context: 1,
-            next_card: 1,
             contexts: HashMap::new(),
             card_protocols: HashMap::new(),
             card_backends: HashMap::new(),
         }
     }
     fn mint_context(&mut self) -> u32 {
-        let h = self.next_context;
-        self.next_context += 1;
+        let h = NEXT_CONTEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.contexts.insert(h, ());
         h
     }
     fn mint_card(&mut self, protocol: u32, backend_idx: usize) -> i32 {
-        let h = self.next_card;
-        self.next_card += 1;
+        let h = NEXT_CARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.card_protocols.insert(h, protocol);
         self.card_backends.insert(h, backend_idx);
         h
@@ -745,7 +774,7 @@ fn transmit(
     trace::hexdump("apdu>", &apdu);
 
     let backend = &backends[state.backend_of(req.h_card)];
-    let result = backend.lock().unwrap().transmit(&apdu);
+    let result = transmit_waiting_for_touch(backend, &apdu);
     let active = state
         .card_protocols
         .get(&req.h_card)
@@ -779,6 +808,47 @@ fn transmit(
             reply_struct.pcb_recv_length = 0;
             reply_struct.rv = code;
             write_body(stream, &reply_struct.to_bytes())
+        }
+    }
+}
+
+/// Transmit one APDU, waiting for a simulated touch if the card says the
+/// operation needs one (a touch-`always`/`cached` slot with no touch
+/// available; see `touch.rs`).
+///
+/// The backend mutex is held only for each attempt, never across the
+/// wait: a blocked attempt changes nothing on the card and hands back the
+/// card's [`TouchPad`](crate::touch::TouchPad), this thread parks on the
+/// pad's own condition variable, and on a change it re-locks the card and
+/// transmits the same APDU again. So while one client waits for a touch
+/// the control socket can still lock that card to deliver it
+/// (`fibby ctl touch`), and other clients and other cards are served as
+/// usual. A touch that never arrives answers the card's timeout status
+/// word once the card's touch timeout has passed since the first attempt.
+pub fn transmit_waiting_for_touch(
+    backend: &SharedBackend,
+    apdu: &[u8],
+) -> crate::backend::ScardResult<Vec<u8>> {
+    use crate::backend::TransmitOutcome;
+    let mut deadline: Option<std::time::Instant> = None;
+    loop {
+        // The guard is a temporary of this statement: the card is unlocked
+        // again before the wait below.
+        let outcome = backend.lock().unwrap().transmit_or_await_touch(apdu)?;
+        let wait = match outcome {
+            TransmitOutcome::Done(response) => return Ok(response),
+            TransmitOutcome::AwaitTouch(wait) => wait,
+        };
+        let deadline = *deadline.get_or_insert_with(|| {
+            crate::touch::log_touch_needed(
+                &wait.slot_label,
+                &format!("waiting up to {} ms", wait.timeout.as_millis()),
+            );
+            std::time::Instant::now() + wait.timeout
+        });
+        if !wait.pad.wait_for_change(wait.seen, deadline) {
+            crate::touch::log_touch_timeout(&wait.slot_label, &wait.timeout_response);
+            return Ok(wait.timeout_response);
         }
     }
 }
