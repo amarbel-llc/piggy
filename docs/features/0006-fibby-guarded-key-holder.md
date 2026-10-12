@@ -320,6 +320,17 @@ Card provisioning changes to make 9C usable:
 papi's enrollment flow is papi's; these are the piggy primitives it
 calls.
 
+**What the signed subject is.** piggy treats the text given to
+`operator-act@piggy`, and the data given to any ordinary sign request,
+as opaque bytes chosen by the caller. It never assumes the subject is a
+commit id. The first downstream consumer makes this concrete: circus
+FDR 0042 (reported by `circus/fair-linden/coco`, 2026-10-12) binds its
+attestation token to the diff content against the merge base, so the
+signed record there is over a patch digest, issued by the run's root
+principal under the card chain, and its enforcing gate waits on phase
+(a). The attestation export of this phase publishes the 9C chain as a
+trust anchor and says nothing about subjects.
+
 ### Keeping test conveniences out of the holder
 
 Everything that makes fibby a good test double is dangerous in a holder:
@@ -609,6 +620,14 @@ is scheduled, not before.
   binding above do not fit it as written. FDR 0032 leaves the tier to
   piggy. Not designed here; a candidate is the durable sealed-key class
   of phase (g).
+- **If a holder tier ever models rights, confer and use are separate.**
+  circus FDR 0043 (reported by `circus/fair-linden/coco`, 2026-10-12)
+  makes its graph runner a principal that must be able to confer a tool
+  it may not use (spinclass#362, moxy FDR 0013 `pass-tools`). Today the
+  holder enforces no per-key rights (deferred by decision), so nothing
+  here is affected; when in-fibby per-key enforcement is taken up, the
+  rights model must express "may hand this key's use to another
+  principal" apart from "may use this key". Not designed here.
 - **How is a cgroup classified as frontend or agent scope?** No naming
   rule or unit property exists yet; FDR 0032 assigns it to clown#244.
   Phases (d) and (e) depend on it. The section "Scopes: frontend and
@@ -696,6 +715,10 @@ at `be3da3f`.
 - spinclass FDR 0032, decisions D3 (tiers), D7 (piggy owns keys), D10
   (operator session key), D11 (9C), D17 (commit signing over the seam).
 - piggy#297, the tracking issue for this record.
+- circus FDR 0042 (attestation token over a patch digest, gated on
+  phase (a)) and FDR 0043 (roustabout, the graph runtime that signs run
+  records and confers tools it may not use): the first downstream
+  consumers, per `circus/fair-linden/coco` on 2026-10-12.
 - FDR 0001 (proxy-only agent) and FDR 0002 (multi-card hot-swap agent):
   the agent shapes the holder reuses.
 - RFC 0008 (pigpen), section 4.4: the X25519 wrap that phase (g)'s
