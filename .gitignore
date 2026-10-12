@@ -6,6 +6,9 @@
 # fib (virtual PIV) runtime state
 /.fib/
 
+# locally rendered diagrams (`just codemod-diagrams`); the .puml is committed
+/docs/diagrams/*.svg
+
 # go build artifacts (binaries land in the module dir when `go build`
 # is run without -o, e.g. `cd go && go build ./cmd/piggy-test-sshd`)
 /go/conformance

@@ -4,7 +4,7 @@
 ' teardown. Companion to docs/features/0006-fibby-guarded-key-holder.md.
 '
 ' Regenerate the rendered image with:  just codemod-diagrams
-' The .puml is the source of truth; the .svg beside it is generated.
+' The .puml is the source of truth; the .svg render is local-only and gitignored.
 
 title Holder card lifecycle — one virtual card per principal (FDR 0006, phases (c) to (e))
 

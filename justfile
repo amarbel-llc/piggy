@@ -291,12 +291,12 @@ codemod-capture-pivy-oracle-box: build-rust
     echo "    git add it; oracle_box_corpus.rs replays it offline in test-rust."
 
 # Render docs/diagrams/*.puml to SVG in place via plantuml (on PATH). The
-# .puml is the source of truth; the .svg beside it is generated and
-# committed so readers (and cross-session peers) can view it without
-# plantuml. Re-run after editing any diagram. Serves the design-doc loop
-# (piggy FDR 0001's SSH-agent topology, eng#295).
+# .puml is the source of truth and the only thing committed; the .svg
+# beside it is a local-only, gitignored render. Re-run after editing any
+# diagram. Serves the design-doc loop (piggy FDR 0001's SSH-agent
+# topology, eng#295).
 #
-# render docs/diagrams/*.puml to SVG in place via plantuml
+# render docs/diagrams/*.puml to local-only, gitignored SVGs (the .puml is what is committed)
 [group('codemod')]
 codemod-diagrams:
     plantuml -tsvg docs/diagrams/*.puml

@@ -4,7 +4,7 @@
 ' eng#295, and posh FDR 0014 (posh docs/features/0014-stable-forwarded-agent-endpoint.md).
 '
 ' Regenerate the rendered image with:  plantuml -tsvg docs/diagrams/ssh-agent-topology.puml
-' The .puml is the source of truth; the .svg beside it is generated.
+' The .puml is the source of truth; the .svg render is local-only and gitignored.
 
 title SSH-agent topology — post eng#295 proxy-only cutover (Linux)
 
