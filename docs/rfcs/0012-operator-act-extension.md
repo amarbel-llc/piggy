@@ -238,9 +238,16 @@ agent, never by the caller.
 
 The PIN MUST be requested for this act regardless of any cached PIN the
 agent holds, since the attested policy is PIN-always and the card will
-demand it. The agent MUST then perform the sign and MUST surface the
-touch wait to the operator (the existing touch notification path). A
-touch timeout is `cancelled`.
+demand it, and the PIN entered for an operator act MUST NOT be cached
+for later requests. The agent MUST then perform the sign and MUST give
+the operator a visible notice when the touch wait begins (a desktop
+notification or a line on the tty; a log line is not a notice). A touch
+timeout is `cancelled`.
+
+An askpass program MUST render the text literally: it MUST NOT
+interpret markup in it (zenity's Pango markup, for instance, so `<` and
+`&` in a text must be escaped or markup disabled), and a program that
+cannot show it in full MUST fail the prompt, as stated above.
 
 #### 2.7. Signing
 
@@ -257,6 +264,18 @@ The result MUST verify under `ssh-keygen -Y verify` with an allowed
 signers file naming the slot's public key and `-n namespace`, once
 armored per `PROTOCOL.sshsig` §1. The agent returns the unarmored blob;
 armoring is the caller's.
+
+**Operator-act namespaces are reachable only through this extension.**
+An ordinary `SSH_AGENTC_SIGN_REQUEST` can carry sshsig signed data too:
+`ssh-keygen -Y sign -n piggy-escalation-v1 -f 9c.pub` would otherwise
+obtain a valid operator-namespace signature after a routine PIN prompt
+and a touch, with the text never shown. An agent MUST therefore refuse
+an ordinary sign request whose data begins with the `SSHSIG` preamble
+and whose `namespace` field is registered for the `operator-act@piggy`
+path (§3), for every key it serves. The check is on the signed-data
+prefix only; `file`, `git`, `piggy-record-v1` and non-sshsig data are
+untouched. `piggy sign-bytes` and any other piggy signing surface that
+reaches a card directly MUST apply the same refusal.
 
 #### 2.8. Proxy agents
 
@@ -488,6 +507,18 @@ agent-scope callers by cgroup) is the structural fix, scheduled with
 FDR 0006 phase (d) once clown#244 defines the scopes. Until then an
 operator who did not expect a prompt cancels it, and `cancelled` tells
 the caller so.
+
+**Direct card access.** §2.7's refusal covers every piggy signing
+surface, but a process with PC/SC access to the card and knowledge of
+the PIN can drive the 9C slot with another PIV tool and have it sign
+operator-namespace bytes the operator never saw; the attested policy
+still costs the attacker a PIN and the operator a touch, so the attack
+needs the operator to touch for a prompt they did not get. The defences
+are the ones already named: the operator treats an unexplained touch
+request as hostile, direct PC/SC is confined to the card agent's
+account where the host arranges it (FDR 0006 tier 2 does so for the
+holder), and the ledger check of §3 fails a quote whose words are not
+in the ledger regardless of how the signature was made.
 
 **Software keys.** Nothing in this document raises a tier-1 software key
 to an operator-act key: §2.4 is satisfied only by a slot that attests
