@@ -1,6 +1,16 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-12
+approved: 2026-10-12
+approval-note: >
+  Approved by the operator on 2026-10-12 after review through the
+  user-stories-and-end-UX tab beside the record: quotes are retrieval from
+  the ledger and never introduce words (the quote prompt is a tier-1
+  stand-in that disappears when the ledger is signed at observation);
+  escalation and certificate prompts are permanent and visibly classed;
+  the operator's tty, including a local posh attach, is a privileged
+  channel. Implementations conform to this text; the conformance suite
+  lands with FDR 0006 phase (a) (piggy#303).
 ---
 
 # Operator-Act Agent Extension, sshsig Namespaces, and Record Purposes (piggy normative; FDR 0006 wire RFC part 1)
