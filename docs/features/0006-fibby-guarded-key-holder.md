@@ -659,16 +659,18 @@ is scheduled, not before.
   held there or by posh. Whether posh's session model can be that
   frontend-scope renderer is a posh question, assigned by clown#244's
   research note. The operator added (2026-10-12) that "the operator's
-  tty may be accessible via posh, which also permits local binding": a
-  roaming session's pty master is posh's, and posh exposes attach
-  surfaces on the same host (its UDP transport, the per-client-host
-  agent socket and status socket posh-server(1) binds, and whatever
-  local attach the operator means by local binding). Every such surface
-  is part of the tty write side and falls under the same requirement:
-  an agent scope must not be able to attach to, or write through, the
-  operator's posh session. Which surfaces posh has and how it would
-  refuse an agent-scope peer is posh's to answer; piggy records only
-  that the requirement reaches it. piggy's part is unchanged: the card
+  tty may be accessible via posh, which also permits local binding",
+  meaning that posh can attach to a session on the same host, so a
+  posh client is a mechanism for reaching the operator's tty without a
+  remote hop. A roaming session's pty master is posh's, and a local
+  attach to it is a write path onto the operator's screen and a read
+  path onto the operator's keystrokes. That surface is part of the tty
+  write side and falls under the same requirement: an agent scope must
+  not be able to attach to the operator's posh session, locally or
+  remotely, nor reach the session's agent and status sockets that
+  posh-server(1) binds beside it. How posh identifies and refuses an
+  agent-scope attacher is posh's to answer; piggy records only that the
+  requirement reaches it. piggy's part is unchanged: the card
   agent and its askpass run as the operator's user service, never under
   `claude`.
 - **What does a quote's `ledger` line name?** RFC 0012 requires a
