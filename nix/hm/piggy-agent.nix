@@ -317,7 +317,8 @@ let
     || cfg.addNewKeysTo != null
     || cfg.agentTimeout != null
     || cfg.proxyOnly
-    || cfg.eventDrivenCardPresence;
+    # Defaults to true (piggy#255), so "set" here means "opted out".
+    || !cfg.eventDrivenCardPresence;
 
   # Map of effective unit-name → per-instance config. Single-instance
   # mode synthesizes one entry named `piggy-agent` from the top-level
