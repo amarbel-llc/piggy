@@ -108,6 +108,27 @@ definition can be checked against it.
   particular they may not approve, mint for another scope, or obtain an
   operator act.
 
+**The operator's tty is a privileged channel, in both directions.** The
+split exists to protect two things the operator does at the keyboard:
+what the operator reads, and what the operator types. Nothing in an
+agent scope may write to the surface the operator reads prompts from
+(the terminal's write side, the graphical session), or a fake prompt
+could be painted over a real one and the operator-act guarantee of RFC
+0012 would prove nothing. And nothing in an agent scope may be the
+observation point for what the operator types, or operator input could
+be forged (FDR 0032 D10). This is the structural twin of troupe's XMPP
+principal: a message from a principal cannot be forged because it is
+signed under a certificate chain; input from the operator cannot be
+forged because only the frontend scope touches the tty. One channel is
+authenticated by cryptography, the other by construction, and together
+they are what "the operator said it" and "the operator saw it" rest on.
+The mechanism that makes the tty unwritable and unobservable from an
+agent scope is clown's and posh's to build (clown#244); piggy states the
+requirement and relies on it (operator, 2026-10-12: "the operator's tty
+write side is privileged and must be inaccessible to agents structurally
+and by design"; "the tty principle is the other side of the xmpp
+principal: messages cannot be forged").
+
 The holder agent classifies a peer by reading its cgroup on the
 connection and mapping it to one of the two scopes. Until clown#244
 defines that mapping, the mapping is an input to the holder's
@@ -626,6 +647,26 @@ is scheduled, not before.
   here is affected; when in-fibby per-key enforcement is taken up, the
   rights model must express "may hand this key's use to another
   principal" apart from "may use this key". Not designed here.
+- **Where does the operator's tty write side live, and who holds it?**
+  The privileged-tty requirement above needs the pty master's write
+  side held outside every agent scope. `clown/quick-cherry/krusty`
+  reported on 2026-10-12, as theory not verified: clown execs `claude`
+  in its own process tree (one cgroup today; the clown#244 split is not
+  implemented), `claude` is a pty slave, and the master's write side is
+  held by the terminal emulator or by posh when the session roams. So
+  the write side is outside the `claude` process but not outside its
+  cgroup tree until clown moves to a frontend scope and the master is
+  held there or by posh. Whether posh's session model can be that
+  frontend-scope renderer is a posh question, assigned by clown#244's
+  research note. piggy's part is unchanged: the card agent and its
+  askpass run as the operator's user service, never under `claude`.
+- **What does a quote's `ledger` line name?** RFC 0012 requires a
+  `piggy-quote-v1` text to name the transcript stanza the quoted input
+  came from. No such identifier exists yet (same report: operator input
+  lives only in Claude Code's JSONL under a harness uuid; the
+  content-addressed transcript is FDR 0032 D8 / slice 2 in troupe).
+  Until it does, quotes cannot be formed and operator acts are
+  escalations and certificates only.
 - **How is a cgroup classified as frontend or agent scope?** No naming
   rule or unit property exists yet; FDR 0032 assigns it to clown#244.
   Phases (d) and (e) depend on it. The section "Scopes: frontend and
@@ -678,6 +719,10 @@ operator's words.
 | 18 | sequencing | (a) to (g) in order; #289 independent |
 | 19 | wire specs | this FDR now, one RFC written per phase |
 | 20 | phase closure (2026-10-12) | "phases approved, but for each phase an I want a human UX / CLI review / QA / e2e test"; see "Phase acceptance" |
+| 21 | review medium (2026-10-12) | user stories and end UX per design record, as a tab beside the record in the review doc: "the user stories are extremely helpful, and let's use this as the review medium going forwards" |
+| 22 | the operator's tty (2026-10-12) | privileged in both directions, structurally inaccessible to agent scopes; the twin of the XMPP principal; see "Scopes: frontend and agent" |
+| 23 | quotes (2026-10-12) | a quote names a ledger stanza and never introduces words: "Why can't the previous operator text in the ledger be used instead of fabricating a new quote?"; RFC 0012 `piggy-quote-v1` |
+| 24 | prompt classes (2026-10-12) | prompts visibly distinct per act class, escalation strongest: "privilege escalation should have a very clear visual"; RFC 0012 `PIGGY_ASKPASS_KIND`, namespaces split by class |
 
 ## Reference: what C pivy-agent did
 

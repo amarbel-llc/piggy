@@ -194,20 +194,37 @@ grant, "a record by the card over the request's digest", is the model.
 
 The card agent MUST present, on the same prompt that collects the PIN:
 
-- the words `operator act` (so the prompt is distinguishable from a
-  routine PIN prompt);
+- the act's **display class** (§3: `quote`, `escalation` or
+  `certificate`), rendered so that the prompt is visibly different from
+  a routine PIN prompt and an `escalation` is visibly different from a
+  `quote`;
 - the card identity and slot (as `piggy health` names them);
 - the `namespace`;
 - the `text`, verbatim.
 
-On the askpass route the agent carries this through the existing
+On the askpass route the agent carries the text through the existing
 `PIGGY_ASKPASS_CONTEXT` mechanism (`crates/piggy/src/card_oracle.rs`,
-`run_askpass`); on the tty route it is rendered above the PIN line.
-The display MUST come from the same process that computes the signed
-data (§2.7); a proxy agent MUST NOT display anything (§2.8). An askpass
-program MAY reformat but MUST NOT elide or truncate the text; a program
-that cannot show it in full MUST fail the prompt, which the agent
-reports as `cancelled`.
+`run_askpass`) and MUST additionally export `PIGGY_ASKPASS_KIND` set to
+the display class, so the askpass program can choose a distinct dialog
+(title, icon, type, colour) per class; a routine PIN prompt carries no
+`PIGGY_ASKPASS_KIND`. On the tty route the class and text are rendered
+above the PIN line. The display MUST come from the same process that
+computes the signed data (§2.7); a proxy agent MUST NOT display anything
+(§2.8). An askpass program MAY reformat but MUST NOT elide or truncate
+the text; a program that cannot show it in full MUST fail the prompt,
+which the agent reports as `cancelled`.
+
+**The display surface is privileged.** The prompt is only evidence if
+nothing in an agent scope can write to the surface the operator reads
+it from (FDR 0006, "Scopes: frontend and agent"). The card agent and the
+askpass program it spawns MUST run outside every agent scope, and the
+operator's terminal write side and graphical session MUST be unwritable
+from an agent scope by construction. piggy relies on that property and
+does not provide it: the mechanism is clown's (clown#244, the scope
+split) and the terminal owner's (posh). Until it exists, the guarantee
+rests on the card agent being a user service of the operator's session,
+never a descendant of `claude`, and on the askpass being spawned by the
+agent, never by the caller.
 
 The PIN MUST be requested for this act regardless of any cached PIN the
 agent holds, since the attested policy is PIN-always and the card will
@@ -255,21 +272,32 @@ registered by amendment to this section and MUST match
 `system-kind-vN` in the sense of RFC 0011 §6.2 rule 1 (`kind` MAY
 contain `_`).
 
-| Namespace                | Path                 | Meaning |
-|--------------------------|----------------------|---------|
-| `piggy-operator_act-v1`  | `operator-act@piggy` | A deliberate human act over displayed text: FDR 0032 D10's tier-1 quote, D11's escalation grant, D2's root certificate when signed by the card. The text is what the operator saw. |
-| `piggy-record-v1`        | ordinary sign request | A signed record (FDR 0032 D8) signed by a principal's own key through `ssh-keygen -Y sign -n piggy-record-v1` or an equivalent agent sign request; the message is the record's canonical bytes as troupe's RFC defines them. Not an operator act. |
+Each namespace on the `operator-act@piggy` path carries a **display
+class**, which the prompt renders (§2.6), and a **text shape**, which
+the agent does not check but a verifier of that act kind MUST.
+
+| Namespace                 | Path                  | Display class | Text shape and meaning |
+|---------------------------|-----------------------|---------------|------------------------|
+| `piggy-quote-v1`          | `operator-act@piggy`  | `quote`       | A quote of operator input already in the ledger (FDR 0032 D10). The text MUST be the recorded input verbatim, followed by one line `ledger <markl-id>` naming the transcript stanza it was taken from (`piggy-record-digest-v1@…`). A verifier MUST resolve that stanza and MUST fail if its recorded input differs from the quoted text. The quote adds the operator's touch to words the ledger already holds; it never introduces words. |
+| `piggy-escalation-v1`     | `operator-act@piggy`  | `escalation`  | An escalation grant (FDR 0032 D11). The text MUST name the escalation request record by markl-id (`piggy-record-digest-v1@…`) and state the granted right and bound in words. |
+| `piggy-certificate-v1`    | `operator-act@piggy`  | `certificate` | A card-signed certificate or enrollment (FDR 0032 D2 root certificate, D15 enrollment blessing). The text MUST name the certified public key and the certificate request record by markl-id. |
+| `piggy-record-v1`         | ordinary sign request | none          | A signed record (FDR 0032 D8) signed by a principal's own key through `ssh-keygen -Y sign -n piggy-record-v1` or an equivalent agent sign request; the message is the record's canonical bytes as troupe's RFC defines them. Not an operator act. |
 
 `operator-act@piggy` MUST refuse (`refused-namespace`) any namespace not
 registered in this table for the `operator-act@piggy` path. In
 particular `file`, `git`, `email`, and `piggy-record-v1` MUST be
 refused: the first three are OpenSSH's and git's domains, and the last
 is reserved for signatures made without a display, so a verifier can
-tell from the namespace alone whether a human saw the bytes.
+tell from the namespace alone whether a human saw the bytes, and from
+which class of prompt. There is no operator-side override: an act under
+an unregistered namespace is refused even if the operator would have
+touched.
 
 Other systems MAY have namespaces registered here for the
-`operator-act@piggy` path by amendment (troupe is expected to); a
-verifier MUST accept only namespaces its policy names.
+`operator-act@piggy` path by amendment (troupe is expected to, and FDR
+0032 D15's pre-authorization policy records are the first candidate);
+each registration names its display class and text shape. A verifier
+MUST accept only namespaces its policy names.
 
 ### 4. markl-id purposes
 
@@ -279,7 +307,7 @@ Two purposes are registered in RFC 0011 §6.1's sense, owned by piggy
 
 | Purpose                 | Owner | Compatible formats            | Description |
 |-------------------------|-------|-------------------------------|-------------|
-| `piggy-record-digest-v1` | piggy | `sha256`, `blake2b256`        | Digest of a signed record's canonical bytes (FDR 0032 D8). This is the `H(message)` of a `piggy-record-v1` or `piggy-operator_act-v1` sshsig when the hash algorithm matches, and the value a `prev` set and an escalation request name. |
+| `piggy-record-digest-v1` | piggy | `sha256`, `blake2b256`        | Digest of a signed record's canonical bytes (FDR 0032 D8). This is the `H(message)` of a `piggy-record-v1` sshsig when the hash algorithm matches, and the value a `prev` set, a `ledger` line in a quote, and an escalation request name. |
 | `piggy-record-sig-v1`    | piggy | `ed25519_sig`, `ecdsa_p256_sig` | The raw signature over a record: the `signature` field of the sshsig blob with its SSH framing stripped to the fixed-width form RFC 0011 §5 defines (as `papi-doc-sig-v1` does). The sshsig blob remains the authoritative, self-describing form; this purpose names it in a markl-id slot. |
 
 Whether a record carries the sshsig blob, the markl-id of its raw
@@ -322,19 +350,21 @@ sent to the forwarded agent on a remote host:
 
     version        = 1
     key            = <ssh blob of ecdsa-sha2-nistp256 AAAAE2VjZHNh… (slot 9C)>
-    namespace      = "piggy-operator_act-v1"
+    namespace      = "piggy-quote-v1"
     hash_algorithm = "sha256"
-    text           = "grant session \"swift-elder\" on <host> the right spinclass:force for 24h\n"
+    text           = "grant swift-elder the right to force its children for six hours\nledger piggy-record-digest-v1@blake2b256-…\n"
     flags          = 0
 
-What the operator sees on the workstation:
+What the operator sees on the workstation (`PIGGY_ASKPASS_KIND=quote`;
+an `escalation` renders in the askpass's strongest style):
 
-    ┌ piggy: operator act ───────────────────────────────────────┐
+    ┌ piggy: QUOTE — sign what you said ─────────────────────────┐
     │ card 5da19c98, slot 9C                                      │
-    │ namespace piggy-operator_act-v1                             │
+    │ namespace piggy-quote-v1                                    │
     │                                                             │
-    │ grant session "swift-elder" on <host> the right             │
-    │ spinclass:force for 24h                                     │
+    │ grant swift-elder the right to force its children for       │
+    │ six hours                                                   │
+    │ ledger piggy-record-digest-v1@blake2b256-…                  │
     │                                                             │
     │ PIN:                                                        │
     └─────────────────────────────────────────────────────────────┘
@@ -388,7 +418,41 @@ key before it can serve this extension.
 `piggy-record-v1` on the operator-act path (§3) means a human-touched
 signature can never be mistaken for an automatic one and vice versa,
 and an operator cannot be tricked into signing a commit or a file under
-the guise of a quote.
+the guise of a quote. Splitting the operator-act namespaces by display
+class means an escalation can never be obtained behind a prompt that
+looked like a quote: the namespace in the signature is the class the
+operator was shown.
+
+**Quotes never introduce words.** A `piggy-quote-v1` text must match a
+ledger stanza (§3), so a session that wants the operator to bless words
+the operator never typed fails the verifier's ledger check even if the
+operator is tricked into touching. At tier 1 the ledger stanza is not
+itself authenticated, which is why the operator must still read the
+words; at tier 2 (FDR 0006 phase (d)) the stanza is signed at
+observation and a quote needs no act at all. The `ledger` line is a
+forward requirement: `clown/quick-cherry/krusty` reported on 2026-10-12
+(clown master `814d90a`) that nothing in clown is content-addressed or
+markl-identified today, that operator input is recorded only in Claude
+Code's own JSONL under a harness-generated uuid, and that the
+merkle-stable transcript identity belongs to FDR 0032 D8 / slice 2 in
+troupe's transcript seam. Until a resolvable stanza id exists, a
+`piggy-quote-v1` text cannot be formed, and operator acts use the
+`escalation` and `certificate` classes only.
+
+**The display surface is privileged.** §2.6 states the requirement:
+nothing in an agent scope may write to what the operator reads the
+prompt from, or the prompt proves nothing. A same-uid process that can
+draw on the operator's terminal or graphical session could paint a
+convincing fake prompt over the real one, or overwrite the text after
+the operator read it. piggy does not and cannot provide that isolation
+from inside the agent; it is a property of how clown and posh arrange
+the operator's session. Until it holds, the defence is that the real
+prompt comes only from the card agent's own askpass, visibly classed
+(`PIGGY_ASKPASS_KIND`), and that the card never signs anything the card
+agent did not hash. FDR 0006 ("Scopes: frontend and agent") states the
+principle: the operator's tty is privileged in both directions, the
+structural twin of the signed XMPP message, and the two together are
+what "the operator saw it" and "the operator said it" rest on.
 
 **Displayability.** Control characters and oversize texts are refused
 (§2.5) because terminal escape sequences could reflow or hide text at
@@ -438,8 +502,8 @@ Tests use binary injection via `bats-emo`:
 | §2.4, refuse when attestation unavailable | `operator_act_policy.bats` | today's fibby (`ATTEST` → 6A80) yields `refused-policy` |
 | §2.4, refuse a PIN-once/touch-cached slot | `operator_act_policy.bats` | fibby slot attesting 9A defaults yields `refused-policy` (phase (c)) |
 | §2.5, displayability | `operator_act_text.bats` | empty, oversize, control-character and invalid-UTF-8 texts yield `refused-text` |
-| §2.6, prompt carries text and namespace | `operator_act_prompt.bats` | the test askpass banner shows `operator act`, the namespace and the verbatim text |
-| §2.7, verifies with `ssh-keygen -Y verify` | `operator_act_sign.bats` | the returned blob, armored, verifies under the slot key and `-n piggy-operator_act-v1` |
+| §2.6, prompt carries class, text and namespace | `operator_act_prompt.bats` | the test askpass sees `PIGGY_ASKPASS_KIND` equal to the namespace's display class and its banner shows the namespace and the verbatim text |
+| §2.7, verifies with `ssh-keygen -Y verify` | `operator_act_sign.bats` | the returned blob, armored, verifies under the slot key and `-n piggy-quote-v1` |
 | §2.8, proxy forwards unchanged, never prompts | `operator_act_proxy.bats` | a `--proxy-only` front relays request and response byte-for-byte; the prompt fires in the card agent only |
 | §3, namespace registry | `operator_act_refusals.bats` | `git`, `file`, `piggy-record-v1` and an unregistered name yield `refused-namespace` |
 | §5, attestation bundle shape | `attestation_bundle.bats` | the export has exactly the five parts in order and the three key spellings agree |
