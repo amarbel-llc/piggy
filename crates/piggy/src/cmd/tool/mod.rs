@@ -48,9 +48,11 @@
 //!   then PUT DATA; matches C `cmd_write_cert`). The current key comes from
 //!   `-K` (`default` or hex). Ported for the cert-holding slots 9A/9C/9D/9E;
 //!   retired and other slots fall through to C.
-//! - `piggy tool generate <slot> -a <alg>` — generate a new key pair
-//!   (GENERATE ASYMMETRIC under mgmt auth), self-sign a minimal cert for it
-//!   (PIN-gated), and print the new public key (matches C `cmd_generate`).
+//! - `piggy tool generate <slot> -a <alg> [-i <pin-policy>] [-t <touch-policy>]`
+//!   — generate a new key pair (GENERATE ASYMMETRIC under mgmt auth),
+//!   self-sign a minimal cert for it (PIN-gated), and print the new public
+//!   key (matches C `cmd_generate`). `-i`/`-t` set the YubicoPIV PIN and touch
+//!   policy; without them no policy tag is sent.
 //!   Modeled for the EC algorithms `eccp256`/`eccp384` on slots 9A/9C/9D/9E;
 //!   RSA/Ed25519 and other slots fall through to C. Needs `-K` (mgmt) and a
 //!   PIN (`-P` or askpass, for the self-sign).
@@ -91,7 +93,7 @@
 
 use std::io::{Read, Write};
 
-use piggy_piv::{PivAlgorithm, PivContext, PivToken};
+use piggy_piv::{PinPolicy, PivAlgorithm, PivContext, PivToken, TouchPolicy};
 
 /// One parsed `piggy tool` invocation: the general options piggy models,
 /// the operation, and its positional arguments.
@@ -116,6 +118,11 @@ struct Invocation {
     /// `-n <cn>`: the CSR subject common name for `req-cert`. Only `req-cert`
     /// reads it; when absent it defaults to `<slot-name>@<short-guid>`.
     cn: Option<String>,
+    /// `-i <policy>`: pivy-tool's PIN policy for a key `generate` creates.
+    /// Absent means the card's default for the slot (no policy tag sent).
+    pin_policy: PinPolicy,
+    /// `-t <policy>`: pivy-tool's touch policy for a key `generate` creates.
+    touch_policy: TouchPolicy,
     op: String,
     positionals: Vec<String>,
 }
@@ -132,6 +139,9 @@ fn parse(args: &[String]) -> Option<Invocation> {
     let mut json = false;
     let mut force = false;
     let mut cn = None;
+    let mut pin_policy = PinPolicy::Default;
+    let mut touch_policy = TouchPolicy::Default;
+    let mut policy_given = false;
     let mut i = 0;
     // Leading options (pivy-tool style: options precede the operation).
     while i < args.len() {
@@ -174,6 +184,19 @@ fn parse(args: &[String]) -> Option<Invocation> {
                 cn = Some(args.get(i + 1)?.clone());
                 i += 2;
             }
+            // pivy-tool's key policy options; only `generate` consumes them.
+            // An unknown policy name is a usage error, like any unmodeled
+            // option.
+            "-i" => {
+                pin_policy = args.get(i + 1)?.parse().ok()?;
+                policy_given = true;
+                i += 2;
+            }
+            "-t" => {
+                touch_policy = args.get(i + 1)?.parse().ok()?;
+                policy_given = true;
+                i += 2;
+            }
             // Any other flag is not modeled here — `None` becomes a usage
             // error in `run` (the 3.6 cutover; no C fallback).
             _ => return None,
@@ -209,6 +232,12 @@ fn parse(args: &[String]) -> Option<Invocation> {
     // (parseable) stay a usage error pointing at `piggy pivy tool list`, so an
     // unmodeled `-p` and a no-`-j` `list` both fall through here.
     if op == "list" && !json {
+        return None;
+    }
+    // Only `generate` applies a key policy. Accepting `-i`/`-t` elsewhere
+    // (e.g. on `import`) would leave the operator believing a policy was set
+    // on a key that got the card default.
+    if policy_given && op != "generate" {
         return None;
     }
     let positionals = args[i + 1..].to_vec();
@@ -275,6 +304,8 @@ fn parse(args: &[String]) -> Option<Invocation> {
         alg,
         force,
         cn,
+        pin_policy,
+        touch_policy,
         op,
         positionals,
     })
@@ -1214,7 +1245,12 @@ fn cmd_generate(inv: &Invocation) -> i32 {
         eprintln!("piggy tool {op}: failed to authenticate with current admin key: {e}");
         return 1;
     }
-    let point = match session.generate_key(slot_id, alg_byte, None, None) {
+    let point = match session.generate_key(
+        slot_id,
+        alg_byte,
+        inv.pin_policy.generate_tag_byte(),
+        inv.touch_policy.generate_tag_byte(),
+    ) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("piggy tool {op}: key generation failed: {e}");
@@ -1231,7 +1267,9 @@ fn cmd_generate(inv: &Invocation) -> i32 {
         &point,
         algorithm,
         &format!("PIV slot {slot_id:02X}"),
-        |digest| session.sign_prehash(slot_id, digest),
+        // The slot has no certificate yet, so the algorithm cannot be read
+        // back from one: pass the one the key was just generated with.
+        |digest| session.sign_prehash_with_alg(slot_id, alg_byte, digest),
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -1832,6 +1870,32 @@ mod tests {
         assert!(parse(&argv(&["-a", "ed25519", "generate", "9a"])).is_none()); // Ed25519 -> C
         assert!(parse(&argv(&["-a", "eccp256", "generate", "82"])).is_none()); // retired slot
         assert!(parse(&argv(&["-a", "eccp256", "generate"])).is_none()); // no slot
+        // generate's policy options take pivy-tool's names only.
+        let inv = parse(&argv(&[
+            "-a", "eccp256", "-i", "always", "-t", "cached", "generate", "9c",
+        ]))
+        .expect("-i/-t are modeled");
+        assert_eq!(inv.pin_policy, super::PinPolicy::Always);
+        assert_eq!(inv.touch_policy, super::TouchPolicy::Cached);
+        let inv = parse(&argv(&["-a", "eccp256", "generate", "9c"])).unwrap();
+        assert_eq!(inv.pin_policy, super::PinPolicy::Default);
+        assert_eq!(inv.touch_policy, super::TouchPolicy::Default);
+        assert!(
+            parse(&argv(&[
+                "-a",
+                "eccp256",
+                "-i",
+                "sometimes",
+                "generate",
+                "9c"
+            ]))
+            .is_none()
+        );
+        assert!(parse(&argv(&["-a", "eccp256", "-t", "once", "generate", "9c"])).is_none());
+        // ...and only generate takes them: an import must not look as if it
+        // honoured a policy it ignores.
+        assert!(parse(&argv(&["-i", "always", "import", "9c"])).is_none());
+        assert!(parse(&argv(&["-t", "default", "pubkey", "9c"])).is_none());
         // import claims only cert slots (key type is checked in cmd_import).
         assert!(parse(&argv(&["import", "82"])).is_none()); // retired slot
         assert!(parse(&argv(&["import"])).is_none()); // no slot

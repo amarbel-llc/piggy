@@ -476,14 +476,38 @@ commands:
 	piggy sign-bytes --slot 9a --guid DEADBEEF... < message > sig.raw
 	```
 
-*card init* [*--serial* _N_|*--guid* _HEX_|*--reader* _NAME_] [*--allow-reprovision*] [*--seal-management-key*[=_PASS-NAME_]|*--no-seal-management-key*] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]
+*card init* [*--serial* _N_|*--guid* _HEX_|*--reader* _NAME_] [*--allow-reprovision*] [*--pin-policy* _SLOT_=_POLICY_]... [*--touch-policy* _SLOT_=_POLICY_]... [*--seal-management-key*[=_PASS-NAME_]|*--no-seal-management-key*] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]
 	Provision a factory-blank PIV card in one step: write the CHUID (a fresh
 	random GUID), generate slot 9D (Key Management / ECDH — piggy's decrypt
-	recipient) and slot 9A (PIV Authentication — the SSH-auth key) as ECDSA
-	P-256, build and card-sign a self-signed certificate for each (CN
-	_piv-key-mgmt@<guid8>_ / _piv-auth@<guid8>_), change the PIN and PUK off
+	recipient), slot 9A (PIV Authentication — the SSH-auth key) and slot 9C
+	(Digital Signature — the operator-act key) as ECDSA P-256, build and
+	card-sign a self-signed certificate for each (CN _piv-key-mgmt@<guid8>_ /
+	_piv-auth@<guid8>_ / _piv-sign@<guid8>_), change the PIN and PUK off
 	their factory defaults, and rotate the management key. The provisioned GUID
 	is printed to stdout.
+
+	Each key is generated with a PIN policy and a touch policy. 9A is PIN
+	_once_, touch _cached_: one PIN per session, and one touch covers a
+	burst of logins. 9C is PIN _always_, touch _always_: every signature is
+	a deliberate act, which is what an operator act requires. 9D keeps the
+	card's own default, as before.
+
+	Because each certificate is signed by its own new key, the card asks for a
+	touch while 9A's and 9C's certificates are signed; piggy says when. A
+	touch that is not given in time stops the command with the card partly
+	provisioned and still on its factory PIN, PUK and management key; the
+	error says so, and *card init --allow-reprovision* starts again.
+
+	*--pin-policy* _SLOT_=_POLICY_ and *--touch-policy* _SLOT_=_POLICY_
+	override one slot each and may be repeated. _SLOT_ is _9a_, _9c_ or _9d_.
+	PIN policies are _default_, _never_, _once_, _always_; touch policies are
+	_default_, _never_, _always_, _cached_. _default_ sends no policy to the
+	card. A 9C that is not PIN _always_ and touch _always_ cannot serve
+	operator acts; piggy warns when it provisions one.
+
+	Policies are a YubiKey feature. On any other PIV card piggy sends none,
+	the keys get the card's own defaults, and piggy warns that the card cannot
+	serve operator acts.
 
 	*--serial* _N_ selects the card by its YubiKey serial; with exactly one
 	factory-blank card attached it is optional, and required only to
@@ -521,7 +545,75 @@ commands:
 	piggy card init
 	piggy card init --serial 15909078
 	piggy card init --seal-management-key
+	piggy card init --touch-policy 9a=never
 	piggy card init --frontend jsonrpc --socket /run/user/1000/piggy-ui.sock
+	```
+
+*card add-key* _SLOT_ [*--pin-policy* _POLICY_] [*--touch-policy* _POLICY_] [*--replace*] [*--management-key-from-store*[=_PASS-NAME_]] [*--serial* _N_|*--guid* _HEX_|*--reader* _NAME_] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]
+	Add one key to a card that is already provisioned, and change nothing
+	else: no other slot, not the PIN, the PUK or the management key. _SLOT_
+	is _9c_ or _9a_.
+
+	*card add-key 9c* gives a card provisioned before piggy generated 9C the
+	operator-act key: PIN _always_, touch _always_ unless overridden. *card
+	add-key 9a --replace* generates a new SSH key (PIN _once_, touch _cached_);
+	everything that trusts the old one must be given the new one. Slot _9d_
+	is refused: the password store is encrypted to its key, and a new key
+	could not decrypt it.
+
+	A slot that already holds a key is refused unless *--replace* is given;
+	with it, piggy asks for confirmation and the old key is destroyed. piggy
+	recognises a slot's key by the slot's certificate, as every piggy
+	command does: a key whose certificate was deleted looks like an empty
+	slot and is replaced without *--replace*.
+
+	If the command stops after the new key is generated (most likely a touch
+	that was not given in time), the slot holds a key without a certificate
+	and any key it held before is gone; the error says so, and running the
+	command again with *--replace* finishes the job.
+
+	The command needs the card's current management key and its PIN, and a
+	touch if the new key has a touch policy. The management key is asked for
+	through the frontend (48 hex digits, or the word _default_ for a card
+	still on the factory key). *--management-key-from-store* reads it from
+	the password store instead: from _PASS-NAME_, or from
+	_piv/<GUID>/management-key_, where *card init --seal-management-key*
+	puts it. Reading it is a normal store decrypt and may ask for a PIN.
+
+	The new public key is printed to stdout as an OpenSSH line with the
+	comment *PIV\_slot\_*_SLOT_*@*_GUID_. Exit status is 2 for a request that is
+	wrong whatever card is attached (slot _9d_, an unknown slot, conflicting
+	selectors) and 1 for any other failure.
+
+	```
+	piggy card add-key 9c
+	piggy card add-key 9c --management-key-from-store
+	piggy card add-key 9a --replace --serial 15909078
+	```
+
+*card export-attestation* [_SLOT_] [*--serial* _N_|*--guid* _HEX_|*--reader* _NAME_]
+	Print the attestation bundle for a slot's key (RFC 0012 section 5), to
+	publish beside the key. _SLOT_ is _9c_ (the default, the operator-act
+	key) or _9a_. Read-only; needs no PIN and no touch.
+
+	The bundle is a text document: a header line, a _# key_ line with the
+	key's markl id, the key as an OpenSSH line (its comment names the slot
+	and the card: *PIV\_slot\_9C card:5da19c98*), the card's attestation
+	certificate for the key, and the
+	card's own attestation certificate (slot F9), both as PEM. With it a
+	verifier can check that the key was generated on a YubiKey and read its
+	PIN and touch policy; the verifier supplies the Yubico root itself.
+
+	Only a key generated on a YubiKey can be attested. A key that was
+	imported, or a card that is not a YubiKey, fails with the card's answer.
+	piggy checks before printing that the attestation is for the slot's key
+	and is signed by the card's attestation certificate, and prints nothing
+	otherwise. Exit status is 2 for an unknown slot or conflicting
+	selectors and 1 for any other failure.
+
+	```
+	piggy card export-attestation > 9c.attestation
+	piggy card export-attestation 9a --serial 15909078
 	```
 
 *help*
@@ -537,7 +629,8 @@ commands:
 *health* [*--format* _auto_|_tap_|_ndjson_] [*-v*, *--verbose*] [*--sign-test*]
 	Read-only, PIN-free checks of the piggy layer: the agent socket, its
 	identities and the *ecdh@joyent.com* extension, pcscd, attached cards
-	and their 9D slots, and the agent's service unit. Nine fixed points;
+	and their 9D slots, and the agent's service unit. Nine fixed points,
+	then the conditional ones described below;
 	TAP-14 on a tty, tap-ndjson(7) otherwise; exit 0 iff no point fails
 	(SKIPs count as ok). *-v* attaches the diagnostic block to every
 	point.
@@ -549,7 +642,18 @@ commands:
 	upstreams are treated as alternatives: a dead one SKIPs while another
 	is live and FAILs only when none is. The service point probes the unit
 	the agent names via *--service-name*, else the platform default. A
-	final point reports the agent's presence mode (event-driven or poll).
+	further point reports the agent's presence mode (event-driven or poll).
+
+	Each attached card then gets two points. The first names the PIN and
+	touch policy the card attests for slots 9A, 9C and 9D, for example
+	_card 5DA19C98: slot policies: 9A PIN once, touch cached; 9C PIN always,
+	touch always; 9D not attested_; a slot is _not attested_ when its key
+	was imported rather than generated on the card, or the card is not a
+	YubiKey (*-v* shows the card's answer). The second, _can sign operator
+	acts_, passes when 9C is attested PIN always and touch always. A card
+	that cannot is flagged with a SKIP whose reason begins _no:_ and says
+	why (9C empty, a weaker policy, or no attestation); it is not a
+	failure, and *card add-key 9c* is the remedy for an empty 9C.
 
 	*--sign-test* adds an agent self-sign probe with every served identity
 	— the only path that exercises the private key and MAY prompt for a
@@ -559,8 +663,8 @@ commands:
 
 *manage* *--jsonrpc* [*--socket* _PATH_]
 	Run the headless JSON-RPC 2.0 management server (RFC 0007): piggy's
-	neutral management primitives *card.list*, *card.init* and
-	*sign_bytes* over stdio, or an *AF_UNIX* socket with *--socket*, so an
+	neutral management primitives *card.list*, *card.init*, *card.add_key*
+	and *sign_bytes* over stdio, or an *AF_UNIX* socket with *--socket*, so an
 	external program drives piggy without spawning subprocesses. After an
 	*initialize* handshake (*piggy-mgmt/1*) requests are served one at a
 	time until EOF. While an interactive method runs, piggy issues the RFC

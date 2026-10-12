@@ -9,8 +9,11 @@
 //! staying agnostic to which binding is in use. [`seal`] escrows a generated
 //! management key into the password store (piggy#258).
 
+pub mod add_key_cmd;
+pub mod attestation_cmd;
 pub mod engine;
 pub mod frontend;
 pub mod init_cmd;
 pub mod protocol;
 pub mod seal;
+pub mod slot_policy;

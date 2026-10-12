@@ -67,6 +67,8 @@ pub trait KeyEscrow {
 pub trait ManagementKeySealer {
     /// Resolve the recipients the store declares for `pass_name`.
     fn prepare(&self, pass_name: &str) -> Result<Box<dyn KeyEscrow>, String>;
+    /// Read back a management key sealed at `pass_name` (its hex text).
+    fn recover(&self, pass_name: &str) -> Result<zeroize::Zeroizing<String>, String>;
 }
 
 /// A sealer with no store behind it; every seal request fails.
@@ -77,6 +79,9 @@ pub struct NoStore;
 impl ManagementKeySealer for NoStore {
     fn prepare(&self, _: &str) -> Result<Box<dyn KeyEscrow>, String> {
         Err("no password store is available to seal into".into())
+    }
+    fn recover(&self, _: &str) -> Result<zeroize::Zeroizing<String>, String> {
+        Err("no password store is available to read from".into())
     }
 }
 

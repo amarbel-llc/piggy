@@ -22,6 +22,6 @@ pub use admin::DEFAULT_ADMIN_KEY;
 pub use context::PivContext;
 pub use error::PivError;
 pub use guid::Guid;
-pub use policy::{PinPolicy, TouchPolicy};
+pub use policy::{KeyPolicy, PinPolicy, TouchPolicy};
 pub use slot::{PivAlgorithm, PivSlot};
 pub use token::{PinSession, PivToken};

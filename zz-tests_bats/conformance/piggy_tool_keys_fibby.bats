@@ -13,6 +13,9 @@
 #     same key, so `generate 9a -a eccp256` prints the identical pubkey line
 #     (the self-signed cert side effect has a random serial and legitimately
 #     differs, so only the printed pubkey is compared).
+#   - generate -i/-t (piggy#303): with a PIN and touch policy, both impls send
+#     the same GENERATE ASYMMETRIC header and data field (the AA/AB policy
+#     tags), read from fibby's wire log;
 # Both are ported for the 9A/9C/9D/9E cert slots; generate models the EC
 # algorithms (eccp256/eccp384) only.
 #
@@ -114,6 +117,99 @@ function generate_9a_matches_c { # @test
   # Sanity: a P-256 pubkey line with the bare slot/GUID comment (no subject).
   [[ "$output" == "ecdsa-sha2-nistp256 "*" PIV_slot_9A@"* ]] \
     || fail "unexpected generate output: $output"
+}
+
+# Every command APDU with instruction byte INS (two lowercase hex digits) in
+# fibby's wire log, one per line as contiguous hex. The log hex-dumps each
+# command as `[fibby:apdu>] OFFSET  b0 b1 ... |ascii|`, 16 bytes a line, so
+# an APDU is the `0000` line plus the `apdu>` lines that follow it.
+_command_apdus_with_ins() {
+  awk -v ins="$1" '
+    $1 == "[fibby:apdu>]" {
+      if ($2 == "0000") {
+        if (grab) print ""
+        grab = ($4 == ins)
+      }
+      if (grab) for (i = 3; i <= NF && $i !~ /^\|/; i++) printf "%s", $i
+      next
+    }
+    grab { print ""; grab = 0 }
+    END { if (grab) print "" }
+  ' "$FIBBY_LOG"
+}
+
+# Diagnostic only: a command APDU (contiguous hex) reduced to `CLA INS P1 P2`
+# and its data field, whichever length encoding it used (short `Lc`, or
+# extended `00 LcHi LcLo`). Lets a failure message say whether two APDUs
+# that differ byte for byte still carry the same command.
+_apdu_header_and_data() {
+  local apdu="$1" header body lc
+  header="${apdu:0:8}"
+  body="${apdu:8}"
+  if [[ ${body:0:2} == 00 && ${#body} -gt 6 ]]; then
+    lc=$((16#${body:2:4}))
+    printf '%s %s' "$header" "${body:6:lc*2}"
+  else
+    lc=$((16#${body:0:2}))
+    printf '%s %s' "$header" "${body:2:lc*2}"
+  fi
+}
+
+# A fresh card for one side of generate_9c_with_policy_matches_c: both sides
+# get the same seeds and the same pinned 9C scalar. --auto-touch because the
+# self-signed cert is signed by the new touch-always key.
+_fresh_card_for_9c_generate() {
+  fibby_down
+  fibby_up --auto-touch --seed-rfc5903-slot-9d-cert --seed-chuid \
+    --generate-slot-9c-priv "$GEN_9A_SCALAR"
+}
+
+function generate_9c_with_policy_matches_c { # @test
+  # piggy#303: `-i <pin-policy>` / `-t <touch-policy>` are pivy-tool's own
+  # options (vendor/pivy/src/pivy-tool.c: `case 'i'` / `case 't'`), and they
+  # reach the card as the YubicoPIV AA/AB tags of GENERATE ASYMMETRIC. Each
+  # tool generates 9C with PIN always + touch always on its own fresh card;
+  # the printed key and the GENERATE command APDU must be identical.
+  #
+  # C's default 9C cert template (user-email) needs an `email` cert variable,
+  # hence its -D; that only shapes the self-signed cert, which is not compared.
+  _fresh_card_for_9c_generate
+  run bash -c "'$REAL_PIVY_TOOL' -P 123456 -a eccp256 -i always -t always \
+    -D email=piggy-test@example.invalid generate 9c 2>'$BATS_TEST_TMPDIR/c.err'"
+  [[ $status -eq 0 ]] || fail "C generate 9c failed: $(cat "$BATS_TEST_TMPDIR/c.err"; tail -40 "$FIBBY_LOG")"
+  local c_out="$output" c_apdu
+  c_apdu="$(_command_apdus_with_ins 47)"
+
+  _fresh_card_for_9c_generate
+  run bash -c "'$PIGGY' tool -P 123456 -a eccp256 -i always -t always generate 9c \
+    2>'$BATS_TEST_TMPDIR/piggy.err'"
+  local p_status="$status" p_out="$output" p_apdu
+  p_apdu="$(_command_apdus_with_ins 47)"
+
+  # Exactly one GENERATE each, for slot 9C, carrying AA 01 03 (PIN always)
+  # and AB 01 02 (touch always).
+  [[ -n $c_apdu && $c_apdu != *$'\n'* ]] || fail "C sent not exactly one GENERATE: [$c_apdu]"
+  [[ $c_apdu == 0047009c* && $c_apdu == *aa0103* && $c_apdu == *ab0102* ]] \
+    || fail "C's GENERATE does not carry the 9C policy tags: $c_apdu"
+
+  # Every check below runs, so one failure does not hide another.
+  local problems=()
+  # Compared as header + data field. The framing legitimately differs: C sends
+  # every command extended-length with an Le to a card that advertises it,
+  # piggy sends a short APDU; what the card is asked to do is the same bytes.
+  [[ "$(_apdu_header_and_data "$p_apdu")" == "$(_apdu_header_and_data "$c_apdu")" ]] || problems+=(
+    "GENERATE differs: C=[$c_apdu] piggy=[$p_apdu] (header+data field: C=[$(_apdu_header_and_data "$c_apdu")] piggy=[$(_apdu_header_and_data "$p_apdu")])"
+  )
+  # The card stored what piggy's APDU asked for.
+  [[ $(grep -c 'GENERATE slot=0x9c ECCP256 -> 9000 (.*policy pin=03 touch=02)' "$FIBBY_LOG") -eq 1 ]] ||
+    problems+=("piggy's card did not record one 9C GENERATE with pin=03 touch=02")
+  [[ $p_status -eq 0 ]] ||
+    problems+=("piggy tool generate 9c exited $p_status: $(cat "$BATS_TEST_TMPDIR/piggy.err")")
+  [[ "$p_out" == "$c_out" ]] ||
+    problems+=("generate pubkey differs: C=[$c_out] piggy=[$p_out]")
+  [[ "$p_out" == "ecdsa-sha2-nistp256 "*" PIV_slot_9C@"* ]] ||
+    problems+=("unexpected generate output: $p_out")
+  [[ ${#problems[@]} -eq 0 ]] || fail "$(printf '%s\n' "${problems[@]}")"
 }
 
 function import_installs_same_key_as_c { # @test

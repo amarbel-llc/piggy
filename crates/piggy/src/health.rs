@@ -114,11 +114,35 @@ pub enum SlotProbe {
     Error(String),
 }
 
-/// One attached card's identity-relevant facts (points 7–8).
+/// What a slot's attestation says about its key's PIN and touch policy
+/// (FDR 0006). The attestation is the only source: it is what a verifier of
+/// an operator act will be shown, so health reports the same thing.
+pub enum PolicyProbe {
+    Attested(piggy_piv::KeyPolicy),
+    /// The slot holds no key.
+    Empty,
+    /// The slot holds a key the card will not attest (imported rather than
+    /// generated on the card, or not a YubiKey), or the read failed.
+    Unattested(String),
+}
+
+pub struct SlotPolicy {
+    pub slot: u8,
+    pub policy: PolicyProbe,
+}
+
+/// The slots whose policy health reports, in report order.
+const POLICY_SLOTS: [u8; 3] = [0x9A, 0x9C, 0x9D];
+
+/// One attached card's identity-relevant facts (points 7–8) and its slot
+/// policies (the per-card points after the base nine).
 pub struct CardInfo {
     pub reader: String,
     pub guid: String,
     pub slot_9d: SlotProbe,
+    /// Empty when the policies were not probed; then no policy points are
+    /// reported for the card.
+    pub policies: Vec<SlotPolicy>,
 }
 
 /// Everything `evaluate` needs. `None` = probe not attempted because a
@@ -439,9 +463,29 @@ fn probe_cards() -> (PcscProbe, Option<Vec<CardInfo>>) {
                 Err(piggy_piv::PivError::SlotEmpty(_)) => SlotProbe::Empty,
                 Err(e) => SlotProbe::Error(e.to_string()),
             },
+            policies: POLICY_SLOTS
+                .iter()
+                .map(|&slot| SlotPolicy {
+                    slot,
+                    policy: probe_slot_policy(&t, slot),
+                })
+                .collect(),
         })
         .collect();
     (PcscProbe::Ok, Some(cards))
+}
+
+/// Read one slot's policy from its attestation. PIN-free: a cert read to
+/// tell an empty slot from a full one, then the YubiKey ATTEST instruction.
+fn probe_slot_policy(token: &piggy_piv::PivToken, slot: u8) -> PolicyProbe {
+    match token.read_slot(slot) {
+        Err(piggy_piv::PivError::SlotEmpty(_)) => PolicyProbe::Empty,
+        Err(e) => PolicyProbe::Unattested(format!("slot read failed: {e}")),
+        Ok(_) => match token.read_slot_policy(slot) {
+            Ok((pin, touch)) => PolicyProbe::Attested(piggy_piv::KeyPolicy { pin, touch }),
+            Err(e) => PolicyProbe::Unattested(e.to_string()),
+        },
+    }
 }
 
 /// Probe phase: run every probe defensively and short-circuit
@@ -1063,7 +1107,68 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
 
     push_upstream_points(&mut out, probes, false);
     push_presence_point(&mut out, probes);
+    push_policy_points(&mut out, probes);
     out
+}
+
+/// FDR 0006: two points per attached card, after every other point so the
+/// base and upstream points keep their indexes. The first names each slot's
+/// attested PIN and touch policy. The second says whether the card can sign
+/// operator acts, which takes a 9C key attested PIN-always and touch-always;
+/// a card that cannot is flagged with a SKIP carrying the reason, not a
+/// failure: it is a card that predates the 9C key, not a broken one, and
+/// its SSH and decrypt paths are healthy.
+fn push_policy_points(out: &mut Vec<CheckResult>, probes: &Probes) {
+    let Some(cards) = &probes.cards else {
+        return;
+    };
+    for card in cards.iter().filter(|c| !c.policies.is_empty()) {
+        let short: String = card.guid.chars().take(8).collect();
+        let describe = |p: &PolicyProbe| match p {
+            PolicyProbe::Attested(policy) => policy.to_string(),
+            PolicyProbe::Empty => "empty".to_string(),
+            PolicyProbe::Unattested(_) => "not attested".to_string(),
+        };
+        let summary: Vec<String> = card
+            .policies
+            .iter()
+            .map(|s| format!("{:02X} {}", s.slot, describe(&s.policy)))
+            .collect();
+        out.push(CheckResult {
+            name: format!("card {short}: slot policies: {}", summary.join("; ")),
+            status: Status::Pass,
+            diags: card
+                .policies
+                .iter()
+                .filter_map(|s| match &s.policy {
+                    PolicyProbe::Unattested(why) => {
+                        Some((format!("{:02x}_not_attested", s.slot), why.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        });
+
+        let signature = card.policies.iter().find(|s| s.slot == 0x9C);
+        let status = match signature.map(|s| &s.policy) {
+            Some(PolicyProbe::Attested(policy)) if policy.serves_operator_acts() => Status::Pass,
+            Some(PolicyProbe::Attested(policy)) => Status::Skip(format!(
+                "no: slot 9C is {policy}, not PIN always, touch always"
+            )),
+            Some(PolicyProbe::Unattested(_)) => Status::Skip(
+                "no: the card cannot attest its 9C key (not generated on this card, or not a YubiKey)"
+                    .into(),
+            ),
+            Some(PolicyProbe::Empty) | None => {
+                Status::Skip("no: slot 9C is empty (add the key with `piggy card add-key 9c`)".into())
+            }
+        };
+        out.push(CheckResult {
+            name: format!("card {short}: can sign operator acts"),
+            status,
+            diags: vec![],
+        });
+    }
 }
 
 /// piggy#248/#255: append an informational point naming the agent's
@@ -1216,6 +1321,7 @@ mod tests {
                 reader: "Yubico YubiKey CCID 00 00".into(),
                 guid: "DEADBEEFDEADBEEF".into(),
                 slot_9d: SlotProbe::Populated,
+                policies: vec![],
             }]),
         }
     }
@@ -1525,6 +1631,99 @@ mod tests {
         assert!(matches!(results[8].status, Status::Skip(_)));
     }
 
+    // -------- FDR 0006: slot policies and the operator-act verdict --------
+
+    fn probes_with_9c(policy_9c: PolicyProbe) -> Probes {
+        use piggy_piv::{KeyPolicy, PinPolicy, TouchPolicy};
+        let mut probes = healthy_probes();
+        probes.cards = Some(vec![CardInfo {
+            reader: "Yubico YubiKey CCID 00 00".into(),
+            guid: "5DA19C98AAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            slot_9d: SlotProbe::Populated,
+            policies: vec![
+                SlotPolicy {
+                    slot: 0x9A,
+                    policy: PolicyProbe::Attested(KeyPolicy {
+                        pin: PinPolicy::Once,
+                        touch: TouchPolicy::Cached,
+                    }),
+                },
+                SlotPolicy {
+                    slot: 0x9C,
+                    policy: policy_9c,
+                },
+                SlotPolicy {
+                    slot: 0x9D,
+                    policy: PolicyProbe::Unattested("card error: SW 6A80".into()),
+                },
+            ],
+        }]);
+        probes
+    }
+
+    fn skip_reason(r: &CheckResult) -> &str {
+        match &r.status {
+            Status::Skip(why) => why,
+            _ => panic!("{} is not a SKIP", r.name),
+        }
+    }
+
+    #[test]
+    fn policy_points_follow_the_base_nine_and_name_every_slot() {
+        let results = evaluate(&probes_with_9c(PolicyProbe::Attested(
+            piggy_piv::KeyPolicy::OPERATOR_ACT,
+        )));
+        assert_eq!(results.len(), 11, "two points for the one card");
+        assert_eq!(
+            results[9].name,
+            "card 5DA19C98: slot policies: 9A PIN once, touch cached; 9C PIN always, touch always; 9D not attested"
+        );
+        assert!(matches!(results[9].status, Status::Pass));
+        assert_eq!(
+            results[9].diags,
+            vec![(
+                "9d_not_attested".to_string(),
+                "card error: SW 6A80".to_string()
+            )],
+            "why a slot is not attested is one -v away"
+        );
+        assert_eq!(results[10].name, "card 5DA19C98: can sign operator acts");
+        assert!(matches!(results[10].status, Status::Pass));
+        assert_eq!(exit_code(&results), 0);
+    }
+
+    #[test]
+    fn a_card_that_cannot_sign_operator_acts_is_flagged_without_failing_health() {
+        use piggy_piv::{KeyPolicy, PinPolicy, TouchPolicy};
+        for (policy_9c, needle) in [
+            (PolicyProbe::Empty, "slot 9C is empty"),
+            (
+                PolicyProbe::Attested(KeyPolicy {
+                    pin: PinPolicy::Once,
+                    touch: TouchPolicy::Never,
+                }),
+                "slot 9C is PIN once, touch never",
+            ),
+            (
+                PolicyProbe::Unattested("card error: SW 6D00".into()),
+                "cannot attest its 9C key",
+            ),
+        ] {
+            let results = evaluate(&probes_with_9c(policy_9c));
+            let verdict = &results[10];
+            assert_eq!(verdict.name, "card 5DA19C98: can sign operator acts");
+            let why = skip_reason(verdict);
+            assert!(why.starts_with("no: ") && why.contains(needle), "{why}");
+            assert_eq!(exit_code(&results), 0, "a flag, not a failure");
+        }
+    }
+
+    #[test]
+    fn unprobed_policies_add_no_points() {
+        // healthy_probes' card carries no policy probes: the plan stays nine.
+        assert_eq!(evaluate(&healthy_probes()).len(), 9);
+    }
+
     /// Matrix row 1: fully-populated healthy probes → all 9 Pass.
     #[test]
     fn healthy_probes_all_pass() {
@@ -1553,11 +1752,13 @@ mod tests {
                 reader: "Yubico YubiKey CCID 00 00".into(),
                 guid: "AAAA".into(),
                 slot_9d: SlotProbe::Populated,
+                policies: vec![],
             },
             CardInfo {
                 reader: "Yubico YubiKey CCID 01 00".into(),
                 guid: "BBBB".into(),
                 slot_9d: SlotProbe::Populated,
+                policies: vec![],
             },
         ]);
         let results = evaluate(&probes);
@@ -1595,6 +1796,7 @@ mod tests {
             reader: "Yubico YubiKey CCID 00 00".into(),
             guid: "DEADBEEFDEADBEEF".into(),
             slot_9d: SlotProbe::Error("pcsc transport error".into()),
+            policies: vec![],
         }]);
         probes.agent = Some(Ok(vec!["card-a".into()]));
         let results = evaluate(&probes);

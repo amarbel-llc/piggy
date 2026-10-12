@@ -177,7 +177,7 @@ enum Command {
     /// Run the headless JSON-RPC management server (RFC 0007).
     ///
     /// Exposes piggy's neutral management primitives (`card.list`,
-    /// `card.init`, `sign_bytes`) as JSON-RPC methods over stdio (default) or
+    /// `card.init`, `card.add_key`, `sign_bytes`) as JSON-RPC methods over stdio (default) or
     /// an `AF_UNIX` socket (`--socket`), so an external program (e.g. papi,
     /// piggy#203; a GUI, piggy#202) drives piggy headless without spawning CLI
     /// subprocesses. While a method runs, piggy issues the RFC 0006 interaction
@@ -439,9 +439,13 @@ struct CardArgs {
 
 #[derive(Subcommand, Debug)]
 enum CardCommand {
-    /// Provision a factory-blank PIV card: write CHUID, generate 9D + 9A keys
-    /// with self-signed certs, change PIN + PUK off the defaults, and rotate
-    /// the management key (piggy#194). Operator interaction runs through the
+    /// Provision a factory-blank PIV card: write CHUID, generate 9D, 9A and
+    /// 9C keys with self-signed certs, change PIN + PUK off the defaults, and
+    /// rotate the management key (piggy#194). 9A is generated PIN once /
+    /// touch cached and 9C PIN always / touch always, so 9C can sign operator
+    /// acts; expect to touch the card twice while it signs their
+    /// certificates. A card that is not a YubiKey gets its own defaults and
+    /// cannot serve operator acts. Operator interaction runs through the
     /// selected frontend (RFC 0006).
     Init {
         /// YubiKey serial of the card to provision. Optional: with one blank
@@ -463,12 +467,23 @@ enum CardCommand {
         reader: Option<String>,
         /// Also accept an already-initialized card-in-hand and re-provision it
         /// (piggy#204). Without this, only a factory-blank card is eligible.
-        /// Reprovision overwrites the card's 9A + 9D keys/certs and resets
+        /// Reprovision overwrites the card's 9A + 9C + 9D keys/certs and resets
         /// PIN/PUK/management key, behind a destructive-overwrite confirm; it
         /// requires the card to still be at its factory-default credentials
         /// (a card whose creds were rotated fails at admin-auth).
         #[arg(long = "allow-reprovision")]
         allow_reprovision: bool,
+        /// Override one slot's PIN policy: SLOT is 9a, 9c or 9d; POLICY is
+        /// default, never, once or always. Repeatable. `default` sends no
+        /// policy to the card. A 9c other than `always` cannot serve operator
+        /// acts.
+        #[arg(long = "pin-policy", value_name = "SLOT=POLICY")]
+        pin_policy: Vec<String>,
+        /// Override one slot's touch policy: SLOT is 9a, 9c or 9d; POLICY is
+        /// default, never, always or cached. Repeatable. A 9c other than
+        /// `always` cannot serve operator acts.
+        #[arg(long = "touch-policy", value_name = "SLOT=POLICY")]
+        touch_policy: Vec<String>,
         /// Seal the generated management key into the password store instead
         /// of displaying it (piggy#258). It is encrypted to the recipients the
         /// store's piggy-ids declares for PASS-NAME (default
@@ -495,6 +510,81 @@ enum CardCommand {
         /// (and only used) when `--frontend jsonrpc`.
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
+    },
+    /// Add one key to an already-provisioned card, leaving every other slot,
+    /// the PIN, the PUK and the management key alone. `add-key 9c` gives an
+    /// existing card the operator-act key (PIN always, touch always);
+    /// `add-key 9a --replace` regenerates the SSH key. 9D is never
+    /// regenerated. Needs the card's current management key and PIN, and a
+    /// touch when the new key has a touch policy. Prints the new public key.
+    AddKey {
+        /// The slot to fill: 9c or 9a.
+        #[arg(value_name = "SLOT")]
+        slot: String,
+        /// PIN policy for the new key: default, never, once or always.
+        /// Defaults to always for 9c and once for 9a.
+        #[arg(long = "pin-policy", value_name = "POLICY")]
+        pin_policy: Option<String>,
+        /// Touch policy for the new key: default, never, always or cached.
+        /// Defaults to always for 9c and cached for 9a.
+        #[arg(long = "touch-policy", value_name = "POLICY")]
+        touch_policy: Option<String>,
+        /// Destroy the key the slot already holds and generate a new one.
+        /// Without this an occupied slot is refused.
+        #[arg(long)]
+        replace: bool,
+        /// Read the card's management key from the password store instead of
+        /// asking for it: PASS-NAME, or `piv/<GUID>/management-key` (where
+        /// `card init --seal-management-key` puts it) when no name is given.
+        #[arg(
+            long = "management-key-from-store",
+            value_name = "PASS-NAME",
+            num_args = 0..=1,
+            default_missing_value = ""
+        )]
+        management_key_from_store: Option<String>,
+        /// YubiKey serial of the card. Optional with one card attached.
+        /// Mutually exclusive with `--guid`/`--reader`.
+        #[arg(long)]
+        serial: Option<u32>,
+        /// Select the card by CHUID GUID (hex). Mutually exclusive with
+        /// `--serial`/`--reader`.
+        #[arg(long, conflicts_with_all = ["serial", "reader"])]
+        guid: Option<String>,
+        /// Select the card by PC/SC reader name. Mutually exclusive with
+        /// `--serial`/`--guid`.
+        #[arg(long, conflicts_with_all = ["serial", "guid"])]
+        reader: Option<String>,
+        /// Interaction frontend: `tty` (default, askpass) or `jsonrpc` (an
+        /// external program drives the prompts over `--socket`).
+        #[arg(long, value_enum, default_value_t = piggy::card::frontend::select::FrontendKind::Tty)]
+        frontend: piggy::card::frontend::select::FrontendKind,
+        /// `AF_UNIX` socket path the JSON-RPC frontend listens on. Required
+        /// (and only used) when `--frontend jsonrpc`.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
+    /// Print a slot's attestation bundle: its public key, the card's
+    /// attestation of that key, and the card's own attestation certificate
+    /// (RFC 0012 §5). Publish it beside the key so a verifier can check that
+    /// the key lives on a YubiKey and what PIN and touch policy it has. Needs
+    /// no PIN. Only a key generated on the card can be attested.
+    ExportAttestation {
+        /// The slot to export: 9c (the operator-act key) or 9a.
+        #[arg(value_name = "SLOT", default_value = "9c")]
+        slot: String,
+        /// YubiKey serial of the card. Optional with one card attached.
+        /// Mutually exclusive with `--guid`/`--reader`.
+        #[arg(long)]
+        serial: Option<u32>,
+        /// Select the card by CHUID GUID (hex). Mutually exclusive with
+        /// `--serial`/`--reader`.
+        #[arg(long, conflicts_with_all = ["serial", "reader"])]
+        guid: Option<String>,
+        /// Select the card by PC/SC reader name. Mutually exclusive with
+        /// `--serial`/`--guid`.
+        #[arg(long, conflicts_with_all = ["serial", "guid"])]
+        reader: Option<String>,
     },
 }
 
@@ -793,6 +883,8 @@ fn main() {
                 guid,
                 reader,
                 allow_reprovision,
+                pin_policy,
+                touch_policy,
                 seal_management_key,
                 no_seal_management_key,
                 frontend,
@@ -803,6 +895,8 @@ fn main() {
                     guid,
                     reader,
                     allow_reprovision,
+                    &pin_policy,
+                    &touch_policy,
                     piggy::card::seal::SealRequest {
                         mode: piggy::card::seal::SealMode::from_cli(
                             seal_management_key,
@@ -812,6 +906,43 @@ fn main() {
                     },
                     frontend,
                     socket.as_deref(),
+                )
+            })),
+            CardCommand::AddKey {
+                slot,
+                pin_policy,
+                touch_policy,
+                replace,
+                management_key_from_store,
+                serial,
+                guid,
+                reader,
+                frontend,
+                socket,
+            } => std::process::exit(piggy::stats::timed_card("add_key", || {
+                piggy::card::add_key_cmd::run(
+                    piggy::card::init_cmd::CardSelector::from_flags(serial, guid, reader),
+                    piggy::card::add_key_cmd::AddKeyArgs {
+                        slot: &slot,
+                        pin_policy: pin_policy.as_deref(),
+                        touch_policy: touch_policy.as_deref(),
+                        replace,
+                        management_key_from_store,
+                    },
+                    &seal_store::StoreSealer,
+                    frontend,
+                    socket.as_deref(),
+                )
+            })),
+            CardCommand::ExportAttestation {
+                slot,
+                serial,
+                guid,
+                reader,
+            } => std::process::exit(piggy::stats::timed_card("export_attestation", || {
+                piggy::card::attestation_cmd::run(
+                    piggy::card::init_cmd::CardSelector::from_flags(serial, guid, reader),
+                    &slot,
                 )
             })),
         },

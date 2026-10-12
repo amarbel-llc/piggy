@@ -54,6 +54,15 @@ banner() {
   printf '[piggy-test-askpass] %s\n' "$*" >&2
 }
 
+# A management-key prompt (`piggy card add-key`) wants a key, not a PIN.
+# PIGGY_TEST_FIB_MGMT_KEY answers that prompt only; without it the prompt
+# falls through to the PIN rule below, as before.
+if [[ -n ${PIGGY_TEST_FIB_MGMT_KEY:-} && $prompt == "Enter management key"* ]]; then
+  banner "supplying PIGGY_TEST_FIB_MGMT_KEY for prompt: $prompt (context: ${PIGGY_ASKPASS_CONTEXT:-<unset>})"
+  printf '%s\n' "$PIGGY_TEST_FIB_MGMT_KEY"
+  exit 0
+fi
+
 if [[ -n ${PIGGY_TEST_FIB_PIN:-} ]]; then
   # Surface PIGGY_ASKPASS_CONTEXT in the banner so tests can assert that a
   # caller (e.g. the Rust `piggy agent`, piggy#58) propagated request

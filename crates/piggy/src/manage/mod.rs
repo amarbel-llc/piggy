@@ -3,7 +3,8 @@
 //! An external program (papi, piggy#203; a GUI, piggy#202) drives piggy's
 //! neutral management primitives over a byte stream instead of spawning CLI
 //! subprocesses. This module is the **command** half (client → server: the
-//! client invokes `card.list` / `card.init` / `sign_bytes`); the RFC 0006
+//! client invokes `card.list` / `card.init` / `card.add_key` / `sign_bytes`);
+//! the RFC 0006
 //! **interaction** half (server → client: piggy issues the PIN/confirm/progress
 //! requests a running command needs) is the existing
 //! [`crate::card::frontend::jsonrpc::JsonRpcFrontend`], reused over the *same*
@@ -179,6 +180,17 @@ fn dispatch<R: BufRead, W: Write>(
                 let mut fe =
                     JsonRpcFrontend::already_initialized(&mut *reader, &mut *writer, "card init");
                 methods::card_init(params, &mut fe, sealer)
+            };
+            respond(writer, id, outcome)
+        }
+        "card.add_key" => {
+            let outcome = {
+                let mut fe = JsonRpcFrontend::already_initialized(
+                    &mut *reader,
+                    &mut *writer,
+                    "card add-key",
+                );
+                methods::card_add_key(params, &mut fe, sealer)
             };
             respond(writer, id, outcome)
         }

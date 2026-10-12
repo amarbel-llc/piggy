@@ -1,10 +1,11 @@
 //! The provisioning engine (piggy#194): orchestrates `piggy card init`
 //! full-setup against a card and a `&mut dyn Frontend`, binding-agnostic
 //! (RFC 0006). It owns the *sequence* — admin-auth, write CHUID, generate the
-//! 9D (key-management/ECDH) and 9A (PIV-auth) keys, build + card-sign + write
-//! their self-signed certs, change the PIN, change the PUK, and rotate the
-//! management key — issuing every human interaction through the frontend so the
-//! same flow runs under the tty or a remote TUI.
+//! 9D (key-management/ECDH), 9A (PIV-auth) and 9C (signature, the FDR 0006
+//! operator-act key) keys with their PIN and touch policies, build, card-sign
+//! and write their self-signed certs, change the PIN, change the PUK, and rotate
+//! the management key — issuing every human interaction through the frontend so
+//! the same flow runs under the tty or a remote TUI.
 //!
 //! The card-write surface is the [`ProvisionCard`] trait, so the orchestration
 //! is unit-testable against a mock card without hardware. The real
@@ -24,13 +25,14 @@
 use openssl::rand::rand_bytes;
 use zeroize::Zeroizing;
 
-use piggy_piv::{PivAlgorithm, PivError};
+use piggy_piv::{KeyPolicy, PinPolicy, PivAlgorithm, PivError};
 
 use crate::card::protocol::{
     CardId, CompletedEvent, CompletedStatus, ConfirmRequest, Frontend, FrontendError,
     MgmtKeyChoice, MgmtKeyRequest, ProgressEvent, SecretKind, SecretRequest,
 };
 use crate::card::seal::KeyEscrow;
+use crate::card::slot_policy::{SLOT_KEY_MGMT, SLOT_PIV_AUTH, SLOT_SIGNATURE, SlotPolicies};
 
 /// PIV factory-default application PIN (`123456`). A factory-blank card carries
 /// this; full-setup verifies it (so the card can sign its own certs) and then
@@ -39,11 +41,6 @@ const DEFAULT_PIN: &str = "123456";
 
 /// PIV factory-default PUK (`12345678`).
 const DEFAULT_PUK: &str = "12345678";
-
-/// The slots full-setup provisions: 9D (key management / ECDH — piggy's
-/// decrypt recipient) and 9A (PIV authentication — the SSH-auth key).
-const SLOT_KEY_MGMT: u8 = 0x9D;
-const SLOT_PIV_AUTH: u8 = 0x9A;
 
 /// The card-write surface the engine drives. A trait so the engine's
 /// orchestration is unit-testable against a mock; the real implementation
@@ -59,9 +56,17 @@ pub trait ProvisionCard {
     fn verify_pin(&mut self, pin: &str) -> Result<(), PivError>;
     /// Write the CHUID with the given 16-byte GUID (marks the card initialized).
     fn write_chuid(&mut self, guid: &[u8; 16]) -> Result<(), PivError>;
-    /// Generate a key pair in `slot`; returns the uncompressed public point
-    /// (`04 ‖ X ‖ Y`).
-    fn generate_key(&mut self, slot: u8, alg: PivAlgorithm) -> Result<Vec<u8>, PivError>;
+    /// Generate a key pair in `slot` with the given PIN and touch policy;
+    /// returns the uncompressed public point (`04 ‖ X ‖ Y`).
+    fn generate_key(
+        &mut self,
+        slot: u8,
+        alg: PivAlgorithm,
+        policy: KeyPolicy,
+    ) -> Result<Vec<u8>, PivError>;
+    /// The policy the card attests for `slot`'s key, or `None` when the card
+    /// cannot attest it (it is not a YubiKey).
+    fn attested_policy(&mut self, slot: u8) -> Option<KeyPolicy>;
     /// Sign a prehash with `slot`'s key using the given algorithm; returns a
     /// DER ECDSA signature (used to self-sign the slot's cert). `alg` is passed
     /// explicitly because here the key exists but its cert does not yet — so
@@ -82,11 +87,17 @@ pub trait ProvisionCard {
     fn set_management_key_3des(&mut self, key: &[u8]) -> Result<(), PivError>;
 }
 
-/// Engine configuration. Minimal for now; the CN convention
-/// (`piv-key-mgmt@<guid8>` / `piv-auth@<guid8>`) is derived from the generated
-/// GUID.
+/// Engine configuration. The CN convention (`piv-key-mgmt@<guid8>` /
+/// `piv-auth@<guid8>` / `piv-sign@<guid8>`, pivy-tool's slot names) is derived
+/// from the generated GUID.
 #[derive(Debug, Clone)]
 pub struct ProvisionConfig {
+    /// The PIN and touch policy each key is generated with.
+    pub policies: SlotPolicies,
+    /// Whether the card takes YubicoPIV policy tags. A card that does not
+    /// (any non-YubiKey PIV card) is provisioned with its own defaults
+    /// whatever `policies` says, and cannot serve operator acts.
+    pub accepts_policies: bool,
     /// 16-byte GUID to write into the CHUID (random in production; pinned by
     /// tests for determinism).
     pub guid: [u8; 16],
@@ -124,6 +135,10 @@ pub struct ProvisionOutcome {
     pub generated_mgmt_key: Option<Zeroizing<String>>,
     /// Where the generated management key was sealed, when it was.
     pub sealed_mgmt_key: Option<SealedKey>,
+    /// Whether the card attests its new 9C key as PIN-always and
+    /// touch-always, so it can serve operator acts (FDR 0006). Read back from
+    /// the attestation after generation, not taken from what was requested.
+    pub serves_operator_acts: bool,
 }
 
 /// Why a provision failed.
@@ -147,6 +162,10 @@ pub enum ProvisionError {
     PukMismatch,
     #[error("supplied management key is not valid 24-byte hex: {0}")]
     BadMgmtKey(String),
+    /// A card write failed after earlier writes had succeeded. The message
+    /// says what state the card was left in and what to run next.
+    #[error("{0}")]
+    Partial(String),
     /// Sealing the generated management key failed; the card's management key
     /// was left unrotated.
     #[error("sealing the management key failed (the card's management key was not rotated): {0}")]
@@ -159,23 +178,315 @@ fn slot_cn(prefix: &str, guid_hex: &str) -> String {
     format!("{prefix}@{short}")
 }
 
-/// Provision a single slot: generate the key, build + card-sign + write its
-/// self-signed cert. Factored out so the cert-signing closure's mutable borrow
-/// of `card` is cleanly scoped.
-fn provision_slot(card: &mut dyn ProvisionCard, slot: u8, cn: &str) -> Result<(), ProvisionError> {
-    let point = card.generate_key(slot, PivAlgorithm::EcP256)?;
-    let cert = piggy_piv::cert_builder::build_self_signed_cert(
-        &point,
-        PivAlgorithm::EcP256,
-        cn,
-        |digest| card.sign_prehash(slot, PivAlgorithm::EcP256, digest),
-    )?;
-    card.put_cert(slot, &cert)?;
-    Ok(())
+/// Provision a single slot: generate the key under `policy`, then build,
+/// card-sign and write its self-signed cert. `pin` is the card's current PIN.
+///
+/// The cert is signed by the new key itself, so the key's own policy applies
+/// to that signature: a PIN-always key needs the PIN verified immediately
+/// before it, and a touch-policy key makes the card wait for a touch.
+///
+/// Once the key is generated the slot's previous key is gone, so a failure
+/// after that point (most likely a missed touch) is reported as
+/// [`ProvisionError::Partial`], saying what the slot now holds and ending
+/// with `recovery`, the caller's advice on what to run next.
+pub(crate) fn provision_slot(
+    card: &mut dyn ProvisionCard,
+    fe: &mut dyn Frontend,
+    slot: u8,
+    cn: &str,
+    policy: KeyPolicy,
+    pin: &str,
+    recovery: &str,
+) -> Result<Vec<u8>, ProvisionError> {
+    let point = card.generate_key(slot, PivAlgorithm::EcP256, policy)?;
+    let certified = (|| -> Result<(), PivError> {
+        if policy.effective_pin(slot) == PinPolicy::Always {
+            card.verify_pin(pin)?;
+        }
+        if policy.needs_touch() {
+            fe.progress(ProgressEvent {
+                step: format!("touch-{slot:02x}"),
+                message: format!("Touch the card now to sign the {slot:02X} certificate"),
+                current: None,
+                total: None,
+            });
+        }
+        let cert = piggy_piv::cert_builder::build_self_signed_cert(
+            &point,
+            PivAlgorithm::EcP256,
+            cn,
+            |digest| card.sign_prehash(slot, PivAlgorithm::EcP256, digest),
+        )?;
+        card.put_cert(slot, &cert)
+    })();
+    certified.map_err(|e| {
+        let missed_touch = if policy.needs_touch() {
+            " (if the card was waiting for a touch, it gave up waiting)"
+        } else {
+            ""
+        };
+        ProvisionError::Partial(format!(
+            "slot {slot:02X} has a new key but its certificate was not written: {e}{missed_touch}. {recovery}"
+        ))
+    })?;
+    Ok(point)
 }
 
-/// Run full-setup provisioning. On success the card has a fresh CHUID, 9D + 9A
-/// keys with self-signed certs, a new PIN/PUK, and (per the frontend's choice)
+/// What to tell the operator when `card init` stops between its first card
+/// write and its last key.
+const INIT_RECOVERY: &str = "The card is partly provisioned and still on the factory PIN, PUK and management key. Run `piggy card init --allow-reprovision` to start again.";
+
+/// Reads the card's management key back from where it was sealed. Deferred so
+/// a refused or declined `add-key` never decrypts anything.
+pub type StoredMgmtKey<'a> = Box<dyn FnOnce() -> Result<Zeroizing<String>, String> + 'a>;
+
+/// What `piggy card add-key` was asked to do, with the card facts it needs.
+pub struct AddKeyConfig<'a> {
+    /// The card's GUID, uppercase hex.
+    pub guid: String,
+    /// The slot to fill: 9A or 9C ([`crate::card::slot_policy::add_key_slot`]).
+    pub slot: u8,
+    pub policy: KeyPolicy,
+    /// See [`ProvisionConfig::accepts_policies`].
+    pub accepts_policies: bool,
+    /// Whether the slot already holds a key.
+    pub occupied: bool,
+    /// Destroy an existing key instead of refusing.
+    pub replace: bool,
+    /// Where to read the card's current management key from the store;
+    /// without it the frontend is asked for the key.
+    pub stored_mgmt_key: Option<StoredMgmtKey<'a>>,
+}
+
+/// What a successful `add-key` produced.
+#[derive(Debug)]
+pub struct AddKeyOutcome {
+    pub guid: String,
+    pub slot: u8,
+    /// The new key's uncompressed public point (`04 ‖ X ‖ Y`).
+    pub public_point: Vec<u8>,
+    /// Whether the new key is a 9C key the card attests as PIN-always and
+    /// touch-always.
+    pub serves_operator_acts: bool,
+}
+
+/// The cert CN prefix pivy-tool gives each slot.
+fn slot_cn_prefix(slot: u8) -> &'static str {
+    match slot {
+        SLOT_PIV_AUTH => "piv-auth",
+        SLOT_SIGNATURE => "piv-sign",
+        _ => "piv-key-mgmt",
+    }
+}
+
+/// Decode the card's current management key as the operator supplies it: the
+/// word `default`, or 48 hex digits.
+fn parse_current_mgmt_key(key: &str) -> Result<Zeroizing<Vec<u8>>, ProvisionError> {
+    let key = key.trim();
+    if key.eq_ignore_ascii_case("default") {
+        return Ok(Zeroizing::new(piggy_piv::DEFAULT_ADMIN_KEY.to_vec()));
+    }
+    // The hex error names the offending character; that is a piece of the
+    // secret, so it is not passed on.
+    let bytes = Zeroizing::new(hex::decode(key).map_err(|_| {
+        ProvisionError::BadMgmtKey("expected 48 hex digits, or the word default".into())
+    })?);
+    if bytes.len() != 24 {
+        return Err(ProvisionError::BadMgmtKey(format!(
+            "expected 24 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Add one key to an already-provisioned card (`piggy card add-key`, FDR
+/// 0006): generate it under `cfg.policy` and write its self-signed cert,
+/// leaving every other slot, the PIN, the PUK and the management key alone.
+/// Like [`run`], a `completed` notification closes the operation either way.
+///
+/// The work is split in two so a caller can open the card session between
+/// them: [`plan_add_key`] does everything that needs the operator and the
+/// store (and so may talk to OTHER cards, when the management key is read
+/// back through one), and [`apply_add_key`] does the card writes. This
+/// function runs both against one card; `piggy card add-key` runs the plan
+/// first and only then opens its session.
+pub fn add_key(
+    card: &mut dyn ProvisionCard,
+    fe: &mut dyn Frontend,
+    cfg: AddKeyConfig<'_>,
+) -> Result<AddKeyOutcome, ProvisionError> {
+    let result =
+        plan_add_key(card.serial(), fe, cfg).and_then(|plan| apply_add_key(card, fe, plan));
+    report_add_key(fe, &result);
+    result
+}
+
+/// Emit the `completed` notification for an `add-key` outcome.
+pub fn report_add_key(fe: &mut dyn Frontend, result: &Result<AddKeyOutcome, ProvisionError>) {
+    match result {
+        Ok(outcome) => fe.completed(CompletedEvent {
+            status: CompletedStatus::Ok,
+            summary: Some(serde_json::json!({
+                "guid": outcome.guid,
+                "slot": format!("{:02x}", outcome.slot),
+            })),
+            error: None,
+        }),
+        Err(e) => fe.completed(CompletedEvent {
+            status: CompletedStatus::Error,
+            summary: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+/// An `add-key` the operator has confirmed, with the secrets it needs in
+/// hand: everything [`apply_add_key`] writes to the card with.
+pub struct AddKeyPlan {
+    guid: String,
+    slot: u8,
+    policy: KeyPolicy,
+    mgmt_key: Zeroizing<Vec<u8>>,
+    pin: Zeroizing<String>,
+}
+
+/// The operator-facing half of `add-key`: refuse an occupied slot, confirm,
+/// and collect the card's current management key and PIN. Touches no card.
+pub fn plan_add_key(
+    serial: Option<u32>,
+    fe: &mut dyn Frontend,
+    cfg: AddKeyConfig<'_>,
+) -> Result<AddKeyPlan, ProvisionError> {
+    let slot = cfg.slot;
+    let card_id = CardId {
+        guid: cfg.guid.clone(),
+        serial,
+        cn: None,
+    };
+    let label = card_id.short_label();
+    if cfg.occupied && !cfg.replace {
+        return Err(ProvisionError::Setup(format!(
+            "slot {slot:02X} on card {label} already holds a key; --replace destroys it and generates a new one"
+        )));
+    }
+    let policy = if cfg.accepts_policies {
+        cfg.policy
+    } else {
+        KeyPolicy::CARD_DEFAULT
+    };
+
+    let message = if cfg.occupied {
+        format!(
+            "Slot {slot:02X} on card {label} ALREADY HOLDS A KEY — replacing it DESTROYS that key, and everything that trusts it stops working. Generate a new {slot:02X} key ({policy})?"
+        )
+    } else {
+        format!("Add a new {slot:02X} key ({policy}) to card {label}? No other slot is changed.")
+    };
+    if !fe.confirm(ConfirmRequest {
+        message,
+        default: Some(false),
+    })? {
+        return Err(ProvisionError::Aborted("declined at confirmation".into()));
+    }
+
+    let slot_name = format!("{slot:02x}");
+    let mgmt_key = match cfg.stored_mgmt_key {
+        Some(read) => read().map_err(ProvisionError::Setup)?,
+        // A `secret` request, not `mgmt_key.request`: that one asks which key
+        // to rotate TO (the tty frontend answers "random"), and here the
+        // question is what the card's key currently IS.
+        None => fe.request_secret(SecretRequest {
+            kind: SecretKind::ManagementKey,
+            prompt: "Current management key".into(),
+            card: Some(card_id.clone()),
+            slot: Some(slot_name.clone()),
+            attempts_remaining: None,
+            detail: Some("the card's current key: 48 hex digits, or the word default".into()),
+        })?,
+    };
+    let mgmt_key = parse_current_mgmt_key(&mgmt_key)?;
+    let pin = fe.request_secret(SecretRequest {
+        kind: SecretKind::CurrentPin,
+        prompt: "Card PIN".into(),
+        card: Some(card_id.clone()),
+        slot: Some(slot_name),
+        attempts_remaining: None,
+        detail: Some(format!("to sign the new {slot:02X} certificate")),
+    })?;
+    Ok(AddKeyPlan {
+        guid: cfg.guid,
+        slot,
+        policy,
+        mgmt_key,
+        pin,
+    })
+}
+
+/// The card half of `add-key`: authenticate, generate the key, write its
+/// certificate, and read back whether it can serve operator acts.
+pub fn apply_add_key(
+    card: &mut dyn ProvisionCard,
+    fe: &mut dyn Frontend,
+    plan: AddKeyPlan,
+) -> Result<AddKeyOutcome, ProvisionError> {
+    let AddKeyPlan {
+        guid,
+        slot,
+        policy,
+        mgmt_key,
+        pin,
+    } = plan;
+    card.authenticate_admin(&mgmt_key)?;
+    card.verify_pin(&pin)?;
+    fe.progress(ProgressEvent {
+        step: format!("generate-{slot:02x}"),
+        message: format!("Generating {slot:02X} key"),
+        current: None,
+        total: None,
+    });
+    let public_point = provision_slot(
+        card,
+        fe,
+        slot,
+        &slot_cn(slot_cn_prefix(slot), &guid),
+        policy,
+        &pin,
+        &format!(
+            "Any key the slot held before is gone. Run `piggy card add-key {slot:02x} --replace` to try again."
+        ),
+    )?;
+
+    let serves_operator_acts = slot == SLOT_SIGNATURE && check_operator_acts(card, fe);
+    Ok(AddKeyOutcome {
+        guid,
+        slot,
+        public_point,
+        serves_operator_acts,
+    })
+}
+
+/// Whether the card can serve operator acts with the 9C key it was just
+/// given, judged on what the card ATTESTS for that key: the same evidence a
+/// verifier of an operator act and `piggy health` use. A card that cannot
+/// serve them is named to the operator with the reason.
+pub(crate) fn check_operator_acts(card: &mut dyn ProvisionCard, fe: &mut dyn Frontend) -> bool {
+    let why = match card.attested_policy(SLOT_SIGNATURE) {
+        Some(policy) if policy.serves_operator_acts() => return true,
+        Some(policy) => format!("slot 9C is attested {policy}, not PIN always, touch always"),
+        None => "it cannot attest its 9C key (it is not a YubiKey, so its keys carry no PIN and touch policy)".to_string(),
+    };
+    fe.progress(ProgressEvent {
+        step: "no-operator-acts".into(),
+        message: format!("Warning: this card cannot serve operator acts: {why}"),
+        current: None,
+        total: None,
+    });
+    false
+}
+
+/// Run full-setup provisioning. On success the card has a fresh CHUID, 9D, 9A
+/// and 9C keys with self-signed certs, a new PIN/PUK, and (per the frontend's choice)
 /// a rotated management key. On any failure a `completed{status:error}`
 /// notification is emitted before the error is returned.
 pub fn run(
@@ -219,17 +530,17 @@ fn run_inner(
         cn: None,
     };
 
-    // Confirm before touching the card — this overwrites slots 9A and 9D.
+    // Confirm before touching the card — this overwrites slots 9A, 9C and 9D.
     // Reprovisioning an already-initialized card is more destructive (it
     // replaces keys/certs that are in use), so escalate the wording.
     let message = if cfg.reprovision {
         format!(
-            "Card {} is ALREADY PROVISIONED — reprovisioning DESTROYS its existing 9A + 9D keys and overwrites their certs (and resets PIN/PUK/management key). Proceed?",
+            "Card {} is ALREADY PROVISIONED — reprovisioning DESTROYS its existing 9A + 9C + 9D keys and overwrites their certs (and resets PIN/PUK/management key). Proceed?",
             card_id.short_label()
         )
     } else {
         format!(
-            "Provision card {} — this generates new 9A + 9D keys and overwrites their certs. Proceed?",
+            "Provision card {} — this generates new 9A + 9C + 9D keys and overwrites their certs. Proceed?",
             card_id.short_label()
         )
     };
@@ -241,7 +552,13 @@ fn run_inner(
         return Err(ProvisionError::Aborted("declined at confirmation".into()));
     }
 
-    let total = 6;
+    let policies = if cfg.accepts_policies {
+        cfg.policies
+    } else {
+        SlotPolicies::CARD_DEFAULT
+    };
+
+    let total = 7;
     let step = |fe: &mut dyn Frontend, n: u32, token: &str, msg: &str| {
         fe.progress(ProgressEvent {
             step: token.into(),
@@ -263,14 +580,43 @@ fn run_inner(
 
     // 3. Slot 9D (key management / ECDH).
     step(fe, 3, "generate-9d", "Generating key-management key (9D)");
-    provision_slot(card, SLOT_KEY_MGMT, &slot_cn("piv-key-mgmt", &guid_hex))?;
+    provision_slot(
+        card,
+        fe,
+        SLOT_KEY_MGMT,
+        &slot_cn("piv-key-mgmt", &guid_hex),
+        policies.key_mgmt,
+        DEFAULT_PIN,
+        INIT_RECOVERY,
+    )?;
 
     // 4. Slot 9A (PIV authentication).
     step(fe, 4, "generate-9a", "Generating authentication key (9A)");
-    provision_slot(card, SLOT_PIV_AUTH, &slot_cn("piv-auth", &guid_hex))?;
+    provision_slot(
+        card,
+        fe,
+        SLOT_PIV_AUTH,
+        &slot_cn("piv-auth", &guid_hex),
+        policies.piv_auth,
+        DEFAULT_PIN,
+        INIT_RECOVERY,
+    )?;
 
-    // 5. Change PIN + PUK off their factory defaults.
-    step(fe, 5, "change-secrets", "Setting new PIN and PUK");
+    // 5. Slot 9C (digital signature): the operator-act key.
+    step(fe, 5, "generate-9c", "Generating operator-act key (9C)");
+    provision_slot(
+        card,
+        fe,
+        SLOT_SIGNATURE,
+        &slot_cn("piv-sign", &guid_hex),
+        policies.signature,
+        DEFAULT_PIN,
+        INIT_RECOVERY,
+    )?;
+    let serves_operator_acts = check_operator_acts(card, fe);
+
+    // 6. Change PIN + PUK off their factory defaults.
+    step(fe, 6, "change-secrets", "Setting new PIN and PUK");
     let new_pin = collect_new_secret(
         fe,
         &card_id,
@@ -290,14 +636,15 @@ fn run_inner(
     )?;
     card.change_puk(DEFAULT_PUK, &new_puk)?;
 
-    // 6. Rotate the management key per the frontend's choice.
-    step(fe, 6, "rotate-mgmt-key", "Rotating management key");
+    // 7. Rotate the management key per the frontend's choice.
+    step(fe, 7, "rotate-mgmt-key", "Rotating management key");
     let (generated_mgmt_key, sealed_mgmt_key) = rotate_mgmt_key(card, fe, &card_id, escrow)?;
 
     Ok(ProvisionOutcome {
         guid: guid_hex,
         generated_mgmt_key,
         sealed_mgmt_key,
+        serves_operator_acts,
     })
 }
 
@@ -463,6 +810,14 @@ mod tests {
         last_mgmt_key: Option<Vec<u8>>,
         /// Fail the management-key rotation, as a card whose write errors.
         reject_mgmt_key: bool,
+        /// The policy each generate carried, in order.
+        policies: Vec<(u8, KeyPolicy)>,
+        /// A card with no attestation (not a YubiKey).
+        cannot_attest: bool,
+        /// Attest this instead of what generate was asked for.
+        attests_instead: Option<KeyPolicy>,
+        /// Fail signing with this slot's key, as a touch that never came.
+        fail_sign: Option<u8>,
     }
 
     impl ProvisionCard for MockCard {
@@ -481,12 +836,32 @@ mod tests {
             self.log.push("chuid".into());
             Ok(())
         }
-        fn generate_key(&mut self, slot: u8, _alg: PivAlgorithm) -> Result<Vec<u8>, PivError> {
+        fn generate_key(
+            &mut self,
+            slot: u8,
+            _alg: PivAlgorithm,
+            policy: KeyPolicy,
+        ) -> Result<Vec<u8>, PivError> {
             self.log.push(format!("generate:{slot:02x}"));
+            self.policies.push((slot, policy));
             // A 65-byte uncompressed-point-shaped blob (04 ‖ 64 zero bytes).
             let mut p = vec![0x04u8];
             p.extend_from_slice(&[0u8; 64]);
             Ok(p)
+        }
+        fn attested_policy(&mut self, slot: u8) -> Option<KeyPolicy> {
+            if self.cannot_attest {
+                return None;
+            }
+            // A real card attests what it stored; an override stands in for
+            // one that stored something other than what was asked.
+            self.attests_instead.or_else(|| {
+                self.policies
+                    .iter()
+                    .rev()
+                    .find(|(s, _)| *s == slot)
+                    .map(|(_, p)| *p)
+            })
         }
         fn sign_prehash(
             &mut self,
@@ -494,6 +869,9 @@ mod tests {
             _alg: PivAlgorithm,
             _digest: &[u8],
         ) -> Result<Vec<u8>, PivError> {
+            if self.fail_sign == Some(slot) {
+                return Err(PivError::Apdu { sw: 0x6982 });
+            }
             self.log.push(format!("sign:{slot:02x}"));
             // A minimal DER SEQUENCE { INTEGER 1, INTEGER 1 } — embedded verbatim.
             Ok(vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01])
@@ -585,6 +963,8 @@ mod tests {
 
     fn cfg() -> ProvisionConfig {
         ProvisionConfig {
+            policies: SlotPolicies::default(),
+            accepts_policies: true,
             guid: [
                 0x19, 0x17, 0x55, 0xCF, 0xF3, 0x9E, 0xFE, 0x52, 0x2C, 0x07, 0xA3, 0x83, 0x27, 0x5B,
                 0xBE, 0xB1,
@@ -621,11 +1001,25 @@ mod tests {
                 "generate:9a",
                 "sign:9a",
                 "put_cert:9a",
+                "generate:9c",
+                // PIN-always: verified again right before its cert is signed.
+                "verify_pin",
+                "sign:9c",
+                "put_cert:9c",
                 "change_pin",
                 "change_puk",
                 "set_mgmt_key",
             ]
         );
+        assert_eq!(
+            card.policies,
+            vec![
+                (0x9D, KeyPolicy::CARD_DEFAULT),
+                (0x9A, SlotPolicies::default().piv_auth),
+                (0x9C, KeyPolicy::OPERATOR_ACT),
+            ]
+        );
+        assert!(outcome.serves_operator_acts);
         // The rotated key matches what was returned to the caller.
         let applied = hex::encode_upper(card.last_mgmt_key.unwrap());
         assert_eq!(applied, *key);
@@ -638,9 +1032,136 @@ mod tests {
                 "write-chuid",
                 "generate-9d",
                 "generate-9a",
+                // 9A is touch-cached, 9C touch-always: each cert needs a touch.
+                "touch-9a",
+                "generate-9c",
+                "touch-9c",
                 "change-secrets",
                 "rotate-mgmt-key",
             ]
+        );
+    }
+
+    #[test]
+    fn card_without_policy_support_gets_card_defaults_and_a_warning() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&NEW_SECRETS, true, MgmtKeyChoice::Default);
+        let generic = ProvisionConfig {
+            accepts_policies: false,
+            ..cfg()
+        };
+        card.cannot_attest = true;
+        let outcome = run(&mut card, &mut fe, &generic, None).unwrap();
+        assert!(!outcome.serves_operator_acts);
+        assert!(
+            card.policies
+                .iter()
+                .all(|(_, p)| *p == KeyPolicy::CARD_DEFAULT),
+            "no policy tags reach a card that would reject them: {:?}",
+            card.policies
+        );
+        // 9C's spec default is PIN-always, so its cert still gets a fresh verify.
+        let generate_9c = card.log.iter().position(|l| l == "generate:9c").unwrap();
+        assert_eq!(card.log[generate_9c + 1], "verify_pin");
+        assert!(
+            fe.steps.contains(&"no-operator-acts".to_string()),
+            "{:?}",
+            fe.steps
+        );
+        assert!(
+            !fe.steps.iter().any(|s| s.starts_with("touch-")),
+            "{:?}",
+            fe.steps
+        );
+    }
+
+    #[test]
+    fn weakened_9c_policy_is_provisioned_but_flagged() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&NEW_SECRETS, true, MgmtKeyChoice::Default);
+        let mut weak = cfg();
+        weak.policies.signature.touch = piggy_piv::TouchPolicy::Cached;
+        let outcome = run(&mut card, &mut fe, &weak, None).unwrap();
+        assert!(!outcome.serves_operator_acts);
+        assert!(
+            fe.steps.contains(&"no-operator-acts".to_string()),
+            "{:?}",
+            fe.steps
+        );
+    }
+
+    #[test]
+    fn missed_touch_mid_init_says_what_state_the_card_is_in() {
+        let mut card = MockCard {
+            fail_sign: Some(0x9C),
+            ..Default::default()
+        };
+        let mut fe = ScriptedFrontend::new(&NEW_SECRETS, true, MgmtKeyChoice::Default);
+        let err = run(&mut card, &mut fe, &cfg(), None).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ProvisionError::Partial(_)), "{msg}");
+        assert!(msg.contains("slot 9C has a new key"), "{msg}");
+        assert!(msg.contains("gave up waiting"), "{msg}");
+        assert!(
+            msg.contains("factory PIN") && msg.contains("--allow-reprovision"),
+            "{msg}"
+        );
+        assert!(
+            !card.log.contains(&"change_pin".to_string()),
+            "{:?}",
+            card.log
+        );
+    }
+
+    #[test]
+    fn failed_add_key_says_the_old_key_is_gone() {
+        let mut card = MockCard {
+            fail_sign: Some(0x9C),
+            ..Default::default()
+        };
+        let mut fe = ScriptedFrontend::new(&["default", "654321"], true, MgmtKeyChoice::Default);
+        let err = add_key(&mut card, &mut fe, add_9c())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("before is gone") && err.contains("add-key 9c --replace"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn malformed_management_key_error_does_not_echo_the_key() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&["zz0102", "654321"], true, MgmtKeyChoice::Default);
+        let err = add_key(&mut card, &mut fe, add_9c())
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains('z'), "{err}");
+        assert!(err.contains("48 hex digits"), "{err}");
+    }
+
+    #[test]
+    fn operator_act_verdict_follows_the_attestation_not_the_request() {
+        // Asked for PIN-always / touch-always, but the card attests less.
+        let mut card = MockCard {
+            attests_instead: Some(KeyPolicy {
+                pin: PinPolicy::Once,
+                touch: piggy_piv::TouchPolicy::Never,
+            }),
+            ..Default::default()
+        };
+        let mut fe = ScriptedFrontend::new(&NEW_SECRETS, true, MgmtKeyChoice::Default);
+        let outcome = run(&mut card, &mut fe, &cfg(), None).unwrap();
+        assert_eq!(
+            card.policies[2],
+            (0x9C, KeyPolicy::OPERATOR_ACT),
+            "requested"
+        );
+        assert!(!outcome.serves_operator_acts, "the attestation decides");
+        assert!(
+            fe.steps.contains(&"no-operator-acts".to_string()),
+            "{:?}",
+            fe.steps
         );
     }
 
@@ -753,6 +1274,173 @@ mod tests {
             msg.contains("ALREADY PROVISIONED") && msg.contains("DESTROYS"),
             "reprovision wording: {msg}"
         );
+    }
+
+    // --- piggy card add-key (FDR 0006) ---
+
+    const GUID_HEX: &str = "191755CFF39EFE522C07A383275BBEB1";
+
+    fn add_9c() -> AddKeyConfig<'static> {
+        AddKeyConfig {
+            guid: GUID_HEX.into(),
+            slot: 0x9C,
+            policy: KeyPolicy::OPERATOR_ACT,
+            accepts_policies: true,
+            occupied: false,
+            replace: false,
+            stored_mgmt_key: None,
+        }
+    }
+
+    #[test]
+    fn add_key_generates_only_the_named_slot() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&["default", "654321"], true, MgmtKeyChoice::Default);
+        let outcome = add_key(&mut card, &mut fe, add_9c()).unwrap();
+        assert_eq!(
+            card.log,
+            vec![
+                "admin",
+                "verify_pin",
+                "generate:9c",
+                "verify_pin",
+                "sign:9c",
+                "put_cert:9c",
+            ],
+            "no CHUID, PIN, PUK or management-key write, and no other slot"
+        );
+        assert_eq!(card.policies, vec![(0x9C, KeyPolicy::OPERATOR_ACT)]);
+        assert!(outcome.serves_operator_acts);
+        assert_eq!(outcome.public_point.len(), 65);
+        assert_eq!(fe.completed, Some(CompletedStatus::Ok));
+        let confirm = fe.confirm_message.unwrap();
+        assert!(
+            confirm.contains("PIN always, touch always") && confirm.contains("No other slot"),
+            "{confirm}"
+        );
+    }
+
+    #[test]
+    fn add_key_refuses_an_occupied_slot_without_replace() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&[], true, MgmtKeyChoice::Default);
+        let err = add_key(
+            &mut card,
+            &mut fe,
+            AddKeyConfig {
+                occupied: true,
+                ..add_9c()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--replace"), "{err}");
+        assert!(card.log.is_empty(), "{:?}", card.log);
+        assert!(fe.confirm_message.is_none(), "refused before asking");
+    }
+
+    #[test]
+    fn add_key_replace_warns_that_the_old_key_is_destroyed() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&["default", "654321"], true, MgmtKeyChoice::Default);
+        add_key(
+            &mut card,
+            &mut fe,
+            AddKeyConfig {
+                slot: 0x9A,
+                policy: SlotPolicies::default().piv_auth,
+                occupied: true,
+                replace: true,
+                ..add_9c()
+            },
+        )
+        .unwrap();
+        let confirm = fe.confirm_message.unwrap();
+        assert!(
+            confirm.contains("DESTROYS") && confirm.contains("9A"),
+            "{confirm}"
+        );
+        assert!(card.log.contains(&"generate:9a".to_string()));
+        assert!(
+            !fe.steps.contains(&"no-operator-acts".to_string()),
+            "9A is not expected to serve operator acts: {:?}",
+            fe.steps
+        );
+    }
+
+    #[test]
+    fn add_key_declined_touches_nothing() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&[], false, MgmtKeyChoice::Default);
+        let err = add_key(&mut card, &mut fe, add_9c()).unwrap_err();
+        assert!(matches!(err, ProvisionError::Aborted(_)), "{err:?}");
+        assert!(card.log.is_empty());
+        assert_eq!(fe.completed, Some(CompletedStatus::Error));
+    }
+
+    #[test]
+    fn add_key_uses_a_stored_management_key_without_asking() {
+        let mut card = MockCard::default();
+        // Only the PIN is scripted: asking for the key would consume it.
+        let mut fe = ScriptedFrontend::new(&["654321"], true, MgmtKeyChoice::Default);
+        add_key(
+            &mut card,
+            &mut fe,
+            AddKeyConfig {
+                stored_mgmt_key: Some(Box::new(|| {
+                    Ok(Zeroizing::new("0102030405060708".repeat(3)))
+                })),
+                ..add_9c()
+            },
+        )
+        .unwrap();
+        assert!(card.log.contains(&"put_cert:9c".to_string()));
+    }
+
+    #[test]
+    fn add_key_does_not_read_the_store_when_refused() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&[], true, MgmtKeyChoice::Default);
+        let err = add_key(
+            &mut card,
+            &mut fe,
+            AddKeyConfig {
+                occupied: true,
+                stored_mgmt_key: Some(Box::new(|| panic!("store read on a refused add-key"))),
+                ..add_9c()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProvisionError::Setup(_)), "{err:?}");
+    }
+
+    #[test]
+    fn add_key_rejects_a_malformed_management_key_before_the_card() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&["abcd", "654321"], true, MgmtKeyChoice::Default);
+        let err = add_key(&mut card, &mut fe, add_9c()).unwrap_err();
+        assert!(matches!(err, ProvisionError::BadMgmtKey(_)), "{err:?}");
+        assert!(card.log.is_empty(), "{:?}", card.log);
+    }
+
+    #[test]
+    fn add_key_on_a_card_without_policies_flags_9c() {
+        let mut card = MockCard {
+            cannot_attest: true,
+            ..Default::default()
+        };
+        let mut fe = ScriptedFrontend::new(&["default", "654321"], true, MgmtKeyChoice::Default);
+        let outcome = add_key(
+            &mut card,
+            &mut fe,
+            AddKeyConfig {
+                accepts_policies: false,
+                ..add_9c()
+            },
+        )
+        .unwrap();
+        assert!(!outcome.serves_operator_acts);
+        assert_eq!(card.policies, vec![(0x9C, KeyPolicy::CARD_DEFAULT)]);
+        assert!(fe.steps.contains(&"no-operator-acts".to_string()));
     }
 
     #[test]

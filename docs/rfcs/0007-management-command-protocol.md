@@ -1,6 +1,12 @@
 ---
 status: proposed
 date: 2026-06-22
+amended: 2026-10-12
+amendment-note: >
+  2026-10-12 (FDR 0006 phase (a), piggy#303): §5.2 `card.init` gains the
+  `pin_policy` and `touch_policy` params and the `serves_operator_acts`
+  result member, and now provisions slot 9C; new §5.4 `card.add_key`. Both
+  are additive under §Compatibility; the protocol string is unchanged.
 ---
 
 # Management Command Protocol (piggy `manage` JSON-RPC)
@@ -32,7 +38,7 @@ namespace (piggy#191). A graphical frontend (piggy#202) is a second consumer.
 
 Scope is the **command** layer and how it composes with [RFC 0006]'s interaction
 layer on one connection. The v1 method set is the neutral primitives papi needs —
-`card.list`, `card.init`, `sign_bytes`; `recipients.*` and `pass.*` methods are
+`card.list`, `card.init`, `card.add_key`, `sign_bytes`; `recipients.*` and `pass.*` methods are
 future work (the latter likely unnecessary in piggy, since papi composes them).
 This specification is expected to be refined as piggy#201 implements it.
 
@@ -148,16 +154,47 @@ is the client's concern. `include_uninitialized: false` omits the
                 "guid": <string>,                ;   none ⇒ the sole eligible card
                 "reader": <string>,
                 "allow_reprovision": <boolean>,  ; OPTIONAL; default false
+                "pin_policy":   { <slot>: <pin policy> },    ; OPTIONAL
+                "touch_policy": { <slot>: <touch policy> },  ; OPTIONAL
                 "seal_management_key": <boolean> | <string> }
                                                  ; OPTIONAL; default false
     result := { "guid": <string>,
+                "serves_operator_acts": <boolean>,
                 "generated_management_key": <string>,
                                   ; present iff a random key was generated
                                   ; (RFC 0006 §2.3 "random") and not sealed
                 "sealed_management_key": <string> }
                                   ; present iff the generated key was sealed
 
-Provisions a factory-blank card (piggy#194). With `allow_reprovision: true`
+    <slot>         := "9a" | "9c" | "9d"       ; case-insensitive
+    <pin policy>   := "default" | "never" | "once" | "always"
+    <touch policy> := "default" | "never" | "always" | "cached"
+
+Provisions a factory-blank card (piggy#194): slots 9D, 9A and 9C. Each key is
+generated with a PIN policy and a touch policy. Absent an override the server
+MUST use 9A = PIN `once`, touch `cached`; 9C = PIN `always`, touch `always`;
+9D = `default`, `default`. `pin_policy` and `touch_policy` each override the
+named slots only; a slot or policy name outside the sets above MUST be rejected
+with `-32602` before any card is touched. `default` means no policy is sent to
+the card. On a card that does not support per-key policies (any card that is
+not a YubiKey) the server MUST send none, whatever the params say.
+
+`serves_operator_acts` says whether the card can sign operator acts with its new
+9C key (piggy FDR 0006). After generating the key the server MUST read the key's
+attestation and set the member from the **attested** policy: true iff the card
+attests the key as PIN `always` and touch `always`. The server MUST NOT derive it
+from the policy that was requested. On a card that cannot attest the key the
+member MUST be false. The member therefore reports the same evidence a verifier
+of an operator act uses, where the card attests.
+
+A key with a touch policy makes the card wait for a touch while the key signs
+its own certificate. The server announces each such wait with a `progress`
+notification whose `step` is `touch-<slot>` (`touch-9a`, `touch-9c`). A client
+SHOULD show it to the operator. When the result's `serves_operator_acts` is
+false the server has sent a `progress` notification with `step`
+`no-operator-acts` whose `message` says why.
+
+With `allow_reprovision: true`
 (piggy#204) an already-initialized card-in-hand is also eligible and is
 re-provisioned (the destructive `confirm` escalates accordingly); a card whose
 credentials were rotated off the factory defaults fails — the full creds-lost
@@ -190,6 +227,53 @@ Signs `message` with a PIV signing slot (piggy#190); piggy applies no
 canonicalization. Issues a `secret` (PIN) interaction request unless the PIN is
 otherwise available.
 
+#### 5.4 `card.add_key`
+
+    params := { "slot": <string>,                ; REQUIRED; "9c" | "9a"
+                "pin_policy": <pin policy>,      ; OPTIONAL
+                "touch_policy": <touch policy>,  ; OPTIONAL
+                "replace": <boolean>,            ; OPTIONAL; default false
+                "management_key_from_store": <boolean> | <string>,
+                                                 ; OPTIONAL; default false
+                "serial": <integer>,             ; OPTIONAL; at most one of serial/guid/reader;
+                "guid": <string>,                ;   none ⇒ the sole provisioned card
+                "reader": <string> }
+    result := { "guid": <string>,
+                "slot": <string>,                ; lowercase, as in params
+                "public_key": <string>,          ; OpenSSH line, comment PIV_slot_<SLOT>@<GUID>
+                "serves_operator_acts": <boolean> }
+
+Adds one key to an already-provisioned card (piggy FDR 0006). The server MUST
+NOT change any other slot, the PIN, the PUK or the management key. The policy
+names are those of §5.2; absent an override the server MUST use the §5.2
+defaults for the slot, and the non-YubiKey rule of §5.2 applies.
+
+`slot` `"9d"` MUST be rejected with `-32602`: a new 9D key cannot decrypt what
+the password store encrypted to the old one. Any other slot outside the set
+above, and an unknown policy name, MUST likewise be rejected with `-32602`.
+These rejections happen before any card is touched and before any interaction
+request.
+
+A slot that already holds a key (the server MAY decide this by the presence of
+the slot's certificate) MUST be refused with `-32050` unless `replace` is true.
+With `replace`, the `confirm` interaction MUST say that the existing key is
+destroyed.
+
+The server issues, in order: `confirm`; a `secret` request of kind
+`management_key` for the card's **current** management key, answered with 48
+hex digits or the word `default` (the factory key); a `secret` request of kind
+`current_pin`; then `progress`/`completed`. With `management_key_from_store`
+the management-key request is not issued: the server reads the key from the
+password store (`true` ⇒ `piv/<GUID>/management-key`; a string ⇒ that store
+path), which is an ordinary store decrypt and happens only after the `confirm`
+is accepted. A failure to read it is `-32050`.
+
+`serves_operator_acts` is derived as in §5.2, from the new key's attestation:
+true iff `slot` is `"9c"` and the card attests the key as PIN `always` and touch
+`always`; false for slot 9A and on a card that cannot attest the key. The
+`touch-<slot>` and `no-operator-acts` `progress` notifications of §5.2 apply
+(the latter for slot 9C only).
+
 Unknown methods MUST be rejected with JSON-RPC error `-32601`.
 
 ### 6. Errors
@@ -215,7 +299,12 @@ Transport failure (the connection closes mid-command) aborts the operation.
   (provisioning) and supplies PINs; the server MUST grant it no capability beyond
   the methods in §5 and MUST NOT return private key material (signing/ECDH stay on
   the card). Provisioning a blank card is destructive; `card.init` MUST issue a
-  `confirm` interaction the client can decline.
+  `confirm` interaction the client can decline. `card.add_key` MUST do the same;
+  with `replace` it destroys a key that may be in use.
+- **A management key crosses the channel in `card.add_key`.** The client
+  supplies the card's current management key as a `secret` response unless
+  `management_key_from_store` is used; the [RFC 0006] §Security rules for
+  secrets apply to it.
 - **Single-flight bounds ambiguity.** Because a connection carries at most one
   in-flight command, an injected or misordered message cannot be mistaken for a
   different command's interaction response.
@@ -237,6 +326,8 @@ result — over BOTH stdio and `--socket`.
 | §3 transports | The same workflow runs over stdio and `--socket`. |
 | §4 handshake | `initialize` version check; single-flight. |
 | §5 methods | `card.list` enumerates; `card.init` provisions a blank fibby card; `sign_bytes` returns a verifiable signature. |
+| §5.2 policies | `card.init` generates 9A and 9C with the default policies and reports `serves_operator_acts`; a bad policy param is `-32602`. |
+| §5.4 `card.add_key` | Adds 9C to a provisioned fibby card; `"9d"` is `-32602`; an occupied slot without `replace` is `-32050`. |
 | §6 errors | An unknown method returns `-32601`. |
 
 ## Compatibility
@@ -244,6 +335,10 @@ result — over BOTH stdio and `--socket`.
 - The protocol is versioned by the `initialize` `protocol` string
   (`piggy-mgmt/1`), shared with [RFC 0006]. New methods are additive; a
   backwards-incompatible change MUST increment the major.
+- New `progress` steps and longer runs are additive too. A client MUST ignore a
+  `progress` notification whose `step` it does not know, and MUST NOT treat the
+  time a command takes as a failure: since the 2026-10-12 amendment `card.init`
+  generates a third key and waits for the operator's touch.
 - The command layer is strictly additive to piggy: the CLI commands are
   unchanged; `piggy manage` is a new entry point.
 

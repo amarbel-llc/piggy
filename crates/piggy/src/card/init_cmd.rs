@@ -14,7 +14,7 @@ use openssl::rand::rand_bytes;
 
 use piggy_ids::Classification;
 use piggy_markl::Id;
-use piggy_piv::{Guid, PinSession, PivAlgorithm, PivContext, PivError, PivToken};
+use piggy_piv::{Guid, KeyPolicy, PinSession, PivAlgorithm, PivContext, PivError, PivToken};
 
 use crate::card::engine::{
     self, Escrow, ProvisionCard, ProvisionConfig, ProvisionError, ProvisionOutcome,
@@ -24,13 +24,20 @@ use crate::card::protocol::{Frontend, ProgressEvent};
 use crate::card::seal::{
     KeyEscrow, SealMode, SealRequest, check_escrow_recipients, default_pass_name,
 };
+use crate::card::slot_policy::SlotPolicies;
 
 /// Adapter wiring the engine's [`ProvisionCard`] seam to a live
 /// [`PinSession`]. Each method delegates to the session; `serial` is captured
 /// before the session opens (it lives on the token, which the session borrows).
-struct SessionCard<'a, 'b> {
-    session: &'a mut PinSession<'b>,
-    serial: Option<u32>,
+pub(crate) struct SessionCard<'a, 'b> {
+    pub(crate) session: &'a mut PinSession<'b>,
+    pub(crate) serial: Option<u32>,
+}
+
+/// Whether `token` takes YubicoPIV PIN and touch policies. A YubiKey answers
+/// the vendor GET VERSION instruction; a generic PIV card rejects it.
+pub(crate) fn accepts_policies(token: &PivToken) -> bool {
+    token.read_ykpiv_version().is_some()
 }
 
 impl ProvisionCard for SessionCard<'_, '_> {
@@ -47,9 +54,22 @@ impl ProvisionCard for SessionCard<'_, '_> {
     fn write_chuid(&mut self, guid: &[u8; 16]) -> Result<(), PivError> {
         self.session.write_chuid(guid)
     }
-    fn generate_key(&mut self, slot: u8, alg: PivAlgorithm) -> Result<Vec<u8>, PivError> {
-        // Card-default PIN/touch policy (no AA/AB tags), like pivy `piv_generate`.
-        self.session.generate_key(slot, alg.to_byte(), None, None)
+    fn generate_key(
+        &mut self,
+        slot: u8,
+        alg: PivAlgorithm,
+        policy: KeyPolicy,
+    ) -> Result<Vec<u8>, PivError> {
+        // A `default` policy sends no AA/AB tag, like pivy `piv_generate`.
+        self.session.generate_key(
+            slot,
+            alg.to_byte(),
+            policy.pin.generate_tag_byte(),
+            policy.touch.generate_tag_byte(),
+        )
+    }
+    fn attested_policy(&mut self, slot: u8) -> Option<KeyPolicy> {
+        self.session.attested_policy(slot).ok()
     }
     fn sign_prehash(
         &mut self,
@@ -236,7 +256,7 @@ fn choose_card_index(
 /// rotated off the factory defaults still fails later at admin-auth (the
 /// creds-lost path is out of scope — papi revocation), so accepting it here
 /// only broadens *selection*, not the trust model.
-fn select_card_for_provision(
+pub(crate) fn select_card_for_provision(
     tokens: Vec<PivToken>,
     selector: &CardSelector,
     allow_reprovision: bool,
@@ -244,6 +264,21 @@ fn select_card_for_provision(
     let metas: Vec<CardMeta> = tokens.iter().map(CardMeta::from_token).collect();
     let idx = choose_card_index(&metas, selector, allow_reprovision)?;
     Ok(tokens.into_iter().nth(idx).unwrap())
+}
+
+/// The one already-provisioned card `selector` names, for the commands that
+/// work on a card `card init` has set up (`add-key`, `export-attestation`).
+pub(crate) fn select_provisioned_card(selector: &CardSelector) -> Result<PivToken, String> {
+    let ctx = PivContext::new().map_err(|e| format!("PC/SC: {e}"))?;
+    let tokens = ctx
+        .enumerate_tokens()
+        .map_err(|e| format!("enumerate cards: {e}"))?;
+    if tokens.is_empty() {
+        return Err(
+            "no provisioned PIV card found (a blank card is set up with `piggy card init`)".into(),
+        );
+    }
+    select_card_for_provision(tokens, selector, true)
 }
 
 /// Provision a blank card through an already-built frontend, returning the
@@ -262,6 +297,7 @@ fn select_card_for_provision(
 pub fn provision_with_frontend(
     selector: CardSelector,
     allow_reprovision: bool,
+    policies: SlotPolicies,
     seal: SealRequest<'_>,
     frontend: &mut dyn Frontend,
 ) -> Result<ProvisionOutcome, ProvisionError> {
@@ -276,6 +312,7 @@ pub fn provision_with_frontend(
     // confirm escalates (it is about to destroy real keys), even on a blank card
     // passed with --allow-reprovision (which is just a normal init).
     let reprovision = token.is_initialized();
+    let accepts_policies = accepts_policies(&token);
 
     let mut guid = [0u8; 16];
     rand_bytes(&mut guid).map_err(|e| ProvisionError::Setup(format!("generate GUID: {e}")))?;
@@ -296,7 +333,12 @@ pub fn provision_with_frontend(
         serial: card_serial,
     };
 
-    let cfg = ProvisionConfig { guid, reprovision };
+    let cfg = ProvisionConfig {
+        policies,
+        accepts_policies,
+        guid,
+        reprovision,
+    };
     let escrow = escrow.as_mut().map(|sink| Escrow {
         sink: sink.as_mut(),
         ask: seal.mode == SealMode::Offer,
@@ -363,31 +405,44 @@ fn prepare_escrow(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_inner(
     serial: Option<u32>,
     guid: Option<String>,
     reader: Option<String>,
     allow_reprovision: bool,
+    pin_policy: &[String],
+    touch_policy: &[String],
     seal: SealRequest<'_>,
     frontend: FrontendKind,
     socket: Option<&Path>,
 ) -> Result<ProvisionOutcome, String> {
-    // Resolve the card selector before touching any card (a bad --guid is a
-    // usage error, not a card-op failure).
+    // Resolve the card selector and the policies before touching any card (a
+    // bad --guid or --pin-policy is a usage error, not a card-op failure).
     let selector = CardSelector::from_flags(serial, guid, reader)?;
+    let policies = SlotPolicies::from_flags(pin_policy, touch_policy)?;
     // Build the frontend first: a jsonrpc channel that can't be opened must
     // fail before we touch any card (RFC 0006 §6).
     let mut frontend = build_frontend(frontend, socket, "card init")?;
-    provision_with_frontend(selector, allow_reprovision, seal, frontend.as_mut())
-        .map_err(|e| e.to_string())
+    provision_with_frontend(
+        selector,
+        allow_reprovision,
+        policies,
+        seal,
+        frontend.as_mut(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// `piggy card init` entry point. Returns a process exit code.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     serial: Option<u32>,
     guid: Option<String>,
     reader: Option<String>,
     allow_reprovision: bool,
+    pin_policy: &[String],
+    touch_policy: &[String],
     seal: SealRequest<'_>,
     frontend: FrontendKind,
     socket: Option<&Path>,
@@ -397,6 +452,8 @@ pub fn run(
         guid,
         reader,
         allow_reprovision,
+        pin_policy,
+        touch_policy,
         seal,
         frontend,
         socket,

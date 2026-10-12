@@ -30,9 +30,14 @@ const PROTOCOL: &str = "piggy-mgmt/1";
 #[derive(Parser, Debug)]
 #[command(about = "Scripted JSON-RPC command client for piggy manage conformance")]
 struct Args {
-    /// Method to invoke: `card.list`, `card.init`, or `sign_bytes`.
+    /// Method to invoke: `card.list`, `card.init`, `card.add_key`, or
+    /// `sign_bytes`.
     #[arg(long)]
     method: String,
+    /// Extra params as a JSON object, merged over the ones the other flags
+    /// build (and the whole params for a method with no flags of its own).
+    #[arg(long = "params-json")]
+    params_json: Option<String>,
 
     /// Connect to a listening `piggy manage --jsonrpc --socket <PATH>`.
     /// Mutually exclusive with `--spawn`.
@@ -53,6 +58,10 @@ struct Args {
     /// Management-key source for `card.init`: "default", "random", or a hex key.
     #[arg(long = "mgmt-source", default_value = "random")]
     mgmt_source: String,
+    /// The card's current management key, returned for a `management_key`
+    /// secret request (card.add_key): "default" or a hex key.
+    #[arg(long = "current-mgmt-key", default_value = "default")]
+    current_mgmt_key: String,
     /// Answer `confirm.request` with this (true = proceed). Set false to test
     /// a declined provision.
     #[arg(long, default_value_t = true)]
@@ -165,8 +174,35 @@ fn main() {
 }
 
 fn build_params(args: &Args) -> Value {
+    let mut params = method_params(args);
+    if let Some(extra) = &args.params_json {
+        let extra: Value = serde_json::from_str(extra).expect("--params-json is JSON");
+        for (key, value) in extra.as_object().expect("--params-json is an object") {
+            params[key] = value.clone();
+        }
+    }
+    params
+}
+
+fn method_params(args: &Args) -> Value {
     match args.method.as_str() {
         "card.list" => json!({ "include_uninitialized": args.include_uninitialized }),
+        "card.add_key" => {
+            let mut p = json!({});
+            if let Some(slot) = &args.slot {
+                p["slot"] = json!(slot);
+            }
+            if let Some(s) = args.serial {
+                p["serial"] = json!(s);
+            }
+            if let Some(g) = &args.guid {
+                p["guid"] = json!(g);
+            }
+            if let Some(r) = &args.reader {
+                p["reader"] = json!(r);
+            }
+            p
+        }
         "card.init" => {
             let mut p = json!({});
             if let Some(s) = args.serial {
@@ -210,6 +246,8 @@ fn answer_interaction(writer: &mut dyn Write, args: &Args, msg: &Value) {
                 .unwrap_or("");
             let secret = if kind.contains("puk") {
                 &args.puk
+            } else if kind == "management_key" {
+                &args.current_mgmt_key
             } else {
                 &args.pin
             };
@@ -228,8 +266,14 @@ fn answer_interaction(writer: &mut dyn Write, args: &Args, msg: &Value) {
                 .expect("card_select.request carries at least one candidate");
             Some(json!({ "guid": guid }))
         }
-        // Notifications carry no id and get no response.
-        "progress" | "completed" => None,
+        // Notifications carry no id and get no response. The progress step
+        // goes to stderr so a test can see which ones the server sent.
+        "progress" => {
+            let step = msg.pointer("/params/step").and_then(Value::as_str);
+            eprintln!("manage-client: progress {}", step.unwrap_or("?"));
+            None
+        }
+        "completed" => None,
         other => panic!("unexpected interaction method {other:?}"),
     };
     if let (Some(id), Some(result)) = (id, result) {

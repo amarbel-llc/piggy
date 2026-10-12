@@ -17,6 +17,13 @@
 # the seeded-9D ECDH path is already covered by piggy_list_blank_fibby /
 # age_plugin_piggy_fibby; here the new surface is the *provisioning writes*.
 #
+# piggy#303 (FDR 0006): init also generates 9C, and by default gives 9A and 9C
+# a touch policy, so signing their certificates waits for a touch. Lanes that
+# are not about touch spawn fibby with `--auto-touch`; the touch cases below
+# spawn it without and either let the wait time out or deliver the touch over
+# the control socket. The policy each slot got is read back from `piggy list`,
+# which takes it from the slot's attestation.
+#
 # Required env (supplied by the just recipes):
 #   FIBBY_BIN          = /path/to/fibby           (nix build .#fibby)
 #   PIGGY_BIN          = /path/to/piggy           (nix build .#default)
@@ -97,6 +104,32 @@ assert_provisioned() {
   }
 }
 
+_list_ndjson() {
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" list --format=ndjson
+}
+
+# Print the one `piggy list` record for GUID's SLOT (`9A`), or fail.
+_slot_record() {
+  local guid="$1" slot="$2" out
+  out=$(_list_ndjson) || return 1
+  printf '%s\n' "$out" | grep -F "\"guid\":\"$guid\"" | grep -F "\"slot\":\"$slot\""
+}
+
+# Assert the policy `piggy list` reports for GUID's SLOT. It comes from the
+# slot's attestation, so only a key generated on the card carries one.
+assert_slot_policy() {
+  local guid="$1" slot="$2" pin="$3" touch="$4" record
+  record=$(_slot_record "$guid" "$slot") || {
+    echo "no $slot record for $guid" >&2
+    _list_ndjson >&2 || true
+    return 1
+  }
+  [[ $record == *"\"pin_policy\":\"$pin\""* && $record == *"\"touch_policy\":\"$touch\""* ]] || {
+    echo "slot $slot is not PIN $pin / touch $touch: $record" >&2
+    return 1
+  }
+}
+
 # tty/askpass lane: the new PIN/PUK come from the test askpass; the confirm
 # prompt is answered "y" on stdin. We run under `setsid -w` so the process has
 # NO controlling tty — then the tty frontend's confirm deterministically falls
@@ -104,7 +137,7 @@ assert_provisioned() {
 # environment that has one). `-w` makes setsid wait and propagate piggy's exit
 # code + output to `run`. The mgmt key rotates random (tty default).
 function card_init_tty_provisions_blank_card { # @test
-  spawn_fibby --model yk5
+  spawn_fibby --auto-touch --model yk5
 
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
     PIGGY_TEST_FIB_PIN=654321 \
@@ -133,6 +166,183 @@ function card_init_tty_provisions_blank_card { # @test
   }
 
   assert_provisioned "$guid"
+
+  # piggy#303: all three slots are provisioned, 9A and 9C with the fresh-card
+  # default policies, and the operator was told when to touch.
+  local slot
+  for slot in 9A 9C 9D; do
+    _slot_record "$guid" "$slot" >/dev/null ||
+      _fail_with_card_init_output "no $slot record for $guid after a default init"
+  done
+  assert_slot_policy "$guid" 9A once cached
+  assert_slot_policy "$guid" 9C always always
+  local touch_line
+  for touch_line in \
+    "Touch the card now to sign the 9A certificate" \
+    "Touch the card now to sign the 9C certificate"; do
+    printf '%s\n' "$stderr" | grep -qF "$touch_line" ||
+      _fail_with_card_init_output "stderr is missing: $touch_line"
+  done
+  if printf '%s\n' "$stderr" | grep -q "cannot serve operator acts"; then
+    _fail_with_card_init_output "a default init warned that the card cannot serve operator acts"
+  fi
+
+  # `piggy health` reads the same attestations: the card's policy summary and
+  # its operator-act verdict, which is a pass, not a skip. No agent runs here,
+  # so health's exit status (it has agent points too) is not what is asserted.
+  local health verdict
+  health=$(PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" health --format ndjson 2>/dev/null) || true
+  printf '%s\n' "$health" | grep -F "slot policies" | grep -qF "9C PIN always, touch always" || {
+    echo "health has no slot-policies point naming '9C PIN always, touch always'" >&2
+    printf '%s\n' "$health" >&2
+    return 1
+  }
+  verdict=$(printf '%s\n' "$health" | grep -F "can sign operator acts") || true
+  [[ $verdict == *'"ok":true'* && $verdict != *'"skip"'* ]] || {
+    echo "health's 'can sign operator acts' point is not a plain pass: '$verdict'" >&2
+    printf '%s\n' "$health" >&2
+    return 1
+  }
+}
+
+# --- piggy#303: per-slot PIN/touch policy and the touch wait -----------------
+
+function card_init_touch_policy_override_reads_back_and_warns { # @test
+  spawn_fibby --auto-touch --model yk5
+
+  _card_init_tty --touch-policy 9c=cached <<<"y"
+  [[ $status -eq 0 ]] || _fail_with_card_init_output "card init --touch-policy 9c=cached failed"
+  local guid="$output"
+  [[ $guid =~ ^[0-9A-F]{32}$ ]] || _fail_with_card_init_output "stdout was not a bare GUID"
+
+  assert_slot_policy "$guid" 9C always cached
+  # The override names one field of one slot: 9A keeps its defaults.
+  assert_slot_policy "$guid" 9A once cached
+  printf '%s\n' "$stderr" | grep -q "cannot serve operator acts" ||
+    _fail_with_card_init_output "no operator-acts warning for a touch-cached 9C"
+}
+
+# A malformed policy flag is a usage error caught before the card is opened:
+# the run is given everything a provision needs (PIN, the "y"), so a card that
+# still lists as uninitialized proves nothing was written.
+_assert_bad_policy_flag_refused() {
+  local needle="$1"
+  shift
+  spawn_fibby --auto-touch --model yk5
+
+  _card_init_tty "$@" <<<"y"
+  [[ $status -ne 0 ]] || _fail_with_card_init_output "card init $* should fail"
+  printf '%s\n' "$stderr" | grep -qF -- "$needle" ||
+    _fail_with_card_init_output "the refusal of '$*' does not say: $needle"
+  if printf '%s\n' "$stderr" | grep -q "Provision card"; then
+    _fail_with_card_init_output "the refusal of '$*' came after the destructive confirm"
+  fi
+
+  local out
+  out=$(_list_ndjson)
+  printf '%s\n' "$out" | grep -q '"uninitialized":true' || {
+    echo "the card was touched despite the bad flag '$*'" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  }
+}
+
+function card_init_unknown_policy_slot_refuses_before_touching_card { # @test
+  _assert_bad_policy_flag_refused "unknown slot" --pin-policy 9e=once
+}
+
+function card_init_unknown_touch_policy_name_refuses_before_touching_card { # @test
+  _assert_bad_policy_flag_refused "unknown touch policy" --touch-policy 9a=once
+}
+
+function card_init_policy_flag_without_a_policy_refuses_before_touching_card { # @test
+  _assert_bad_policy_flag_refused "SLOT=POLICY" --pin-policy 9a
+}
+
+# Touch is real: with no touch granted, signing the 9A certificate waits out
+# fibby's (shortened) touch timeout and init fails.
+function card_init_fails_when_no_touch_arrives { # @test
+  spawn_fibby --touch-timeout-ms 500 --model yk5
+
+  _card_init_tty <<<"y"
+  [[ $status -ne 0 ]] || _fail_with_card_init_output "card init succeeded with no touch"
+  grep -q 'TOUCH needed 9A' "$FIBBY_LOG" ||
+    _fail_with_card_init_output "fibby never waited for a 9A touch"
+  grep -q 'TOUCH timeout 9A' "$FIBBY_LOG" ||
+    _fail_with_card_init_output "fibby did not time the 9A touch out"
+  if grep -q 'TOUCH auto-granted' "$FIBBY_LOG"; then
+    _fail_with_card_init_output "fibby auto-granted a touch without --auto-touch"
+  fi
+}
+
+# Wait for PATTERN to show up in the fibby log (the touch wait is logged
+# before the card parks, so this is the moment a touch can be delivered).
+_wait_for_fibby_log() {
+  local pattern="$1" _
+  for _ in $(seq 1 100); do
+    grep -q "$pattern" "$FIBBY_LOG" && return 0
+    sleep 0.1
+  done
+  echo "fibby log never showed: $pattern" >&2
+  tail -40 "$FIBBY_LOG" >&2 || true
+  return 1
+}
+
+# Touch delivered by hand: init blocks on 9A, then on 9C, and each
+# `fibby ctl touch` lets exactly that step through.
+function card_init_completes_when_each_touch_is_delivered { # @test
+  local ctl="$WORKDIR/control.sock"
+  spawn_fibby --control-socket "$ctl" --model yk5 --card "$READER_A"
+
+  # fd 3 is bats' output channel; a background child holding it would keep
+  # bats waiting after the test.
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_TEST_FIB_PIN=654321 \
+    setsid -w "$PIGGY_BIN" card init \
+    >"$WORKDIR/init.out" 2>"$WORKDIR/init.err" 3>&- <<<"y" &
+  local init_pid=$!
+
+  local slot rc=0
+  for slot in 9A 9C; do
+    _wait_for_fibby_log "TOUCH needed $slot" || {
+      kill "$init_pid" 2>/dev/null || true
+      cat "$WORKDIR/init.err" >&2 || true
+      return 1
+    }
+    if kill -0 "$init_pid" 2>/dev/null; then :; else
+      echo "card init exited while waiting for the $slot touch" >&2
+      cat "$WORKDIR/init.err" >&2 || true
+      return 1
+    fi
+    "$FIBBY_BIN" ctl --socket "$ctl" touch "$READER_A" || {
+      echo "fibby ctl touch failed for $slot" >&2
+      kill "$init_pid" 2>/dev/null || true
+      return 1
+    }
+  done
+  wait "$init_pid" || rc=$?
+  [[ $rc -eq 0 ]] || {
+    echo "card init exited $rc after both touches were delivered" >&2
+    cat "$WORKDIR/init.err" >&2 || true
+    tail -60 "$FIBBY_LOG" >&2 || true
+    return 1
+  }
+
+  grep -q 'TOUCH granted 9A' "$FIBBY_LOG" || {
+    echo "fibby did not log the 9A touch as granted" >&2
+    return 1
+  }
+  grep -q 'TOUCH granted 9C' "$FIBBY_LOG" || {
+    echo "fibby did not log the 9C touch as granted" >&2
+    return 1
+  }
+  local guid
+  guid=$(cat "$WORKDIR/init.out")
+  [[ $guid =~ ^[0-9A-F]{32}$ ]] || {
+    echo "card init stdout was not a bare GUID: '$guid'" >&2
+    return 1
+  }
+  assert_provisioned "$guid"
+  assert_slot_policy "$guid" 9C always always
 }
 
 # --- piggy#258: sealing the generated management key into the store ---------
@@ -150,7 +360,7 @@ GUID_B="B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2"
 _spawn_cards_with_backup_recipient() {
   [[ -x ${PIGGY_IDS_BIN:-/nonexistent} ]] ||
     skip "PIGGY_IDS_BIN unset; run via just test-bats-conformance-card-init-fibby"
-  spawn_fibby --model yk5 \
+  spawn_fibby --auto-touch --model yk5 \
     --card "$READER_A" \
     --card "$READER_B" --seed-rfc5903-slot-9d-cert --seed-chuid-guid "$GUID_B"
   local b_id
@@ -265,7 +475,7 @@ function card_init_declined_seal_offer_displays_key { # @test
 # An explicit seal with nowhere to seal to refuses before the destructive
 # confirm, leaving the card factory-blank.
 function card_init_seal_flag_without_recipients_refuses_before_touching_card { # @test
-  spawn_fibby --model yk5
+  spawn_fibby --auto-touch --model yk5
 
   _card_init_tty --seal-management-key <<<"y"
   [[ $status -ne 0 ]] || _fail_with_card_init_output "seal with no piggy-ids should refuse"
@@ -290,7 +500,7 @@ function card_init_jsonrpc_provisions_blank_card { # @test
   if [[ -z ${CARD_FRONTEND_BIN:-} ]] || [[ ! -x ${CARD_FRONTEND_BIN:-/nonexistent} ]]; then
     skip "CARD_FRONTEND_BIN unset; run via just test-bats-conformance-card-init-fibby"
   fi
-  spawn_fibby --model yk5
+  spawn_fibby --auto-touch --model yk5
 
   local rpc_sock="$WORKDIR/frontend.sock"
   local rpc_log="$WORKDIR/frontend.log"
@@ -335,7 +545,7 @@ function card_init_jsonrpc_provisions_blank_card { # @test
 # factory-default PIN/mgmt key, so the engine's default admin-auth succeeds (the
 # case-A path; a creds-rotated card would fail at admin-auth, by design).
 function card_init_allow_reprovision_reinits_an_initialized_card { # @test
-  spawn_fibby --model yk5 --seed-chuid
+  spawn_fibby --auto-touch --model yk5 --seed-chuid
 
   # Without the flag: an initialized card is not a blank card → refused, no writes.
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \

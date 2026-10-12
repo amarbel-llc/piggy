@@ -17,10 +17,12 @@ use std::process::Command;
 use base64::Engine as _;
 use serde_json::Value;
 
+use crate::card::add_key_cmd::{AddKeyArgs, add_key_with_frontend, openssh_line};
 use crate::card::engine::ProvisionError;
 use crate::card::init_cmd::{CardSelector, provision_with_frontend};
 use crate::card::protocol::{Frontend, FrontendError};
 use crate::card::seal::{ManagementKeySealer, SealMode, SealRequest};
+use crate::card::slot_policy::{SlotPolicies, add_key_slot, key_policy_from_flags};
 use crate::manage::{CARD_OP_FAILED, INTERACTION_DECLINED, INVALID_PARAMS};
 use crate::sign_core::{self, SigFormat, SignError};
 
@@ -41,6 +43,39 @@ fn seal_param(params: &Value) -> Result<SealMode, (i64, String)> {
                 .to_string(),
         )),
     }
+}
+
+/// `card.init`'s `pin_policy` / `touch_policy`: each an object mapping a slot
+/// (`9a`, `9c`, `9d`) to a policy name, overriding the fresh-card default for
+/// that slot only. Absent or null keeps every default.
+fn slot_policies_param(method: &str, params: &Value) -> Result<SlotPolicies, (i64, String)> {
+    type Setter = fn(&mut SlotPolicies, &str, &str) -> Result<(), String>;
+    let fields: [(&str, Setter); 2] = [
+        ("pin_policy", SlotPolicies::set_pin),
+        ("touch_policy", SlotPolicies::set_touch),
+    ];
+    let mut policies = SlotPolicies::default();
+    for (key, set) in fields {
+        let overrides = match params.get(key) {
+            None | Some(Value::Null) => continue,
+            Some(Value::Object(map)) => map,
+            Some(_) => {
+                return Err((
+                    INVALID_PARAMS,
+                    format!("{method}: '{key}' must be an object mapping a slot to a policy name"),
+                ));
+            }
+        };
+        for (slot, policy) in overrides {
+            let policy = policy.as_str().ok_or((
+                INVALID_PARAMS,
+                format!("{method}: '{key}.{slot}' must be a policy name"),
+            ))?;
+            set(&mut policies, slot, policy)
+                .map_err(|e| (INVALID_PARAMS, format!("{method}: '{key}.{slot}': {e}")))?;
+        }
+    }
+    Ok(policies)
 }
 
 /// `card.list` (RFC 0007 §5.1) — enumerate attached PIV cards. Read-only,
@@ -135,12 +170,16 @@ pub fn card_init(
         .get("allow_reprovision")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let policies = slot_policies_param("card.init", params)?;
     let seal = seal_param(params)?;
 
     let seal = SealRequest { mode: seal, sealer };
-    match provision_with_frontend(selector, allow_reprovision, seal, fe) {
+    match provision_with_frontend(selector, allow_reprovision, policies, seal, fe) {
         Ok(outcome) => {
-            let mut result = serde_json::json!({ "guid": outcome.guid });
+            let mut result = serde_json::json!({
+                "guid": outcome.guid,
+                "serves_operator_acts": outcome.serves_operator_acts,
+            });
             if let Some(key) = &outcome.generated_mgmt_key {
                 result["generated_management_key"] = Value::String(key.as_str().to_string());
             }
@@ -150,6 +189,94 @@ pub fn card_init(
             Ok(result)
         }
         // A declined confirm/prompt is the operator aborting — RFC 0007 §6 -32010.
+        Err(ProvisionError::Frontend(FrontendError::Declined(m)))
+        | Err(ProvisionError::Aborted(m)) => Err((INTERACTION_DECLINED, m)),
+        Err(e) => Err((CARD_OP_FAILED, e.to_string())),
+    }
+}
+
+/// An optional string param: absent or null is `None`, a string is `Some`,
+/// anything else is an invalid-params error.
+fn optional_str<'a>(
+    method: &str,
+    params: &'a Value,
+    key: &str,
+) -> Result<Option<&'a str>, (i64, String)> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s)),
+        Some(_) => Err((
+            INVALID_PARAMS,
+            format!("{method}: '{key}' must be a string"),
+        )),
+    }
+}
+
+/// `card.add_key` (RFC 0007 §5.4) — add one key to an already-provisioned
+/// card. Issues confirm, `secret` (the card's current management key unless
+/// `management_key_from_store` names where to read it, then the PIN) and
+/// progress interactions through `fe`. Returns `{ "guid", "slot",
+/// "public_key", "serves_operator_acts" }`. Asking for slot 9d, an unknown
+/// slot or an unknown policy is `-32602`; an occupied slot without `replace`
+/// is `-32050`; an operator decline is `-32010`.
+pub fn card_add_key(
+    params: &Value,
+    fe: &mut dyn Frontend,
+    sealer: &dyn ManagementKeySealer,
+) -> Result<Value, (i64, String)> {
+    const METHOD: &str = "card.add_key";
+    let invalid = |e: String| (INVALID_PARAMS, format!("{METHOD}: {e}"));
+
+    let slot = optional_str(METHOD, params, "slot")?
+        .ok_or_else(|| invalid("'slot' is required (9c or 9a)".into()))?;
+    let (_, default_policy) = add_key_slot(slot).map_err(invalid)?;
+    let pin_policy = optional_str(METHOD, params, "pin_policy")?;
+    let touch_policy = optional_str(METHOD, params, "touch_policy")?;
+    key_policy_from_flags(default_policy, pin_policy, touch_policy).map_err(invalid)?;
+
+    let serial = match params.get("serial") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| invalid("'serial' must be a u32".into()))?,
+        ),
+    };
+    let guid = optional_str(METHOD, params, "guid")?.map(str::to_string);
+    let reader = optional_str(METHOD, params, "reader")?.map(str::to_string);
+    let selector = CardSelector::from_flags(serial, guid, reader).map_err(invalid)?;
+    let replace = params
+        .get("replace")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let management_key_from_store = match params.get("management_key_from_store") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => None,
+        Some(Value::Bool(true)) => Some(String::new()),
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(_) => {
+            return Err(invalid(
+                "'management_key_from_store' must be a boolean or a non-empty store path".into(),
+            ));
+        }
+    };
+
+    let args = AddKeyArgs {
+        slot,
+        pin_policy,
+        touch_policy,
+        replace,
+        management_key_from_store,
+    };
+    match add_key_with_frontend(selector, args, sealer, fe) {
+        Ok(outcome) => {
+            let public_key = openssh_line(&outcome).map_err(|e| (CARD_OP_FAILED, e))?;
+            Ok(serde_json::json!({
+                "guid": outcome.guid,
+                "slot": format!("{:02x}", outcome.slot),
+                "public_key": public_key,
+                "serves_operator_acts": outcome.serves_operator_acts,
+            }))
+        }
         Err(ProvisionError::Frontend(FrontendError::Declined(m)))
         | Err(ProvisionError::Aborted(m)) => Err((INTERACTION_DECLINED, m)),
         Err(e) => Err((CARD_OP_FAILED, e.to_string())),
@@ -319,6 +446,66 @@ mod tests {
             .unwrap_err();
             assert_eq!(err.0, INVALID_PARAMS, "{bad}");
             assert!(err.1.contains("seal_management_key"), "{}", err.1);
+        }
+    }
+
+    #[test]
+    fn slot_policies_param_overrides_only_what_it_names() {
+        let p = slot_policies_param(
+            "card.init",
+            &serde_json::json!({ "pin_policy": { "9a": "always" }, "touch_policy": { "9c": "cached" } }),
+        )
+        .unwrap();
+        let d = SlotPolicies::default();
+        assert_eq!(p.piv_auth.pin, piggy_piv::PinPolicy::Always);
+        assert_eq!(p.piv_auth.touch, d.piv_auth.touch);
+        assert_eq!(p.signature.touch, piggy_piv::TouchPolicy::Cached);
+        assert_eq!(p.key_mgmt, d.key_mgmt);
+        assert_eq!(
+            slot_policies_param("card.init", &serde_json::json!({})),
+            Ok(d)
+        );
+    }
+
+    #[test]
+    fn card_init_rejects_malformed_policy_params() {
+        for bad in [
+            serde_json::json!({ "pin_policy": "always" }),
+            serde_json::json!({ "pin_policy": { "9a": 3 } }),
+            serde_json::json!({ "pin_policy": { "9e": "once" } }),
+            serde_json::json!({ "touch_policy": { "9c": "once" } }),
+        ] {
+            let mut fe = no_frontend();
+            let err = card_init(&bad, &mut fe, &crate::card::seal::NoStore).unwrap_err();
+            assert_eq!(err.0, INVALID_PARAMS, "{bad}");
+            assert!(err.1.contains("_policy"), "{}", err.1);
+        }
+    }
+
+    #[test]
+    fn card_add_key_rejects_bad_requests_before_any_card() {
+        for (bad, needle) in [
+            (serde_json::json!({}), "'slot' is required"),
+            (serde_json::json!({ "slot": "9d" }), "never regenerated"),
+            (serde_json::json!({ "slot": "9e" }), "9c or 9a"),
+            (serde_json::json!({ "slot": 9 }), "'slot' must be a string"),
+            (
+                serde_json::json!({ "slot": "9c", "pin_policy": "sometimes" }),
+                "unknown PIN policy",
+            ),
+            (
+                serde_json::json!({ "slot": "9c", "management_key_from_store": 7 }),
+                "management_key_from_store",
+            ),
+            (
+                serde_json::json!({ "slot": "9c", "serial": 1, "reader": "r" }),
+                "at most one",
+            ),
+        ] {
+            let mut fe = no_frontend();
+            let err = card_add_key(&bad, &mut fe, &crate::card::seal::NoStore).unwrap_err();
+            assert_eq!(err.0, INVALID_PARAMS, "{bad}");
+            assert!(err.1.contains(needle), "{bad}: {}", err.1);
         }
     }
 

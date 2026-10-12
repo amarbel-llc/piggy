@@ -128,7 +128,7 @@ _seed_9a_and_pubkey() {
 # a full provision, answering confirm + new PIN/PUK + mgmt_key over the child's
 # stdin/stdout. The child inherits PCSCLITE_CSOCK_NAME, so it talks to fibby.
 function card_init_over_stdio_provisions_blank_card { # @test
-  spawn_fibby --model yk5
+  spawn_fibby --auto-touch --model yk5
 
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
     run "$MANAGE_CLIENT_BIN" --spawn "$PIGGY_BIN" --method card.init \
@@ -153,7 +153,7 @@ function card_init_over_stdio_provisions_blank_card { # @test
 # Same provision workflow as the stdio lane (RFC 0007 §3 — same workflow, both
 # transports).
 function card_init_over_socket_provisions_blank_card { # @test
-  spawn_fibby --model yk5
+  spawn_fibby --auto-touch --model yk5
 
   local sock="$WORKDIR/manage.sock"
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" manage --jsonrpc --socket "$sock" \

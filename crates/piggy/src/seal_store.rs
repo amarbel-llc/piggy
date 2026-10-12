@@ -53,6 +53,13 @@ impl ManagementKeySealer for StoreSealer {
             recipients,
         }))
     }
+
+    fn recover(&self, pass_name: &str) -> Result<Zeroizing<String>, String> {
+        let line = Zeroizing::new(crate::crypt::decrypt_first_line(pass_name)?);
+        let text = std::str::from_utf8(&line)
+            .map_err(|_| format!("{pass_name} does not hold a management key (not text)"))?;
+        Ok(Zeroizing::new(text.trim().to_string()))
+    }
 }
 
 struct StoreEscrow {

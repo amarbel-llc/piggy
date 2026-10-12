@@ -500,15 +500,7 @@ impl PivToken {
         if !sw.is_success() {
             return Err(PivError::Apdu { sw: sw.as_u16() });
         }
-        // Most YubiKey firmware returns raw DER (starts with SEQUENCE 0x30).
-        // Some versions wrap the cert in a PIV data object (0x53 { 0x70 = cert }).
-        // Handle both transparently.
-        if data.first().copied() == Some(0x53) {
-            if let Ok(cert_der) = unwrap_piv_cert_object(&data) {
-                return Ok(cert_der);
-            }
-        }
-        Ok(data)
+        Ok(attestation_cert_der(data))
     }
 
     /// Begin a PIN-bracketed session over this token. Card operations
@@ -823,6 +815,33 @@ fn transmit_on(card: &pcsc::Card, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord), 
     }
 
     Ok((data, sw))
+}
+
+/// The certificate DER out of an ATTEST response. Most YubiKey firmware
+/// returns raw DER (starts with SEQUENCE 0x30); some versions wrap the cert
+/// in a PIV data object (0x53 { 0x70 = cert }). Both are handled.
+fn attestation_cert_der(data: Vec<u8>) -> Vec<u8> {
+    if data.first().copied() == Some(0x53) {
+        if let Ok(cert_der) = unwrap_piv_cert_object(&data) {
+            return cert_der;
+        }
+    }
+    data
+}
+
+impl PinSession<'_> {
+    /// A slot's PIN and touch policy as its attestation states them, read
+    /// inside the session (so right after a GENERATE in the same session).
+    /// Needs no PIN. Fails on a card that cannot attest the slot's key: see
+    /// [`PivToken::read_slot_policy`].
+    pub fn attested_policy(&self, slot_id: u8) -> Result<crate::policy::KeyPolicy, PivError> {
+        let (data, sw) = self.transmit(&Apdu::yk_attest(slot_id))?;
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+        let (pin, touch) = crate::attest::parse_policy(&attestation_cert_der(data))?;
+        Ok(crate::policy::KeyPolicy { pin, touch })
+    }
 }
 
 /// Try to unwrap a PIV data object (0x53 { 0x70 = cert_der }).
