@@ -8,7 +8,10 @@ approval-note: >
   frontend and agent scopes to be captured in manpages; a comparison of
   the guarded-memory guarantees against C pivy and the state of the
   art; and the direct agent-to-fibby transport promoted from a
-  conditional lift to committed phase (h).
+  conditional lift to committed phase (h). Phases approved on
+  2026-10-12 with one condition: every phase closes only after a human
+  UX review, CLI review, QA and end-to-end test by the operator (see
+  "Phase acceptance").
 promotion-criteria: >
   proposed -> experimental when phase (a) has landed and all four hold:
   (1) on one host, a software ed25519 key added through the piggy agent
@@ -340,6 +343,60 @@ Phase (h) is committed, not conditional; the operator has said it will
 be needed. Its position is last because nothing earlier depends on it,
 and the cap lever below can pull it forward.
 
+### Phase acceptance: a human pass closes every phase
+
+The merge gate proves a phase's code against fibby and the VM lanes. It
+does not prove that the prompts read well, that the CLI is usable, or
+that the flow works on a real host with a real card. So no phase is
+done when its last commit merges. Each phase closes only after the
+operator has run it by hand, and that pass has four parts:
+
+1. **UX review.** The operator reads every new or changed user-facing
+   surface: CLI help, manpage sections, error messages, prompt text,
+   health and status output. Wording the operator would not want to meet
+   at 2am goes back.
+2. **CLI review.** The operator drives the new commands and flags from a
+   shell, including the misuse paths (wrong slot, missing card, scope
+   that does not exist, holder down), and judges the exit codes and
+   messages.
+3. **QA.** The operator exercises the phase's failure modes and limits
+   deliberately: denied approval, timeout, card removed mid-operation,
+   the 16-card cap, the test-lockout refusal.
+4. **End-to-end test.** The operator runs the phase's headline flow on
+   a real host, with real hardware where the phase touches hardware,
+   from a clean state to the user-visible result.
+
+Each phase lands an `explore-fdr0006-<phase>` just recipe that stages
+the setup for the hand run (hosts, units, throwaway card, fibby
+holder), so the pass is repeatable and the recipe doubles as the
+written test script. The pass itself is not automated and is not run by
+the merge gate.
+
+**Bookkeeping.** Each phase gets a tracking issue. The implementation
+commits reference it but do not carry `Closes`; the operator closes the
+issue after the acceptance pass, with a comment naming what was run,
+on which host and card, and what was sent back. A phase whose pass
+sends work back stays open; the fixes merge through the gate as usual
+and the pass is repeated. The promotion criteria in the front matter
+are read as including the acceptance pass of every phase they name.
+
+The headline flow per phase, as the design stands today:
+
+| Phase | What the operator runs by hand |
+|---|---|
+| (a) | Enable the home-manager option on one host; add a software ed25519 key through the piggy agent socket; see it in `ssh-add -L`; make an sshsig with it and verify with `ssh-keygen -Y verify`. Run the operator-act client against a real card: read the prompt text, approve, verify the 9C sshsig; repeat naming 9A and see the refusal. Run `card init` with the new defaults on a throwaway YubiKey and read the health policy report and the attestation export. |
+| (b) | Unlock the agent as usual and confirm nothing changed in daily use. Check that the agent process is non-dumpable and that its locked-memory figure moved; confirm a core dump cannot be taken. Review the crate's API as a reader. |
+| (c) | Build the holder output and confirm it refuses every test flag and reports its build profile. Create and destroy a card at runtime over the control socket; read its attestation. Confirm the test-lane output still accepts the test flags. |
+| (d) | From a bound scope, mint a key over the agent extension; sign with it; from a sibling scope, be refused; retire it; exit the scope and confirm the card is gone. Do this once in the VM lane and once on a real host under the hardened units, and read the unit logs. |
+| (e) | Trigger a touch-policy operation and meet the approver prompt in a frontend scope: read it, approve, deny, let it time out, and judge each outcome's message. |
+| (f) | Start the holder with a real card present and bless its attestation key from 9C; read the blessing at the prompt; start it without the card and see what the holder does instead. |
+| (g) | Run the throughput measurement and read it before deciding the phase proceeds; then open a madder store sealed to a holder key and to a card key. |
+| (h) | Mint past the 16-card cap and confirm the agent still reaches every card over the direct transport; confirm the PC/SC path still works for real cards on the same host. |
+
+These rows will be revised as each phase's tracking issue is written;
+the row is a starting script, not the acceptance criterion. The
+criterion is the four-part pass above.
+
 Deleting `vendor/pivy` (epic #289 phase 5) is independent of all of
 this. The C behaviour worth keeping is recorded at the end of this
 document so the code can go.
@@ -584,6 +641,7 @@ operator's words.
 | 17 | madder | later phase, measure first |
 | 18 | sequencing | (a) to (g) in order; #289 independent |
 | 19 | wire specs | this FDR now, one RFC written per phase |
+| 20 | phase closure (2026-10-12) | "phases approved, but for each phase an I want a human UX / CLI review / QA / e2e test"; see "Phase acceptance" |
 
 ## Reference: what C pivy-agent did
 
