@@ -324,10 +324,10 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-rust test-go test-pigpen test-nix-hm-module _test-conformance-linux-only _test-vm-linux-only
+test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-rust test-go test-pigpen test-nix-hm-module test-nix-hm-secrets-module _test-conformance-linux-only _test-vm-linux-only
 
 [group('post-build')]
-test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-nix-hm-secrets-module
+test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware
 
 [linux]
 _test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby

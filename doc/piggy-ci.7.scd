@@ -31,8 +31,9 @@ the repo's *sweatfile* (*pre-merge = "just"*).
 	sandboxed bats lane (*test-bats-default*, *nix build .#bats-default*),
 	the conformance bats glob (*test-bats-conformance*), *cargo test*
 	(*test-rust*), the go/ tests (*test-go*), the standalone piggy-pigpen
-	crate (*test-pigpen*), the home-manager module evaluation smoke test
-	(*test-nix-hm-module*), and, on Linux only, the fibby-backed conformance
+	crate (*test-pigpen*), the home-manager module evaluation smoke tests
+	(*test-nix-hm-module*, *test-nix-hm-secrets-module*), and, on Linux
+	only, the fibby-backed conformance
 	lanes (*\_test-conformance-linux-only*) and the NixOS VM lanes
 	(*\_test-vm-linux-only*: *test-vm-luks*, *test-vm-zfs*,
 	*test-vm-agent*).
@@ -55,9 +56,8 @@ take two to three minutes each once the guest closure is cached; a
 *just test-optional*
 	Not run by the gate: *test-bats-file* and *test-bats-piggy-local* (the
 	fast, unsandboxed local-iteration paths), *test-bats-conformance-protocol*
-	(the SSH-agent wire-protocol bats), *test-bats-conformance-pivy-agent-hardware*
-	(needs a plugged-in card), and *test-nix-hm-secrets-module* (the
-	*services.piggy-secrets* module evaluation smoke test).
+	(the SSH-agent wire-protocol bats), and
+	*test-bats-conformance-pivy-agent-hardware* (needs a plugged-in card).
 
 *just test-vm-coverage*
 	The three VM lanes re-run on an instrumented piggy, merged into an
