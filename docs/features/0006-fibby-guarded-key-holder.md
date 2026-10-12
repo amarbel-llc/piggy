@@ -189,6 +189,12 @@ What fibby gains, in the holder build:
   agent's certificate-based slot discovery at
   `crates/piggy-piv/src/token.rs:354-371` finds it) and destroy a card
   (wipe, then remove). Minting is **one virtual card per principal**.
+  The whole lifecycle of one card, from mint through use, refusal,
+  approval and teardown, is drawn in
+  `docs/diagrams/fdr0006-card-lifecycle.puml` (rendered `.svg` beside
+  it, `just codemod-diagrams`):
+
+  ![Holder card lifecycle: mint, use, refusal, approval, teardown](../diagrams/fdr0006-card-lifecycle.svg)
 - **Per-key policy.** A card's key carries a YubiKey-style PIN policy
   and touch policy, reported through the metadata and attestation
   commands that `piggy-piv` already parses.

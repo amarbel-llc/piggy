@@ -1,0 +1,84 @@
+@startuml fdr0006-card-lifecycle
+' Runtime lifecycle of one holder card (FDR 0006, "The holder: fibby as a
+' virtual PIV card" and "The holder service"): mint, use, refusal, approval,
+' teardown. Companion to docs/features/0006-fibby-guarded-key-holder.md.
+'
+' Regenerate the rendered image with:  just codemod-diagrams
+' The .puml is the source of truth; the .svg beside it is generated.
+
+title Holder card lifecycle — one virtual card per principal (FDR 0006, phases (c) to (e))
+
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam sequenceMessageAlign center
+skinparam note {
+  BackgroundColor #FFFDF0
+  BorderColor #B8A100
+}
+
+participant "session\n(agent scope,\nbound)" as S
+participant "sibling session\n(agent scope,\nnot bound)" as X
+participant "approver\n(frontend scope)" as A
+participant "holder agent\n(service account)" as H
+participant "fibby\n(own account,\nguarded memory)" as F
+
+== Mint (phase d) ==
+S -> H : mint@piggy
+H -> H : read peer creds + cgroup\nrefuse if scope maps to neither
+alt live cards < cap
+  H -> F : control socket: create card\n(ed25519, PIN never, touch policy)
+  F -> F : generate key + self-signed cert\nin guarded memory
+  F --> H : card id
+  H -> H : record binding\ncard <-> principal <-> scope
+  H --> S : public key
+else cap reached
+  H --> S : refused: card cap
+  note right of S
+    FDR 0032: session start is
+    refused; no tier-1 fallback
+  end note
+end
+
+== Use ==
+S -> H : sign (key, data)
+H -> H : binding matches caller scope
+H -> F : PC/SC: select slot, sign
+alt touch policy on key
+  F --> H : touch needed
+  H -> A : approve? (key, principal, scope)
+  note right of H
+    only a frontend-scope peer
+    may answer; an agent-scope
+    process cannot approve itself
+  end note
+  alt approved
+    A --> H : approve
+    H -> F : continue
+  else denied or timed out
+    A --> H : deny
+    H --> S : refused: not approved
+  end
+end
+F --> H : signature
+H --> S : sshsig
+
+X -> H : sign (same key, data)
+H -> H : no binding for this scope
+H --> X : refused
+
+== Teardown (whichever comes first) ==
+alt owner retires
+  S -> H : retire@piggy (key)
+else bound cgroup disappears
+  H -> H : observes scope exit
+end
+H -> F : control socket: destroy card
+F -> F : wipe key material\nthen remove card
+F --> H : done
+H -> H : drop binding
+
+note over F
+  No private key crosses any socket, in either direction.
+  A holder restart wipes every card; sessions mint again.
+end note
+@enduml
