@@ -18,58 +18,9 @@
 let
   inherit (pkgs) lib;
 
-  # Stub home-manager-shaped option set. The piggy-agent module needs
-  # `home.sessionVariables`, `systemd.user.services`, `systemd.user.tmpfiles.rules`,
-  # `launchd.agents`, `assertions`, and `meta.maintainers` to be declared
-  # somewhere; in a real home-manager invocation, hm declares them.
-  harness = {
-    options = {
-      home.sessionVariables = lib.mkOption {
-        type = lib.types.attrs;
-        default = { };
-      };
-      # home-manager normally derives this from `home.username` and the
-      # platform; the harness pins it so the module can build absolute
-      # default paths (e.g. Darwin's StandardErrorPath — see #64) at
-      # eval time. The value is arbitrary but must be an absolute path
-      # to satisfy any consumer that type-checks against `path`.
-      home.homeDirectory = lib.mkOption {
-        type = lib.types.str;
-        default = "/Users/eval-test";
-      };
-      systemd.user.services = lib.mkOption {
-        type = lib.types.attrs;
-        default = { };
-      };
-      systemd.user.tmpfiles.rules = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        default = [ ];
-      };
-      launchd.agents = lib.mkOption {
-        type = lib.types.attrs;
-        default = { };
-      };
-      xdg.configFile = lib.mkOption {
-        type = lib.types.attrs;
-        default = { };
-      };
-      assertions = lib.mkOption {
-        type = lib.types.listOf (
-          lib.types.submodule {
-            options = {
-              assertion = lib.mkOption { type = lib.types.bool; };
-              message = lib.mkOption { type = lib.types.str; };
-            };
-          }
-        );
-        default = [ ];
-      };
-      meta.maintainers = lib.mkOption {
-        type = lib.types.listOf lib.types.attrs;
-        default = [ ];
-      };
-    };
-  };
+  # The home-manager options the module writes to, declared without a
+  # real home-manager.
+  harness = ./stub-home-manager.nix;
 
   # `mkPackageOption pkgs "piggy"` defaults to `pkgs.piggy`, which
   # doesn't exist in stock nixpkgs. Every case is evaluated with
@@ -1332,6 +1283,301 @@ let
           got = {
             inherit tripped text;
           };
+        };
+    }
+
+    # --- softwareKeys (FDR 0006 tier 1: a stock ssh-agent for added keys) ---
+
+    {
+      # The whole wiring from one option: a second unit running the stock
+      # ssh-agent on its own socket, and the piggy agent proxying it and
+      # routing adds to it. Linux only; Darwin trips the platform
+      # assertion instead.
+      name = "software-keys-runs-ssh-agent-and-designates-it-for-adds";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.softwareKeys.enable = true;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+          texts = result.config.services.piggy-agent._launcherTexts;
+          agentText = texts.piggy-agent or "";
+          softText = texts.piggy-agent-software-keys or "";
+          sock = "\${XDG_STATE_HOME:-$HOME/.local/state}/piggy/piggy-agent-software-keys.sock";
+          hasUpstream = lib.hasInfix " --upstream software=\"${sock}\"" agentText;
+          hasAddTo = lib.hasInfix "--add-new-keys-to software " agentText;
+          softRunsSshAgent =
+            lib.hasInfix "SOCK=\"${sock}\"" softText && lib.hasInfix "/bin/ssh-agent -D -a \"$SOCK\"" softText;
+          agentUnit = result.config.systemd.user.services.piggy-agent.Unit or { };
+          ordered =
+            (agentUnit.After or [ ]) == [ "piggy-agent-software-keys.service" ]
+            && (agentUnit.Wants or [ ]) == [ "piggy-agent-software-keys.service" ];
+          softLauncher = forceLauncherNamed "piggy-agent-software-keys" result;
+        in
+        {
+          ok =
+            if pkgs.stdenv.isLinux then
+              tripped == [ ] && hasUpstream && hasAddTo && softRunsSshAgent && ordered && softLauncher != null
+            else
+              lib.any (m: lib.hasInfix "`softwareKeys.enable` is Linux-only" m) tripped;
+          got = {
+            inherit
+              tripped
+              agentText
+              softText
+              agentUnit
+              ;
+          };
+        };
+    }
+    {
+      # Off by default: no second unit, no upstream, no add target.
+      name = "software-keys-off-by-default";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+      };
+      check =
+        result:
+        let
+          texts = result.config.services.piggy-agent._launcherTexts;
+          agentText = texts.piggy-agent or "";
+          unitNames = lib.attrNames result.config.systemd.user.services;
+        in
+        {
+          ok =
+            !(texts ? piggy-agent-software-keys)
+            && !(lib.hasInfix "--upstream" agentText)
+            && !(lib.hasInfix "--add-new-keys-to" agentText)
+            && !(lib.elem "piggy-agent-software-keys" unitNames);
+          got = { inherit agentText unitNames; };
+        };
+    }
+    {
+      # Explicit upstreams keep their place ahead of the software one, and
+      # a custom socket path is used on both sides.
+      name = "software-keys-appends-after-explicit-upstreams";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "other";
+            socketPath = "/tmp/other.sock";
+          }
+        ];
+        services.piggy-agent.softwareKeys = {
+          enable = true;
+          socketPath = "$HOME/soft.sock";
+        };
+      };
+      check =
+        result:
+        let
+          tripped = lib.filter (m: !(lib.hasInfix "Linux-only" m)) (trippedMessages result);
+          texts = result.config.services.piggy-agent._launcherTexts;
+          agentText = texts.piggy-agent or "";
+          softText = texts.piggy-agent-software-keys or "";
+        in
+        {
+          ok =
+            tripped == [ ]
+            && lib.hasInfix ''--upstream other="/tmp/other.sock" --upstream software="$HOME/soft.sock"'' agentText
+            && lib.hasInfix "SOCK=\"$HOME/soft.sock\"" softText;
+          got = { inherit tripped agentText softText; };
+        };
+    }
+    {
+      # Each instance gets its own ssh-agent unit and socket.
+      name = "software-keys-per-instance";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.instances = {
+          work = {
+            allCards = true;
+            softwareKeys.enable = true;
+          };
+          plain = {
+            allCards = true;
+          };
+        };
+      };
+      check =
+        result:
+        let
+          tripped = lib.filter (m: !(lib.hasInfix "Linux-only" m)) (trippedMessages result);
+          texts = result.config.services.piggy-agent._launcherTexts;
+          workText = texts.piggy-agent-work or "";
+          plainText = texts.piggy-agent-plain or "";
+        in
+        {
+          ok =
+            tripped == [ ]
+            && lib.hasInfix "piggy/piggy-agent-work-software-keys.sock" workText
+            && lib.hasInfix "--add-new-keys-to software " workText
+            && texts ? piggy-agent-work-software-keys
+            && !(texts ? piggy-agent-plain-software-keys)
+            && !(lib.hasInfix "--upstream" plainText)
+            && (
+              !pkgs.stdenv.isLinux
+              ||
+                lib.attrNames result.config.systemd.user.services == [
+                  "piggy-agent-plain"
+                  "piggy-agent-work"
+                  "piggy-agent-work-software-keys"
+                ]
+            );
+          got = { inherit tripped workText plainText; };
+        };
+    }
+    {
+      # An instance whose name is another instance's software-keys unit
+      # would silently replace that unit.
+      name = "software-keys-unit-name-collision-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.instances = {
+          work = {
+            allCards = true;
+            softwareKeys.enable = true;
+          };
+          work-software-keys = {
+            allCards = true;
+          };
+        };
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+        in
+        {
+          ok = lib.any (m: lib.hasInfix "which another instance already uses" m) tripped;
+          got = tripped;
+        };
+    }
+    {
+      # Top-level softwareKeys alongside `instances` is the same mistake as
+      # any other top-level per-instance option.
+      name = "top-level-software-keys-with-instances-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.softwareKeys.enable = true;
+        services.piggy-agent.instances.work = {
+          allCards = true;
+        };
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+        in
+        {
+          ok = lib.any (m: lib.hasInfix "top-level options" m) tripped;
+          got = tripped;
+        };
+    }
+    {
+      # The socket path sits unescaped inside double quotes in both
+      # launchers; a quote in it would end the argument early.
+      name = "software-keys-socket-path-with-quote-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.softwareKeys = {
+          enable = true;
+          socketPath = "/tmp/a\"b.sock";
+        };
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+        in
+        {
+          ok = lib.any (m: lib.hasInfix "`softwareKeys.socketPath` must not contain double quotes" m) tripped;
+          got = tripped;
+        };
+    }
+    {
+      # softwareKeys owns the add target; a hand-set one is a conflict.
+      name = "software-keys-with-add-new-keys-to-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "other";
+            socketPath = "/tmp/other.sock";
+          }
+        ];
+        services.piggy-agent.addNewKeysTo = "other";
+        services.piggy-agent.softwareKeys.enable = true;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+        in
+        {
+          ok = lib.any (m: lib.hasInfix "`addNewKeysTo` must be unset" m) tripped;
+          got = tripped;
+        };
+    }
+    {
+      name = "software-keys-reserves-its-upstream-name";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = rustPackageStub;
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.upstreams = [
+          {
+            name = "software";
+            socketPath = "/tmp/other.sock";
+          }
+        ];
+        services.piggy-agent.softwareKeys.enable = true;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+        in
+        {
+          ok = lib.any (m: lib.hasInfix "upstream name `software` is reserved" m) tripped;
+          got = tripped;
+        };
+    }
+    {
+      # The C pivy-agent has no --upstream surface to route adds through.
+      name = "c-agent-with-software-keys-trips-assertion";
+      cfg = {
+        services.piggy-agent.enable = true;
+        services.piggy-agent.package = pkgs.hello.overrideAttrs (_: {
+          pname = "pivy";
+        });
+        services.piggy-agent.allCards = true;
+        services.piggy-agent.softwareKeys.enable = true;
+      };
+      check =
+        result:
+        let
+          tripped = trippedMessages result;
+        in
+        {
+          ok = lib.any (m: lib.hasInfix "`softwareKeys.enable` requires the Rust agent" m) tripped;
+          got = tripped;
         };
     }
 

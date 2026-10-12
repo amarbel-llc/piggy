@@ -153,6 +153,15 @@ upstreams being the forwarded, card-backed agents. Workstations run the
 card-backed agent, optionally proxying a stock *ssh-agent* for software
 keys. Either way every host has one *piggy-agent* socket.
 
+The home-manager option _services.piggy-agent.softwareKeys.enable_ sets up
+that workstation shape for this agent on Linux: it runs a stock *ssh-agent* in a second
+unit and passes *--upstream software=*_SOCKET_ *--add-new-keys-to software*,
+so *ssh-add* against the piggy socket puts the key in that *ssh-agent*. Such
+a key is held in memory, not in a file; any process running as the same
+user can use it, and restarting the *ssh-agent* unit forgets it. On macOS,
+name the launchd *ssh-agent* with *--upstream* and *--add-new-keys-to*
+instead.
+
 # CARD PRESENCE
 
 The card-backed agent re-enumerates PC/SC on a reconcile loop: each pass

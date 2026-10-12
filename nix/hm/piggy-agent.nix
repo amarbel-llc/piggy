@@ -30,6 +30,55 @@ let
   # key list and exit instead of serving.
   foregroundArgs = lib.optional (!isRustAgent) "-i";
 
+  # The upstream name a `softwareKeys` instance designates for adds
+  # (FDR 0006 tier 1). Fixed, so `piggy health` and logs read the same on
+  # every host.
+  softwareKeysUpstreamName = "software";
+
+  softwareKeysUnitName = name: "${name}-software-keys";
+
+  # A unit's socket: the configured path, else `<unit>.sock` in piggy's
+  # state dir. Left for bash to expand at service start.
+  socketExprFor =
+    unit: configured:
+    if configured != null then
+      configured
+    else
+      "\${XDG_STATE_HOME:-$HOME/.local/state}/piggy/${unit}.sock";
+
+  softwareKeysSocketExpr =
+    name: instanceCfg: socketExprFor (softwareKeysUnitName name) instanceCfg.softwareKeys.socketPath;
+
+  # The upstreams and add target an instance actually runs with: its own,
+  # plus the software-keys ssh-agent when `softwareKeys.enable` is set.
+  # The software upstream goes last so explicitly configured upstreams
+  # keep their listing order ahead of it.
+  effectiveUpstreams =
+    name: instanceCfg:
+    instanceCfg.upstreams
+    ++ lib.optional instanceCfg.softwareKeys.enable {
+      name = softwareKeysUpstreamName;
+      socketPath = softwareKeysSocketExpr name instanceCfg;
+    };
+
+  # Launcher preamble shared by the agent and the software-keys
+  # ssh-agent: XDG_STATE_HOME default, socket-dir creation, stale-socket
+  # cleanup. coreutils is called by ABSOLUTE store path (and the parent
+  # dir derived with bash ${SOCK%/*} rather than dirname) because a
+  # `systemd --user` service on a headless is-ssh-host has a minimal PATH
+  # with no coreutils on it — bare mkdir/dirname/rm exit 127 under
+  # `set -eu` and crash-loop the unit. eng#295 exposed this on the first
+  # headless is-ssh-host to run the proxy-only launcher; piggy#243. Do
+  # NOT revert to bare commands.
+  socketPreamble = socketExpr: ''
+    set -eu
+    : "''${HOME:?HOME must be set}"
+    : "''${XDG_STATE_HOME:=$HOME/.local/state}"
+    SOCK="${socketExpr}"
+    ${pkgs.coreutils}/bin/mkdir -p -m 0700 "''${SOCK%/*}"
+    ${pkgs.coreutils}/bin/rm -f "$SOCK"
+  '';
+
   # Build the per-instance unit definitions. Single-instance mode
   # synthesizes one instance named `piggy-agent` from the top-level
   # options; multi-instance mode (planned) maps `cfg.instances` through
@@ -39,11 +88,7 @@ let
   mkInstance =
     name: instanceCfg:
     let
-      socketPathExpr =
-        if instanceCfg.socketPath != null then
-          instanceCfg.socketPath
-        else
-          "\${XDG_STATE_HOME:-$HOME/.local/state}/piggy/${name}.sock";
+      socketPathExpr = socketExprFor name instanceCfg.socketPath;
 
       # The service unit / launchd label this instance runs under, for the
       # agent's `--service-name` self-report (piggy#162) so `piggy health`
@@ -54,6 +99,11 @@ let
       # mode this equals health's default (`piggy-agent.service`) — emitting
       # it is harmless there and essential for multi-instance units.
       serviceName = if pkgs.stdenv.isDarwin then "org.nix-community.home.${name}" else "${name}.service";
+
+      softwareKeys = instanceCfg.softwareKeys;
+      softwareKeysUnit = softwareKeysUnitName name;
+      upstreams = effectiveUpstreams name instanceCfg;
+      addNewKeysTo = if softwareKeys.enable then softwareKeysUpstreamName else instanceCfg.addNewKeysTo;
 
       # Args other than the socket path. These get routed through
       # `lib.escapeShellArgs` so user-supplied strings (guid, cak,
@@ -98,9 +148,9 @@ let
           "--agent-timeout"
           (toString instanceCfg.agentTimeout)
         ])
-        ++ (lib.optionals (instanceCfg.addNewKeysTo != null) [
+        ++ (lib.optionals (addNewKeysTo != null) [
           "--add-new-keys-to"
-          instanceCfg.addNewKeysTo
+          addNewKeysTo
         ])
         # Proxy-only role (eng#295): no card, upstreams only. Rust agent
         # only; the assertions below pin the card flags to unset.
@@ -145,13 +195,14 @@ let
         ++ lib.concatMap (u: [
           "--upstream"
           ''${u.name}="${u.socketPath}"''
-        ]) instanceCfg.upstreams;
+        ]) upstreams;
 
       # Single shared launcher script for both Linux and Darwin. Handles
-      # XDG_STATE_HOME default, socket-dir creation, stale-socket cleanup,
-      # then exec's the agent. Unifying eliminates the brittle bash -c
-      # '...' string in ExecStart (single-quote injection hazards) and
-      # the tmpfiles.d rule (the script mkdir's the dir itself).
+      # XDG_STATE_HOME default, socket-dir creation, stale-socket cleanup
+      # (socketPreamble), then exec's the agent. Unifying eliminates the
+      # brittle bash -c '...' string in ExecStart (single-quote injection
+      # hazards) and the tmpfiles.d rule (the script mkdir's the dir
+      # itself).
       #
       # SSH_AUTH_SOCK stays here because socketPathExpr can include
       # `$XDG_STATE_HOME` / `$HOME` references that need runtime
@@ -159,27 +210,36 @@ let
       # set on the systemd Service.Environment / launchd
       # EnvironmentVariables instead so they're inspectable in
       # eval-test.
-      #
-      # The socket-dir / stale-socket lines call coreutils by ABSOLUTE
-      # store path (and derive the parent dir with bash ${SOCK%/*}
-      # rather than dirname) because a `systemd --user` service on a
-      # headless is-ssh-host has a minimal PATH with no coreutils on
-      # it — bare mkdir/dirname/rm exit 127 under `set -eu` and crash-
-      # loop the unit. eng#295 exposed this on the first headless
-      # is-ssh-host to run the proxy-only launcher; piggy#243. Do NOT
-      # revert to bare commands.
-      launcherText = ''
-        set -eu
-        : "''${HOME:?HOME must be set}"
-        : "''${XDG_STATE_HOME:=$HOME/.local/state}"
-        SOCK="${socketPathExpr}"
-        ${pkgs.coreutils}/bin/mkdir -p -m 0700 "''${SOCK%/*}"
-        ${pkgs.coreutils}/bin/rm -f "$SOCK"
+      launcherText = socketPreamble socketPathExpr + ''
         export SSH_AUTH_SOCK="$SOCK"
         exec ${binPath} ${lib.concatStringsSep " " execWords}
       '';
 
       launcher = pkgs.writeShellScript "${name}-launch" launcherText;
+
+      # The stock OpenSSH ssh-agent that holds tier-1 software keys (FDR
+      # 0006). `-D` keeps it in the foreground for systemd; the keys live
+      # only in its memory, so a restart of this unit forgets them.
+      softwareKeysLauncherText = socketPreamble (softwareKeysSocketExpr name instanceCfg) + ''
+        exec ${softwareKeys.package}/bin/ssh-agent -D -a "$SOCK"
+      '';
+
+      softwareKeysService = {
+        Unit = {
+          Description = "Stock ssh-agent holding software keys for ${name}";
+          Documentation = "https://code.linenisgreat.com/piggy";
+        };
+
+        Service = {
+          ExecStart = "${pkgs.writeShellScript "${softwareKeysUnit}-launch" softwareKeysLauncherText}";
+          Restart = "always";
+          RestartSec = 3;
+        };
+
+        Install = {
+          WantedBy = [ "default.target" ];
+        };
+      };
 
       # Static env vars routed to the agent process via the unit's
       # native env-vars surface. systemd takes a list of "K=V" strings;
@@ -202,6 +262,12 @@ let
         Unit = {
           Description = "Piggy PIV-backed SSH agent (${name})";
           Documentation = "https://code.linenisgreat.com/piggy";
+        }
+        # The agent tolerates a dead upstream, so this is ordering only:
+        # start the software-keys agent first, never fail without it.
+        // lib.optionalAttrs softwareKeys.enable {
+          Wants = [ "${softwareKeysUnit}.service" ];
+          After = [ "${softwareKeysUnit}.service" ];
         };
 
         Service = {
@@ -244,10 +310,20 @@ let
       inherit
         socketPathExpr
         launcher
-        launcherText
-        linuxService
         darwinAgent
         ;
+      launcherTexts = {
+        ${name} = launcherText;
+      }
+      // lib.optionalAttrs softwareKeys.enable {
+        ${softwareKeysUnit} = softwareKeysLauncherText;
+      };
+      linuxServices = {
+        ${name} = linuxService;
+      }
+      // lib.optionalAttrs softwareKeys.enable {
+        ${softwareKeysUnit} = softwareKeysService;
+      };
     };
 
   hasInstances = cfg.instances != { };
@@ -277,6 +353,48 @@ let
     };
   };
 
+  # `softwareKeys.*` (FDR 0006 tier 1). Shared by the top-level option
+  # set and the per-instance submodule.
+  softwareKeysOptions = {
+    enable = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Run a stock OpenSSH `ssh-agent` beside this piggy agent and
+        designate it for added keys: the agent gets
+        `--upstream ${softwareKeysUpstreamName}=<socket>
+        --add-new-keys-to ${softwareKeysUpstreamName}`, so an `ssh-add`
+        against the piggy socket lands in that `ssh-agent`, and its
+        keys are listed and signed with through the piggy socket.
+
+        This is for keys that should not sit in a file (FDR 0006,
+        tier 1). The key lives in the `ssh-agent`'s memory only, and
+        any process running as this user can use it. A restart of the
+        `<unit>-software-keys` unit forgets every key.
+
+        Sets the add target, so it cannot be combined with
+        {option}`addNewKeysTo`, and reserves the upstream name
+        `${softwareKeysUpstreamName}`. Rust agent on Linux only: on
+        Darwin, list the launchd `ssh-agent` in {option}`upstreams`
+        and name it in {option}`addNewKeysTo` instead.
+      '';
+    };
+
+    package = lib.mkPackageOption pkgs "openssh" { };
+
+    socketPath = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      defaultText = lib.literalExpression "$XDG_STATE_HOME/piggy/<unit>-software-keys.sock";
+      description = ''
+        Socket of the software-keys `ssh-agent`. `$HOME`-style
+        references are expanded by bash at service start; literal
+        double quotes are rejected. Nothing needs to point at this
+        socket: clients use the piggy agent's socket.
+      '';
+    };
+  };
+
   # Snapshot of the top-level instance options, used to synthesize a
   # single `piggy-agent` entry when `cfg.instances` is empty.
   topLevelInstanceCfg = {
@@ -296,6 +414,7 @@ let
       agentTimeout
       proxyOnly
       eventDrivenCardPresence
+      softwareKeys
       ;
   };
 
@@ -318,7 +437,9 @@ let
     || cfg.agentTimeout != null
     || cfg.proxyOnly
     # Defaults to true (piggy#255), so "set" here means "opted out".
-    || !cfg.eventDrivenCardPresence;
+    || !cfg.eventDrivenCardPresence
+    || cfg.softwareKeys.enable
+    || cfg.softwareKeys.socketPath != null;
 
   # Map of effective unit-name → per-instance config. Single-instance
   # mode synthesizes one entry named `piggy-agent` from the top-level
@@ -383,7 +504,7 @@ let
         message = "services.piggy-agent: `proxyOnly` requires the Rust agent (package pname \"piggy\"), not the C pivy-agent (instance ${unitName}).";
       }
       {
-        assertion = !ic.proxyOnly || ic.upstreams != [ ];
+        assertion = !ic.proxyOnly || effectiveUpstreams unitName ic != [ ];
         message = "services.piggy-agent: `proxyOnly = true` requires at least one entry in `upstreams` — a proxy with nothing to proxy to serves no keys (instance ${unitName}).";
       }
       {
@@ -421,6 +542,34 @@ let
       {
         assertion = ic.addNewKeysTo == null || lib.any (u: u.name == ic.addNewKeysTo) ic.upstreams;
         message = "services.piggy-agent: `addNewKeysTo` must name an entry in `upstreams` (instance ${unitName}).";
+      }
+      # softwareKeys (FDR 0006 tier 1): it supplies the add target and one
+      # upstream itself, so the hand-set equivalents must not collide.
+      {
+        assertion = !ic.softwareKeys.enable || isRustAgent;
+        message = "services.piggy-agent: `softwareKeys.enable` requires the Rust agent (package pname \"piggy\"), not the C pivy-agent (instance ${unitName}).";
+      }
+      {
+        assertion = !ic.softwareKeys.enable || pkgs.stdenv.isLinux;
+        message = "services.piggy-agent: `softwareKeys.enable` is Linux-only; on Darwin list the launchd ssh-agent in `upstreams` and name it in `addNewKeysTo` (instance ${unitName}).";
+      }
+      {
+        assertion = !ic.softwareKeys.enable || ic.addNewKeysTo == null;
+        message = "services.piggy-agent: `softwareKeys.enable` designates its own ssh-agent for added keys, so `addNewKeysTo` must be unset (instance ${unitName}).";
+      }
+      {
+        assertion = !ic.softwareKeys.enable || lib.all (u: u.name != softwareKeysUpstreamName) ic.upstreams;
+        message = "services.piggy-agent: the upstream name `${softwareKeysUpstreamName}` is reserved by `softwareKeys.enable` (instance ${unitName}).";
+      }
+      # `instances.work.softwareKeys` and `instances.work-software-keys`
+      # would both claim the unit `piggy-agent-work-software-keys`.
+      {
+        assertion = !ic.softwareKeys.enable || !(effectiveInstances ? ${softwareKeysUnitName unitName});
+        message = "services.piggy-agent: the software-keys unit of instance ${unitName} is named ${softwareKeysUnitName unitName}, which another instance already uses; rename that instance.";
+      }
+      {
+        assertion = ic.softwareKeys.socketPath == null || !lib.hasInfix "\"" ic.softwareKeys.socketPath;
+        message = "services.piggy-agent: `softwareKeys.socketPath` must not contain double quotes (instance ${unitName}).";
       }
       # No eventDrivenCardPresence assertion (piggy#255): it now defaults true,
       # so a C-agent or proxyOnly instance that never touches it would trip a
@@ -678,6 +827,8 @@ in
       '';
     };
 
+    softwareKeys = softwareKeysOptions;
+
     _launcherTexts = mkOption {
       type = types.attrsOf types.str;
       internal = true;
@@ -788,6 +939,7 @@ in
               default = true;
               description = "Event-driven card presence for this instance (piggy#248; default since piggy#255). Set `false` to opt out to poll-only (`--poll-only`). Card-backed Rust agent only; the C agent and `proxyOnly` ignore it.";
             };
+            softwareKeys = softwareKeysOptions;
           };
         }
       );
@@ -856,13 +1008,16 @@ in
           "services.piggy-agent: top-level options "
           + "(`guid`/`allCards`/`cak`/`slots`/`socketPath`/`askpass`"
           + "/`logFile`/`extraArgs`/`upstreams`/`addNewKeysTo`"
-          + "/`agentTimeout`/`proxyOnly`/`eventDrivenCardPresence`) are "
+          + "/`agentTimeout`/`proxyOnly`/`eventDrivenCardPresence`"
+          + "/`softwareKeys`) are "
           + "forbidden when `instances` is non-empty. Move them into "
           + "`instances.<name>` entries.";
       }
     ];
 
-    services.piggy-agent._launcherTexts = lib.mapAttrs (_: built: built.launcherText) builtInstances;
+    services.piggy-agent._launcherTexts = lib.concatMapAttrs (
+      _: built: built.launcherTexts
+    ) builtInstances;
 
     services.piggy-agent.resolvedSocketPath = lib.mkIf (
       !hasInstances
@@ -871,7 +1026,7 @@ in
     services.piggy-agent.resolvedSocketPaths = resolvedSocketPathsMap;
 
     systemd.user.services = mkIf pkgs.stdenv.isLinux (
-      lib.mapAttrs (_: built: built.linuxService) builtInstances
+      lib.concatMapAttrs (_: built: built.linuxServices) builtInstances
     );
 
     launchd.agents = mkIf pkgs.stdenv.isDarwin (

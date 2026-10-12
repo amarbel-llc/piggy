@@ -7,6 +7,9 @@
 #                    upstream, routes ssh-add there  — the workstation shape
 #   piggy-front      --proxy-only over upstreams piv=piggy-agent and soft
 #                    — the remote-host shape, one socket fronting both
+#   hm-piggy-agent, hm-piggy-agent-software-keys
+#                    the two units `services.piggy-agent.softwareKeys`
+#                    emits (FDR 0006 tier 1), run as a guest user
 #
 # The testScript proves the merged listing order, that a sign through the
 # front lands on the right backend (card vs software), that a real sshd
@@ -27,6 +30,42 @@ let
   softSock = "/run/upstream/agent.sock";
   pivSock = "/run/piggy/agent.sock";
   frontSock = "/run/piggy-front/agent.sock";
+
+  # FDR 0006 tier 1: the shipped `services.piggy-agent.softwareKeys`
+  # option, evaluated for a guest user without a real home-manager. The
+  # units it emits are run below as that user, so the lane proves the
+  # launchers the module writes and not a hand-copied flag list.
+  hmUser = "hm";
+  hmHome = "/home/${hmUser}";
+  hmStateDir = "${hmHome}/.local/state/piggy";
+  hmSock = "${hmStateDir}/piggy-agent.sock";
+  hmSoftSock = "${hmStateDir}/piggy-agent-software-keys.sock";
+  hmEval = lib.evalModules {
+    modules = [
+      ../hm/stub-home-manager.nix
+      ../hm/piggy-agent.nix
+      {
+        home.homeDirectory = hmHome;
+        services.piggy-agent = {
+          enable = true;
+          # The module picks the Rust flag surface by pname; the coverage
+          # lanes pass a `piggy-cov` build of the same binary.
+          package = piggy // {
+            pname = "piggy";
+          };
+          allCards = true;
+          softwareKeys.enable = true;
+        };
+      }
+    ];
+    specialArgs = { inherit pkgs; };
+  };
+  hmTripped = lib.filter (a: !a.assertion) hmEval.config.assertions;
+  hmUnits =
+    assert lib.assertMsg (hmTripped == [ ]) (lib.concatMapStringsSep "\n" (a: a.message) hmTripped);
+    hmEval.config.systemd.user.services;
+  hmUnitName = name: "hm-${name}";
+  hmDependencies = map hmUnitName;
 
   # piggy#296 / #300: this lane intermittently hangs in an `ssh` step until
   # the global timeout, and the driver's own log cannot say why: it shows
@@ -199,6 +238,38 @@ in
         ++ frontExtraEnvironment;
       };
     };
+
+    users.users.${hmUser} = {
+      isNormalUser = true;
+      home = hmHome;
+    };
+
+    # The home-manager user units, run as system units under the guest
+    # user (the guest has no user session to host `systemd --user`).
+    # ExecStart, Environment and ordering come from the module; only the
+    # card endpoint and the test askpass discipline are added.
+    imports = [
+      {
+        systemd.services = lib.mapAttrs' (
+          name: unit:
+          lib.nameValuePair (hmUnitName name) {
+            description = unit.Unit.Description;
+            wantedBy = [ "multi-user.target" ];
+            wants = hmDependencies (unit.Unit.Wants or [ ]);
+            after = hmDependencies (unit.Unit.After or [ ]) ++ [ "fibby.service" ];
+            serviceConfig = {
+              Type = "simple";
+              User = hmUser;
+              ExecStart = unit.Service.ExecStart;
+              Environment =
+                (unit.Service.Environment or [ ])
+                ++ [ "PCSCLITE_CSOCK_NAME=/run/fibby/pcscd.comm" ]
+                ++ frontExtraEnvironment;
+            };
+          }
+        ) hmUnits;
+      }
+    ];
   };
 
   testScript =
@@ -307,5 +378,29 @@ in
           assert [l.split()[0] for l in front] == ["ecdsa-sha2-nistp256"] * 2, front
           machine.succeed("systemctl start soft-ssh-agent.service")
           machine.wait_for_file(SOFT)
+
+      HM = "${hmSock}"
+      HM_SOFT = "${hmSoftSock}"
+
+      with subtest("home-manager softwareKeys: an added key lands in the module's ssh-agent and signs"):
+          wait_for_units(["hm-piggy-agent.service", "hm-piggy-agent-software-keys.service"])
+          machine.wait_for_file(HM)
+          machine.wait_for_file(HM_SOFT)
+          machine.succeed('ssh-keygen -t ed25519 -N "" -q -C hm-software-key -f /root/hmkey')
+          machine.succeed(f"SSH_AUTH_SOCK={HM} ssh-add -q /root/hmkey")
+          # The private key now lives in the ssh-agent only, so the signature
+          # below can only have been made by an agent.
+          machine.succeed("rm /root/hmkey")
+          soft = listing(HM_SOFT)
+          assert len(soft) == 1 and soft[0].endswith(" hm-software-key"), soft
+          machine.wait_until_succeeds(
+              f"[ \"$(SSH_AUTH_SOCK={HM} ssh-add -L | grep -c '^ecdsa-sha2-nistp256 ')\" -eq 2 ]",
+              timeout=120,
+          )
+          merged = listing(HM)
+          assert merged[-1] == soft[0], merged
+          n0 = ecdsa_9a_count()
+          sign_and_verify(HM, "/root/hmkey.pub", "hm@software")
+          expect_ecdsa_9a(n0)  # the software sign never touched the card
     '';
 }
