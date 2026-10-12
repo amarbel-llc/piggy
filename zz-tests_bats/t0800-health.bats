@@ -1,5 +1,9 @@
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
+  # Keep the card probes off the host's pcscd, and so off any real card:
+  # pcsc-lite's client honours this path on Linux. macOS's PCSC.framework
+  # may not, which is why the assertions below still tolerate a card.
+  export PCSCLITE_CSOCK_NAME="$BATS_TEST_TMPDIR/no-pcscd.comm"
 }
 
 # `piggy health` runs in two very different environments:
@@ -14,16 +18,31 @@ setup() {
 # 9) deterministic in both environments and to keep the probes off any
 # live agent socket. Points 1 (systemd unit), 6-8 (pcscd/cards) vary
 # by host and are only asserted where a guard makes them deterministic
-# (see the pcscd-absent test at the bottom). The card probes the
-# binary performs against a live pcscd are read-only (enumerate + cert
-# read) — no PIN prompt can result from running these tests locally.
+# (see the pcscd-absent test at the bottom). setup keeps the probes off
+# the host's pcscd on Linux; where it cannot, the card probes the binary
+# performs are read-only (enumerate + cert read, and since FDR 0006 an
+# attestation request per slot) — no PIN prompt can result from running
+# these tests locally.
+#
+# The plan is the base nine plus two FDR 0006 policy points per attached
+# card, so its length varies by host too: assert_plan_is_base_nine_plus_cards
+# pins the shape without pinning the number of cards.
+
+# The TAP plan line is 1..N with N = 9 + 2 * (cards attached).
+assert_plan_is_base_nine_plus_cards() {
+  local plan="${lines[1]}"
+  [[ $plan =~ ^1\.\.([0-9]+)$ ]] || fail "not a TAP plan line: $plan"
+  local count="${BASH_REMATCH[1]}"
+  ((count >= 9 && (count - 9) % 2 == 0)) ||
+    fail "plan $plan is not the base nine plus two points per card"
+}
 
 function health_unresolved_socket_fails_point_2_and_skips_dependents { # @test
   unset PIGGY_AUTH_SOCK SSH_AUTH_SOCK
   run "$PIGGY" health --format tap
   assert_failure
   assert_line --index 0 "TAP version 14"
-  assert_line --index 1 "1..9"
+  assert_plan_is_base_nine_plus_cards
   assert_output --partial "not ok 2 - agent: socket resolved"
   assert_output --partial "ok 3 - agent: socket exists # SKIP socket unresolved"
   assert_output --partial "ok 4 - agent: answers request_identities # SKIP socket unresolved"
@@ -50,10 +69,10 @@ function health_ndjson_emits_parseable_records_with_summary { # @test
   assert_failure
   report="$output"
   # Every line parses as JSON: slurping the stream errors on any
-  # malformed line. plan + 9 test records + summary = 11.
-  run jq -es 'length' <<<"$report"
+  # malformed line. The plan record counts the test records, at least
+  # the base nine; the stream is plan + tests + summary.
+  run jq -es '.[0].type == "plan" and .[0].count >= 9 and length == .[0].count + 2' <<<"$report"
   assert_success
-  assert_output "11"
   # The trailing record is the tap-ndjson(7) mandatory summary; the
   # unresolved socket guarantees at least one failure on every host.
   # Re-derive the last line from the verified report rather than the
@@ -67,22 +86,22 @@ function health_sign_test_reports_unreachable_agent_without_disturbing_plan { # 
   # piggy#179: `--sign-test` adds an opt-in agent self-sign probe on stderr.
   # With both sockets unset it cannot reach an agent (so it never signs and
   # never prompts for a PIN), reports the unresolved socket, and the run
-  # still fails. The pinned 9-point TAP stream on stdout is unchanged.
+  # still fails. The TAP stream on stdout keeps its plan.
   unset PIGGY_AUTH_SOCK SSH_AUTH_SOCK
   run "$PIGGY" health --format tap --sign-test
   assert_failure
-  assert_line --index 1 "1..9"
+  assert_plan_is_base_nine_plus_cards
   assert_output --partial "piggy health --sign-test (piggy#179): agent self-sign probe"
   assert_output --partial "agent socket unresolved"
 }
 
 function health_pcscd_absent_fails_point_6_and_skips_card_points { # @test
-  # Environment asymmetry: this case is only real inside the sandboxed
-  # nix lane, where no pcscd exists. On a dev machine a live pcscd
-  # (and possibly a real card) is reachable, so probe for it cheaply
-  # and skip — asserting on live-host card state is forbidden.
-  if [[ -S ${PCSCLITE_CSOCK_NAME:-} || -S /run/pcscd/pcscd.comm ]]; then
-    skip "pcscd reachable on this host"
+  # setup points pcsc-lite at a socket that does not exist, which makes
+  # this case real on Linux whatever the host runs. Elsewhere the system
+  # PC/SC stack may ignore that and reach a live daemon (and possibly a
+  # real card) — asserting on live-host card state is forbidden.
+  if [[ $(uname -s) != Linux ]]; then
+    skip "cannot keep the probe off this host's PC/SC daemon"
   fi
   unset PIGGY_AUTH_SOCK SSH_AUTH_SOCK
   run "$PIGGY" health --format tap
