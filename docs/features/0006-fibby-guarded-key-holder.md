@@ -571,6 +571,19 @@ not something this session read.
 
 ## Open questions
 
+**How these get ruled.** The operator has set two conditions on closing
+any question below (2026-10-12). First, each ruling is asked for with a
+worked example in simple terms: what the default mode does and what each
+failure mode looks like to the person at the keyboard, as PlantUML
+sequence diagrams under `docs/diagrams/` where a diagram says it better
+than prose (`just codemod-diagrams` renders them). Second, questions
+that a tracer bullet can inform wait for it: phase (c) answers the
+Ed25519 question, phase (d)'s first mint informs the scope-binding and
+cgroup questions, and the phase (g) measurement answers latency. The
+decisions are not frozen before those bullets have flown. A question
+that blocks a phase's RFC is raised with its examples when that phase
+is scheduled, not before.
+
 - **Which scope does a minted key bind to?** FDR 0032 D7 places
   troupe's connection owner in a frontend scope, while the signers of a
   principal's key include processes in the agent scope (git commit
