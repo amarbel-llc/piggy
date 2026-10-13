@@ -4513,3 +4513,203 @@ explore-launchd-piggy-agent label="piggy-agent":
 [group('explore')]
 explore-piggy-health *ARGS:
     cargo run -q -p piggy -- health -v --format tap {{ARGS}}
+
+# Stage the hand pass that closes piggy#303 (FDR 0006 phase (a), "Phase
+# acceptance"): open a shell with everything the operator needs to read the
+# prompts, drive the new verbs and misuse them, and print the checklist.
+#
+# CARD=virtual (the default) touches no real card: a private fibby card, a
+# private piggy agent on it with a stock ssh-agent as its software upstream,
+# and PCSCLITE_CSOCK_NAME / SSH_AUTH_SOCK / PIGGY_AUTH_SOCK pointed at them,
+# with PIGGY_STORE_DIR an empty private store.
+# The card wants a real touch decision: `fdr-touch &` grants the next one.
+#   PROMPTS=test (the default) answers every PIN prompt with the virtual
+#     card's PIN through the test askpass and prints what the prompt carried:
+#     nothing can reach a real dialog (piggy-testing(7) PIN PROMPT SAFETY NET).
+#   PROMPTS=real runs contrib/piggy-askpass.sh, so the operator SEES the real
+#     dialogs, against the virtual card only (its PIN is 123456). Start each
+#     text with `piggy-test:` and the dialog carries a [TEST] banner.
+# CARD=real is the explicit flag for the real-card half of the pass. It
+# starts nothing and redirects nothing: the shell talks to the host's pcscd
+# and the operator's own agent, and every prompt is a real one.
+# RUN, when given, is run with `bash -c` in that environment instead of the
+# shell (how the recipe itself is checked without a terminal).
+#
+# stage the piggy#303 hand pass: a shell on a virtual card (or, CARD=real, the real one) plus the checklist
+[group('explore')]
+[linux]
+explore-fdr0006-a CARD="virtual" PROMPTS="test" RUN="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    card="{{ CARD }}"
+    prompts="{{ PROMPTS }}"
+    run={{ quote(RUN) }}
+    case "$card" in virtual | real) ;; *) echo "CARD must be virtual or real, not '$card'" >&2; exit 2 ;; esac
+    case "$prompts" in test | real) ;; *) echo "PROMPTS must be test or real, not '$prompts'" >&2; exit 2 ;; esac
+
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    dir="$(mktemp -d -t fdr6a.XXXXXX)"
+    mkdir "$dir/bin"
+    ln -s "$piggy_out/bin/piggy" "$dir/bin/piggy"
+    export PATH="$dir/bin:$PATH"
+    export FDR0006_DIR="$dir"
+
+    cat >"$dir/CHECKLIST" <<'CHECKLIST_EOF'
+    piggy#303 hand pass (FDR 0006 phase (a)). `cat $FDR0006_DIR/CHECKLIST` shows this again.
+    Work in $FDR0006_DIR (cd there); comment on piggy#303 with what you ran,
+    on which host and card, and what you sent back. The operator closes #303.
+
+    1. UX REVIEW: read, do not run
+       piggy operator-sign --help          piggy card init --help
+       piggy card add-key --help           piggy card export-attestation --help
+       man piggy-agent   (OPERATOR ACTS, SCOPES, ENVIRONMENT)     man piggy   (operator-sign)
+
+    2. PROVISION (virtual card, or a THROWAWAY YubiKey; never a card you rely on)
+       piggy card init                     # new defaults: 9A once/cached, 9C always/always
+       piggy health --format tap           # per-slot policy points; "can sign operator acts"
+       piggy list --format=ndjson          # pin_policy / touch_policy per slot
+       piggy card export-attestation > 9c.attestation ; cat 9c.attestation
+       piggy card init                     # again, on the provisioned card: must refuse
+       piggy card add-key 9c               # occupied: must refuse without --replace
+       (the agent picks the new keys up on its next card check: ssh-add -L shows PIV_slot_9C)
+       virtual card: signing waits for a touch. `fdr-touch &` BEFORE the command
+       grants the next one asked for; card init asks for two (`fdr-touch 2 &`).
+       PROMPTS=test: keep the card's PIN 123456, the test askpass answers with it.
+
+    3. OPERATOR ACT: read the prompt before you type
+       printf 'piggy-test: grant merge to master\n' > grant.txt
+       piggy operator-sign --namespace piggy-escalation-v1 < grant.txt > grant.sig ; echo "exit $?"
+       ssh-add -L | awk '/PIV_slot_9C/ {print "operator", $1, $2}' > allowed_signers
+       ssh-keygen -Y verify -f allowed_signers -I operator -n piggy-escalation-v1 -s grant.sig < grant.txt
+       Repeat with --namespace piggy-certificate-v1 and piggy-quote-v1: is each prompt
+       visibly its own, and the escalation the strongest?
+       Try a 4096-byte text: does the dialog show ALL of it (it must, or fail)?
+       Try text with <b>markup</b> & an under_score and a back\slash: shown literally?
+
+    4. MISUSE: each must refuse, with an exit code you could script against
+       piggy operator-sign --namespace piggy-escalation-v1 --slot 9a < grant.txt   # 1 refused-policy
+       piggy operator-sign --namespace git < grant.txt                              # 1 not a namespace
+       piggy operator-sign --namespace piggy-escalation-v1 < /dev/null              # 1 no text
+       PIGGY_AUTH_SOCK=/nonexistent piggy operator-sign --namespace piggy-escalation-v1 < grant.txt   # 3
+       ssh-add -L | grep PIV_slot_9C > 9c.pub
+       ssh-keygen -Y sign -f 9c.pub -U -n piggy-escalation-v1 grant.txt             # must be refused
+       ssh-keygen -Y sign -f 9c.pub -U -n file grant.txt                            # ordinary: allowed
+
+    5. QA: break it on purpose (each is exit 4 unless noted)
+       cancel the PIN prompt                       -> cancelled
+       enter the PIN, then do not touch            -> cancelled after the card's timeout
+       enter the PIN, pull the card before touching
+       pull the card, then ask                     -> card-absent (or exit 1 no key, once the agent drops it)
+       Was there a visible notice when the card started waiting for the touch?
+
+    6. TIER 1: software keys through the piggy socket
+       ssh-keygen -t ed25519 -N '' -f soft -C piggy-test-soft ; ssh-add soft ; ssh-add -L
+       ssh-keygen -Y sign -f soft.pub -U -n file grant.txt   (then verify as in 3, with -n file)
+       stop the software upstream (virtual: fdr-stop-software); ssh-add -L must still list the card's keys
+       On your own host this is services.piggy-agent.softwareKeys.enable = true.
+
+    NOT COVERED BY THE AUTOMATED LANES: yours to judge on a real card and display
+       - what the three zenity dialogs look like, and whether a long text shows whole
+       - whether the touch notice reaches you where you are looking
+       - the attestation chain to a Yubico root, and the real F9 certificate
+         (openssl verify -partial_chain -CAfile f9.pem attestation.pem)
+    CHECKLIST_EOF
+
+    cleanup() {
+      local pid
+      for pid in "${agent_pid:-}" "${soft_pid:-}" "${fibby_pid:-}"; do
+        [[ -n $pid ]] && kill "$pid" 2>/dev/null || true
+      done
+      rm -rf "$dir"
+    }
+    trap cleanup EXIT
+
+    if [[ $card == real ]]; then
+      echo "CARD=real: nothing is redirected. Prompts, PINs and touches below are REAL."
+      echo "pcscd: the host's.  agent: ${PIGGY_AUTH_SOCK:-${SSH_AUTH_SOCK:-<no agent socket set>}}"
+      echo "Use a THROWAWAY card for step 2. Steps marked 'virtual' do not apply."
+    else
+      fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+      reader="Virtual PCD piggy fibby 00 00"
+      export PCSCLITE_CSOCK_NAME="$dir/pcscd.comm"
+      # A private, empty store: card init must not offer to seal a virtual
+      # card's management key into the operator's own.
+      export PIGGY_STORE_DIR="$dir/store"
+      FIBBY_LOG=info "$fibby_out/bin/fibby" --socket "$PCSCLITE_CSOCK_NAME" --backend virtual \
+        --control-socket "$dir/control.sock" --model yk5 >"$dir/fibby.log" 2>&1 &
+      fibby_pid=$!
+
+      # fdr-remove / fdr-insert: pull and replace the card.
+      # fdr-touch [N]: grant the next N (default 1) touches the card asks
+      # for, waiting up to two minutes (`fdr-touch &` before the command
+      # that will ask); `fdr-touch now` grants one that is already pending.
+      for verb in touch remove insert; do
+        printf '#!/usr/bin/env bash\nexec %q ctl --socket %q %s %q\n' \
+          "$fibby_out/bin/fibby" "$dir/control.sock" "$verb" "$reader" >"$dir/bin/fdr-$verb"
+        chmod +x "$dir/bin/fdr-$verb"
+      done
+      mv "$dir/bin/fdr-touch" "$dir/bin/fdr-touch-now"
+      cat >"$dir/bin/fdr-touch" <<'TOUCH_EOF'
+    #!/usr/bin/env bash
+    [[ ${1:-} == now ]] && exec fdr-touch-now
+    want=${1:-1}
+    asked() { grep -c 'TOUCH needed' "$FDR0006_DIR/fibby.log" 2>/dev/null || true; }
+    before=$(asked)
+    granted=0
+    for _ in $(seq 1 1200); do
+      if (($(asked) > before + granted)); then
+        fdr-touch-now >/dev/null
+        granted=$((granted + 1))
+        ((granted == want)) && exit 0
+      fi
+      sleep 0.1
+    done
+    echo "fdr-touch: the card asked for $granted of $want touches in two minutes" >&2
+    exit 1
+    TOUCH_EOF
+      chmod +x "$dir/bin/fdr-touch"
+
+      if [[ $prompts == test ]]; then
+        export SSH_ASKPASS="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+        export SSH_ASKPASS_REQUIRE=force
+        export DISPLAY=""
+        export PIGGY_TEST_FIB_PIN=123456
+        export PIGGY_TEST_FIB_MGMT_KEY=default
+        # The touch notice lands in $FDR0006_DIR/notices, not on a desktop.
+        printf '#!/usr/bin/env bash\nprintf "%%s | %%s\\n" "$1" "$2" >>"$FDR0006_DIR/notices"\n' >"$dir/bin/fdr-notifier"
+        chmod +x "$dir/bin/fdr-notifier"
+        export PIGGY_ASKPASS_NOTIFIER="$dir/bin/fdr-notifier"
+        echo "PROMPTS=test: PIN prompts are answered for you; what each carried is in $dir/agent.log"
+        echo "Touch notices are recorded in $dir/notices"
+      else
+        export SSH_ASKPASS="$PWD/contrib/piggy-askpass.sh"
+        # Without force the agent would read the PIN from this terminal
+        # and the dialogs under review would never appear.
+        export SSH_ASKPASS_REQUIRE=force
+        echo "PROMPTS=real: you will see real dialogs, for the VIRTUAL card. Its PIN is 123456."
+        echo "Begin each text with 'piggy-test:' so the dialog carries a [TEST] banner."
+      fi
+
+      ssh-agent -D -a "$dir/soft.sock" >/dev/null 2>&1 &
+      soft_pid=$!
+      "$dir/bin/piggy" agent -A -a "$dir/agent.sock" \
+        --upstream "software=$dir/soft.sock" --add-new-keys-to software >"$dir/agent.log" 2>&1 &
+      agent_pid=$!
+      for _ in $(seq 1 50); do [[ -S $dir/agent.sock ]] && break; sleep 0.1; done
+      [[ -S $dir/agent.sock ]] || { echo "the agent did not come up:" >&2; cat "$dir/agent.log" >&2; exit 1; }
+      export SSH_AUTH_SOCK="$dir/agent.sock" PIGGY_AUTH_SOCK="$dir/agent.sock"
+      printf '#!/usr/bin/env bash\nkill %s\n' "$soft_pid" >"$dir/bin/fdr-stop-software"
+      chmod +x "$dir/bin/fdr-stop-software"
+      echo "CARD=virtual: a blank virtual card (PIN 123456, default management key)."
+      echo "Helpers: fdr-touch [N|now]  fdr-remove  fdr-insert  fdr-stop-software"
+      echo "Logs: $dir/agent.log  $dir/fibby.log"
+    fi
+
+    cd "$dir"
+    if [[ -n $run ]]; then
+      bash -c "$run"
+      exit
+    fi
+    echo
+    cat "$dir/CHECKLIST"
+    PS1="(fdr0006-a:$card) ${PS1:-\\$ }" "${SHELL:-bash}" || true
