@@ -190,6 +190,72 @@ consumes; other agents need not implement them:
 *upstream-status@piggy*
 	One entry per *--upstream*: name, reachable or not, key count.
 
+# OPERATOR ACTS
+
+The card-backed agent answers *operator-act@piggy* (piggy RFC 0012), the
+extension *piggy operator-sign* speaks. A caller sends a text and an sshsig
+namespace; the agent, and only the agent, makes the signature:
+
+. It refuses, before any prompt, a request that is malformed, a namespace
+  other than *piggy-quote-v1*, *piggy-escalation-v1* or
+  *piggy-certificate-v1*, and a text that cannot be shown whole (not UTF-8,
+  empty, over 4096 bytes, or holding a control character other than newline
+  and tab).
+. It asks the card to attest the slot's key, and refuses unless the
+  attestation is for that key, is signed by the card's F9 certificate, and
+  states PIN always and touch always. The policy is read from the card for
+  every request; nothing configured stands in for it. A key that was
+  imported, or that a card cannot attest, is refused.
+. It asks for the PIN on a prompt that shows the act: its class (quote,
+  escalation or certificate), the card and slot, the namespace, and the
+  text, verbatim. The PIN is asked for every act and is never taken from,
+  or put in, the agent's PIN cache. *PIGGY_ASKPASS_KIND* carries the class
+  to the askpass program so each class gets its own dialog.
+. It tells the operator that the card is waiting for a touch (see
+  *ENVIRONMENT*), and waits for it.
+. It builds the sshsig from the text it showed and returns it. The caller
+  never supplies a digest or a pre-built blob.
+
+A refusal is an answer, with a status the caller can act on (_refused-policy_,
+_refused-namespace_, _refused-text_, _no-such-key_, _cancelled_,
+_card-absent_, _bad-request_, _error_); it is not an agent failure, which is
+what an agent without the extension returns.
+
+So that the extension is the only way to such a signature, an ordinary sign
+request whose data is sshsig signed data under one of those three namespaces
+is refused, whether the key is on a card here or held by an upstream. Signing under *file*, *git* or any
+other namespace, and SSH authentication, are unaffected.
+
+With *--upstream*, a request for a key the agent does not hold is forwarded,
+unchanged, to the upstream that listed the key, and the answer is relayed
+unchanged. A *--proxy-only* front does only that: it never shows the text and
+never prompts. The prompt appears on the host where the card is, which is
+what lets *piggy operator-sign* work over a forwarded agent.
+
+# SCOPES
+
+An operator act is evidence that a human read a text and chose to sign it.
+That holds only if two things are true of where the agent runs, and the agent
+cannot check either from the inside:
+
+- The agent, and the askpass program it starts, run outside every agent
+  runtime (a *claude* process tree, or any other): as a user service of the
+  operator's session, never as a descendant of the thing that asks for the
+  act. The prompt is always raised by the agent, never by the caller.
+- Nothing an agent runtime controls can write to the surface the operator
+  reads the prompt from: the terminal's write side, or the graphical
+  session. A process that could draw there could paint a different text
+  over the real prompt.
+
+piggy relies on this separation and does not provide it; it is the session
+manager's and the terminal owner's to arrange (piggy FDR 0006, "Scopes:
+frontend and agent"). What the agent itself guarantees is narrower: the bytes
+the card signs are computed by the agent from the text the agent put on its
+own prompt, and only a card-attested PIN-always, touch-always key signs them.
+Any process that can reach the agent socket can ask for an act, and each
+request interrupts the operator with a prompt; an operator who did not expect
+one should cancel it.
+
 # PIN PROMPTS
 
 The PIN is requested on demand through the *SSH_ASKPASS* program, with
@@ -198,7 +264,10 @@ program, _never_ reads a tty or refuses, unset or _prefer_ tries a tty
 first. _contrib/piggy-askpass.sh_ is the shipped helper: it renders
 piggy-aware context above the prompt, re-derives a live Wayland display
 when the agent inherited a frozen *systemd --user* environment, and
-refuses rather than guessing. Test harnesses must point *SSH_ASKPASS* at
+refuses rather than guessing. For an operator act it reads the class from
+*PIGGY_ASKPASS_KIND* and gives each its own banner, window title, button and
+dialog; an escalation also requires the word ESCALATE to be typed. It
+refuses a class it does not know. Test harnesses must point *SSH_ASKPASS* at
 a non-interactive helper; see *piggy-testing*(7).
 
 # SLOT SPECIFICATION
@@ -255,6 +324,17 @@ _SSH_AGENT_PID_
 
 _SSH_ASKPASS_, _SSH_ASKPASS_REQUIRE_
 	The PIN prompt program and its route; see *PIN PROMPTS*.
+
+_PIGGY_ASKPASS_NOTIFIER_, _SSH_NOTIFY_SEND_
+	The program that tells the operator the card is waiting for a touch
+	during an operator act, run as _PROGRAM TITLE MESSAGE_ and not waited
+	for. The first of these that is set is used; with neither,
+	*terminal-notifier* or *notify-send* if _PATH_ has one. The same line
+	is always written to the agent's standard error, which is the notice
+	when the agent runs in a terminal. An agent running as a service with
+	no notifier to call has told nobody, and logs a warning saying so. The
+	home-manager option _services.piggy-agent.notifySend_ sets
+	_SSH_NOTIFY_SEND_.
 
 _STATSD_HOST_, _STATSD_PORT_
 	Opt in to stats-me telemetry. Their _presence_ is the gate: with

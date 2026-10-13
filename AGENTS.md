@@ -15,7 +15,7 @@ Piggy is a passwordstore.org fork that replaces GPG encryption with PIV smart ca
 | Page | Covers |
 |---|---|
 | piggy(1) | every `pass` subcommand, `list`, `ssh-copy-id`, `sign-bytes`, `operator-sign`, `card init`, `health`, `manage`, `secrets reconcile`, `luks`, `zfs`; `PIGGY_*` and `STATSD_*` environment |
-| piggy-agent(1) | the Rust agent: flags, upstream proxying and `--proxy-only` (FDR 0001), card presence, the `agent-mode@piggy` / `upstream-status@piggy` self-reports, PIN prompts, telemetry |
+| piggy-agent(1) | the Rust agent: flags, upstream proxying and `--proxy-only` (FDR 0001), card presence, the `agent-mode@piggy` / `upstream-status@piggy` self-reports, operator acts (`operator-act@piggy`) and the scopes they assume, PIN prompts, telemetry |
 | age-plugin-piggy(1) | the age plugin (slot 9D as an age identity) |
 | piggy-ids(5) | the recipients file format |
 | piggy-piv-slots(7) | PIV slot conventions |
