@@ -216,6 +216,11 @@ namespace; the agent, and only the agent, makes the signature:
 . It builds the sshsig from the text it showed and returns it. The caller
   never supplies a digest or a pre-built blob.
 
+The classed prompt is only as good as the askpass program the host runs. The
+agent hands it the class and the text and cannot tell what it showed: the
+shipped _contrib/piggy-askpass.sh_ honours both, while a program that ignores
+*PIGGY_ASKPASS_CONTEXT* shows a bare PIN prompt and the act is still signed.
+
 A refusal is an answer, with a status the caller can act on (_refused-policy_,
 _refused-namespace_, _refused-text_, _no-such-key_, _cancelled_,
 _card-absent_, _bad-request_, _error_); it is not an agent failure, which is
