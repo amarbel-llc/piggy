@@ -389,6 +389,16 @@ const (
 	PurposePiggyRecipientV1   = internal.PurposePiggyRecipientV1
 )
 
+// Piggy signed-record purposes (piggy RFC 0012 §4).
+// piggy-record-digest-v1 carries the digest of a signed record's
+// canonical bytes; piggy-record-sig-v1 carries the raw fixed-width
+// signature over a record, its SSH framing stripped.
+// keep sorted
+const (
+	PurposePiggyRecordDigestV1 = internal.PurposePiggyRecordDigestV1
+	PurposePiggyRecordSigV1    = internal.PurposePiggyRecordSigV1
+)
+
 // Pigpen sealed-document purposes (piggy RFC 0008 §5).
 // pigpen-wrap-v1 carries a per-recipient wrapped file key;
 // pigpen-doc-v1 carries the header MAC or the payload digest.
@@ -429,9 +439,18 @@ const (
 // papi-doc-sig-v1 landed under ObjectSig; piggy, as the canonical
 // holder, overrides it to this dedicated type. Transitional — moves
 // down to papi with the papi purposes (#186).
+const PurposeTypePapiSig = internal.PurposeTypePapiSig
+
+// PurposeTypePiggyRecordDigest and PurposeTypePiggyRecordSig — the
+// signed-record purposes (piggy RFC 0012 §4): the digest of a record's
+// canonical bytes, and the raw signature over a record. A record is
+// neither a blob nor a dodder object, and its signature is neither a
+// dodder object sig nor a papi sig, so each gets its own label,
+// following the PurposeTypePapiSig precedent.
 const (
-	PurposeTypePapiSig   = internal.PurposeTypePapiSig
-	PurposeTypePigpenDoc = internal.PurposeTypePigpenDoc
+	PurposeTypePiggyRecordDigest = internal.PurposeTypePiggyRecordDigest
+	PurposeTypePiggyRecordSig    = internal.PurposeTypePiggyRecordSig
+	PurposeTypePigpenDoc         = internal.PurposeTypePigpenDoc
 )
 
 // PurposeTypePigpenWrap and PurposeTypePigpenDoc — the pigpen

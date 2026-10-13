@@ -128,6 +128,114 @@ pub fn unlock_agent_pin(socket_path: &Path, pin: &str) -> Result<(), OracleError
     })
 }
 
+/// Why an operator act could not be asked of an agent at all. A request the
+/// agent answered, even with a refusal, is not one of these: that comes back
+/// as a [`crate::operator_act::Response`].
+#[derive(Debug)]
+pub enum OperatorActError {
+    /// The agent could not be reached, or would not list its keys.
+    Unreachable(String),
+    /// The agent answered, and serves no key for the slot.
+    NoKey(String),
+    /// The agent answered the extension with a failure. An agent that
+    /// predates `operator-act@piggy` does this (RFC 0012 §2.2); so does a
+    /// connection lost mid-request.
+    NotServed(String),
+    /// The agent answered, but not with an operator-act response.
+    Protocol(String),
+}
+
+impl std::fmt::Display for OperatorActError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable(e) | Self::NoKey(e) => write!(f, "{e}"),
+            Self::NotServed(e) => write!(
+                f,
+                "the agent did not serve {}: {e} (an agent older than this piggy answers this way)",
+                crate::operator_act::EXTENSION
+            ),
+            Self::Protocol(e) => write!(f, "unexpected answer from the agent: {e}"),
+        }
+    }
+}
+
+/// Ask the agent at `socket_path` for an operator act (RFC 0012) with the
+/// key it serves for `slot_id`, optionally narrowed by `guid_hint`.
+///
+/// Returns the agent's response and the public key the request named, so
+/// the caller can say which key signed. There is no timeout: the agent may
+/// be waiting on a human reading a prompt, typing a PIN and touching a card,
+/// possibly on another host behind a forwarded socket.
+pub fn operator_act(
+    socket_path: &Path,
+    slot_id: u8,
+    guid_hint: Option<&str>,
+    namespace: &str,
+    hash: crate::operator_act::HashAlgorithm,
+    text: &[u8],
+) -> Result<(crate::operator_act::Response, ssh_key::PublicKey), OperatorActError> {
+    use crate::operator_act::{EXTENSION, Request, Response};
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| OperatorActError::Unreachable(format!("tokio runtime: {e}")))?;
+    let socket_path = socket_path.to_path_buf();
+    let namespace = namespace.to_string();
+    let text = text.to_vec();
+    let guid_hint = guid_hint.map(str::to_string);
+
+    runtime.block_on(async move {
+        let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
+            OperatorActError::Unreachable(format!("connect {}: {e}", socket_path.display()))
+        })?;
+        let mut client = Client::new(stream);
+        let identities = client
+            .request_identities()
+            .await
+            .map_err(|e| OperatorActError::Unreachable(format!("request_identities: {e}")))?;
+        let comments: Vec<String> = identities.iter().map(|i| i.comment.clone()).collect();
+        let index = select_signing_identity(&comments, slot_id, guid_hint.as_deref())
+            .map_err(OperatorActError::NoKey)?;
+        let identity = &identities[index];
+        let public_key = ssh_key::PublicKey::new(identity.pubkey.clone(), identity.comment.clone());
+        let key = public_key
+            .to_bytes()
+            .map_err(|e| OperatorActError::NoKey(format!("encode the key: {e}")))?;
+
+        let request = Request {
+            key,
+            namespace,
+            hash_algorithm: hash.as_str().to_string(),
+            text,
+        };
+        let answer = client
+            .extension(Extension {
+                name: EXTENSION.into(),
+                details: request.encode().into(),
+            })
+            .await
+            .map_err(|e| OperatorActError::NotServed(e.to_string()))?
+            .ok_or_else(|| {
+                OperatorActError::Protocol("plain SUCCESS, no operator-act response".into())
+            })?;
+        if answer.name != EXTENSION {
+            return Err(OperatorActError::Protocol(format!(
+                "a response to {:?}, not to {EXTENSION}",
+                answer.name
+            )));
+        }
+        let response = Response::decode(answer.details.as_ref())
+            .ok_or_else(|| OperatorActError::Protocol("malformed operator-act response".into()))?;
+        if response.status == crate::operator_act::Status::Signed && response.sshsig.is_empty() {
+            return Err(OperatorActError::Protocol(
+                "status signed, with no signature".into(),
+            ));
+        }
+        Ok((response, public_key))
+    })
+}
+
 /// List the agent's identities; returns the key comments (count = len).
 ///
 /// Health-check probe for `piggy health` — same fresh-connection shape

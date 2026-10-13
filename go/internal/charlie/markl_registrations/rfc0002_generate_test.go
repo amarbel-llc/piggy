@@ -45,6 +45,8 @@ var rfc0002StablePurposes = []string{
 	markl.PurposePiggyRecipientV1,
 	markl.PurposePigpenWrapV1,
 	markl.PurposePigpenDocV1,
+	markl.PurposePiggyRecordDigestV1,
+	markl.PurposePiggyRecordSigV1,
 }
 
 // rfc0002StableFormats lists every format ID piggy registers. Sizes are

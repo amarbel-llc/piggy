@@ -1,0 +1,17 @@
+[package]
+name = "operator-act-probe"
+version = "0.1.0"
+edition = "2021"
+
+# Test-only helper: a raw `operator-act@piggy` client for the RFC 0012
+# conformance lanes. `piggy operator-sign` refuses to send a request it can
+# tell is wrong, so the lanes that prove the AGENT refuses one (a bad version,
+# trailing bytes, an unregistered namespace, undisplayable text) need a client
+# that sends exactly what it is told and prints the answer byte for byte.
+# Built via `cargo build -p operator-act-probe` by the conformance recipe, not
+# shipped. No dependencies: it speaks the agent wire format by hand so it
+# cannot inherit a bug from the code under test.
+
+[[bin]]
+name = "operator-act-probe"
+path = "src/main.rs"

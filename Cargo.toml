@@ -6,6 +6,7 @@ members = [
     "crates/fib-wait-ready",
     "crates/fibby",
     "crates/manage-client",
+    "crates/operator-act-probe",
     "crates/piggy",
     "crates/piggy-box",
     "crates/piggy-ids",

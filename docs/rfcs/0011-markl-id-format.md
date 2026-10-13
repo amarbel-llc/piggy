@@ -8,6 +8,7 @@ revisions:
   - 2026-06-09: add ssh_ecdsa_nistp256_pub format (§5) and piggy-piv_*/piggy-recipient-v1 purposes (§6.1), promoted to the normative cross-language subset
   - 2026-07-18: expand the purpose grammar from the `system-domain-role-version` registry convention to general identifiers (§2.1, §6); add the embedding-grammar quoting-split section (§2.2) (linenisgreat/madder#270)
   - 2026-07-20: move from madder RFC 0002 to piggy RFC 0011, completing the piggy#183 markl-ownership inversion; narrow the purpose charset from the 2026-07-18 open-Unicode form to a bare-ident-plus-quoted-String model, restrict blech32 to a single separator and lower-case only, define blech32 by reference to bech32, make checksum verification normative for decoders, mark the legacy combined-HRP form historical (§9.1), and add the identifier conformance-vector corpus and divergence register (§7.3, §7.4) (linenisgreat/madder#273)
+  - 2026-10-12: add the piggy-record-digest-v1 and piggy-record-sig-v1 purposes (§6.1), registered by piggy RFC 0012 §4
 ---
 
 # RFC 0011 — Markl ID Format
@@ -720,13 +721,18 @@ decode opaquely per §6.6.
 | `piggy-piv_sig-v1`               | piggy  | `ssh_ecdsa_nistp256_pub`                        | PIV slot 9C public key (Digital Signature) |
 | `piggy-piv_card_auth-v1`         | piggy  | `ssh_ecdsa_nistp256_pub`                        | PIV slot 9E public key (Card Authentication) |
 | `piggy-recipient-v1`             | piggy  | `pivy_ecdh_p256_pub`, `age_x25519_pub`          | Encryption recipient (PIV slot 9D ECDH key, or age recipient) |
+| `piggy-record-digest-v1`         | piggy  | `sha256`, `blake2b256`                          | Digest of a signed record's canonical bytes (piggy RFC 0012 §4) |
+| `piggy-record-sig-v1`            | piggy  | `ed25519_sig`, `ecdsa_p256_sig`                 | Raw signature over a signed record, SSH framing stripped to the §5 fixed-width form (piggy RFC 0012 §4) |
 | `papi-doc-sig-v1`                | papi   | `ecdsa_p256_sig`                                | PAPI document signature (slot-9A SSH sig over JCS bytes) |
 
 The `piggy-*` purposes are owned by this repository and mirrored in its
 `piggy-markl` Rust crate
-(`crates/piggy-markl/src/{format,purpose}.rs`). They are surfaced by
-`piggy list` and consumed by madder wherever a piggy-issued key appears
-in a markl-id slot.
+(`crates/piggy-markl/src/{format,purpose}.rs`). The key purposes
+(`piggy-piv_*-v1`, `piggy-recipient-v1`) are surfaced by `piggy list`
+and consumed by madder wherever a piggy-issued key appears in a markl-id
+slot. The record purposes (`piggy-record-{digest,sig}-v1`) name a signed
+record's digest and raw signature; their semantics are authoritative in
+piggy RFC 0012 §4.
 
 The `papi-doc-sig-v1` purpose is owned jointly with
 [`amarbel-llc/papi`](https://github.com/amarbel-llc/papi) and mirrored in

@@ -69,6 +69,11 @@ if [[ -n ${PIGGY_TEST_FIB_PIN:-} ]]; then
   # context to the askpass child. Unset for callers that don't (the C
   # pivy-agent), making the differential visible in agent logs.
   banner "supplying PIGGY_TEST_FIB_PIN for prompt: $prompt (context: ${PIGGY_ASKPASS_CONTEXT:-<unset>})"
+  # An operator act (RFC 0012) names its display class; a routine prompt
+  # carries none and logs no such line.
+  if [[ -n ${PIGGY_ASKPASS_KIND:-} ]]; then
+    banner "operator act kind: $PIGGY_ASKPASS_KIND"
+  fi
   # No trailing newline manipulation: ssh-add and pivy-box both trim the
   # first line via strcspn / similar. A plain echo is the simplest.
   printf '%s\n' "$PIGGY_TEST_FIB_PIN"

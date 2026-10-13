@@ -77,6 +77,30 @@ var (
 			markl.FormatIdHashBlake2b256,
 		},
 	}
+
+	// piggy-record-digest-v1 — the digest of a signed record's canonical
+	// bytes: the value a `prev` set, a quote's `ledger` line and an
+	// escalation request name (piggy RFC 0012 §4).
+	PurposePiggyRecordDigestV1Opts = markl.RegisterPurposeOpts{
+		Id:   markl.PurposePiggyRecordDigestV1,
+		Type: markl.PurposeTypePiggyRecordDigest,
+		FormatIds: []string{
+			markl.FormatIdHashSha256,
+			markl.FormatIdHashBlake2b256,
+		},
+	}
+
+	// piggy-record-sig-v1 — the raw signature over a record: the sshsig
+	// blob's signature with its SSH framing stripped to the fixed-width
+	// form (piggy RFC 0012 §4), as papi-doc-sig-v1 does.
+	PurposePiggyRecordSigV1Opts = markl.RegisterPurposeOpts{
+		Id:   markl.PurposePiggyRecordSigV1,
+		Type: markl.PurposeTypePiggyRecordSig,
+		FormatIds: []string{
+			markl.FormatIdEd25519Sig,
+			markl.FormatIdEcdsaP256Sig,
+		},
+	}
 )
 
 // AllPurposes is the ordered list of piggy's own purpose registrations.
@@ -89,6 +113,8 @@ var AllPurposes = []markl.RegisterPurposeOpts{
 	PurposePiggyRecipientV1Opts,
 	PurposePigpenWrapV1Opts,
 	PurposePigpenDocV1Opts,
+	PurposePiggyRecordDigestV1Opts,
+	PurposePiggyRecordSigV1Opts,
 }
 
 func init() {

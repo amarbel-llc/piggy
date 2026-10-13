@@ -57,6 +57,14 @@ const (
 	PurposePiggyPivSigV1      = "piggy-piv_sig-v1"       // PIV slot 9C
 	PurposePiggyRecipientV1   = "piggy-recipient-v1"     // PIV slot 9D / age
 
+	// Piggy signed-record purposes (piggy RFC 0012 §4).
+	// piggy-record-digest-v1 carries the digest of a signed record's
+	// canonical bytes; piggy-record-sig-v1 carries the raw fixed-width
+	// signature over a record, its SSH framing stripped.
+	// keep sorted
+	PurposePiggyRecordDigestV1 = "piggy-record-digest-v1"
+	PurposePiggyRecordSigV1    = "piggy-record-sig-v1"
+
 	// Pigpen sealed-document purposes (piggy RFC 0008 §5).
 	// pigpen-wrap-v1 carries a per-recipient wrapped file key;
 	// pigpen-doc-v1 carries the header MAC or the payload digest.

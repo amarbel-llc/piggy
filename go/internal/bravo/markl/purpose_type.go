@@ -43,4 +43,12 @@ const (
 	// gets its own label, following the PurposeTypePapiSig precedent.
 	PurposeTypePigpenWrap
 	PurposeTypePigpenDoc
+	// PurposeTypePiggyRecordDigest and PurposeTypePiggyRecordSig — the
+	// signed-record purposes (piggy RFC 0012 §4): the digest of a record's
+	// canonical bytes, and the raw signature over a record. A record is
+	// neither a blob nor a dodder object, and its signature is neither a
+	// dodder object sig nor a papi sig, so each gets its own label,
+	// following the PurposeTypePapiSig precedent.
+	PurposeTypePiggyRecordDigest
+	PurposeTypePiggyRecordSig
 )

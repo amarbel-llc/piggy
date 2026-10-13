@@ -577,6 +577,12 @@ fn cmd_sign(inv: &Invocation) -> i32 {
         eprintln!("piggy tool sign: stdin: {e}");
         return 1;
     }
+    // RFC 0012 §2.7: no surface that reaches a card signs an operator act
+    // unseen. (C pivy-tool has no such rule; this is piggy's.)
+    if let Err(refusal) = crate::operator_act::refuse_operator_act_signed_data(&input) {
+        eprintln!("piggy tool sign: {refusal}");
+        return 1;
+    }
     let digest: Vec<u8> = match algorithm {
         PivAlgorithm::EcP256 => openssl::sha::sha256(&input).to_vec(),
         PivAlgorithm::EcP384 => openssl::sha::sha384(&input).to_vec(),

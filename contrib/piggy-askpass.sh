@@ -78,6 +78,24 @@
 #                           hanging notifier cannot wedge the
 #                           prompt.
 #
+# Operator acts (RFC 0012 §2.6): when the agent is about to sign an
+# operator act it sets PIGGY_ASKPASS_KIND to the act's display class
+# (quote, escalation or certificate) and puts the namespace and the exact
+# text being signed in PIGGY_ASKPASS_CONTEXT. Each class then gets its own
+# banner, window title, confirm button and dialog, so the prompt cannot be
+# mistaken for a routine PIN prompt, nor an escalation for a quote:
+#
+#   quote        entry dialog; button "Sign quote".
+#   certificate  form with one PIN field; button "Issue certificate".
+#   escalation   form with the PIN field and a second field in which the
+#                word ESCALATE must be typed; button "Grant escalation".
+#                On a tty the word is asked for on a line of its own.
+#
+# The text is shown whole or the prompt fails; an unknown class fails too.
+# Reading a text takes longer than typing a PIN, so the zenity timeout
+# defaults to 120 seconds for these. With PIGGY_ASKPASS_KIND unset nothing
+# here applies and the prompt is the routine one.
+#
 # Diagnostic log: zenity's stderr and a per-invocation header are
 # appended to $XDG_LOG_HOME/piggy/askpass.log (default
 # $HOME/.local/log/piggy/askpass.log per XDG_LOG_HOME(7)). Safe to
@@ -87,8 +105,53 @@ set -euo pipefail
 
 prompt="${1:-<no prompt supplied>}"
 context="${PIGGY_ASKPASS_CONTEXT:-}"
-zenity_timeout="${PIGGY_ASKPASS_TIMEOUT:-30}"
+kind="${PIGGY_ASKPASS_KIND:-}"
 require="${SSH_ASKPASS_REQUIRE:-}"
+
+# The word an escalation makes the operator type, on top of the PIN.
+escalation_word="ESCALATE"
+
+# What sets one class of operator act apart from the others and from a
+# routine prompt: the banner over the text, the window title and the
+# confirm button. One function per class, so a class can grow its own
+# rendering without touching the others; the dialogs themselves are the
+# zenity_<class> functions further down.
+class_quote() {
+  class_banner="=== OPERATOR ACT: QUOTE — you are signing words already on record ==="
+  class_title="piggy operator act: QUOTE"
+  class_ok_label="Sign quote"
+}
+
+class_escalation() {
+  class_banner="!!! OPERATOR ACT: ESCALATION — you are GRANTING AUTHORITY !!!"
+  class_title="piggy operator act: ESCALATION (grants authority)"
+  class_ok_label="Grant escalation"
+}
+
+class_certificate() {
+  class_banner="=== OPERATOR ACT: CERTIFICATE — you are certifying a key ==="
+  class_title="piggy operator act: CERTIFICATE"
+  class_ok_label="Issue certificate"
+}
+
+class_banner=""
+class_title="piggy PIV PIN"
+class_ok_label=""
+default_timeout=30
+case "$kind" in
+  "") ;;
+  quote | escalation | certificate)
+    "class_$kind"
+    default_timeout=120
+    ;;
+  *)
+    # A class this helper does not know how to present. Rendering it as a
+    # routine prompt would hide what kind of act the PIN authorizes.
+    printf '[piggy-askpass] unknown PIGGY_ASKPASS_KIND %q; refusing to prompt.\n' "$kind" >&2
+    exit 2
+    ;;
+esac
+zenity_timeout="${PIGGY_ASKPASS_TIMEOUT:-$default_timeout}"
 
 # Parent-process info. ps is universal on Linux + Darwin and avoids
 # the /proc-vs-no-/proc split. Tolerate ps failing (chrooted, etc).
@@ -115,6 +178,9 @@ fi
 render_context() {
   if [[ -n $test_tag ]]; then
     printf '%s\n' "$test_tag"
+  fi
+  if [[ -n $class_banner ]]; then
+    printf '%s\n' "$class_banner"
   fi
   printf 'Parent: %s (PID %s)\n' "$parent_comm" "$parent_pid"
   if [[ -n $context ]]; then
@@ -150,6 +216,15 @@ if [[ $require != force ]] && [[ -e /dev/tty ]] && (: >/dev/tty) 2>/dev/null; th
   pin=""
   IFS= read -r -s pin <&3
   echo >&4 # newline after the (silent) input
+  if [[ $kind == escalation ]]; then
+    typed=""
+    printf 'Type %s to grant this escalation: ' "$escalation_word" >&4
+    IFS= read -r typed <&3
+    if [[ $typed != "$escalation_word" ]]; then
+      printf 'Not granted.\n' >&4
+      exit 1
+    fi
+  fi
   exec 3<&- 4>&-
   printf '%s\n' "$pin"
   exit 0
@@ -199,6 +274,9 @@ fire_heads_up() {
   local notifier title body
   notifier="$(resolve_notifier)" || return 0
   title="piggy-agent: PIN required"
+  if [[ -n $kind ]]; then
+    title="piggy-agent: operator act ($kind) awaits your PIN"
+  fi
   body="${prompt} (${parent_comm} PID ${parent_pid})"
   # Detached: subshell with backgrounded invocation. stderr/stdout
   # silenced so a broken notifier cannot pollute pivy-agent's logs.
@@ -246,6 +324,73 @@ if [[ -z ${WAYLAND_DISPLAY:-} && -z ${DISPLAY:-} ]]; then
   fi
 fi
 
+# The zenity dialogs: the routine PIN prompt and one per operator-act
+# class. Each reads $body and $zenity_timeout, prints the PIN on stdout
+# and returns zenity's exit status, so a cancel or a timeout propagates.
+
+zenity_routine() {
+  zenity --timeout="$zenity_timeout" --entry --hide-text --title="$class_title" --text="$body"
+}
+
+# An operator act's text must reach the operator's eyes literally (RFC 0012
+# §2.6), and zenity does not show --text literally. As read in zenity
+# 4.2.1's source: every dialog runs it through g_strcompress, which turns
+# backslash escapes into the characters they name; --entry then reads `_`
+# as a keyboard-mnemonic marker and drops it; --forms parses the result as
+# Pango markup, where `<`, `>` and `&` are syntax and a malformed tag blanks
+# the whole label. The two functions below undo exactly that, per dialog.
+# (The routine prompt predates this and is left byte-for-byte as it was.)
+
+literal_for_zenity_entry() {
+  local text="$1"
+  text="${text//\\/\\\\}"
+  text="${text//_/__}"
+  printf '%s' "$text"
+}
+
+# `\&` because bash 5.2+ reads a bare `&` in the replacement as "the match".
+literal_for_zenity_forms() {
+  local text="$1"
+  text="${text//\\/\\\\}"
+  text="${text//&/\&amp;}"
+  text="${text//</\&lt;}"
+  text="${text//>/\&gt;}"
+  printf '%s' "$text"
+}
+
+zenity_quote() {
+  zenity --timeout="$zenity_timeout" --entry --hide-text \
+    --title="$class_title" --ok-label="$class_ok_label" \
+    --text="$(literal_for_zenity_entry "$body")"
+}
+
+zenity_certificate() {
+  zenity --timeout="$zenity_timeout" --forms \
+    --title="$class_title" --ok-label="$class_ok_label" \
+    --text="$(literal_for_zenity_forms "$body")" \
+    --add-password="PIV PIN"
+}
+
+# The form answers its two fields on two lines: the PIN, then the word.
+zenity_escalation() {
+  local answer typed_pin typed_word
+  answer="$(zenity --timeout="$zenity_timeout" --forms \
+    --title="$class_title" --ok-label="$class_ok_label" \
+    --text="$(literal_for_zenity_forms "$body")" \
+    --separator=$'\n' \
+    --add-password="PIV PIN" \
+    --add-entry="Type $escalation_word to grant")" || return
+  {
+    IFS= read -r typed_pin || true
+    IFS= read -r typed_word || true
+  } <<<"$answer"
+  if [[ $typed_word != "$escalation_word" ]]; then
+    printf '[piggy-askpass] escalation not confirmed: %s was not typed.\n' "$escalation_word" >&2
+    return 1
+  fi
+  printf '%s\n' "$typed_pin"
+}
+
 # Render target 2: zenity. We don't gate on $DISPLAY/$WAYLAND_DISPLAY —
 # macOS zenity reaches the Aqua session without either var being set,
 # and launchd-spawned agents (pivy-agent) reach this script with a
@@ -284,7 +429,7 @@ if command -v zenity >/dev/null 2>&1; then
   # entered), masking zenity's real exit. After the `fi` of any `if`
   # statement, `$?` is 0 regardless. Only the `else` branch preserves
   # cmd's unmodified exit code.
-  if pin="$(zenity --timeout="$zenity_timeout" --entry --hide-text --title="piggy PIV PIN" --text="$body" 2>>"$log_path")"; then
+  if pin="$("zenity_${kind:-routine}" 2>>"$log_path")"; then
     printf 'zenity exit=0\n' >>"$log_path"
     printf '%s\n' "$pin"
     exit 0

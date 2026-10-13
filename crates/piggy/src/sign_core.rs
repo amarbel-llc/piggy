@@ -58,7 +58,7 @@ pub fn parse_slot(s: &str) -> Result<u8, String> {
             "slot 9d is the Key Management (ECDH) slot and cannot sign; use 9a or 9c".to_string(),
         ),
         other => Err(format!(
-            "unsupported slot {other:?}; sign-bytes supports 9a (auth) and 9c (signature)"
+            "unsupported slot {other:?}; the signing slots are 9a (auth) and 9c (signature)"
         )),
     }
 }
@@ -79,6 +79,9 @@ pub fn sign_message<F: Frontend + ?Sized>(
     frontend: Option<&mut F>,
 ) -> Result<Vec<u8>, SignError> {
     let slot_id = parse_slot(slot).map_err(SignError::Failed)?;
+    // Before any card or agent is asked: an operator act is signed only
+    // where its text is shown first (RFC 0012 §2.7).
+    crate::operator_act::refuse_operator_act_signed_data(message).map_err(SignError::Failed)?;
 
     // Card-first: use a locally-attached PIV card when one is reachable. On
     // ANY card-selection failure (PCSC unavailable, no card, no GUID match)

@@ -232,6 +232,34 @@
       "encoded": "pigpen-doc-v1@pigpen_header_mac-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0sanf8xl"
     },
     {
+      "name": "purpose/piggy-record-digest-v1/blake2b256",
+      "purpose": "piggy-record-digest-v1",
+      "format": "blake2b256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400"
+    },
+    {
+      "name": "purpose/piggy-record-digest-v1/sha256",
+      "purpose": "piggy-record-digest-v1",
+      "format": "sha256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "piggy-record-digest-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6"
+    },
+    {
+      "name": "purpose/piggy-record-sig-v1/ecdsa_p256_sig",
+      "purpose": "piggy-record-sig-v1",
+      "format": "ecdsa_p256_sig",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "piggy-record-sig-v1@ecdsa_p256_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cywvqw8"
+    },
+    {
+      "name": "purpose/piggy-record-sig-v1/ed25519_sig",
+      "purpose": "piggy-record-sig-v1",
+      "format": "ed25519_sig",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "encoded": "piggy-record-sig-v1@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cy4lu83"
+    },
+    {
       "name": "purpose/example-unregistered-purpose-v1/sha256",
       "purpose": "example-unregistered-purpose-v1",
       "format": "sha256",

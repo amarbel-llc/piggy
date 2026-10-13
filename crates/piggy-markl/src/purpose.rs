@@ -60,6 +60,16 @@ pub enum PurposeId {
     /// content digest of its `@`-referenced payload (piggy RFC 0008
     /// §5). Accepts `pigpen_header_mac` and `blake2b256`.
     PigpenDocV1,
+    /// `piggy-record-digest-v1` — digest of a signed record's canonical
+    /// bytes (piggy RFC 0012 §4; spinclass FDR 0032 D8). The value a
+    /// `prev` set, a quote's `ledger` line and an escalation request
+    /// name. Accepts `sha256` and `blake2b256`.
+    PiggyRecordDigestV1,
+    /// `piggy-record-sig-v1` — the raw signature over a record: the
+    /// sshsig blob's signature with its SSH framing stripped to the
+    /// fixed-width form (piggy RFC 0012 §4), as `papi-doc-sig-v1` does.
+    /// Accepts `ed25519_sig` and `ecdsa_p256_sig`.
+    PiggyRecordSigV1,
     /// `dodder-blob-digest-sha256-v1` — blob content hash. Piggy does
     /// not produce these, but accepts them for round-trip purposes.
     DodderBlobDigestSha256V1,
@@ -354,6 +364,8 @@ impl PurposeId {
             PurposeId::PapiDocSigV1 => "papi-doc-sig-v1",
             PurposeId::PigpenWrapV1 => "pigpen-wrap-v1",
             PurposeId::PigpenDocV1 => "pigpen-doc-v1",
+            PurposeId::PiggyRecordDigestV1 => "piggy-record-digest-v1",
+            PurposeId::PiggyRecordSigV1 => "piggy-record-sig-v1",
             PurposeId::DodderBlobDigestSha256V1 => "dodder-blob-digest-sha256-v1",
             PurposeId::DodderObjectDigestV2 => "dodder-object-digest-v2",
             PurposeId::DodderObjectSigV2 => "dodder-object-sig-v2",
@@ -372,6 +384,8 @@ impl PurposeId {
             "papi-doc-sig-v1" => PurposeId::PapiDocSigV1,
             "pigpen-wrap-v1" => PurposeId::PigpenWrapV1,
             "pigpen-doc-v1" => PurposeId::PigpenDocV1,
+            "piggy-record-digest-v1" => PurposeId::PiggyRecordDigestV1,
+            "piggy-record-sig-v1" => PurposeId::PiggyRecordSigV1,
             "dodder-blob-digest-sha256-v1" => PurposeId::DodderBlobDigestSha256V1,
             "dodder-object-digest-v2" => PurposeId::DodderObjectDigestV2,
             "dodder-object-sig-v2" => PurposeId::DodderObjectSigV2,
@@ -420,13 +434,12 @@ impl PurposeId {
             PurposeId::PigpenDocV1 => {
                 matches!(format, FormatId::PigpenHeaderMac | FormatId::Blake2b256)
             }
-            PurposeId::DodderBlobDigestSha256V1 => {
+            PurposeId::PiggyRecordDigestV1
+            | PurposeId::DodderBlobDigestSha256V1
+            | PurposeId::DodderObjectDigestV2 => {
                 matches!(format, FormatId::Sha256 | FormatId::Blake2b256)
             }
-            PurposeId::DodderObjectDigestV2 => {
-                matches!(format, FormatId::Sha256 | FormatId::Blake2b256)
-            }
-            PurposeId::DodderObjectSigV2 => {
+            PurposeId::PiggyRecordSigV1 | PurposeId::DodderObjectSigV2 => {
                 matches!(format, FormatId::Ed25519Sig | FormatId::EcdsaP256Sig)
             }
             PurposeId::DodderRepoPublicKeyV1 => {
@@ -540,6 +553,34 @@ mod tests {
         assert!(p.validate_format(FormatId::Blake2b256).is_ok());
         assert!(p.validate_format(FormatId::PigpenWrapP256).is_err());
         assert!(p.validate_format(FormatId::Sha256).is_err());
+    }
+
+    /// piggy RFC 0012 §4.
+    #[test]
+    fn piggy_record_purposes_accept_their_rfc_0012_formats() {
+        let digest = PurposeId::PiggyRecordDigestV1;
+        assert_eq!(digest.as_str(), "piggy-record-digest-v1");
+        assert_eq!(PurposeId::parse("piggy-record-digest-v1"), digest);
+        assert!(digest.validate_format(FormatId::Sha256).is_ok());
+        assert!(digest.validate_format(FormatId::Blake2b256).is_ok());
+        assert!(
+            digest.validate_format(FormatId::EcdsaP256Sig).is_err(),
+            "a signature is not a record digest"
+        );
+
+        let sig = PurposeId::PiggyRecordSigV1;
+        assert_eq!(sig.as_str(), "piggy-record-sig-v1");
+        assert_eq!(PurposeId::parse("piggy-record-sig-v1"), sig);
+        assert!(sig.validate_format(FormatId::Ed25519Sig).is_ok());
+        assert!(sig.validate_format(FormatId::EcdsaP256Sig).is_ok());
+        assert!(
+            sig.validate_format(FormatId::Sha256).is_err(),
+            "a digest is not a record signature"
+        );
+        assert!(
+            sig.validate_format(FormatId::SshEcdsaNistp256Pub).is_err(),
+            "the signing key is not the signature"
+        );
     }
 
     #[test]

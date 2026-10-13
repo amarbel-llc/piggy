@@ -2,7 +2,8 @@ setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   # Keep the card probes off the host's pcscd, and so off any real card:
   # pcsc-lite's client honours this path on Linux. macOS's PCSC.framework
-  # may not, which is why the assertions below still tolerate a card.
+  # may not, which is why the assertions below still tolerate a card. The
+  # lane as a whole is not hermetic against the host's pcscd: piggy#305.
   export PCSCLITE_CSOCK_NAME="$BATS_TEST_TMPDIR/no-pcscd.comm"
 }
 

@@ -330,7 +330,7 @@ test: validate-grammar test-grammar-vectors test-bats-default test-bats-conforma
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby
+_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -1336,6 +1336,49 @@ test-bats-conformance-card-add-key-fibby:
       MANAGE_CLIENT_BIN="$PWD/target/debug/manage-client" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_card_add_key_fibby.bats
+
+# Fibby-backed gate for `operator-act@piggy` and `piggy operator-sign`
+# (piggy#303, RFC 0012): the Rust agent over a virtual card whose 9C key was
+# generated on the card (so fibby attests it PIN always, touch always), asked
+# for operator acts by the CLI and by the raw `operator-act-probe` (cargo-built
+# on demand). One bats file per row of the RFC's conformance table; FILES
+# narrows the run to some of them. [linux]-only like the other fibby lanes.
+#
+# run the fibby-backed operator-act bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-operator-act *FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    cargo build -p operator-act-probe --quiet
+    files="{{ FILES }}"
+    # PIGGY satisfies the parent common.bash loader without a cargo build.
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      OPERATOR_ACT_PROBE_BIN="$PWD/target/debug/operator-act-probe" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      ${files:-zz-tests_bats/conformance/operator_act_*.bats zz-tests_bats/conformance/attestation_bundle.bats}
+
+# The operator-act lanes against the cargo-built piggy and fibby instead of the
+# nix-built ones: the fast loop while changing the agent or the lanes. The gate
+# is test-bats-conformance-operator-act.
+#
+# run the operator-act bats lanes against target/debug binaries
+[group('debug')]
+[linux]
+debug-operator-act-local *FILES: build-rust
+    #!/usr/bin/env bash
+    set -euo pipefail
+    files="{{ FILES }}"
+    PIGGY="$PWD/target/debug/piggy" \
+      FIBBY_BIN="$PWD/target/debug/fibby" \
+      PIGGY_BIN="$PWD/target/debug/piggy" \
+      OPERATOR_ACT_PROBE_BIN="$PWD/target/debug/operator-act-probe" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      ${files:-zz-tests_bats/conformance/operator_act_*.bats zz-tests_bats/conformance/attestation_bundle.bats}
 
 # Fibby-backed gate for `piggy manage --jsonrpc` (piggy#201, RFC 0007): drive
 # the headless command server end to end against a virtual fibby card through

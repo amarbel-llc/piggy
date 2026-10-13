@@ -14,6 +14,8 @@ piggy - PIV smart-card backed password store and agent
 
 *piggy sign-bytes* *--slot* _9a_|_9c_ [*--guid* _GUID_] [*--format* _raw_|_der_] [*-P* _PIN_]
 
+*piggy operator-sign* *--namespace* _NAMESPACE_ [*--slot* _9c_|_9a_] [*--guid* _GUID_] [*--hash* _sha512_|_sha256_]
+
 *piggy help*
 
 *piggy version*
@@ -474,6 +476,71 @@ commands:
 
 	```
 	piggy sign-bytes --slot 9a --guid DEADBEEF... < message > sig.raw
+	```
+
+	*sign-bytes* refuses a message that is sshsig signed data under an
+	operator-act namespace (see *operator-sign*): such a signature is made
+	only where its text is shown first. *piggy tool sign* and the agent's
+	ordinary sign request refuse the same bytes.
+
+*operator-sign* *--namespace* _NAMESPACE_ [*--slot* _9c_|_9a_] [*--guid* _GUID_] [*--hash* _sha512_|_sha256_]
+	Sign the text read from stdin as an operator act (RFC 0012) and write
+	an armored sshsig to stdout. An operator act is a signature a human
+	made on purpose, having read what it says: an escalation grant, a
+	certificate, a quote of their own words.
+
+	*operator-sign* signs nothing itself. It sends the text and the
+	namespace to the agent's *operator-act@piggy* extension (the socket in
+	*PIGGY_AUTH_SOCK*, else *SSH_AUTH_SOCK*) and the agent that holds the
+	card does the rest: it checks that the card attests the slot's key as
+	PIN always and touch always, shows the exact text on the prompt that
+	asks for the PIN, waits for the touch, and builds the sshsig from the
+	text it showed. There is no flag to skip any of that, and none to
+	supply a PIN or a digest. Because everything happens in the agent, the
+	command works unchanged over a forwarded agent socket or through a
+	*piggy agent --proxy-only* front: the prompt appears where the card is.
+
+	*--namespace* is one of *piggy-quote-v1*, *piggy-escalation-v1* or
+	*piggy-certificate-v1*. It is part of what is signed, and it selects
+	how the prompt presents the act, so an escalation cannot be obtained
+	behind a prompt that looked like a quote. Any other namespace is
+	refused.
+
+	*--slot* defaults to *9c*, the key *piggy card init* and *piggy card
+	add-key 9c* enroll for this. A slot whose key the card does not attest
+	as PIN always and touch always is refused, whatever it is; 9A as
+	*card init* enrolls it is. *--guid* picks the card when the agent
+	serves the slot for more than one.
+
+	The text must be 1 to 4096 bytes of UTF-8 with no control characters
+	other than newline and tab, so that what the prompt shows is what is
+	signed. To bind something that is not text, put its markl-id in the
+	text. The text is not secret: it is shown on screen and crosses the
+	agent socket.
+
+	The signature verifies with *ssh-keygen -Y verify -n* _NAMESPACE_
+	against the slot's public key. *piggy card export-attestation* prints
+	the evidence that the key is a card's PIN-always, touch-always key.
+
+	Exit status, grouped by what a caller should do next (the RFC's name
+	for the outcome is on stderr):
+
+	*0*  signed; the sshsig is on stdout.
+
+	*1*  refused, and asking again will not change the answer: the slot's
+	policy, the namespace, the text, a malformed request, a key the agent
+	does not serve, or an error.
+
+	*2*  usage error.
+
+	*3*  no agent here serves operator acts: no agent socket, an
+	unreachable agent, or one that predates the extension.
+
+	*4*  not signed this time: the operator cancelled or did not touch the
+	card in time, or the card was absent. Asking again may succeed.
+
+	```
+	piggy operator-sign --namespace piggy-escalation-v1 < grant.txt > grant.sig
 	```
 
 *card init* [*--serial* _N_|*--guid* _HEX_|*--reader* _NAME_] [*--allow-reprovision*] [*--pin-policy* _SLOT_=_POLICY_]... [*--touch-policy* _SLOT_=_POLICY_]... [*--seal-management-key*[=_PASS-NAME_]|*--no-seal-management-key*] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]

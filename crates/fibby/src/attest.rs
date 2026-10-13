@@ -31,6 +31,11 @@ const OID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.84
 const OID_PRIME256V1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 const OID_ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
 
+/// X.509 basicConstraints (RFC 5280 §4.2.1.9) and its value for a CA:
+/// `SEQUENCE { BOOLEAN TRUE }`.
+const OID_BASIC_CONSTRAINTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.19");
+const BASIC_CONSTRAINTS_CA: &[u8] = &[0x30, 0x03, 0x01, 0x01, 0xFF];
+
 /// YubicoPIV attestation extension: firmware version, three bytes
 /// `[major, minor, patch]`.
 pub const OID_YK_FIRMWARE_VERSION: ObjectIdentifier =
@@ -64,7 +69,23 @@ impl AttestationAuthority {
         let name =
             Name::from_str(ATTESTATION_SUBJECT).expect("the attestation subject is a valid DN");
         let point = VerifyingKey::from(&signing_key).to_encoded_point(false);
-        let cert_der = issue_certificate(&signing_key, &name, &name, 1, point.as_bytes(), None);
+        // The F9 certificate issues the slot attestations, so it says it is
+        // a CA: a verifier that checks the chain with a stock X.509 library
+        // (`openssl verify`) rejects an issuer that does not.
+        let ca = Extension {
+            extn_id: OID_BASIC_CONSTRAINTS,
+            critical: true,
+            extn_value: OctetString::new(BASIC_CONSTRAINTS_CA)
+                .expect("a short extension value encodes"),
+        };
+        let cert_der = issue_certificate(
+            &signing_key,
+            &name,
+            &name,
+            1,
+            point.as_bytes(),
+            Some(vec![ca]),
+        );
         AttestationAuthority {
             signing_key,
             name,

@@ -55,6 +55,7 @@ mod init;
 mod insert;
 mod internal_clipboard_restore;
 mod luks;
+mod operator_sign;
 mod pigpen_pointer;
 mod platform;
 mod recipients;
@@ -150,6 +151,19 @@ enum Command {
     /// flags pass through to that parser.
     #[command(name = "sign-bytes", disable_help_flag = true)]
     SignBytes {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Sign stdin as an operator act through the agent (RFC 0012).
+    ///
+    /// Sends the text and an sshsig namespace to the agent's
+    /// `operator-act@piggy` extension. The agent that holds the card shows
+    /// the exact text on the PIN prompt, checks that the slot is attested
+    /// PIN-always and touch-always, signs, and returns an sshsig, written
+    /// armored to stdout. `operator-sign` owns its argv parsing
+    /// (`--namespace`/`--slot`/`--guid`/`--hash`).
+    #[command(name = "operator-sign", disable_help_flag = true)]
+    OperatorSign {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
@@ -876,6 +890,8 @@ fn main() {
         Command::SignBytes { rest } => {
             std::process::exit(piggy::stats::timed_sign_bytes(|| sign_bytes::run(&rest)))
         }
+
+        Command::OperatorSign { rest } => std::process::exit(operator_sign::run(&rest)),
 
         Command::Card(args) => match args.cmd {
             CardCommand::Init {

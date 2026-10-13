@@ -41,6 +41,16 @@ var (
 // ECDH key, or an age recipient) piggy encrypts blobs to.
 var PurposePiggyRecipientV1Opts = internal.PurposePiggyRecipientV1Opts
 
+// piggy-record-digest-v1 — the digest of a signed record's canonical
+// bytes: the value a `prev` set, a quote's `ledger` line and an
+// escalation request name (piggy RFC 0012 §4).
+var PurposePiggyRecordDigestV1Opts = internal.PurposePiggyRecordDigestV1Opts
+
+// piggy-record-sig-v1 — the raw signature over a record: the sshsig
+// blob's signature with its SSH framing stripped to the fixed-width
+// form (piggy RFC 0012 §4), as papi-doc-sig-v1 does.
+var PurposePiggyRecordSigV1Opts = internal.PurposePiggyRecordSigV1Opts
+
 // pigpen-doc-v1 — a sealed pigpen document's header MAC, or the
 // content digest of its `@`-referenced payload (piggy RFC 0008 §5).
 var PurposePigpenDocV1Opts = internal.PurposePigpenDocV1Opts

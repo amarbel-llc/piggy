@@ -350,6 +350,20 @@ fn read_tty_line(tty: &mut std::fs::File) -> Result<String, OracleError> {
 /// `tokio::task::spawn_blocking`. Reference impl: pivy's
 /// `vendor/pivy/src/ebox-cmd.c::run_askpass`.
 pub fn run_askpass(prompt: &str, context: Option<&str>) -> Result<Zeroizing<String>, OracleError> {
+    run_askpass_of_kind(prompt, context, None)
+}
+
+/// [`run_askpass`] for a prompt that is not a routine PIN prompt. `kind` is
+/// exported to the askpass child as `PIGGY_ASKPASS_KIND` so it can render a
+/// visibly different dialog: an operator act passes its display class (RFC
+/// 0012 §2.6). A routine prompt passes `None` and the variable is removed
+/// from the child's environment, so a value inherited by this process can
+/// never dress a routine prompt up as an operator act or the reverse.
+pub fn run_askpass_of_kind(
+    prompt: &str,
+    context: Option<&str>,
+    kind: Option<&str>,
+) -> Result<Zeroizing<String>, OracleError> {
     let require = std::env::var_os("SSH_ASKPASS_REQUIRE");
     let askpass_env = std::env::var_os("SSH_ASKPASS");
     let askpass = match pin_route(require.as_deref(), askpass_env.as_deref())? {
@@ -364,6 +378,10 @@ pub fn run_askpass(prompt: &str, context: Option<&str>) -> Result<Zeroizing<Stri
     if let Some(ctx) = context {
         cmd.env("PIGGY_ASKPASS_CONTEXT", ctx);
     }
+    match kind {
+        Some(kind) => cmd.env("PIGGY_ASKPASS_KIND", kind),
+        None => cmd.env_remove("PIGGY_ASKPASS_KIND"),
+    };
     let mut child = cmd.spawn().map_err(|e| {
         OracleError::Other(format!("spawn askpass {}: {e}", askpass.to_string_lossy()))
     })?;
@@ -384,6 +402,60 @@ pub fn run_askpass(prompt: &str, context: Option<&str>) -> Result<Zeroizing<Stri
         return Err(OracleError::Other("askpass returned empty PIN".into()));
     }
     Ok(Zeroizing::new(trimmed))
+}
+
+/// The program that shows the operator a desktop notice, called as
+/// `notifier TITLE MESSAGE`: `$PIGGY_ASKPASS_NOTIFIER`, else
+/// `$SSH_NOTIFY_SEND` (what `services.piggy-agent.notifySend` exports), else
+/// `terminal-notifier` or `notify-send` when `PATH` has one. The same order
+/// `contrib/piggy-askpass.sh` resolves its heads-up in.
+fn operator_notifier() -> Option<std::ffi::OsString> {
+    let from_env = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    from_env("PIGGY_ASKPASS_NOTIFIER")
+        .or_else(|| from_env("SSH_NOTIFY_SEND"))
+        .or_else(|| {
+            let path = std::env::var_os("PATH")?;
+            ["terminal-notifier", "notify-send"]
+                .into_iter()
+                .find(|name| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+                .map(Into::into)
+        })
+}
+
+/// Tell the operator something that needs them at the card and takes no
+/// answer: the card is waiting for a touch (RFC 0012 §2.6).
+///
+/// The notice goes out two ways, because the agent cannot know which one
+/// the operator is looking at: a line on stderr, which is the terminal of an
+/// agent run by hand, and a desktop notification through
+/// [`operator_notifier`]. The notifier is started and left to finish on its
+/// own, so one that hangs cannot hold up the card. Returns whether a
+/// notifier was started: with none, an agent with no terminal has told
+/// nobody, and the caller logs that.
+pub fn notify_operator(title: &str, message: &str) -> bool {
+    // Not eprintln!: a closed stderr must not panic an agent that is
+    // holding a verified PIN session.
+    let _ = writeln!(std::io::stderr(), "{title}: {message}");
+    let Some(notifier) = operator_notifier() else {
+        return false;
+    };
+    let spawned = Command::new(&notifier)
+        .arg(title)
+        .arg(message)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(mut child) => {
+            // Reap it whenever it ends; nobody waits on the result.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Default PIN supplier: route the prompt per `SSH_ASKPASS_REQUIRE`

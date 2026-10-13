@@ -738,3 +738,178 @@ STUB_EOF
     return 1
   }
 }
+
+# -------- operator acts: PIGGY_ASKPASS_KIND (RFC 0012 §2.6) --------
+#
+# The agent names an operator act's display class in PIGGY_ASKPASS_KIND.
+# Each class must look different from a routine prompt and from the other
+# classes, and a routine prompt must not change at all.
+
+# Run the helper tty-less against a zenity stub that records its argv and
+# answers with $1 (printf format). The rest of the arguments are NAME=value
+# pairs for the helper's environment. Sets ZENITY_ARGV to the argv log.
+run_askpass_against_zenity_stub() {
+  local answer="$1"
+  shift
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-kind.XXXXXX")"
+  ZENITY_ARGV="$stub_dir/argv.log"
+  for tool in bash ps tr dirname mkdir date; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  cat >"$stub_dir/zenity" <<STUB_EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >"$ZENITY_ARGV"
+printf '$answer'
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" "$@" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "PIN for card 5DA19C98 to sign this operator act" </dev/null
+}
+
+assert_zenity_argv_has() {
+  grep -qxF -- "$1" "$ZENITY_ARGV" || {
+    echo "expected $1 in the zenity argv; got:"
+    cat "$ZENITY_ARGV"
+    return 1
+  }
+}
+
+refute_zenity_argv_has() {
+  if grep -qF -- "$1" "$ZENITY_ARGV"; then
+    echo "did not expect $1 in the zenity argv; got:"
+    cat "$ZENITY_ARGV"
+    return 1
+  fi
+}
+
+@test "kind_banner_names_the_class_above_the_verbatim_text" {
+  export PIGGY_ASKPASS_KIND=escalation
+  export PIGGY_ASKPASS_CONTEXT=$'operator act: escalation\nnamespace piggy-escalation-v1\n\ngrant: merge to master'
+  run "$ASKPASS" "PIN for card 5DA19C98 to sign this operator act"
+
+  assert_success
+  assert_output --partial "OPERATOR ACT: ESCALATION"
+  assert_output --partial "namespace piggy-escalation-v1"
+  assert_output --partial "grant: merge to master"
+}
+
+@test "kind_banners_differ_per_class_and_a_routine_prompt_has_none" {
+  local class
+  for class in quote escalation certificate; do
+    PIGGY_ASKPASS_KIND="$class" run "$ASKPASS" "Enter PIV PIN"
+    assert_success
+    assert_output --partial "OPERATOR ACT: ${class^^}"
+  done
+
+  unset PIGGY_ASKPASS_KIND
+  run "$ASKPASS" "Enter PIV PIN"
+  assert_success
+  refute_output --partial "OPERATOR ACT"
+}
+
+@test "unknown_kind_refuses_rather_than_prompting_as_routine" {
+  PIGGY_ASKPASS_KIND=blessing run "$ASKPASS" "Enter PIV PIN"
+
+  assert_failure 2
+  assert_output --partial "unknown PIGGY_ASKPASS_KIND"
+}
+
+@test "routine_prompt_zenity_argv_is_unchanged_by_the_kind_support" {
+  run_askpass_against_zenity_stub '123456\n'
+
+  assert_success
+  assert_output "123456"
+  assert_zenity_argv_has "--entry"
+  assert_zenity_argv_has "--hide-text"
+  assert_zenity_argv_has "--title=piggy PIV PIN"
+  assert_zenity_argv_has "--timeout=30"
+  refute_zenity_argv_has "--ok-label"
+  refute_zenity_argv_has "--forms"
+}
+
+@test "quote_is_an_entry_dialog_with_its_own_title_and_button" {
+  run_askpass_against_zenity_stub '123456\n' PIGGY_ASKPASS_KIND=quote
+
+  assert_success
+  assert_output "123456"
+  assert_zenity_argv_has "--entry"
+  assert_zenity_argv_has "--title=piggy operator act: QUOTE"
+  assert_zenity_argv_has "--ok-label=Sign quote"
+  # Reading the text takes longer than typing a PIN.
+  assert_zenity_argv_has "--timeout=120"
+}
+
+@test "certificate_is_a_form_with_its_own_title_and_button" {
+  run_askpass_against_zenity_stub '123456\n' PIGGY_ASKPASS_KIND=certificate
+
+  assert_success
+  assert_output "123456"
+  assert_zenity_argv_has "--forms"
+  assert_zenity_argv_has "--add-password=PIV PIN"
+  assert_zenity_argv_has "--title=piggy operator act: CERTIFICATE"
+  assert_zenity_argv_has "--ok-label=Issue certificate"
+  refute_zenity_argv_has "--add-entry"
+}
+
+@test "escalation_form_demands_the_typed_word_and_yields_only_the_pin" {
+  run_askpass_against_zenity_stub '123456\nESCALATE\n' PIGGY_ASKPASS_KIND=escalation
+
+  assert_success
+  assert_output "123456"
+  assert_zenity_argv_has "--forms"
+  assert_zenity_argv_has "--add-entry=Type ESCALATE to grant"
+  assert_zenity_argv_has "--title=piggy operator act: ESCALATION (grants authority)"
+  assert_zenity_argv_has "--ok-label=Grant escalation"
+}
+
+@test "escalation_without_the_typed_word_fails_and_yields_no_pin" {
+  run_askpass_against_zenity_stub '123456\nyes\n' PIGGY_ASKPASS_KIND=escalation
+
+  assert_failure 1
+  refute_output --partial "123456"
+}
+
+# zenity does not show --text literally (see the script): the forms dialogs
+# parse Pango markup, the entry dialog reads `_` as a mnemonic, and both
+# interpret backslash escapes. The text of an act must survive all three.
+TRICKY_TEXT='grant <b>bold</b> & more; id ecdsa_p256_sig; path a\nb'
+
+assert_zenity_text_has() {
+  grep -qF -- "$1" "$ZENITY_ARGV" || {
+    echo "expected the zenity --text to contain: $1" >&2
+    cat "$ZENITY_ARGV" >&2
+    return 1
+  }
+}
+
+@test "forms_dialogs_escape_markup_and_backslashes_so_the_text_shows_literally" {
+  local class
+  for class in escalation certificate; do
+    run_askpass_against_zenity_stub '123456\nESCALATE\n' \
+      PIGGY_ASKPASS_KIND="$class" PIGGY_ASKPASS_CONTEXT="$TRICKY_TEXT"
+    assert_success
+    assert_zenity_text_has 'grant &lt;b&gt;bold&lt;/b&gt; &amp; more; id ecdsa_p256_sig; path a\\nb'
+    refute_zenity_argv_has '<b>'
+  done
+}
+
+@test "entry_dialog_escapes_mnemonics_and_backslashes_so_the_text_shows_literally" {
+  run_askpass_against_zenity_stub '123456\n' \
+    PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="$TRICKY_TEXT"
+  assert_success
+  # Not markup here, so < > & stay; `_` is doubled, `\` is doubled.
+  assert_zenity_text_has 'grant <b>bold</b> & more; id ecdsa__p256__sig; path a\\nb'
+}
+
+@test "explicit_timeout_still_wins_for_an_operator_act" {
+  run_askpass_against_zenity_stub '123456\n' PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_TIMEOUT=9
+
+  assert_success
+  assert_zenity_argv_has "--timeout=9"
+}

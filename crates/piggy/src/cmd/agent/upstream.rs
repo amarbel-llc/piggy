@@ -313,6 +313,51 @@ impl UpstreamPool {
             })?
     }
 
+    /// Forward an extension request to the ONE upstream that listed
+    /// `pubkey`, and relay its answer unchanged. `None` when no upstream
+    /// holds the key (after one refresh of the routing map, as [`Self::sign`]
+    /// does).
+    ///
+    /// Unlike [`Self::forward_extension`] this never tries a second upstream:
+    /// the request may put a prompt in front of a human, and a refusal or a
+    /// cancel from the upstream that owns the key is an answer, not a reason
+    /// to ask another. `wait` replaces the pool's request timeout for the
+    /// same reason: the human needs longer than a probe does.
+    ///
+    /// The outer `Err` is this pool failing to get an answer at all (the
+    /// upstream could not be reached, or said nothing within `wait`); the
+    /// inner result is whatever the upstream answered, a failure included.
+    /// The caller needs the difference: only the second is the upstream's
+    /// to relay.
+    pub async fn forward_extension_for_key(
+        &self,
+        pubkey: &KeyData,
+        request: Extension,
+        wait: Duration,
+    ) -> Option<Result<Result<Option<Extension>, AgentError>, String>> {
+        let mut idx = self.known_keys.lock().await.get(pubkey).copied();
+        if idx.is_none() {
+            self.list_identities().await;
+            idx = self.known_keys.lock().await.get(pubkey).copied();
+        }
+        let upstream = self.upstreams[idx?].clone();
+        tracing::debug!(
+            upstream = %upstream.name,
+            extension = %request.name,
+            "routing extension to the upstream that holds the key"
+        );
+        let answer = async {
+            let mut client = self
+                .connect(&upstream)
+                .await
+                .map_err(|e| format!("upstream {}: {e}", upstream.name))?;
+            timeout(wait, client.extension(request))
+                .await
+                .map_err(|_| format!("upstream {}: no answer within {wait:?}", upstream.name))
+        };
+        Some(answer.await)
+    }
+
     /// Union of the extension names the upstreams advertise, gathered by
     /// forwarding the client's `query` request to each. Per-upstream
     /// degrade: an unreachable upstream or an unparseable response just

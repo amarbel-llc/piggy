@@ -370,6 +370,13 @@ impl PiggyAgent {
     }
 
     async fn sign_inner(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
+        // An operator act is only ever signed by `operator-act@piggy`, which
+        // shows its text first (RFC 0012 §2.7); the same bytes arriving here
+        // would be signed unseen. Checked before routing, so a key held by
+        // an upstream that lacks this rule is covered too.
+        crate::operator_act::refuse_operator_act_signed_data(&request.data)
+            .map_err(|refusal| AgentError::Other(refusal.into()))?;
+
         let key = match self.find_cached_key(&request.pubkey).await {
             Ok(key) => key,
             // piggy#215: not a native key — with upstreams configured,
@@ -499,6 +506,12 @@ impl PiggyAgent {
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
+                // RFC 0012 §2.8: a card agent serves operator acts itself. A
+                // proxy-only agent advertises the extension only when an
+                // upstream does, which the union below takes care of.
+                if !self.proxy_only {
+                    supported.push(crate::operator_act::EXTENSION.to_string());
+                }
                 // piggy#215: with upstreams configured, advertise the
                 // self-reporting status extension (piggy health's probe
                 // target — its absence means "nothing to check") and
@@ -579,6 +592,20 @@ impl PiggyAgent {
                     Err(NativeExtError::KeyNotNative(msg)) => Err(AgentError::Other(msg.into())),
                 }
             }
+            // RFC 0012: an operator act. Every outcome the agent decides
+            // itself is a status inside a named response, so a caller can
+            // tell a refusal from an agent that predates the extension; a
+            // request for a key held upstream is relayed as it came back.
+            n if n == crate::operator_act::EXTENSION => {
+                let details = extension.details.clone().into_bytes();
+                match self.handle_operator_act(&details, extension).await {
+                    OperatorActAnswer::Local(response) => Ok(Some(Extension {
+                        name: crate::operator_act::EXTENSION.into(),
+                        details: response.encode().into(),
+                    })),
+                    OperatorActAnswer::Relayed(answer) => answer,
+                }
+            }
             // eng#295: self-report the agent's role so `piggy health` can
             // shape its plan (a proxy-only agent has no card to check).
             n if n == super::mode::AGENT_MODE_EXT => {
@@ -639,7 +666,253 @@ impl From<AgentError> for NativeExtError {
     }
 }
 
+/// How long a proxy waits for the agent that holds the card to answer an
+/// operator act. The operator reads a text, types a PIN and touches the
+/// card in that time, so the pool's probe-sized `--agent-timeout` does not
+/// apply.
+const OPERATOR_ACT_UPSTREAM_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The answer to an `operator-act@piggy` request: one this agent decided, or
+/// the upstream's own answer relayed unchanged (RFC 0012 §2.8).
+enum OperatorActAnswer {
+    Local(crate::operator_act::Response),
+    Relayed(Result<Option<Extension>, AgentError>),
+}
+
+/// Check that the card attests `slot`'s key as an operator-act key (RFC 0012
+/// §2.4): the attestation is for `requested`, states PIN always and touch
+/// always, and is signed by the card's F9 certificate. The policy is read
+/// from the card on every request; nothing configured or cached stands in
+/// for it. `Err` is the `detail` of a `refused-policy` answer.
+fn check_operator_act_attestation(
+    token: &piggy_piv::PivToken,
+    slot: u8,
+    requested: &KeyData,
+) -> Result<(), String> {
+    let attestation = token
+        .yk_attest(slot)
+        .map_err(|e| format!("slot {slot:02X}: the card did not attest the key ({e})"))?;
+    let (pin, touch) = piggy_piv::attest::parse_policy(&attestation)
+        .map_err(|e| format!("slot {slot:02X}: the attestation states no policy ({e})"))?;
+    let policy = piggy_piv::KeyPolicy { pin, touch };
+    if !policy.serves_operator_acts() {
+        return Err(format!("slot {slot:02X}: {policy}"));
+    }
+    let (_, attested_key) = piggy_piv::cert::extract_public_key(&attestation)
+        .map_err(|e| format!("slot {slot:02X}: unreadable attestation ({e})"))?;
+    if attested_key.key_data() != requested {
+        return Err(format!(
+            "slot {slot:02X}: the attestation is for a different key"
+        ));
+    }
+    let intermediate = token
+        .read_slot(0xF9)
+        .map_err(|e| format!("slot {slot:02X}: no card attestation certificate ({e})"))?;
+    let chains = openssl::x509::X509::from_der(&attestation)
+        .and_then(|att| {
+            let issuer = openssl::x509::X509::from_der(intermediate.cert_der())?;
+            let issuer_key = issuer.public_key()?;
+            att.verify(&issuer_key)
+        })
+        .map_err(|e| format!("slot {slot:02X}: attestation chain unreadable ({e})"))?;
+    if !chains {
+        return Err(format!(
+            "slot {slot:02X}: the attestation is not signed by the card's attestation certificate"
+        ));
+    }
+    Ok(())
+}
+
 impl PiggyAgent {
+    /// Serve one `operator-act@piggy` request (RFC 0012 §2).
+    ///
+    /// Order matters. The key decides who answers: a key this agent does not
+    /// hold goes to the upstream that listed it, untouched and undisplayed.
+    /// For a key held here, the namespace, the text and the attested policy
+    /// are all judged BEFORE any prompt, so a refusal never costs the
+    /// operator a PIN. Only then is the text shown, on the same prompt that
+    /// takes the PIN, and the bytes signed are built here from that text.
+    async fn handle_operator_act(
+        &mut self,
+        details: &[u8],
+        extension: Extension,
+    ) -> OperatorActAnswer {
+        use crate::operator_act::{self as act, Response, Status};
+        let refuse =
+            |status, detail: String| OperatorActAnswer::Local(Response::refusal(status, detail));
+
+        // Routing reads the key and nothing else: whether the rest of the
+        // request is one this build understands is for the agent that holds
+        // the key to say (RFC 0012 §2.8), and that may be a newer agent.
+        let Some(public_key) =
+            act::request_key(details).and_then(|key| PublicKey::from_bytes(key).ok())
+        else {
+            return refuse(Status::BadRequest, "malformed operator-act request".into());
+        };
+        let key = match self.find_cached_key(public_key.key_data()).await {
+            Ok(key) => key,
+            Err(_) => {
+                let relayed = self
+                    .upstreams
+                    .forward_extension_for_key(
+                        public_key.key_data(),
+                        extension,
+                        OPERATOR_ACT_UPSTREAM_WAIT,
+                    )
+                    .await;
+                return match relayed {
+                    Some(Ok(answer)) => OperatorActAnswer::Relayed(answer),
+                    // The upstream never answered. Say so in a response, or
+                    // the caller takes this agent for one without the
+                    // extension. The prompt may still be up over there.
+                    Some(Err(unanswered)) => refuse(Status::Error, unanswered),
+                    None => refuse(Status::NoSuchKey, "no agent here serves that key".into()),
+                };
+            }
+        };
+
+        let Some(request) = act::Request::decode(details) else {
+            return refuse(Status::BadRequest, "malformed operator-act request".into());
+        };
+        let Some(hash) = act::HashAlgorithm::parse(&request.hash_algorithm) else {
+            return refuse(
+                Status::BadRequest,
+                format!(
+                    "hash algorithm {:?} is not sha256 or sha512",
+                    request.hash_algorithm
+                ),
+            );
+        };
+
+        let Some(class) = act::display_class(&request.namespace) else {
+            return refuse(
+                Status::RefusedNamespace,
+                format!(
+                    "namespace {:?} is not registered for operator acts",
+                    request.namespace
+                ),
+            );
+        };
+        let Some(text) = act::displayable_text(&request.text) else {
+            return refuse(
+                Status::RefusedText,
+                format!(
+                    "the text must be 1 to {} bytes of UTF-8 with no control characters other than newline and tab",
+                    act::MAX_TEXT_BYTES
+                ),
+            );
+        };
+
+        {
+            let _card_guard = self.card_lock.lock().await;
+            let token = match reconnect_to_token(&key.guid) {
+                Ok(token) => token,
+                Err(e) => return refuse(Status::CardAbsent, e.to_string()),
+            };
+            if let Err(detail) =
+                check_operator_act_attestation(&token, key.slot_id, public_key.key_data())
+            {
+                return refuse(Status::RefusedPolicy, detail);
+            }
+        }
+
+        // The PIN is asked for this act whatever is cached: the slot is
+        // PIN-always, and the prompt is where the operator reads the text.
+        let card = key.guid.short_id();
+        let context = act::prompt_context(class, &card, key.slot_id, &request.namespace, text);
+        let prompt = format!("PIN for card {card} to sign this operator act");
+        let kind = class.as_str();
+        let prompted = {
+            let _prompt_guard = self.prompt_lock.lock().await;
+            let prompt_start = std::time::Instant::now();
+            let prompted = tokio::task::spawn_blocking(move || {
+                crate::card_oracle::run_askpass_of_kind(&prompt, Some(&context), Some(kind))
+            })
+            .await;
+            // The same `piggy.agent.pin_prompt.<result>` series `ensure_pin`
+            // feeds: an operator-act prompt is a PIN prompt.
+            let outcome = if matches!(prompted, Ok(Ok(_))) {
+                crate::stats::Outcome::Success
+            } else {
+                crate::stats::Outcome::Failure
+            };
+            crate::stats::agent_op("pin_prompt", outcome, prompt_start.elapsed());
+            prompted
+        };
+        let pin = match prompted {
+            Ok(Ok(pin)) => pin,
+            Ok(Err(e)) => return refuse(Status::Cancelled, e.to_string()),
+            Err(e) => return refuse(Status::Error, format!("askpass task: {e}")),
+        };
+
+        let signed_data = act::signed_data(&request.namespace, hash, &request.text);
+        let digest = match prepare_sign_data(key.algorithm, &signed_data, 0) {
+            Ok(digest) => digest,
+            Err(e) => return refuse(Status::Error, e.to_string()),
+        };
+        let card_signature = {
+            let _card_guard = self.card_lock.lock().await;
+            let mut token = match reconnect_to_token(&key.guid) {
+                Ok(token) => token,
+                Err(e) => return refuse(Status::CardAbsent, e.to_string()),
+            };
+            // The prompt may have been up for minutes. Whatever was attested
+            // before it is not trusted across that gap (RFC 0012 §2.4): the
+            // card in the reader now attests again, under the lock the sign
+            // is made under.
+            if let Err(detail) =
+                check_operator_act_attestation(&token, key.slot_id, public_key.key_data())
+            {
+                return refuse(Status::RefusedPolicy, detail);
+            }
+            let mut session = match token.begin_pin_session() {
+                Ok(session) => session,
+                Err(e) => return refuse(Status::CardAbsent, e.to_string()),
+            };
+            if let Err(e) = session.verify_pin(&pin) {
+                return refuse(Status::Error, e.to_string());
+            }
+            // The card now waits for the touch, and the PIN dialog that had
+            // the operator's attention has just closed: tell them.
+            let notified = crate::card_oracle::notify_operator(
+                "piggy-agent: touch your card",
+                &format!(
+                    "card {card}, slot {:02X}: touch it now to sign the {kind} operator act",
+                    key.slot_id
+                ),
+            );
+            if !notified {
+                tracing::warn!(
+                    card = %card,
+                    "operator act: waiting for a touch, with no notifier to say so \
+                     (set SSH_NOTIFY_SEND or PIGGY_ASKPASS_NOTIFIER)"
+                );
+            }
+            match session.sign_prehash(key.slot_id, &digest) {
+                Ok(signature) => signature,
+                // 6982 (the card's "security status not satisfied") right
+                // after a good PIN in the same transaction is the card
+                // giving up on the touch.
+                Err(PivError::PinRequired) => {
+                    return refuse(Status::Cancelled, "the card was not touched in time".into());
+                }
+                Err(e) => return refuse(Status::Error, e.to_string()),
+            }
+        };
+
+        let signature = match to_ssh_signature(key.algorithm, &card_signature, 0) {
+            Ok(signature) => signature,
+            Err(e) => return refuse(Status::Error, e.to_string()),
+        };
+        let encoded = act::ssh_signature(signature.algorithm().as_str(), signature.as_bytes());
+        OperatorActAnswer::Local(Response::signed(act::sshsig_blob(
+            &request.key,
+            &request.namespace,
+            hash,
+            &encoded,
+        )))
+    }
+
     async fn find_cached_key(&self, pubkey: &KeyData) -> Result<CachedKey, AgentError> {
         let keys = self.keys.lock().await;
         Self::find_key(&keys, pubkey).ok_or_else(|| AgentError::Other("key not found".into()))
@@ -2463,6 +2736,232 @@ mod tests {
                 .any(|e| e == "ext:ecdh@joyent.com"),
             "malformed ecdh request was forwarded upstream"
         );
+    }
+
+    // -------- operator-act@piggy (RFC 0012; pre-PCSC branches) --------
+    //
+    // Everything here is decided before the card is opened or a prompt is
+    // raised, so it runs without PCSC. The card half (attestation, prompt,
+    // sign) is the fibby lanes' to cover.
+
+    use crate::operator_act as act;
+
+    fn operator_act_request(key: KeyData, namespace: &str, hash: &str, text: &[u8]) -> Extension {
+        let key: PublicKey = key.into();
+        Extension {
+            name: act::EXTENSION.into(),
+            details: act::Request {
+                key: key.to_bytes().unwrap(),
+                namespace: namespace.into(),
+                hash_algorithm: hash.into(),
+                text: text.to_vec(),
+            }
+            .encode()
+            .into(),
+        }
+    }
+
+    async fn operator_act_status(agent: &mut PiggyAgent, request: Extension) -> act::Status {
+        let answer = agent
+            .extension(request)
+            .await
+            .expect("a refusal is a SUCCESS response, not an agent failure")
+            .expect("an operator-act response");
+        assert_eq!(answer.name, act::EXTENSION);
+        let response = act::Response::decode(&answer.details.into_bytes()).expect("well-formed");
+        assert!(response.sshsig.is_empty(), "a refusal carries no signature");
+        response.status
+    }
+
+    #[tokio::test]
+    async fn operator_act_malformed_request_is_bad_request() {
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9C)]);
+        let truncated = Extension {
+            name: act::EXTENSION.into(),
+            details: vec![0x00, 0x00].into(),
+        };
+        assert_eq!(
+            operator_act_status(&mut agent, truncated).await,
+            act::Status::BadRequest
+        );
+        let unknown_hash = operator_act_request(
+            ed25519_key_data(0x11),
+            "piggy-escalation-v1",
+            "md5",
+            b"grant",
+        );
+        assert_eq!(
+            operator_act_status(&mut agent, unknown_hash).await,
+            act::Status::BadRequest
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_act_unserved_key_without_upstreams_is_no_such_key() {
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9C)]);
+        let request = operator_act_request(
+            ed25519_key_data(0x77),
+            "piggy-escalation-v1",
+            "sha512",
+            b"grant",
+        );
+        assert_eq!(
+            operator_act_status(&mut agent, request).await,
+            act::Status::NoSuchKey
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_act_refuses_unregistered_namespaces_for_a_held_key() {
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9C)]);
+        for namespace in ["git", "file", "email", "piggy-record-v1", "piggy-grant-v9"] {
+            let request = operator_act_request(ed25519_key_data(0x11), namespace, "sha512", b"x");
+            assert_eq!(
+                operator_act_status(&mut agent, request).await,
+                act::Status::RefusedNamespace,
+                "{namespace}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_act_refuses_text_the_prompt_cannot_show() {
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9C)]);
+        let oversize = vec![b'a'; act::MAX_TEXT_BYTES + 1];
+        for text in [&b""[..], b"a\x1b[2Jb", b"\xff\xfe", &oversize] {
+            let request = operator_act_request(
+                ed25519_key_data(0x11),
+                "piggy-escalation-v1",
+                "sha512",
+                text,
+            );
+            assert_eq!(
+                operator_act_status(&mut agent, request).await,
+                act::Status::RefusedText
+            );
+        }
+    }
+
+    /// RFC 0012 §2.8: a key this agent does not hold goes to the upstream
+    /// that listed it, and the upstream's answer comes back as it was.
+    #[tokio::test]
+    async fn operator_act_for_an_upstream_key_is_relayed_unjudged() {
+        let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+            0x77, "card-key",
+        )])
+        .with_extensions(&[act::EXTENSION]);
+        let events = stub.events.clone();
+        let path = upstream_stub::spawn_stub("operator-act-fwd", stub);
+        let mut agent = PiggyAgent::new(Vec::new())
+            .with_proxy_only(true)
+            .with_upstream_pool(pool_for(path));
+        agent.request_identities().await.unwrap();
+
+        // A namespace this agent would refuse for its own key: a proxy does
+        // not judge, the agent that holds the card does.
+        let request = operator_act_request(ed25519_key_data(0x77), "git", "sha512", b"x");
+        let answer = agent.extension(request).await.unwrap().expect("relayed");
+        assert_eq!(answer.details.into_bytes(), b"stub-echo");
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| *e == format!("ext:{}", act::EXTENSION)),
+            "the upstream never saw the request"
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_act_is_advertised_by_a_card_agent_and_not_by_a_bare_proxy() {
+        async fn advertised(agent: &mut PiggyAgent) -> bool {
+            let answer = agent
+                .extension(Extension {
+                    name: "query".into(),
+                    details: Vec::new().into(),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let details = answer.details.into_bytes();
+            details
+                .windows(act::EXTENSION.len())
+                .any(|w| w == act::EXTENSION.as_bytes())
+        }
+        assert!(advertised(&mut PiggyAgent::new(Vec::new())).await);
+        assert!(!advertised(&mut PiggyAgent::new(Vec::new()).with_proxy_only(true)).await);
+    }
+
+    /// The ordinary sign path must not mint what `operator-act@piggy` exists
+    /// to guard: sshsig signed data in an operator-act namespace is refused
+    /// before the card or a prompt is reached.
+    #[tokio::test]
+    async fn sign_refuses_operator_act_signed_data() {
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9C)]);
+        let req = SignRequest {
+            pubkey: ed25519_key_data(0x11),
+            data: act::signed_data(
+                "piggy-escalation-v1",
+                act::HashAlgorithm::Sha512,
+                b"grant: anything",
+            ),
+            flags: 0,
+        };
+        let err = agent.sign(req).await.unwrap_err();
+        assert_agent_error_other_eq(&err, "signed only through operator-act@piggy");
+    }
+
+    /// The refusal comes before routing: an upstream that predates the rule
+    /// never sees the bytes, so it cannot sign them.
+    #[tokio::test]
+    async fn sign_refuses_operator_act_signed_data_for_an_upstream_key_too() {
+        let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+            0x77, "card-key",
+        )]);
+        let events = stub.events.clone();
+        let path = upstream_stub::spawn_stub("operator-act-sign-guard", stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+        agent.request_identities().await.unwrap();
+        let seen_before = events.lock().unwrap().len();
+
+        let req = SignRequest {
+            pubkey: ed25519_key_data(0x77),
+            data: act::signed_data("piggy-quote-v1", act::HashAlgorithm::Sha256, b"words"),
+            flags: 0,
+        };
+        let err = agent.sign(req).await.unwrap_err();
+        assert_agent_error_other_eq(&err, "signed only through operator-act@piggy");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            seen_before,
+            "the upstream was asked to sign operator-act data"
+        );
+    }
+
+    /// A proxy does not judge what it forwards: a request this build would
+    /// call `bad-request` still reaches the upstream that holds the key.
+    #[tokio::test]
+    async fn operator_act_from_a_later_version_is_still_relayed() {
+        let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+            0x77, "card-key",
+        )])
+        .with_extensions(&[act::EXTENSION]);
+        let path = upstream_stub::spawn_stub("operator-act-fwd-v2", stub);
+        let mut agent = PiggyAgent::new(Vec::new())
+            .with_proxy_only(true)
+            .with_upstream_pool(pool_for(path));
+        agent.request_identities().await.unwrap();
+
+        let key: PublicKey = ed25519_key_data(0x77).into();
+        let mut contents = 2u32.to_be_bytes().to_vec();
+        contents.extend(ssh_string(&key.to_bytes().unwrap()));
+        contents.extend_from_slice(b"what version 2 adds");
+        let request = Extension {
+            name: act::EXTENSION.into(),
+            details: ssh_string(&contents).into(),
+        };
+        let answer = agent.extension(request).await.unwrap().expect("relayed");
+        assert_eq!(answer.details.into_bytes(), b"stub-echo");
     }
 
     // -------- Session impl: sign (pre-PCSC branch) --------
