@@ -96,7 +96,7 @@ let
     result: map (a: a.message) (builtins.filter (a: !a.assertion) result.config.assertions);
 
   # Unit-shape checks only apply where the module emits a systemd unit.
-  onLinux = ok: if pkgs.stdenv.isLinux then ok else true;
+  onLinux = ok: if pkgs.stdenv.hostPlatform.isLinux then ok else true;
 
   cases = [
     {
@@ -163,7 +163,7 @@ let
         result:
         let
           act = (activationOf result).data;
-          execStart = if pkgs.stdenv.isLinux then (unitOf result).Service.ExecStart else "";
+          execStart = if pkgs.stdenv.hostPlatform.isLinux then (unitOf result).Service.ExecStart else "";
         in
         {
           ok =
@@ -203,7 +203,7 @@ let
           && lib.hasSuffix "/bin/piggy secrets reconcile" (unitOf result).Service.ExecStart
           && !((unitOf result) ? Install)
         );
-        got = if pkgs.stdenv.isLinux then unitOf result else null;
+        got = if pkgs.stdenv.hostPlatform.isLinux then unitOf result else null;
       };
     }
     {
@@ -218,7 +218,7 @@ let
         ok = onLinux (
           lib.elem "PIGGY_AUTH_SOCK=${home}/.local/state/piggy/piggy-agent.sock" (unitEnv result)
         );
-        got = if pkgs.stdenv.isLinux then unitEnv result else null;
+        got = if pkgs.stdenv.hostPlatform.isLinux then unitEnv result else null;
       };
     }
     {
@@ -226,7 +226,7 @@ let
       cfg = withFiles { };
       check = result: {
         ok = onLinux (!(lib.any (lib.hasPrefix "PIGGY_AUTH_SOCK=") (unitEnv result)));
-        got = if pkgs.stdenv.isLinux then unitEnv result else null;
+        got = if pkgs.stdenv.hostPlatform.isLinux then unitEnv result else null;
       };
     }
     {
@@ -239,7 +239,7 @@ let
             v: lib.hasPrefix "SSH_ASKPASS=" v && lib.hasSuffix "/libexec/piggy/piggy-askpass.sh" v
           ) (unitEnv result)
         );
-        got = if pkgs.stdenv.isLinux then unitEnv result else null;
+        got = if pkgs.stdenv.hostPlatform.isLinux then unitEnv result else null;
       };
     }
     {

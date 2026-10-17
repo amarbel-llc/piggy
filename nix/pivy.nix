@@ -147,7 +147,7 @@ let
       libedit
       zlib
     ]
-    ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
+    ++ pkgs.lib.optionals (!pkgs.stdenv.hostPlatform.isDarwin) [
       pcsclite
     ];
 
@@ -194,8 +194,8 @@ pkgs.stdenv.mkDerivation {
       LIBRESSL_INC=${libressl}/include \
       LIBRESSL_LIB=${libressl}/lib \
       ZLIB_LIB=${pkgs.zlib}/lib \
-      SYSTEM_CFLAGS="${pkgs.lib.optionalString pkgs.stdenv.isDarwin "-arch ${pkgs.stdenv.hostPlatform.darwinArch}"}${pkgs.lib.optionalString pkgs.stdenv.isLinux "$(pkg-config --cflags libbsd-overlay) -DHAVE_USER_FROM_UID -DHAVE_STRMODE -DHAVE_GROUP_FROM_GID"} -DPIVY_ASKPASS_DEFAULT='\"$out/libexec/pivy/pivy-askpass\"'" \
-      SYSTEM_LDFLAGS="${pkgs.lib.optionalString pkgs.stdenv.isDarwin "-arch ${pkgs.stdenv.hostPlatform.darwinArch}"}${pkgs.lib.optionalString pkgs.stdenv.isLinux "$(pkg-config --libs libbsd-overlay)"}"
+      SYSTEM_CFLAGS="${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "-arch ${pkgs.stdenv.hostPlatform.darwinArch}"}${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "$(pkg-config --cflags libbsd-overlay) -DHAVE_USER_FROM_UID -DHAVE_STRMODE -DHAVE_GROUP_FROM_GID"} -DPIVY_ASKPASS_DEFAULT='\"$out/libexec/pivy/pivy-askpass\"'" \
+      SYSTEM_LDFLAGS="${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "-arch ${pkgs.stdenv.hostPlatform.darwinArch}"}${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "$(pkg-config --libs libbsd-overlay)"}"
     runHook postBuild
   '';
 
@@ -235,12 +235,12 @@ pkgs.stdenv.mkDerivation {
         "$adoc"
     done
 
-    ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+    ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
       mkdir -p $out/lib/systemd/user
       substitute pivy-agent@.service $out/lib/systemd/user/pivy-agent@.service \
         --replace-fail '@@BINDIR@@' "$out/bin"
     ''}
-    ${pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+    ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
       mkdir -p $out/share/pivy
       substitute macosx/net.cooperi.pivy-agent.plist $out/share/pivy/net.cooperi.pivy-agent.plist \
         --replace-fail '/opt/pivy/bin/pivy-agent' "$out/bin/pivy-agent"
@@ -258,13 +258,13 @@ pkgs.stdenv.mkDerivation {
     #!/bin/sh
     case "\$(uname)" in
       Darwin) exec ${
-        if pkgs.stdenv.isDarwin then
+        if pkgs.stdenv.hostPlatform.isDarwin then
           "${pkgs.terminal-notifier}/bin/terminal-notifier"
         else
           "terminal-notifier"
       } -title "\$1" -message "\$2" ;;
       *)      exec ${
-        if pkgs.stdenv.isLinux then "${pkgs.libnotify}/bin/notify-send" else "notify-send"
+        if pkgs.stdenv.hostPlatform.isLinux then "${pkgs.libnotify}/bin/notify-send" else "notify-send"
       } "\$1" "\$2" ;;
     esac
     NOTIFY

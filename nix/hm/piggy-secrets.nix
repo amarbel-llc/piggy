@@ -329,7 +329,7 @@ in
 
     services.piggy-secrets._manifestText = manifestText;
 
-    systemd.user.services = mkIf pkgs.stdenv.isLinux {
+    systemd.user.services = mkIf pkgs.stdenv.hostPlatform.isLinux {
       piggy-secrets = {
         Unit = {
           Description = "Reconcile piggy ebox-backed secret files";
@@ -350,7 +350,7 @@ in
     # the bare-lib eval-test harness, which has no `lib.hm`. `reloadSystemd`
     # ordering makes the unit start see this generation's unit definition.
     home.activation.piggySecrets = {
-      after = [ "writeBoundary" ] ++ lib.optional pkgs.stdenv.isLinux "reloadSystemd";
+      after = [ "writeBoundary" ] ++ lib.optional pkgs.stdenv.hostPlatform.isLinux "reloadSystemd";
       before = [ ];
       data = activationText;
     };

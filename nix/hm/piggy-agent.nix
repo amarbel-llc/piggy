@@ -98,7 +98,8 @@ let
       # is single-platform, so pick from stdenv here. In single-instance
       # mode this equals health's default (`piggy-agent.service`) — emitting
       # it is harmless there and essential for multi-instance units.
-      serviceName = if pkgs.stdenv.isDarwin then "org.nix-community.home.${name}" else "${name}.service";
+      serviceName =
+        if pkgs.stdenv.hostPlatform.isDarwin then "org.nix-community.home.${name}" else "${name}.service";
 
       softwareKeys = instanceCfg.softwareKeys;
       softwareKeysUnit = softwareKeysUnitName name;
@@ -550,7 +551,7 @@ let
         message = "services.piggy-agent: `softwareKeys.enable` requires the Rust agent (package pname \"piggy\"), not the C pivy-agent (instance ${unitName}).";
       }
       {
-        assertion = !ic.softwareKeys.enable || pkgs.stdenv.isLinux;
+        assertion = !ic.softwareKeys.enable || pkgs.stdenv.hostPlatform.isLinux;
         message = "services.piggy-agent: `softwareKeys.enable` is Linux-only; on Darwin list the launchd ssh-agent in `upstreams` and name it in `addNewKeysTo` (instance ${unitName}).";
       }
       {
@@ -1025,11 +1026,11 @@ in
 
     services.piggy-agent.resolvedSocketPaths = resolvedSocketPathsMap;
 
-    systemd.user.services = mkIf pkgs.stdenv.isLinux (
+    systemd.user.services = mkIf pkgs.stdenv.hostPlatform.isLinux (
       lib.concatMapAttrs (_: built: built.linuxServices) builtInstances
     );
 
-    launchd.agents = mkIf pkgs.stdenv.isDarwin (
+    launchd.agents = mkIf pkgs.stdenv.hostPlatform.isDarwin (
       lib.mapAttrs (_: built: built.darwinAgent) builtInstances
     );
 

@@ -198,7 +198,7 @@
 
         # Software PIV smart card for tests. Only built on Linux — vsmartcard
         # is marked broken on darwin upstream.
-        virtualPiv = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
+        virtualPiv = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
           import ./nix/virtual-piv.nix {
             inherit pkgs pkgs-master;
             jcardsim-src = jcardsim;
@@ -213,7 +213,7 @@
         # `checks` so `nix flake check` runs it; the justfile
         # `test-vm-*` recipes are the paved paths. The guard wraps the
         # import: runNixOSTest must never be evaluated on darwin.
-        vmTests = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
+        vmTests = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
           import ./nix/vm-tests { inherit pkgs piggy fibby; }
         );
 
@@ -225,7 +225,7 @@
         # test-vm-coverage`). fibby stays uninstrumented: it is test
         # infrastructure, and it has no SIGTERM handler, so an instrumented
         # daemon would be killed without flushing its profile anyway.
-        vmCoverage = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (
+        vmCoverage = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
           let
             lanes = import ./nix/vm-tests {
               inherit pkgs fibby;
@@ -287,7 +287,7 @@
           pkgs.coreutils
           pkgs.zenity
         ]
-        ++ pkgs.lib.optional pkgs.stdenv.isLinux pkgs.procps;
+        ++ pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.procps;
 
         # Native rust workspace: `piggy` (binary) + `piggy-piv` (library).
         # pcsclite is only needed on linux; macOS has PC/SC in CoreServices.
@@ -297,7 +297,7 @@
         rustBuildInputs = [
           pkgs.openssl
         ]
-        ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs-master.pcsclite ];
+        ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs-master.pcsclite ];
         rustNativeBuildInputs = [ pkgs.pkg-config ];
 
         # Shared cargoLock attrs for every buildRustPackage derivation in
@@ -384,7 +384,7 @@
         # validation recipes) is available. Darwin builds without the
         # feature because pcsc-sys's libpcsclite link isn't satisfied
         # there — flake.nix:166 only adds pcsclite to rustBuildInputs on
-        # `stdenv.isLinux`, matching the upstream vsmartcard-on-darwin
+        # `stdenv.hostPlatform.isLinux`, matching the upstream vsmartcard-on-darwin
         # status. The `VirtualCard` backend is always available on both
         # platforms.
         #
@@ -418,7 +418,7 @@
             "-p"
             "fibby"
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             "--features"
             "hardware-proxy"
           ];
@@ -432,7 +432,7 @@
             "-p"
             "fibby"
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             "--features"
             "hardware-proxy"
           ];
@@ -561,7 +561,7 @@
             passthru.tests = {
               conformance = piggy-agent-conformance;
             }
-            // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+            // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
               fib = virtualPiv.fibBundle;
             };
 
@@ -876,7 +876,7 @@
         }
         // batsLib.batsLaneOutputs
         // vmCoverage
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           fib = virtualPiv.fib;
           fib-bundle = virtualPiv.fibBundle;
           fib-reader-conf = virtualPiv.readerConf;
@@ -982,7 +982,7 @@
               # to answer it.
               pkgs.expect
             ]
-            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               # `just load-fib` needs pcscd + opensc-tool on PATH; it runs
               # fib itself via `nix run .#fib`, so fib is deliberately NOT
               # a devShell package: a jcardsim build failure (its vendored

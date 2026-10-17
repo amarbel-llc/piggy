@@ -66,7 +66,7 @@ let
   # multi-instance cases pass `piggy-agent-<key>` per instance.
   forceLauncherNamed =
     unitName: result:
-    if pkgs.stdenv.isLinux then
+    if pkgs.stdenv.hostPlatform.isLinux then
       result.config.systemd.user.services.${unitName}.Service.ExecStart
     else
       result.config.launchd.agents.${unitName}.config.ProgramArguments;
@@ -79,7 +79,7 @@ let
   # or an attrset (launchd). Used by the SSH_ASKPASS-contract tests.
   getUnitEnv =
     unitName: result:
-    if pkgs.stdenv.isLinux then
+    if pkgs.stdenv.hostPlatform.isLinux then
       let
         env = result.config.systemd.user.services.${unitName}.Service.Environment or [ ];
         parsePair =
@@ -645,7 +645,7 @@ let
         in
         {
           ok =
-            if pkgs.stdenv.isDarwin then
+            if pkgs.stdenv.hostPlatform.isDarwin then
               isAbsolute && noLiteralHome
             else
               # On Linux the launchd.agents surface is unpopulated;
