@@ -16,6 +16,7 @@ use piggy_ids::Classification;
 use piggy_markl::Id;
 use piggy_piv::{Guid, KeyPolicy, PinSession, PivAlgorithm, PivContext, PivError, PivToken};
 
+use crate::card::RequestBinding;
 use crate::card::engine::{
     self, Escrow, ProvisionCard, ProvisionConfig, ProvisionError, ProvisionOutcome,
 };
@@ -116,25 +117,57 @@ pub enum CardSelector {
 }
 
 impl CardSelector {
-    /// Build the selector from the mutually-exclusive flags shared by the CLI
-    /// (`piggy card init`) and the JSON-RPC `card.init` method. At most one of
-    /// `serial`/`guid`/`reader` may be set; `guid` is parsed from hex. The CLI
-    /// also enforces exclusivity via clap, so the conflict arm is defense in
-    /// depth for the JSON-RPC path.
+    /// Build the selector from the mutually-exclusive selectors shared by
+    /// the `card` subcommands and the JSON-RPC `card.*` methods. At most one
+    /// of `serial`/`guid`/`reader` may be set; `guid` is parsed from hex. The
+    /// CLI also enforces exclusivity via clap, so the conflict arm is defense
+    /// in depth for the JSON-RPC path. Errors name the selectors as
+    /// `binding` spells them.
     pub fn from_flags(
         serial: Option<u32>,
         guid: Option<String>,
         reader: Option<String>,
+        binding: RequestBinding,
     ) -> Result<Self, String> {
         match (serial, guid, reader) {
             (None, None, None) => Ok(Self::Auto),
             (Some(s), None, None) => Ok(Self::Serial(s)),
             (None, Some(g), None) => Guid::from_hex(g.trim())
                 .map(Self::Guid)
-                .map_err(|e| format!("invalid --guid {g:?}: {e}")),
+                .map_err(|e| format!("invalid {} {g:?}: {e}", binding.option("guid"))),
             (None, None, Some(r)) => Ok(Self::Reader(r)),
-            _ => Err("provide at most one of --serial, --guid, --reader".to_string()),
+            _ => Err(format!(
+                "provide at most one of {}, {}, {}",
+                binding.option("serial"),
+                binding.option("guid"),
+                binding.option("reader")
+            )),
         }
+    }
+}
+
+/// The `--serial`/`--guid`/`--reader` card selectors every `card`
+/// subcommand takes. `card init` rewords the help for provisioning a blank
+/// card (see its `mut_arg`s in `main.rs`).
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct CardSelectorArgs {
+    /// YubiKey serial of the card. Optional with one card attached.
+    /// Mutually exclusive with `--guid`/`--reader`.
+    #[arg(long)]
+    pub serial: Option<u32>,
+    /// Select the card by CHUID GUID (hex). Mutually exclusive with
+    /// `--serial`/`--reader`.
+    #[arg(long, conflicts_with_all = ["serial", "reader"])]
+    pub guid: Option<String>,
+    /// Select the card by PC/SC reader name. Mutually exclusive with
+    /// `--serial`/`--guid`.
+    #[arg(long, conflicts_with_all = ["serial", "guid"])]
+    pub reader: Option<String>,
+}
+
+impl CardSelectorArgs {
+    pub fn selector(self) -> Result<CardSelector, String> {
+        CardSelector::from_flags(self.serial, self.guid, self.reader, RequestBinding::Cli)
     }
 }
 
@@ -405,11 +438,8 @@ fn prepare_escrow(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_inner(
-    serial: Option<u32>,
-    guid: Option<String>,
-    reader: Option<String>,
+    selector: CardSelectorArgs,
     allow_reprovision: bool,
     pin_policy: &[String],
     touch_policy: &[String],
@@ -419,7 +449,7 @@ fn run_inner(
 ) -> Result<ProvisionOutcome, String> {
     // Resolve the card selector and the policies before touching any card (a
     // bad --guid or --pin-policy is a usage error, not a card-op failure).
-    let selector = CardSelector::from_flags(serial, guid, reader)?;
+    let selector = selector.selector()?;
     let policies = SlotPolicies::from_flags(pin_policy, touch_policy)?;
     // Build the frontend first: a jsonrpc channel that can't be opened must
     // fail before we touch any card (RFC 0006 §6).
@@ -435,11 +465,8 @@ fn run_inner(
 }
 
 /// `piggy card init` entry point. Returns a process exit code.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
-    serial: Option<u32>,
-    guid: Option<String>,
-    reader: Option<String>,
+    selector: CardSelectorArgs,
     allow_reprovision: bool,
     pin_policy: &[String],
     touch_policy: &[String],
@@ -448,9 +475,7 @@ pub fn run(
     socket: Option<&Path>,
 ) -> i32 {
     match run_inner(
-        serial,
-        guid,
-        reader,
+        selector,
         allow_reprovision,
         pin_policy,
         touch_policy,
@@ -507,10 +532,12 @@ mod tests {
 
     // --- CardSelector::from_flags ---
 
+    const CLI: RequestBinding = RequestBinding::Cli;
+
     #[test]
     fn from_flags_none_is_auto() {
         assert!(matches!(
-            CardSelector::from_flags(None, None, None),
+            CardSelector::from_flags(None, None, None, CLI),
             Ok(CardSelector::Auto)
         ));
     }
@@ -518,14 +545,14 @@ mod tests {
     #[test]
     fn from_flags_serial() {
         assert!(matches!(
-            CardSelector::from_flags(Some(42), None, None),
+            CardSelector::from_flags(Some(42), None, None, CLI),
             Ok(CardSelector::Serial(42))
         ));
     }
 
     #[test]
     fn from_flags_guid_parses_hex() {
-        match CardSelector::from_flags(None, Some(GUID_A.to_string()), None) {
+        match CardSelector::from_flags(None, Some(GUID_A.to_string()), None, CLI) {
             Ok(CardSelector::Guid(g)) => assert_eq!(g.to_hex(), GUID_A.to_uppercase()),
             other => panic!("expected Guid, got {other:?}"),
         }
@@ -533,7 +560,7 @@ mod tests {
 
     #[test]
     fn from_flags_reader() {
-        match CardSelector::from_flags(None, None, Some("R 01 00".to_string())) {
+        match CardSelector::from_flags(None, None, Some("R 01 00".to_string()), CLI) {
             Ok(CardSelector::Reader(r)) => assert_eq!(r, "R 01 00"),
             other => panic!("expected Reader, got {other:?}"),
         }
@@ -541,14 +568,28 @@ mod tests {
 
     #[test]
     fn from_flags_conflict_errors() {
-        let e = CardSelector::from_flags(Some(1), Some(GUID_A.to_string()), None).unwrap_err();
-        assert!(e.contains("at most one"), "{e}");
+        let e = CardSelector::from_flags(Some(1), Some(GUID_A.to_string()), None, CLI).unwrap_err();
+        assert!(
+            e.contains("at most one of --serial, --guid, --reader"),
+            "{e}"
+        );
     }
 
     #[test]
     fn from_flags_bad_guid_errors() {
-        let e = CardSelector::from_flags(None, Some("nothex!!".to_string()), None).unwrap_err();
+        let e =
+            CardSelector::from_flags(None, Some("nothex!!".to_string()), None, CLI).unwrap_err();
         assert!(e.contains("invalid --guid"), "{e}");
+    }
+
+    #[test]
+    fn from_flags_errors_name_json_rpc_params_without_cli_flags() {
+        let rpc = RequestBinding::JsonRpc;
+        let e = CardSelector::from_flags(None, Some("nothex!!".into()), None, rpc).unwrap_err();
+        assert!(e.contains("invalid 'guid'"), "{e}");
+        let e = CardSelector::from_flags(Some(1), None, Some("r".into()), rpc).unwrap_err();
+        assert!(e.contains("'serial', 'guid', 'reader'"), "{e}");
+        assert!(!e.contains("--"), "{e}");
     }
 
     // --- choose_card_index ---

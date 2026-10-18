@@ -25,14 +25,18 @@
 use openssl::rand::rand_bytes;
 use zeroize::Zeroizing;
 
-use piggy_piv::{KeyPolicy, PinPolicy, PivAlgorithm, PivError};
+use piggy_piv::{KeyPolicy, PinPolicy, PivAlgorithm, PivError, TouchPolicy};
 
+use crate::card::RequestBinding;
 use crate::card::protocol::{
     CardId, CompletedEvent, CompletedStatus, ConfirmRequest, Frontend, FrontendError,
     MgmtKeyChoice, MgmtKeyRequest, ProgressEvent, SecretKind, SecretRequest,
 };
 use crate::card::seal::KeyEscrow;
-use crate::card::slot_policy::{SLOT_KEY_MGMT, SLOT_PIV_AUTH, SLOT_SIGNATURE, SlotPolicies};
+use crate::card::slot_policy::{
+    OperatorActBlocker, SLOT_KEY_MGMT, SLOT_PIV_AUTH, SLOT_SIGNATURE, SlotPolicies,
+    operator_act_verdict,
+};
 
 /// PIV factory-default application PIN (`123456`). A factory-blank card carries
 /// this; full-setup verifies it (so the card can sign its own certs) and then
@@ -172,6 +176,18 @@ pub enum ProvisionError {
     Seal(String),
 }
 
+/// What to tell the operator before a key with a touch policy signs its own
+/// certificate. A `cached` key does not wait when the card was touched a few
+/// seconds before, so it is told to touch only if the card asks.
+fn touch_instruction(touch: TouchPolicy, slot: u8) -> String {
+    match touch {
+        TouchPolicy::Cached => {
+            format!("Touch the card if it asks, to sign the {slot:02X} certificate")
+        }
+        _ => format!("Touch the card now to sign the {slot:02X} certificate"),
+    }
+}
+
 /// The CN for a slot's self-signed cert: `<prefix>@<first-8-hex-of-guid>`.
 fn slot_cn(prefix: &str, guid_hex: &str) -> String {
     let short: String = guid_hex.chars().take(8).collect();
@@ -206,7 +222,7 @@ pub(crate) fn provision_slot(
         if policy.needs_touch() {
             fe.progress(ProgressEvent {
                 step: format!("touch-{slot:02x}"),
-                message: format!("Touch the card now to sign the {slot:02X} certificate"),
+                message: touch_instruction(policy.touch, slot),
                 current: None,
                 total: None,
             });
@@ -256,6 +272,9 @@ pub struct AddKeyConfig<'a> {
     /// Where to read the card's current management key from the store;
     /// without it the frontend is asked for the key.
     pub stored_mgmt_key: Option<StoredMgmtKey<'a>>,
+    /// How the request was made, so a refusal names `--replace` or the
+    /// `replace` param.
+    pub binding: RequestBinding,
 }
 
 /// What a successful `add-key` produced.
@@ -349,6 +368,21 @@ pub struct AddKeyPlan {
     policy: KeyPolicy,
     mgmt_key: Zeroizing<Vec<u8>>,
     pin: Zeroizing<String>,
+    binding: RequestBinding,
+}
+
+/// What to do after `add-key` lost the slot's old key and did not finish the
+/// new one: ask again with replace, in the caller's own terms.
+fn add_key_retry_advice(slot: u8, binding: RequestBinding) -> String {
+    match binding {
+        RequestBinding::Cli => {
+            format!("Run `piggy card add-key {slot:02x} --replace` to try again.")
+        }
+        RequestBinding::JsonRpc => format!(
+            "Call card.add_key again for slot {slot:02x} with {} to try again.",
+            binding.switch_on("replace")
+        ),
+    }
 }
 
 /// The operator-facing half of `add-key`: refuse an occupied slot, confirm,
@@ -367,7 +401,8 @@ pub fn plan_add_key(
     let label = card_id.short_label();
     if cfg.occupied && !cfg.replace {
         return Err(ProvisionError::Setup(format!(
-            "slot {slot:02X} on card {label} already holds a key; --replace destroys it and generates a new one"
+            "slot {slot:02X} on card {label} already holds a key; {} destroys it and generates a new one",
+            cfg.binding.switch_on("replace")
         )));
     }
     let policy = if cfg.accepts_policies {
@@ -420,6 +455,7 @@ pub fn plan_add_key(
         policy,
         mgmt_key,
         pin,
+        binding: cfg.binding,
     })
 }
 
@@ -436,6 +472,7 @@ pub fn apply_add_key(
         policy,
         mgmt_key,
         pin,
+        binding,
     } = plan;
     card.authenticate_admin(&mgmt_key)?;
     card.verify_pin(&pin)?;
@@ -453,7 +490,8 @@ pub fn apply_add_key(
         policy,
         &pin,
         &format!(
-            "Any key the slot held before is gone. Run `piggy card add-key {slot:02x} --replace` to try again."
+            "Any key the slot held before is gone. {}",
+            add_key_retry_advice(slot, binding)
         ),
     )?;
 
@@ -471,10 +509,12 @@ pub fn apply_add_key(
 /// verifier of an operator act and `piggy health` use. A card that cannot
 /// serve them is named to the operator with the reason.
 pub(crate) fn check_operator_acts(card: &mut dyn ProvisionCard, fe: &mut dyn Frontend) -> bool {
-    let why = match card.attested_policy(SLOT_SIGNATURE) {
-        Some(policy) if policy.serves_operator_acts() => return true,
-        Some(policy) => format!("slot 9C is attested {policy}, not PIN always, touch always"),
-        None => "it cannot attest its 9C key (it is not a YubiKey, so its keys carry no PIN and touch policy)".to_string(),
+    let why = match operator_act_verdict(card.attested_policy(SLOT_SIGNATURE)) {
+        Ok(()) => return true,
+        Err(OperatorActBlocker::Policy(policy)) => {
+            format!("slot 9C is attested {policy}, not PIN always, touch always")
+        }
+        Err(OperatorActBlocker::Unattested) => "it cannot attest its 9C key (it is not a YubiKey, so its keys carry no PIN and touch policy)".to_string(),
     };
     fe.progress(ProgressEvent {
         step: "no-operator-acts".into(),
@@ -1289,7 +1329,60 @@ mod tests {
             occupied: false,
             replace: false,
             stored_mgmt_key: None,
+            binding: RequestBinding::Cli,
         }
+    }
+
+    #[test]
+    fn json_rpc_add_key_refusals_name_the_param_not_the_flag() {
+        let mut card = MockCard::default();
+        let mut fe = ScriptedFrontend::new(&[], true, MgmtKeyChoice::Default);
+        let err = add_key(
+            &mut card,
+            &mut fe,
+            AddKeyConfig {
+                occupied: true,
+                binding: RequestBinding::JsonRpc,
+                ..add_9c()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("'replace': true destroys it"), "{err}");
+        assert!(!err.contains("--replace"), "{err}");
+
+        let mut card = MockCard {
+            fail_sign: Some(0x9C),
+            ..Default::default()
+        };
+        let mut fe = ScriptedFrontend::new(&["default", "654321"], true, MgmtKeyChoice::Default);
+        let err = add_key(
+            &mut card,
+            &mut fe,
+            AddKeyConfig {
+                binding: RequestBinding::JsonRpc,
+                ..add_9c()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("Call card.add_key again for slot 9c with 'replace': true"),
+            "{err}"
+        );
+        assert!(!err.contains("piggy card add-key"), "{err}");
+    }
+
+    #[test]
+    fn touch_instruction_says_a_cached_key_may_not_ask() {
+        assert_eq!(
+            touch_instruction(TouchPolicy::Always, 0x9C),
+            "Touch the card now to sign the 9C certificate"
+        );
+        assert_eq!(
+            touch_instruction(TouchPolicy::Cached, 0x9A),
+            "Touch the card if it asks, to sign the 9A certificate"
+        );
     }
 
     #[test]

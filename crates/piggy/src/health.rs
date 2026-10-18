@@ -1149,19 +1149,26 @@ fn push_policy_points(out: &mut Vec<CheckResult>, probes: &Probes) {
                 .collect(),
         });
 
+        use piggy::card::slot_policy::{OperatorActBlocker, operator_act_verdict};
         let signature = card.policies.iter().find(|s| s.slot == 0x9C);
+        let attested = |probe: &PolicyProbe| match probe {
+            PolicyProbe::Attested(policy) => Some(*policy),
+            _ => None,
+        };
         let status = match signature.map(|s| &s.policy) {
-            Some(PolicyProbe::Attested(policy)) if policy.serves_operator_acts() => Status::Pass,
-            Some(PolicyProbe::Attested(policy)) => Status::Skip(format!(
-                "no: slot 9C is {policy}, not PIN always, touch always"
-            )),
-            Some(PolicyProbe::Unattested(_)) => Status::Skip(
-                "no: the card cannot attest its 9C key (not generated on this card, or not a YubiKey)"
-                    .into(),
-            ),
             Some(PolicyProbe::Empty) | None => {
                 Status::Skip("no: slot 9C is empty (add the key with `piggy card add-key 9c`)".into())
             }
+            Some(probe) => match operator_act_verdict(attested(probe)) {
+                Ok(()) => Status::Pass,
+                Err(OperatorActBlocker::Policy(policy)) => Status::Skip(format!(
+                    "no: slot 9C is {policy}, not PIN always, touch always"
+                )),
+                Err(OperatorActBlocker::Unattested) => Status::Skip(
+                    "no: the card cannot attest its 9C key (not generated on this card, or not a YubiKey)"
+                        .into(),
+                ),
+            },
         };
         out.push(CheckResult {
             name: format!("card {short}: can sign operator acts"),

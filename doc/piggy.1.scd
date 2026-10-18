@@ -560,7 +560,9 @@ commands:
 	card's own default, as before.
 
 	Because each certificate is signed by its own new key, the card asks for a
-	touch while 9A's and 9C's certificates are signed; piggy says when. A
+	touch while 9A's and 9C's certificates are signed; piggy says when. For a
+	touch _cached_ key piggy says to touch the card if it asks: a touch a few
+	seconds earlier still counts, and then the card does not ask. A
 	touch that is not given in time stops the command with the card partly
 	provisioned and still on its factory PIN, PUK and management key; the
 	error says so, and *card init --allow-reprovision* starts again.
@@ -568,7 +570,8 @@ commands:
 	*--pin-policy* _SLOT_=_POLICY_ and *--touch-policy* _SLOT_=_POLICY_
 	override one slot each and may be repeated. _SLOT_ is _9a_, _9c_ or _9d_.
 	PIN policies are _default_, _never_, _once_, _always_; touch policies are
-	_default_, _never_, _always_, _cached_. _default_ sends no policy to the
+	_default_, _never_, _always_, _cached_. Slot and policy names are read in
+	any case (_9C=Always_ is _9c=always_). _default_ sends no policy to the
 	card. A 9C that is not PIN _always_ and touch _always_ cannot serve
 	operator acts; piggy warns when it provisions one.
 
@@ -626,7 +629,8 @@ commands:
 	add-key 9a --replace* generates a new SSH key (PIN _once_, touch _cached_);
 	everything that trusts the old one must be given the new one. Slot _9d_
 	is refused: the password store is encrypted to its key, and a new key
-	could not decrypt it.
+	could not decrypt it. *--pin-policy* and *--touch-policy* take the
+	policy names of *card init*, in any case.
 
 	A slot that already holds a key is refused unless *--replace* is given;
 	with it, piggy asks for confirmation and the old key is destroyed. piggy
@@ -649,8 +653,9 @@ commands:
 
 	The new public key is printed to stdout as an OpenSSH line with the
 	comment *PIV\_slot\_*_SLOT_*@*_GUID_. Exit status is 2 for a request that is
-	wrong whatever card is attached (slot _9d_, an unknown slot, conflicting
-	selectors) and 1 for any other failure.
+	wrong whatever card is attached (slot _9d_, an unknown slot, an unknown
+	policy name, conflicting selectors), refused before any frontend is
+	opened or prompt shown, and 1 for any other failure.
 
 	```
 	piggy card add-key 9c
@@ -736,7 +741,9 @@ commands:
 	*initialize* handshake (*piggy-mgmt/1*) requests are served one at a
 	time until EOF. While an interactive method runs, piggy issues the RFC
 	0006 interaction requests (PIN, confirm, progress) back over the same
-	connection.
+	connection. An error message names the params a caller sent (_'replace':
+	true_, _'pin\_policy'_), never the command-line flags of the matching
+	*card* subcommand.
 
 ## piggy secrets
 

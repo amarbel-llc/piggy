@@ -1287,25 +1287,30 @@ fn cmd_generate(inv: &Invocation) -> i32 {
         eprintln!("piggy tool {op}: failed to write the new cert to slot {slot_id:02X}: {e}");
         return 1;
     }
-    let ecdsa = match ssh_key::public::EcdsaPublicKey::from_sec1_bytes(&point) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("piggy tool {op}: parse generated public key: {e}");
-            return 1;
-        }
-    };
-    let mut pubkey = ssh_key::PublicKey::from(ssh_key::public::KeyData::Ecdsa(ecdsa));
-    pubkey.set_comment(format!("PIV_slot_{slot_id:02X}@{guid}"));
-    match pubkey.to_openssh() {
+    match generated_key_openssh_line(&point, slot_id, &guid) {
         Ok(line) => {
             println!("{line}");
             0
         }
         Err(e) => {
-            eprintln!("piggy tool {op}: render OpenSSH: {e}");
+            eprintln!("piggy tool {op}: {e}");
             1
         }
     }
+}
+
+/// A key just generated in `slot` as an OpenSSH public-key line, from its
+/// uncompressed EC point, commented `PIV_slot_<SLOT>@<GUID>` (`guid` as
+/// given, uppercase hex). The line `piggy tool generate` and `piggy card
+/// add-key` both print.
+pub fn generated_key_openssh_line(point: &[u8], slot: u8, guid: &str) -> Result<String, String> {
+    let ecdsa = ssh_key::public::EcdsaPublicKey::from_sec1_bytes(point)
+        .map_err(|e| format!("parse generated public key: {e}"))?;
+    let mut pubkey = ssh_key::PublicKey::from(ssh_key::public::KeyData::Ecdsa(ecdsa));
+    pubkey.set_comment(format!("PIV_slot_{slot:02X}@{guid}"));
+    pubkey
+        .to_openssh()
+        .map_err(|e| format!("render OpenSSH: {e}"))
 }
 
 /// The message directing an unsupported `import` key type to the C path.
@@ -1794,7 +1799,23 @@ fn select_token(guid_prefix: Option<&str>) -> Result<PivToken, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_admin_key_arg, is_supported_cert_slot, parse};
+    use super::{generated_key_openssh_line, is_admin_key_arg, is_supported_cert_slot, parse};
+
+    /// The P-256 base point, uncompressed: a valid public key to render.
+    const P256_G: &str = "046B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C2964FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5";
+
+    #[test]
+    fn generated_key_line_is_openssh_with_the_slot_comment() {
+        let point = hex::decode(P256_G).unwrap();
+        let line = generated_key_openssh_line(&point, 0x9C, "5DA19C98AAAA").unwrap();
+        let fields: Vec<&str> = line.split(' ').collect();
+        assert_eq!(fields.len(), 3, "{line}");
+        assert_eq!(fields[0], "ecdsa-sha2-nistp256");
+        assert!(fields[1].starts_with("AAAA"), "{line}");
+        assert_eq!(fields[2], "PIV_slot_9C@5DA19C98AAAA");
+        let err = generated_key_openssh_line(&[0x04, 1, 2], 0x9A, "G").unwrap_err();
+        assert!(err.starts_with("parse generated public key"), "{err}");
+    }
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()

@@ -17,12 +17,13 @@ use std::process::Command;
 use base64::Engine as _;
 use serde_json::Value;
 
+use crate::card::RequestBinding;
 use crate::card::add_key_cmd::{AddKeyArgs, add_key_with_frontend, openssh_line};
 use crate::card::engine::ProvisionError;
 use crate::card::init_cmd::{CardSelector, provision_with_frontend};
 use crate::card::protocol::{Frontend, FrontendError};
 use crate::card::seal::{ManagementKeySealer, SealMode, SealRequest};
-use crate::card::slot_policy::{SlotPolicies, add_key_slot, key_policy_from_flags};
+use crate::card::slot_policy::SlotPolicies;
 use crate::manage::{CARD_OP_FAILED, INTERACTION_DECLINED, INVALID_PARAMS};
 use crate::sign_core::{self, SigFormat, SignError};
 
@@ -162,7 +163,7 @@ pub fn card_init(
         .get("reader")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let selector = CardSelector::from_flags(serial, guid, reader)
+    let selector = CardSelector::from_flags(serial, guid, reader, RequestBinding::JsonRpc)
         .map_err(|e| (INVALID_PARAMS, format!("card.init: {e}")))?;
     // Also accept an already-initialized card-in-hand and re-provision it
     // (piggy#204) — default false (factory-blank only).
@@ -229,10 +230,8 @@ pub fn card_add_key(
 
     let slot = optional_str(METHOD, params, "slot")?
         .ok_or_else(|| invalid("'slot' is required (9c or 9a)".into()))?;
-    let (_, default_policy) = add_key_slot(slot).map_err(invalid)?;
     let pin_policy = optional_str(METHOD, params, "pin_policy")?;
     let touch_policy = optional_str(METHOD, params, "touch_policy")?;
-    key_policy_from_flags(default_policy, pin_policy, touch_policy).map_err(invalid)?;
 
     let serial = match params.get("serial") {
         None | Some(Value::Null) => None,
@@ -244,7 +243,8 @@ pub fn card_add_key(
     };
     let guid = optional_str(METHOD, params, "guid")?.map(str::to_string);
     let reader = optional_str(METHOD, params, "reader")?.map(str::to_string);
-    let selector = CardSelector::from_flags(serial, guid, reader).map_err(invalid)?;
+    let selector =
+        CardSelector::from_flags(serial, guid, reader, RequestBinding::JsonRpc).map_err(invalid)?;
     let replace = params
         .get("replace")
         .and_then(Value::as_bool)
@@ -266,7 +266,9 @@ pub fn card_add_key(
         touch_policy,
         replace,
         management_key_from_store,
+        binding: RequestBinding::JsonRpc,
     };
+    args.slot_and_policy().map_err(invalid)?;
     match add_key_with_frontend(selector, args, sealer, fe) {
         Ok(outcome) => {
             let public_key = openssh_line(&outcome).map_err(|e| (CARD_OP_FAILED, e))?;
@@ -500,6 +502,31 @@ mod tests {
             (
                 serde_json::json!({ "slot": "9c", "serial": 1, "reader": "r" }),
                 "at most one",
+            ),
+        ] {
+            let mut fe = no_frontend();
+            let err = card_add_key(&bad, &mut fe, &crate::card::seal::NoStore).unwrap_err();
+            assert_eq!(err.0, INVALID_PARAMS, "{bad}");
+            assert!(err.1.contains(needle), "{bad}: {}", err.1);
+            // A JSON-RPC caller is told about params, never CLI flags.
+            assert!(!err.1.contains("--"), "{bad}: {}", err.1);
+        }
+    }
+
+    #[test]
+    fn card_add_key_policy_errors_name_the_param() {
+        for (bad, needle) in [
+            (
+                serde_json::json!({ "slot": "9c", "pin_policy": "sometimes" }),
+                "'pin_policy': unknown PIN policy",
+            ),
+            (
+                serde_json::json!({ "slot": "9a", "touch_policy": "once" }),
+                "'touch_policy': unknown touch policy",
+            ),
+            (
+                serde_json::json!({ "slot": "9c", "guid": "nothex" }),
+                "invalid 'guid'",
             ),
         ] {
             let mut fe = no_frontend();

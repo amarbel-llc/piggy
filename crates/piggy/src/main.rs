@@ -461,24 +461,28 @@ enum CardCommand {
     /// certificates. A card that is not a YubiKey gets its own defaults and
     /// cannot serve operator acts. Operator interaction runs through the
     /// selected frontend (RFC 0006).
+    // The shared selectors, with help worded for picking a blank card.
+    #[command(
+        mut_arg("serial", |a| a.help(
+            "YubiKey serial of the card to provision. Optional: with one blank card \
+             attached it is auto-selected; required to disambiguate when multiple are \
+             present. Mutually exclusive with `--guid`/`--reader`"
+        )),
+        mut_arg("guid", |a| a.help(
+            "Select the card to provision by CHUID GUID (hex) — for a card whose serial \
+             isn't exposed over the PIV channel (e.g. an older YubiKey 4, piggy#256). \
+             Mutually exclusive with `--serial`/`--reader`. Note: factory-blank cards \
+             share the all-zeros GUID, so use `--reader` to disambiguate two blank cards"
+        )),
+        mut_arg("reader", |a| a.help(
+            "Select the card to provision by PC/SC reader name. Mutually exclusive with \
+             `--serial`/`--guid`. The robust selector for a serial-less blank card \
+             (piggy#256)"
+        ))
+    )]
     Init {
-        /// YubiKey serial of the card to provision. Optional: with one blank
-        /// card attached it is auto-selected; required to disambiguate when
-        /// multiple are present. Mutually exclusive with `--guid`/`--reader`.
-        #[arg(long)]
-        serial: Option<u32>,
-        /// Select the card to provision by CHUID GUID (hex) — for a card whose
-        /// serial isn't exposed over the PIV channel (e.g. an older YubiKey 4,
-        /// piggy#256). Mutually exclusive with `--serial`/`--reader`. Note:
-        /// factory-blank cards share the all-zeros GUID, so use `--reader` to
-        /// disambiguate two blank cards.
-        #[arg(long, conflicts_with_all = ["serial", "reader"])]
-        guid: Option<String>,
-        /// Select the card to provision by PC/SC reader name. Mutually
-        /// exclusive with `--serial`/`--guid`. The robust selector for a
-        /// serial-less blank card (piggy#256).
-        #[arg(long, conflicts_with_all = ["serial", "guid"])]
-        reader: Option<String>,
+        #[command(flatten)]
+        selector: piggy::card::init_cmd::CardSelectorArgs,
         /// Also accept an already-initialized card-in-hand and re-provision it
         /// (piggy#204). Without this, only a factory-blank card is eligible.
         /// Reprovision overwrites the card's 9A + 9C + 9D keys/certs and resets
@@ -557,18 +561,8 @@ enum CardCommand {
             default_missing_value = ""
         )]
         management_key_from_store: Option<String>,
-        /// YubiKey serial of the card. Optional with one card attached.
-        /// Mutually exclusive with `--guid`/`--reader`.
-        #[arg(long)]
-        serial: Option<u32>,
-        /// Select the card by CHUID GUID (hex). Mutually exclusive with
-        /// `--serial`/`--reader`.
-        #[arg(long, conflicts_with_all = ["serial", "reader"])]
-        guid: Option<String>,
-        /// Select the card by PC/SC reader name. Mutually exclusive with
-        /// `--serial`/`--guid`.
-        #[arg(long, conflicts_with_all = ["serial", "guid"])]
-        reader: Option<String>,
+        #[command(flatten)]
+        selector: piggy::card::init_cmd::CardSelectorArgs,
         /// Interaction frontend: `tty` (default, askpass) or `jsonrpc` (an
         /// external program drives the prompts over `--socket`).
         #[arg(long, value_enum, default_value_t = piggy::card::frontend::select::FrontendKind::Tty)]
@@ -587,18 +581,8 @@ enum CardCommand {
         /// The slot to export: 9c (the operator-act key) or 9a.
         #[arg(value_name = "SLOT", default_value = "9c")]
         slot: String,
-        /// YubiKey serial of the card. Optional with one card attached.
-        /// Mutually exclusive with `--guid`/`--reader`.
-        #[arg(long)]
-        serial: Option<u32>,
-        /// Select the card by CHUID GUID (hex). Mutually exclusive with
-        /// `--serial`/`--reader`.
-        #[arg(long, conflicts_with_all = ["serial", "reader"])]
-        guid: Option<String>,
-        /// Select the card by PC/SC reader name. Mutually exclusive with
-        /// `--serial`/`--guid`.
-        #[arg(long, conflicts_with_all = ["serial", "guid"])]
-        reader: Option<String>,
+        #[command(flatten)]
+        selector: piggy::card::init_cmd::CardSelectorArgs,
     },
 }
 
@@ -895,9 +879,7 @@ fn main() {
 
         Command::Card(args) => match args.cmd {
             CardCommand::Init {
-                serial,
-                guid,
-                reader,
+                selector,
                 allow_reprovision,
                 pin_policy,
                 touch_policy,
@@ -907,9 +889,7 @@ fn main() {
                 socket,
             } => std::process::exit(piggy::stats::timed_card("init", || {
                 piggy::card::init_cmd::run(
-                    serial,
-                    guid,
-                    reader,
+                    selector,
                     allow_reprovision,
                     &pin_policy,
                     &touch_policy,
@@ -930,37 +910,30 @@ fn main() {
                 touch_policy,
                 replace,
                 management_key_from_store,
-                serial,
-                guid,
-                reader,
+                selector,
                 frontend,
                 socket,
             } => std::process::exit(piggy::stats::timed_card("add_key", || {
                 piggy::card::add_key_cmd::run(
-                    piggy::card::init_cmd::CardSelector::from_flags(serial, guid, reader),
+                    selector.selector(),
                     piggy::card::add_key_cmd::AddKeyArgs {
                         slot: &slot,
                         pin_policy: pin_policy.as_deref(),
                         touch_policy: touch_policy.as_deref(),
                         replace,
                         management_key_from_store,
+                        binding: piggy::card::RequestBinding::Cli,
                     },
                     &seal_store::StoreSealer,
                     frontend,
                     socket.as_deref(),
                 )
             })),
-            CardCommand::ExportAttestation {
-                slot,
-                serial,
-                guid,
-                reader,
-            } => std::process::exit(piggy::stats::timed_card("export_attestation", || {
-                piggy::card::attestation_cmd::run(
-                    piggy::card::init_cmd::CardSelector::from_flags(serial, guid, reader),
-                    &slot,
-                )
-            })),
+            CardCommand::ExportAttestation { slot, selector } => {
+                std::process::exit(piggy::stats::timed_card("export_attestation", || {
+                    piggy::card::attestation_cmd::run(selector.selector(), &slot)
+                }))
+            }
         },
 
         Command::Secrets(args) => match args.cmd {

@@ -92,6 +92,11 @@
 #                On a tty the word is asked for on a line of its own.
 #
 # The text is shown whole or the prompt fails; an unknown class fails too.
+# A PIN dialog does not scroll, so an act whose rendered text is taller than
+# $operator_act_scroll_lines lines is first shown in a scrollable, read-only
+# zenity --text-info window (plain text, never markup) with an "I have read
+# the whole text" box that must be ticked before OK; cancelling it, or
+# letting it time out, cancels the act. The per-class PIN dialog follows.
 # Reading a text takes longer than typing a PIN, so the zenity timeout
 # defaults to 120 seconds for these. With PIGGY_ASKPASS_KIND unset nothing
 # here applies and the prompt is the routine one.
@@ -110,6 +115,13 @@ require="${SSH_ASKPASS_REQUIRE:-}"
 
 # The word an escalation makes the operator type, on top of the PIN.
 escalation_word="ESCALATE"
+
+# The tallest operator-act text, in lines of the rendered prompt (banner,
+# parent, context and prompt), shown in the PIN dialog alone. Fifteen lines
+# fit a zenity PIN dialog on a small laptop screen; anything taller is read
+# in a scrolling window first, so no part of it can sit below the screen's
+# edge unseen (RFC 0012 §2.6).
+operator_act_scroll_lines=15
 
 # What sets one class of operator act apart from the others and from a
 # routine prompt: the banner over the text, the window title and the
@@ -391,6 +403,24 @@ zenity_escalation() {
   printf '%s\n' "$typed_pin"
 }
 
+# Whether $body is too tall for a PIN dialog alone. Counted in bash: the
+# script's hard dependencies stay zenity and coreutils' basics.
+body_is_too_tall_for_a_pin_dialog() {
+  local newlines="${body//[^$'\n']/}"
+  ((${#newlines} + 1 > operator_act_scroll_lines))
+}
+
+# The scrolling read of a tall operator act. --text-info shows what it reads
+# on stdin as plain text (no Pango markup, no backslash escapes), so the
+# text needs none of the escaping the PIN dialogs do. OK stays disabled
+# until the box is ticked; cancel and timeout both fail, which cancels the
+# act. A non-editable --text-info prints nothing on OK.
+zenity_read_whole_text() {
+  printf '%s\n' "$body" | zenity --timeout="$zenity_timeout" --text-info \
+    --title="$class_title" --width=720 --height=560 \
+    --checkbox="I have read the whole text" >/dev/null
+}
+
 # Render target 2: zenity. We don't gate on $DISPLAY/$WAYLAND_DISPLAY —
 # macOS zenity reaches the Aqua session without either var being set,
 # and launchd-spawned agents (pivy-agent) reach this script with a
@@ -429,6 +459,15 @@ if command -v zenity >/dev/null 2>&1; then
   # entered), masking zenity's real exit. After the `fi` of any `if`
   # statement, `$?` is 0 regardless. Only the `else` branch preserves
   # cmd's unmodified exit code.
+  if [[ -n $kind ]] && body_is_too_tall_for_a_pin_dialog; then
+    if zenity_read_whole_text 2>>"$log_path"; then
+      printf 'zenity text-info exit=0\n' >>"$log_path"
+    else
+      rc=$?
+      printf 'zenity text-info exit=%s\n' "$rc" >>"$log_path"
+      exit "$rc"
+    fi
+  fi
   if pin="$("zenity_${kind:-routine}" 2>>"$log_path")"; then
     printf 'zenity exit=0\n' >>"$log_path"
     printf '%s\n' "$pin"

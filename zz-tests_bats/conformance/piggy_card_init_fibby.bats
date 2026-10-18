@@ -34,6 +34,7 @@ bats_require_minimum_version 1.5.0
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   load "$(dirname "$BATS_TEST_FILE")/../lib/fibby.bash"
+  load "$(dirname "$BATS_TEST_FILE")/../lib/card.bash"
 
   if [[ -z ${FIBBY_BIN:-} ]] || [[ ! -x ${FIBBY_BIN:-/nonexistent} ]]; then
     skip "FIBBY_BIN unset or not executable; run via just test-bats-conformance-card-init-fibby"
@@ -81,7 +82,7 @@ assert_provisioned() {
   # The env prefix must sit on the `piggy list` SIMPLE command inside the
   # substitution — `VAR=x out=$(...)` would set VAR as a plain (unexported)
   # shell var and `piggy list` would hit the ambient pcscd, not fibby.
-  out=$(PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" list --format=ndjson) || {
+  out=$(card_list_ndjson) || {
     echo "piggy list after init failed" >&2
     printf '%s\n' "$out" >&2
     tail -40 "$FIBBY_LOG" >&2 || true
@@ -100,32 +101,6 @@ assert_provisioned() {
   printf '%s\n' "$out" | grep -q '"slot":"9D"' || {
     echo "provisioned card did not surface its 9D recipient record" >&2
     printf '%s\n' "$out" >&2
-    return 1
-  }
-}
-
-_list_ndjson() {
-  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" list --format=ndjson
-}
-
-# Print the one `piggy list` record for GUID's SLOT (`9A`), or fail.
-_slot_record() {
-  local guid="$1" slot="$2" out
-  out=$(_list_ndjson) || return 1
-  printf '%s\n' "$out" | grep -F "\"guid\":\"$guid\"" | grep -F "\"slot\":\"$slot\""
-}
-
-# Assert the policy `piggy list` reports for GUID's SLOT. It comes from the
-# slot's attestation, so only a key generated on the card carries one.
-assert_slot_policy() {
-  local guid="$1" slot="$2" pin="$3" touch="$4" record
-  record=$(_slot_record "$guid" "$slot") || {
-    echo "no $slot record for $guid" >&2
-    _list_ndjson >&2 || true
-    return 1
-  }
-  [[ $record == *"\"pin_policy\":\"$pin\""* && $record == *"\"touch_policy\":\"$touch\""* ]] || {
-    echo "slot $slot is not PIN $pin / touch $touch: $record" >&2
     return 1
   }
 }
@@ -171,20 +146,22 @@ function card_init_tty_provisions_blank_card { # @test
   # default policies, and the operator was told when to touch.
   local slot
   for slot in 9A 9C 9D; do
-    _slot_record "$guid" "$slot" >/dev/null ||
-      _fail_with_card_init_output "no $slot record for $guid after a default init"
+    [[ -n $(card_slot_record "$guid" "$slot") ]] ||
+      card_fail_with_output "no $slot record for $guid after a default init"
   done
-  assert_slot_policy "$guid" 9A once cached
-  assert_slot_policy "$guid" 9C always always
+  card_assert_slot_policy "$guid" 9A once cached
+  card_assert_slot_policy "$guid" 9C always always
+  # 9A is touch cached, so the card may not ask (a touch a few seconds
+  # earlier still counts); 9C is touch always.
   local touch_line
   for touch_line in \
-    "Touch the card now to sign the 9A certificate" \
+    "Touch the card if it asks, to sign the 9A certificate" \
     "Touch the card now to sign the 9C certificate"; do
     printf '%s\n' "$stderr" | grep -qF "$touch_line" ||
-      _fail_with_card_init_output "stderr is missing: $touch_line"
+      card_fail_with_output "stderr is missing: $touch_line"
   done
   if printf '%s\n' "$stderr" | grep -q "cannot serve operator acts"; then
-    _fail_with_card_init_output "a default init warned that the card cannot serve operator acts"
+    card_fail_with_output "a default init warned that the card cannot serve operator acts"
   fi
 
   # `piggy health` reads the same attestations: the card's policy summary and
@@ -210,16 +187,17 @@ function card_init_tty_provisions_blank_card { # @test
 function card_init_touch_policy_override_reads_back_and_warns { # @test
   spawn_fibby --auto-touch --model yk5
 
-  _card_init_tty --touch-policy 9c=cached <<<"y"
-  [[ $status -eq 0 ]] || _fail_with_card_init_output "card init --touch-policy 9c=cached failed"
+  # Policy names are case-insensitive (piggy#312), as slot names are.
+  _card_init_tty --touch-policy 9C=Cached <<<"y"
+  [[ $status -eq 0 ]] || card_fail_with_output "card init --touch-policy 9C=Cached failed"
   local guid="$output"
-  [[ $guid =~ ^[0-9A-F]{32}$ ]] || _fail_with_card_init_output "stdout was not a bare GUID"
+  [[ $guid =~ ^[0-9A-F]{32}$ ]] || card_fail_with_output "stdout was not a bare GUID"
 
-  assert_slot_policy "$guid" 9C always cached
+  card_assert_slot_policy "$guid" 9C always cached
   # The override names one field of one slot: 9A keeps its defaults.
-  assert_slot_policy "$guid" 9A once cached
+  card_assert_slot_policy "$guid" 9A once cached
   printf '%s\n' "$stderr" | grep -q "cannot serve operator acts" ||
-    _fail_with_card_init_output "no operator-acts warning for a touch-cached 9C"
+    card_fail_with_output "no operator-acts warning for a touch-cached 9C"
 }
 
 # A malformed policy flag is a usage error caught before the card is opened:
@@ -231,15 +209,15 @@ _assert_bad_policy_flag_refused() {
   spawn_fibby --auto-touch --model yk5
 
   _card_init_tty "$@" <<<"y"
-  [[ $status -ne 0 ]] || _fail_with_card_init_output "card init $* should fail"
+  [[ $status -ne 0 ]] || card_fail_with_output "card init $* should fail"
   printf '%s\n' "$stderr" | grep -qF -- "$needle" ||
-    _fail_with_card_init_output "the refusal of '$*' does not say: $needle"
+    card_fail_with_output "the refusal of '$*' does not say: $needle"
   if printf '%s\n' "$stderr" | grep -q "Provision card"; then
-    _fail_with_card_init_output "the refusal of '$*' came after the destructive confirm"
+    card_fail_with_output "the refusal of '$*' came after the destructive confirm"
   fi
 
   local out
-  out=$(_list_ndjson)
+  out=$(card_list_ndjson)
   printf '%s\n' "$out" | grep -q '"uninitialized":true' || {
     echo "the card was touched despite the bad flag '$*'" >&2
     printf '%s\n' "$out" >&2
@@ -265,13 +243,13 @@ function card_init_fails_when_no_touch_arrives { # @test
   spawn_fibby --touch-timeout-ms 500 --model yk5
 
   _card_init_tty <<<"y"
-  [[ $status -ne 0 ]] || _fail_with_card_init_output "card init succeeded with no touch"
+  [[ $status -ne 0 ]] || card_fail_with_output "card init succeeded with no touch"
   grep -q 'TOUCH needed 9A' "$FIBBY_LOG" ||
-    _fail_with_card_init_output "fibby never waited for a 9A touch"
+    card_fail_with_output "fibby never waited for a 9A touch"
   grep -q 'TOUCH timeout 9A' "$FIBBY_LOG" ||
-    _fail_with_card_init_output "fibby did not time the 9A touch out"
+    card_fail_with_output "fibby did not time the 9A touch out"
   if grep -q 'TOUCH auto-granted' "$FIBBY_LOG"; then
-    _fail_with_card_init_output "fibby auto-granted a touch without --auto-touch"
+    card_fail_with_output "fibby auto-granted a touch without --auto-touch"
   fi
 }
 
@@ -292,7 +270,7 @@ _wait_for_fibby_log() {
 # `fibby ctl touch` lets exactly that step through.
 function card_init_completes_when_each_touch_is_delivered { # @test
   local ctl="$WORKDIR/control.sock"
-  spawn_fibby --control-socket "$ctl" --model yk5 --card "$READER_A"
+  spawn_fibby --control-socket "$ctl" --model yk5 --card "$CARD_READER_A"
 
   # fd 3 is bats' output channel; a background child holding it would keep
   # bats waiting after the test.
@@ -313,7 +291,7 @@ function card_init_completes_when_each_touch_is_delivered { # @test
       cat "$WORKDIR/init.err" >&2 || true
       return 1
     fi
-    "$FIBBY_BIN" ctl --socket "$ctl" touch "$READER_A" || {
+    "$FIBBY_BIN" ctl --socket "$ctl" touch "$CARD_READER_A" || {
       echo "fibby ctl touch failed for $slot" >&2
       kill "$init_pid" 2>/dev/null || true
       return 1
@@ -342,7 +320,7 @@ function card_init_completes_when_each_touch_is_delivered { # @test
     return 1
   }
   assert_provisioned "$guid"
-  assert_slot_policy "$guid" 9C always always
+  card_assert_slot_policy "$guid" 9C always always
 }
 
 # --- piggy#258: sealing the generated management key into the store ---------
@@ -350,39 +328,12 @@ function card_init_completes_when_each_touch_is_delivered { # @test
 # Card A is factory-blank (the provision target); card B carries a seeded 9D
 # key and plays the backup card the escrow is sealed to. The store's piggy-ids
 # lists only card B, so recovering the key proves it survives the loss or
-# reset of the card it belongs to.
-
-READER_A="Virtual PCD fibby A 00 00"
-READER_B="Virtual PCD fibby B 00 00"
-GUID_B="B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2"
-
-# Spawn both cards and make card B the store's only recipient.
-_spawn_cards_with_backup_recipient() {
-  [[ -x ${PIGGY_IDS_BIN:-/nonexistent} ]] ||
-    skip "PIGGY_IDS_BIN unset; run via just test-bats-conformance-card-init-fibby"
-  spawn_fibby --auto-touch --model yk5 \
-    --card "$READER_A" \
-    --card "$READER_B" --seed-rfc5903-slot-9d-cert --seed-chuid-guid "$GUID_B"
-  local b_id
-  b_id=$(PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_IDS_BIN" detect-pubkey --guid "$GUID_B") || {
-    echo "detect-pubkey on the backup card failed" >&2
-    tail -40 "$FIBBY_LOG" >&2 || true
-    return 1
-  }
-  printf '%s\n' "$b_id" >"$PIGGY_STORE_DIR/piggy-ids"
-}
+# reset of the card it belongs to (card_spawn_with_backup_recipient).
 
 # Decrypt a sealed management key with the backup card (factory PIN).
 _recover_sealed_key() {
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_TEST_FIB_PIN=123456 \
     "$PIGGY_BIN" box stream decrypt <"$1"
-}
-
-_fail_with_card_init_output() {
-  echo "$1" >&2
-  printf 'status: %s\nstdout: %s\nstderr: %s\n' "$status" "$output" "$stderr" >&2
-  tail -60 "$FIBBY_LOG" >&2 || true
-  return 1
 }
 
 # `piggy card init ARGS` through the tty frontend (see the tty lane above for
@@ -396,21 +347,21 @@ _card_init_tty() {
 function card_init_seal_flag_escrows_key_recoverable_by_backup_card { # @test
   [[ -x ${PIVY_TOOL:-/nonexistent} ]] ||
     skip "PIVY_TOOL unset; run via just test-bats-conformance-card-init-fibby"
-  _spawn_cards_with_backup_recipient
+  card_spawn_with_backup_recipient --auto-touch --model yk5
 
-  _card_init_tty --reader "$READER_A" --seal-management-key <<<"y"
-  [[ $status -eq 0 ]] || _fail_with_card_init_output "card init --seal-management-key failed"
+  _card_init_tty --reader "$CARD_READER_A" --seal-management-key <<<"y"
+  [[ $status -eq 0 ]] || card_fail_with_output "card init --seal-management-key failed"
 
   local guid="$output"
-  [[ $guid =~ ^[0-9A-F]{32}$ ]] || _fail_with_card_init_output "stdout was not a bare GUID"
+  [[ $guid =~ ^[0-9A-F]{32}$ ]] || card_fail_with_output "stdout was not a bare GUID"
   printf '%s\n' "$stderr" | grep -q "sealed to piv/$guid/management-key" ||
-    _fail_with_card_init_output "no seal confirmation on stderr"
+    card_fail_with_output "no seal confirmation on stderr"
   if printf '%s\n' "$stderr" | grep -q "record this"; then
-    _fail_with_card_init_output "the sealed key was also displayed"
+    card_fail_with_output "the sealed key was also displayed"
   fi
 
   local ebox="$PIGGY_STORE_DIR/piv/$guid/management-key.ebox"
-  [[ -f $ebox ]] || _fail_with_card_init_output "no sealed ebox at $ebox"
+  [[ -f $ebox ]] || card_fail_with_output "no sealed ebox at $ebox"
 
   local key
   key=$(_recover_sealed_key "$ebox") || {
@@ -444,32 +395,32 @@ function card_init_seal_flag_escrows_key_recoverable_by_backup_card { # @test
 
 # The tty flow offers the seal when the store can take it; accepting seals.
 function card_init_accepted_seal_offer_escrows_key { # @test
-  _spawn_cards_with_backup_recipient
+  card_spawn_with_backup_recipient --auto-touch --model yk5
 
-  _card_init_tty --reader "$READER_A" <<<$'y\ny'
-  [[ $status -eq 0 ]] || _fail_with_card_init_output "card init with an accepted seal offer failed"
+  _card_init_tty --reader "$CARD_READER_A" <<<$'y\ny'
+  [[ $status -eq 0 ]] || card_fail_with_output "card init with an accepted seal offer failed"
 
   local guid="$output"
   printf '%s\n' "$stderr" | grep -q "into the password store at piv/$guid/management-key" ||
-    _fail_with_card_init_output "the seal was not offered"
+    card_fail_with_output "the seal was not offered"
   [[ -f "$PIGGY_STORE_DIR/piv/$guid/management-key.ebox" ]] ||
-    _fail_with_card_init_output "accepting the offer did not seal the key"
+    card_fail_with_output "accepting the offer did not seal the key"
   if printf '%s\n' "$stderr" | grep -q "record this"; then
-    _fail_with_card_init_output "the sealed key was also displayed"
+    card_fail_with_output "the sealed key was also displayed"
   fi
 }
 
 # Declining the offer keeps the display-once behaviour and writes no escrow.
 function card_init_declined_seal_offer_displays_key { # @test
-  _spawn_cards_with_backup_recipient
+  card_spawn_with_backup_recipient --auto-touch --model yk5
 
-  _card_init_tty --reader "$READER_A" <<<$'y\nn'
-  [[ $status -eq 0 ]] || _fail_with_card_init_output "card init with a declined seal offer failed"
+  _card_init_tty --reader "$CARD_READER_A" <<<$'y\nn'
+  [[ $status -eq 0 ]] || card_fail_with_output "card init with a declined seal offer failed"
 
   printf '%s\n' "$stderr" | grep -q "record this" ||
-    _fail_with_card_init_output "a declined offer did not display the key"
+    card_fail_with_output "a declined offer did not display the key"
   [[ ! -e "$PIGGY_STORE_DIR/piv" ]] ||
-    _fail_with_card_init_output "a declined offer still wrote an escrow"
+    card_fail_with_output "a declined offer still wrote an escrow"
 }
 
 # An explicit seal with nowhere to seal to refuses before the destructive
@@ -478,11 +429,11 @@ function card_init_seal_flag_without_recipients_refuses_before_touching_card { #
   spawn_fibby --auto-touch --model yk5
 
   _card_init_tty --seal-management-key <<<"y"
-  [[ $status -ne 0 ]] || _fail_with_card_init_output "seal with no piggy-ids should refuse"
+  [[ $status -ne 0 ]] || card_fail_with_output "seal with no piggy-ids should refuse"
   printf '%s\n' "$stderr" | grep -q "piggy-ids" ||
-    _fail_with_card_init_output "the refusal does not name the missing piggy-ids"
+    card_fail_with_output "the refusal does not name the missing piggy-ids"
   if printf '%s\n' "$stderr" | grep -q "Provision card"; then
-    _fail_with_card_init_output "the refusal came after the destructive confirm"
+    card_fail_with_output "the refusal came after the destructive confirm"
   fi
 
   local out

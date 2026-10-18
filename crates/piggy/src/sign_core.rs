@@ -51,14 +51,15 @@ pub enum SignError {
 /// Map a user-facing slot string to its PIV slot id. Only signing-capable
 /// slots are accepted; 9D (Key Management / ECDH) is rejected explicitly.
 pub fn parse_slot(s: &str) -> Result<u8, String> {
-    match s.to_ascii_lowercase().as_str() {
-        "9a" => Ok(0x9A),
-        "9c" => Ok(0x9C),
-        "9d" => Err(
+    use crate::card::slot_policy::{SLOT_KEY_MGMT, SLOT_PIV_AUTH, SLOT_SIGNATURE, named_slot};
+    match named_slot(s) {
+        Some(slot @ (SLOT_PIV_AUTH | SLOT_SIGNATURE)) => Ok(slot),
+        Some(SLOT_KEY_MGMT) => Err(
             "slot 9d is the Key Management (ECDH) slot and cannot sign; use 9a or 9c".to_string(),
         ),
-        other => Err(format!(
-            "unsupported slot {other:?}; the signing slots are 9a (auth) and 9c (signature)"
+        _ => Err(format!(
+            "unsupported slot {:?}; the signing slots are 9a (auth) and 9c (signature)",
+            s.to_ascii_lowercase()
         )),
     }
 }

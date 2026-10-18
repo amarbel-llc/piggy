@@ -8,6 +8,9 @@ use std::path::Path;
 
 use piggy_piv::PivError;
 
+use piggy_piv::KeyPolicy;
+
+use crate::card::RequestBinding;
 use crate::card::engine::{self, AddKeyConfig, AddKeyOutcome, ProvisionError, StoredMgmtKey};
 use crate::card::frontend::select::{FrontendKind, build_frontend};
 use crate::card::init_cmd::{CardSelector, SessionCard, accepts_policies, select_provisioned_card};
@@ -27,6 +30,23 @@ pub struct AddKeyArgs<'a> {
     /// it: `Some("")` is the conventional path for the card
     /// ([`default_pass_name`]), `Some(name)` that store entry.
     pub management_key_from_store: Option<String>,
+    /// How the request was made, for wording what went wrong.
+    pub binding: RequestBinding,
+}
+
+impl AddKeyArgs<'_> {
+    /// The slot and the policy its key gets, or why the request is wrong
+    /// whatever card is plugged in (asking for 9D, say).
+    pub fn slot_and_policy(&self) -> Result<(u8, KeyPolicy), String> {
+        let (slot, default_policy) = add_key_slot(self.slot)?;
+        let policy = key_policy_from_flags(
+            default_policy,
+            self.pin_policy,
+            self.touch_policy,
+            self.binding,
+        )?;
+        Ok((slot, policy))
+    }
 }
 
 /// Add a key through an already-built frontend. The binding-agnostic entry
@@ -40,9 +60,7 @@ pub fn add_key_with_frontend(
 ) -> Result<AddKeyOutcome, ProvisionError> {
     // The slot and policy are checked before any card is opened: asking for
     // 9D is a usage error whatever is plugged in.
-    let (slot, default_policy) = add_key_slot(args.slot).map_err(ProvisionError::Setup)?;
-    let policy = key_policy_from_flags(default_policy, args.pin_policy, args.touch_policy)
-        .map_err(ProvisionError::Setup)?;
+    let (slot, policy) = args.slot_and_policy().map_err(ProvisionError::Setup)?;
 
     let mut token = select_provisioned_card(&selector).map_err(ProvisionError::Setup)?;
     let guid = token.guid().to_hex();
@@ -85,6 +103,7 @@ pub fn add_key_with_frontend(
         occupied,
         replace: args.replace,
         stored_mgmt_key,
+        binding: args.binding,
     };
     // The card session opens only after the plan is made. Reading the
     // management key from the store is a decrypt, which may go to another
@@ -107,13 +126,7 @@ pub fn add_key_with_frontend(
 /// The new key as an OpenSSH public-key line, commented the way `piggy tool
 /// generate` comments one (`PIV_slot_9C@<GUID>`).
 pub fn openssh_line(outcome: &AddKeyOutcome) -> Result<String, String> {
-    let ecdsa = ssh_key::public::EcdsaPublicKey::from_sec1_bytes(&outcome.public_point)
-        .map_err(|e| format!("parse generated public key: {e}"))?;
-    let mut pubkey = ssh_key::PublicKey::from(ssh_key::public::KeyData::Ecdsa(ecdsa));
-    pubkey.set_comment(format!("PIV_slot_{:02X}@{}", outcome.slot, outcome.guid));
-    pubkey
-        .to_openssh()
-        .map_err(|e| format!("encode generated public key: {e}"))
+    crate::cmd::tool::generated_key_openssh_line(&outcome.public_point, outcome.slot, &outcome.guid)
 }
 
 /// `piggy card add-key` entry point. Returns a process exit code: 2 for a
@@ -129,7 +142,9 @@ pub fn run(
         eprintln!("piggy card add-key: {e}");
         code
     };
-    if let Err(e) = add_key_slot(args.slot) {
+    // A wrong slot or a misspelt policy fails here, before a jsonrpc
+    // frontend is connected to or any prompt is shown.
+    if let Err(e) = args.slot_and_policy() {
         return fail(2, &e);
     }
     let selector = match selector {

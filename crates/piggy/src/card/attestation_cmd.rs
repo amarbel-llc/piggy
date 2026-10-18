@@ -8,6 +8,7 @@ use piggy_ids::{Classification, ClassifyInput, classify_ssh_slot};
 use piggy_piv::PivToken;
 
 use crate::card::init_cmd::{CardSelector, select_provisioned_card};
+use crate::card::slot_policy::{SLOT_PIV_AUTH, SLOT_SIGNATURE, named_slot};
 
 /// The first line of every bundle (RFC 0012 §5 item 1).
 pub const BUNDLE_HEADER: &str = "# piggy-attestation-bundle v1";
@@ -18,9 +19,8 @@ const SLOT_ATTESTATION: u8 = 0xF9;
 /// The slots whose key has a signing purpose and so can be exported: 9C, the
 /// operator-act key and the default, and 9A.
 pub fn export_slot(slot: &str) -> Result<u8, String> {
-    match slot.to_ascii_lowercase().as_str() {
-        "9c" => Ok(0x9C),
-        "9a" => Ok(0x9A),
+    match named_slot(slot) {
+        Some(id @ (SLOT_SIGNATURE | SLOT_PIV_AUTH)) => Ok(id),
         _ => Err(format!(
             "unknown slot {slot:?} (export-attestation takes 9c or 9a)"
         )),

@@ -907,6 +907,131 @@ assert_zenity_text_has() {
   assert_zenity_text_has 'grant <b>bold</b> & more; id ecdsa__p256__sig; path a\\nb'
 }
 
+# -------- tall operator-act texts: the scrolling read (RFC 0012 §2.6) --------
+#
+# A PIN dialog does not scroll. An operator act taller than the script's
+# operator_act_scroll_lines (15) is first shown whole in zenity --text-info,
+# which must be acknowledged; the PIN dialog follows. A routine prompt never
+# gets one. These run the real script against a stub, so what is pinned is
+# the zenity argv and the text handed over, not what a real dialog draws.
+
+# Like run_askpass_against_zenity_stub, but the stub logs every call: its argv
+# to ZENITY_CALLS after a `--- zenity call` marker, and for --text-info the
+# text it read on stdin to ZENITY_TEXT_INFO. --text-info exits with $1; any
+# other dialog answers the PIN 123456.
+run_askpass_against_logging_zenity_stub() {
+  local text_info_exit="$1"
+  shift
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-tall.XXXXXX")"
+  ZENITY_CALLS="$stub_dir/calls.log"
+  ZENITY_TEXT_INFO="$stub_dir/text-info.txt"
+  for tool in bash ps tr dirname mkdir date cat; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  cat >"$stub_dir/zenity" <<STUB_EOF
+#!/usr/bin/env bash
+printf -- '--- zenity call\n' >>"$ZENITY_CALLS"
+printf '%s\n' "\$@" >>"$ZENITY_CALLS"
+for arg in "\$@"; do
+  if [[ \$arg == --text-info ]]; then
+    cat >"$ZENITY_TEXT_INFO"
+    exit $text_info_exit
+  fi
+done
+printf '123456\n'
+STUB_EOF
+  chmod +x "$stub_dir/zenity"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" "$@" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "PIN for card 5DA19C98 to sign this operator act" </dev/null
+}
+
+zenity_call_count() {
+  grep -c '^--- zenity call$' "$ZENITY_CALLS"
+}
+
+# Twenty lines of act text, the last one full of what zenity would mangle.
+tall_act_text() {
+  printf 'grant line %d\n' $(seq 1 20)
+  printf '%s' "$TRICKY_TEXT"
+}
+
+@test "tall_operator_act_text_is_read_in_a_scrolling_window_before_the_pin" {
+  run_askpass_against_logging_zenity_stub 0 \
+    PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
+
+  assert_success
+  assert_output "123456"
+  [[ $(zenity_call_count) -eq 2 ]] || {
+    echo "expected the scrolling read, then the PIN dialog; got:"
+    cat "$ZENITY_CALLS"
+    return 1
+  }
+  local text_info_at entry_at
+  text_info_at=$(grep -n -x -- '--text-info' "$ZENITY_CALLS" | cut -d: -f1)
+  entry_at=$(grep -n -x -- '--entry' "$ZENITY_CALLS" | cut -d: -f1)
+  [[ -n $text_info_at && -n $entry_at && $text_info_at -lt $entry_at ]] || {
+    echo "the scrolling read did not come before the PIN dialog:"
+    cat "$ZENITY_CALLS"
+    return 1
+  }
+  ZENITY_ARGV="$ZENITY_CALLS"
+  assert_zenity_argv_has "--checkbox=I have read the whole text"
+  assert_zenity_argv_has "--title=piggy operator act: QUOTE"
+  assert_zenity_argv_has "--timeout=120"
+  # The text reaches --text-info verbatim, unescaped: it is plain text there.
+  grep -qxF "Context: grant line 1" "$ZENITY_TEXT_INFO"
+  grep -qxF "grant line 20" "$ZENITY_TEXT_INFO"
+  grep -qF -- "$TRICKY_TEXT" "$ZENITY_TEXT_INFO" || {
+    echo "the tricky line did not reach --text-info literally:"
+    cat "$ZENITY_TEXT_INFO"
+    return 1
+  }
+  grep -qF "OPERATOR ACT: QUOTE" "$ZENITY_TEXT_INFO"
+}
+
+@test "cancelling_the_scrolling_window_cancels_the_act" {
+  run_askpass_against_logging_zenity_stub 1 \
+    PIGGY_ASKPASS_KIND=escalation PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
+
+  assert_failure 1
+  refute_output --partial "123456"
+  [[ $(zenity_call_count) -eq 1 ]] || {
+    echo "a cancelled read still opened the PIN dialog:"
+    cat "$ZENITY_CALLS"
+    return 1
+  }
+}
+
+@test "short_operator_act_text_goes_straight_to_the_pin_dialog" {
+  run_askpass_against_logging_zenity_stub 0 \
+    PIGGY_ASKPASS_KIND=certificate PIGGY_ASKPASS_CONTEXT=$'issue cert\nfor key X'
+
+  assert_success
+  assert_output "123456"
+  assert_equal "$(zenity_call_count)" 1
+  ZENITY_ARGV="$ZENITY_CALLS"
+  refute_zenity_argv_has "--text-info"
+  assert_zenity_argv_has "--forms"
+}
+
+@test "tall_routine_prompt_never_gets_a_scrolling_window" {
+  run_askpass_against_logging_zenity_stub 0 \
+    PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
+
+  assert_success
+  assert_output "123456"
+  assert_equal "$(zenity_call_count)" 1
+  ZENITY_ARGV="$ZENITY_CALLS"
+  refute_zenity_argv_has "--text-info"
+  assert_zenity_argv_has "--title=piggy PIV PIN"
+}
+
 @test "explicit_timeout_still_wins_for_an_operator_act" {
   run_askpass_against_zenity_stub '123456\n' PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_TIMEOUT=9
 

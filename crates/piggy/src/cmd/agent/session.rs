@@ -723,6 +723,29 @@ fn check_operator_act_attestation(
     Ok(())
 }
 
+/// The refusal for an operator act whose PIN prompt yielded no PIN: the
+/// operator dismissed it, it timed out, or the askpass program failed. All
+/// are `cancelled` (RFC 0012 §2.3); the detail says it was the prompt.
+fn operator_act_prompt_refusal(e: &dyn std::fmt::Display) -> (crate::operator_act::Status, String) {
+    (
+        crate::operator_act::Status::Cancelled,
+        format!("no PIN from the askpass: {e}"),
+    )
+}
+
+/// The refusal for an operator act whose PIN the card did not take. Still
+/// `error` (RFC 0012 §2.3 has no status of its own for it); the detail tells
+/// a wrong PIN, with the card's count of tries left, from a blocked PIN and
+/// from a verify that failed some other way.
+fn operator_act_pin_refusal(e: &PivError) -> (crate::operator_act::Status, String) {
+    let detail = match e {
+        PivError::PinIncorrect { retries } => format!("wrong PIN ({retries} retries left)"),
+        PivError::PinBlocked => "PIN blocked".to_string(),
+        other => format!("PIN verify failed: {other}"),
+    };
+    (crate::operator_act::Status::Error, detail)
+}
+
 impl PiggyAgent {
     /// Serve one `operator-act@piggy` request (RFC 0012 §2).
     ///
@@ -841,7 +864,10 @@ impl PiggyAgent {
         };
         let pin = match prompted {
             Ok(Ok(pin)) => pin,
-            Ok(Err(e)) => return refuse(Status::Cancelled, e.to_string()),
+            Ok(Err(e)) => {
+                let (status, detail) = operator_act_prompt_refusal(&e);
+                return refuse(status, detail);
+            }
             Err(e) => return refuse(Status::Error, format!("askpass task: {e}")),
         };
 
@@ -870,7 +896,8 @@ impl PiggyAgent {
                 Err(e) => return refuse(Status::CardAbsent, e.to_string()),
             };
             if let Err(e) = session.verify_pin(&pin) {
-                return refuse(Status::Error, e.to_string());
+                let (status, detail) = operator_act_pin_refusal(&e);
+                return refuse(status, detail);
             }
             // The card now waits for the touch, and the PIN dialog that had
             // the operator's attention has just closed: tell them.
@@ -2771,6 +2798,29 @@ mod tests {
         let response = act::Response::decode(&answer.details.into_bytes()).expect("well-formed");
         assert!(response.sshsig.is_empty(), "a refusal carries no signature");
         response.status
+    }
+
+    #[test]
+    fn operator_act_wrong_pin_and_askpass_failure_read_differently() {
+        let (status, detail) = operator_act_pin_refusal(&PivError::PinIncorrect { retries: 2 });
+        assert_eq!(status, act::Status::Error);
+        assert_eq!(detail, "wrong PIN (2 retries left)");
+
+        let (status, detail) = operator_act_pin_refusal(&PivError::PinBlocked);
+        assert_eq!(status, act::Status::Error);
+        assert_eq!(detail, "PIN blocked");
+
+        let (status, detail) = operator_act_pin_refusal(&PivError::Apdu { sw: 0x6A80 });
+        assert_eq!(status, act::Status::Error);
+        assert!(detail.starts_with("PIN verify failed: "), "{detail}");
+
+        let (status, detail) = operator_act_prompt_refusal(&"askpass exited with exit status: 1");
+        assert_eq!(status, act::Status::Cancelled);
+        assert_eq!(
+            detail,
+            "no PIN from the askpass: askpass exited with exit status: 1"
+        );
+        assert!(!detail.contains("wrong PIN"));
     }
 
     #[tokio::test]

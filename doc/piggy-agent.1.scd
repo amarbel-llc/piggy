@@ -224,7 +224,11 @@ shipped _contrib/piggy-askpass.sh_ honours both, while a program that ignores
 A refusal is an answer, with a status the caller can act on (_refused-policy_,
 _refused-namespace_, _refused-text_, _no-such-key_, _cancelled_,
 _card-absent_, _bad-request_, _error_); it is not an agent failure, which is
-what an agent without the extension returns.
+what an agent without the extension returns. Its detail tells apart the
+answers a status shares: a PIN prompt that was dismissed, timed out or
+failed is _cancelled_ with *no PIN from the askpass:* and its reason; a PIN
+the card did not take is _error_ with *wrong PIN (*_N_* retries left)*, *PIN
+blocked*, or *PIN verify failed:* and the card's answer.
 
 So that the extension is the only way to such a signature, an ordinary sign
 request whose data is sshsig signed data under one of those three namespaces
@@ -272,7 +276,11 @@ when the agent inherited a frozen *systemd --user* environment, and
 refuses rather than guessing. For an operator act it reads the class from
 *PIGGY_ASKPASS_KIND* and gives each its own banner, window title, button and
 dialog; an escalation also requires the word ESCALATE to be typed. It
-refuses a class it does not know. Test harnesses must point *SSH_ASKPASS* at
+refuses a class it does not know. A PIN dialog does not scroll, so in zenity
+an act whose prompt runs past 15 lines is first shown whole, as plain text,
+in a scrolling window whose OK stays disabled until "I have read the whole
+text" is ticked; cancelling that window cancels the act, and the PIN dialog
+follows it. Test harnesses must point *SSH_ASKPASS* at
 a non-interactive helper; see *piggy-testing*(7).
 
 # SLOT SPECIFICATION
