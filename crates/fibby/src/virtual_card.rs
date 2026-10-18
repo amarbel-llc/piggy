@@ -864,7 +864,7 @@ impl VirtualCard {
             return true;
         }
         let now = Instant::now() + self.touch_clock_skew;
-        match self.touch.try_consume(cached_policy, now) {
+        match self.touch.try_consume(slot, cached_policy, now) {
             Ok(TouchPass::Granted) => {
                 trace::emit(trace::INFO, "vcard", &format!("TOUCH granted {slot_label}"));
                 true
@@ -2147,8 +2147,8 @@ impl VirtualCard {
     ///   sign.
     ///
     /// A touch-"always"/"cached" slot also passes the touch gate
-    /// ([`Self::pass_touch_gate`]) after every other check and before the
-    /// key is used.
+    /// ([`Self::pass_touch_gate`]) after every other check, including the
+    /// sign itself, and before the signature is released.
     ///
     /// Returns:
     /// - `69 82` if the PIN is required and not verified, or a required
@@ -2221,9 +2221,11 @@ impl VirtualCard {
                 return sw(0x6A, 0x88);
             }
         };
-        if !self.pass_touch_gate(slot, slot_label) {
-            return SW_TOUCH_TIMEOUT.to_vec();
-        }
+        // Sign before the touch gate, and release the signature only once
+        // it passes: a challenge the key cannot sign (e.g. too short) is
+        // rejected without waiting for, or spending, a touch, as a real
+        // card validates the input first (piggy#314). The computation is
+        // pure, so a blocked attempt still changes nothing.
         let sig: Signature = match signing_key.sign_prehash(challenge) {
             Ok(s) => s,
             Err(_) => {
@@ -2235,6 +2237,9 @@ impl VirtualCard {
                 return sw(0x6A, 0x80);
             }
         };
+        if !self.pass_touch_gate(slot, slot_label) {
+            return SW_TOUCH_TIMEOUT.to_vec();
+        }
         // The card returns the ASN.1 `ECDSA-Sig-Value` (SEQUENCE { r, s })
         // under the GA `82` (RESPONSE) tag — the same DER pivy parses out
         // in piv_sign_prehash.
@@ -2850,8 +2855,9 @@ fn parse_generate_request(body: &[u8]) -> Option<GenerateRequest> {
 /// one-byte long form (`81 xx`) for `128..256`, two-byte (`82 xx xx`)
 /// otherwise. Used to wrap the variable-width DER ECDSA signature in the
 /// `7C`/`82` response template (the ECDH handler hard-codes its lengths
-/// because the X-coordinate output is fixed-width; sign output is not).
-fn push_ber_len(out: &mut Vec<u8>, len: usize) {
+/// because the X-coordinate output is fixed-width; sign output is not),
+/// and the attestation certificate object (`attest.rs`).
+pub(crate) fn push_ber_len(out: &mut Vec<u8>, len: usize) {
     if len < 0x80 {
         out.push(len as u8);
     } else if len < 0x100 {
@@ -5099,7 +5105,10 @@ mod tests {
 
         let start = Instant::now();
         let resp =
-            crate::server::transmit_waiting_for_touch(&shared, &ga_sign_apdu(&[0x66; 32])).unwrap();
+            crate::server::transmit_waiting_for_touch(&shared, &ga_sign_apdu(&[0x66; 32]), || {
+                false
+            })
+            .unwrap();
         let waited = start.elapsed();
         granter.join().unwrap();
 
@@ -5121,7 +5130,7 @@ mod tests {
         let apdu = ga_sign_apdu(&[0x77; 32]);
 
         let start = Instant::now();
-        let resp = crate::server::transmit_waiting_for_touch(&shared, &apdu).unwrap();
+        let resp = crate::server::transmit_waiting_for_touch(&shared, &apdu, || false).unwrap();
         assert_eq!(resp, vec![0x69, 0x82], "touch timeout status word");
         assert!(
             start.elapsed() >= Duration::from_millis(80),
@@ -5130,7 +5139,7 @@ mod tests {
 
         // The failed wait left the card usable: a touch now lets it sign.
         typed.lock().unwrap().grant_touch().unwrap();
-        let resp = crate::server::transmit_waiting_for_touch(&shared, &apdu).unwrap();
+        let resp = crate::server::transmit_waiting_for_touch(&shared, &apdu, || false).unwrap();
         assert!(is_success(&resp));
     }
 
@@ -5174,7 +5183,7 @@ mod tests {
         c.set_touch_timeout(Duration::from_secs(20));
         let shared: crate::server::SharedBackend = Arc::new(std::sync::Mutex::new(c));
         let start = Instant::now();
-        let resp = crate::server::transmit_waiting_for_touch(&shared, &apdu).unwrap();
+        let resp = crate::server::transmit_waiting_for_touch(&shared, &apdu, || false).unwrap();
         assert!(is_success(&resp));
         assert!(start.elapsed() < Duration::from_secs(5));
     }
@@ -5239,6 +5248,114 @@ mod tests {
                 "7c22822047e03668154b982a23f935f0ac074cb306cb94860073ebc10b92ddcc289e96f29000"
             )
         );
+    }
+
+    /// piggy#314 (1): a sign the key cannot perform (a challenge shorter
+    /// than half the field size) is rejected before the touch gate, so it
+    /// neither waits for a touch nor spends a granted one.
+    #[test]
+    fn invalid_sign_input_fails_without_waiting_for_or_spending_a_touch() {
+        let (shared, typed) = shared_touch_card(touch_policy::ALWAYS, Duration::from_secs(20));
+        let short = ga_sign_apdu(&[0x11; 8]);
+
+        let start = Instant::now();
+        let resp = crate::server::transmit_waiting_for_touch(&shared, &short, || false).unwrap();
+        assert_eq!(resp, vec![0x6A, 0x80], "rejected for the input");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "no touch was waited for"
+        );
+
+        typed.lock().unwrap().grant_touch().unwrap();
+        let resp = crate::server::transmit_waiting_for_touch(&shared, &short, || false).unwrap();
+        assert_eq!(resp, vec![0x6A, 0x80]);
+        assert_eq!(
+            typed.lock().unwrap().touch.pending(),
+            1,
+            "the failed sign left the touch for the next operation"
+        );
+        let resp =
+            crate::server::transmit_waiting_for_touch(&shared, &ga_sign_apdu(&[0x12; 32]), || {
+                false
+            })
+            .unwrap();
+        assert!(is_success(&resp), "the next valid sign takes it");
+        assert_eq!(typed.lock().unwrap().touch.pending(), 0);
+    }
+
+    /// piggy#314 (2): a waiter whose client hung up abandons its operation
+    /// instead of consuming the next touch, which then serves the next
+    /// live operation.
+    #[test]
+    fn a_hung_up_clients_waiter_does_not_consume_the_next_touch() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (shared, typed) = shared_touch_card(touch_policy::ALWAYS, Duration::from_secs(20));
+        let gone = Arc::new(AtomicBool::new(false));
+        let dead_waiter = {
+            let (shared, gone) = (Arc::clone(&shared), Arc::clone(&gone));
+            std::thread::spawn(move || {
+                crate::server::transmit_waiting_for_touch(
+                    &shared,
+                    &ga_sign_apdu(&[0x13; 32]),
+                    || gone.load(Ordering::SeqCst),
+                )
+                .unwrap()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100)); // let it park
+        gone.store(true, Ordering::SeqCst);
+        typed.lock().unwrap().grant_touch().unwrap();
+
+        let start = Instant::now();
+        let resp = dead_waiter.join().unwrap();
+        assert_eq!(resp, SW_TOUCH_TIMEOUT.to_vec(), "abandoned, never signed");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the waiter noticed promptly, not at the timeout"
+        );
+        assert_eq!(
+            typed.lock().unwrap().touch.pending(),
+            1,
+            "the touch is still there for a live operation"
+        );
+        let resp =
+            crate::server::transmit_waiting_for_touch(&shared, &ga_sign_apdu(&[0x14; 32]), || {
+                false
+            })
+            .unwrap();
+        assert!(is_success(&resp));
+        assert_eq!(typed.lock().unwrap().touch.pending(), 0);
+    }
+
+    /// piggy#314 (3): the `cached` window is per slot, as YubiKey's is per
+    /// key: a touch that opened 9A's window does not serve 9C.
+    #[test]
+    fn touch_cached_window_belongs_to_the_slot_that_was_touched() {
+        let mut c =
+            card_with_generated_key(0x9A, Some(pin_policy::NEVER), Some(touch_policy::CACHED));
+        c.set_generate_override(0x9C, RFC6979_SCALAR);
+        let resp = c
+            .transmit(&generate_apdu_with_policy(
+                0x9C,
+                Some(pin_policy::NEVER),
+                Some(touch_policy::CACHED),
+            ))
+            .unwrap();
+        assert!(is_success(&resp), "GENERATE 9C");
+        let sign_9a = ga_sign_apdu(&[0x15; 32]);
+        let sign_9c = ga_sign_apdu_slot(0x9C, &[0x16; 32]);
+
+        c.grant_touch().unwrap();
+        assert!(is_success(&c.transmit(&sign_9a).unwrap()), "9A touched");
+        assert!(is_success(&c.transmit(&sign_9a).unwrap()), "9A cached");
+        assert_eq!(
+            c.transmit(&sign_9c).unwrap(),
+            SW_TOUCH_TIMEOUT.to_vec(),
+            "9A's window does not serve 9C"
+        );
+        c.grant_touch().unwrap();
+        assert!(is_success(&c.transmit(&sign_9c).unwrap()), "9C touched");
+        assert!(is_success(&c.transmit(&sign_9c).unwrap()), "9C cached");
     }
 
     // -- YK GET METADATA (INS 0xF7) tests ---------------------------------

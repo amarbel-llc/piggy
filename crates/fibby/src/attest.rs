@@ -27,6 +27,8 @@ use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::time::{Time, Validity};
 
+use crate::virtual_card::push_ber_len;
+
 const OID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const OID_PRIME256V1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 const OID_ECDSA_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
@@ -103,11 +105,11 @@ impl AttestationAuthority {
     /// `53 { 70 <cert DER> 71 01 00 FE 00 }`.
     pub fn cert_object(&self) -> Vec<u8> {
         let mut inner = vec![0x70];
-        push_der_len(&mut inner, self.cert_der.len());
+        push_ber_len(&mut inner, self.cert_der.len());
         inner.extend_from_slice(&self.cert_der);
         inner.extend_from_slice(&[0x71, 0x01, 0x00, 0xFE, 0x00]);
         let mut object = vec![0x53];
-        push_der_len(&mut object, inner.len());
+        push_ber_len(&mut object, inner.len());
         object.extend_from_slice(&inner);
         object
     }
@@ -206,17 +208,6 @@ fn issue_certificate(
     }
     .to_der()
     .expect("a Certificate encodes")
-}
-
-/// Append a definite length in the short, `81` or `82` form.
-fn push_der_len(out: &mut Vec<u8>, len: usize) {
-    if len < 0x80 {
-        out.push(len as u8);
-    } else if len < 0x100 {
-        out.extend_from_slice(&[0x81, len as u8]);
-    } else {
-        out.extend_from_slice(&[0x82, (len >> 8) as u8, (len & 0xFF) as u8]);
-    }
 }
 
 #[cfg(test)]

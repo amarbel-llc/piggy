@@ -70,3 +70,7 @@ x509-cert = "0.2"
 der = "0.7"
 spki = "0.7"
 const-oid = "0.9"
+# `recv(MSG_PEEK | MSG_DONTWAIT)` so a connection waiting for a simulated
+# touch can tell its client hung up (piggy#314); `UnixStream::peek` is not
+# stable. Already in the lockfile (the piggy crate depends on it).
+libc = "0.2"

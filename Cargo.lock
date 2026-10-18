@@ -608,6 +608,7 @@ dependencies = [
  "der",
  "des",
  "ecdsa",
+ "libc",
  "p256",
  "pcsc",
  "rand_core 0.6.4",

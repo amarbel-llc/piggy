@@ -15,6 +15,7 @@
 //! is stalled. The only nesting is backend mutex, then pad mutex, never
 //! the reverse.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,8 +32,10 @@ pub const TOUCH_CACHE_WINDOW: Duration = Duration::from_secs(15);
 struct PadState {
     /// Touches granted and not yet consumed by an operation.
     pending: u32,
-    /// End of the window in which a `cached` slot needs no fresh touch.
-    cached_until: Option<Instant>,
+    /// Per slot: end of the window in which that `cached` slot needs no
+    /// fresh touch. Per key, as on a YubiKey: a touch that opened 9A's
+    /// window does not serve 9C.
+    cached_until: HashMap<u8, Instant>,
     /// Bumped on every change a blocked operation could be waiting for
     /// (a grant, or a cache window opening). A waiter records the value
     /// it saw when it blocked and sleeps until it moves, so a grant that
@@ -67,13 +70,23 @@ impl TouchPad {
         state.pending
     }
 
-    /// Try to satisfy one touch-requiring operation at time `now`, without
-    /// blocking. `cached_policy` is true for a touch-`cached` slot, false
-    /// for touch-`always`. On failure returns the pad generation to wait
-    /// on with [`Self::wait_for_change`].
-    pub fn try_consume(&self, cached_policy: bool, now: Instant) -> Result<TouchPass, u64> {
+    /// Try to satisfy one touch-requiring operation on `slot` at time
+    /// `now`, without blocking. `cached_policy` is true for a
+    /// touch-`cached` slot, false for touch-`always`. On failure returns
+    /// the pad generation to wait on with [`Self::wait_for_change`].
+    pub fn try_consume(
+        &self,
+        slot: u8,
+        cached_policy: bool,
+        now: Instant,
+    ) -> Result<TouchPass, u64> {
         let mut state = self.state.lock().unwrap();
-        if cached_policy && state.cached_until.is_some_and(|until| now < until) {
+        if cached_policy
+            && state
+                .cached_until
+                .get(&slot)
+                .is_some_and(|until| now < *until)
+        {
             return Ok(TouchPass::Cached);
         }
         if state.pending == 0 {
@@ -81,7 +94,7 @@ impl TouchPad {
         }
         state.pending -= 1;
         if cached_policy {
-            state.cached_until = Some(now + TOUCH_CACHE_WINDOW);
+            state.cached_until.insert(slot, now + TOUCH_CACHE_WINDOW);
             // A second operation blocked on the same cached slot can now
             // ride this touch: wake it.
             state.generation += 1;
@@ -109,11 +122,11 @@ impl TouchPad {
         }
     }
 
-    /// Close the `cached` window (card removed, factory reset). Pending
-    /// grants are kept: a grant models the operator's finger, not card
-    /// state.
+    /// Close every slot's `cached` window (card removed, factory reset).
+    /// Pending grants are kept: a grant models the operator's finger, not
+    /// card state.
     pub fn clear_cache(&self) {
-        self.state.lock().unwrap().cached_until = None;
+        self.state.lock().unwrap().cached_until.clear();
     }
 
     /// Touches granted and not yet consumed.
@@ -148,6 +161,17 @@ pub fn log_touch_needed(slot_label: &str, detail: &str) {
     );
 }
 
+/// See [`log_touch_needed`]. The client that was waiting went away, so
+/// the operation is dropped untried and any touch is left pending for the
+/// next live operation.
+pub fn log_touch_abandoned(slot_label: &str) {
+    crate::trace::emit(
+        crate::trace::INFO,
+        "vcard",
+        &format!("TOUCH abandoned {slot_label} (client gone)"),
+    );
+}
+
 /// See [`log_touch_needed`]. `response` is the status word answered.
 pub fn log_touch_timeout(slot_label: &str, response: &[u8]) {
     let sw: String = response.iter().map(|b| format!("{b:02X}")).collect();
@@ -166,11 +190,11 @@ mod tests {
     fn always_policy_consumes_one_grant_per_operation() {
         let pad = TouchPad::default();
         let now = Instant::now();
-        assert!(pad.try_consume(false, now).is_err(), "no touch yet");
+        assert!(pad.try_consume(0x9A, false, now).is_err(), "no touch yet");
         assert_eq!(pad.grant(), 1);
-        assert_eq!(pad.try_consume(false, now), Ok(TouchPass::Granted));
+        assert_eq!(pad.try_consume(0x9A, false, now), Ok(TouchPass::Granted));
         assert!(
-            pad.try_consume(false, now).is_err(),
+            pad.try_consume(0x9A, false, now).is_err(),
             "one grant serves one touch-always operation"
         );
     }
@@ -180,19 +204,51 @@ mod tests {
         let pad = TouchPad::default();
         let t0 = Instant::now();
         pad.grant();
-        assert_eq!(pad.try_consume(true, t0), Ok(TouchPass::Granted));
+        assert_eq!(pad.try_consume(0x9A, true, t0), Ok(TouchPass::Granted));
         assert_eq!(
-            pad.try_consume(true, t0 + TOUCH_CACHE_WINDOW - Duration::from_millis(1)),
+            pad.try_consume(
+                0x9A,
+                true,
+                t0 + TOUCH_CACHE_WINDOW - Duration::from_millis(1)
+            ),
             Ok(TouchPass::Cached),
             "inside the window no fresh touch is needed"
         );
         assert!(
-            pad.try_consume(true, t0 + TOUCH_CACHE_WINDOW).is_err(),
+            pad.try_consume(0x9A, true, t0 + TOUCH_CACHE_WINDOW)
+                .is_err(),
             "the window has closed"
         );
         assert!(
-            pad.try_consume(false, t0).is_err(),
+            pad.try_consume(0x9A, false, t0).is_err(),
             "a cached touch never serves a touch-always slot"
+        );
+    }
+
+    /// YubiKey's `cached` window is per key: a touch on 9A does not let a
+    /// 9C operation through, and each slot's window runs on its own clock.
+    #[test]
+    fn cached_window_is_per_slot() {
+        let pad = TouchPad::default();
+        let t0 = Instant::now();
+        pad.grant();
+        assert_eq!(pad.try_consume(0x9A, true, t0), Ok(TouchPass::Granted));
+        assert!(
+            pad.try_consume(0x9C, true, t0).is_err(),
+            "9A's window does not serve 9C"
+        );
+        let t1 = t0 + Duration::from_secs(10);
+        pad.grant();
+        assert_eq!(pad.try_consume(0x9C, true, t1), Ok(TouchPass::Granted));
+        let t2 = t0 + TOUCH_CACHE_WINDOW;
+        assert!(
+            pad.try_consume(0x9A, true, t2).is_err(),
+            "9A's window closed"
+        );
+        assert_eq!(
+            pad.try_consume(0x9C, true, t2),
+            Ok(TouchPass::Cached),
+            "9C's window, opened later, is still open"
         );
     }
 
@@ -202,11 +258,11 @@ mod tests {
         let t0 = Instant::now();
         pad.grant();
         pad.grant();
-        assert_eq!(pad.try_consume(true, t0), Ok(TouchPass::Granted));
+        assert_eq!(pad.try_consume(0x9A, true, t0), Ok(TouchPass::Granted));
         pad.clear_cache();
         assert_eq!(pad.pending(), 1, "the unconsumed grant survives");
         assert_eq!(
-            pad.try_consume(true, t0),
+            pad.try_consume(0x9A, true, t0),
             Ok(TouchPass::Granted),
             "with the window closed the next operation needs a touch again"
         );
@@ -215,7 +271,7 @@ mod tests {
     #[test]
     fn wait_returns_at_once_for_a_grant_that_beat_the_waiter() {
         let pad = TouchPad::default();
-        let seen = pad.try_consume(false, Instant::now()).unwrap_err();
+        let seen = pad.try_consume(0x9A, false, Instant::now()).unwrap_err();
         pad.grant(); // lands before the waiter parks
         assert!(pad.wait_for_change(seen, Instant::now() + Duration::from_secs(5)));
     }
@@ -223,7 +279,7 @@ mod tests {
     #[test]
     fn wait_times_out_when_nothing_changes() {
         let pad = TouchPad::default();
-        let seen = pad.try_consume(false, Instant::now()).unwrap_err();
+        let seen = pad.try_consume(0x9A, false, Instant::now()).unwrap_err();
         let start = Instant::now();
         assert!(!pad.wait_for_change(seen, start + Duration::from_millis(40)));
         assert!(start.elapsed() >= Duration::from_millis(40));

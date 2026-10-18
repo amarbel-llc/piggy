@@ -774,7 +774,7 @@ fn transmit(
     trace::hexdump("apdu>", &apdu);
 
     let backend = &backends[state.backend_of(req.h_card)];
-    let result = transmit_waiting_for_touch(backend, &apdu);
+    let result = transmit_waiting_for_touch(backend, &apdu, || peer_hung_up(stream));
     let active = state
         .card_protocols
         .get(&req.h_card)
@@ -825,12 +825,21 @@ fn transmit(
 /// (`fibby ctl touch`), and other clients and other cards are served as
 /// usual. A touch that never arrives answers the card's timeout status
 /// word once the card's touch timeout has passed since the first attempt.
+///
+/// `client_gone` is asked, without the card locked, before every retry and
+/// at least every [`CLIENT_GONE_POLL`] while waiting. Once it says the
+/// client that sent the APDU has hung up, the operation is abandoned
+/// untried (answering the timeout status word to nobody), so a dead
+/// client's waiter never consumes a touch meant for the next live
+/// operation (piggy#314).
 pub fn transmit_waiting_for_touch(
     backend: &SharedBackend,
     apdu: &[u8],
+    client_gone: impl Fn() -> bool,
 ) -> crate::backend::ScardResult<Vec<u8>> {
     use crate::backend::TransmitOutcome;
-    let mut deadline: Option<std::time::Instant> = None;
+    use std::time::Instant;
+    let mut deadline: Option<Instant> = None;
     loop {
         // The guard is a temporary of this statement: the card is unlocked
         // again before the wait below.
@@ -844,12 +853,54 @@ pub fn transmit_waiting_for_touch(
                 &wait.slot_label,
                 &format!("waiting up to {} ms", wait.timeout.as_millis()),
             );
-            std::time::Instant::now() + wait.timeout
+            Instant::now() + wait.timeout
         });
-        if !wait.pad.wait_for_change(wait.seen, deadline) {
-            crate::touch::log_touch_timeout(&wait.slot_label, &wait.timeout_response);
-            return Ok(wait.timeout_response);
+        loop {
+            let slice_end = deadline.min(Instant::now() + CLIENT_GONE_POLL);
+            let changed = wait.pad.wait_for_change(wait.seen, slice_end);
+            if client_gone() {
+                crate::touch::log_touch_abandoned(&wait.slot_label);
+                return Ok(wait.timeout_response);
+            }
+            if changed {
+                break; // retry the APDU
+            }
+            if Instant::now() >= deadline {
+                crate::touch::log_touch_timeout(&wait.slot_label, &wait.timeout_response);
+                return Ok(wait.timeout_response);
+            }
         }
+    }
+}
+
+/// How often a connection waiting for a touch checks that its client is
+/// still there (see [`transmit_waiting_for_touch`]).
+const CLIENT_GONE_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// True once the peer of `stream` has hung up: a non-blocking peek reads
+/// end-of-file or a connection error. A client blocked in SCardTransmit
+/// sends nothing, so "would block" means it is still waiting. Nothing is
+/// consumed from the socket.
+fn peer_hung_up(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut probe = [0u8; 1];
+    // SAFETY: `probe` is a valid one-byte buffer for the whole call and
+    // the fd is owned by `stream`, which outlives it.
+    let n = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            probe.as_mut_ptr().cast(),
+            probe.len(),
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    match n {
+        0 => true,
+        n if n > 0 => false,
+        _ => !matches!(
+            std::io::Error::last_os_error().kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ),
     }
 }
 
@@ -965,4 +1016,25 @@ fn reply(stream: &mut UnixStream, body: &[u8]) -> std::io::Result<()> {
 
 fn reply_handle_rv(stream: &mut UnixStream, handle: i32, rv: u32) -> std::io::Result<()> {
     reply(stream, &HandleRv { handle, rv }.to_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn peer_hung_up_tells_a_waiting_client_from_a_closed_one() {
+        let (mut ours, mut theirs) = UnixStream::pair().unwrap();
+        assert!(!peer_hung_up(&ours), "an idle live peer is still there");
+
+        theirs.write_all(&[0x42]).unwrap();
+        assert!(!peer_hung_up(&ours), "a peer with data pending is alive");
+        let mut byte = [0u8; 1];
+        ours.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, [0x42], "the probe consumed nothing");
+
+        drop(theirs);
+        assert!(peer_hung_up(&ours), "a closed peer has hung up");
+    }
 }

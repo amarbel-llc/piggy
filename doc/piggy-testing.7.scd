@@ -101,16 +101,20 @@ with and enforces it (piggy#303). A slot whose touch policy is _always_
 or _cached_ does not sign or do ECDH until the card is touched:
 *fibby ctl --socket* _PATH_ *touch* _READER_ grants that card one touch,
 which its next touch-requiring operation consumes. A _cached_ slot then
-needs no further touch for 15 seconds; a touch is never carried over to
-an _always_ slot. With no touch granted the operation waits
-*--touch-timeout-ms* _MILLIS_ (default 15000) and then answers 6982.
+needs no further touch for 15 seconds; the window is per slot, and a
+touch is never carried over to an _always_ slot. An operation whose input
+is invalid fails before the touch gate, without waiting or spending a
+touch. With no touch granted the operation waits
+*--touch-timeout-ms* _MILLIS_ (default 15000) and then answers 6982; if
+its client hangs up meanwhile the operation is abandoned untried, so it
+never takes a touch meant for the next one.
 *--auto-touch* grants every such operation at once, for lanes that are
 not about touch. Both flags are global: they apply to every card the
 fibby serves. The lines a lane can grep, written at every enabled
 _FIBBY_LOG_ level and shown here for slot 9A, are _TOUCH needed 9A_ (the
 operation is waiting, so this is when to deliver the touch), _TOUCH
-granted 9A_, _TOUCH cached 9A_, _TOUCH auto-granted 9A_ and _TOUCH
-timeout 9A -> 6982_. *piggy card init* and *piggy card add-key* give 9A
+granted 9A_, _TOUCH cached 9A_, _TOUCH auto-granted 9A_, _TOUCH
+abandoned 9A_ and _TOUCH timeout 9A -> 6982_. *piggy card init* and *piggy card add-key* give 9A
 and 9C a touch policy by default and sign each new certificate with the
 new key, so a lane that provisions with the default policies must spawn
 fibby with *--auto-touch* or deliver each touch. fibby attests only a
