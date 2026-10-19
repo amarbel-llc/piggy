@@ -27,8 +27,16 @@ use ssh_agent_lib::{
 };
 use ssh_key::{Signature, public::KeyData};
 use tokio::net::UnixStream;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
+
+/// The most upstream connections the pool holds open at once, across every
+/// upstream and every client (piggy#326). A request beyond it fails at once
+/// instead of opening another socket, so neither a burst of clients nor an
+/// upstream that leads back into this agent (each hop holding its sockets
+/// open while it waits on the next) can exhaust the agent's descriptors.
+/// Far above what clients need: one listing holds one per upstream.
+pub const MAX_UPSTREAM_CONNECTIONS: usize = 64;
 
 /// The piggy-private extension `piggy health` uses to ask a running
 /// agent about its upstreams (piggy#215 step 5). Implemented ONLY by
@@ -77,6 +85,24 @@ pub fn parse_upstream_spec(spec: &str) -> Result<Upstream, String> {
     })
 }
 
+/// `path` with its directory resolved (symlinks, `..`), the file name kept as
+/// given: a socket that does not exist yet still compares.
+fn resolved_socket_path(path: &std::path::Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => {
+            let dir = if dir.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                dir
+            };
+            std::fs::canonicalize(dir)
+                .map(|dir| dir.join(name))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
 /// Parse and validate a full `--upstream` flag list: every spec must be
 /// `NAME=SOCKET_PATH` and names must be unique (they become log labels
 /// and, later, `piggy health` check points).
@@ -116,16 +142,56 @@ pub struct UpstreamPool {
     /// live on the card, so without a designated software agent there
     /// is nowhere for an added key to go.
     add_new_keys_to: Option<usize>,
+    /// One permit per open upstream connection, shared by every clone of
+    /// the pool; see [`MAX_UPSTREAM_CONNECTIONS`].
+    connections: Arc<Semaphore>,
+}
+
+/// An open upstream connection, holding its share of
+/// [`MAX_UPSTREAM_CONNECTIONS`] until it is dropped.
+struct UpstreamConnection {
+    client: Client<UnixStream>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl std::ops::Deref for UpstreamConnection {
+    type Target = Client<UnixStream>;
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+impl std::ops::DerefMut for UpstreamConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.client
+    }
 }
 
 impl UpstreamPool {
     pub fn new(upstreams: Vec<Upstream>, timeout: Duration) -> Self {
+        Self::with_connection_limit(upstreams, timeout, MAX_UPSTREAM_CONNECTIONS)
+    }
+
+    fn with_connection_limit(upstreams: Vec<Upstream>, timeout: Duration, limit: usize) -> Self {
         Self {
             upstreams,
             timeout,
             known_keys: Arc::new(Mutex::new(HashMap::new())),
             add_new_keys_to: None,
+            connections: Arc::new(Semaphore::new(limit)),
         }
+    }
+
+    /// The configured upstream whose socket is `socket`, the agent's own
+    /// listening socket: proxying to it would send every request back into
+    /// the agent, without end (piggy#326). Paths are compared with their
+    /// directories resolved, so a symlinked runtime directory still matches.
+    pub fn upstream_at(&self, socket: &std::path::Path) -> Option<&str> {
+        let own = resolved_socket_path(socket);
+        self.upstreams
+            .iter()
+            .find(|u| resolved_socket_path(&u.path) == own)
+            .map(|u| u.name.as_str())
     }
 
     /// Designate the upstream that receives `add_identity` requests
@@ -159,15 +225,31 @@ impl UpstreamPool {
         self.upstreams.len()
     }
 
-    /// Connect to one upstream socket, timeout-bounded.
-    async fn connect(&self, upstream: &Upstream) -> Result<Client<UnixStream>, AgentError> {
+    /// Connect to one upstream socket, timeout-bounded, within the pool's
+    /// connection limit: past it the connect fails at once.
+    async fn connect(&self, upstream: &Upstream) -> Result<UpstreamConnection, AgentError> {
+        let permit = Arc::clone(&self.connections)
+            .try_acquire_owned()
+            .map_err(|_| {
+                AgentError::Other(
+                    format!(
+                        "upstream {}: the pool's upstream connections are all open; not opening \
+                         another (is an upstream leading back into this agent?)",
+                        upstream.name
+                    )
+                    .into(),
+                )
+            })?;
         let stream = timeout(self.timeout, UnixStream::connect(&upstream.path))
             .await
             .map_err(|_| {
                 AgentError::Other(format!("upstream {}: connect timed out", upstream.name).into())
             })?
             .map_err(AgentError::IO)?;
-        Ok(Client::new(stream))
+        Ok(UpstreamConnection {
+            client: Client::new(stream),
+            _permit: permit,
+        })
     }
 
     /// List every upstream's identities in configured order, rebuilding
@@ -590,6 +672,10 @@ pub(super) mod test_support {
         /// `request_identities` (the hung-not-dead upstream the pool's
         /// timeout exists for).
         pub hang_identities: bool,
+        /// A proxying agent: answers `request_identities` by listing this
+        /// pool, as piggy's own agent does. Pointed at the stub's own
+        /// socket it is the cycle piggy#326 guards against.
+        pub relay: Option<UpstreamPool>,
     }
 
     impl StubUpstream {
@@ -600,7 +686,13 @@ pub(super) mod test_support {
                 extensions: Vec::new(),
                 events: Arc::new(std::sync::Mutex::new(Vec::new())),
                 hang_identities: false,
+                relay: None,
             }
+        }
+
+        pub fn relaying_to(mut self, pool: UpstreamPool) -> Self {
+            self.relay = Some(pool);
+            self
         }
 
         pub fn with_extensions(mut self, names: &[&str]) -> Self {
@@ -629,6 +721,9 @@ pub(super) mod test_support {
         async fn request_identities(&mut self) -> Result<Vec<Identity>, AgentError> {
             if self.hang_identities {
                 std::future::pending::<()>().await;
+            }
+            if let Some(pool) = &self.relay {
+                return Ok(pool.list_identities().await);
             }
             Ok(self.identities.clone())
         }
@@ -690,11 +785,40 @@ pub(super) mod test_support {
     /// sun_path limit. Returns the socket path; the listener task lives
     /// until the test runtime drops.
     pub fn spawn_stub(tag: &str, stub: StubUpstream) -> PathBuf {
-        let path = PathBuf::from("/tmp").join(format!("pgup{}-{tag}.sock", std::process::id()));
+        let path = stub_socket_path(tag);
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).expect("bind stub upstream socket");
         tokio::spawn(ssh_agent_lib::agent::listen(listener, stub));
         path
+    }
+
+    /// Where [`spawn_stub`] binds the stub tagged `tag`, known before it is
+    /// spawned so a stub can be given a pool that points back at itself.
+    pub fn stub_socket_path(tag: &str) -> PathBuf {
+        PathBuf::from("/tmp").join(format!("pgup{}-{tag}.sock", std::process::id()))
+    }
+
+    /// An upstream that accepts every connection and closes it at once:
+    /// each request on it fails with a broken pipe or a reset, as the
+    /// flapping upstream of piggy#326 did.
+    pub fn spawn_closing_upstream(tag: &str) -> PathBuf {
+        let path = stub_socket_path(tag);
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind closing upstream");
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        path
+    }
+
+    /// This process's open descriptors.
+    #[cfg(target_os = "linux")]
+    pub fn open_descriptors() -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .expect("read /proc/self/fd")
+            .count()
     }
 
     pub fn upstream_identity(seed: u8, comment: &str) -> Identity {
@@ -1075,6 +1199,109 @@ mod tests {
                 },
             ]
         );
+    }
+
+    // -------- descriptor safety (piggy#326) --------
+    //
+    // Descriptor counts are process-wide and other tests run alongside, so
+    // the bounds below are loose: they separate "settles back" from
+    // "grows with every request", not one descriptor from two.
+
+    /// An upstream that accepts and closes at once, listed many times, must
+    /// leave the pool's descriptors where they started: each failed request
+    /// closes its socket.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_closing_upstream_does_not_grow_descriptors() {
+        let path = spawn_closing_upstream("closing");
+        let pool = pool_of(vec![("closing", path)]);
+        pool.list_identities().await; // warm the runtime's own descriptors
+        let before = open_descriptors();
+        for _ in 0..200 {
+            assert!(pool.list_identities().await.is_empty());
+        }
+        let after = open_descriptors();
+        assert!(
+            after < before + 50,
+            "200 failed requests took descriptors from {before} to {after}"
+        );
+    }
+
+    /// An upstream that leads back into a proxy (here a relaying stub whose
+    /// pool lists its own socket) recurses until the pool's connection
+    /// limit cuts it; the listing then answers, the descriptors the cycle
+    /// held never climb far, and they come back. Without the limit the
+    /// cycle recurses until the process runs out of descriptors, which is
+    /// what took the agent down in piggy#326; the peak catches that.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_upstream_cycle_is_cut_by_the_connection_limit() {
+        const LIMIT: usize = 16;
+        let path = stub_socket_path("cycle");
+        let pool = UpstreamPool::with_connection_limit(
+            vec![Upstream {
+                name: "cycle".into(),
+                path: path.clone(),
+            }],
+            Duration::from_secs(5),
+            LIMIT,
+        );
+        spawn_stub("cycle", StubUpstream::new(vec![]).relaying_to(pool.clone()));
+        let before = open_descriptors();
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(before));
+        let sampling = {
+            let peak = Arc::clone(&peak);
+            tokio::spawn(async move {
+                loop {
+                    peak.fetch_max(open_descriptors(), std::sync::atomic::Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+        };
+
+        let listed = timeout(Duration::from_secs(10), pool.list_identities())
+            .await
+            .expect("a cyclic upstream must not wedge the listing");
+        sampling.abort();
+        assert!(listed.is_empty(), "{listed:?}");
+        let peak = peak.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            peak < before + 200,
+            "the cycle drove descriptors from {before} to {peak} before it was cut"
+        );
+
+        // Each hop's sockets close as the cycle unwinds; give the stub's
+        // per-connection tasks a moment to see the hangups.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let after = open_descriptors();
+        assert!(
+            after < before + 50,
+            "the cut cycle left descriptors at {after} (from {before})"
+        );
+        assert_eq!(
+            pool.connections.available_permits(),
+            LIMIT,
+            "every upstream connection the cycle opened must be closed"
+        );
+    }
+
+    #[test]
+    fn upstream_at_finds_the_agents_own_socket() {
+        let dir = std::env::temp_dir();
+        let pool = UpstreamPool::new(
+            vec![Upstream {
+                name: "own".into(),
+                path: dir.join("pgup-own.sock"),
+            }],
+            Duration::from_secs(1),
+        );
+        // The same socket reached through `..` still matches: the
+        // directory is resolved, and the socket need not exist yet.
+        assert_eq!(
+            pool.upstream_at(&dir.join(".").join("pgup-own.sock")),
+            Some("own")
+        );
+        assert_eq!(pool.upstream_at(&dir.join("pgup-other.sock")), None);
     }
 
     #[test]

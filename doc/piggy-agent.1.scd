@@ -146,6 +146,13 @@ agent multiplexer in between:
 - Add-identity goes to the *--add-new-keys-to* upstream or is refused.
 - A dead upstream degrades the listing to whatever the others serve; it
   does not break the agent. *piggy health* reports each upstream's state.
+- The agent holds at most 64 upstream connections open at once, across all
+  upstreams and clients; a request beyond that fails at once rather than
+  opening another socket. An upstream that leads back into the agent (a
+  cycle through another proxy) is cut there instead of exhausting the
+  agent's descriptors, and an *--upstream* naming the agent's own socket is
+  refused at start. If the agent does run out of descriptors it keeps
+  listening and serves again once they free up (piggy#326).
 
 *--proxy-only* is the remote-host shape of this (piggy FDR 0001): a host
 reached over SSH runs a cardless front on a stable socket path, its

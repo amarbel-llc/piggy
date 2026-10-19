@@ -11,6 +11,7 @@ use tokio::net::UnixListener;
 
 mod cak;
 mod card;
+mod listener;
 // pub: `agent_client::probe_agent_mode` (the `piggy health` side) shares
 // the AGENT_MODE_EXT name + AgentMode payload type.
 pub mod mode;
@@ -433,6 +434,18 @@ async fn run_async(
         }
     };
 
+    // piggy#326: an upstream at this agent's own socket would send every
+    // proxied request straight back in, without end.
+    if let Some(name) = upstream_pool
+        .as_ref()
+        .and_then(|pool| pool.upstream_at(std::path::Path::new(&socket_path)))
+    {
+        return Err(format!(
+            "--upstream {name} is this agent's own socket ({socket_path}); proxying to it would loop"
+        )
+        .into());
+    }
+
     // Detect shell output format
     let use_csh = cli.csh_format
         || (!cli.sh_format && std::env::var("SHELL").is_ok_and(|s| s.ends_with("csh")));
@@ -450,7 +463,7 @@ async fn run_async(
         println!("echo Agent pid {};", std::process::id());
     }
 
-    let listener = bind_reclaiming_stale(&socket_path)?;
+    let listener = listener::ResilientListener(bind_reclaiming_stale(&socket_path)?);
     // piggy#255: event-driven presence is the default for a card-backed agent;
     // --poll-only opts out, and a proxy-only agent runs no card loop at all.
     let event_driven = !cli.proxy_only && !cli.poll_only;
