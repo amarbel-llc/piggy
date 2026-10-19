@@ -920,13 +920,34 @@ impl PiggyAgent {
             // first, and on a PIN-always slot a real YubiKey drops the
             // verified PIN across that extra GET DATA, answering 6982 to the
             // sign even after a good PIN and a touch (piggy#325).
+            let started = std::time::Instant::now();
             match session.sign_prehash_with_alg(key.slot_id, key.algorithm.to_byte(), &digest) {
                 Ok(signature) => signature,
                 // 6982 (the card's "security status not satisfied") right
-                // after a good PIN in the same transaction is the card
-                // giving up on the touch.
+                // after a good PIN is either the card giving up on the touch
+                // or the PIN state being gone; only the time the sign took
+                // tells them apart (piggy#325). An operator-act slot is
+                // attested touch-always, so it does wait for a touch.
                 Err(PivError::PinRequired) => {
-                    return refuse(Status::Cancelled, "the card was not touched in time".into());
+                    let elapsed = started.elapsed();
+                    let refusal = piggy_piv::refusal::classify(elapsed, true);
+                    tracing::warn!(
+                        card = %card,
+                        slot = key.slot_id,
+                        sw = "0x6982",
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        ?refusal,
+                        "operator act: the card refused the sign"
+                    );
+                    let status = match refusal {
+                        piggy_piv::refusal::SecurityStatusRefusal::TouchTimedOut => {
+                            Status::Cancelled
+                        }
+                        piggy_piv::refusal::SecurityStatusRefusal::PinStateNotSatisfied => {
+                            Status::Error
+                        }
+                    };
+                    return refuse(status, piggy_piv::refusal::describe(refusal, elapsed));
                 }
                 Err(e) => return refuse(Status::Error, e.to_string()),
             }

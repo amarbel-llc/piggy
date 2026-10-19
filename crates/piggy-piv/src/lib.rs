@@ -14,6 +14,7 @@ pub mod pin_mgmt;
 pub mod pinfo;
 pub mod policy;
 pub mod put_data;
+pub mod refusal;
 pub mod slot;
 pub mod tlv;
 pub mod token;

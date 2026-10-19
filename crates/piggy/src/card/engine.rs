@@ -215,6 +215,9 @@ pub(crate) fn provision_slot(
     recovery: &str,
 ) -> Result<Vec<u8>, ProvisionError> {
     let point = card.generate_key(slot, PivAlgorithm::EcP256, policy)?;
+    // How long a sign the card refused with 0x6982 took, which tells a missed
+    // touch from a lost PIN state (piggy#325).
+    let mut refused_after = None;
     let certified = (|| -> Result<(), PivError> {
         if policy.effective_pin(slot) == PinPolicy::Always {
             card.verify_pin(pin)?;
@@ -231,18 +234,30 @@ pub(crate) fn provision_slot(
             &point,
             PivAlgorithm::EcP256,
             cn,
-            |digest| card.sign_prehash(slot, PivAlgorithm::EcP256, digest),
+            |digest| {
+                let started = std::time::Instant::now();
+                let signed = card.sign_prehash(slot, PivAlgorithm::EcP256, digest);
+                if matches!(
+                    signed,
+                    Err(PivError::PinRequired | PivError::Apdu { sw: 0x6982 })
+                ) {
+                    refused_after = Some(started.elapsed());
+                }
+                signed
+            },
         )?;
         card.put_cert(slot, &cert)
     })();
     certified.map_err(|e| {
-        let missed_touch = if policy.needs_touch() {
-            " (if the card was waiting for a touch, it gave up waiting)"
-        } else {
-            ""
+        let why = match refused_after {
+            Some(elapsed) => {
+                let refusal = piggy_piv::refusal::classify(elapsed, policy.needs_touch());
+                format!(": {}", piggy_piv::refusal::describe(refusal, elapsed))
+            }
+            None => String::new(),
         };
         ProvisionError::Partial(format!(
-            "slot {slot:02X} has a new key but its certificate was not written: {e}{missed_touch}. {recovery}"
+            "slot {slot:02X} has a new key but its certificate was not written: {e}{why}. {recovery}"
         ))
     })?;
     Ok(point)
@@ -1141,7 +1156,10 @@ mod tests {
         let msg = err.to_string();
         assert!(matches!(err, ProvisionError::Partial(_)), "{msg}");
         assert!(msg.contains("slot 9C has a new key"), "{msg}");
-        assert!(msg.contains("gave up waiting"), "{msg}");
+        // The mock refuses at once, which is a lost PIN state, never a missed
+        // touch (piggy#325).
+        assert!(msg.contains("SW=0x6982"), "{msg}");
+        assert!(!msg.contains("not touched"), "{msg}");
         assert!(
             msg.contains("factory PIN") && msg.contains("--allow-reprovision"),
             "{msg}"

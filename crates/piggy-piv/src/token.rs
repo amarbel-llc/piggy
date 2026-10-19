@@ -39,8 +39,8 @@ const PIN_SESSION_RESET_RETRY_CAP: u32 = 3;
 /// before disposition (vendor/pivy/src/piv.c::piv_txn_end). That
 /// optimization lets cooperative cards retain other state across the
 /// reset; piggy chooses the simpler "always reset" rule. Cost: a
-/// subsequent client must re-select the PIV applet. Acceptable for
-/// the show-batch use case.
+/// subsequent client must re-select the PIV applet, which
+/// [`PivToken::begin_pin_session`] does on every session it opens.
 pub struct PinSession<'tok> {
     /// `Option` so [`PinSession::end`] can consume the transaction
     /// without `Drop` re-running over `self.txn`. `None` only
@@ -566,6 +566,17 @@ impl PivToken {
             }
         }
         let txn = self.card.transaction().map_err(PivError::Pcsc)?;
+        // SELECT PIV again, inside the transaction, every time. The token
+        // selected it at connect, but another client's session may have
+        // ended with ResetCard since (every PIN-verified session does, see
+        // above), and a reset card has no applet selected: its first PIV
+        // APDU would come back 0x6D00 (piggy#323, #325). Inside the
+        // transaction nothing can deselect it again before the session's
+        // own APDUs run.
+        let (_, sw) = transmit_on(&txn, &Apdu::select(PIV_AID))?;
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
         Ok(PinSession {
             txn: Some(txn),
             pin_verified: false,
