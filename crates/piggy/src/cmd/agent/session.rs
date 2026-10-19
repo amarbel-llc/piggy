@@ -915,7 +915,12 @@ impl PiggyAgent {
                      (set SSH_NOTIFY_SEND or PIGGY_ASKPASS_NOTIFIER)"
                 );
             }
-            match session.sign_prehash(key.slot_id, &digest) {
+            // The algorithm is already known from the key list, so sign with
+            // it directly: `sign_prehash` would read the slot's certificate
+            // first, and on a PIN-always slot a real YubiKey drops the
+            // verified PIN across that extra GET DATA, answering 6982 to the
+            // sign even after a good PIN and a touch (piggy#325).
+            match session.sign_prehash_with_alg(key.slot_id, key.algorithm.to_byte(), &digest) {
                 Ok(signature) => signature,
                 // 6982 (the card's "security status not satisfied") right
                 // after a good PIN in the same transaction is the card
