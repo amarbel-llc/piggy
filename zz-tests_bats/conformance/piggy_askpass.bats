@@ -833,12 +833,14 @@ refute_zenity_argv_has() {
   refute_zenity_argv_has "--forms"
 }
 
-@test "quote_is_an_entry_dialog_with_its_own_title_and_button" {
+@test "quote_is_a_form_with_its_own_title_and_button" {
   run_askpass_against_zenity_stub '123456\n' PIGGY_ASKPASS_KIND=quote
 
   assert_success
   assert_output "123456"
-  assert_zenity_argv_has "--entry"
+  assert_zenity_argv_has "--forms"
+  assert_zenity_argv_has "--add-password=PIV PIN"
+  refute_zenity_argv_has "--entry"
   assert_zenity_argv_has "--title=piggy operator act: QUOTE"
   assert_zenity_argv_has "--ok-label=Sign quote"
   # Reading the text takes longer than typing a PIN.
@@ -875,9 +877,37 @@ refute_zenity_argv_has() {
   refute_output --partial "123456"
 }
 
+# piggy#319: the class is recognisable before the text is read, by a band
+# in the class's own colour carrying its own symbol, and no two classes
+# share either.
+@test "each_class_opens_its_form_with_its_own_coloured_band_and_symbol" {
+  local class band seen_bands=""
+  for class in quote certificate escalation; do
+    run_askpass_against_zenity_stub '123456\nESCALATE\n' PIGGY_ASKPASS_KIND="$class"
+    assert_success
+    band=$(grep -o -m1 '<span [^>]*background="#[0-9a-f]*"[^>]*> [^ ]*' "$ZENITY_ARGV") || {
+      echo "no coloured band opens the $class form; got:"
+      cat "$ZENITY_ARGV"
+      return 1
+    }
+    [[ $seen_bands != *"$band"* ]] || {
+      echo "the $class band repeats another class's colour and symbol: $band"
+      return 1
+    }
+    seen_bands+="$band|"
+  done
+  case "$seen_bands" in
+    *'#c01c28'*'⚠'*) ;;
+    *)
+      echo "escalation is not the red ⚠ band: $seen_bands"
+      return 1
+      ;;
+  esac
+}
+
 # zenity does not show --text literally (see the script): the forms dialogs
-# parse Pango markup, the entry dialog reads `_` as a mnemonic, and both
-# interpret backslash escapes. The text of an act must survive all three.
+# parse Pango markup and interpret backslash escapes. The text of an act
+# must survive both.
 TRICKY_TEXT='grant <b>bold</b> & more; id ecdsa_p256_sig; path a\nb'
 
 assert_zenity_text_has() {
@@ -890,21 +920,13 @@ assert_zenity_text_has() {
 
 @test "forms_dialogs_escape_markup_and_backslashes_so_the_text_shows_literally" {
   local class
-  for class in escalation certificate; do
+  for class in quote escalation certificate; do
     run_askpass_against_zenity_stub '123456\nESCALATE\n' \
       PIGGY_ASKPASS_KIND="$class" PIGGY_ASKPASS_CONTEXT="$TRICKY_TEXT"
     assert_success
     assert_zenity_text_has 'grant &lt;b&gt;bold&lt;/b&gt; &amp; more; id ecdsa_p256_sig; path a\\nb'
     refute_zenity_argv_has '<b>'
   done
-}
-
-@test "entry_dialog_escapes_mnemonics_and_backslashes_so_the_text_shows_literally" {
-  run_askpass_against_zenity_stub '123456\n' \
-    PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="$TRICKY_TEXT"
-  assert_success
-  # Not markup here, so < > & stay; `_` is doubled, `\` is doubled.
-  assert_zenity_text_has 'grant <b>bold</b> & more; id ecdsa__p256__sig; path a\\nb'
 }
 
 # -------- tall operator-act texts: the scrolling read (RFC 0012 §2.6) --------
@@ -972,10 +994,10 @@ tall_act_text() {
     cat "$ZENITY_CALLS"
     return 1
   }
-  local text_info_at entry_at
+  local text_info_at pin_dialog_at
   text_info_at=$(grep -n -x -- '--text-info' "$ZENITY_CALLS" | cut -d: -f1)
-  entry_at=$(grep -n -x -- '--entry' "$ZENITY_CALLS" | cut -d: -f1)
-  [[ -n $text_info_at && -n $entry_at && $text_info_at -lt $entry_at ]] || {
+  pin_dialog_at=$(grep -n -x -- '--forms' "$ZENITY_CALLS" | cut -d: -f1)
+  [[ -n $text_info_at && -n $pin_dialog_at && $text_info_at -lt $pin_dialog_at ]] || {
     echo "the scrolling read did not come before the PIN dialog:"
     cat "$ZENITY_CALLS"
     return 1

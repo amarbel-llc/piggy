@@ -275,7 +275,9 @@ piggy-aware context above the prompt, re-derives a live Wayland display
 when the agent inherited a frozen *systemd --user* environment, and
 refuses rather than guessing. For an operator act it reads the class from
 *PIGGY_ASKPASS_KIND* and gives each its own banner, window title, button and
-dialog; an escalation also requires the word ESCALATE to be typed. It
+dialog, which in zenity opens with a band in the class's colour carrying its
+symbol (escalation red, certificate amber, quote blue); an escalation also
+requires the word ESCALATE to be typed. It
 refuses a class it does not know. A PIN dialog does not scroll, so in zenity
 an act whose prompt runs past 15 lines is first shown whole, as plain text,
 in a scrolling window whose OK stays disabled until "I have read the whole

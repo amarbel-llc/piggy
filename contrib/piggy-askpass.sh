@@ -83,11 +83,14 @@
 # (quote, escalation or certificate) and puts the namespace and the exact
 # text being signed in PIGGY_ASKPASS_CONTEXT. Each class then gets its own
 # banner, window title, confirm button and dialog, so the prompt cannot be
-# mistaken for a routine PIN prompt, nor an escalation for a quote:
+# mistaken for a routine PIN prompt, nor an escalation for a quote. In
+# zenity every class is a form whose text opens with a coloured band
+# carrying the class's symbol, so the class is recognisable before a word
+# of the text is read (piggy#319):
 #
-#   quote        entry dialog; button "Sign quote".
-#   certificate  form with one PIN field; button "Issue certificate".
-#   escalation   form with the PIN field and a second field in which the
+#   quote        blue band, ❝; one PIN field; button "Sign quote".
+#   certificate  amber band, ✎; one PIN field; button "Issue certificate".
+#   escalation   red band, ⚠; the PIN field and a second field in which the
 #                word ESCALATE must be typed; button "Grant escalation".
 #                On a tty the word is asked for on a line of its own.
 #
@@ -124,31 +127,45 @@ escalation_word="ESCALATE"
 operator_act_scroll_lines=15
 
 # What sets one class of operator act apart from the others and from a
-# routine prompt: the banner over the text, the window title and the
-# confirm button. One function per class, so a class can grow its own
-# rendering without touching the others; the dialogs themselves are the
-# zenity_<class> functions further down.
+# routine prompt: the banner over the text, the window title, the confirm
+# button, and in zenity a band in the class's colour with its symbol. One
+# function per class, so a class can grow its own rendering without
+# touching the others; the dialogs themselves are the zenity_<class>
+# functions further down. The symbols are BMP dingbats, which the common
+# desktop fonts carry; colour emoji are not relied on.
 class_quote() {
   class_banner="=== OPERATOR ACT: QUOTE — you are signing words already on record ==="
   class_title="piggy operator act: QUOTE"
   class_ok_label="Sign quote"
+  class_band="❝  QUOTE — signing words already on record"
+  class_band_background="#1c71d8"
+  class_band_foreground="#ffffff"
 }
 
 class_escalation() {
   class_banner="!!! OPERATOR ACT: ESCALATION — you are GRANTING AUTHORITY !!!"
   class_title="piggy operator act: ESCALATION (grants authority)"
   class_ok_label="Grant escalation"
+  class_band="⚠  ESCALATION — you are GRANTING AUTHORITY  ⚠"
+  class_band_background="#c01c28"
+  class_band_foreground="#ffffff"
 }
 
 class_certificate() {
   class_banner="=== OPERATOR ACT: CERTIFICATE — you are certifying a key ==="
   class_title="piggy operator act: CERTIFICATE"
   class_ok_label="Issue certificate"
+  class_band="✎  CERTIFICATE — certifying a key"
+  class_band_background="#e5a50a"
+  class_band_foreground="#000000"
 }
 
 class_banner=""
 class_title="piggy PIV PIN"
 class_ok_label=""
+class_band=""
+class_band_background=""
+class_band_foreground=""
 default_timeout=30
 case "$kind" in
   "") ;;
@@ -347,18 +364,10 @@ zenity_routine() {
 # An operator act's text must reach the operator's eyes literally (RFC 0012
 # §2.6), and zenity does not show --text literally. As read in zenity
 # 4.2.1's source: every dialog runs it through g_strcompress, which turns
-# backslash escapes into the characters they name; --entry then reads `_`
-# as a keyboard-mnemonic marker and drops it; --forms parses the result as
-# Pango markup, where `<`, `>` and `&` are syntax and a malformed tag blanks
-# the whole label. The two functions below undo exactly that, per dialog.
+# backslash escapes into the characters they name; --forms then parses the
+# result as Pango markup, where `<`, `>` and `&` are syntax and a malformed
+# tag blanks the whole label. The function below undoes exactly that.
 # (The routine prompt predates this and is left byte-for-byte as it was.)
-
-literal_for_zenity_entry() {
-  local text="$1"
-  text="${text//\\/\\\\}"
-  text="${text//_/__}"
-  printf '%s' "$text"
-}
 
 # `\&` because bash 5.2+ reads a bare `&` in the replacement as "the match".
 literal_for_zenity_forms() {
@@ -370,16 +379,26 @@ literal_for_zenity_forms() {
   printf '%s' "$text"
 }
 
+# The form text of an operator act: the class's coloured band, which is the
+# only markup in it and is built from the script's own constants, then the
+# act's text, escaped to show literally.
+operator_act_form_text() {
+  printf '<span size="x-large" weight="bold" background="%s" foreground="%s"> %s </span>\n\n%s' \
+    "$class_band_background" "$class_band_foreground" "$class_band" \
+    "$(literal_for_zenity_forms "$body")"
+}
+
 zenity_quote() {
-  zenity --timeout="$zenity_timeout" --entry --hide-text \
+  zenity --timeout="$zenity_timeout" --forms \
     --title="$class_title" --ok-label="$class_ok_label" \
-    --text="$(literal_for_zenity_entry "$body")"
+    --text="$(operator_act_form_text)" \
+    --add-password="PIV PIN"
 }
 
 zenity_certificate() {
   zenity --timeout="$zenity_timeout" --forms \
     --title="$class_title" --ok-label="$class_ok_label" \
-    --text="$(literal_for_zenity_forms "$body")" \
+    --text="$(operator_act_form_text)" \
     --add-password="PIV PIN"
 }
 
@@ -388,7 +407,7 @@ zenity_escalation() {
   local answer typed_pin typed_word
   answer="$(zenity --timeout="$zenity_timeout" --forms \
     --title="$class_title" --ok-label="$class_ok_label" \
-    --text="$(literal_for_zenity_forms "$body")" \
+    --text="$(operator_act_form_text)" \
     --separator=$'\n' \
     --add-password="PIV PIN" \
     --add-entry="Type $escalation_word to grant")" || return
