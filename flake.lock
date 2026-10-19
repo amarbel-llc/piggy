@@ -228,6 +228,22 @@
         "type": "github"
       }
     },
+    "nixpkgs-x86_64-darwin": {
+      "locked": {
+        "lastModified": 1792285535,
+        "narHash": "sha256-2ziqQLBRfA3qKlOwHv3WcYHymPA4+tm0IQQkLI6a3L4=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "21691b79c41ba30a80b110523c943d8d45a0912b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-26.05-darwin",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "oracle-javacard-sdks": {
       "flake": false,
       "locked": {
@@ -296,6 +312,7 @@
         "jcardsim": "jcardsim",
         "langlang": "langlang",
         "nixpkgs-master": "nixpkgs-master",
+        "nixpkgs-x86_64-darwin": "nixpkgs-x86_64-darwin",
         "oracle-javacard-sdks": "oracle-javacard-sdks",
         "pivapplet": "pivapplet",
         "purse-first": "purse-first",

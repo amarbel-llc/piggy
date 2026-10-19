@@ -16,6 +16,11 @@
     igloo.url = "https://code.linenisgreat.com/igloo/archive/master.tar.gz";
     nixpkgs-master.url = "github:NixOS/nixpkgs/b4fd65b198c599cbe814fcb9f42d25d021595ec9";
     utils.url = "https://flakehub.com/f/numtide/flake-utils/0.1.102";
+    # Nixpkgs 26.11 dropped x86_64-darwin (so igloo's systems list and
+    # nixpkgs-master no longer carry it); 26.05 is the last branch that
+    # builds it, with security fixes until the end of 2026. The Intel Mac
+    # package is built from here alone; see mkIntelMacPackages below.
+    nixpkgs-x86_64-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
 
     bats = {
       url = "https://code.linenisgreat.com/bats/archive/master.tar.gz";
@@ -119,6 +124,7 @@
       self,
       igloo,
       nixpkgs-master,
+      nixpkgs-x86_64-darwin,
       utils,
       bats,
       langlang,
@@ -128,891 +134,941 @@
       pivapplet,
       oracle-javacard-sdks,
     }:
-    (utils.lib.eachDefaultSystem (
-      system:
-      let
-        # Single source of truth for piggy's user-visible version. Read
-        # from version.env at flake-eval time and threaded into the
-        # piggy/piggy-agent-conformance derivations' `version` attr and
-        # the makeWrapper `--set PIGGY_VERSION`. Cargo's build.rs
-        # (crates/piggy/build.rs) reads the same file at compile time.
-        # See eng-versioning(7) and piggy CLAUDE.md.
-        piggyVersion = builtins.head (
-          builtins.match ".*PIGGY_VERSION=([^\n]+).*" (builtins.readFile ./version.env)
-        );
-
-        # Short commit for the `piggy version` self-line (eng-versioning(7)).
-        # Clean tree → shortRev; dirty worktree → dirtyShortRev; neither
-        # (e.g. a tarball with no git metadata) → "unknown".
-        piggyCommit = self.shortRev or self.dirtyShortRev or "unknown";
-        # pcsclite is pinned *within* the nixpkgs-master input rather than as
-        # its own tool-flake, so the rev that pins it is the input's rev.
-        pcscliteRev = nixpkgs-master.shortRev or "unknown";
-
-        # The `amarbel-llc/nixpkgs` overlay supplies the fork's package
-        # additions; the bats lane builder itself comes from the
-        # `amarbel-llc/bats` flake input (see `batsLib` below). Keeping
-        # the overlay in scope for every consumer of `pkgs` so the rest
-        # of the flake picks up the fork additions uniformly.
-        #
-        # The second overlay strips a malformed " none required" token
-        # from libfyaml's pkg-config Libs: line on darwin, which leaks
-        # into appstream's link command as literal filename arguments
-        # and breaks the build of zenity → libadwaita → appstream's
-        # transitive consumers. Tracked at NixOS/nixpkgs#514566; fix
-        # ported from NixOS/nixpkgs#513484. Drop once that PR merges
-        # and is pulled into amarbel-llc/nixpkgs.
-        libfyamlFix =
-          final: prev:
-          prev.lib.optionalAttrs prev.stdenv.hostPlatform.isDarwin {
-            libfyaml = prev.libfyaml.overrideAttrs (old: {
-              postInstall = (old.postInstall or "") + ''
-                substituteInPlace "$dev/lib/pkgconfig/libfyaml.pc" \
-                  --replace-fail " none required" ""
-              '';
-            });
-          };
-        pkgs = import igloo {
-          inherit system;
-          overlays = [
-            igloo.overlays.default
-            libfyamlFix
-          ];
-        };
-        pkgs-master = import nixpkgs-master { inherit system; };
-
-        # gomod.nix is the producer half of the flake-input-go_mod protocol
-        # (amarbel-llc/nixpkgs RFC 0001): mkGoPkgs publishes go-pkgs /
-        # go-pkgs-test so madder/dodder/cutting-garden bridge
-        # code.linenisgreat.com/piggy/go as a flake input (flake.lock-only
-        # bumps) instead of a go.mod pseudo-version. The producer src is scoped
-        # to the go/ subdir, so downstream bridges with NO subPath. goFlakeInputs
-        # (the dewey bridge) is threaded into the two buildGoApplication binaries
-        # below so dewey resolves during the self-consume build. See go/gomod.nix.
-        gomod = import ./go/gomod.nix {
-          inherit pkgs purse-first system;
-          src = self + "/go";
-        };
-        inherit (gomod) goFlakeInputs;
-        inherit (gomod.goPkgs) go-pkgs go-pkgs-test;
-
-        # Software PIV smart card for tests. Only built on Linux — vsmartcard
-        # is marked broken on darwin upstream.
-        virtualPiv = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
-          import ./nix/virtual-piv.nix {
-            inherit pkgs pkgs-master;
-            jcardsim-src = jcardsim;
-            pivapplet-src = pivapplet;
-            oracle-javacard-sdks-src = oracle-javacard-sdks;
-          }
-        );
-
-        # NixOS VM integration lane (nix/vm-tests/): fibby + the Rust
-        # agent as guest systemd units, LUKS2 and ZFS unlocked from the
-        # store. Linux-only, TCG-tolerant (no KVM on the build host). Merged into
-        # `checks` so `nix flake check` runs it; the justfile
-        # `test-vm-*` recipes are the paved paths. The guard wraps the
-        # import: runNixOSTest must never be evaluated on darwin.
-        vmTests = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
-          import ./nix/vm-tests { inherit pkgs piggy fibby; }
-        );
-
-        # The same lanes on the instrumented (`-C instrument-coverage`)
-        # piggy, each shipping its guest's .profraw files in $out, plus
-        # the merged llvm-cov report over all of them. Exposed as packages,
-        # NOT checks: deliberately outside the merge gate and `nix flake
-        # check` until the added wall time is measured (`just
-        # test-vm-coverage`). fibby stays uninstrumented: it is test
-        # infrastructure, and it has no SIGTERM handler, so an instrumented
-        # daemon would be killed without flushing its profile anyway.
-        vmCoverage = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
-          let
-            lanes = import ./nix/vm-tests {
-              inherit pkgs fibby;
-              piggy = piggy-cov;
-              coverage = true;
+    let
+      # Intel Mac: packages only, from nixpkgs 26.05 (see the input). No
+      # checks, devShells or formatter — those need igloo, conformist and
+      # bats, which follow 26.11. First step: piggy-rs only, to find out
+      # whether the workspace builds there; the wrapped piggy, fibby and
+      # one shared package definition come once it does.
+      mkIntelMacPackages =
+        system:
+        let
+          pkgs = import nixpkgs-x86_64-darwin { inherit system; };
+        in
+        {
+          piggy-rs = pkgs.rustPlatform.buildRustPackage {
+            pname = "piggy-rs";
+            version = "0.1.0";
+            src = pkgs.lib.cleanSourceWith {
+              src = ./.;
+              filter =
+                name: type:
+                let
+                  rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
+                  base = baseNameOf rel;
+                in
+                base == "Cargo.toml"
+                || base == "Cargo.lock"
+                || base == "version.env"
+                || pkgs.lib.hasPrefix "crates" rel;
             };
-            covLanes = pkgs.lib.mapAttrs' (name: drv: pkgs.lib.nameValuePair "${name}-cov" drv) lanes;
-          in
-          covLanes
-          // {
-            coverage-report = import ./nix/vm-tests/coverage-report.nix {
-              inherit pkgs;
-              tests = pkgs.lib.attrValues covLanes;
-              objects = [
-                "${piggy-rs-cov}/bin/piggy"
-                "${piggy-rs-cov}/bin/piggy-ids"
-                "${piggy-rs-cov}/bin/age-plugin-piggy"
-              ];
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "tap-dancer-0.1.12" = "sha256-tZ30ATmSKh10fY8hRwH+ZY+Hz0Pvpg7/yA9chYSdlvI=";
+              };
             };
-          }
-        );
-
-        # pivy C package, built from vendor/pivy (see nix/pivy.nix and
-        # piggy #21). Local derivation instead of a nested flake input.
-        pivyPkg = import ./nix/pivy.nix {
-          inherit pkgs;
-          src = ./vendor/pivy;
-        };
-
-        # Runtime deps on PATH for the wrapped piggy binary. `pivy`
-        # backs the C-pivy delegations (`tool`, `piggy pivy <tool>`, and
-        # the `piggy box` subcommands the rust impl doesn't cover — see
-        # crates/piggy/src/exec.rs); store decrypt is in-process
-        # (piggy#164) and needs nothing from it.
-        # `openssh` provides `ssh-copy-id`, which `piggy ssh-copy-id`
-        # (crates/piggy/src/ssh_copy_id.rs) execs to install the 9A keys.
-        # C pivy is NO LONGER a runtime dep (piggy#289 Phase 4): every op piggy
-        # needs is Rust, so `pivyPkg` is demoted to a test-only input (`.#pivy`,
-        # the differential oracle) and kept OUT of the shipped closure —
-        # enforced by the `lint-closure-no-pivy` check below. The
-        # `piggy pivy <tool>` escape hatch therefore finds no `pivy-*` on PATH
-        # and says so clearly (exec.rs); its code is removed in Phase 5.
-        runtimeDeps = [
-          pkgs.git
-          pkgs.tree
-          pkgs.qrencode
-          pkgs.gnugrep
-          pkgs.coreutils
-          pkgs.openssh
-        ];
-
-        # Runtime deps for contrib/piggy-askpass.sh when invoked by
-        # pivy-agent's launchd job (PATH is unset there). `ps` is in
-        # `procps` on Linux; macOS provides /bin/ps in the base system
-        # so we don't add a darwin-specific dep. `zenity` is the GUI
-        # fallback when /dev/tty isn't connected (the typical agent
-        # case).
-        askpassRuntimeDeps = [
-          pkgs.coreutils
-          pkgs.zenity
-        ]
-        ++ pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.procps;
-
-        # Native rust workspace: `piggy` (binary) + `piggy-piv` (library).
-        # pcsclite is only needed on linux; macOS has PC/SC in CoreServices.
-        # Uses pkgs-master (2.4.1) for backward-compatible IPC protocol
-        # negotiation — a 2.4.1 client can talk to daemons as old as 1.8.24,
-        # which covers Ubuntu 24.04's 2.0.3 pcscd without workarounds.
-        rustBuildInputs = [
-          pkgs.openssl
-        ]
-        ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs-master.pcsclite ];
-        rustNativeBuildInputs = [ pkgs.pkg-config ];
-
-        # Shared cargoLock attrs for every buildRustPackage derivation in
-        # this flake. They all vendor from the same Cargo.lock, so git-dep
-        # outputHashes must stay identical — buildRustPackage fetches every
-        # git dep in the lock file regardless of which workspace package is
-        # built (fibby doesn't depend on tap-dancer but still needs the
-        # hash). Factored here so a tap-dancer bump (or any future git dep)
-        # only needs one edit.
-        sharedCargoLock = {
-          lockFile = ./Cargo.lock;
-          outputHashes = {
-            "tap-dancer-0.1.12" = "sha256-tZ30ATmSKh10fY8hRwH+ZY+Hz0Pvpg7/yA9chYSdlvI=";
+            buildInputs = [
+              pkgs.openssl
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.pcsclite ];
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            doCheck = false;
           };
         };
-
-        # Coverage variant knobs for the Rust derivations (nix/vm-tests/
-        # coverage-report.nix): `-C instrument-coverage` makes every
-        # process write an LLVM .profraw at exit (path from
-        # LLVM_PROFILE_FILE), the binaries stay unstripped so llvm-cov can
-        # map counters back to source, and the in-sandbox `cargo test` is
-        # skipped — the normal variant already runs it, and instrumented
-        # tests would only slow the build.
-        coverageAttrs = {
-          RUSTFLAGS = "-C instrument-coverage";
-          dontStrip = true;
-          doCheck = false;
+      withIntelMac =
+        outputs:
+        nixpkgs-master.lib.recursiveUpdate outputs {
+          packages.x86_64-darwin = mkIntelMacPackages "x86_64-darwin";
         };
-
-        mkPiggyRs =
-          {
-            coverage ? false,
-          }:
-          pkgs.rustPlatform.buildRustPackage (
-            {
-              pname = if coverage then "piggy-rs-cov" else "piggy-rs";
-              version = "0.1.0";
-
-              src = pkgs.lib.cleanSourceWith {
-                src = ./.;
-                filter =
-                  name: type:
-                  let
-                    rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
-                    base = baseNameOf rel;
-                  in
-                  base == "Cargo.toml"
-                  || base == "Cargo.lock"
-                  # version.env is read by crates/piggy/build.rs at compile
-                  # time and must reach the sandboxed source tree.
-                  || base == "version.env"
-                  || pkgs.lib.hasPrefix "crates" rel;
-              };
-
-              cargoLock = sharedCargoLock;
-
-              buildInputs = rustBuildInputs;
-              nativeBuildInputs = rustNativeBuildInputs;
-
-              # Integration tests in crates/piggy-piv/tests/ need a pcsc daemon
-              # that nix sandboxes can't provide. Match pivy's flake, which skips
-              # checks on darwin for the same reason (no system pcscd under CI).
-              doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
-
-              meta = with pkgs.lib; {
-                description = "Piggy rust workspace (piggy CLI + piggy-piv library)";
-                homepage = "https://code.linenisgreat.com/piggy";
-                license = licenses.mpl20;
-                platforms = platforms.linux ++ platforms.darwin;
-              };
-            }
-            // pkgs.lib.optionalAttrs coverage coverageAttrs
+    in
+    withIntelMac (
+      (utils.lib.eachDefaultSystem (
+        system:
+        let
+          # Single source of truth for piggy's user-visible version. Read
+          # from version.env at flake-eval time and threaded into the
+          # piggy/piggy-agent-conformance derivations' `version` attr and
+          # the makeWrapper `--set PIGGY_VERSION`. Cargo's build.rs
+          # (crates/piggy/build.rs) reads the same file at compile time.
+          # See eng-versioning(7) and piggy CLAUDE.md.
+          piggyVersion = builtins.head (
+            builtins.match ".*PIGGY_VERSION=([^\n]+).*" (builtins.readFile ./version.env)
           );
 
-        piggy-rs = mkPiggyRs { };
-        piggy-rs-cov = mkPiggyRs { coverage = true; };
+          # Short commit for the `piggy version` self-line (eng-versioning(7)).
+          # Clean tree → shortRev; dirty worktree → dirtyShortRev; neither
+          # (e.g. a tarball with no git metadata) → "unknown".
+          piggyCommit = self.shortRev or self.dirtyShortRev or "unknown";
+          # pcsclite is pinned *within* the nixpkgs-master input rather than as
+          # its own tool-flake, so the rev that pins it is the input's rev.
+          pcscliteRev = nixpkgs-master.shortRev or "unknown";
 
-        # Standalone `fibby` package — the pcsc-lite-daemon-protocol Rust
-        # server (see docs/plans/2026-05-29-fibby-virtual-piv-rust-design.md
-        # and crates/fibby/README.md). Shares the workspace source filter
-        # with piggy-rs so a single nix-cached build artifact serves both.
-        # On Linux, the `hardware-proxy` Cargo feature is enabled so the
-        # HardwareProxy backend (real-card passthrough used by the wet-env
-        # validation recipes) is available. Darwin builds without the
-        # feature because pcsc-sys's libpcsclite link isn't satisfied
-        # there — flake.nix:166 only adds pcsclite to rustBuildInputs on
-        # `stdenv.hostPlatform.isLinux`, matching the upstream vsmartcard-on-darwin
-        # status. The `VirtualCard` backend is always available on both
-        # platforms.
-        #
-        # Used by: `just load-fibby` (downstream of this output), the wet-env
-        # capture recipes (`debug-fibby-roundtrip-capture` /
-        # `debug-fibby-roundtrip-via-fib`), and any consumer of #129's
-        # planned packaging story (e.g. a future home-manager service).
-        fibby = pkgs.rustPlatform.buildRustPackage {
-          pname = "fibby";
-          version = "0.1.0";
-
-          src = pkgs.lib.cleanSourceWith {
-            src = ./.;
-            filter =
-              name: type:
-              let
-                rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
-                base = baseNameOf rel;
-              in
-              base == "Cargo.toml"
-              || base == "Cargo.lock"
-              || base == "version.env"
-              || pkgs.lib.hasPrefix "crates" rel;
-          };
-
-          cargoLock = sharedCargoLock;
-
-          # Build only the fibby crate (the workspace builds piggy etc. as
-          # a side effect via piggy-rs; this keeps the artifact narrow).
-          cargoBuildFlags = [
-            "-p"
-            "fibby"
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-            "--features"
-            "hardware-proxy"
-          ];
-
-          # Match the build feature gate on tests so `cargo test` exercises
-          # the hardware-proxy code path on Linux. The 18 fibby tests
-          # (17 unit + 1 loopback) are pure-data / VirtualCard-driven, so
-          # they pass with or without the feature; the feature gate just
-          # ensures the hardware-proxy code TYPE-CHECKS in the sandbox.
-          cargoTestFlags = [
-            "-p"
-            "fibby"
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-            "--features"
-            "hardware-proxy"
-          ];
-
-          buildInputs = rustBuildInputs;
-          nativeBuildInputs = rustNativeBuildInputs;
-
-          # Run the 18 fibby tests inside the sandbox. Loopback uses /tmp
-          # for its AF_UNIX socket (sun_path-short), so it survives the
-          # short nix-sandbox TMPDIR fine. Hardware-proxy unit tests stay
-          # hermetic — they don't try to reach a real pcscd.
-          doCheck = true;
-
-          meta = with pkgs.lib; {
-            description = "Pure-Rust virtual PIV card speaking the pcsc-lite client protocol directly";
-            homepage = "https://code.linenisgreat.com/piggy";
-            license = licenses.mpl20;
-            mainProgram = "fibby";
-            platforms = platforms.linux ++ platforms.darwin;
-          };
-        };
-
-        # Wrapped `piggy` binary: rust dispatch + bash passwordstore + pivy
-        # fallback, bundled as a single symlink-joined package. A function
-        # of the Rust workspace derivation so the coverage variant
-        # (piggy-rs-cov) gets the identical wrapper.
-        mkPiggy =
-          {
-            piggyRs,
-            coverage ? false,
-          }:
-          pkgs.stdenv.mkDerivation {
-            pname = if coverage then "piggy-cov" else "piggy";
-            version = piggyVersion;
-
-            src = ./.;
-
-            nativeBuildInputs = [
-              pkgs.makeWrapper
-              pkgs.scdoc
+          # The `amarbel-llc/nixpkgs` overlay supplies the fork's package
+          # additions; the bats lane builder itself comes from the
+          # `amarbel-llc/bats` flake input (see `batsLib` below). Keeping
+          # the overlay in scope for every consumer of `pkgs` so the rest
+          # of the flake picks up the fork additions uniformly.
+          #
+          # The second overlay strips a malformed " none required" token
+          # from libfyaml's pkg-config Libs: line on darwin, which leaks
+          # into appstream's link command as literal filename arguments
+          # and breaks the build of zenity → libadwaita → appstream's
+          # transitive consumers. Tracked at NixOS/nixpkgs#514566; fix
+          # ported from NixOS/nixpkgs#513484. Drop once that PR merges
+          # and is pulled into amarbel-llc/nixpkgs.
+          libfyamlFix =
+            final: prev:
+            prev.lib.optionalAttrs prev.stdenv.hostPlatform.isDarwin {
+              libfyaml = prev.libfyaml.overrideAttrs (old: {
+                postInstall = (old.postInstall or "") + ''
+                  substituteInPlace "$dev/lib/pkgconfig/libfyaml.pc" \
+                    --replace-fail " none required" ""
+                '';
+              });
+            };
+          pkgs = import igloo {
+            inherit system;
+            overlays = [
+              igloo.overlays.default
+              libfyamlFix
             ];
+          };
+          pkgs-master = import nixpkgs-master { inherit system; };
 
-            dontBuild = true;
+          # gomod.nix is the producer half of the flake-input-go_mod protocol
+          # (amarbel-llc/nixpkgs RFC 0001): mkGoPkgs publishes go-pkgs /
+          # go-pkgs-test so madder/dodder/cutting-garden bridge
+          # code.linenisgreat.com/piggy/go as a flake input (flake.lock-only
+          # bumps) instead of a go.mod pseudo-version. The producer src is scoped
+          # to the go/ subdir, so downstream bridges with NO subPath. goFlakeInputs
+          # (the dewey bridge) is threaded into the two buildGoApplication binaries
+          # below so dewey resolves during the self-consume build. See go/gomod.nix.
+          gomod = import ./go/gomod.nix {
+            inherit pkgs purse-first system;
+            src = self + "/go";
+          };
+          inherit (gomod) goFlakeInputs;
+          inherit (gomod.goPkgs) go-pkgs go-pkgs-test;
 
-            installPhase = ''
-              mkdir -p $out/bin \
-                       $out/libexec/piggy \
-                       $out/share/man/man1
-
-              # Stash the rust dispatcher and the piggy-ids helper binary
-              # at known paths, then wrap the rust binary as
-              # $out/bin/piggy with PIGGY_IDS_PATH set so the rust
-              # `piggy-ids` callers (encrypt / list-available / etc.)
-              # locate it.
-              install -m 0755 ${piggyRs}/bin/piggy \
-                              $out/libexec/piggy/piggy-rs
-              install -m 0755 ${piggyRs}/bin/piggy-ids \
-                              $out/libexec/piggy/piggy-ids
-              # age discovers the plugin by PATH name (`age-plugin-piggy`); it
-              # reads PIGGY_AUTH_SOCK / SSH_AUTH_SOCK at runtime and talks to
-              # piggy-agent over the `ecdh@joyent.com` extension. The thin
-              # wrapper exists only to bake PIGGY_VERSION/COMMIT in for the
-              # eng-versioning(7) `--version` line (build.rs can't get the commit
-              # in the .git-less sandbox). makeWrapper exec's the real binary
-              # with all args + the rest of the env intact, so the `--age-plugin`
-              # protocol and the agent-socket env still flow through. Having
-              # `piggy` on PATH then also exposes the plugin to age.
-              install -m 0755 ${piggyRs}/bin/age-plugin-piggy \
-                              $out/libexec/piggy/age-plugin-piggy
-              makeWrapper $out/libexec/piggy/age-plugin-piggy \
-                          $out/bin/age-plugin-piggy \
-                --set PIGGY_VERSION ${piggyVersion} \
-                --set PIGGY_COMMIT ${piggyCommit}
-              # User-facing SSH_ASKPASS helper. Lives under libexec/piggy/
-              # so consumers can reference it as
-              # `''${piggy}/libexec/piggy/piggy-askpass.sh`, matching the
-              # pattern pivy uses for its bundled pivy-askpass. We install
-              # the raw script (preserves shebang + comments) then wrap
-              # it to pin runtime deps (ps, zenity) on PATH — the script
-              # is invoked by pivy-agent's launchd job where PATH is
-              # otherwise unset. Replaces pivy's `exec zenity --password`
-              # one-liner whose GTK4 AdwMessageDialog deprecation
-              # triggers GLib NULL-str warnings on every prompt.
-              install -m 0755 contrib/piggy-askpass.sh \
-                              $out/libexec/piggy/piggy-askpass.sh.unwrapped
-              makeWrapper $out/libexec/piggy/piggy-askpass.sh.unwrapped \
-                          $out/libexec/piggy/piggy-askpass.sh \
-                --prefix PATH : ${pkgs.lib.makeBinPath askpassRuntimeDeps}
-              for f in doc/*.scd; do
-                stem="$(basename "$f" .scd)"
-                section="''${stem##*.}"
-                name="''${stem%.*}"
-                mkdir -p "$out/share/man/man''${section}"
-                scdoc < "$f" > "$out/share/man/man''${section}/''${name}.''${section}"
-              done
-
-              # The PIGGY_VERSION/COMMIT/<component> --set group below is the
-              # `piggy version` data source: the native `version` handler
-              # reads these from the environment makeWrapper bakes in.
-              # Component versions are read live off the derivations
-              # (pivyPkg.version, pkgs-master.pcsclite.version) so a pin
-              # bump shows up in the output with no manual edit — drift
-              # stays visible, per eng-versioning(7).
-              #
-              # IGLOO-PROMOTION CANDIDATE (amarbel-llc/nixpkgs#68): this
-              # version+commit+component injection is the non-Go analog of
-              # buildGoApplication's auto-embedding (amarbel-llc/nixpkgs#31).
-              # A generalized `mkVersionedWrapper` deriving these flags from
-              # {version.env, src.rev, components} is the lift target — this
-              # block is the tracer-bullet reference consumer.
-              makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
-                --set PIGGY_IDS_PATH $out/libexec/piggy/piggy-ids \
-                --set PIGGY_VERSION ${piggyVersion} \
-                --set PIGGY_COMMIT ${piggyCommit} \
-                --set PIGGY_PCSCLITE_VERSION ${pkgs-master.pcsclite.version} \
-                --set PIGGY_PCSCLITE_REV ${pcscliteRev} \
-                --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
-            '';
-
-            # Expose the Go-based SSH-agent conformance binary as a test
-            # attribute of the main piggy package. Reachable via
-            # `nix build .#piggy.tests.conformance` and enumerated by
-            # `nix flake check`. Keeps the relationship between the agent
-            # and its wire-protocol oracle explicit without merging the
-            # Rust and Go toolchains into one derivation.
-            passthru.tests = {
-              conformance = piggy-agent-conformance;
+          # Software PIV smart card for tests. Only built on Linux — vsmartcard
+          # is marked broken on darwin upstream.
+          virtualPiv = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+            import ./nix/virtual-piv.nix {
+              inherit pkgs pkgs-master;
+              jcardsim-src = jcardsim;
+              pivapplet-src = pivapplet;
+              oracle-javacard-sdks-src = oracle-javacard-sdks;
             }
-            // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-              fib = virtualPiv.fibBundle;
+          );
+
+          # NixOS VM integration lane (nix/vm-tests/): fibby + the Rust
+          # agent as guest systemd units, LUKS2 and ZFS unlocked from the
+          # store. Linux-only, TCG-tolerant (no KVM on the build host). Merged into
+          # `checks` so `nix flake check` runs it; the justfile
+          # `test-vm-*` recipes are the paved paths. The guard wraps the
+          # import: runNixOSTest must never be evaluated on darwin.
+          vmTests = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+            import ./nix/vm-tests { inherit pkgs piggy fibby; }
+          );
+
+          # The same lanes on the instrumented (`-C instrument-coverage`)
+          # piggy, each shipping its guest's .profraw files in $out, plus
+          # the merged llvm-cov report over all of them. Exposed as packages,
+          # NOT checks: deliberately outside the merge gate and `nix flake
+          # check` until the added wall time is measured (`just
+          # test-vm-coverage`). fibby stays uninstrumented: it is test
+          # infrastructure, and it has no SIGTERM handler, so an instrumented
+          # daemon would be killed without flushing its profile anyway.
+          vmCoverage = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+            let
+              lanes = import ./nix/vm-tests {
+                inherit pkgs fibby;
+                piggy = piggy-cov;
+                coverage = true;
+              };
+              covLanes = pkgs.lib.mapAttrs' (name: drv: pkgs.lib.nameValuePair "${name}-cov" drv) lanes;
+            in
+            covLanes
+            // {
+              coverage-report = import ./nix/vm-tests/coverage-report.nix {
+                inherit pkgs;
+                tests = pkgs.lib.attrValues covLanes;
+                objects = [
+                  "${piggy-rs-cov}/bin/piggy"
+                  "${piggy-rs-cov}/bin/piggy-ids"
+                  "${piggy-rs-cov}/bin/age-plugin-piggy"
+                ];
+              };
+            }
+          );
+
+          # pivy C package, built from vendor/pivy (see nix/pivy.nix and
+          # piggy #21). Local derivation instead of a nested flake input.
+          pivyPkg = import ./nix/pivy.nix {
+            inherit pkgs;
+            src = ./vendor/pivy;
+          };
+
+          # Runtime deps on PATH for the wrapped piggy binary. `pivy`
+          # backs the C-pivy delegations (`tool`, `piggy pivy <tool>`, and
+          # the `piggy box` subcommands the rust impl doesn't cover — see
+          # crates/piggy/src/exec.rs); store decrypt is in-process
+          # (piggy#164) and needs nothing from it.
+          # `openssh` provides `ssh-copy-id`, which `piggy ssh-copy-id`
+          # (crates/piggy/src/ssh_copy_id.rs) execs to install the 9A keys.
+          # C pivy is NO LONGER a runtime dep (piggy#289 Phase 4): every op piggy
+          # needs is Rust, so `pivyPkg` is demoted to a test-only input (`.#pivy`,
+          # the differential oracle) and kept OUT of the shipped closure —
+          # enforced by the `lint-closure-no-pivy` check below. The
+          # `piggy pivy <tool>` escape hatch therefore finds no `pivy-*` on PATH
+          # and says so clearly (exec.rs); its code is removed in Phase 5.
+          runtimeDeps = [
+            pkgs.git
+            pkgs.tree
+            pkgs.qrencode
+            pkgs.gnugrep
+            pkgs.coreutils
+            pkgs.openssh
+          ];
+
+          # Runtime deps for contrib/piggy-askpass.sh when invoked by
+          # pivy-agent's launchd job (PATH is unset there). `ps` is in
+          # `procps` on Linux; macOS provides /bin/ps in the base system
+          # so we don't add a darwin-specific dep. `zenity` is the GUI
+          # fallback when /dev/tty isn't connected (the typical agent
+          # case).
+          askpassRuntimeDeps = [
+            pkgs.coreutils
+            pkgs.zenity
+          ]
+          ++ pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.procps;
+
+          # Native rust workspace: `piggy` (binary) + `piggy-piv` (library).
+          # pcsclite is only needed on linux; macOS has PC/SC in CoreServices.
+          # Uses pkgs-master (2.4.1) for backward-compatible IPC protocol
+          # negotiation — a 2.4.1 client can talk to daemons as old as 1.8.24,
+          # which covers Ubuntu 24.04's 2.0.3 pcscd without workarounds.
+          rustBuildInputs = [
+            pkgs.openssl
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs-master.pcsclite ];
+          rustNativeBuildInputs = [ pkgs.pkg-config ];
+
+          # Shared cargoLock attrs for every buildRustPackage derivation in
+          # this flake. They all vendor from the same Cargo.lock, so git-dep
+          # outputHashes must stay identical — buildRustPackage fetches every
+          # git dep in the lock file regardless of which workspace package is
+          # built (fibby doesn't depend on tap-dancer but still needs the
+          # hash). Factored here so a tap-dancer bump (or any future git dep)
+          # only needs one edit.
+          sharedCargoLock = {
+            lockFile = ./Cargo.lock;
+            outputHashes = {
+              "tap-dancer-0.1.12" = "sha256-tZ30ATmSKh10fY8hRwH+ZY+Hz0Pvpg7/yA9chYSdlvI=";
+            };
+          };
+
+          # Coverage variant knobs for the Rust derivations (nix/vm-tests/
+          # coverage-report.nix): `-C instrument-coverage` makes every
+          # process write an LLVM .profraw at exit (path from
+          # LLVM_PROFILE_FILE), the binaries stay unstripped so llvm-cov can
+          # map counters back to source, and the in-sandbox `cargo test` is
+          # skipped — the normal variant already runs it, and instrumented
+          # tests would only slow the build.
+          coverageAttrs = {
+            RUSTFLAGS = "-C instrument-coverage";
+            dontStrip = true;
+            doCheck = false;
+          };
+
+          mkPiggyRs =
+            {
+              coverage ? false,
+            }:
+            pkgs.rustPlatform.buildRustPackage (
+              {
+                pname = if coverage then "piggy-rs-cov" else "piggy-rs";
+                version = "0.1.0";
+
+                src = pkgs.lib.cleanSourceWith {
+                  src = ./.;
+                  filter =
+                    name: type:
+                    let
+                      rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
+                      base = baseNameOf rel;
+                    in
+                    base == "Cargo.toml"
+                    || base == "Cargo.lock"
+                    # version.env is read by crates/piggy/build.rs at compile
+                    # time and must reach the sandboxed source tree.
+                    || base == "version.env"
+                    || pkgs.lib.hasPrefix "crates" rel;
+                };
+
+                cargoLock = sharedCargoLock;
+
+                buildInputs = rustBuildInputs;
+                nativeBuildInputs = rustNativeBuildInputs;
+
+                # Integration tests in crates/piggy-piv/tests/ need a pcsc daemon
+                # that nix sandboxes can't provide. Match pivy's flake, which skips
+                # checks on darwin for the same reason (no system pcscd under CI).
+                doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
+
+                meta = with pkgs.lib; {
+                  description = "Piggy rust workspace (piggy CLI + piggy-piv library)";
+                  homepage = "https://code.linenisgreat.com/piggy";
+                  license = licenses.mpl20;
+                  platforms = platforms.linux ++ platforms.darwin;
+                };
+              }
+              // pkgs.lib.optionalAttrs coverage coverageAttrs
+            );
+
+          piggy-rs = mkPiggyRs { };
+          piggy-rs-cov = mkPiggyRs { coverage = true; };
+
+          # Standalone `fibby` package — the pcsc-lite-daemon-protocol Rust
+          # server (see docs/plans/2026-05-29-fibby-virtual-piv-rust-design.md
+          # and crates/fibby/README.md). Shares the workspace source filter
+          # with piggy-rs so a single nix-cached build artifact serves both.
+          # On Linux, the `hardware-proxy` Cargo feature is enabled so the
+          # HardwareProxy backend (real-card passthrough used by the wet-env
+          # validation recipes) is available. Darwin builds without the
+          # feature because pcsc-sys's libpcsclite link isn't satisfied
+          # there — flake.nix:166 only adds pcsclite to rustBuildInputs on
+          # `stdenv.hostPlatform.isLinux`, matching the upstream vsmartcard-on-darwin
+          # status. The `VirtualCard` backend is always available on both
+          # platforms.
+          #
+          # Used by: `just load-fibby` (downstream of this output), the wet-env
+          # capture recipes (`debug-fibby-roundtrip-capture` /
+          # `debug-fibby-roundtrip-via-fib`), and any consumer of #129's
+          # planned packaging story (e.g. a future home-manager service).
+          fibby = pkgs.rustPlatform.buildRustPackage {
+            pname = "fibby";
+            version = "0.1.0";
+
+            src = pkgs.lib.cleanSourceWith {
+              src = ./.;
+              filter =
+                name: type:
+                let
+                  rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
+                  base = baseNameOf rel;
+                in
+                base == "Cargo.toml"
+                || base == "Cargo.lock"
+                || base == "version.env"
+                || pkgs.lib.hasPrefix "crates" rel;
             };
 
+            cargoLock = sharedCargoLock;
+
+            # Build only the fibby crate (the workspace builds piggy etc. as
+            # a side effect via piggy-rs; this keeps the artifact narrow).
+            cargoBuildFlags = [
+              "-p"
+              "fibby"
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              "--features"
+              "hardware-proxy"
+            ];
+
+            # Match the build feature gate on tests so `cargo test` exercises
+            # the hardware-proxy code path on Linux. The 18 fibby tests
+            # (17 unit + 1 loopback) are pure-data / VirtualCard-driven, so
+            # they pass with or without the feature; the feature gate just
+            # ensures the hardware-proxy code TYPE-CHECKS in the sandbox.
+            cargoTestFlags = [
+              "-p"
+              "fibby"
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              "--features"
+              "hardware-proxy"
+            ];
+
+            buildInputs = rustBuildInputs;
+            nativeBuildInputs = rustNativeBuildInputs;
+
+            # Run the 18 fibby tests inside the sandbox. Loopback uses /tmp
+            # for its AF_UNIX socket (sun_path-short), so it survives the
+            # short nix-sandbox TMPDIR fine. Hardware-proxy unit tests stay
+            # hermetic — they don't try to reach a real pcscd.
+            doCheck = true;
+
             meta = with pkgs.lib; {
-              description = "PIV-based password store using pivy-box and ebox templates";
-              license = licenses.gpl2Plus;
+              description = "Pure-Rust virtual PIV card speaking the pcsc-lite client protocol directly";
+              homepage = "https://code.linenisgreat.com/piggy";
+              license = licenses.mpl20;
+              mainProgram = "fibby";
               platforms = platforms.linux ++ platforms.darwin;
             };
           };
 
-        piggy = mkPiggy { piggyRs = piggy-rs; };
-        piggy-cov = mkPiggy {
-          piggyRs = piggy-rs-cov;
-          coverage = true;
-        };
+          # Wrapped `piggy` binary: rust dispatch + bash passwordstore + pivy
+          # fallback, bundled as a single symlink-joined package. A function
+          # of the Rust workspace derivation so the coverage variant
+          # (piggy-rs-cov) gets the identical wrapper.
+          mkPiggy =
+            {
+              piggyRs,
+              coverage ? false,
+            }:
+            pkgs.stdenv.mkDerivation {
+              pname = if coverage then "piggy-cov" else "piggy";
+              version = piggyVersion;
 
-        # The two Go test binaries piggy's bats lanes need, now built from the
-        # unified go/ module (code.linenisgreat.com/piggy/go) via
-        # buildGoApplication self-consuming the go-pkgs-test producer output
-        # (rich-acacia's canonical self-consume, RFC 0001 § Self-consumption): a
-        # source-filter regression OR a stale go/gomod2nix.toml fails the build
-        # HERE, in piggy's gate, rather than in a downstream consumer's. Building
-        # from the unified module is why the #183/#188 "no buildGoModule for the
-        # LIBRARY" ruling still holds — the library is gated by the dagnabit
-        # facade check; these are BINARIES, always built, now from one module.
-        # goFlakeInputs bridges dewey so it resolves hermetically.
-        piggy-agent-conformance = pkgs.buildGoApplication {
-          pname = "piggy-agent-conformance";
-          version = piggyVersion;
+              src = ./.;
 
-          src = go-pkgs-test;
-          pwd = go-pkgs-test;
-          modules = ./go/gomod2nix.toml;
-          inherit goFlakeInputs;
+              nativeBuildInputs = [
+                pkgs.makeWrapper
+                pkgs.scdoc
+              ];
 
-          subPackages = [ "cmd/piggy-agent-conformance" ];
-          go = pkgs-master.go_1_26;
-          GOTOOLCHAIN = "local";
+              dontBuild = true;
 
-          # buildGoApplication's stock goCheckHook tests only subPackages (cmd/,
-          # no _test.go), so the whole-module registry packages would never be
-          # exercised from the filtered tree. Override checkPhase with the blessed
-          # self-consume floor: `go vet -tags test ./...` type-checks EVERY
-          # package (incl. _test.go under the test tag) against go-pkgs-test, so a
-          # dropped source file fails here. vet (not test): no network / no card
-          # in the nix sandbox.
-          checkPhase = ''
-            runHook preCheck
-            go vet -tags test ./...
-            runHook postCheck
-          '';
+              installPhase = ''
+                mkdir -p $out/bin \
+                         $out/libexec/piggy \
+                         $out/share/man/man1
 
-          meta = with pkgs.lib; {
-            description = "Go-based SSH agent conformance tests for piggy";
-            homepage = "https://code.linenisgreat.com/piggy";
-            license = licenses.mpl20;
-            platforms = platforms.linux ++ platforms.darwin;
+                # Stash the rust dispatcher and the piggy-ids helper binary
+                # at known paths, then wrap the rust binary as
+                # $out/bin/piggy with PIGGY_IDS_PATH set so the rust
+                # `piggy-ids` callers (encrypt / list-available / etc.)
+                # locate it.
+                install -m 0755 ${piggyRs}/bin/piggy \
+                                $out/libexec/piggy/piggy-rs
+                install -m 0755 ${piggyRs}/bin/piggy-ids \
+                                $out/libexec/piggy/piggy-ids
+                # age discovers the plugin by PATH name (`age-plugin-piggy`); it
+                # reads PIGGY_AUTH_SOCK / SSH_AUTH_SOCK at runtime and talks to
+                # piggy-agent over the `ecdh@joyent.com` extension. The thin
+                # wrapper exists only to bake PIGGY_VERSION/COMMIT in for the
+                # eng-versioning(7) `--version` line (build.rs can't get the commit
+                # in the .git-less sandbox). makeWrapper exec's the real binary
+                # with all args + the rest of the env intact, so the `--age-plugin`
+                # protocol and the agent-socket env still flow through. Having
+                # `piggy` on PATH then also exposes the plugin to age.
+                install -m 0755 ${piggyRs}/bin/age-plugin-piggy \
+                                $out/libexec/piggy/age-plugin-piggy
+                makeWrapper $out/libexec/piggy/age-plugin-piggy \
+                            $out/bin/age-plugin-piggy \
+                  --set PIGGY_VERSION ${piggyVersion} \
+                  --set PIGGY_COMMIT ${piggyCommit}
+                # User-facing SSH_ASKPASS helper. Lives under libexec/piggy/
+                # so consumers can reference it as
+                # `''${piggy}/libexec/piggy/piggy-askpass.sh`, matching the
+                # pattern pivy uses for its bundled pivy-askpass. We install
+                # the raw script (preserves shebang + comments) then wrap
+                # it to pin runtime deps (ps, zenity) on PATH — the script
+                # is invoked by pivy-agent's launchd job where PATH is
+                # otherwise unset. Replaces pivy's `exec zenity --password`
+                # one-liner whose GTK4 AdwMessageDialog deprecation
+                # triggers GLib NULL-str warnings on every prompt.
+                install -m 0755 contrib/piggy-askpass.sh \
+                                $out/libexec/piggy/piggy-askpass.sh.unwrapped
+                makeWrapper $out/libexec/piggy/piggy-askpass.sh.unwrapped \
+                            $out/libexec/piggy/piggy-askpass.sh \
+                  --prefix PATH : ${pkgs.lib.makeBinPath askpassRuntimeDeps}
+                for f in doc/*.scd; do
+                  stem="$(basename "$f" .scd)"
+                  section="''${stem##*.}"
+                  name="''${stem%.*}"
+                  mkdir -p "$out/share/man/man''${section}"
+                  scdoc < "$f" > "$out/share/man/man''${section}/''${name}.''${section}"
+                done
+
+                # The PIGGY_VERSION/COMMIT/<component> --set group below is the
+                # `piggy version` data source: the native `version` handler
+                # reads these from the environment makeWrapper bakes in.
+                # Component versions are read live off the derivations
+                # (pivyPkg.version, pkgs-master.pcsclite.version) so a pin
+                # bump shows up in the output with no manual edit — drift
+                # stays visible, per eng-versioning(7).
+                #
+                # IGLOO-PROMOTION CANDIDATE (amarbel-llc/nixpkgs#68): this
+                # version+commit+component injection is the non-Go analog of
+                # buildGoApplication's auto-embedding (amarbel-llc/nixpkgs#31).
+                # A generalized `mkVersionedWrapper` deriving these flags from
+                # {version.env, src.rev, components} is the lift target — this
+                # block is the tracer-bullet reference consumer.
+                makeWrapper $out/libexec/piggy/piggy-rs $out/bin/piggy \
+                  --set PIGGY_IDS_PATH $out/libexec/piggy/piggy-ids \
+                  --set PIGGY_VERSION ${piggyVersion} \
+                  --set PIGGY_COMMIT ${piggyCommit} \
+                  --set PIGGY_PCSCLITE_VERSION ${pkgs-master.pcsclite.version} \
+                  --set PIGGY_PCSCLITE_REV ${pcscliteRev} \
+                  --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
+              '';
+
+              # Expose the Go-based SSH-agent conformance binary as a test
+              # attribute of the main piggy package. Reachable via
+              # `nix build .#piggy.tests.conformance` and enumerated by
+              # `nix flake check`. Keeps the relationship between the agent
+              # and its wire-protocol oracle explicit without merging the
+              # Rust and Go toolchains into one derivation.
+              passthru.tests = {
+                conformance = piggy-agent-conformance;
+              }
+              // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+                fib = virtualPiv.fibBundle;
+              };
+
+              meta = with pkgs.lib; {
+                description = "PIV-based password store using pivy-box and ebox templates";
+                license = licenses.gpl2Plus;
+                platforms = platforms.linux ++ platforms.darwin;
+              };
+            };
+
+          piggy = mkPiggy { piggyRs = piggy-rs; };
+          piggy-cov = mkPiggy {
+            piggyRs = piggy-rs-cov;
+            coverage = true;
           };
-        };
 
-        # Go test-only SSH server for the hardware-free SSH-over-fibby bats lane
-        # (piggy#135 Phase A). Same unified-module buildGoApplication shape as
-        # piggy-agent-conformance; build-only (its cmd/ import graph is the
-        # validation — the whole-module vet self-consume rides on the primary
-        # binary above). Named after its cmd/ dir, so no postInstall rename.
-        piggy-test-sshd = pkgs.buildGoApplication {
-          pname = "piggy-test-sshd";
-          version = piggyVersion;
+          # The two Go test binaries piggy's bats lanes need, now built from the
+          # unified go/ module (code.linenisgreat.com/piggy/go) via
+          # buildGoApplication self-consuming the go-pkgs-test producer output
+          # (rich-acacia's canonical self-consume, RFC 0001 § Self-consumption): a
+          # source-filter regression OR a stale go/gomod2nix.toml fails the build
+          # HERE, in piggy's gate, rather than in a downstream consumer's. Building
+          # from the unified module is why the #183/#188 "no buildGoModule for the
+          # LIBRARY" ruling still holds — the library is gated by the dagnabit
+          # facade check; these are BINARIES, always built, now from one module.
+          # goFlakeInputs bridges dewey so it resolves hermetically.
+          piggy-agent-conformance = pkgs.buildGoApplication {
+            pname = "piggy-agent-conformance";
+            version = piggyVersion;
 
-          src = go-pkgs-test;
-          pwd = go-pkgs-test;
-          modules = ./go/gomod2nix.toml;
-          inherit goFlakeInputs;
+            src = go-pkgs-test;
+            pwd = go-pkgs-test;
+            modules = ./go/gomod2nix.toml;
+            inherit goFlakeInputs;
 
-          subPackages = [ "cmd/piggy-test-sshd" ];
-          go = pkgs-master.go_1_26;
-          GOTOOLCHAIN = "local";
+            subPackages = [ "cmd/piggy-agent-conformance" ];
+            go = pkgs-master.go_1_26;
+            GOTOOLCHAIN = "local";
 
-          meta = with pkgs.lib; {
-            description = "Go-based test-only SSH server for piggy's SSH-over-fibby bats lane";
-            homepage = "https://code.linenisgreat.com/piggy";
-            license = licenses.mpl20;
-            platforms = platforms.linux ++ platforms.darwin;
-          };
-        };
+            # buildGoApplication's stock goCheckHook tests only subPackages (cmd/,
+            # no _test.go), so the whole-module registry packages would never be
+            # exercised from the filtered tree. Override checkPhase with the blessed
+            # self-consume floor: `go vet -tags test ./...` type-checks EVERY
+            # package (incl. _test.go under the test tag) against go-pkgs-test, so a
+            # dropped source file fails here. vet (not test): no network / no card
+            # in the nix sandbox.
+            checkPhase = ''
+              runHook preCheck
+              go vet -tags test ./...
+              runHook postCheck
+            '';
 
-        # Sandboxed bats lane. See ./bats.nix for the lane builder and
-        # the `# bats file_tags=hardware` convention that filters
-        # pcscd/hardware-requiring tests out of the default lane.
-        #
-        # batsSrc is passed as a plain path (not `cleanSourceWith`)
-        # because the auto-discovery in bats.nix does
-        # `builtins.readDir batsSrc` at eval time. cleanSourceWith
-        # produces a derivation whose store path must be realized
-        # before readDir can introspect it; in eval-only mode (e.g.
-        # `nix flake check --no-build`) that realization can't happen,
-        # surfacing as `error: path '<hash>-source' is not valid`.
-        # Store-path stability across unrelated repo edits can be
-        # re-added later via `cleanSourceWith` if it becomes worth it.
-        batsLib = import ./bats.nix {
-          inherit pkgs;
-          # Unwrapped rust dispatcher: lets test-PATH overrides
-          # (mock-pivy-box.sh etc.) win over what the rust handlers
-          # invoke for crypto.
-          piggyRs = piggy-rs;
-          # Wrapped piggy: source of `$out/libexec/piggy/piggy-ids`
-          # referenced by the extraEnv (PIGGY_IDS_REAL).
-          piggyWrapped = piggy;
-          # Threaded through so the lane can inject CONFORMANCE_BIN
-          # for conformance/piggy_agent_protocol.bats. See piggy#115.
-          conformanceBin = piggy-agent-conformance;
-          # Threaded through so the lane can inject REAL_PIVY_TOOL
-          # for conformance/pivy_tool_admin_key.bats. See piggy#116.
-          pivy = pivyPkg;
-          # The virtual card, so default-lane tests can run real card
-          # crypto inside the sandbox (piggy#281).
-          inherit fibby;
-          batsLane = bats.lib.${system}.batsLane;
-          bats-libs = bats.packages.${system}.bats-libs;
-          batsSrc = ./zz-tests_bats;
-        };
-
-        # conformist config, Nix-generated from ./conformist.nix merged with the
-        # eng-convention preset (conformist.lib.presets.eng). Drives `nix fmt`
-        # (build.wrapper — config + every formatter baked as /nix/store paths)
-        # and the read-only `checks.formatting` gate (build.check). Replaces the
-        # retired treefmt-nix. See conformist-nix(7).
-        conformistEval = conformist.lib.evalModule pkgs {
-          imports = [
-            conformist.lib.presets.eng
-            ./conformist.nix
-          ];
-          package = conformist.packages.${system}.default;
-        };
-
-        # Impure lane: the eng-convention checks that need a live working tree /
-        # host tools (git-remotes, git-default-branch, sweatfile, agents-md), so
-        # they cannot run in the sandboxed pure config — `just lint-worktree`
-        # runs them against the real worktree via this config. See
-        # conformist.lib.presets.eng-impure.
-        #
-        # It also carries the dewey-facade-export drift CHECK as the merge-gate
-        # safety net: `just lint-worktree` is in the `lint` aggregate the
-        # pre-merge `just` hook runs, so committed go/ facade drift fails
-        # the merge even if the pre-commit auto-repair hook was bypassed. This
-        # replaces the old standalone `lint-facades` recipe
-        # (`dagnabit export --check`). The pre-commit lane (conformistCodegenEval)
-        # does the REPAIR; this lane does the merge CHECK — same module, two
-        # lanes.
-        conformistImpureEval = conformist.lib.evalModule pkgs {
-          imports = [
-            conformist.lib.presets.eng-impure
-            purse-first.lib.conformistLinters.dewey-facade-export
-            conformistFacadeModule
-          ];
-          package = conformist.packages.${system}.default;
-          projectRootFile = "flake.nix";
-        };
-
-        # The dewey pkgs/ facade-export lane, CONSUMED from purse-first's
-        # published module (purse-first#163) rather than hand-wired: the module
-        # owns the `dagnabit export` invocation + the DAGNABIT_CONFORMIST_CONFIG
-        # threading, fed the formatters-only FACADE config below. The tier
-        # opt-ins are layered on here (the upstream module ships the
-        # check/repair commands but not the stage-mutation flags). Shared by
-        # BOTH the impure merge-gate CHECK (conformistImpureEval) and the
-        # pre-commit REPAIR (conformistCodegenEval).
-        #
-        # Generated facades belong to the generator (purse-first
-        # docs/plans/2026-09-30-dagnabit-conformist-tree-root.md): piggy's own
-        # config excludes go/pkgs/** (./conformist.nix), and dagnabit formats
-        # the facades with this dedicated goimports+gofumpt config, so the
-        # committed bytes are a function of the dagnabit version and this config
-        # alone. dagnabit refuses a facade config that carries linters, excludes
-        # matching a facade, or a formatter working-dir — which is why the
-        # repo's own presets.eng config can no longer be passed here.
-        conformistFacadeFormatEval = conformist.lib.evalModule pkgs {
-          imports = [ purse-first.lib.conformistModules.dagnabit-facade ];
-          package = conformist.packages.${system}.default;
-        };
-
-        conformistFacadeModule =
-          { ... }:
-          {
-            linters.dewey-facade-export.enable = true;
-            # piggy's dewey-layout module root (holds internal/ + pkgs/).
-            linters.dewey-facade-export.deweyDir = "go";
-            # go/ uses `//go:generate dagnabit export` directives, not
-            # `--library`.
-            linters.dewey-facade-export.library = false;
-            # Pinned package ⇒ hermetic, PATH-independent dagnabit.
-            linters.dewey-facade-export.dagnabitPackage = purse-first.packages.${system}.dagnabit;
-            linters.dewey-facade-export.conformistConfig = conformistFacadeFormatEval.config.build.configFile;
-            # Layer the stage-mutation tiers (conformist#55/#56/#57) onto the
-            # module's generated linter so the pre-commit hook regenerates AND
-            # stages drift into the commit.
-            settings.linter.dewey-facade-export = {
-              # flake.lock joins the module's go-glob trigger (list options
-              # merge): the facades embed dagnabit's version stamp, so a
-              # purse-first bump restamps them all from a flake.lock-only
-              # commit — which stages no *.go and would never fire the lane.
-              includes = [ "flake.lock" ];
-              "restage-repair-outputs" = true; # tier 2: restage modified facades
-              "stage-new-outputs" = true; # tier 3: stage a brand-new pkgs/ facade
-              "stage-deleted-outputs" = true; # tier 4: stage a removed/relocated facade
+            meta = with pkgs.lib; {
+              description = "Go-based SSH agent conformance tests for piggy";
+              homepage = "https://code.linenisgreat.com/piggy";
+              license = licenses.mpl20;
+              platforms = platforms.linux ++ platforms.darwin;
             };
           };
 
-        # Dedicated PRE-COMMIT (facade-repair) eval. EXPLICIT membership: the
-        # formatters + excludes from ./conformist.nix, plus the facade-export
-        # repair lane — but deliberately NOT presets.eng (its convention linters
-        # stay at the merge/worktree gate, not commit time).
-        # build.preCommit from THIS eval is the sweatfile [hooks].pre-commit
-        # hook, so a commit auto-formats and regenerates-and-stages go/
-        # facade drift, and nothing else.
-        conformistCodegenEval = conformist.lib.evalModule pkgs {
-          imports = [
-            ./conformist.nix
-            # The facade-export linter MODULE (options.linters.dewey-facade-export.*);
-            # conformistFacadeModule above sets its enable + params.
-            purse-first.lib.conformistLinters.dewey-facade-export
-            conformistFacadeModule
-          ];
-          package = conformist.packages.${system}.default;
-        };
-      in
-      {
-        packages = {
-          default = piggy;
-          piggy = piggy;
-          piggy-rs = piggy-rs;
-          piggy-agent-conformance = piggy-agent-conformance;
-          # The C pivy stack (pivy-agent / pivy-tool / pivy-box etc.).
-          # Exposed so the hardware bats lane can `nix build .#pivy`
-          # to get a freshly-built pivy-agent under
-          # `result/bin/pivy-agent`. See
-          # zz-tests_bats/conformance/pivy_agent_hardware.bats and
-          # the test-bats-conformance-pivy-agent-hardware just recipe.
-          pivy = pivyPkg;
-          # The `age` CLI (plugin-capable), exposed so the
-          # age-plugin-piggy hardware bats lane can `nix build .#age`
-          # to drive a real encrypt/decrypt round-trip through the
-          # plugin. See zz-tests_bats/conformance/age_plugin_piggy_fibby.bats
-          # and the test-bats-conformance-age-plugin-piggy recipe.
-          age = pkgs.age;
-          # The langlang PEG grammar parser/validator (piggy#220), the
-          # `just validate-grammar` / `just test-grammar-vectors` gates
-          # for go/internal/bravo/markl/marklid.peg. `nix build
-          # .#langlang` gets the CLI under `result/bin/langlang`.
-          langlang = langlang.packages.${system}.default;
-          # The normative markl-id grammar and the RFC 0011 §7.3
-          # identifier conformance corpus, exported as store paths so
-          # downstream repos (cutting-garden/trellis, hyphence, papi)
-          # stage them hermetically at validation time instead of
-          # vendoring copies (piggy#236; the pattern papi established
-          # for hyphence-content.peg). piggy is the root of the
-          # upstream→downstream langlang @import chain, and these two
-          # files ARE its export surface: the peg's named rules are a
-          # frozen contract (see TestGrammarImportSurface), the corpus
-          # is the drift guard downstream identifier grammars replay
-          # (RFC 0011 §7.4).
-          marklid-grammar = pkgs.runCommandLocal "marklid.peg" { } ''
-            cp ${self}/go/internal/bravo/markl/marklid.peg "$out"
-          '';
-          markl-identifier-vectors = pkgs.runCommandLocal "0011-identifier-vectors.txt" { } ''
-            cp ${self}/docs/rfcs/0011-identifier-vectors.txt "$out"
-          '';
-          # Standalone fibby binary. On Linux this carries the
-          # `hardware-proxy` feature; on darwin it's VirtualCard-only
-          # (vsmartcard upstream is broken on darwin). Consumed by
-          # `just load-fibby` and the wet-env capture recipes; future
-          # consumer is the planned home-manager service (#129 stretch).
-          fibby = fibby;
-          # Instrumented-coverage variant of the wrapped piggy, consumed by
-          # the vm-piggy-*-cov lanes and `.#coverage-report`.
-          piggy-cov = piggy-cov;
-          # Go test-only SSH server for the SSH-over-fibby bats lane
-          # (piggy#135). Consumed by the forthcoming Phase D recipe via
-          # `nix build .#piggy-test-sshd`.
-          piggy-test-sshd = piggy-test-sshd;
-          # The toolchain-hermetic per-commit facade-repair hook, named by the
-          # sweatfile [hooks].pre-commit command and put on the devShell PATH as
-          # `conformist-pre-commit`. `nix build .#conformist-pre-commit` dogfoods
-          # it (forces the codegen eval + facade lane to resolve).
-          conformist-pre-commit = conformistCodegenEval.config.build.preCommit;
-          # Its merge-repair sibling from the SAME codegen eval, on the
-          # devShell PATH below as `conformist-repair` (sweatfile
-          # [hooks].repair): heals bump-commit codegen drift (dewey facades)
-          # at merge time with the post-bump drivers — the pre-commit hook's
-          # store-pinned driver predates the very bump it would need to heal
-          # (eng tier-B convergence, proven on madder; eng's fallback wrapper
-          # is severed from child repos and would otherwise skip).
-          conformist-repair = conformistCodegenEval.config.build.repair;
-          # The impure-lane config (eng git-state checks + the facade CHECK),
-          # consumed by `just lint-worktree` via `nix build
-          # .#conformist-impure-config`.
-          conformist-impure-config = conformistImpureEval.config.build.configFile;
+          # Go test-only SSH server for the hardware-free SSH-over-fibby bats lane
+          # (piggy#135 Phase A). Same unified-module buildGoApplication shape as
+          # piggy-agent-conformance; build-only (its cmd/ import graph is the
+          # validation — the whole-module vet self-consume rides on the primary
+          # binary above). Named after its cmd/ dir, so no postInstall rename.
+          piggy-test-sshd = pkgs.buildGoApplication {
+            pname = "piggy-test-sshd";
+            version = piggyVersion;
 
-          # go-pkgs / go-pkgs-test: the flake-input-go_mod producer outputs
-          # (filtered go/ source trees) that let downstream repos
-          # (madder/dodder/cutting-garden) bridge piggy's go/ module as a flake
-          # input via goFlakeInputs, instead of a go.mod pseudo-version (RFC
-          # 0001). Consumers bridge `code.linenisgreat.com/piggy/go` = go-pkgs
-          # with NO subPath (the producer src is already scoped to go/). See
-          # go/gomod.nix.
-          inherit go-pkgs go-pkgs-test;
+            src = go-pkgs-test;
+            pwd = go-pkgs-test;
+            modules = ./go/gomod2nix.toml;
+            inherit goFlakeInputs;
 
-          # The gomod2nix CLI (from piggy's pinned igloo), exposed so
-          # `just build-gomod2nix` can regenerate go/gomod2nix.toml hermetically
-          # (`nix run .#gomod2nix`) without depending on a devShell reload.
-          gomod2nix = pkgs.gomod2nix;
-        }
-        // batsLib.batsLaneOutputs
-        // vmCoverage
-        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          fib = virtualPiv.fib;
-          fib-bundle = virtualPiv.fibBundle;
-          fib-reader-conf = virtualPiv.readerConf;
-          fib-pcscd = virtualPiv.pcscdForFib;
-          jcardsim = virtualPiv.jcardsim;
-          pivapplet = virtualPiv.pivapplet;
-        };
+            subPackages = [ "cmd/piggy-test-sshd" ];
+            go = pkgs-master.go_1_26;
+            GOTOOLCHAIN = "local";
 
-        checks = {
-          bats-default = batsLib.batsLaneOutputs.bats-default;
-          # Read-only CI gate: builds in /nix/store off a source
-          # snapshot, runs the conformist formatters + the eng preset's
-          # file-based linters, and fails if any file would change. Driven
-          # from `just lint-fmt` and surfaced under `nix flake check`.
-          formatting = conformistEval.config.build.check self;
-          # piggy#289 Phase 4: the shipped `piggy` runtime closure must NOT
-          # contain the C pivy package. pivy is a test-only input (`.#pivy`, the
-          # differential oracle) now, not a runtime dep — this fails the build if
-          # any reference re-introduces it into the closure. Driven from
-          # `just lint-closure-no-pivy`.
-          lint-closure-no-pivy =
-            let
-              ci = pkgs.closureInfo { rootPaths = [ piggy ]; };
-            in
-            pkgs.runCommand "lint-closure-no-pivy" { } ''
-              if grep -qF '${pivyPkg}' ${ci}/store-paths; then
-                echo "FAIL: C pivy (${pivyPkg}) is in the piggy runtime closure" >&2
-                echo "  piggy#289 Phase 4 demoted pivy to a test-only input; it must not ship." >&2
-                echo "  Something re-introduced a runtime reference to it." >&2
-                exit 1
-              fi
-              echo "ok: no C pivy in the piggy runtime closure"
-              touch "$out"
-            '';
-        }
-        // vmTests;
+            meta = with pkgs.lib; {
+              description = "Go-based test-only SSH server for piggy's SSH-over-fibby bats lane";
+              homepage = "https://code.linenisgreat.com/piggy";
+              license = licenses.mpl20;
+              platforms = platforms.linux ++ platforms.darwin;
+            };
+          };
 
-        # `nix fmt` runs the generated conformist wrapper (config + every
-        # formatter baked as /nix/store paths). See conformistEval.
-        formatter = conformistEval.config.build.wrapper;
+          # Sandboxed bats lane. See ./bats.nix for the lane builder and
+          # the `# bats file_tags=hardware` convention that filters
+          # pcscd/hardware-requiring tests out of the default lane.
+          #
+          # batsSrc is passed as a plain path (not `cleanSourceWith`)
+          # because the auto-discovery in bats.nix does
+          # `builtins.readDir batsSrc` at eval time. cleanSourceWith
+          # produces a derivation whose store path must be realized
+          # before readDir can introspect it; in eval-only mode (e.g.
+          # `nix flake check --no-build`) that realization can't happen,
+          # surfacing as `error: path '<hash>-source' is not valid`.
+          # Store-path stability across unrelated repo edits can be
+          # re-added later via `cleanSourceWith` if it becomes worth it.
+          batsLib = import ./bats.nix {
+            inherit pkgs;
+            # Unwrapped rust dispatcher: lets test-PATH overrides
+            # (mock-pivy-box.sh etc.) win over what the rust handlers
+            # invoke for crypto.
+            piggyRs = piggy-rs;
+            # Wrapped piggy: source of `$out/libexec/piggy/piggy-ids`
+            # referenced by the extraEnv (PIGGY_IDS_REAL).
+            piggyWrapped = piggy;
+            # Threaded through so the lane can inject CONFORMANCE_BIN
+            # for conformance/piggy_agent_protocol.bats. See piggy#115.
+            conformanceBin = piggy-agent-conformance;
+            # Threaded through so the lane can inject REAL_PIVY_TOOL
+            # for conformance/pivy_tool_admin_key.bats. See piggy#116.
+            pivy = pivyPkg;
+            # The virtual card, so default-lane tests can run real card
+            # crypto inside the sandbox (piggy#281).
+            inherit fibby;
+            batsLane = bats.lib.${system}.batsLane;
+            bats-libs = bats.packages.${system}.bats-libs;
+            batsSrc = ./zz-tests_bats;
+          };
 
-        devShells.default = pkgs.mkShell {
-          packages =
-            runtimeDeps
-            ++ rustBuildInputs
-            ++ rustNativeBuildInputs
-            ++ [
-              pkgs-master.just
-              pkgs-master.rustc
-              pkgs-master.cargo
-              pkgs-master.rustfmt
-              pkgs-master.clippy
-              pkgs-master.rust-analyzer
-              # conformist (treefmt successor): the bare CLI for `just
-              # lint-worktree` (`conformist check --config-file …`), plus the
-              # toolchain-hermetic per-commit facade-repair wrapper on PATH as
-              # `conformist-pre-commit` (the sweatfile [hooks].pre-commit
-              # command). `nix fmt` uses the wrapper from `formatter` above.
-              conformist.packages.${system}.default
-              conformistCodegenEval.config.build.preCommit
-              # Its merge-repair sibling, on PATH as `conformist-repair` for
-              # spinclass's [hooks].repair (see packages.conformist-repair).
-              conformistCodegenEval.config.build.repair
-              pkgs.scdoc
-              # Go toolchain for the go/ module (piggy-agent-conformance
-              # + piggy-test-sshd): `go build`/`vet`/`gofmt` for fast
-              # dev-loop iteration outside nix, and to back the hamster.*
-              # MCP tools. igloo FDR 0012: `pkgs.go` is nixpkgs' go again
-              # (the overlay override rebuilt libcap and everything above
-              # it on every registry bump); the newest registry toolchain
-              # is `pkgs.goToolchain`, which is what the packaged binaries
-              # build with, so the shell go matches the build.
-              pkgs.goToolchain.go
-              # dagnabit (from purse-first): generates the go/ module's pkgs/
-              # export facades from its internal/ packages. The facade
-              # check/repair now runs through conformist's
-              # dewey-facade-export lane (pre-commit REPAIR + lint-worktree
-              # CHECK), which invokes a store-pinned dagnabit; this bare
-              # copy stays on PATH for ad-hoc `dagnabit export` and installs
-              # dagnabit(1). See #183 and the go/ module.
-              purse-first.packages.${system}.dagnabit
-              # gomod2nix CLI (from the igloo overlay, same one paired with
-              # buildGoApplication): `just build-gomod2nix` (= `cd go &&
-              # gomod2nix`) regenerates go/gomod2nix.toml from go.mod/go.sum
-              # after a dep change. buildGoApplication is the freshness gate (a
-              # stale toml fails the binary builds); conformist subdir lint is
-              # deferred to conformist#79.
-              pkgs.gomod2nix
-              # gum drives terminal UI logging in the maint group recipes
-              # (`bump-version`, `tag`, `release`). See eng-versioning(7)
-              # "JUSTFILE RELEASE RECIPES".
-              pkgs.gum
-              # In amarbel-llc/bats's new package layout, `batman`
-              # (the test orchestrator) and `bats` (the bats-core
-              # binary the bats CLI calls live under) are separate
-              # outputs. We need both on PATH so plain `bats` and
-              # `batman` invocations from justfile recipes resolve.
-              bats.packages.${system}.batman
-              bats.packages.${system}.bats
-              # `expect` drives the interactive tty confirmation prompt in the
-              # `piggy tool factory-reset` bats lane (piggy#291): the reset gate
-              # reads a typed `YES` from /dev/tty, so a headless test needs a pty
-              # to answer it.
-              pkgs.expect
-            ]
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-              # `just load-fib` needs pcscd + opensc-tool on PATH; it runs
-              # fib itself via `nix run .#fib`, so fib is deliberately NOT
-              # a devShell package: a jcardsim build failure (its vendored
-              # Maven closure vs the toolchain, piggy#252) must not take
-              # every `just` recipe down with it, least of all
-              # `debug-capture-jcardsim-m2`, the recipe that repairs it.
-              pkgs.pcsclite
-              pkgs.opensc
+          # conformist config, Nix-generated from ./conformist.nix merged with the
+          # eng-convention preset (conformist.lib.presets.eng). Drives `nix fmt`
+          # (build.wrapper — config + every formatter baked as /nix/store paths)
+          # and the read-only `checks.formatting` gate (build.check). Replaces the
+          # retired treefmt-nix. See conformist-nix(7).
+          conformistEval = conformist.lib.evalModule pkgs {
+            imports = [
+              conformist.lib.presets.eng
+              ./conformist.nix
             ];
+            package = conformist.packages.${system}.default;
+          };
 
-          # Help the openssl + pcsc-sys crates find their libraries
-          # without having to vendor, mirroring pivy's flake semantics.
-          OPENSSL_NO_VENDOR = "1";
-          OPENSSL_DIR = "${pkgs.openssl.dev}";
-          OPENSSL_LIB_DIR = "${pkgs.lib.getLib pkgs.openssl}/lib";
-        };
+          # Impure lane: the eng-convention checks that need a live working tree /
+          # host tools (git-remotes, git-default-branch, sweatfile, agents-md), so
+          # they cannot run in the sandboxed pure config — `just lint-worktree`
+          # runs them against the real worktree via this config. See
+          # conformist.lib.presets.eng-impure.
+          #
+          # It also carries the dewey-facade-export drift CHECK as the merge-gate
+          # safety net: `just lint-worktree` is in the `lint` aggregate the
+          # pre-merge `just` hook runs, so committed go/ facade drift fails
+          # the merge even if the pre-commit auto-repair hook was bypassed. This
+          # replaces the old standalone `lint-facades` recipe
+          # (`dagnabit export --check`). The pre-commit lane (conformistCodegenEval)
+          # does the REPAIR; this lane does the merge CHECK — same module, two
+          # lanes.
+          conformistImpureEval = conformist.lib.evalModule pkgs {
+            imports = [
+              conformist.lib.presets.eng-impure
+              purse-first.lib.conformistLinters.dewey-facade-export
+              conformistFacadeModule
+            ];
+            package = conformist.packages.${system}.default;
+            projectRootFile = "flake.nix";
+          };
+
+          # The dewey pkgs/ facade-export lane, CONSUMED from purse-first's
+          # published module (purse-first#163) rather than hand-wired: the module
+          # owns the `dagnabit export` invocation + the DAGNABIT_CONFORMIST_CONFIG
+          # threading, fed the formatters-only FACADE config below. The tier
+          # opt-ins are layered on here (the upstream module ships the
+          # check/repair commands but not the stage-mutation flags). Shared by
+          # BOTH the impure merge-gate CHECK (conformistImpureEval) and the
+          # pre-commit REPAIR (conformistCodegenEval).
+          #
+          # Generated facades belong to the generator (purse-first
+          # docs/plans/2026-09-30-dagnabit-conformist-tree-root.md): piggy's own
+          # config excludes go/pkgs/** (./conformist.nix), and dagnabit formats
+          # the facades with this dedicated goimports+gofumpt config, so the
+          # committed bytes are a function of the dagnabit version and this config
+          # alone. dagnabit refuses a facade config that carries linters, excludes
+          # matching a facade, or a formatter working-dir — which is why the
+          # repo's own presets.eng config can no longer be passed here.
+          conformistFacadeFormatEval = conformist.lib.evalModule pkgs {
+            imports = [ purse-first.lib.conformistModules.dagnabit-facade ];
+            package = conformist.packages.${system}.default;
+          };
+
+          conformistFacadeModule =
+            { ... }:
+            {
+              linters.dewey-facade-export.enable = true;
+              # piggy's dewey-layout module root (holds internal/ + pkgs/).
+              linters.dewey-facade-export.deweyDir = "go";
+              # go/ uses `//go:generate dagnabit export` directives, not
+              # `--library`.
+              linters.dewey-facade-export.library = false;
+              # Pinned package ⇒ hermetic, PATH-independent dagnabit.
+              linters.dewey-facade-export.dagnabitPackage = purse-first.packages.${system}.dagnabit;
+              linters.dewey-facade-export.conformistConfig = conformistFacadeFormatEval.config.build.configFile;
+              # Layer the stage-mutation tiers (conformist#55/#56/#57) onto the
+              # module's generated linter so the pre-commit hook regenerates AND
+              # stages drift into the commit.
+              settings.linter.dewey-facade-export = {
+                # flake.lock joins the module's go-glob trigger (list options
+                # merge): the facades embed dagnabit's version stamp, so a
+                # purse-first bump restamps them all from a flake.lock-only
+                # commit — which stages no *.go and would never fire the lane.
+                includes = [ "flake.lock" ];
+                "restage-repair-outputs" = true; # tier 2: restage modified facades
+                "stage-new-outputs" = true; # tier 3: stage a brand-new pkgs/ facade
+                "stage-deleted-outputs" = true; # tier 4: stage a removed/relocated facade
+              };
+            };
+
+          # Dedicated PRE-COMMIT (facade-repair) eval. EXPLICIT membership: the
+          # formatters + excludes from ./conformist.nix, plus the facade-export
+          # repair lane — but deliberately NOT presets.eng (its convention linters
+          # stay at the merge/worktree gate, not commit time).
+          # build.preCommit from THIS eval is the sweatfile [hooks].pre-commit
+          # hook, so a commit auto-formats and regenerates-and-stages go/
+          # facade drift, and nothing else.
+          conformistCodegenEval = conformist.lib.evalModule pkgs {
+            imports = [
+              ./conformist.nix
+              # The facade-export linter MODULE (options.linters.dewey-facade-export.*);
+              # conformistFacadeModule above sets its enable + params.
+              purse-first.lib.conformistLinters.dewey-facade-export
+              conformistFacadeModule
+            ];
+            package = conformist.packages.${system}.default;
+          };
+        in
+        {
+          packages = {
+            default = piggy;
+            piggy = piggy;
+            piggy-rs = piggy-rs;
+            piggy-agent-conformance = piggy-agent-conformance;
+            # The C pivy stack (pivy-agent / pivy-tool / pivy-box etc.).
+            # Exposed so the hardware bats lane can `nix build .#pivy`
+            # to get a freshly-built pivy-agent under
+            # `result/bin/pivy-agent`. See
+            # zz-tests_bats/conformance/pivy_agent_hardware.bats and
+            # the test-bats-conformance-pivy-agent-hardware just recipe.
+            pivy = pivyPkg;
+            # The `age` CLI (plugin-capable), exposed so the
+            # age-plugin-piggy hardware bats lane can `nix build .#age`
+            # to drive a real encrypt/decrypt round-trip through the
+            # plugin. See zz-tests_bats/conformance/age_plugin_piggy_fibby.bats
+            # and the test-bats-conformance-age-plugin-piggy recipe.
+            age = pkgs.age;
+            # The langlang PEG grammar parser/validator (piggy#220), the
+            # `just validate-grammar` / `just test-grammar-vectors` gates
+            # for go/internal/bravo/markl/marklid.peg. `nix build
+            # .#langlang` gets the CLI under `result/bin/langlang`.
+            langlang = langlang.packages.${system}.default;
+            # The normative markl-id grammar and the RFC 0011 §7.3
+            # identifier conformance corpus, exported as store paths so
+            # downstream repos (cutting-garden/trellis, hyphence, papi)
+            # stage them hermetically at validation time instead of
+            # vendoring copies (piggy#236; the pattern papi established
+            # for hyphence-content.peg). piggy is the root of the
+            # upstream→downstream langlang @import chain, and these two
+            # files ARE its export surface: the peg's named rules are a
+            # frozen contract (see TestGrammarImportSurface), the corpus
+            # is the drift guard downstream identifier grammars replay
+            # (RFC 0011 §7.4).
+            marklid-grammar = pkgs.runCommandLocal "marklid.peg" { } ''
+              cp ${self}/go/internal/bravo/markl/marklid.peg "$out"
+            '';
+            markl-identifier-vectors = pkgs.runCommandLocal "0011-identifier-vectors.txt" { } ''
+              cp ${self}/docs/rfcs/0011-identifier-vectors.txt "$out"
+            '';
+            # Standalone fibby binary. On Linux this carries the
+            # `hardware-proxy` feature; on darwin it's VirtualCard-only
+            # (vsmartcard upstream is broken on darwin). Consumed by
+            # `just load-fibby` and the wet-env capture recipes; future
+            # consumer is the planned home-manager service (#129 stretch).
+            fibby = fibby;
+            # Instrumented-coverage variant of the wrapped piggy, consumed by
+            # the vm-piggy-*-cov lanes and `.#coverage-report`.
+            piggy-cov = piggy-cov;
+            # Go test-only SSH server for the SSH-over-fibby bats lane
+            # (piggy#135). Consumed by the forthcoming Phase D recipe via
+            # `nix build .#piggy-test-sshd`.
+            piggy-test-sshd = piggy-test-sshd;
+            # The toolchain-hermetic per-commit facade-repair hook, named by the
+            # sweatfile [hooks].pre-commit command and put on the devShell PATH as
+            # `conformist-pre-commit`. `nix build .#conformist-pre-commit` dogfoods
+            # it (forces the codegen eval + facade lane to resolve).
+            conformist-pre-commit = conformistCodegenEval.config.build.preCommit;
+            # Its merge-repair sibling from the SAME codegen eval, on the
+            # devShell PATH below as `conformist-repair` (sweatfile
+            # [hooks].repair): heals bump-commit codegen drift (dewey facades)
+            # at merge time with the post-bump drivers — the pre-commit hook's
+            # store-pinned driver predates the very bump it would need to heal
+            # (eng tier-B convergence, proven on madder; eng's fallback wrapper
+            # is severed from child repos and would otherwise skip).
+            conformist-repair = conformistCodegenEval.config.build.repair;
+            # The impure-lane config (eng git-state checks + the facade CHECK),
+            # consumed by `just lint-worktree` via `nix build
+            # .#conformist-impure-config`.
+            conformist-impure-config = conformistImpureEval.config.build.configFile;
+
+            # go-pkgs / go-pkgs-test: the flake-input-go_mod producer outputs
+            # (filtered go/ source trees) that let downstream repos
+            # (madder/dodder/cutting-garden) bridge piggy's go/ module as a flake
+            # input via goFlakeInputs, instead of a go.mod pseudo-version (RFC
+            # 0001). Consumers bridge `code.linenisgreat.com/piggy/go` = go-pkgs
+            # with NO subPath (the producer src is already scoped to go/). See
+            # go/gomod.nix.
+            inherit go-pkgs go-pkgs-test;
+
+            # The gomod2nix CLI (from piggy's pinned igloo), exposed so
+            # `just build-gomod2nix` can regenerate go/gomod2nix.toml hermetically
+            # (`nix run .#gomod2nix`) without depending on a devShell reload.
+            gomod2nix = pkgs.gomod2nix;
+          }
+          // batsLib.batsLaneOutputs
+          // vmCoverage
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            fib = virtualPiv.fib;
+            fib-bundle = virtualPiv.fibBundle;
+            fib-reader-conf = virtualPiv.readerConf;
+            fib-pcscd = virtualPiv.pcscdForFib;
+            jcardsim = virtualPiv.jcardsim;
+            pivapplet = virtualPiv.pivapplet;
+          };
+
+          checks = {
+            bats-default = batsLib.batsLaneOutputs.bats-default;
+            # Read-only CI gate: builds in /nix/store off a source
+            # snapshot, runs the conformist formatters + the eng preset's
+            # file-based linters, and fails if any file would change. Driven
+            # from `just lint-fmt` and surfaced under `nix flake check`.
+            formatting = conformistEval.config.build.check self;
+            # piggy#289 Phase 4: the shipped `piggy` runtime closure must NOT
+            # contain the C pivy package. pivy is a test-only input (`.#pivy`, the
+            # differential oracle) now, not a runtime dep — this fails the build if
+            # any reference re-introduces it into the closure. Driven from
+            # `just lint-closure-no-pivy`.
+            lint-closure-no-pivy =
+              let
+                ci = pkgs.closureInfo { rootPaths = [ piggy ]; };
+              in
+              pkgs.runCommand "lint-closure-no-pivy" { } ''
+                if grep -qF '${pivyPkg}' ${ci}/store-paths; then
+                  echo "FAIL: C pivy (${pivyPkg}) is in the piggy runtime closure" >&2
+                  echo "  piggy#289 Phase 4 demoted pivy to a test-only input; it must not ship." >&2
+                  echo "  Something re-introduced a runtime reference to it." >&2
+                  exit 1
+                fi
+                echo "ok: no C pivy in the piggy runtime closure"
+                touch "$out"
+              '';
+          }
+          // vmTests;
+
+          # `nix fmt` runs the generated conformist wrapper (config + every
+          # formatter baked as /nix/store paths). See conformistEval.
+          formatter = conformistEval.config.build.wrapper;
+
+          devShells.default = pkgs.mkShell {
+            packages =
+              runtimeDeps
+              ++ rustBuildInputs
+              ++ rustNativeBuildInputs
+              ++ [
+                pkgs-master.just
+                pkgs-master.rustc
+                pkgs-master.cargo
+                pkgs-master.rustfmt
+                pkgs-master.clippy
+                pkgs-master.rust-analyzer
+                # conformist (treefmt successor): the bare CLI for `just
+                # lint-worktree` (`conformist check --config-file …`), plus the
+                # toolchain-hermetic per-commit facade-repair wrapper on PATH as
+                # `conformist-pre-commit` (the sweatfile [hooks].pre-commit
+                # command). `nix fmt` uses the wrapper from `formatter` above.
+                conformist.packages.${system}.default
+                conformistCodegenEval.config.build.preCommit
+                # Its merge-repair sibling, on PATH as `conformist-repair` for
+                # spinclass's [hooks].repair (see packages.conformist-repair).
+                conformistCodegenEval.config.build.repair
+                pkgs.scdoc
+                # Go toolchain for the go/ module (piggy-agent-conformance
+                # + piggy-test-sshd): `go build`/`vet`/`gofmt` for fast
+                # dev-loop iteration outside nix, and to back the hamster.*
+                # MCP tools. igloo FDR 0012: `pkgs.go` is nixpkgs' go again
+                # (the overlay override rebuilt libcap and everything above
+                # it on every registry bump); the newest registry toolchain
+                # is `pkgs.goToolchain`, which is what the packaged binaries
+                # build with, so the shell go matches the build.
+                pkgs.goToolchain.go
+                # dagnabit (from purse-first): generates the go/ module's pkgs/
+                # export facades from its internal/ packages. The facade
+                # check/repair now runs through conformist's
+                # dewey-facade-export lane (pre-commit REPAIR + lint-worktree
+                # CHECK), which invokes a store-pinned dagnabit; this bare
+                # copy stays on PATH for ad-hoc `dagnabit export` and installs
+                # dagnabit(1). See #183 and the go/ module.
+                purse-first.packages.${system}.dagnabit
+                # gomod2nix CLI (from the igloo overlay, same one paired with
+                # buildGoApplication): `just build-gomod2nix` (= `cd go &&
+                # gomod2nix`) regenerates go/gomod2nix.toml from go.mod/go.sum
+                # after a dep change. buildGoApplication is the freshness gate (a
+                # stale toml fails the binary builds); conformist subdir lint is
+                # deferred to conformist#79.
+                pkgs.gomod2nix
+                # gum drives terminal UI logging in the maint group recipes
+                # (`bump-version`, `tag`, `release`). See eng-versioning(7)
+                # "JUSTFILE RELEASE RECIPES".
+                pkgs.gum
+                # In amarbel-llc/bats's new package layout, `batman`
+                # (the test orchestrator) and `bats` (the bats-core
+                # binary the bats CLI calls live under) are separate
+                # outputs. We need both on PATH so plain `bats` and
+                # `batman` invocations from justfile recipes resolve.
+                bats.packages.${system}.batman
+                bats.packages.${system}.bats
+                # `expect` drives the interactive tty confirmation prompt in the
+                # `piggy tool factory-reset` bats lane (piggy#291): the reset gate
+                # reads a typed `YES` from /dev/tty, so a headless test needs a pty
+                # to answer it.
+                pkgs.expect
+              ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                # `just load-fib` needs pcscd + opensc-tool on PATH; it runs
+                # fib itself via `nix run .#fib`, so fib is deliberately NOT
+                # a devShell package: a jcardsim build failure (its vendored
+                # Maven closure vs the toolchain, piggy#252) must not take
+                # every `just` recipe down with it, least of all
+                # `debug-capture-jcardsim-m2`, the recipe that repairs it.
+                pkgs.pcsclite
+                pkgs.opensc
+              ];
+
+            # Help the openssl + pcsc-sys crates find their libraries
+            # without having to vendor, mirroring pivy's flake semantics.
+            OPENSSL_NO_VENDOR = "1";
+            OPENSSL_DIR = "${pkgs.openssl.dev}";
+            OPENSSL_LIB_DIR = "${pkgs.lib.getLib pkgs.openssl}/lib";
+          };
+        }
+      ))
+      // {
+        # See docs/plans/2026-04-27-piggy-agent-nix-module.md for the
+        # module's design rationale and option surface. The NixOS
+        # module is a thin re-export that wires the hm module into
+        # `home-manager.sharedModules`; per-user activation lives
+        # under `home-manager.users.<u>.services.piggy-agent`.
+        homeManagerModules.piggy-agent = import ./nix/hm/piggy-agent.nix;
+        nixosModules.piggy-agent = import ./nix/nixos/piggy-agent.nix;
+
+        # `services.piggy-secrets` — ebox-backed secret files kept current by
+        # `piggy secrets reconcile` (FDR 0003). Same thin NixOS re-export shape.
+        homeManagerModules.piggy-secrets = import ./nix/hm/piggy-secrets.nix;
+        nixosModules.piggy-secrets = import ./nix/nixos/piggy-secrets.nix;
       }
-    ))
-    // {
-      # See docs/plans/2026-04-27-piggy-agent-nix-module.md for the
-      # module's design rationale and option surface. The NixOS
-      # module is a thin re-export that wires the hm module into
-      # `home-manager.sharedModules`; per-user activation lives
-      # under `home-manager.users.<u>.services.piggy-agent`.
-      homeManagerModules.piggy-agent = import ./nix/hm/piggy-agent.nix;
-      nixosModules.piggy-agent = import ./nix/nixos/piggy-agent.nix;
-
-      # `services.piggy-secrets` — ebox-backed secret files kept current by
-      # `piggy secrets reconcile` (FDR 0003). Same thin NixOS re-export shape.
-      homeManagerModules.piggy-secrets = import ./nix/hm/piggy-secrets.nix;
-      nixosModules.piggy-secrets = import ./nix/nixos/piggy-secrets.nix;
-    };
+    );
 }
