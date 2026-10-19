@@ -94,15 +94,18 @@
 #                word ESCALATE must be typed; button "Grant escalation".
 #                On a tty the word is asked for on a line of its own.
 #
-# The text is shown whole or the prompt fails; an unknown class fails too.
-# A PIN dialog does not scroll, so an act whose rendered text is taller than
-# $operator_act_scroll_lines lines is first shown in a scrollable, read-only
-# zenity --text-info window (plain text, never markup) with an "I have read
-# the whole text" box that must be ticked before OK; cancelling it, or
-# letting it time out, cancels the act. The per-class PIN dialog follows.
-# Reading a text takes longer than typing a PIN, so the zenity timeout
-# defaults to 120 seconds for these. With PIGGY_ASKPASS_KIND unset nothing
-# here applies and the prompt is the routine one.
+# The text is shown whole, on the dialog that takes the PIN, or the prompt
+# fails (RFC 0012 §2.6); an unknown class fails too. A zenity PIN dialog
+# does not scroll, so an act whose rendered prompt is taller than
+# $operator_act_max_lines lines (a line longer than
+# $operator_act_wrap_columns characters counting as the lines it wraps to)
+# is refused before any dialog opens: the helper exits
+# $exit_refused_with_reason and prints why on stdout, naming the limit, and
+# the agent reports the act cancelled with that reason so the caller can
+# shorten the text (piggy#322). A tty has no such limit. Reading a text
+# takes longer than typing a PIN, so the zenity timeout defaults to 120
+# seconds for these. With PIGGY_ASKPASS_KIND unset nothing here applies and
+# the prompt is the routine one.
 #
 # Diagnostic log: zenity's stderr and a per-invocation header are
 # appended to $XDG_LOG_HOME/piggy/askpass.log (default
@@ -119,12 +122,19 @@ require="${SSH_ASKPASS_REQUIRE:-}"
 # The word an escalation makes the operator type, on top of the PIN.
 escalation_word="ESCALATE"
 
-# The tallest operator-act text, in lines of the rendered prompt (banner,
-# parent, context and prompt), shown in the PIN dialog alone. Fifteen lines
-# fit a zenity PIN dialog on a small laptop screen; anything taller is read
-# in a scrolling window first, so no part of it can sit below the screen's
-# edge unseen (RFC 0012 §2.6).
-operator_act_scroll_lines=15
+# The tallest operator-act prompt a zenity PIN dialog shows, in lines of the
+# rendered prompt (banner, parent, context and prompt), a line longer than
+# the wrap width counting as the lines it wraps to. The prompt's own lines
+# take about nine of them, leaving about fifteen for the act's text. Chosen
+# so the PIN field and its button stay on a laptop screen; anything taller
+# is refused, never elided (RFC 0012 §2.6, piggy#322).
+operator_act_max_lines=24
+operator_act_wrap_columns=80
+
+# The exit status of a prompt refused for a reason the caller can act on,
+# with that reason on stdout instead of a PIN. The agent passes the reason
+# on in the act's refusal.
+exit_refused_with_reason=3
 
 # What sets one class of operator act apart from the others and from a
 # routine prompt: the banner over the text, the window title, the confirm
@@ -422,22 +432,15 @@ zenity_escalation() {
   printf '%s\n' "$typed_pin"
 }
 
-# Whether $body is too tall for a PIN dialog alone. Counted in bash: the
-# script's hard dependencies stay zenity and coreutils' basics.
-body_is_too_tall_for_a_pin_dialog() {
-  local newlines="${body//[^$'\n']/}"
-  ((${#newlines} + 1 > operator_act_scroll_lines))
-}
-
-# The scrolling read of a tall operator act. --text-info shows what it reads
-# on stdin as plain text (no Pango markup, no backslash escapes), so the
-# text needs none of the escaping the PIN dialogs do. OK stays disabled
-# until the box is ticked; cancel and timeout both fail, which cancels the
-# act. A non-editable --text-info prints nothing on OK.
-zenity_read_whole_text() {
-  printf '%s\n' "$body" | zenity --timeout="$zenity_timeout" --text-info \
-    --title="$class_title" --width=720 --height=560 \
-    --checkbox="I have read the whole text" >/dev/null
+# How many lines $body takes in a PIN dialog: each line, plus one more for
+# every $operator_act_wrap_columns characters it runs past the first. Counted
+# in bash: the script's hard dependencies stay zenity and coreutils' basics.
+rendered_body_lines() {
+  local line lines=0
+  while IFS= read -r line; do
+    lines=$((lines + 1 + (${#line} > 0 ? (${#line} - 1) / operator_act_wrap_columns : 0)))
+  done <<<"$body"
+  printf '%d' "$lines"
 }
 
 # Render target 2: zenity. We don't gate on $DISPLAY/$WAYLAND_DISPLAY —
@@ -449,10 +452,6 @@ zenity_read_whole_text() {
 # to fail with a clear nonzero exit if there's truly no GUI to talk to.
 if command -v zenity >/dev/null 2>&1; then
   body="$(render_context)"
-  # Heads-up: fire BEFORE zenity opens. When the zenity window is
-  # hidden / off-screen / on a non-focused display this is the only
-  # in-band signal the user gets that the agent is waiting.
-  fire_heads_up
   # Capture zenity's stderr to $XDG_LOG_HOME/piggy/askpass.log (default
   # $HOME/.local/log per XDG_LOG_HOME(7)). Without this, a silently-
   # failing zenity in the launchd/pivy-agent-spawned env leaves no
@@ -478,15 +477,22 @@ if command -v zenity >/dev/null 2>&1; then
   # entered), masking zenity's real exit. After the `fi` of any `if`
   # statement, `$?` is 0 regardless. Only the `else` branch preserves
   # cmd's unmodified exit code.
-  if [[ -n $kind ]] && body_is_too_tall_for_a_pin_dialog; then
-    if zenity_read_whole_text 2>>"$log_path"; then
-      printf 'zenity text-info exit=0\n' >>"$log_path"
-    else
-      rc=$?
-      printf 'zenity text-info exit=%s\n' "$rc" >>"$log_path"
-      exit "$rc"
+  #
+  # An operator act too tall for the PIN dialog is refused before anything
+  # is shown, so no notice announces a dialog that never opens.
+  if [[ -n $kind ]]; then
+    body_lines="$(rendered_body_lines)"
+    if ((body_lines > operator_act_max_lines)); then
+      printf 'refused: too tall (%s lines > %s)\n' "$body_lines" "$operator_act_max_lines" >>"$log_path"
+      printf 'the operator-act text is too tall for the PIN dialog: it renders to %s lines, and this askpass shows at most %s (lines over %s characters count as the lines they wrap to); shorten the text\n' \
+        "$body_lines" "$operator_act_max_lines" "$operator_act_wrap_columns"
+      exit "$exit_refused_with_reason"
     fi
   fi
+  # Heads-up: fire BEFORE zenity opens. When the zenity window is
+  # hidden / off-screen / on a non-focused display this is the only
+  # in-band signal the user gets that the agent is waiting.
+  fire_heads_up
   if pin="$("zenity_${kind:-routine}" 2>>"$log_path")"; then
     printf 'zenity exit=0\n' >>"$log_path"
     printf '%s\n' "$pin"

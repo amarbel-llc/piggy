@@ -278,11 +278,15 @@ refuses rather than guessing. For an operator act it reads the class from
 dialog, which in zenity opens with a band in the class's colour carrying its
 symbol (escalation red, certificate amber, quote blue); an escalation also
 requires the word ESCALATE to be typed. It
-refuses a class it does not know. A PIN dialog does not scroll, so in zenity
-an act whose prompt runs past 15 lines is first shown whole, as plain text,
-in a scrolling window whose OK stays disabled until "I have read the whole
-text" is ticked; cancelling that window cancels the act, and the PIN dialog
-follows it. Test harnesses must point *SSH_ASKPASS* at
+refuses a class it does not know. The dialog that takes the PIN must show
+the act's whole text, and a zenity PIN dialog does not scroll, so the helper
+refuses an act whose rendered prompt is taller than 24 lines (a line longer
+than 80 characters counting as the lines it wraps to) before any dialog
+opens; it never elides the text. The refusal exits 3 with its reason on
+standard output, naming the limit, and the agent reports the act
+_cancelled_ with that reason, so the caller can shorten the text. A tty
+prompt has no such limit. Any askpass may refuse the same way: exit 3 with
+a one-line reason on standard output. Test harnesses must point *SSH_ASKPASS* at
 a non-interactive helper; see *piggy-testing*(7).
 
 # SLOT SPECIFICATION

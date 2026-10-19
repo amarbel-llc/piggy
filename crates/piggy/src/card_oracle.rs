@@ -353,6 +353,12 @@ pub fn run_askpass(prompt: &str, context: Option<&str>) -> Result<Zeroizing<Stri
     run_askpass_of_kind(prompt, context, None)
 }
 
+/// The askpass exit status that means "refused, and here is why": the
+/// reason is on its stdout instead of a PIN, for the caller to act on.
+/// `contrib/piggy-askpass.sh` uses it for an operator act too tall for its
+/// PIN dialog (piggy#322).
+pub const ASKPASS_EXIT_REFUSED_WITH_REASON: i32 = 3;
+
 /// [`run_askpass`] for a prompt that is not a routine PIN prompt. `kind` is
 /// exported to the askpass child as `PIGGY_ASKPASS_KIND` so it can render a
 /// visibly different dialog: an operator act passes its display class (RFC
@@ -394,6 +400,12 @@ pub fn run_askpass_of_kind(
     let status = child
         .wait()
         .map_err(|e| OracleError::Other(format!("await askpass: {e}")))?;
+    if status.code() == Some(ASKPASS_EXIT_REFUSED_WITH_REASON) {
+        let reason = buf.trim();
+        if !reason.is_empty() {
+            return Err(OracleError::Other(format!("askpass refused: {reason}")));
+        }
+    }
     if !status.success() {
         return Err(OracleError::Other(format!("askpass exited with {status}")));
     }
@@ -667,6 +679,44 @@ mod tests {
                     "error should mention exit, got: {msg}"
                 );
             }
+            other => panic!("expected OracleError::Other, got {other:?}"),
+        }
+
+        match prev {
+            Some(v) => std::env::set_var("SSH_ASKPASS", v),
+            None => std::env::remove_var("SSH_ASKPASS"),
+        }
+        if let Some(v) = prev_require {
+            std::env::set_var("SSH_ASKPASS_REQUIRE", v);
+        }
+    }
+
+    /// piggy#322: an askpass that refuses with a reason (exit 3, the reason
+    /// on stdout) has that reason reach the caller, so it can act on it; the
+    /// reason is never taken for a PIN.
+    #[test]
+    fn askpass_refusal_with_reason_surfaces_the_reason() {
+        let _guard = env_lock();
+        let dir = TempDir::new();
+        let askpass = write_executable(
+            &dir.0,
+            "askpass-refuse.sh",
+            "#!/bin/sh\necho 'the text is too tall: 60 lines, at most 24'\nexit 3\n",
+        );
+
+        let prev = std::env::var_os("SSH_ASKPASS");
+        let prev_require = std::env::var_os("SSH_ASKPASS_REQUIRE");
+        std::env::set_var("SSH_ASKPASS", &askpass);
+        // An ambient `never` would reroute to /dev/tty and block the run.
+        std::env::remove_var("SSH_ASKPASS_REQUIRE");
+
+        let err = run_askpass_of_kind("test prompt", Some("piggy-test:tall"), Some("quote"))
+            .expect_err("a refusal must not yield a PIN");
+        match err {
+            OracleError::Other(msg) => assert_eq!(
+                msg,
+                "askpass refused: the text is too tall: 60 lines, at most 24"
+            ),
             other => panic!("expected OracleError::Other, got {other:?}"),
         }
 

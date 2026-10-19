@@ -929,40 +929,32 @@ assert_zenity_text_has() {
   done
 }
 
-# -------- tall operator-act texts: the scrolling read (RFC 0012 §2.6) --------
+# -------- tall operator-act texts: refused (RFC 0012 §2.6, piggy#322) --------
 #
-# A PIN dialog does not scroll. An operator act taller than the script's
-# operator_act_scroll_lines (15) is first shown whole in zenity --text-info,
-# which must be acknowledged; the PIN dialog follows. A routine prompt never
-# gets one. These run the real script against a stub, so what is pinned is
-# the zenity argv and the text handed over, not what a real dialog draws.
+# A PIN dialog does not scroll, and the dialog that takes the PIN must show
+# the whole text. An operator act whose rendered prompt is taller than the
+# script's operator_act_max_lines (24, long lines counting as the lines they
+# wrap to at 80 characters) is refused before any dialog opens: exit 3, the
+# reason on stdout naming the limit. A routine prompt is never refused for
+# its height. These run the real script against a stub, so what is pinned
+# is the zenity argv and the exit, not what a real dialog draws.
 
-# Like run_askpass_against_zenity_stub, but the stub logs every call: its argv
-# to ZENITY_CALLS after a `--- zenity call` marker, and for --text-info the
-# text it read on stdin to ZENITY_TEXT_INFO. --text-info exits with $1; any
-# other dialog answers the PIN 123456.
+# Like run_askpass_against_zenity_stub, but the stub logs every call (its
+# argv to ZENITY_CALLS after a `--- zenity call` marker) and always answers
+# the PIN 123456.
 run_askpass_against_logging_zenity_stub() {
-  local text_info_exit="$1"
-  shift
   unset PIGGY_ASKPASS_DRY_RUN
 
   local stub_dir python3_path
   stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-tall.XXXXXX")"
   ZENITY_CALLS="$stub_dir/calls.log"
-  ZENITY_TEXT_INFO="$stub_dir/text-info.txt"
-  for tool in bash ps tr dirname mkdir date cat; do
+  for tool in bash ps tr dirname mkdir date; do
     ln -s "$(command -v "$tool")" "$stub_dir/$tool"
   done
   cat >"$stub_dir/zenity" <<STUB_EOF
 #!/usr/bin/env bash
 printf -- '--- zenity call\n' >>"$ZENITY_CALLS"
 printf '%s\n' "\$@" >>"$ZENITY_CALLS"
-for arg in "\$@"; do
-  if [[ \$arg == --text-info ]]; then
-    cat >"$ZENITY_TEXT_INFO"
-    exit $text_info_exit
-  fi
-done
 printf '123456\n'
 STUB_EOF
   chmod +x "$stub_dir/zenity"
@@ -974,83 +966,63 @@ STUB_EOF
 }
 
 zenity_call_count() {
-  grep -c '^--- zenity call$' "$ZENITY_CALLS"
+  if [[ -e $ZENITY_CALLS ]]; then
+    grep -c '^--- zenity call$' "$ZENITY_CALLS"
+  else
+    printf '0'
+  fi
 }
 
-# Twenty lines of act text, the last one full of what zenity would mangle.
+# Thirty lines of act text, the last one full of what zenity would mangle.
 tall_act_text() {
-  printf 'grant line %d\n' $(seq 1 20)
+  printf 'grant line %d\n' $(seq 1 30)
   printf '%s' "$TRICKY_TEXT"
 }
 
-@test "tall_operator_act_text_is_read_in_a_scrolling_window_before_the_pin" {
-  run_askpass_against_logging_zenity_stub 0 \
-    PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
+@test "tall_operator_act_text_is_refused_before_any_dialog_with_the_limit_named" {
+  local class
+  for class in quote certificate escalation; do
+    run_askpass_against_logging_zenity_stub \
+      PIGGY_ASKPASS_KIND="$class" PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
 
-  assert_success
-  assert_output "123456"
-  [[ $(zenity_call_count) -eq 2 ]] || {
-    echo "expected the scrolling read, then the PIN dialog; got:"
-    cat "$ZENITY_CALLS"
-    return 1
-  }
-  local text_info_at pin_dialog_at
-  text_info_at=$(grep -n -x -- '--text-info' "$ZENITY_CALLS" | cut -d: -f1)
-  pin_dialog_at=$(grep -n -x -- '--forms' "$ZENITY_CALLS" | cut -d: -f1)
-  [[ -n $text_info_at && -n $pin_dialog_at && $text_info_at -lt $pin_dialog_at ]] || {
-    echo "the scrolling read did not come before the PIN dialog:"
-    cat "$ZENITY_CALLS"
-    return 1
-  }
-  ZENITY_ARGV="$ZENITY_CALLS"
-  assert_zenity_argv_has "--checkbox=I have read the whole text"
-  assert_zenity_argv_has "--title=piggy operator act: QUOTE"
-  assert_zenity_argv_has "--timeout=120"
-  # The text reaches --text-info verbatim, unescaped: it is plain text there.
-  grep -qxF "Context: grant line 1" "$ZENITY_TEXT_INFO"
-  grep -qxF "grant line 20" "$ZENITY_TEXT_INFO"
-  grep -qF -- "$TRICKY_TEXT" "$ZENITY_TEXT_INFO" || {
-    echo "the tricky line did not reach --text-info literally:"
-    cat "$ZENITY_TEXT_INFO"
-    return 1
-  }
-  grep -qF "OPERATOR ACT: QUOTE" "$ZENITY_TEXT_INFO"
+    assert_failure 3
+    refute_output --partial "123456"
+    assert_output --partial "too tall for the PIN dialog"
+    assert_output --partial "at most 24"
+    assert_equal "$(zenity_call_count)" 0
+  done
 }
 
-@test "cancelling_the_scrolling_window_cancels_the_act" {
-  run_askpass_against_logging_zenity_stub 1 \
-    PIGGY_ASKPASS_KIND=escalation PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
+@test "one_long_line_counts_as_the_lines_it_wraps_to" {
+  local long_line
+  long_line="$(printf 'x%.0s' $(seq 1 2000))"
+  run_askpass_against_logging_zenity_stub \
+    PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="grant: $long_line"
 
-  assert_failure 1
-  refute_output --partial "123456"
-  [[ $(zenity_call_count) -eq 1 ]] || {
-    echo "a cancelled read still opened the PIN dialog:"
-    cat "$ZENITY_CALLS"
-    return 1
-  }
+  assert_failure 3
+  assert_output --partial "too tall for the PIN dialog"
+  assert_equal "$(zenity_call_count)" 0
 }
 
 @test "short_operator_act_text_goes_straight_to_the_pin_dialog" {
-  run_askpass_against_logging_zenity_stub 0 \
+  run_askpass_against_logging_zenity_stub \
     PIGGY_ASKPASS_KIND=certificate PIGGY_ASKPASS_CONTEXT=$'issue cert\nfor key X'
 
   assert_success
   assert_output "123456"
   assert_equal "$(zenity_call_count)" 1
   ZENITY_ARGV="$ZENITY_CALLS"
-  refute_zenity_argv_has "--text-info"
   assert_zenity_argv_has "--forms"
 }
 
-@test "tall_routine_prompt_never_gets_a_scrolling_window" {
-  run_askpass_against_logging_zenity_stub 0 \
+@test "tall_routine_prompt_is_never_refused_for_its_height" {
+  run_askpass_against_logging_zenity_stub \
     PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
 
   assert_success
   assert_output "123456"
   assert_equal "$(zenity_call_count)" 1
   ZENITY_ARGV="$ZENITY_CALLS"
-  refute_zenity_argv_has "--text-info"
   assert_zenity_argv_has "--title=piggy PIV PIN"
 }
 
