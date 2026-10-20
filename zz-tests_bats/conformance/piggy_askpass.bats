@@ -1035,8 +1035,8 @@ tall_act_text() {
 
 # -------- operator acts in piggy-askpass-gtk --------
 #
-# With PIGGY_ASKPASS_GTK=1 and piggy-askpass-gtk on PATH the operator-act
-# dialogs are its, not zenity's. These run the real script against a stub of the helper that logs
+# With piggy-askpass-gtk on PATH every dialog is its, not zenity's, unless
+# PIGGY_ASKPASS_GTK=0. These run the real script against a stub of the helper that logs
 # its argv and stdin, answers 123456 and exits with $1, beside the logging
 # zenity stub, so what is pinned is which dialog runs and what it is handed.
 
@@ -1138,18 +1138,23 @@ helper_option() {
   done
 }
 
-@test "the_routine_prompt_never_uses_the_gtk_helper" {
+@test "the_routine_prompt_uses_the_gtk_helper_without_a_band" {
   run_askpass_against_gtk_helper_stub 0
 
   assert_success
-  assert_equal "$(zenity_call_count)" 1
-  [[ ! -e $HELPER_ARGV ]]
+  assert_output "123456"
+  assert_equal "$(zenity_call_count)" 0
+  assert_equal "$(helper_option --title)" "piggy PIV PIN"
+  assert_equal "$(helper_option --timeout)" 30
+  if grep -qxF -- --band "$HELPER_ARGV"; then
+    echo "a routine prompt got a band"
+    return 1
+  fi
 }
 
-# The helper is opt-in while it is being tried: on PATH but not asked for,
-# it is not used.
-@test "without_piggy_askpass_gtk_1_the_zenity_dialogs_stay" {
-  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=escalation PIGGY_ASKPASS_GTK=
+# PIGGY_ASKPASS_GTK=0 is the way back to zenity while the helper is on PATH.
+@test "with_piggy_askpass_gtk_0_the_zenity_dialogs_stay" {
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=escalation PIGGY_ASKPASS_GTK=0
 
   assert_success
   assert_output "123456"

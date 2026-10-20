@@ -94,10 +94,10 @@
 #                word ESCALATE must be typed; button "Grant escalation".
 #                On a tty the word is asked for on a line of its own.
 #
-# With PIGGY_ASKPASS_GTK=1 and piggy-askpass-gtk on PATH (on Linux the nix
-# wrapper puts it there) it shows these dialogs instead of zenity, with the
-# same band, text, fields and buttons, but taking focus when it opens; see
-# gtk_operator_act below. It is opt-in until it has been tried on a desktop.
+# With piggy-askpass-gtk on PATH (on Linux the nix wrapper puts it there) it
+# shows every dialog, routine PIN prompts included, instead of zenity, with
+# the same band, text, fields and buttons, but taking focus when it opens;
+# see gtk_operator_act below. PIGGY_ASKPASS_GTK=0 uses zenity instead.
 #
 # The text is shown whole, on the dialog that takes the PIN, or the prompt
 # fails (RFC 0012 §2.6); an unknown class fails too. A zenity PIN dialog
@@ -438,8 +438,8 @@ zenity_escalation() {
 }
 
 # The operator-act dialog of piggy-askpass-gtk (crates/piggy-askpass-gtk),
-# used instead of zenity's when PIGGY_ASKPASS_GTK=1 and it is on PATH, which
-# the nix wrapper arranges on Linux. Unlike zenity's form it takes focus when
+# used instead of zenity's when it is on PATH (and PIGGY_ASKPASS_GTK is not
+# 0), which the nix wrapper arranges on Linux. Unlike zenity's form it takes focus when
 # it opens, puts the band across its whole width, and shows the text as plain
 # text, read from stdin, so nothing needs escaping. For an escalation it
 # takes the typed word itself and only a click grants it. It answers with
@@ -456,8 +456,21 @@ gtk_operator_act() {
   printf '%s' "$body" | piggy-askpass-gtk "${args[@]}"
 }
 
+# The routine PIN dialog of piggy-askpass-gtk: no band and no typed word, but
+# the same hold, clock and focus as an operator act's.
+gtk_routine() {
+  printf '%s' "$body" | piggy-askpass-gtk \
+    --title "$class_title" --ok-label "OK" --timeout "$zenity_timeout"
+}
+
+# The GTK helper is used whenever it is on PATH, for every dialog this script
+# shows; PIGGY_ASKPASS_GTK=0 falls back to zenity.
+gtk_dialogs_enabled() {
+  [[ ${PIGGY_ASKPASS_GTK:-1} != 0 ]] && command -v piggy-askpass-gtk >/dev/null 2>&1
+}
+
 operator_act_dialog() {
-  if [[ ${PIGGY_ASKPASS_GTK:-0} == 1 ]] && command -v piggy-askpass-gtk >/dev/null 2>&1; then
+  if gtk_dialogs_enabled; then
     printf 'gtk_operator_act'
   else
     printf 'zenity_%s' "$kind"
@@ -482,7 +495,7 @@ rendered_body_lines() {
 # to exit 2, which pivy-agent (pivy-agent.c:1067) treats as a confirm
 # failure → AUTHZ_DENIED → every signature refused. Trust zenity itself
 # to fail with a clear nonzero exit if there's truly no GUI to talk to.
-if command -v zenity >/dev/null 2>&1; then
+if gtk_dialogs_enabled || command -v zenity >/dev/null 2>&1; then
   body="$(render_context)"
   # Capture zenity's stderr to $XDG_LOG_HOME/piggy/askpass.log (default
   # $HOME/.local/log per XDG_LOG_HOME(7)). Without this, a silently-
@@ -526,6 +539,9 @@ if command -v zenity >/dev/null 2>&1; then
   # in-band signal the user gets that the agent is waiting.
   fire_heads_up
   dialog="zenity_routine"
+  if gtk_dialogs_enabled; then
+    dialog="gtk_routine"
+  fi
   if [[ -n $kind ]]; then
     dialog="$(operator_act_dialog)"
   fi

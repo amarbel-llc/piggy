@@ -4529,6 +4529,8 @@ explore-piggy-health *ARGS:
 #   PROMPTS=real runs contrib/piggy-askpass.sh, so the operator SEES the real
 #     dialogs, against the virtual card only (its PIN is 123456). Start each
 #     text with `piggy-test:` and the dialog carries a [TEST] banner.
+#   PROMPTS=gtk is PROMPTS=real with PIGGY_ASKPASS_GTK=1 in the agent's
+#     environment, so the operator sees the GTK 4 helper's dialogs.
 # CARD=real is the explicit flag for the real-card half of the pass. It
 # starts nothing and redirects nothing: the shell talks to the host's pcscd
 # and the operator's own agent, and every prompt is a real one.
@@ -4545,7 +4547,7 @@ explore-fdr0006-a CARD="virtual" PROMPTS="test" RUN="":
     prompts="{{ PROMPTS }}"
     run={{ quote(RUN) }}
     case "$card" in virtual | real) ;; *) echo "CARD must be virtual or real, not '$card'" >&2; exit 2 ;; esac
-    case "$prompts" in test | real) ;; *) echo "PROMPTS must be test or real, not '$prompts'" >&2; exit 2 ;; esac
+    case "$prompts" in test | real | gtk) ;; *) echo "PROMPTS must be test, real or gtk, not '$prompts'" >&2; exit 2 ;; esac
 
     piggy_out=$(nix build .#default --no-link --print-out-paths)
     dir="$(mktemp -d -t fdr6a.XXXXXX)"
@@ -4686,7 +4688,15 @@ explore-fdr0006-a CARD="virtual" PROMPTS="test" RUN="":
         # Without force the agent would read the PIN from this terminal
         # and the dialogs under review would never appear.
         export SSH_ASKPASS_REQUIRE=force
-        echo "PROMPTS=real: you will see real dialogs, for the VIRTUAL card. Its PIN is 123456."
+        # The dialogs are opened by the AGENT, so the opt-in must be in the
+        # environment it is started with, not just in the RUN shell.
+        # contrib/piggy-askpass.sh is run directly here, not through the nix
+        # wrapper that puts the helper on PATH, so put it there ourselves.
+        if [[ $prompts == gtk ]]; then
+          gtk_out=$(nix build .#piggy-askpass-gtk --no-link --print-out-paths)
+          export PATH="$gtk_out/bin:$PATH" PIGGY_ASKPASS_GTK=1
+        fi
+        echo "PROMPTS=$prompts: you will see real dialogs, for the VIRTUAL card. Its PIN is 123456."
         echo "Begin each text with 'piggy-test:' so the dialog carries a [TEST] banner."
       fi
 

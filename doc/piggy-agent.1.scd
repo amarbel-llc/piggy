@@ -285,9 +285,9 @@ refuses rather than guessing. For an operator act it reads the class from
 dialog, which opens with a band in the class's colour carrying its symbol
 (escalation red, certificate amber, quote blue); an escalation also
 requires the word ESCALATE to be typed, and then a click on its button.
-The dialogs are zenity's. On Linux, with *PIGGY_ASKPASS_GTK*=1 (opt-in
-while it is being tried), the operator-act dialog is instead
-*piggy-askpass-gtk*, which the packaged helper finds on its *PATH*: it
+On Linux every dialog, the routine PIN prompt included, is
+*piggy-askpass-gtk*, which the packaged helper finds on its *PATH*; with
+*PIGGY_ASKPASS_GTK*=0, or where it is absent, they are zenity's. The helper
 takes focus when it opens and shows the text as plain text. For its first
 3 seconds it takes no input but a cancel, its fields are greyed out, and
 it shakes at any keystroke, so a key meant for another window can neither
