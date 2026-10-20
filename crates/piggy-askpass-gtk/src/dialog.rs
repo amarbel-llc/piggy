@@ -20,9 +20,12 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
 
     let main_loop = glib::MainLoop::new(None, false);
     let outcome: Rc<RefCell<Option<Outcome>>> = Rc::new(RefCell::new(None));
+    // Modal, as zenity's libadwaita dialogs are: on twerk's GNOME X11 session
+    // a modal window opens centred where a plain one opens top-left.
     let window = gtk::Window::builder()
         .title(options.title.as_str())
         .resizable(false)
+        .modal(true)
         .build();
 
     // The first ending wins; closing the window afterwards is not a cancel.
