@@ -288,7 +288,11 @@ requires the word ESCALATE to be typed, and then a click on its button.
 The dialogs are zenity's. On Linux, with *PIGGY_ASKPASS_GTK*=1 (opt-in
 while it is being tried), the operator-act dialog is instead
 *piggy-askpass-gtk*, which the packaged helper finds on its *PATH*: it
-takes focus when it opens and shows the text as plain text. The helper
+takes focus when it opens and shows the text as plain text. For its first
+3 seconds it takes no input but a cancel, and shakes at any keystroke, so
+a key meant for another window can neither type into it nor confirm the
+act; a line under its buttons counts down that block and the seconds left
+before it times out. The helper
 refuses a class it does not know. The dialog that takes the PIN must show
 the act's whole text, and neither PIN dialog scrolls, so the helper
 refuses an act whose rendered prompt is taller than 24 lines (a line longer
