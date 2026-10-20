@@ -298,7 +298,8 @@ dialog has a timeout, a green section and a short red one (a tenth of the
 time left after the block, at least 3 seconds) with the used part gone
 white. Keystrokes and pointer moves pause the clock, under a pause symbol
 that fades in and out, and for 2 seconds after they stop, counted down over
-the clock; the dialog gives up (exit 5) only when the clock runs out.
+the clock; the dialog gives up (exit 5) when the clock runs out, and in any
+case 5 minutes after it opened, however much input it has had.
 Pressing Return to confirm leaves the clock as it is. The helper
 refuses a class it does not know. The dialog that takes the PIN must show
 the act's whole text, and neither PIN dialog scrolls, so the helper

@@ -25,6 +25,10 @@ const RED_FLOOR: Duration = Duration::from_secs(3);
 /// How long the clock stands still after each keystroke or pointer move, so
 /// an operator who is typing is not timed out mid-PIN.
 const INPUT_PAUSE: Duration = Duration::from_secs(2);
+/// The longest the dialog stays open, counted from opening, whatever the
+/// clock shows: input pauses the clock, so without this an operator who
+/// keeps typing or moving the pointer could hold the dialog open forever.
+const MAX_LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// Input this recent still counts as going on: the clock shows a pause symbol
 /// rather than the countdown to resuming.
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(400);
@@ -344,6 +348,10 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
                 return glib::ControlFlow::Continue;
             }
             let now = Instant::now();
+            if now.saturating_duration_since(opened) >= MAX_LIFETIME {
+                finish(Outcome::TimedOut);
+                return glib::ControlFlow::Break;
+            }
             let (mut phase, mut in_phase) = clock.get();
             // Only the part of this interval after any pause counts.
             let paused_until = last_input.get().map_or(opened, |at| at + INPUT_PAUSE);
