@@ -268,10 +268,11 @@ pub struct VirtualCard {
     /// Answer `6D 00` to every command but SELECT while no applet is
     /// selected, as a real card does after a reset (piggy#323: a YubiKey
     /// gave a client 0x6D00 when another client's session had reset it).
-    /// Off by default: fibby models one client's power and selection, so its
-    /// `connect` and `disconnect` deselect for every handle, which a real
-    /// card shared through pcscd does not; a test that turns this on runs
-    /// clients that SELECT before they speak (`--require-select`).
+    /// Off by default, since many existing tests speak without a SELECT; a
+    /// test that turns it on runs clients that SELECT before they speak
+    /// (`--require-select`). The server powers the card up for the first
+    /// open handle only (piggy#320), so another client's connect does not
+    /// deselect it.
     require_select: bool,
     /// PUK (PIN Unblocking Key) value, stored as raw ASCII bytes. The
     /// YubiKey factory default is `"12345678"` (8 bytes, no 0xFF

@@ -42,6 +42,28 @@ pub type SharedBackend = Arc<Mutex<dyn Backend>>;
 /// slot order.
 pub type SharedBackends = Arc<Vec<SharedBackend>>;
 
+/// What pcscd itself tracks for each card, across every client (piggy#320):
+/// how many handles are open on it, and which handle holds its transaction.
+/// A backend models the card, so these live here, beside it.
+#[derive(Default)]
+struct CardShare {
+    open_handles: usize,
+    transaction_holder: Option<i32>,
+}
+
+/// One [`CardShare`] per backend, same indexing as [`SharedBackends`].
+type CardShares = Arc<Vec<Mutex<CardShare>>>;
+
+impl CardShare {
+    /// Whether `h_card` may use the card now: no transaction is held, or
+    /// `h_card` holds it. pcscd answers anyone else SCARD_E_SHARING_VIOLATION
+    /// (and libpcsclite retries SCardBeginTransaction on it).
+    fn admits(&self, h_card: i32) -> bool {
+        self.transaction_holder
+            .is_none_or(|holder| holder == h_card)
+    }
+}
+
 /// A live client connection's server→client write half plus its
 /// reader-state-change registration flag (piggy#248). Every write that can
 /// race the async event notification — the `WAIT_READER_STATE_CHANGE` (0x13)
@@ -119,6 +141,7 @@ pub fn serve(
     control_socket: Option<&str>,
 ) -> std::io::Result<()> {
     assert!(!backends.is_empty(), "serve needs at least one backend");
+    let shares: CardShares = Arc::new(backends.iter().map(|_| Mutex::default()).collect());
     let backends: SharedBackends = Arc::new(backends);
     // piggy#248: registry of live client connections so the control thread
     // can wake any blocked in SCardGetStatusChange when presence toggles.
@@ -156,9 +179,10 @@ pub fn serve(
         match stream {
             Ok(stream) => {
                 let backends = Arc::clone(&backends);
+                let shares = Arc::clone(&shares);
                 let waiters = Arc::clone(&waiters);
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, backends, waiters) {
+                    if let Err(e) = handle_client(stream, backends, shares, waiters) {
                         trace::emit(trace::INFO, "conn", &format!("connection ended: {e}"));
                     }
                 });
@@ -400,11 +424,21 @@ impl ConnState {
     fn backend_of(&self, h_card: i32) -> usize {
         self.card_backends.get(&h_card).copied().unwrap_or(0)
     }
+    /// Drop `h_card`'s bookkeeping; its backend index, or `None` if this
+    /// connection never opened it (or closed it already).
+    fn forget_card(&mut self, h_card: i32) -> Option<usize> {
+        self.card_protocols.remove(&h_card);
+        self.card_backends.remove(&h_card)
+    }
+    fn open_cards(&self) -> Vec<i32> {
+        self.card_backends.keys().copied().collect()
+    }
 }
 
 fn handle_client(
     stream: UnixStream,
     backends: SharedBackends,
+    shares: CardShares,
     waiters: Waiters,
 ) -> std::io::Result<()> {
     // piggy#248: register this connection in the waiters registry so a
@@ -418,9 +452,48 @@ fn handle_client(
         armed: false,
     }));
     waiters.lock().unwrap().push(Arc::clone(&sink));
-    let result = serve_connection(stream, backends, &sink);
+    let mut state = ConnState::new();
+    let result = serve_connection(stream, &backends, &shares, &sink, &mut state);
     waiters.lock().unwrap().retain(|w| !Arc::ptr_eq(w, &sink));
+    // A client that exits without SCardDisconnect still closes its handles,
+    // as pcscd does when a client's socket goes away.
+    for h_card in state.open_cards() {
+        let _ = close_handle(&backends, &shares, &mut state, h_card, disposition::LEAVE);
+    }
     result
+}
+
+/// Close `h_card` with `disposition`, as pcscd does: release its
+/// transaction, and power the card down only when no other handle is open
+/// on it. A reset or unpower disposition resets the card for everyone even
+/// while other handles stay open.
+fn close_handle(
+    backends: &SharedBackends,
+    shares: &CardShares,
+    state: &mut ConnState,
+    h_card: i32,
+    disp: u32,
+) -> crate::backend::ScardResult<()> {
+    let Some(idx) = state.forget_card(h_card) else {
+        return Err(crate::error::SCARD_E_INVALID_HANDLE);
+    };
+    let last = {
+        let mut share = shares[idx].lock().unwrap();
+        if share.transaction_holder == Some(h_card) {
+            share.transaction_holder = None;
+        }
+        share.open_handles = share.open_handles.saturating_sub(1);
+        share.open_handles == 0
+    };
+    let mut backend = backends[idx].lock().unwrap();
+    if last {
+        backend.disconnect(disp)
+    } else {
+        if disp == disposition::RESET || disp == disposition::UNPOWER {
+            backend.end_transaction(disp);
+        }
+        Ok(())
+    }
 }
 
 /// Serve one client connection: the `CMD_VERSION` handshake then the command
@@ -429,8 +502,10 @@ fn handle_client(
 /// every other reply writes through the connection thread's own `stream`.
 fn serve_connection(
     mut stream: UnixStream,
-    backends: SharedBackends,
+    backends: &SharedBackends,
+    shares: &CardShares,
     sink: &Arc<Mutex<ConnSink>>,
+    state: &mut ConnState,
 ) -> std::io::Result<()> {
     // 1) CMD_VERSION handshake. Must come first; a version-major
     //    mismatch is the sole cause of SCARD_E_SERVICE_STOPPED.
@@ -478,7 +553,6 @@ fn serve_connection(
     }
 
     // 2) Command loop.
-    let mut state = ConnState::new();
     loop {
         let (header, body) = match read_message(&mut stream)? {
             Some(m) => m,
@@ -499,20 +573,22 @@ fn serve_connection(
         trace::hexdump("rx", &body);
 
         match cmd {
-            Some(Command::EstablishContext) => establish(&mut stream, &body, &mut state)?,
+            Some(Command::EstablishContext) => establish(&mut stream, &body, state)?,
             Some(Command::ReleaseContext) => simple_ok(&mut stream, &body)?,
-            Some(Command::GetReadersState) => readers_state(&mut stream, &backends)?,
-            Some(Command::Connect) => connect(&mut stream, &body, &mut state, &backends)?,
-            Some(Command::Reconnect) => reconnect(&mut stream, &body, &state, &backends)?,
-            Some(Command::Disconnect) => disconnect(&mut stream, &body, &state, &backends)?,
-            Some(Command::BeginTransaction) => begin_end_ok(&mut stream, &body)?,
-            Some(Command::EndTransaction) => {
-                end_transaction(&mut stream, &body, &state, &backends)?
+            Some(Command::GetReadersState) => readers_state(&mut stream, backends)?,
+            Some(Command::Connect) => connect(&mut stream, &body, state, backends, shares)?,
+            Some(Command::Reconnect) => reconnect(&mut stream, &body, state, backends, shares)?,
+            Some(Command::Disconnect) => disconnect(&mut stream, &body, state, backends, shares)?,
+            Some(Command::BeginTransaction) => {
+                begin_transaction(&mut stream, &body, state, shares)?
             }
-            Some(Command::Transmit) => transmit(&mut stream, &body, &state, &backends)?,
+            Some(Command::EndTransaction) => {
+                end_transaction(&mut stream, &body, state, backends, shares)?
+            }
+            Some(Command::Transmit) => transmit(&mut stream, &body, state, backends, shares)?,
             Some(Command::Status) => status(&mut stream, &body)?,
             Some(Command::Cancel) => cancel(&mut stream, &body)?,
-            Some(Command::WaitReaderStateChange) => wait_reader_state(sink, &backends)?,
+            Some(Command::WaitReaderStateChange) => wait_reader_state(sink, backends)?,
             Some(Command::StopWaitingReaderStateChange) => stop_waiting(sink)?,
             // Known commands fibby doesn't speak yet. Closing the
             // connection here is intentional: it makes the unimplemented
@@ -626,6 +702,7 @@ fn connect(
     body: &[u8],
     state: &mut ConnState,
     backends: &SharedBackends,
+    shares: &CardShares,
 ) -> std::io::Result<()> {
     let req = match ConnectStruct::from_bytes(body) {
         Some(r) => r,
@@ -656,12 +733,22 @@ fn connect(
         resp.rv = SCARD_E_NO_SMARTCARD;
         return reply(stream, &resp.to_bytes());
     }
-    match backends[idx]
-        .lock()
-        .unwrap()
-        .connect(req.dw_share_mode, req.dw_preferred_protocols)
-    {
+    // pcscd powers a card up for its first handle only; a second client's
+    // connect finds it powered, with its applet selection and PIN state as
+    // the other client left them (piggy#320).
+    let mut share = shares[idx].lock().unwrap();
+    let powered = if share.open_handles == 0 {
+        backends[idx]
+            .lock()
+            .unwrap()
+            .connect(req.dw_share_mode, req.dw_preferred_protocols)
+    } else {
+        Ok(protocol::T1)
+    };
+    match powered {
         Ok(active) => {
+            share.open_handles += 1;
+            drop(share);
             let h = state.mint_card(active, idx);
             resp.h_card = h;
             resp.dw_active_protocol = active;
@@ -694,6 +781,7 @@ fn reconnect(
     body: &[u8],
     state: &ConnState,
     backends: &SharedBackends,
+    shares: &CardShares,
 ) -> std::io::Result<()> {
     // reconnect_struct { i32 hCard; u32 dwShareMode; u32 dwPreferredProtocols;
     //                    u32 dwInitialization; u32 dwActiveProtocol; u32 rv }
@@ -702,10 +790,27 @@ fn reconnect(
         return reply(stream, body); // echo; malformed
     }
     let h_card = i32::from_le_bytes(body[0..4].try_into().unwrap());
-    let (share, preferred) = (r(4), r(8));
+    let (share_mode, preferred, initialization) = (r(4), r(8), r(12));
     let mut out = body.to_vec();
-    let backend = &backends[state.backend_of(h_card)];
-    match backend.lock().unwrap().connect(share, preferred) {
+    let idx = state.backend_of(h_card);
+    let backend = &backends[idx];
+    // The handle stays open across a reconnect, so the open-handle count
+    // does not move. A sole handle re-powers the card as before; with other
+    // handles open only a reset or unpower initialization touches it.
+    let sole = shares[idx].lock().unwrap().open_handles <= 1;
+    let result = if sole {
+        backend.lock().unwrap().connect(share_mode, preferred)
+    } else {
+        if initialization == disposition::RESET || initialization == disposition::UNPOWER {
+            backend.lock().unwrap().end_transaction(initialization);
+        }
+        Ok(state
+            .card_protocols
+            .get(&h_card)
+            .copied()
+            .unwrap_or(protocol::T1))
+    };
+    match result {
         Ok(active) => {
             out[16..20].copy_from_slice(&active.to_le_bytes()); // dwActiveProtocol
             out[20..24].copy_from_slice(&SCARD_S_SUCCESS.to_le_bytes());
@@ -723,16 +828,16 @@ fn reconnect(
 fn disconnect(
     stream: &mut UnixStream,
     body: &[u8],
-    state: &ConnState,
+    state: &mut ConnState,
     backends: &SharedBackends,
+    shares: &CardShares,
 ) -> std::io::Result<()> {
     let req = HandleArgRv::from_bytes(body).unwrap_or(HandleArgRv {
         handle: -1,
         arg: disposition::LEAVE,
         rv: 0,
     });
-    let backend = &backends[state.backend_of(req.handle)];
-    let rv = match backend.lock().unwrap().disconnect(req.arg) {
+    let rv = match close_handle(backends, shares, state, req.handle, req.arg) {
         Ok(()) => SCARD_S_SUCCESS,
         Err(code) => code,
     };
@@ -760,6 +865,7 @@ fn transmit(
     body: &[u8],
     state: &ConnState,
     backends: &SharedBackends,
+    shares: &CardShares,
 ) -> std::io::Result<()> {
     let req = match TransmitStruct::from_bytes(body) {
         Some(r) => r,
@@ -775,8 +881,22 @@ fn transmit(
     );
     trace::hexdump("apdu>", &apdu);
 
-    let backend = &backends[state.backend_of(req.h_card)];
-    let result = transmit_waiting_for_touch(backend, &apdu, || peer_hung_up(stream));
+    let idx = state.backend_of(req.h_card);
+    // While another handle holds the card's transaction, pcscd refuses
+    // this one's APDUs instead of interleaving them (piggy#320).
+    let result = if shares[idx].lock().unwrap().admits(req.h_card) {
+        transmit_waiting_for_touch(&backends[idx], &apdu, || peer_hung_up(stream))
+    } else {
+        trace::emit(
+            trace::DEBUG,
+            "tx",
+            &format!(
+                "TRANSMIT hCard={} -> sharing violation (another handle holds the transaction)",
+                req.h_card
+            ),
+        );
+        Err(crate::error::SCARD_E_SHARING_VIOLATION)
+    };
     let active = state
         .card_protocols
         .get(&req.h_card)
@@ -919,10 +1039,26 @@ fn cancel(stream: &mut UnixStream, body: &[u8]) -> std::io::Result<()> {
     reply_handle_rv(stream, req.handle, SCARD_S_SUCCESS)
 }
 
-fn begin_end_ok(stream: &mut UnixStream, body: &[u8]) -> std::io::Result<()> {
-    // BEGIN_TRANSACTION: single-client model grants unconditionally.
+/// BEGIN_TRANSACTION: the card is the caller's until it ends the
+/// transaction. While another handle holds it, answer
+/// SCARD_E_SHARING_VIOLATION, which libpcsclite's SCardBeginTransaction
+/// retries until the holder lets go: the caller waits, as with pcscd.
+fn begin_transaction(
+    stream: &mut UnixStream,
+    body: &[u8],
+    state: &ConnState,
+    shares: &CardShares,
+) -> std::io::Result<()> {
     let req = HandleRv::from_bytes(body).unwrap_or(HandleRv { handle: -1, rv: 0 });
-    reply_handle_rv(stream, req.handle, SCARD_S_SUCCESS)
+    let mut share = shares[state.backend_of(req.handle)].lock().unwrap();
+    let rv = if share.admits(req.handle) {
+        share.transaction_holder = Some(req.handle);
+        SCARD_S_SUCCESS
+    } else {
+        crate::error::SCARD_E_SHARING_VIOLATION
+    };
+    drop(share);
+    reply_handle_rv(stream, req.handle, rv)
 }
 
 fn end_transaction(
@@ -930,16 +1066,27 @@ fn end_transaction(
     body: &[u8],
     state: &ConnState,
     backends: &SharedBackends,
+    shares: &CardShares,
 ) -> std::io::Result<()> {
     let req = HandleArgRv::from_bytes(body).unwrap_or(HandleArgRv {
         handle: -1,
         arg: disposition::LEAVE,
         rv: 0,
     });
-    backends[state.backend_of(req.handle)]
-        .lock()
-        .unwrap()
-        .end_transaction(req.arg);
+    let idx = state.backend_of(req.handle);
+    // Only the holder's disposition reaches the card: a handle that holds no
+    // transaction has none to end.
+    let held = {
+        let mut share = shares[idx].lock().unwrap();
+        let held = share.transaction_holder == Some(req.handle);
+        if held {
+            share.transaction_holder = None;
+        }
+        held
+    };
+    if held {
+        backends[idx].lock().unwrap().end_transaction(req.arg);
+    }
     reply(
         stream,
         &HandleArgRv {

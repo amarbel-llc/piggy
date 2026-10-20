@@ -131,9 +131,17 @@ transaction ended with a reset disposition (as piggy-piv ends every
 session that verified a PIN) resets the card for every client: no applet
 stays selected and the PIN and management-key authentication are
 cleared. *--require-select* makes fibby answer 6D00 while no applet is
-selected, as the real card does; it is off by default because fibby
-models one client's power and selection, so its connect and disconnect
-deselect for every client, which a card shared through pcscd does not.
+selected, as the real card does.
+
+Several clients share one fibby card the way pcscd shares a real one
+(piggy#320): the card powers up for the first open handle and down when
+the last one closes, so another client's connect or disconnect leaves the
+applet selection and PIN state alone; a client whose connection drops
+without SCardDisconnect has its handles closed for it. While one handle
+holds the card's transaction, other handles' transmits and
+SCardBeginTransaction are answered SCARD_E_SHARING_VIOLATION, which
+libpcsclite retries for SCardBeginTransaction, so a running *piggy agent*
+waits out a *piggy card init* instead of interleaving with it.
 
 *--hardware-proxy* relays a real card and keeps the wire trace; that is
 how APDU fixtures for new client code are captured.

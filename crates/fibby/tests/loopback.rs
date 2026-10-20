@@ -239,6 +239,121 @@ impl Client {
     }
 }
 
+impl Client {
+    /// TRANSMIT expecting the server to refuse it; returns the refusal's rv.
+    fn transmit_rv(&mut self, h_card: i32, apdu: &[u8]) -> u32 {
+        let tx = TransmitStruct {
+            h_card,
+            io_send_pci_protocol: protocol::T1,
+            io_send_pci_length: 8,
+            cb_send_length: apdu.len() as u32,
+            io_recv_pci_protocol: 0,
+            io_recv_pci_length: 0,
+            pcb_recv_length: 4096,
+            rv: 0,
+        };
+        self.send(Command::Transmit, &tx.to_bytes());
+        self.stream.write_all(apdu).unwrap();
+        self.stream.flush().unwrap();
+        let reply = TransmitStruct::from_bytes(&self.recv(TransmitStruct::WIRE_LEN)).unwrap();
+        if reply.rv == 0 {
+            let _ = self.recv(reply.pcb_recv_length as usize);
+        }
+        reply.rv
+    }
+
+    fn begin_transaction(&mut self, h_card: i32) -> u32 {
+        self.send(
+            Command::BeginTransaction,
+            &HandleRv {
+                handle: h_card,
+                rv: 0,
+            }
+            .to_bytes(),
+        );
+        HandleRv::from_bytes(&self.recv(HandleRv::WIRE_LEN))
+            .unwrap()
+            .rv
+    }
+
+    fn end_transaction(&mut self, h_card: i32, disp: u32) {
+        self.send(
+            Command::EndTransaction,
+            &HandleArgRv {
+                handle: h_card,
+                arg: disp,
+                rv: 0,
+            }
+            .to_bytes(),
+        );
+        let _ = self.recv(HandleArgRv::WIRE_LEN);
+    }
+
+    fn disconnect(&mut self, h_card: i32, disp: u32) {
+        self.send(
+            Command::Disconnect,
+            &HandleArgRv {
+                handle: h_card,
+                arg: disp,
+                rv: 0,
+            }
+            .to_bytes(),
+        );
+        let _ = self.recv(HandleArgRv::WIRE_LEN);
+    }
+}
+
+/// VERIFY with fibby's factory PIN 123456.
+fn verify_default_pin_apdu() -> Vec<u8> {
+    vec![
+        0x00, 0x20, 0x00, 0x80, 0x08, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF,
+    ]
+}
+
+/// VERIFY with no body: the PIN status query (9000 when verified).
+fn pin_status_apdu() -> Vec<u8> {
+    vec![0x00, 0x20, 0x00, 0x80]
+}
+
+/// piggy#320: what pcscd does for a card shared by two clients. While one
+/// holds the transaction, the other's TRANSMIT and BEGIN are refused with a
+/// sharing violation instead of interleaving, and the second client closing
+/// its handle leaves the card powered with the first client's PIN verified.
+/// fibby used to power the card down for everyone on any disconnect and
+/// grant every transaction, which broke `card init` beside a running agent.
+#[test]
+fn a_second_client_neither_interleaves_into_a_transaction_nor_powers_the_card_down() {
+    const SHARING_VIOLATION: u32 = 0x8010_000B;
+    let path = unique_socket_path();
+    start_server(&path, vec![VirtualCard::new()]);
+    let (mut a, ctx_a) = open_session(&path);
+    let (mut b, ctx_b) = open_session(&path);
+    let reader = first_reader(&mut a).reader_name;
+    let ha = a.connect_reader(ctx_a, &reader).h_card;
+    let hb = b.connect_reader(ctx_b, &reader).h_card;
+
+    assert_eq!(a.begin_transaction(ha), 0);
+    a.transmit(ha, &select_piv_apdu());
+    assert_eq!(a.transmit(ha, &verify_default_pin_apdu()), vec![0x90, 0x00]);
+
+    assert_eq!(b.transmit_rv(hb, &select_piv_apdu()), SHARING_VIOLATION);
+    assert_eq!(b.begin_transaction(hb), SHARING_VIOLATION);
+    b.disconnect(hb, disposition::LEAVE);
+
+    assert_eq!(
+        a.transmit(ha, &pin_status_apdu()),
+        vec![0x90, 0x00],
+        "another client's disconnect cleared the transaction holder's PIN"
+    );
+
+    // Once the holder lets go, the other client gets in.
+    a.end_transaction(ha, disposition::LEAVE);
+    let (mut c, ctx_c) = open_session(&path);
+    let hc = c.connect_reader(ctx_c, &reader).h_card;
+    assert_eq!(c.begin_transaction(hc), 0);
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Extract the 16 GUID bytes from a `53 …` CHUID GET DATA response by
 /// scanning for the `34 10` TLV (test-side convenience, not a parser).
 fn guid_of(chuid_resp: &[u8]) -> [u8; 16] {
