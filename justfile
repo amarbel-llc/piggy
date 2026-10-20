@@ -4327,6 +4327,57 @@ debug-fibby-slot-9c-sign:
 # -a eccp256 generate 9a` (SELECT + mgmt-key auth + GENERATE) and asserts it
 # prints a public key. Exits non-zero on failure. No hardware.
 #
+# piggy#320: run `piggy card init` against a fresh fibby with a slow askpass
+# (each secret answered after DELAY seconds, as a human would), first alone,
+# then beside a `piggy list` loop, then beside a running `piggy agent -A`.
+# Tests whether another client's probe during init's prompts is what makes
+# step 7 (management-key rotation) answer 0x6982. No hardware, no tty.
+#
+# reproduce card init's step-7 0x6982 with and without a concurrent PC/SC client
+[group('debug')]
+[linux]
+debug-card-init-interleave DELAY="3": build-rust
+    #!/usr/bin/env bash
+    set -uo pipefail
+    piggy="$PWD/target/debug/piggy"
+    fibby="$PWD/target/debug/fibby"
+    test_askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    workdir=$(mktemp -d /tmp/pg320-XXXXXX)
+    trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$workdir"' EXIT
+    printf '#!/usr/bin/env bash\nsleep %s\nexec %q "$@"\n' "{{ DELAY }}" "$test_askpass" >"$workdir/slow-askpass"
+    chmod +x "$workdir/slow-askpass"
+    run_case() {
+      local name="$1" interloper="$2" sock="$workdir/$1.comm"
+      FIBBY_LOG=debug "$fibby" --socket "$sock" --backend virtual --model yk5 --auto-touch \
+        >"$workdir/$name.fibby.log" 2>&1 &
+      local fpid=$!
+      for _ in $(seq 1 50); do [[ -S $sock ]] && break; sleep 0.1; done
+      local ipid=""
+      if [[ $interloper == list ]]; then
+        ( while :; do PCSCLITE_CSOCK_NAME="$sock" "$piggy" list --format=ndjson >/dev/null 2>&1; sleep 0.5; done ) &
+        ipid=$!
+      elif [[ $interloper == agent ]]; then
+        # The setup the failing runs had: a card agent beside the card.
+        PCSCLITE_CSOCK_NAME="$sock" SSH_ASKPASS=/bin/false SSH_ASKPASS_REQUIRE=force DISPLAY= \
+          "$piggy" agent -A -a "$workdir/$name.agent.sock" >"$workdir/$name.agent.log" 2>&1 &
+        ipid=$!
+        sleep 1
+      fi
+      local rc=0 started=$SECONDS
+      PCSCLITE_CSOCK_NAME="$sock" PIGGY_TEST_FIB_PIN=654321 \
+        SSH_ASKPASS="$workdir/slow-askpass" SSH_ASKPASS_REQUIRE=force DISPLAY= \
+        setsid -w "$piggy" card init --no-seal-management-key <<<"y" \
+        >"$workdir/$name.out" 2>"$workdir/$name.err" || rc=$?
+      [[ -n $ipid ]] && kill "$ipid" 2>/dev/null
+      kill "$fpid" 2>/dev/null
+      echo "=== $name (interloper=$interloper): card init exit $rc after $((SECONDS - started)) s"
+      echo "fibby: $(grep -c 'DISCONNECT' "$workdir/$name.fibby.log") disconnects, $(grep -c 'END TRANSACTION with reset' "$workdir/$name.fibby.log") reset dispositions, $(grep -c 'VERIFY -> 9000' "$workdir/$name.fibby.log") good VERIFYs"
+      grep -E '\[[0-9]/7\]|failed|error' "$workdir/$name.err" | tail -4
+    }
+    run_case alone none
+    run_case beside-list list
+    run_case beside-agent agent
+
 # drive pivy-tool generate against fibby to check the GENERATE ASYMMETRIC wire format
 [group('debug')]
 debug-fibby-generate:
@@ -4723,3 +4774,137 @@ explore-fdr0006-a CARD="virtual" PROMPTS="test" RUN="":
     echo
     cat "$dir/CHECKLIST"
     PS1="(fdr0006-a:$card) ${PS1:-\\$ }" "${SHELL:-bash}" || true
+
+# The piggy#303 operator-act prompt checks on a host with no GUI: drive
+# contrib/piggy-askpass.sh's /dev/tty render target with expect(1) end to
+# end (piggy agent on a private fibby card, then `piggy operator-sign`).
+# expect gives the agent a PRIVATE pty as its controlling terminal, so the
+# askpass renders there; the whole run is under `setsid -w`, so nothing can
+# reach the operator's own tty. This is the terminal rendering only: what
+# zenity draws is piggy#315 (recorded argv) and piggy#316 (Xvfb screenshots).
+#
+# drive the operator-act askpass tty prompt with expect against a virtual card (piggy#303)
+[group('explore')]
+[linux]
+explore-fdr0006-a-askpass-tty:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    expect_out=$(nix build --inputs-from . nixpkgs-master#expect --no-link --print-out-paths)
+    cargo build -p card-frontend-server --quiet
+    dir="$(mktemp -d -t fdr6a-tty.XXXXXX)"
+    export DIR="$dir" PIGGY="$piggy_out/bin/piggy" ASKPASS="$PWD/contrib/piggy-askpass.sh"
+    export PCSCLITE_CSOCK_NAME="$dir/pcscd.comm" PIGGY_STORE_DIR="$dir/store"
+    export PIGGY_AUTH_SOCK="$dir/agent.sock" SSH_AUTH_SOCK="$dir/agent.sock"
+    # No askpass may fall through to a GUI or the operator's terminal.
+    unset DISPLAY WAYLAND_DISPLAY SSH_ASKPASS SSH_ASKPASS_REQUIRE
+    pids=()
+    cleanup() { kill "${pids[@]}" 2>/dev/null || true; rm -rf "$dir"; }
+    trap cleanup EXIT
+
+    "$fibby_out/bin/fibby" --socket "$PCSCLITE_CSOCK_NAME" --backend virtual \
+      --model yk5 --auto-touch >"$dir/fibby.log" 2>&1 &
+    pids+=($!)
+    "$PWD/target/debug/card-frontend-server" --socket "$dir/frontend.sock" \
+      --pin 123456 --puk 12345678 --mgmt-source random >"$dir/frontend.log" 2>&1 &
+    pids+=($!)
+    for _ in $(seq 1 50); do [[ -S $dir/frontend.sock ]] && break; sleep 0.1; done
+    "$PIGGY" card init --frontend jsonrpc --socket "$dir/frontend.sock" </dev/null >/dev/null
+
+    printf 'piggy-test: T1 grant merge to master\n' >"$dir/t1.txt"
+    printf 'piggy-test: T2 certify key ssh-ed25519 AAAA-test\n' >"$dir/t2.txt"
+    printf 'piggy-test: T3 quote this line\n' >"$dir/t3.txt"
+    { printf 'piggy-test: T4 long text\n'
+      for i in $(seq 1 60); do printf 'line %02d %s\n' "$i" "$(printf 'x%.0s' $(seq 1 52))"; done
+      printf 'LAST LINE of the long text\n'; } >"$dir/t4.txt"
+    printf 'piggy-test: T5 <b>markup</b> & an under_score and a back\\slash\n' >"$dir/t5.txt"
+
+    cat >"$dir/acts.exp" <<'EXPECT_EOF'
+    set timeout 60
+    set dir $env(DIR)
+    # The agent's controlling terminal is this private pty; the askpass it
+    # spawns opens /dev/tty and renders there.
+    spawn -noecho env SSH_ASKPASS=$env(ASKPASS) $env(PIGGY) agent -A -a $dir/agent.sock
+    for {set i 0} {$i < 100 && ![file exists $dir/agent.sock]} {incr i} { after 100 }
+    # Wait for the agent to have the card's 9C key before the first act.
+    for {set i 0} {$i < 100} {incr i} {
+      if {![catch {exec ssh-add -L} keys] && [string match *PIV_slot_9C* $keys]} break
+      after 200
+    }
+    set fh [open $dir/allowed_signers w]
+    foreach line [split $keys "\n"] {
+      if {[string match *PIV_slot_9C* $line]} { puts $fh "operator [lrange $line 0 1]" }
+    }
+    close $fh
+    # One act: start operator-sign in the background, capture everything the
+    # askpass drew up to its PIN line into NAME.screen, then answer with PIN
+    # (or ^D to cancel) and, for an escalation, WORD.
+    proc act {name ns file pin word} {
+      global dir spawn_id
+      exec sh -c "\"\$PIGGY\" operator-sign --namespace $ns <$dir/$file >$dir/$name.sig 2>$dir/$name.err; echo \$? >$dir/$name.rc" &
+      expect {
+        -re {PIN for card [0-9A-F]+ to sign this operator act\r?\n} {
+          set fh [open $dir/$name.screen w]; puts -nonewline $fh $expect_out(buffer); close $fh
+        }
+        timeout { set fh [open $dir/$name.screen w]; puts $fh "TIMEOUT waiting for the PIN line"; close $fh; return }
+      }
+      if {$pin eq "^D"} { send "\x04" } else { send "$pin\r" }
+      if {$word ne ""} {
+        expect {
+          -exact "Type ESCALATE to grant this escalation: " { send "$word\r" }
+          timeout {}
+        }
+      }
+      for {set i 0} {$i < 300 && ![file exists $dir/$name.rc]} {incr i} {
+        expect -timeout 0 -re {.+} {}
+        after 100
+      }
+    }
+    act esc   piggy-escalation-v1  t1.txt 123456 ESCALATE
+    act cert  piggy-certificate-v1 t2.txt 123456 ""
+    act quote piggy-quote-v1       t3.txt 123456 ""
+    act long  piggy-escalation-v1  t4.txt 123456 ESCALATE
+    act markup piggy-escalation-v1 t5.txt 123456 ESCALATE
+    act cancel piggy-escalation-v1 t1.txt ^D ""
+    act wrongword piggy-escalation-v1 t1.txt 123456 nope
+    EXPECT_EOF
+    setsid -w "$expect_out/bin/expect" "$dir/acts.exp" </dev/null >"$dir/expect.log" 2>&1 || true
+    for f in "$dir"/*.screen; do
+      printf '\n# ----- %s\n' "$(basename "$f")"
+      sed 's/^/# /' "$f"
+    done
+    printf '\n# ----- operator-sign stderr\n'
+    for f in "$dir"/*.err; do printf '# %s: %s\n' "$(basename "$f" .err)" "$(tr '\n' ' ' <"$f")"; done
+
+    # acts.exp wrote the 9C key while its agent was alive.
+    touch "$dir/allowed_signers"
+    n=0 fails=0
+    check() { # check DESCRIPTION COMMAND...
+      n=$((n + 1))
+      if "${@:2}" >/dev/null 2>&1; then echo "ok $n - $1"; else echo "not ok $n - $1"; fails=$((fails + 1)); fi
+    }
+    rc_is() { [[ $(cat "$dir/$1.rc" 2>/dev/null) == "$2" ]]; }
+    shows() { grep -qF -- "$2" "$dir/$1.screen"; }
+    verifies() { ssh-keygen -Y verify -f "$dir/allowed_signers" -I operator -n "$2" -s "$dir/$1.sig" <"$dir/$3"; }
+    echo "TAP version 14"
+    check "escalation: banner"                 shows esc '!!! OPERATOR ACT: ESCALATION'
+    check "escalation: [TEST] tag"             shows esc '[TEST]'
+    check "escalation: the operator's text"    shows esc 'piggy-test: T1 grant merge to master'
+    check "escalation: signed (exit 0)"        rc_is esc 0
+    check "escalation: sshsig verifies"        verifies esc piggy-escalation-v1 t1.txt
+    check "certificate: banner"                shows cert '=== OPERATOR ACT: CERTIFICATE'
+    check "certificate: the operator's text"   shows cert 'piggy-test: T2 certify key'
+    check "certificate: signed, verifies"      verifies cert piggy-certificate-v1 t2.txt
+    check "quote: banner"                      shows quote '=== OPERATOR ACT: QUOTE'
+    check "quote: signed, verifies"            verifies quote piggy-quote-v1 t3.txt
+    check "long text: first line shown"        shows long 'line 01 '
+    check "long text: last line shown"         shows long 'LAST LINE of the long text'
+    check "long text: signed, verifies"        verifies long piggy-escalation-v1 t4.txt
+    check "markup: shown literally"            shows markup 'T5 <b>markup</b> & an under_score and a back\slash'
+    check "markup: signed, verifies"           verifies markup piggy-escalation-v1 t5.txt
+    check "cancel at the PIN: exit 4"          rc_is cancel 4
+    check "cancel at the PIN: says cancelled"  grep -q cancelled "$dir/cancel.err"
+    check "wrong escalation word: exit 4"      rc_is wrongword 4
+    echo "1..$n"
+    ((fails == 0))
