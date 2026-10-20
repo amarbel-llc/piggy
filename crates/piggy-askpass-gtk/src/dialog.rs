@@ -2,6 +2,7 @@
 //! act with a confirm word a second field the word must be typed into.
 
 use std::cell::{Cell, RefCell};
+use std::f64::consts::PI;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -13,12 +14,30 @@ use crate::Outcome;
 use crate::options::{Band, Options};
 
 const BAND_CSS_CLASS: &str = "piggy-band";
+const DIGIT_CSS_CLASS: &str = "piggy-digit";
 
 /// How long after opening the dialog takes no input but a cancel, so a
 /// keystroke meant for another window cannot fill in or confirm the act.
 const INPUT_BLOCK: Duration = Duration::from_secs(3);
+/// The red section is a tenth of the time after the block, but never shorter
+/// than this: the last stretch before the dialog gives up.
+const RED_FLOOR: Duration = Duration::from_secs(3);
+/// How long the clock stands still after each keystroke or pointer move, so
+/// an operator who is typing is not timed out mid-PIN.
+const INPUT_PAUSE: Duration = Duration::from_secs(2);
+/// Input this recent still counts as going on: the clock shows a pause symbol
+/// rather than the countdown to resuming.
+const ACTIVITY_WINDOW: Duration = Duration::from_millis(400);
+const CLOCK_SIZE: i32 = 48;
+/// How long the pause symbol takes to fade in when input starts, and to fade
+/// out once the clock is counting down to resuming.
+const PAUSE_FADE_IN: Duration = Duration::from_millis(150);
+const PAUSE_FADE_OUT: Duration = Duration::from_millis(350);
+/// How far the pointer must move, in pixels, to count as input. GTK also
+/// reports motion when the window lays out under a resting pointer.
+const POINTER_SLOP: f64 = 3.0;
 const CONTENT_MARGIN: i32 = 18;
-const TICK: Duration = Duration::from_millis(200);
+const TICK: Duration = Duration::from_millis(50);
 const SHAKE_FRAME: Duration = Duration::from_millis(16);
 const SHAKE_FRAMES: u32 = 12;
 const SHAKE_AMPLITUDE: i32 = 10;
@@ -67,9 +86,89 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
         .margin_end(CONTENT_MARGIN)
         .build();
 
-    if let Some(band) = &options.band {
-        content.append(&band_label(band));
+    // The clock: one pie, whole orange with the seconds of the input block
+    // counted over it, then a green section and a short red one with a hand
+    // sweeping round them. It sits in the band, left of the class's symbol.
+    let timeout = options
+        .timeout_secs
+        .map(|secs| Duration::from_secs(secs.into()));
+    let lengths = timeout.map(split_timeout);
+    let green_share = lengths.map_or(1.0, |(green, red)| fraction(green, green + red));
+    let has_timeout = lengths.is_some();
+    // The phase, how far round the clock the hand is (0 to 1), and how
+    // visible the pause symbol is (0 to 1) while input pauses the clock.
+    let light_state = Rc::new(Cell::new((Phase::Hold, 0.0_f64, 0.0_f64)));
+    let lights = gtk::DrawingArea::builder()
+        .content_width(CLOCK_SIZE)
+        .content_height(CLOCK_SIZE)
+        .build();
+    {
+        let light_state = light_state.clone();
+        lights.set_draw_func(move |_, cr, width, height| {
+            let (phase, progress, pause_alpha) = light_state.get();
+            let radius = f64::from(width.min(height)) / 2.0 - 3.0;
+            let centre = (f64::from(width) / 2.0, f64::from(height) / 2.0);
+            let green = light_rgb(Phase::Green);
+            let red = light_rgb(Phase::Red);
+            match phase {
+                Phase::Hold => wedge(cr, centre, radius, light_rgb(Phase::Hold), 1.0, 0.0, 1.0),
+                _ if !has_timeout => wedge(cr, centre, radius, green, 1.0, 0.0, 1.0),
+                _ => {
+                    // Time still to run stays green or red; time gone by is
+                    // white, the colour of the rim.
+                    let white = (1.0, 1.0, 1.0);
+                    wedge(
+                        cr,
+                        centre,
+                        radius,
+                        green,
+                        1.0,
+                        progress.min(green_share),
+                        green_share,
+                    );
+                    wedge(cr, centre, radius, red, 1.0, progress.max(green_share), 1.0);
+                    wedge(cr, centre, radius, white, 1.0, 0.0, progress);
+                }
+            }
+            if pause_alpha > 0.0 {
+                // Input is going on: a pause symbol over a dimmed clock.
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.45 * pause_alpha);
+                cr.arc(centre.0, centre.1, radius, 0.0, 2.0 * PI);
+                let _ = cr.fill();
+                let (bar_width, bar_height, gap) = (radius * 0.24, radius * 0.95, radius * 0.24);
+                cr.set_source_rgba(1.0, 1.0, 1.0, pause_alpha);
+                cr.rectangle(
+                    centre.0 - gap / 2.0 - bar_width,
+                    centre.1 - bar_height / 2.0,
+                    bar_width,
+                    bar_height,
+                );
+                cr.rectangle(
+                    centre.0 + gap / 2.0,
+                    centre.1 - bar_height / 2.0,
+                    bar_width,
+                    bar_height,
+                );
+                let _ = cr.fill();
+            }
+            // The white rim.
+            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+            cr.set_line_width(2.5);
+            cr.arc(centre.0, centre.1, radius, 0.0, 2.0 * PI);
+            let _ = cr.stroke();
+        });
     }
+    // The block's seconds, 3, 2, 1, over the orange clock.
+    let digit = gtk::Label::new(None);
+    digit.add_css_class(DIGIT_CSS_CLASS);
+    digit.set_halign(gtk::Align::Center);
+    digit.set_valign(gtk::Align::Center);
+    digit.set_can_target(false);
+    let clock_face = gtk::Overlay::new();
+    clock_face.set_child(Some(&lights));
+    clock_face.add_overlay(&digit);
+
+    content.append(&band_row(options.band.as_ref(), &clock_face));
     content.append(&text_label(text));
 
     let pin_entry = gtk::PasswordEntry::builder().hexpand(true).build();
@@ -110,10 +209,6 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
     buttons.append(&confirm);
     content.append(&buttons);
 
-    let status = gtk::Label::new(None);
-    status.set_xalign(1.0);
-    status.add_css_class("dim-label");
-    content.append(&status);
     window.set_child(Some(&content));
 
     // The input block: nothing but a cancel is taken until it ends.
@@ -123,6 +218,24 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
     }
     confirm.set_sensitive(false);
     let shaking = Rc::new(Cell::new(false));
+    // Which light is on, and how long it has run. Any input once the block
+    // has ended pauses the clock for INPUT_PAUSE, so the dialog does not give
+    // up on an operator who is in the middle of typing; it then carries on
+    // from where it stopped.
+    let clock = Rc::new(Cell::new((Phase::Hold, Duration::ZERO)));
+    let last_input: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
+    // Set once the act is confirmed: the clock then changes no more.
+    let frozen = Rc::new(Cell::new(false));
+    let pause_clock = {
+        let last_input = last_input.clone();
+        let blocked = blocked.clone();
+        let frozen = frozen.clone();
+        Rc::new(move || {
+            if !blocked.get() && !frozen.get() {
+                last_input.set(Some(Instant::now()));
+            }
+        })
+    };
 
     {
         let finish = finish.clone();
@@ -131,8 +244,10 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
     {
         let finish = finish.clone();
         let pin_entry = pin_entry.clone();
+        let frozen = frozen.clone();
         confirm.connect_clicked(move |button| {
             if button.is_sensitive() {
+                frozen.set(true);
                 finish(Outcome::Confirmed {
                     pin: pin_entry.text().to_string(),
                 });
@@ -146,9 +261,14 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
         let blocked = blocked.clone();
         let shaking = shaking.clone();
         let content = content.clone();
+        let pause_clock = pause_clock.clone();
+        // Where Return confirms, that keystroke is the end of the dialog, not
+        // an operator at work: it must not touch the clock.
+        let return_confirms = options.confirm_word.is_none();
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed(move |_, key, _, _| {
+            let is_return = matches!(key, gdk::Key::Return | gdk::Key::KP_Enter);
             if key == gdk::Key::Escape {
                 finish(Outcome::Cancelled);
                 glib::Propagation::Stop
@@ -156,10 +276,37 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
                 shake(&content, &shaking);
                 glib::Propagation::Stop
             } else {
+                if !(return_confirms && is_return) {
+                    pause_clock();
+                }
                 glib::Propagation::Proceed
             }
         });
         window.add_controller(keys);
+    }
+    {
+        // The pointer counts as input too: moving or clicking in the dialog
+        // is an operator who is still there. Only a real move counts: GTK
+        // also reports motion, at the same spot, when the window lays out
+        // under a resting pointer, and that must not stop the clock.
+        let motion = gtk::EventControllerMotion::new();
+        motion.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let pause = pause_clock.clone();
+        let anchor: Cell<Option<(f64, f64)>> = Cell::new(None);
+        motion.connect_motion(move |_, x, y| match anchor.get() {
+            Some((ax, ay)) if (x - ax).abs() + (y - ay).abs() < POINTER_SLOP => {}
+            Some(_) => {
+                anchor.set(Some((x, y)));
+                pause();
+            }
+            None => anchor.set(Some((x, y))),
+        });
+        window.add_controller(motion);
+        let click = gtk::GestureClick::new();
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let pause = pause_clock.clone();
+        click.connect_pressed(move |_, _, _, _| pause());
+        window.add_controller(click);
     }
     {
         let finish = finish.clone();
@@ -169,52 +316,123 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
         });
     }
     {
-        // One ticker drives both countdowns: it ends the input block, ends
-        // the dialog at its timeout, and keeps the status line current.
+        // One ticker drives the clock: it ends the input block, moves green
+        // to red and red to a timeout, and keeps the face current. With a
+        // timeout of T the block takes the first INPUT_BLOCK; the rest splits
+        // into a green section and a red one (split_timeout). Time in which
+        // the clock is paused for input does not count.
         let opened = Instant::now();
-        let timeout = options
-            .timeout_secs
-            .map(|secs| Duration::from_secs(secs.into()));
+        let last_tick = Cell::new(opened);
+        let pause_alpha = Cell::new(0.0_f64);
+        let frozen = frozen.clone();
         let finish = finish.clone();
         let outcome = outcome.clone();
         let pin_entry = pin_entry.clone();
         let confirm = confirm.clone();
-        let status = status.clone();
+        let digit = digit.clone();
+        let lights = lights.clone();
+        let clock = clock.clone();
+        let last_input = last_input.clone();
+        let light_state = light_state.clone();
+        let blocked = blocked.clone();
         let tick = move || {
             if outcome.borrow().is_some() {
                 return glib::ControlFlow::Break;
             }
-            let elapsed = opened.elapsed();
-            if timeout.is_some_and(|timeout| elapsed >= timeout) {
-                finish(Outcome::TimedOut);
-                return glib::ControlFlow::Break;
+            if frozen.get() {
+                return glib::ControlFlow::Continue;
             }
-            if blocked.get() && elapsed >= INPUT_BLOCK {
-                blocked.set(false);
-                for input in &inputs {
-                    input.set_sensitive(true);
+            let now = Instant::now();
+            let (mut phase, mut in_phase) = clock.get();
+            // Only the part of this interval after any pause counts.
+            let paused_until = last_input.get().map_or(opened, |at| at + INPUT_PAUSE);
+            let counting_from = last_tick.replace(now).max(paused_until);
+            in_phase += now.saturating_duration_since(counting_from);
+            match phase {
+                Phase::Hold => {
+                    if timeout
+                        .is_some_and(|timeout| now.saturating_duration_since(opened) >= timeout)
+                    {
+                        finish(Outcome::TimedOut);
+                        return glib::ControlFlow::Break;
+                    }
+                    if in_phase >= INPUT_BLOCK {
+                        blocked.set(false);
+                        for input in &inputs {
+                            input.set_sensitive(true);
+                        }
+                        confirm.set_sensitive(confirm_sensitive_after_block);
+                        pin_entry.grab_focus();
+                        (phase, in_phase) = (Phase::Green, Duration::ZERO);
+                    }
                 }
-                confirm.set_sensitive(confirm_sensitive_after_block);
-                pin_entry.grab_focus();
-            }
-            let block_left = secs_left(INPUT_BLOCK, elapsed);
-            let timeout_left = timeout.map(|timeout| secs_left(timeout, elapsed));
-            match status_text(block_left, timeout_left) {
-                Some(text) => {
-                    status.set_text(&text);
-                    status.set_visible(true);
+                Phase::Green => {
+                    if lengths.is_some_and(|(green, _)| in_phase >= green) {
+                        (phase, in_phase) = (Phase::Red, Duration::ZERO);
+                    }
                 }
-                None => status.set_visible(false),
+                Phase::Red => {
+                    if lengths.is_some_and(|(_, red)| in_phase >= red) {
+                        finish(Outcome::TimedOut);
+                        return glib::ControlFlow::Break;
+                    }
+                }
             }
+            clock.set((phase, in_phase));
+            // How far round the clock the hand is.
+            let hand = match (phase, lengths) {
+                (Phase::Hold, _) => 0.0,
+                (Phase::Green, Some((green, red))) => fraction(in_phase, green + red),
+                (Phase::Red, Some((green, red))) => fraction(green + in_phase, green + red),
+                (_, None) => 1.0,
+            };
+            // While input is going on the clock shows a pause symbol; once it
+            // stops, the seconds until the clock resumes are counted over it,
+            // as the input block's are over the orange one.
+            let pausing = match last_input.get() {
+                Some(at) if phase != Phase::Hold => {
+                    let since = now.saturating_duration_since(at);
+                    if since < ACTIVITY_WINDOW {
+                        Pausing::Active
+                    } else if since < INPUT_PAUSE {
+                        Pausing::Counting(secs_left(INPUT_PAUSE, since))
+                    } else {
+                        Pausing::No
+                    }
+                }
+                _ => Pausing::No,
+            };
+            // The pause symbol fades in while input goes on and out after.
+            let step = |fade: Duration| TICK.as_secs_f64() / fade.as_secs_f64();
+            let alpha = if pausing == Pausing::Active {
+                (pause_alpha.get() + step(PAUSE_FADE_IN)).min(1.0)
+            } else {
+                (pause_alpha.get() - step(PAUSE_FADE_OUT)).max(0.0)
+            };
+            pause_alpha.set(alpha);
+            light_state.set((phase, hand, alpha));
+            let counted = match (phase, pausing) {
+                (Phase::Hold, _) => Some(secs_left(INPUT_BLOCK, in_phase)),
+                (_, Pausing::Counting(left)) => Some(left),
+                _ => None,
+            };
+            match counted {
+                Some(seconds) => {
+                    digit.set_markup(&format!(
+                        "<span size=\"large\" weight=\"heavy\" foreground=\"#ffffff\">{seconds}</span>"
+                    ));
+                    digit.set_visible(true);
+                }
+                None => digit.set_visible(false),
+            }
+            lights.queue_draw();
             glib::ControlFlow::Continue
         };
         tick();
         glib::timeout_add_local(TICK, tick);
     }
 
-    if let Some(band) = &options.band {
-        install_band_style(&window, band);
-    }
+    install_style(&window, options.band.as_ref());
     // Present, not just show: a window that is only shown can open behind
     // the one the operator is typing into, and the PIN then goes there.
     window.present();
@@ -267,23 +485,96 @@ fn secs_left(total: Duration, elapsed: Duration) -> u64 {
     left.as_secs() + u64::from(left.subsec_nanos() > 0)
 }
 
-fn status_text(block_left: u64, timeout_left: Option<u64>) -> Option<String> {
-    match (block_left, timeout_left) {
-        (0, None) => None,
-        (0, Some(timeout_left)) => Some(format!("Cancels in {timeout_left} s")),
-        (block_left, None) => Some(format!("Input opens in {block_left} s")),
-        (block_left, Some(timeout_left)) => Some(format!(
-            "Input opens in {block_left} s · cancels in {timeout_left} s"
-        )),
+/// The traffic light: orange while input is held, green while it is taken,
+/// red while the dialog counts down to giving up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Hold,
+    Green,
+    Red,
+}
+
+/// Whether input has paused the clock: going on now, counting down to the
+/// clock's resuming (whole seconds left), or not at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pausing {
+    No,
+    Active,
+    Counting(u64),
+}
+
+fn light_rgb(light: Phase) -> (f64, f64, f64) {
+    match light {
+        Phase::Hold => (0.96, 0.62, 0.07),
+        Phase::Green => (0.15, 0.64, 0.41),
+        Phase::Red => (0.88, 0.11, 0.14),
     }
 }
 
-fn band_label(band: &Band) -> gtk::Label {
-    let label = gtk::Label::new(Some(&band.text));
-    label.add_css_class(BAND_CSS_CLASS);
-    label.set_hexpand(true);
-    label.set_xalign(0.0);
-    label
+/// How a timeout of `total`, counted from opening, divides once the input
+/// block has taken its share: the green section and the red one. The red one
+/// is a tenth of what is left, but at least `RED_FLOOR` and never more than
+/// half of it.
+fn split_timeout(total: Duration) -> (Duration, Duration) {
+    let after_block = total.saturating_sub(INPUT_BLOCK);
+    let red = (after_block / 10).max(RED_FLOOR).min(after_block / 2);
+    (after_block - red, red)
+}
+
+/// Fills the part of the clock from `from` to `to` (each a fraction of a turn
+/// from the top, clockwise) in `rgb` at `alpha`.
+fn wedge(
+    cr: &gdk::cairo::Context,
+    centre: (f64, f64),
+    radius: f64,
+    rgb: (f64, f64, f64),
+    alpha: f64,
+    from: f64,
+    to: f64,
+) {
+    if to <= from {
+        return;
+    }
+    let top = -PI / 2.0;
+    cr.set_source_rgba(rgb.0, rgb.1, rgb.2, alpha);
+    cr.move_to(centre.0, centre.1);
+    cr.arc(
+        centre.0,
+        centre.1,
+        radius,
+        top + 2.0 * PI * from,
+        top + 2.0 * PI * to,
+    );
+    cr.close_path();
+    let _ = cr.fill();
+}
+
+/// How far `elapsed` has got through `total`, from 0 to 1.
+fn fraction(elapsed: Duration, total: Duration) -> f64 {
+    if total.is_zero() {
+        1.0
+    } else {
+        (elapsed.as_secs_f64() / total.as_secs_f64()).min(1.0)
+    }
+}
+
+/// The strip across the top of the dialog: the clock, and the class's name
+/// and symbol beside it in the class's colour. Without a band, the clock
+/// stands alone.
+fn band_row(band: Option<&Band>, clock: &impl IsA<gtk::Widget>) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .build();
+    row.append(clock);
+    if let Some(band) = band {
+        row.add_css_class(BAND_CSS_CLASS);
+        let label = gtk::Label::new(Some(&band.text));
+        label.set_hexpand(true);
+        label.set_xalign(0.0);
+        row.append(&label);
+    }
+    row
 }
 
 /// The act's text, set as plain text so nothing in it is read as markup, in
@@ -315,13 +606,20 @@ fn field(caption: &str, entry: &impl IsA<gtk::Widget>) -> gtk::Box {
 
 /// The colours come from `HexColour`, which accepts only `#rrggbb`, so the
 /// stylesheet cannot be steered by them.
-fn install_band_style(window: &gtk::Window, band: &Band) {
-    let css = format!(
-        "label.{BAND_CSS_CLASS} {{ background-color: {}; color: {}; font-size: x-large; \
-         font-weight: bold; padding: 8px 12px; }}",
-        band.background.as_str(),
-        band.foreground.as_str(),
+fn install_style(window: &gtk::Window, band: Option<&Band>) {
+    // The clock's digits sit over green, red or orange: a dark halo keeps
+    // them legible on each.
+    let mut css = format!(
+        "label.{DIGIT_CSS_CLASS} {{ text-shadow: 0 0 4px rgba(0, 0, 0, 0.9), 0 0 2px #000000; }} "
     );
+    if let Some(band) = band {
+        css.push_str(&format!(
+            "box.{BAND_CSS_CLASS} {{ background-color: {}; padding: 8px 12px; }} \
+             box.{BAND_CSS_CLASS} label {{ color: {}; font-size: x-large; font-weight: bold; }}",
+            band.background.as_str(),
+            band.foreground.as_str(),
+        ));
+    }
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&css);
     gtk::style_context_add_provider_for_display(
@@ -346,14 +644,27 @@ mod tests {
     }
 
     #[test]
-    fn the_status_line_shows_whichever_countdowns_are_running() {
-        assert_eq!(
-            status_text(3, Some(60)).as_deref(),
-            Some("Input opens in 3 s · cancels in 60 s")
-        );
-        assert_eq!(status_text(2, None).as_deref(), Some("Input opens in 2 s"));
-        assert_eq!(status_text(0, Some(42)).as_deref(), Some("Cancels in 42 s"));
-        assert_eq!(status_text(0, None), None);
+    fn a_timeout_splits_into_the_block_a_green_section_and_a_short_red_one() {
+        let secs = Duration::from_secs;
+        let millis = Duration::from_millis;
+        // Red is a tenth of what the block leaves: 57 s gives 5.7 s.
+        assert_eq!(split_timeout(secs(60)), (millis(51_300), millis(5_700)));
+        // A tenth would be under the floor, so the floor applies.
+        assert_eq!(split_timeout(secs(12)), (secs(6), secs(3)));
+        // Not even the floor fits: red is half of what is left.
+        assert_eq!(split_timeout(secs(5)), (secs(1), secs(1)));
+        // No time left after the block: nothing to split.
+        assert_eq!(split_timeout(secs(3)), (Duration::ZERO, Duration::ZERO));
+        assert_eq!(split_timeout(secs(1)), (Duration::ZERO, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_fraction_runs_from_zero_to_one_and_stops_there() {
+        let ten = Duration::from_secs(10);
+        assert_eq!(fraction(Duration::ZERO, ten), 0.0);
+        assert_eq!(fraction(Duration::from_secs(5), ten), 0.5);
+        assert_eq!(fraction(Duration::from_secs(20), ten), 1.0);
+        assert_eq!(fraction(Duration::from_secs(1), Duration::ZERO), 1.0);
     }
 
     #[test]

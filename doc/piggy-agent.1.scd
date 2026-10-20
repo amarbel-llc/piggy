@@ -289,10 +289,16 @@ The dialogs are zenity's. On Linux, with *PIGGY_ASKPASS_GTK*=1 (opt-in
 while it is being tried), the operator-act dialog is instead
 *piggy-askpass-gtk*, which the packaged helper finds on its *PATH*: it
 takes focus when it opens and shows the text as plain text. For its first
-3 seconds it takes no input but a cancel, and shakes at any keystroke, so
-a key meant for another window can neither type into it nor confirm the
-act; a line under its buttons counts down that block and the seconds left
-before it times out. The helper
+3 seconds it takes no input but a cancel, its fields are greyed out, and
+it shakes at any keystroke, so a key meant for another window can neither
+type into it nor confirm the act. A clock in the band shows the time: whole
+orange with the seconds of that block counted over it, then, when the
+dialog has a timeout, a green section and a short red one (a tenth of the
+time left after the block, at least 3 seconds) with the used part gone
+white. Keystrokes and pointer moves pause the clock, under a pause symbol
+that fades in and out, and for 2 seconds after they stop, counted down over
+the clock; the dialog gives up (exit 5) only when the clock runs out.
+Pressing Return to confirm leaves the clock as it is. The helper
 refuses a class it does not know. The dialog that takes the PIN must show
 the act's whole text, and neither PIN dialog scrolls, so the helper
 refuses an act whose rendered prompt is taller than 24 lines (a line longer
