@@ -1,0 +1,20 @@
+[package]
+name = "piggy-askpass-gtk"
+version = "0.1.0"
+edition = "2021"
+description = "The GTK dialog contrib/piggy-askpass.sh shows an operator act's PIN prompt in"
+# No license field until piggy#327 decides this crate's licence.
+publish = false
+
+# This crate is intentionally NOT a member of the piggy workspace (see the root
+# Cargo.toml `exclude`): it links GTK 4, which the rest of the workspace must not
+# need to build, and it is Linux-only (on macOS piggy-askpass.sh keeps zenity).
+# It carries its own Cargo.lock. The empty [workspace] table makes it its own
+# workspace root so cargo does not walk up into the worktree's Cargo.toml (see
+# crates/piggy-pigpen/Cargo.toml for why that matters in a nested worktree).
+
+[workspace]
+
+[dependencies]
+# v4_12 for CssProvider::load_from_string.
+gtk4 = { version = "0.10", features = ["v4_12"] }

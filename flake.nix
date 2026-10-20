@@ -338,11 +338,35 @@
           # so we don't add a darwin-specific dep. `zenity` is the GUI
           # fallback when /dev/tty isn't connected (the typical agent
           # case).
+          # On Linux piggy-askpass-gtk shows the operator-act dialogs (zenity
+          # stays the fallback and the routine prompt's dialog).
           askpassRuntimeDeps = [
             pkgs.coreutils
             pkgs.zenity
           ]
-          ++ pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.procps;
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            pkgs.procps
+            piggy-askpass-gtk
+          ];
+
+          # The operator-act dialog contrib/piggy-askpass.sh prefers on Linux
+          # (crates/piggy-askpass-gtk). Its own derivation and Cargo.lock: it
+          # links GTK 4, which the workspace build must not need. No licence
+          # in meta until piggy#327 decides the crate's licence.
+          piggy-askpass-gtk = pkgs.rustPlatform.buildRustPackage {
+            pname = "piggy-askpass-gtk";
+            version = "0.1.0";
+            src = ./crates/piggy-askpass-gtk;
+            cargoLock.lockFile = ./crates/piggy-askpass-gtk/Cargo.lock;
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            buildInputs = [ pkgs.gtk4 ];
+            meta = {
+              description = "GTK dialog for piggy operator-act PIN prompts";
+              homepage = "https://code.linenisgreat.com/piggy";
+              mainProgram = "piggy-askpass-gtk";
+              platforms = pkgs.lib.platforms.linux;
+            };
+          };
 
           # Native rust workspace: `piggy` (binary) + `piggy-piv` (library).
           # pcsclite is only needed on linux; macOS has PC/SC in CoreServices.
@@ -938,6 +962,8 @@
             fib-pcscd = virtualPiv.pcscdForFib;
             jcardsim = virtualPiv.jcardsim;
             pivapplet = virtualPiv.pivapplet;
+            # The GTK operator-act dialog piggy-askpass.sh prefers on Linux.
+            piggy-askpass-gtk = piggy-askpass-gtk;
           };
 
           checks = {

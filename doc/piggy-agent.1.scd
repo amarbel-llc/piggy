@@ -282,11 +282,15 @@ piggy-aware context above the prompt, re-derives a live Wayland display
 when the agent inherited a frozen *systemd --user* environment, and
 refuses rather than guessing. For an operator act it reads the class from
 *PIGGY_ASKPASS_KIND* and gives each its own banner, window title, button and
-dialog, which in zenity opens with a band in the class's colour carrying its
-symbol (escalation red, certificate amber, quote blue); an escalation also
-requires the word ESCALATE to be typed. It
+dialog, which opens with a band in the class's colour carrying its symbol
+(escalation red, certificate amber, quote blue); an escalation also
+requires the word ESCALATE to be typed, and then a click on its button.
+The dialogs are zenity's. On Linux, with *PIGGY_ASKPASS_GTK*=1 (opt-in
+while it is being tried), the operator-act dialog is instead
+*piggy-askpass-gtk*, which the packaged helper finds on its *PATH*: it
+takes focus when it opens and shows the text as plain text. The helper
 refuses a class it does not know. The dialog that takes the PIN must show
-the act's whole text, and a zenity PIN dialog does not scroll, so the helper
+the act's whole text, and neither PIN dialog scrolls, so the helper
 refuses an act whose rendered prompt is taller than 24 lines (a line longer
 than 80 characters counting as the lines it wraps to) before any dialog
 opens; it never elides the text. The refusal exits 3 with its reason on

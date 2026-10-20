@@ -94,6 +94,11 @@
 #                word ESCALATE must be typed; button "Grant escalation".
 #                On a tty the word is asked for on a line of its own.
 #
+# With PIGGY_ASKPASS_GTK=1 and piggy-askpass-gtk on PATH (on Linux the nix
+# wrapper puts it there) it shows these dialogs instead of zenity, with the
+# same band, text, fields and buttons, but taking focus when it opens; see
+# gtk_operator_act below. It is opt-in until it has been tried on a desktop.
+#
 # The text is shown whole, on the dialog that takes the PIN, or the prompt
 # fails (RFC 0012 §2.6); an unknown class fails too. A zenity PIN dialog
 # does not scroll, so an act whose rendered prompt is taller than
@@ -432,6 +437,33 @@ zenity_escalation() {
   printf '%s\n' "$typed_pin"
 }
 
+# The operator-act dialog of piggy-askpass-gtk (crates/piggy-askpass-gtk),
+# used instead of zenity's when PIGGY_ASKPASS_GTK=1 and it is on PATH, which
+# the nix wrapper arranges on Linux. Unlike zenity's form it takes focus when
+# it opens, puts the band across its whole width, and shows the text as plain
+# text, read from stdin, so nothing needs escaping. For an escalation it
+# takes the typed word itself and only a click grants it. It answers with
+# zenity's exit statuses.
+gtk_operator_act() {
+  local args=(
+    --title "$class_title" --ok-label "$class_ok_label" --timeout "$zenity_timeout"
+    --band "$class_band"
+    --band-background "$class_band_background" --band-foreground "$class_band_foreground"
+  )
+  if [[ $kind == escalation ]]; then
+    args+=(--confirm-word "$escalation_word")
+  fi
+  printf '%s' "$body" | piggy-askpass-gtk "${args[@]}"
+}
+
+operator_act_dialog() {
+  if [[ ${PIGGY_ASKPASS_GTK:-0} == 1 ]] && command -v piggy-askpass-gtk >/dev/null 2>&1; then
+    printf 'gtk_operator_act'
+  else
+    printf 'zenity_%s' "$kind"
+  fi
+}
+
 # How many lines $body takes in a PIN dialog: each line, plus one more for
 # every $operator_act_wrap_columns characters it runs past the first. Counted
 # in bash: the script's hard dependencies stay zenity and coreutils' basics.
@@ -493,13 +525,17 @@ if command -v zenity >/dev/null 2>&1; then
   # hidden / off-screen / on a non-focused display this is the only
   # in-band signal the user gets that the agent is waiting.
   fire_heads_up
-  if pin="$("zenity_${kind:-routine}" 2>>"$log_path")"; then
-    printf 'zenity exit=0\n' >>"$log_path"
+  dialog="zenity_routine"
+  if [[ -n $kind ]]; then
+    dialog="$(operator_act_dialog)"
+  fi
+  if pin="$("$dialog" 2>>"$log_path")"; then
+    printf '%s exit=0\n' "$dialog" >>"$log_path"
     printf '%s\n' "$pin"
     exit 0
   else
     rc=$?
-    printf 'zenity exit=%s\n' "$rc" >>"$log_path"
+    printf '%s exit=%s\n' "$dialog" "$rc" >>"$log_path"
     exit "$rc"
   fi
 fi

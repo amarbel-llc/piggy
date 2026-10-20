@@ -1032,3 +1032,136 @@ tall_act_text() {
   assert_success
   assert_zenity_argv_has "--timeout=9"
 }
+
+# -------- operator acts in piggy-askpass-gtk --------
+#
+# With PIGGY_ASKPASS_GTK=1 and piggy-askpass-gtk on PATH the operator-act
+# dialogs are its, not zenity's. These run the real script against a stub of the helper that logs
+# its argv and stdin, answers 123456 and exits with $1, beside the logging
+# zenity stub, so what is pinned is which dialog runs and what it is handed.
+
+# $1: the helper stub's exit status. The rest: NAME=value pairs for the script.
+run_askpass_against_gtk_helper_stub() {
+  local helper_exit="$1"
+  shift
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-gtk.XXXXXX")"
+  HELPER_ARGV="$stub_dir/helper-argv.log"
+  HELPER_STDIN="$stub_dir/helper-stdin.log"
+  ZENITY_CALLS="$stub_dir/zenity-calls.log"
+  for tool in bash ps tr dirname mkdir date cat; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  cat >"$stub_dir/piggy-askpass-gtk" <<STUB_EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >"$HELPER_ARGV"
+cat >"$HELPER_STDIN"
+printf '123456\n'
+exit $helper_exit
+STUB_EOF
+  cat >"$stub_dir/zenity" <<STUB_EOF
+#!/usr/bin/env bash
+printf -- '--- zenity call\n' >>"$ZENITY_CALLS"
+printf '123456\nESCALATE\n'
+STUB_EOF
+  chmod +x "$stub_dir/piggy-askpass-gtk" "$stub_dir/zenity"
+  python3_path="$(command -v python3)"
+
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" PIGGY_ASKPASS_GTK=1 "$@" \
+    "$python3_path" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$ASKPASS" "PIN for card 5DA19C98 to sign this operator act" </dev/null
+}
+
+# The value the helper stub was given for option $1 (the argument after it).
+helper_option() {
+  grep -A1 -xF -- "$1" "$HELPER_ARGV" | tail -n1
+}
+
+@test "operator_acts_use_the_gtk_helper_with_their_class_and_never_zenity" {
+  local class title
+  for class in quote certificate escalation; do
+    run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND="$class"
+
+    assert_success
+    assert_output "123456"
+    assert_equal "$(zenity_call_count)" 0
+    title="piggy operator act: ${class^^}"
+    [[ $class == escalation ]] && title+=" (grants authority)"
+    assert_equal "$(helper_option --title)" "$title"
+    assert_equal "$(helper_option --timeout)" 120
+    [[ $(helper_option --band-background) == '#'?????? ]]
+    [[ $(helper_option --band-foreground) == '#'?????? ]]
+  done
+}
+
+@test "only_an_escalation_asks_the_gtk_helper_for_the_typed_word" {
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=escalation
+  assert_success
+  assert_equal "$(helper_option --confirm-word)" ESCALATE
+  assert_equal "$(helper_option --ok-label)" "Grant escalation"
+  assert_equal "$(helper_option --band-background)" "#c01c28"
+
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=quote
+  assert_success
+  if grep -qxF -- --confirm-word "$HELPER_ARGV"; then
+    echo "a quote asked for the typed word"
+    return 1
+  fi
+}
+
+# The helper sets the text as plain text, so the script hands it over
+# unescaped, on stdin, never in an argument.
+@test "the_gtk_helper_gets_the_act_text_unescaped_on_stdin" {
+  run_askpass_against_gtk_helper_stub 0 \
+    PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="$TRICKY_TEXT"
+
+  assert_success
+  grep -qF -- "$TRICKY_TEXT" "$HELPER_STDIN" || {
+    echo "the text did not reach the helper literally; got:"
+    cat "$HELPER_STDIN"
+    return 1
+  }
+  if grep -qF -- 'ecdsa_p256_sig' "$HELPER_ARGV"; then
+    echo "the text was passed in the helper's arguments"
+    return 1
+  fi
+}
+
+@test "a_cancelled_or_timed_out_gtk_dialog_propagates_its_status_and_no_pin" {
+  local status_code
+  for status_code in 1 5; do
+    run_askpass_against_gtk_helper_stub "$status_code" PIGGY_ASKPASS_KIND=certificate
+    assert_failure "$status_code"
+    assert_equal "$(zenity_call_count)" 0
+  done
+}
+
+@test "the_routine_prompt_never_uses_the_gtk_helper" {
+  run_askpass_against_gtk_helper_stub 0
+
+  assert_success
+  assert_equal "$(zenity_call_count)" 1
+  [[ ! -e $HELPER_ARGV ]]
+}
+
+# The helper is opt-in while it is being tried: on PATH but not asked for,
+# it is not used.
+@test "without_piggy_askpass_gtk_1_the_zenity_dialogs_stay" {
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=escalation PIGGY_ASKPASS_GTK=
+
+  assert_success
+  assert_output "123456"
+  assert_equal "$(zenity_call_count)" 1
+  [[ ! -e $HELPER_ARGV ]]
+}
+
+@test "tall_operator_act_text_is_refused_before_the_gtk_helper_opens" {
+  run_askpass_against_gtk_helper_stub 0 \
+    PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
+
+  assert_failure 3
+  assert_output --partial "too tall for the PIN dialog"
+  [[ ! -e $HELPER_ARGV ]]
+}

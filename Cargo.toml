@@ -22,4 +22,7 @@ members = [
 # wasm32 build is possible) rather than the OpenSSL-backed piggy-box, and
 # carries its own Cargo.lock that is not part of the nix `sharedCargoLock`.
 # Promoting it into `members` is a cutover step (RFC 0008 "Compatibility").
-exclude = ["vendor", "crates/piggy-pigpen"]
+#
+# crates/piggy-askpass-gtk links GTK 4, which nothing else in the workspace
+# needs, and is Linux-only; it is built by its own derivation in flake.nix.
+exclude = ["vendor", "crates/piggy-pigpen", "crates/piggy-askpass-gtk"]
