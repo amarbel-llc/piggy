@@ -258,6 +258,21 @@ pub struct VirtualCard {
     /// (e.g. GA ECDH on slot 9D) consult this before honoring the
     /// request and return `69 82` when unset.
     pin_verified: bool,
+    /// Whether a command other than VERIFY has completed since the PIN was
+    /// last verified. A PIN-always slot needs the VERIFY immediately before
+    /// its private-key operation: a real YubiKey answered `69 82` to a 9C
+    /// sign that a certificate GET DATA sat between, after a good PIN, and
+    /// signed once the GET DATA was gone (piggy#325). A touch-blocked
+    /// attempt changes nothing, so it does not count.
+    command_since_verify: bool,
+    /// Answer `6D 00` to every command but SELECT while no applet is
+    /// selected, as a real card does after a reset (piggy#323: a YubiKey
+    /// gave a client 0x6D00 when another client's session had reset it).
+    /// Off by default: fibby models one client's power and selection, so its
+    /// `connect` and `disconnect` deselect for every handle, which a real
+    /// card shared through pcscd does not; a test that turns this on runs
+    /// clients that SELECT before they speak (`--require-select`).
+    require_select: bool,
     /// PUK (PIN Unblocking Key) value, stored as raw ASCII bytes. The
     /// YubiKey factory default is `"12345678"` (8 bytes, no 0xFF
     /// padding). Used by CHANGE REFERENCE DATA (P2=0x81) to authorize a
@@ -754,6 +769,8 @@ impl VirtualCard {
             pin: DEFAULT_PIN.to_vec(),
             pin_retries: DEFAULT_PIN_RETRIES,
             pin_verified: false,
+            command_since_verify: false,
+            require_select: false,
             puk: DEFAULT_PUK.to_vec(),
             puk_retries: DEFAULT_PUK_RETRIES,
             slot_9a_priv: None,
@@ -888,6 +905,30 @@ impl VirtualCard {
     /// (and log that it was auto-granted). Test convenience.
     pub fn set_auto_touch(&mut self, auto_touch: bool) {
         self.auto_touch = auto_touch;
+    }
+
+    /// `--require-select`: answer `6D 00` while no applet is selected, as a
+    /// real card does after a reset.
+    pub fn set_require_select(&mut self, require_select: bool) {
+        self.require_select = require_select;
+    }
+
+    /// The card state a reset clears, as a real card loses it: no applet
+    /// selected, no PIN verified, no management-key authentication.
+    fn reset_session_state(&mut self) {
+        self.selected_piv = false;
+        self.selected_otp = false;
+        self.pin_verified = false;
+        self.pending_mgmt_witness = None;
+        self.mgmt_authenticated = false;
+    }
+
+    /// Mark the PIN verified as a successful VERIFY does, for tests that
+    /// set up card state without sending one.
+    #[cfg(test)]
+    fn mark_pin_verified(&mut self) {
+        self.pin_verified = true;
+        self.command_since_verify = false;
     }
 
     /// `--touch-timeout-ms`: how long a touch-requiring operation waits
@@ -1267,6 +1308,19 @@ impl Backend for VirtualCard {
         Ok(())
     }
 
+    fn end_transaction(&mut self, disposition: u32) {
+        if disposition == crate::proto::disposition::RESET
+            || disposition == crate::proto::disposition::UNPOWER
+        {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                "END TRANSACTION with reset -> no applet selected, PIN and admin auth cleared",
+            );
+            self.reset_session_state();
+        }
+    }
+
     /// Direct transmit never waits: an operation blocked on a touch
     /// answers the timeout status word at once. The server uses
     /// [`Self::transmit_or_await_touch`] (through
@@ -1304,8 +1358,34 @@ impl VirtualCard {
     /// Process one command APDU. Never blocks: a touch-requiring operation
     /// with no touch available sets `touch_blocked` and returns the
     /// timeout status word, having changed nothing.
+    ///
+    /// Around the command itself: under `--require-select` a command with
+    /// no applet selected is refused `6D 00`, and every command that runs
+    /// (not VERIFY, not one blocked on a touch) counts as coming between a
+    /// VERIFY and a PIN-always operation.
     fn dispatch(&mut self, command_apdu: &[u8]) -> ScardResult<Vec<u8>> {
         self.touch_blocked = None;
+        let ins = command_apdu.get(1).copied();
+        if self.require_select
+            && !self.selected_piv
+            && !self.selected_otp
+            && ins.is_some_and(|ins| ins != apdu::ins::SELECT)
+        {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                "no applet selected -> 6D00 (--require-select)",
+            );
+            return Ok(sw(0x6D, 0x00));
+        }
+        let response = self.dispatch_command(command_apdu)?;
+        if ins != Some(apdu::ins::VERIFY) && self.touch_blocked.is_none() {
+            self.command_since_verify = true;
+        }
+        Ok(response)
+    }
+
+    fn dispatch_command(&mut self, command_apdu: &[u8]) -> ScardResult<Vec<u8>> {
         if command_apdu.len() < 4 {
             return Ok(sw(0x6F, 0x00)); // no precise diagnosis
         }
@@ -1651,6 +1731,7 @@ impl VirtualCard {
                 if pin == self.pin.as_slice() {
                     self.pin_retries = DEFAULT_PIN_RETRIES;
                     self.pin_verified = true;
+                    self.command_since_verify = false;
                     trace::emit(trace::DEBUG, "vcard", "VERIFY -> 9000 (success)");
                     sw(0x90, 0x00)
                 } else {
@@ -2050,6 +2131,14 @@ impl VirtualCard {
             );
             return sw(0x69, 0x82);
         }
+        if pin == pin_policy::ALWAYS && self.command_since_verify {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                "GA ECDH 9D -> 6982 (PIN-always: a command came between VERIFY and the ECDH)",
+            );
+            return sw(0x69, 0x82);
+        }
         let scalar_bytes = match self.slot_9d_priv {
             Some(s) => s,
             None => {
@@ -2139,12 +2228,12 @@ impl VirtualCard {
     /// - "never" (slot 9E by default): no VERIFY needed.
     /// - "once" (slots 9A and 9D by default): needs `pin_verified`, leaves
     ///   it set.
-    /// - "always" (slot 9C by default): needs `pin_verified` and clears it
-    ///   after a successful sign, so the next PIN-gated op needs a fresh
-    ///   VERIFY. This is the conservative model of YubiKey's "always"
-    ///   policy — exact global-vs-per-slot semantics on real silicon are
-    ///   unverified; here the verification is treated as consumed by the
-    ///   sign.
+    /// - "always" (slot 9C by default): needs `pin_verified` with no other
+    ///   command since the VERIFY (`command_since_verify`, as a real
+    ///   YubiKey showed, piggy#325), and clears it after a successful sign,
+    ///   so the next PIN-gated op needs a fresh VERIFY. Exact
+    ///   global-vs-per-slot semantics on real silicon are unverified; here
+    ///   the verification is treated as consumed by the sign.
     ///
     /// A touch-"always"/"cached" slot also passes the touch gate
     /// ([`Self::pass_touch_gate`]) after every other check, including the
@@ -2174,6 +2263,16 @@ impl VirtualCard {
                 trace::DEBUG,
                 "vcard",
                 &format!("GA ECDSA {slot_label} -> 6982 (PIN not verified)"),
+            );
+            return sw(0x69, 0x82);
+        }
+        if pin == pin_policy::ALWAYS && self.command_since_verify {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!(
+                    "GA ECDSA {slot_label} -> 6982 (PIN-always: a command came between VERIFY and the sign)"
+                ),
             );
             return sw(0x69, 0x82);
         }
@@ -3805,7 +3904,7 @@ mod tests {
     #[test]
     fn ga_ecdh_slot_9d_without_key_returns_6a88() {
         let mut c = VirtualCard::new();
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let req = hex_to_bytes(
             "0087119d0000477c458200854104b3ef72daa94a55f409e495f654f234fb8f9730fa66923e7e45a910bb9773535e5d9a77be8d9f0968e7fb008cf9c156d7d468fbecb573e17801e2d441486b9f860000",
         );
@@ -3823,7 +3922,7 @@ mod tests {
     fn ga_ecdh_slot_9d_matches_wet_env_capture_yubico_piv_tool_bootstrap() {
         let mut c = VirtualCard::new();
         c.seed_slot_9d_priv(RFC6979_SCALAR);
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let req = hex_to_bytes(
             "0087119d0000477c458200854104b3ef72daa94a55f409e495f654f234fb8f9730fa66923e7e45a910bb9773535e5d9a77be8d9f0968e7fb008cf9c156d7d468fbecb573e17801e2d441486b9f860000",
         );
@@ -3843,7 +3942,7 @@ mod tests {
     fn ga_ecdh_slot_9d_matches_wet_env_capture_pivy_tool_bootstrap() {
         let mut c = VirtualCard::new();
         c.seed_slot_9d_priv(RFC6979_SCALAR);
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let req = hex_to_bytes(
             "0087119d0000477c458200854104b47f3c10ff4444e640a4837b83d1b600f1dd60e98df6c778116f219670166705f3dd289073c4090ce100001d2a5eae3faa9104f59e1d372f6b068702f0ec42cb0000",
         );
@@ -3864,7 +3963,7 @@ mod tests {
     fn seed_rfc5903_slot_9d_cert_installs_cert_and_enables_ecdh() {
         let mut c = VirtualCard::new();
         c.seed_rfc5903_slot_9d_cert();
-        c.pin_verified = true;
+        c.mark_pin_verified();
 
         let cert = c.transmit(&get_data_apdu(TAG_SLOT_9D_CERT)).unwrap();
         assert_eq!(cert[0], 0x53, "GET DATA returns the 53-wrapped cert object");
@@ -3942,7 +4041,7 @@ mod tests {
     #[test]
     fn ga_ecdsa_slot_9a_without_key_returns_6a88() {
         let mut c = VirtualCard::new();
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let resp = c.transmit(&ga_sign_apdu(&[0x5A; 32])).unwrap();
         assert_eq!(resp, vec![0x6A, 0x88], "slot 9A empty -> 6A88");
     }
@@ -3958,7 +4057,7 @@ mod tests {
 
         let mut c = VirtualCard::new();
         c.seed_slot_9a_priv(RFC6979_SCALAR);
-        c.pin_verified = true;
+        c.mark_pin_verified();
 
         let digest: [u8; 32] = [
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
@@ -3981,7 +4080,7 @@ mod tests {
     fn ga_ecdsa_slot_9a_is_deterministic() {
         let mut c = VirtualCard::new();
         c.seed_slot_9a_priv(RFC6979_SCALAR);
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let apdu = ga_sign_apdu(&[0x42; 32]);
         let first = c.transmit(&apdu).unwrap();
         let second = c.transmit(&apdu).unwrap();
@@ -3997,7 +4096,7 @@ mod tests {
     fn seed_rfc6979_slot_9a_cert_enables_signing() {
         let mut c = VirtualCard::new();
         c.seed_rfc6979_slot_9a_cert();
-        c.pin_verified = true;
+        c.mark_pin_verified();
 
         let cert = c.transmit(&get_data_apdu(TAG_SLOT_9A_CERT)).unwrap();
         assert_eq!(cert[0], 0x53, "GET DATA returns the 53-wrapped cert object");
@@ -4103,7 +4202,7 @@ mod tests {
     #[test]
     fn ga_ecdsa_slot_9c_without_key_returns_6a88() {
         let mut c = VirtualCard::new();
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let resp = c.transmit(&ga_sign_apdu_slot(0x9C, &[0x5A; 32])).unwrap();
         assert_eq!(resp, vec![0x6A, 0x88], "slot 9C empty -> 6A88");
     }
@@ -4118,7 +4217,7 @@ mod tests {
 
         let mut c = VirtualCard::new();
         c.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
-        c.pin_verified = true;
+        c.mark_pin_verified();
 
         let digest: [u8; 32] = [
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
@@ -4141,10 +4240,10 @@ mod tests {
     fn ga_ecdsa_slot_9c_is_deterministic() {
         let mut c = VirtualCard::new();
         c.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let apdu = ga_sign_apdu_slot(0x9C, &[0x42; 32]);
         let first = c.transmit(&apdu).unwrap();
-        c.pin_verified = true; // re-VERIFY: slot 9C is PIN-always
+        c.mark_pin_verified(); // re-VERIFY: slot 9C is PIN-always
         let second = c.transmit(&apdu).unwrap();
         assert_eq!(first, second, "RFC 6979 sign is deterministic");
         assert_eq!(&first[first.len() - 2..], &[0x90, 0x00]);
@@ -4157,7 +4256,7 @@ mod tests {
     fn ga_ecdsa_slot_9c_consumes_pin_verification() {
         let mut c = VirtualCard::new();
         c.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let apdu = ga_sign_apdu_slot(0x9C, &[0x33; 32]);
 
         let first = c.transmit(&apdu).unwrap();
@@ -4175,13 +4274,95 @@ mod tests {
             "second sign without re-VERIFY -> 6982"
         );
 
-        c.pin_verified = true; // fresh VERIFY
+        c.mark_pin_verified(); // fresh VERIFY
         let third = c.transmit(&apdu).unwrap();
         assert_eq!(
             &third[third.len() - 2..],
             &[0x90, 0x00],
             "re-verify then sign -> 9000"
         );
+    }
+
+    /// piggy#325: a real YubiKey refused a PIN-always 9C sign with 6982
+    /// after a good VERIFY when a certificate GET DATA sat between the two,
+    /// and signed once it was gone. The card needs the VERIFY immediately
+    /// before the operation.
+    #[test]
+    fn pin_always_sign_needs_its_verify_immediately_before() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9c_priv(FIBBY_SLOT_9C_TEST_PRIV);
+        let sign = ga_sign_apdu_slot(0x9C, &[0x35; 32]);
+
+        assert_eq!(
+            c.transmit(&verify_default_pin_apdu_short()).unwrap(),
+            vec![0x90, 0x00]
+        );
+        c.transmit(&get_data_apdu(&[0x5F, 0xC1, 0x0A])).unwrap(); // 9C cert
+        assert_eq!(
+            c.transmit(&sign).unwrap(),
+            vec![0x69, 0x82],
+            "a command between VERIFY and a PIN-always sign -> 6982"
+        );
+
+        assert_eq!(
+            c.transmit(&verify_default_pin_apdu_short()).unwrap(),
+            vec![0x90, 0x00]
+        );
+        let signed = c.transmit(&sign).unwrap();
+        assert_eq!(
+            &signed[signed.len() - 2..],
+            &[0x90, 0x00],
+            "VERIFY then sign"
+        );
+    }
+
+    /// A PIN-"once" slot keeps its verification across other commands.
+    #[test]
+    fn pin_once_sign_survives_commands_after_its_verify() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_9a_priv(RFC6979_SCALAR);
+        c.transmit(&verify_default_pin_apdu_short()).unwrap();
+        c.transmit(&get_data_apdu(&[0x5F, 0xC1, 0x05])).unwrap(); // 9A cert
+        let signed = c.transmit(&ga_sign_apdu(&[0x36; 32])).unwrap();
+        assert_eq!(&signed[signed.len() - 2..], &[0x90, 0x00]);
+    }
+
+    /// A transaction ended with a reset disposition resets the card: the
+    /// PIN is no longer verified and, under `--require-select`, no applet
+    /// answers until PIV is selected again (piggy#323).
+    #[test]
+    fn a_reset_disposition_deselects_and_forgets_the_pin() {
+        let mut c = VirtualCard::new();
+        c.set_require_select(true);
+        c.seed_slot_9a_priv(RFC6979_SCALAR);
+        c.transmit(&select_piv()).unwrap();
+        c.transmit(&verify_default_pin_apdu_short()).unwrap();
+
+        c.end_transaction(crate::proto::disposition::RESET);
+        assert_eq!(
+            c.transmit(&ga_sign_apdu(&[0x37; 32])).unwrap(),
+            vec![0x6D, 0x00],
+            "no applet selected after the reset -> 6D00"
+        );
+        c.transmit(&select_piv()).unwrap();
+        assert_eq!(
+            c.transmit(&ga_sign_apdu(&[0x37; 32])).unwrap(),
+            vec![0x69, 0x82],
+            "the reset cleared the PIN"
+        );
+    }
+
+    #[test]
+    fn a_leave_disposition_keeps_the_card_state() {
+        let mut c = VirtualCard::new();
+        c.set_require_select(true);
+        c.seed_slot_9a_priv(RFC6979_SCALAR);
+        c.transmit(&select_piv()).unwrap();
+        c.transmit(&verify_default_pin_apdu_short()).unwrap();
+
+        c.end_transaction(crate::proto::disposition::LEAVE);
+        let signed = c.transmit(&ga_sign_apdu(&[0x38; 32])).unwrap();
+        assert_eq!(&signed[signed.len() - 2..], &[0x90, 0x00]);
     }
 
     /// Contrast guard for the shared signer: slot 9A is PIN policy "once",
@@ -4191,7 +4372,7 @@ mod tests {
     fn ga_ecdsa_slot_9a_sign_does_not_consume_pin_verification() {
         let mut c = VirtualCard::new();
         c.seed_slot_9a_priv(RFC6979_SCALAR);
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let apdu = ga_sign_apdu(&[0x44; 32]);
 
         let first = c.transmit(&apdu).unwrap();
@@ -4221,12 +4402,14 @@ mod tests {
 
         let mut c = VirtualCard::new();
         c.seed_fibby_slot_9c_cert();
-        c.pin_verified = true;
 
         let cert = c.transmit(&get_data_apdu(TAG_SLOT_9C_CERT)).unwrap();
         assert_eq!(cert[0], 0x53, "GET DATA returns the 53-wrapped cert object");
         assert_eq!(&cert[cert.len() - 2..], &[0x90, 0x00], "cert read -> 9000");
 
+        // 9C is PIN-always: the VERIFY goes immediately before the sign,
+        // after the cert read (piggy#325).
+        c.mark_pin_verified();
         let sig = c.transmit(&ga_sign_apdu_slot(0x9C, &[0x7E; 32])).unwrap();
         assert_eq!(
             &sig[sig.len() - 2..],
@@ -4338,7 +4521,7 @@ mod tests {
         );
 
         // The generated slot now signs (9A "once" — PIN-verify then sign).
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let sig = c.transmit(&ga_sign_apdu(&[0x5A; 32])).unwrap();
         assert_eq!(
             &sig[sig.len() - 2..],
@@ -4375,7 +4558,7 @@ mod tests {
         );
         assert_eq!(c.slot_9a_priv, Some(RFC6979_SCALAR), "scalar installed");
         // The imported slot now signs (9A "once" — PIN-verify then sign).
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let sig = c.transmit(&ga_sign_apdu(&[0x5A; 32])).unwrap();
         assert_eq!(
             &sig[sig.len() - 2..],
@@ -4452,7 +4635,7 @@ mod tests {
         let point = extract_generate_point(&c.transmit(&generate_apdu(0x9D)).unwrap());
 
         // 9D sign is PIN-gated (policy "once").
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let prehash = [0x9Du8; 32];
         let der = extract_ga_sign_der(&c.transmit(&ga_sign_apdu_slot(0x9D, &prehash)).unwrap());
 
@@ -4959,7 +5142,7 @@ mod tests {
             c.transmit(&ga_sign_apdu(&digest)).unwrap(),
             vec![0x69, 0x82]
         );
-        c.pin_verified = true;
+        c.mark_pin_verified();
         assert!(is_success(&c.transmit(&ga_sign_apdu(&digest)).unwrap()));
         assert!(c.pin_verified, "9A leaves the PIN verified");
         assert!(is_success(&c.transmit(&ga_sign_apdu(&digest)).unwrap()));
@@ -4968,7 +5151,7 @@ mod tests {
         let mut c = card_with_generated_key(0x9C, None, None);
         let sign_9c = ga_sign_apdu_slot(0x9C, &digest);
         assert_eq!(c.transmit(&sign_9c).unwrap(), vec![0x69, 0x82]);
-        c.pin_verified = true;
+        c.mark_pin_verified();
         assert!(is_success(&c.transmit(&sign_9c).unwrap()));
         assert!(!c.pin_verified, "9C consumes the PIN");
         assert_eq!(c.transmit(&sign_9c).unwrap(), vec![0x69, 0x82]);
@@ -4978,7 +5161,7 @@ mod tests {
         let sign_9d = ga_sign_apdu_slot(0x9D, &digest);
         assert_eq!(c.transmit(&sign_9d).unwrap(), vec![0x69, 0x82]);
         assert_eq!(c.transmit(&ecdh_9d_apdu()).unwrap(), vec![0x69, 0x82]);
-        c.pin_verified = true;
+        c.mark_pin_verified();
         assert!(is_success(&c.transmit(&sign_9d).unwrap()));
         assert!(is_success(&c.transmit(&ecdh_9d_apdu()).unwrap()));
         assert!(c.pin_verified, "9D leaves the PIN verified");
@@ -4994,7 +5177,7 @@ mod tests {
                 vec![0x69, 0x82],
                 "round {round}: no PIN"
             );
-            c.pin_verified = true;
+            c.mark_pin_verified();
             assert!(is_success(&c.transmit(&apdu).unwrap()), "round {round}");
             assert!(!c.pin_verified, "round {round}: the sign consumed the PIN");
         }
@@ -5014,7 +5197,7 @@ mod tests {
     #[test]
     fn pin_once_on_9c_overrides_the_slot_default_of_always() {
         let mut c = card_with_generated_key(0x9C, Some(pin_policy::ONCE), None);
-        c.pin_verified = true;
+        c.mark_pin_verified();
         let apdu = ga_sign_apdu_slot(0x9C, &[0x33; 32]);
         assert!(is_success(&c.transmit(&apdu).unwrap()));
         assert!(c.pin_verified, "once: the PIN stays verified");
@@ -5029,7 +5212,7 @@ mod tests {
 
         // always: each ECDH consumes the PIN.
         let mut c = card_with_generated_key(0x9D, Some(pin_policy::ALWAYS), None);
-        c.pin_verified = true;
+        c.mark_pin_verified();
         assert!(is_success(&c.transmit(&ecdh_9d_apdu()).unwrap()));
         assert!(!c.pin_verified);
         assert_eq!(c.transmit(&ecdh_9d_apdu()).unwrap(), vec![0x69, 0x82]);
@@ -5156,7 +5339,7 @@ mod tests {
         );
         assert_eq!(c.touch_blocked, None, "refused for the PIN, not the touch");
 
-        c.pin_verified = true;
+        c.mark_pin_verified();
         assert_eq!(c.transmit(&apdu).unwrap(), SW_TOUCH_TIMEOUT.to_vec());
         assert!(c.pin_verified, "no touch, no sign, PIN not consumed");
 
@@ -5234,7 +5417,7 @@ mod tests {
     #[test]
     fn touch_policy_gates_9d_ecdh() {
         let mut c = card_with_generated_key(0x9D, None, Some(touch_policy::ALWAYS));
-        c.pin_verified = true;
+        c.mark_pin_verified();
         assert_eq!(
             c.transmit(&ecdh_9d_apdu()).unwrap(),
             SW_TOUCH_TIMEOUT.to_vec()

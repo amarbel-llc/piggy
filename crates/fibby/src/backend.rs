@@ -81,6 +81,13 @@ pub trait Backend: Send {
     /// (`proto::disposition::*`). LEAVE/RESET/UNPOWER/EJECT.
     fn disconnect(&mut self, disposition: u32) -> ScardResult<()>;
 
+    /// End a transaction with the given disposition. A client ending one
+    /// with RESET (piggy-piv does, after a session that verified a PIN)
+    /// resets the card for every client: no applet stays selected and no
+    /// PIN stays verified. Default no-op: a backend fronting real silicon
+    /// leaves that to the silicon.
+    fn end_transaction(&mut self, _disposition: u32) {}
+
     /// Transmit a command APDU, returning the full response (data ‖ SW1
     /// SW2). The protocol layer streams this straight back to the
     /// client; the backend does no framing of its own.

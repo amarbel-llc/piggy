@@ -122,6 +122,19 @@ key generated on the card, and the attestation is where *piggy list*
 reads a slot's _pin_policy_ and _touch_policy_ from: a seeded or
 imported key reports neither.
 
+fibby models two more things a real YubiKey does that client code must
+not trip over (piggy#325). A _PIN-always_ key (9C by default) needs its
+VERIFY immediately before the operation: any other command in between,
+a certificate read included, answers the operation 6982, and the log
+says _PIN-always: a command came between VERIFY and the sign_. And a
+transaction ended with a reset disposition (as piggy-piv ends every
+session that verified a PIN) resets the card for every client: no applet
+stays selected and the PIN and management-key authentication are
+cleared. *--require-select* makes fibby answer 6D00 while no applet is
+selected, as the real card does; it is off by default because fibby
+models one client's power and selection, so its connect and disconnect
+deselect for every client, which a card shared through pcscd does not.
+
 *--hardware-proxy* relays a real card and keeps the wire trace; that is
 how APDU fixtures for new client code are captured.
 

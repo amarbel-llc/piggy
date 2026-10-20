@@ -53,6 +53,9 @@ struct Args {
     /// `--touch-timeout-ms`: how long a touch-requiring operation waits
     /// for a touch on every virtual card. `None` keeps the 15 s default.
     touch_timeout: Option<std::time::Duration>,
+    /// `--require-select`: every virtual card answers 6D00 while no applet
+    /// is selected, as a real card does after a reset (piggy#325).
+    require_select: bool,
 }
 
 /// One virtual card's seed configuration (the per-card slice of the CLI).
@@ -135,6 +138,7 @@ fn parse_args() -> Result<Args, String> {
         control_socket: None,
         auto_touch: false,
         touch_timeout: None,
+        require_select: false,
     };
     let mut reader_flag_given = false;
     let mut global_seed_flag: Option<String> = None;
@@ -174,6 +178,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--model" => args.model = value("--model")?,
             "--auto-touch" => args.auto_touch = true,
+            "--require-select" => args.require_select = true,
             "--touch-timeout-ms" => {
                 let millis: u64 = value("--touch-timeout-ms")?
                     .parse()
@@ -333,6 +338,7 @@ fn print_help() {
                       [--reader SUBSTR] [--model yk4|yk5]\n\
                       [--control-socket PATH]\n\
                       [--auto-touch] [--touch-timeout-ms MILLIS]\n\
+                      [--require-select]\n\
                       [--card NAME [seed flags…]]…\n\
                       [--seed-rfc6979-slot-9a-cert]\n\
                       [--seed-rfc5903-slot-9d-cert] [--seed-slot-9c-cert]\n\
@@ -414,6 +420,14 @@ fn print_help() {
          virtual card. FIBBY_LOG lines to grep: `TOUCH needed <slot>`,\n\
          `TOUCH granted <slot>`, `TOUCH cached <slot>`,\n\
          `TOUCH auto-granted <slot>`, `TOUCH timeout <slot> -> 6982`.\n\
+         \n\
+         Card state. A transaction ended with a reset disposition resets\n\
+         the card for every client: no applet stays selected, and the PIN\n\
+         and management-key authentication are cleared. A PIN-always key\n\
+         needs its VERIFY immediately before its operation; any other\n\
+         command in between answers the operation 6982. --require-select\n\
+         makes every virtual card answer 6D00 while no applet is selected,\n\
+         as a real card does after a reset.\n\
          \n\
          Point clients at the socket via PCSCLITE_CSOCK_NAME.\n\
          Set FIBBY_LOG=info|debug|wire for logging."
@@ -536,6 +550,7 @@ fn make_backends(args: &Args) -> Result<Vec<SharedBackend>, String> {
             // card this fibby serves.
             let with_touch_flags = |mut card: VirtualCard| {
                 card.set_auto_touch(args.auto_touch);
+                card.set_require_select(args.require_select);
                 if let Some(timeout) = args.touch_timeout {
                     card.set_touch_timeout(timeout);
                 }

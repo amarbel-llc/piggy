@@ -506,7 +506,9 @@ fn serve_connection(
             Some(Command::Reconnect) => reconnect(&mut stream, &body, &state, &backends)?,
             Some(Command::Disconnect) => disconnect(&mut stream, &body, &state, &backends)?,
             Some(Command::BeginTransaction) => begin_end_ok(&mut stream, &body)?,
-            Some(Command::EndTransaction) => end_transaction(&mut stream, &body)?,
+            Some(Command::EndTransaction) => {
+                end_transaction(&mut stream, &body, &state, &backends)?
+            }
             Some(Command::Transmit) => transmit(&mut stream, &body, &state, &backends)?,
             Some(Command::Status) => status(&mut stream, &body)?,
             Some(Command::Cancel) => cancel(&mut stream, &body)?,
@@ -923,12 +925,21 @@ fn begin_end_ok(stream: &mut UnixStream, body: &[u8]) -> std::io::Result<()> {
     reply_handle_rv(stream, req.handle, SCARD_S_SUCCESS)
 }
 
-fn end_transaction(stream: &mut UnixStream, body: &[u8]) -> std::io::Result<()> {
+fn end_transaction(
+    stream: &mut UnixStream,
+    body: &[u8],
+    state: &ConnState,
+    backends: &SharedBackends,
+) -> std::io::Result<()> {
     let req = HandleArgRv::from_bytes(body).unwrap_or(HandleArgRv {
         handle: -1,
         arg: disposition::LEAVE,
         rv: 0,
     });
+    backends[state.backend_of(req.handle)]
+        .lock()
+        .unwrap()
+        .end_transaction(req.arg);
     reply(
         stream,
         &HandleArgRv {
