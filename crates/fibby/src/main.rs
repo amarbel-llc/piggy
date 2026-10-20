@@ -37,6 +37,9 @@ struct Args {
     backend: String,
     reader: String,
     model: String,
+    /// `--serial N`: the YubiKey serial every virtual card reports, in
+    /// place of the model's captured physical-card serial (piggy#328).
+    serial: Option<u32>,
     /// The implicit single card's seeds (every pre-#242 invocation).
     seeds: SeedSpec,
     /// `--card NAME` groups (piggy#242): each starts a new virtual card;
@@ -133,6 +136,7 @@ fn parse_args() -> Result<Args, String> {
         backend: "virtual".to_string(),
         reader: "Yubico".to_string(),
         model: "yk4".to_string(),
+        serial: None,
         seeds: SeedSpec::default(),
         cards: Vec::new(),
         control_socket: None,
@@ -177,6 +181,13 @@ fn parse_args() -> Result<Args, String> {
                 reader_flag_given = true;
             }
             "--model" => args.model = value("--model")?,
+            "--serial" => {
+                args.serial = Some(
+                    value("--serial")?
+                        .parse()
+                        .map_err(|_| "--serial: want a whole number below 4294967296")?,
+                );
+            }
             "--auto-touch" => args.auto_touch = true,
             "--require-select" => args.require_select = true,
             "--touch-timeout-ms" => {
@@ -335,7 +346,7 @@ fn print_help() {
         "fibby — pure-Rust virtual PIV card over the pcsc-lite protocol\n\
          \n\
          USAGE: fibby [--socket PATH] [--backend virtual|hardware]\n\
-                      [--reader SUBSTR] [--model yk4|yk5]\n\
+                      [--reader SUBSTR] [--model yk4|yk5] [--serial N]\n\
                       [--control-socket PATH]\n\
                       [--auto-touch] [--touch-timeout-ms MILLIS]\n\
                       [--require-select]\n\
@@ -353,6 +364,10 @@ fn print_help() {
          firmware version). Only meaningful when --backend=virtual; the\n\
          hardware backend reports whatever the real card advertises.\n\
          Default: yk4 (the wet-env-verified profile).\n\
+         \n\
+         --serial N replaces the serial every virtual card reports (a whole\n\
+         number); without it yk5 reports the serial captured from a physical\n\
+         card. yk4 still has no PIV serial, only the OTP-applet one.\n\
          \n\
          --seed-rfc6979-slot-9a-cert installs the canonical fibby slot 9A\n\
          test cert (X.509 self-signed over the RFC 6979 §A.2.5 P-256 keypair)\n\
@@ -551,6 +566,9 @@ fn make_backends(args: &Args) -> Result<Vec<SharedBackend>, String> {
             let with_touch_flags = |mut card: VirtualCard| {
                 card.set_auto_touch(args.auto_touch);
                 card.set_require_select(args.require_select);
+                if let Some(serial) = args.serial {
+                    card.set_serial(serial);
+                }
                 if let Some(timeout) = args.touch_timeout {
                     card.set_touch_timeout(timeout);
                 }

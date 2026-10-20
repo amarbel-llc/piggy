@@ -227,6 +227,11 @@ pub struct VirtualCard {
     /// the OTP-applet serial API-request that models a YubiKey 4's serial
     /// read (piggy#256).
     selected_otp: bool,
+    /// Serial replacing the model's captured one (piggy#328), set by the
+    /// CLI's `--serial`. A model that has no PIV serial (Yk4) still
+    /// answers `6D00` on the PIV vendor instruction; the OTP path
+    /// reports the override on every model.
+    serial_override: Option<[u8; 4]>,
     /// PIV data-object storage keyed by tag bytes (the inner `<tag>` in
     /// `5C <len> <tag>`). Values are stored already-wrapped in a 53
     /// BER-TLV so GET DATA can return them verbatim — that's how real
@@ -766,6 +771,7 @@ impl VirtualCard {
             powered: false,
             selected_piv: false,
             selected_otp: false,
+            serial_override: None,
             data_objects: HashMap::new(),
             pin: DEFAULT_PIN.to_vec(),
             pin_retries: DEFAULT_PIN_RETRIES,
@@ -792,6 +798,23 @@ impl VirtualCard {
             touch_clock_skew: Duration::ZERO,
             touch_blocked: None,
         }
+    }
+
+    /// Report `serial` instead of the model's captured one (piggy#328), so
+    /// a test run never shows a physical card's serial.
+    pub fn set_serial(&mut self, serial: u32) {
+        self.serial_override = Some(serial.to_be_bytes());
+    }
+
+    fn piv_serial(&self) -> Option<[u8; 4]> {
+        self.model
+            .serial()
+            .map(|captured| self.serial_override.unwrap_or(captured))
+    }
+
+    fn otp_serial(&self) -> [u8; 4] {
+        self.serial_override
+            .unwrap_or_else(|| self.model.otp_serial())
     }
 
     /// The key in `slot`, if it is a slot VirtualCard models and holds one.
@@ -1489,7 +1512,7 @@ impl VirtualCard {
         // silicon does on non-standard P1/P2 here, so default-to-
         // 6D00 keeps the diagnostic honest).
         if cla == 0x00 && ins == apdu::ins::YK_SERIAL && p1 == 0x00 && p2 == 0x00 {
-            match self.model.serial() {
+            match self.piv_serial() {
                 Some(serial) => {
                     trace::emit(
                         trace::DEBUG,
@@ -1524,7 +1547,7 @@ impl VirtualCard {
             && p1 == apdu::ins::OTP_SLOT_DEVICE_SERIAL
             && p2 == 0x00
         {
-            let serial = self.model.otp_serial();
+            let serial = self.otp_serial();
             trace::emit(
                 trace::DEBUG,
                 "vcard",
@@ -3485,6 +3508,26 @@ mod tests {
         // 00 F2 C2 E6 + 9000 — byte-equal to the primary YubiKey 5's
         // captured wire response.
         assert_eq!(resp, vec![0x00, 0xF2, 0xC2, 0xE6, 0x90, 0x00]);
+    }
+
+    #[test]
+    fn set_serial_replaces_the_captured_yk5_serial() {
+        let mut c = VirtualCard::with_model(Model::Yk5);
+        c.set_serial(0x0001_E240); // 123456
+        let resp = c
+            .transmit(&[0x00, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00])
+            .unwrap();
+        assert_eq!(resp, vec![0x00, 0x01, 0xE2, 0x40, 0x90, 0x00]);
+    }
+
+    #[test]
+    fn set_serial_keeps_yk4_piv_serial_unsupported() {
+        let mut c = VirtualCard::with_model(Model::Yk4);
+        c.set_serial(0x0001_E240);
+        let resp = c
+            .transmit(&[0x00, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00])
+            .unwrap();
+        assert_eq!(resp, vec![0x6D, 0x00]);
     }
 
     #[test]

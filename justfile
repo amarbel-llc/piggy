@@ -4636,7 +4636,7 @@ explore-fdr0006-a CARD="virtual" PROMPTS="test" RUN="":
       # card's management key into the operator's own.
       export PIGGY_STORE_DIR="$dir/store"
       FIBBY_LOG=info "$fibby_out/bin/fibby" --socket "$PCSCLITE_CSOCK_NAME" --backend virtual \
-        --control-socket "$dir/control.sock" --model yk5 >"$dir/fibby.log" 2>&1 &
+        --control-socket "$dir/control.sock" --model yk5 --serial 12345678 >"$dir/fibby.log" 2>&1 &
       fibby_pid=$!
 
       # fdr-remove / fdr-insert: pull and replace the card.
