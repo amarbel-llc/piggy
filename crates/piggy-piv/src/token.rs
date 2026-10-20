@@ -635,13 +635,24 @@ impl<'tok> PinSession<'tok> {
     /// session's transaction so a concurrent PC/SC client cannot clear the
     /// PIN-verified state between `verify_pin` and this call.
     ///
+    /// `slot` is the slot as [`Self::read_slot`] read it, which the caller
+    /// does BEFORE `verify_pin`: on a PIN-always slot a YubiKey needs the
+    /// VERIFY immediately before the private-key operation, and answers
+    /// 6982 when any other command (the certificate read included) came
+    /// between them (piggy#325). Taking the slot rather than its id is
+    /// what keeps that read out of the gap.
+    ///
     /// Requires a prior `verify_pin` for slots whose PIN policy
     /// demands it; this method does NOT pre-check (the card enforces
     /// the policy and returns SW=6982 if the PIN is required and
     /// missing), matching C pivy's behavior.
-    pub fn sign_prehash(&mut self, slot_id: u8, data: &[u8]) -> Result<Vec<u8>, PivError> {
-        let slot = self.read_slot(slot_id)?;
-        self.general_authenticate(slot.algorithm().to_byte(), slot_id, ga_tag::CHALLENGE, data)
+    pub fn sign_prehash(&mut self, slot: &PivSlot, data: &[u8]) -> Result<Vec<u8>, PivError> {
+        self.general_authenticate(
+            slot.algorithm().to_byte(),
+            slot.id(),
+            ga_tag::CHALLENGE,
+            data,
+        )
     }
 
     /// Sign pre-hashed data with the slot key using an explicitly-supplied PIV
@@ -663,13 +674,17 @@ impl<'tok> PinSession<'tok> {
     }
 
     /// Perform ECDH key agreement with the slot's private key, inside this
-    /// session's transaction. Same PIN-policy semantics as `sign_prehash`.
-    pub fn ecdh_derive(&mut self, slot_id: u8, peer_ec_point: &[u8]) -> Result<Vec<u8>, PivError> {
-        let slot = self.read_slot(slot_id)?;
+    /// session's transaction. `slot` is read before `verify_pin`, and the
+    /// PIN-policy semantics are those of [`Self::sign_prehash`].
+    pub fn ecdh_derive(
+        &mut self,
+        slot: &PivSlot,
+        peer_ec_point: &[u8],
+    ) -> Result<Vec<u8>, PivError> {
         validate_ec_point(slot.algorithm(), peer_ec_point)?;
         self.general_authenticate(
             slot.algorithm().to_byte(),
-            slot_id,
+            slot.id(),
             ga_tag::EXPONENT,
             peer_ec_point,
         )
@@ -699,10 +714,12 @@ impl<'tok> PinSession<'tok> {
         }
     }
 
-    /// Read a slot's cert and public key. Does not need PIN, but
-    /// lives on `PinSession` so callers don't have to break out of
-    /// the session borrow to call it on the underlying token.
-    fn read_slot(&self, slot_id: u8) -> Result<PivSlot, PivError> {
+    /// Read a slot's cert and public key, for [`Self::sign_prehash`] and
+    /// [`Self::ecdh_derive`]. Does not need PIN; call it BEFORE
+    /// `verify_pin`, so no command sits between the VERIFY and the
+    /// operation (piggy#325). Lives on `PinSession` so callers don't have
+    /// to break out of the session borrow to call it on the token.
+    pub fn read_slot(&self, slot_id: u8) -> Result<PivSlot, PivError> {
         let cert_tag = slot::slot_to_cert_tag(slot_id).ok_or(PivError::SlotEmpty(slot_id))?;
         let apdu = Apdu::get_data(cert_tag);
         let (data, sw) = self.transmit(&apdu)?;

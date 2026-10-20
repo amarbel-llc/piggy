@@ -563,8 +563,8 @@ fn cmd_sign(inv: &Invocation) -> i32 {
             return 1;
         }
     };
-    let algorithm = match token.read_slot(slot_id) {
-        Ok(s) => s.algorithm(),
+    let slot = match token.read_slot(slot_id) {
+        Ok(s) => s,
         Err(e) => {
             eprintln!(
                 "piggy tool sign: failed to read cert for signing key in slot {slot_id:02X}: {e}"
@@ -572,6 +572,7 @@ fn cmd_sign(inv: &Invocation) -> i32 {
             return 1;
         }
     };
+    let algorithm = slot.algorithm();
     let mut input = Vec::new();
     if let Err(e) = std::io::stdin().read_to_end(&mut input) {
         eprintln!("piggy tool sign: stdin: {e}");
@@ -611,7 +612,7 @@ fn cmd_sign(inv: &Invocation) -> i32 {
         eprintln!("piggy tool sign: PIN verification failed: {e}");
         return 1;
     }
-    let sig = match session.sign_prehash(slot_id, &digest) {
+    let sig = match session.sign_prehash(&slot, &digest) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("piggy tool sign: failed to sign data: {e}");
@@ -692,7 +693,7 @@ fn cmd_req_cert(inv: &Invocation) -> i32 {
         return 1;
     }
     let csr_der = match piggy_piv::cert_builder::build_csr(&point, algorithm, &cn, |digest| {
-        session.sign_prehash(slot_id, digest)
+        session.sign_prehash(&slot, digest)
     }) {
         Ok(d) => d,
         Err(e) => {
@@ -761,11 +762,20 @@ fn cmd_ecdh(inv: &Invocation) -> i32 {
             return 1;
         }
     };
+    // Read before the VERIFY, so nothing sits between the VERIFY and the
+    // ECDH (piggy#325).
+    let slot = match session.read_slot(slot_id) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool ecdh: failed to read the key in slot {slot_id:02X}: {e}");
+            return 1;
+        }
+    };
     if let Err(e) = session.verify_pin(&pin) {
         eprintln!("piggy tool ecdh: PIN verification failed: {e}");
         return 1;
     }
-    let secret = match session.ecdh_derive(slot_id, &peer_point) {
+    let secret = match session.ecdh_derive(&slot, &peer_point) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("piggy tool ecdh: failed to compute ECDH: {e}");
@@ -1387,7 +1397,9 @@ fn cmd_import(inv: &Invocation) -> i32 {
         &point,
         algorithm,
         &format!("PIV slot {slot_id:02X}"),
-        |digest| session.sign_prehash(slot_id, digest),
+        // The key was just imported and has no cert yet, so its algorithm
+        // is the one imported; reading the slot would find the old cert.
+        |digest| session.sign_prehash_with_alg(slot_id, alg_byte, digest),
     ) {
         Ok(d) => d,
         Err(e) => {

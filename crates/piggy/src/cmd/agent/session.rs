@@ -417,6 +417,11 @@ impl PiggyAgent {
             let mut session = token
                 .begin_pin_session()
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
+            // Read before the VERIFY, so nothing sits between the VERIFY and
+            // the sign (piggy#325).
+            let slot = session
+                .read_slot(key.slot_id)
+                .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
             if let Some(acq) = &acquired {
                 // piggy#245: never spend a low-retry card's last tries on a
@@ -439,7 +444,7 @@ impl PiggyAgent {
             }
 
             let sig_bytes = session
-                .sign_prehash(key.slot_id, &sign_data)
+                .sign_prehash(&slot, &sign_data)
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
             return to_ssh_signature(key.algorithm, &sig_bytes, request.flags);
         }
@@ -1018,6 +1023,10 @@ impl PiggyAgent {
                 let mut session = token
                     .begin_pin_session()
                     .map_err(|e| AgentError::Other(e.to_string().into()))?;
+                // Read before the VERIFY (piggy#325).
+                let slot = session
+                    .read_slot(key.slot_id)
+                    .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
                 if let Some(acq) = &acquired {
                     // piggy#245: never spend a low-retry card's last tries on
@@ -1040,7 +1049,7 @@ impl PiggyAgent {
                 }
 
                 break session
-                    .ecdh_derive(key.slot_id, &ec_point)
+                    .ecdh_derive(&slot, &ec_point)
                     .map_err(|e| AgentError::Other(e.to_string().into()))?;
             }
         };
@@ -1175,6 +1184,10 @@ impl PiggyAgent {
                 let mut session = token
                     .begin_pin_session()
                     .map_err(|e| AgentError::Other(e.to_string().into()))?;
+                // Read before the VERIFY (piggy#325).
+                let slot = session
+                    .read_slot(box_slot)
+                    .map_err(|e| AgentError::Other(e.to_string().into()))?;
 
                 if let Some(acq) = &acquired {
                     // piggy#245: never spend a low-retry card's last tries on
@@ -1197,7 +1210,7 @@ impl PiggyAgent {
                 }
 
                 break session
-                    .ecdh_derive(box_slot, &ec_point)
+                    .ecdh_derive(&slot, &ec_point)
                     .map_err(|e| AgentError::Other(e.to_string().into()))?;
             }
         };

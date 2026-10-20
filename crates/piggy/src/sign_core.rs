@@ -258,6 +258,11 @@ fn sign_with_card<F: Frontend + ?Sized>(
         let mut session = token
             .begin_pin_session()
             .map_err(|e| SignError::Failed(format!("open card session: {e}")))?;
+        // Read before the VERIFY, so nothing sits between the VERIFY and the
+        // sign (piggy#325).
+        let slot = session
+            .read_slot(slot_id)
+            .map_err(|e| SignError::Failed(format!("read slot {slot_id:02X}: {e}")))?;
 
         match session.verify_pin(pin.as_str()) {
             Ok(()) => {}
@@ -278,7 +283,7 @@ fn sign_with_card<F: Frontend + ?Sized>(
         }
 
         return session
-            .sign_prehash(slot_id, digest)
+            .sign_prehash(&slot, digest)
             .map_err(|e| SignError::Failed(format!("card sign: {e}")));
     }
 }

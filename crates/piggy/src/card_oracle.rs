@@ -152,9 +152,14 @@ impl EcdhOracle for CardEcdhOracle {
         let mut session = token
             .begin_pin_session()
             .map_err(|e| OracleError::Transport(format!("begin_pin_session: {e}")))?;
+        // The slot is read before the VERIFY, so nothing sits between the
+        // VERIFY and the ECDH (piggy#325).
+        let slot = session
+            .read_slot(DEFAULT_SLOT)
+            .map_err(|e| OracleError::Transport(format!("read slot: {e}")))?;
         session.verify_pin(&pin).map_err(piv_to_oracle_pin_error)?;
         let secret = session
-            .ecdh_derive(DEFAULT_SLOT, &partner_uncompressed)
+            .ecdh_derive(&slot, &partner_uncompressed)
             .map_err(|e| OracleError::Transport(format!("ecdh_derive: {e}")))?;
         Ok(secret)
     }

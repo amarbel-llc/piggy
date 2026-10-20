@@ -808,6 +808,7 @@ pub(crate) fn with_batch_unlock<R>(
                 slot_id: target_slot,
                 self_pubkey_uncompressed: target_uncompressed,
                 target_curve,
+                slot: None,
                 pin_verified: false,
                 frontend,
                 card: card_id,
@@ -1607,6 +1608,9 @@ pub(crate) struct BatchOracle<'sess, 'tok> {
     /// than letting `unlock_ebox` fail with the generic
     /// "UnlockFailed".
     target_curve: piggy_box::piv_box::EcCurve,
+    /// The slot, read once before the batch's VERIFY so no command sits
+    /// between a VERIFY and the ECDH after it (piggy#325).
+    slot: Option<piggy_piv::PivSlot>,
     pin_verified: bool,
     /// The RFC 0006 frontend the batch PIN is requested through (#200).
     /// `tty` (default) renders the card-named askpass prompt; `jsonrpc`
@@ -1649,6 +1653,15 @@ impl<'sess, 'tok> EcdhOracle for BatchOracle<'sess, 'tok> {
             return Err(OracleError::NoKey);
         }
 
+        if self.slot.is_none() {
+            match self.session.read_slot(self.slot_id) {
+                Ok(slot) => self.slot = Some(slot),
+                Err(e) => {
+                    self.last_failure = Some(classify_piv_error(&e));
+                    return Err(OracleError::Transport(format!("read slot: {e}")));
+                }
+            }
+        }
         if !self.pin_verified {
             let req = SecretRequest {
                 kind: SecretKind::CurrentPin,
@@ -1674,10 +1687,8 @@ impl<'sess, 'tok> EcdhOracle for BatchOracle<'sess, 'tok> {
 
         let partner_point = extract_point_from_sshkey_blob(partner_pubkey_ssh_blob)?;
         let partner_uncompressed = canonicalize_uncompressed(&partner_point)?;
-        match self
-            .session
-            .ecdh_derive(self.slot_id, &partner_uncompressed)
-        {
+        let slot = self.slot.as_ref().expect("the slot is read above");
+        match self.session.ecdh_derive(slot, &partner_uncompressed) {
             Ok(secret) => Ok(secret),
             Err(e) => {
                 self.last_failure = Some(classify_piv_error(&e));

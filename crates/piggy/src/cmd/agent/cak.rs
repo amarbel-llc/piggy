@@ -45,8 +45,9 @@ fn authenticate_inner(guid: &Guid, cak: &KeyData) -> Result<bool, String> {
     // Slot 9E (Card Authentication) is PIN-never; no verify_pin needed. We
     // open a session anyway so the sign runs inside a PC/SC transaction.
     let mut session = token.begin_pin_session().map_err(|e| e.to_string())?;
+    let slot = session.read_slot(0x9E).map_err(|e| e.to_string())?;
     let der_sig = session
-        .sign_prehash(0x9E, &challenge)
+        .sign_prehash(&slot, &challenge)
         .map_err(|e| e.to_string())?;
 
     piggy_piv::cert::verify_ec_signature(cak, &challenge, &der_sig).map_err(|e| e.to_string())

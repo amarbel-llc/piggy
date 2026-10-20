@@ -82,6 +82,42 @@ _seed_and_pubkey() {
   ssh-keygen -e -m PKCS8 -f "$WORKDIR/k.pub" >"$WORKDIR/pub.pem"
 }
 
+# piggy#325: slot 9C is PIN-always, and a real YubiKey refuses its sign with
+# 6982 when any command (the certificate read included) comes between the
+# VERIFY and the sign; fibby now does the same. sign-bytes reads the slot
+# before the VERIFY, so the sign goes through and verifies.
+function sign_bytes_on_a_pin_always_slot_verifies { # @test
+  spawn_fibby --seed-slot-9c-cert --seed-chuid
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" run "$PIGGY_BIN" list --format=ssh
+  [[ $status -eq 0 ]] || {
+    echo "piggy list --format=ssh exited $status: $output" >&2
+    return 1
+  }
+  printf '%s\n' "$output" | grep 'slot=9C' | awk '{print $1, $2}' >"$WORKDIR/k.pub"
+  [[ -s $WORKDIR/k.pub ]] || {
+    echo "no slot-9C key in piggy list output: $output" >&2
+    return 1
+  }
+  ssh-keygen -e -m PKCS8 -f "$WORKDIR/k.pub" >"$WORKDIR/pub.pem"
+  printf 'operator-act-shaped-bytes-but-not-one' >"$WORKDIR/msg"
+
+  local status=0
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
+    "$PIGGY_BIN" sign-bytes --slot 9c -P 123456 --format der \
+    <"$WORKDIR/msg" >"$WORKDIR/sig.der" 2>"$WORKDIR/sign.err" || status=$?
+  [[ $status -eq 0 && -s $WORKDIR/sig.der ]] || {
+    echo "sign-bytes --slot 9c exited $status: $(cat "$WORKDIR/sign.err")" >&2
+    grep -E 'PIN-always|6982' "$FIBBY_LOG" | tail -5 >&2 || true
+    return 1
+  }
+  run openssl dgst -sha256 -verify "$WORKDIR/pub.pem" \
+    -signature "$WORKDIR/sig.der" "$WORKDIR/msg"
+  [[ $output == *"Verified OK"* ]] || {
+    echo "the 9C signature does not verify: $output" >&2
+    return 1
+  }
+}
+
 # `sign-bytes --format der` produces a DER ECDSA signature that openssl
 # verifies against the slot-9A public key: real card crypto end-to-end, and
 # the DER-framing confirmation from the papi#15 co-design.

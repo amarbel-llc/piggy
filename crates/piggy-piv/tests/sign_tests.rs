@@ -20,7 +20,7 @@ fn sign_with_9e_no_pin() {
     };
     // Try slot 9E which typically doesn't need PIN
     match token.read_slot(0x9E) {
-        Ok(_) => {
+        Ok(slot) => {
             // Slot exists, try to sign (may still fail without card). 9E needs
             // no PIN, but signing is reachable only via a PinSession
             // transaction now (piggy#56), so open one first.
@@ -35,7 +35,7 @@ fn sign_with_9e_no_pin() {
                     return;
                 }
             };
-            match session.sign_prehash(0x9E, data) {
+            match session.sign_prehash(&slot, data) {
                 Ok(sig) => assert!(!sig.is_empty()),
                 Err(e) => eprintln!("Sign failed (expected without real card): {}", e),
             }
