@@ -87,15 +87,16 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
         .build();
 
     // The clock: one pie, whole orange with the seconds of the input block
-    // counted over it, then a green section and a short red one with a hand
-    // sweeping round them. It sits in the band, left of the class's symbol.
+    // counted over it, then a green section and a short red one that turn
+    // white as their time is used. It sits in the band, left of the class's
+    // symbol.
     let timeout = options
         .timeout_secs
         .map(|secs| Duration::from_secs(secs.into()));
     let lengths = timeout.map(split_timeout);
     let green_share = lengths.map_or(1.0, |(green, red)| fraction(green, green + red));
     let has_timeout = lengths.is_some();
-    // The phase, how far round the clock the hand is (0 to 1), and how
+    // The phase, how much of the clock's time is used (0 to 1), and how
     // visible the pause symbol is (0 to 1) while input pauses the clock.
     let light_state = Rc::new(Cell::new((Phase::Hold, 0.0_f64, 0.0_f64)));
     let lights = gtk::DrawingArea::builder()
@@ -218,7 +219,7 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
     }
     confirm.set_sensitive(false);
     let shaking = Rc::new(Cell::new(false));
-    // Which light is on, and how long it has run. Any input once the block
+    // The clock's phase, and how long it has run. Any input once the block
     // has ended pauses the clock for INPUT_PAUSE, so the dialog does not give
     // up on an operator who is in the middle of typing; it then carries on
     // from where it stopped.
@@ -379,8 +380,8 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
                 }
             }
             clock.set((phase, in_phase));
-            // How far round the clock the hand is.
-            let hand = match (phase, lengths) {
+            // How much of the clock's time is used.
+            let used = match (phase, lengths) {
                 (Phase::Hold, _) => 0.0,
                 (Phase::Green, Some((green, red))) => fraction(in_phase, green + red),
                 (Phase::Red, Some((green, red))) => fraction(green + in_phase, green + red),
@@ -410,7 +411,7 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
                 (pause_alpha.get() - step(PAUSE_FADE_OUT)).max(0.0)
             };
             pause_alpha.set(alpha);
-            light_state.set((phase, hand, alpha));
+            light_state.set((phase, used, alpha));
             let counted = match (phase, pausing) {
                 (Phase::Hold, _) => Some(secs_left(INPUT_BLOCK, in_phase)),
                 (_, Pausing::Counting(left)) => Some(left),
@@ -485,7 +486,7 @@ fn secs_left(total: Duration, elapsed: Duration) -> u64 {
     left.as_secs() + u64::from(left.subsec_nanos() > 0)
 }
 
-/// The traffic light: orange while input is held, green while it is taken,
+/// The clock's phase: orange while input is held, green while it is taken,
 /// red while the dialog counts down to giving up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
