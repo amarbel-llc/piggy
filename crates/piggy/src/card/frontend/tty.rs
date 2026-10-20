@@ -17,7 +17,7 @@
 //! (JSON-RPC) binding renders natively; PIN-protected storage — the eventual
 //! secure default — is tracked in piggy#198.
 
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 
 use zeroize::Zeroizing;
 
@@ -156,18 +156,24 @@ impl Frontend for TtyFrontend {
             Some(false) => " [y/N] ",
             None => " [y/n] ",
         };
-        // Prefer the controlling tty so a piped stdin carrying data is not
-        // consumed; fall back to a stderr-prompt + stdin read when there is no
-        // tty (non-interactive automation, a piped invocation, some sudo
-        // setups). This y/n channel is entirely separate from secret entry:
+        // Use the controlling tty only when stdin is a terminal. A redirected
+        // stdin (`echo y | piggy card init`) is the caller's answer channel,
+        // and the prompt then goes to stderr, so redirecting either isolates
+        // the prompt from the operator's terminal (piggy#321). The same
+        // stderr-prompt + stdin read is the fallback when there is no tty at
+        // all. This y/n channel is entirely separate from secret entry:
         // PINs/PUKs always come via `$SSH_ASKPASS` (`run_askpass`), never the
-        // tty or stdin, so this fallback cannot interfere with the askpass
-        // flow. Echo stays on — a y/n is not a secret.
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/tty")
-        {
+        // tty or stdin, so it cannot interfere with the askpass flow. Echo
+        // stays on — a y/n is not a secret.
+        let controlling_tty = if std::io::stdin().is_terminal() {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+        } else {
+            Err(std::io::Error::other("stdin is not a terminal"))
+        };
+        match controlling_tty {
             Ok(mut tty) => {
                 write!(tty, "{}{hint}", req.message)
                     .and_then(|()| tty.flush())
