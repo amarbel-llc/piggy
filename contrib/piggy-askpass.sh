@@ -456,11 +456,13 @@ gtk_operator_act() {
   printf '%s' "$body" | piggy-askpass-gtk "${args[@]}"
 }
 
-# The routine PIN dialog of piggy-askpass-gtk: no band and no typed word, but
-# the same hold, clock and focus as an operator act's.
+# The routine PIN dialog of piggy-askpass-gtk: a slate band of its own, none
+# of the operator-act colours, and no typed word, but the same hold, clock
+# and focus as an operator act's.
 gtk_routine() {
   printf '%s' "$body" | piggy-askpass-gtk \
-    --title "$class_title" --ok-label "OK" --timeout "$zenity_timeout"
+    --title "$class_title" --ok-label "OK" --timeout "$zenity_timeout" \
+    --band "✱  PIN REQUEST" --band-background "#5e5c64" --band-foreground "#ffffff"
 }
 
 # The GTK helper is used whenever it is on PATH, for every dialog this script

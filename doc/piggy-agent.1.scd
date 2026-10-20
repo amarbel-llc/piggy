@@ -287,9 +287,10 @@ dialog, which opens with a band in the class's colour carrying its symbol
 requires the word ESCALATE to be typed, and then a click on its button.
 On Linux every dialog, the routine PIN prompt included, is
 *piggy-askpass-gtk*, which the packaged helper finds on its *PATH*; with
-*PIGGY_ASKPASS_GTK*=0, or where it is absent, they are zenity's. The helper
+*PIGGY_ASKPASS_GTK*=0, or where it is absent, they are zenity's. A routine
+prompt carries a slate PIN REQUEST band, none of the operator-act colours. The helper
 takes focus when it opens and shows the text as plain text. For its first
-3 seconds it takes no input but a cancel, its fields are greyed out, and
+2 seconds it takes no input but a cancel, its fields are greyed out, and
 it shakes at any keystroke, so a key meant for another window can neither
 type into it nor confirm the act. A clock in the band shows the time: whole
 orange with the seconds of that block counted over it, then, when the

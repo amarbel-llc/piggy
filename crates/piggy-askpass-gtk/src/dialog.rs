@@ -18,7 +18,7 @@ const DIGIT_CSS_CLASS: &str = "piggy-digit";
 
 /// How long after opening the dialog takes no input but a cancel, so a
 /// keystroke meant for another window cannot fill in or confirm the act.
-const INPUT_BLOCK: Duration = Duration::from_secs(3);
+const INPUT_BLOCK: Duration = Duration::from_secs(2);
 /// The red section is a tenth of the time after the block, but never shorter
 /// than this: the last stretch before the dialog gives up.
 const RED_FLOOR: Duration = Duration::from_secs(3);
@@ -648,14 +648,14 @@ mod tests {
     fn a_timeout_splits_into_the_block_a_green_section_and_a_short_red_one() {
         let secs = Duration::from_secs;
         let millis = Duration::from_millis;
-        // Red is a tenth of what the block leaves: 57 s gives 5.7 s.
-        assert_eq!(split_timeout(secs(60)), (millis(51_300), millis(5_700)));
+        // Red is a tenth of what the block leaves: 58 s gives 5.8 s.
+        assert_eq!(split_timeout(secs(60)), (millis(52_200), millis(5_800)));
         // A tenth would be under the floor, so the floor applies.
-        assert_eq!(split_timeout(secs(12)), (secs(6), secs(3)));
+        assert_eq!(split_timeout(secs(12)), (secs(7), secs(3)));
         // Not even the floor fits: red is half of what is left.
-        assert_eq!(split_timeout(secs(5)), (secs(1), secs(1)));
+        assert_eq!(split_timeout(secs(5)), (millis(1_500), millis(1_500)));
         // No time left after the block: nothing to split.
-        assert_eq!(split_timeout(secs(3)), (Duration::ZERO, Duration::ZERO));
+        assert_eq!(split_timeout(secs(2)), (Duration::ZERO, Duration::ZERO));
         assert_eq!(split_timeout(secs(1)), (Duration::ZERO, Duration::ZERO));
     }
 

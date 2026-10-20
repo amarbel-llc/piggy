@@ -1138,7 +1138,7 @@ helper_option() {
   done
 }
 
-@test "the_routine_prompt_uses_the_gtk_helper_without_a_band" {
+@test "the_routine_prompt_uses_the_gtk_helper_with_a_band_of_its_own" {
   run_askpass_against_gtk_helper_stub 0
 
   assert_success
@@ -1146,8 +1146,14 @@ helper_option() {
   assert_equal "$(zenity_call_count)" 0
   assert_equal "$(helper_option --title)" "piggy PIV PIN"
   assert_equal "$(helper_option --timeout)" 30
-  if grep -qxF -- --band "$HELPER_ARGV"; then
-    echo "a routine prompt got a band"
+  assert_equal "$(helper_option --band)" "✱  PIN REQUEST"
+  # Not the colour of any operator-act class.
+  local class_colour
+  for class_colour in '#1c71d8' '#c01c28' '#e5a50a'; do
+    [[ $(helper_option --band-background) != "$class_colour" ]]
+  done
+  if grep -qxF -- --confirm-word "$HELPER_ARGV"; then
+    echo "a routine prompt asked for a typed word"
     return 1
   fi
 }
