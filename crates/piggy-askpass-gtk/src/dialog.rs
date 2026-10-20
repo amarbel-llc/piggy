@@ -20,12 +20,15 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
 
     let main_loop = glib::MainLoop::new(None, false);
     let outcome: Rc<RefCell<Option<Outcome>>> = Rc::new(RefCell::new(None));
-    // Modal, as zenity's libadwaita dialogs are: on twerk's GNOME X11 session
-    // a modal window opens centred where a plain one opens top-left.
+    // A header bar makes GTK draw the window's own decorations, as zenity's
+    // libadwaita dialogs do. On twerk's GNOME X11 session (Mutter 46) a
+    // window decorated by the window manager opened at the top-left, and the
+    // same window with client-side decorations (GTK_CSD=1) opened centred.
     let window = gtk::Window::builder()
         .title(options.title.as_str())
         .resizable(false)
         .modal(true)
+        .titlebar(&gtk::HeaderBar::new())
         .build();
 
     // The first ending wins; closing the window afterwards is not a cancel.
