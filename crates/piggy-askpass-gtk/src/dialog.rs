@@ -348,7 +348,7 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
                 return glib::ControlFlow::Continue;
             }
             let now = Instant::now();
-            if now.saturating_duration_since(opened) >= MAX_LIFETIME {
+            if lifetime_spent(now.saturating_duration_since(opened)) {
                 finish(Outcome::TimedOut);
                 return glib::ControlFlow::Break;
             }
@@ -492,6 +492,11 @@ fn shake_offset(frame: u32) -> i32 {
 fn secs_left(total: Duration, elapsed: Duration) -> u64 {
     let left = total.saturating_sub(elapsed);
     left.as_secs() + u64::from(left.subsec_nanos() > 0)
+}
+
+/// Whether a dialog open for `since_opening` has used up MAX_LIFETIME.
+fn lifetime_spent(since_opening: Duration) -> bool {
+    since_opening >= MAX_LIFETIME
 }
 
 /// The clock's phase: orange while input is held, green while it is taken,
@@ -650,6 +655,13 @@ mod tests {
         assert_eq!(secs_left(three, Duration::from_millis(2_999)), 1);
         assert_eq!(secs_left(three, three), 0);
         assert_eq!(secs_left(three, Duration::from_secs(10)), 0);
+    }
+
+    #[test]
+    fn a_dialog_gives_up_five_minutes_after_opening_whatever_the_clock_did() {
+        assert!(!lifetime_spent(Duration::from_secs(299)));
+        assert!(lifetime_spent(Duration::from_secs(300)));
+        assert!(lifetime_spent(Duration::from_secs(3_600)));
     }
 
     #[test]
