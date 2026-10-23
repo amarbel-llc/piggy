@@ -11,6 +11,13 @@ approval-note: >
   the operator's tty, including a local posh attach, is a privileged
   channel. Implementations conform to this text; the conformance suite
   lands with FDR 0006 phase (a) (piggy#303).
+amended: 2026-10-23
+amendment-note: >
+  2026-10-23 (piggy#332, circus EPIC 0001 D1/D4): the `piggy-escalation-v1`
+  text shape names the record the act signs, which is a grant, a profile
+  transition or an escalation request record, per the new §3.1 table;
+  previously it named an escalation request record only. Docs only: the
+  agent does not check text shapes, so no implementation changes.
 ---
 
 # Operator-Act Agent Extension, sshsig Namespaces, and Record Purposes (piggy normative; FDR 0006 wire RFC part 1)
@@ -308,7 +315,7 @@ the agent does not check but a verifier of that act kind MUST.
 | Namespace                 | Path                  | Display class | Text shape and meaning |
 |---------------------------|-----------------------|---------------|------------------------|
 | `piggy-quote-v1`          | `operator-act@piggy`  | `quote`       | A quote of operator input already in the ledger (FDR 0032 D10). The text MUST be the recorded input verbatim, followed by one line `ledger <markl-id>` naming the transcript stanza it was taken from (`piggy-record-digest-v1@…`). A verifier MUST resolve that stanza and MUST fail if its recorded input differs from the quoted text. The quote adds the operator's touch to words the ledger already holds; it never introduces words. |
-| `piggy-escalation-v1`     | `operator-act@piggy`  | `escalation`  | An escalation grant (FDR 0032 D11). The text MUST name the escalation request record by markl-id (`piggy-record-digest-v1@…`) and state the granted right and bound in words. A first grant to a grantee that holds no rights yet is an escalation too, as is a widening of an existing grant; the namespace does not tell the two apart, so a verifier that needs to know reads it from the request record, or from the text when the requesting system has the text say so. |
+| `piggy-escalation-v1`     | `operator-act@piggy`  | `escalation`  | An escalation grant (FDR 0032 D11). The text MUST name the record the act signs by markl-id (`piggy-record-digest-v1@…`), which is one of the kinds in §3.1, and state in words what that kind's row says. A first grant to a grantee that holds no rights yet is an escalation too, as is a widening of an existing grant; the namespace does not tell the two apart, so a verifier that needs to know reads it from the named record, or from the text when the requesting system has the text say so. |
 | `piggy-certificate-v1`    | `operator-act@piggy`  | `certificate` | A card-signed certificate or enrollment (FDR 0032 D2 root certificate, D15 enrollment blessing). The text MUST name the certified public key and the certificate request record by markl-id. |
 | `piggy-record-v1`         | ordinary sign request | none          | A signed record (FDR 0032 D8) signed by a principal's own key through `ssh-keygen -Y sign -n piggy-record-v1` or an equivalent agent sign request; the message is the record's canonical bytes as troupe's RFC defines them. Not an operator act. |
 
@@ -327,6 +334,22 @@ Other systems MAY have namespaces registered here for the
 0032 D15's pre-authorization policy records are the first candidate);
 each registration names its display class and text shape. A verifier
 MUST accept only namespaces its policy names.
+
+#### 3.1. Records an escalation names
+
+The record a `piggy-escalation-v1` text names is the one the act signs.
+The kinds below are those FDR 0032 and spinclass FDR 0034 define; their
+grammar and canonical bytes are the owning system's, and a verifier of a
+kind MUST resolve the named record and MUST fail if the text's words do
+not match it.
+
+| Kind | The text names | The text states in words |
+|------|----------------|--------------------------|
+| grant | the grant record: a card root, or a re-issued root that widens a grant (FDR 0034 `profile-grant`) | the grantee, the profiles and rights granted, and whether the act is a first grant or a widening |
+| profile transition | the transition record of a bound profile moving to a new digest (spinclass#407) | the profile and its old and new digests |
+| escalation request | the escalation request record, for a right the requester was not granted (a merge escalation, FDR 0032 D11) | the granted right and its bound |
+
+A kind is added to this table by amendment, like a namespace (§3).
 
 ### 4. markl-id purposes
 
