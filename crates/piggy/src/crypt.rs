@@ -99,10 +99,9 @@ pub(crate) fn decrypt_first_line(pass_name: &str) -> Result<Vec<u8>, String> {
             "sneaky path ({reason}) in secret name {pass_name:?}"
         ));
     }
-    let passfile = crate::store::store_root().join(format!("{name}.ebox"));
-    if !passfile.is_file() {
+    let Some(passfile) = crate::store::find_entry(name) else {
         return Err(format!("{name} is not in the password store"));
-    }
+    };
     let plaintext = decrypt(&passfile)?;
     let end = plaintext
         .iter()

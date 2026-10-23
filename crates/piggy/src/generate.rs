@@ -65,6 +65,22 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let root = store_root();
+    // An in-place generate changes an existing entry, which must be in
+    // the write store; a fresh one may shadow a later store's (piggy#330).
+    let refusal = if opts.inplace {
+        crate::store::refuse_write("generate --in-place", &opts.path)
+    } else {
+        crate::store::read_only_write_store("generate", &root)
+    };
+    if let Some(refusal) = refusal {
+        eprintln!("{refusal}");
+        return 1;
+    }
+    if !opts.inplace {
+        if let Some(note) = crate::store::shadow_note(&opts.path) {
+            eprintln!("{note}");
+        }
+    }
     let passfile = root.join(format!("{}.ebox", opts.path));
     let parent = passfile.parent().unwrap_or(&root);
     if let Err(err) = std::fs::create_dir_all(parent) {

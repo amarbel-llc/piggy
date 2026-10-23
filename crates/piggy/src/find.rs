@@ -15,9 +15,10 @@
 //! arrow.
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::store::store_root;
+use crate::store::store_roots;
 
 /// Exit code conventions:
 /// - 0: tree printed (matches or not)
@@ -31,19 +32,32 @@ pub fn run(terms: &[String]) -> i32 {
     println!("Search Terms: {}", terms.join(","));
 
     let glob = build_glob(terms);
-    let root = store_root();
+    let roots = store_roots();
+    if roots.len() == 1 {
+        return find_in(&roots[0], &glob);
+    }
+    // piggy#330: one block per store, headed by its path, so a match
+    // says which store it came from.
+    let mut code = 0;
+    for root in roots.iter().filter(|r| r.is_dir()) {
+        println!("{}", root.display());
+        code = code.max(find_in(root, &glob));
+    }
+    code
+}
 
+fn find_in(root: &Path, glob: &str) -> i32 {
     let mut child = match Command::new("tree")
         .arg("-N")
         .arg("-C")
         .arg("-l")
         .arg("--noreport")
         .arg("-P")
-        .arg(&glob)
+        .arg(glob)
         .arg("--prune")
         .arg("--matchdirs")
         .arg("--ignore-case")
-        .arg(&root)
+        .arg(root)
         .stdout(Stdio::piped())
         .spawn()
     {

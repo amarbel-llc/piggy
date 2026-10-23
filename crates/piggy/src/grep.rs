@@ -11,7 +11,7 @@
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use crate::store::{collect_eboxes, store_root};
+use crate::store::{collect_eboxes, store_roots};
 
 const HEADER_BLUE_BOLD_RESET: &str = "\x1b[94m"; // blue
 const HEADER_BOLD: &str = "\x1b[1m"; // bold
@@ -27,24 +27,36 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
 
-    let root = store_root();
-    if !root.exists() {
-        return 0;
-    }
-
-    let entries = match collect_eboxes(&root) {
-        Ok(v) => v,
-        Err(err) => {
-            eprintln!("piggy pass grep: walk {}: {}", root.display(), err);
-            return 2;
+    // piggy#330: every store in search order; an entry an earlier store
+    // also holds is skipped, as a read would take the earlier one.
+    let roots = store_roots();
+    let mut entries = Vec::new();
+    for (i, root) in roots.iter().enumerate() {
+        if !root.exists() {
+            continue;
         }
-    };
+        let found = match collect_eboxes(root) {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("piggy pass grep: walk {}: {}", root.display(), err);
+                return 2;
+            }
+        };
+        for path in found {
+            let shadowed = path
+                .strip_prefix(root)
+                .is_ok_and(|rel| roots[..i].iter().any(|r| r.join(rel).is_file()));
+            if !shadowed {
+                entries.push((root, path));
+            }
+        }
+    }
 
     // One decryptor per walk: the PIN (card path) or agent connection is
     // paid once for the whole store, not per entry.
     let mut decryptor = piggy::cmd::pivy_box::Decryptor::from_env();
     let mut stdout = std::io::stdout().lock();
-    for path in entries {
+    for (root, path) in entries {
         let plaintext = match decrypt(&path, &mut decryptor) {
             Some(p) => p,
             None => continue,
@@ -55,7 +67,7 @@ pub fn run(args: &[String]) -> i32 {
             None => continue,
         };
 
-        let (dir, name) = split_display(&path, &root);
+        let (dir, name) = split_display(&path, root);
         let _ = writeln!(
             stdout,
             "{HEADER_BLUE_BOLD_RESET}{dir}{HEADER_BOLD}{name}{ANSI_RESET}:"

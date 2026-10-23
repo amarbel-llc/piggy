@@ -59,6 +59,12 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
 
+    // piggy#330: editing an entry only a later store holds would silently
+    // fork it into the write store; refuse and say how to copy it up.
+    if let Some(refusal) = crate::store::refuse_write("edit", &path) {
+        eprintln!("{refusal}");
+        return 1;
+    }
     let root = store_root();
     let passfile = root.join(format!("{path}.ebox"));
     let parent = passfile.parent().unwrap_or(&root);

@@ -23,7 +23,7 @@ use std::process::Command;
 
 use crate::git_ops;
 use crate::reencrypt;
-use crate::store::store_root;
+use crate::store::store_roots;
 
 pub fn run_move(args: &[String]) -> i32 {
     run(Op::Move, args)
@@ -66,15 +66,36 @@ fn run(op: Op, args: &[String]) -> i32 {
         return 1;
     }
 
-    let root = store_root();
+    // piggy#330: both land in the write store. A move takes its source
+    // from there too; a copy takes it from the first store holding it,
+    // which is how an entry is copied up from a later store.
+    let roots = store_roots();
+    let root = roots[0].clone();
+    let refusal = match op {
+        Op::Move => crate::store::refuse_write("move", &opts.old),
+        Op::Copy => crate::store::read_only_write_store("copy", &root),
+    };
+    if let Some(refusal) = refusal {
+        eprintln!("{refusal}");
+        return 1;
+    }
+    let old_stripped = opts.old.trim_end_matches('/');
+    let source_root = match op {
+        Op::Move => &root,
+        Op::Copy => roots
+            .iter()
+            .find(|r| {
+                r.join(format!("{old_stripped}.ebox")).is_file() || r.join(old_stripped).is_dir()
+            })
+            .unwrap_or(&root),
+    };
 
     // The new path is carried as a string so the bash `${new_path%/*}`
     // mkdir target and the `$new_path == */` trailing-slash test survive
     // (PathBuf::join normalizes trailing slashes away).
     let root_str = root.to_string_lossy().into_owned();
-    let old_stripped = opts.old.trim_end_matches('/');
     let old_ends_with_slash = opts.old != old_stripped;
-    let mut old_path = root.join(old_stripped);
+    let mut old_path = source_root.join(old_stripped);
     let mut old_dir = old_path.clone();
     let mut new_path = format!("{}/{}", root_str, opts.new);
 
@@ -121,6 +142,15 @@ fn run(op: Op, args: &[String]) -> i32 {
 
     if !transfer(op, &old_path, &new_path, force) {
         return 1;
+    }
+    // A copy from a read-only later store (a home-manager store path)
+    // keeps its modes, which would leave the write store's copy
+    // unwritable.
+    if source_root != &root {
+        if let Err(err) = make_owner_writable(&new_path) {
+            eprintln!("piggy pass cp: make {} writable: {err}", new_path.display());
+            return 1;
+        }
     }
 
     // Re-encrypt the moved/copied subtree to its new nearest piggy-ids,
@@ -173,6 +203,24 @@ fn commit_move(root: &Path, old_path: &Path, old_dir: &Path, new_path: &Path, op
     }
 
     let _ = remove_empty_parents(old_dir, root);
+}
+
+/// Add the owner's write bit to `path` and, for a directory, everything
+/// under it.
+fn make_owner_writable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    let mode = meta.permissions().mode();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o200))?;
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            make_owner_writable(&entry?.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn has_staged_changes(work_tree: &Path, path: &Path) -> bool {

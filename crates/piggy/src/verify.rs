@@ -13,15 +13,37 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::store::{collect_eboxes, resolve_target, store_root};
+use crate::store::{collect_eboxes, resolve_target, store_roots};
 
 /// Exit code conventions:
 /// - 0: every entry decrypted successfully (or store is empty)
 /// - 1: at least one entry failed to decrypt
 /// - 2: usage / IO error before verification could begin
 pub fn run(subpath: Option<&str>) -> i32 {
-    let root = store_root();
-    let target = match resolve_target(&root, subpath) {
+    let roots = store_roots();
+    if roots.len() == 1 {
+        return verify_store(&roots[0], subpath);
+    }
+    // piggy#330: every store holding the subpath gets its own report,
+    // headed by its path; shadowed entries are verified too, since each
+    // store's ciphertexts are checked for themselves.
+    let holders: Vec<&PathBuf> = roots
+        .iter()
+        .filter(|root| subpath.is_none_or(|sub| root.join(sub).exists()))
+        .collect();
+    if holders.is_empty() {
+        return verify_store(&roots[0], subpath);
+    }
+    let mut code = 0;
+    for root in holders {
+        println!("{}", root.display());
+        code = code.max(verify_store(root, subpath));
+    }
+    code
+}
+
+fn verify_store(root: &Path, subpath: Option<&str>) -> i32 {
+    let target = match resolve_target(root, subpath) {
         Ok(p) => p,
         Err(msg) => {
             eprintln!("piggy pass verify: {msg}");

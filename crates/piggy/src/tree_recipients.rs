@@ -137,7 +137,7 @@ fn build_tree(dir: &Path, depth: usize) -> std::io::Result<Vec<Node>> {
 /// original casing. Mirrors `verify::strip_ebox`; a shared helper is a
 /// followup (see the verify/tree_recipients walk-and-render unification
 /// issue).
-fn strip_ebox_suffix(name: &str) -> String {
+pub(crate) fn strip_ebox_suffix(name: &str) -> String {
     if name.len() >= ".ebox".len() {
         let (head, tail) = name.split_at(name.len() - ".ebox".len());
         if tail.eq_ignore_ascii_case(".ebox") {

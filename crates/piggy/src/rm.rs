@@ -37,6 +37,10 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
 
+    if let Some(refusal) = crate::store::refuse_write("remove", &opts.path) {
+        eprintln!("{refusal}");
+        return 1;
+    }
     let root = store_root();
     let resolved = match resolve_path(&root, &opts.path) {
         Some(r) => r,

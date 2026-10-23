@@ -45,7 +45,14 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let root = store_root();
+    if let Some(refusal) = crate::store::read_only_write_store("insert", &root) {
+        eprintln!("{refusal}");
+        return 1;
+    }
     let passfile = root.join(format!("{}.ebox", opts.path));
+    if let Some(note) = crate::store::shadow_note(&opts.path) {
+        eprintln!("{note}");
+    }
 
     if !opts.force
         && passfile.exists()

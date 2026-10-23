@@ -24,25 +24,124 @@ impl EnvLookup for RealEnv {
     }
 }
 
-/// Resolve `$PIGGY_STORE_DIR` with the same precedence as piggy.sh:
-/// PIGGY_STORE_DIR > $XDG_DATA_HOME/piggy > $HOME/.local/share/piggy.
+/// The write store: the first of [`store_roots`]. Every write (insert,
+/// generate, edit, rm, mv, init, recipients, git) lands here.
 pub(crate) fn store_root() -> PathBuf {
     store_root_from(&RealEnv)
 }
 
 pub(crate) fn store_root_from(env: &dyn EnvLookup) -> PathBuf {
+    store_roots_from(env).swap_remove(0)
+}
+
+/// Every store, in search order (piggy#330). `$PIGGY_STORE_DIR` is a
+/// colon-separated list like `PATH`, empty components skipped; there is
+/// no escape, so a store path containing `:` cannot be named. Unset or
+/// empty, the one store is `$XDG_DATA_HOME/piggy`, else
+/// `$HOME/.local/share/piggy`. Never empty.
+pub(crate) fn store_roots() -> Vec<PathBuf> {
+    store_roots_from(&RealEnv)
+}
+
+pub(crate) fn store_roots_from(env: &dyn EnvLookup) -> Vec<PathBuf> {
     if let Some(v) = env.get("PIGGY_STORE_DIR") {
-        if !v.is_empty() {
-            return PathBuf::from(v);
+        let roots: Vec<PathBuf> = std::env::split_paths(&v)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+        if !roots.is_empty() {
+            return roots;
         }
     }
     if let Some(v) = env.get("XDG_DATA_HOME") {
         if !v.is_empty() {
-            return PathBuf::from(v).join("piggy");
+            return vec![PathBuf::from(v).join("piggy")];
         }
     }
     let home = env.get("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".local/share/piggy")
+    vec![PathBuf::from(home).join(".local/share/piggy")]
+}
+
+/// The ebox for pass-name `name` in the first store that holds it.
+pub(crate) fn find_entry_in(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
+    roots
+        .iter()
+        .map(|root| root.join(format!("{name}.ebox")))
+        .find(|passfile| passfile.is_file())
+}
+
+/// [`find_entry_in`] over [`store_roots`].
+pub(crate) fn find_entry(name: &str) -> Option<PathBuf> {
+    find_entry_in(&store_roots(), name)
+}
+
+/// The later store holding `name` (an entry or a directory) when the
+/// write store does not: the case a write to an existing entry refuses.
+pub(crate) fn later_store_holding<'a>(roots: &'a [PathBuf], name: &str) -> Option<&'a Path> {
+    let holds = |root: &Path| {
+        let name = name.trim_end_matches('/');
+        root.join(format!("{name}.ebox")).is_file()
+            || (!name.is_empty() && root.join(name).is_dir())
+    };
+    let (write, later) = roots.split_first()?;
+    if holds(write) {
+        return None;
+    }
+    later.iter().map(PathBuf::as_path).find(|root| holds(root))
+}
+
+/// The refusal for an `op` on `name`, which lives only in `holder`, a
+/// store after the write store.
+pub(crate) fn not_in_write_store(op: &str, name: &str, holder: &Path, write: &Path) -> String {
+    format!(
+        "Error: {name} is in {}, not in the write store {} (the first store in \
+         PIGGY_STORE_DIR); piggy only changes entries in the write store. To {op} it, \
+         copy it there first with `piggy pass cp {name} {name}`, or put {} first in \
+         PIGGY_STORE_DIR.",
+        holder.display(),
+        write.display(),
+        holder.display(),
+    )
+}
+
+/// [`later_store_holding`] over [`store_roots`], rendered as the refusal
+/// for `op`; `None` when the write may go ahead.
+pub(crate) fn refuse_write_to_later_store(op: &str, name: &str) -> Option<String> {
+    let roots = store_roots();
+    later_store_holding(&roots, name).map(|holder| not_in_write_store(op, name, holder, &roots[0]))
+}
+
+/// The refusal for an `op` when the write store `root` is read-only (a
+/// home-manager store path, say); `None` when it is writable or does
+/// not exist yet.
+pub(crate) fn read_only_write_store(op: &str, root: &Path) -> Option<String> {
+    let read_only = std::fs::metadata(root).is_ok_and(|m| m.permissions().readonly());
+    read_only.then(|| {
+        format!(
+            "Error: the write store {} (the first store in PIGGY_STORE_DIR) is read-only, so \
+             piggy cannot {op} entries in it. Put a writable store first in PIGGY_STORE_DIR, \
+             for example PIGGY_STORE_DIR=<writable-store>:$PIGGY_STORE_DIR.",
+            root.display(),
+        )
+    })
+}
+
+/// Both refusals a write to `name` can meet, the read-only write store
+/// first; `None` when the write may go ahead.
+pub(crate) fn refuse_write(op: &str, name: &str) -> Option<String> {
+    read_only_write_store(op, &store_root()).or_else(|| refuse_write_to_later_store(op, name))
+}
+
+/// The note a new write store entry `name` prints when a later store
+/// holds the same name, which reads now no longer reach.
+pub(crate) fn shadow_note(name: &str) -> Option<String> {
+    let roots = store_roots();
+    later_store_holding(&roots, name).map(|holder| {
+        format!(
+            "note: {name} in {} is now shadowed by the write store {}",
+            holder.display(),
+            roots[0].display()
+        )
+    })
 }
 
 /// Resolve a user-supplied subpath against the store root, rejecting
@@ -241,6 +340,104 @@ mod tests {
             store_root_from(&env),
             PathBuf::from("/c/home/.local/share/piggy")
         );
+    }
+
+    #[test]
+    fn store_roots_single_store_is_unchanged() {
+        let env = fake(&[("PIGGY_STORE_DIR", "/a/piggy")]);
+        assert_eq!(store_roots_from(&env), vec![PathBuf::from("/a/piggy")]);
+    }
+
+    #[test]
+    fn store_roots_split_on_colon_in_order_skipping_empties() {
+        let env = fake(&[("PIGGY_STORE_DIR", "/a/rw::/b/ro:")]);
+        assert_eq!(
+            store_roots_from(&env),
+            vec![PathBuf::from("/a/rw"), PathBuf::from("/b/ro")]
+        );
+        assert_eq!(store_root_from(&env), PathBuf::from("/a/rw"));
+    }
+
+    #[test]
+    fn store_roots_of_only_colons_fall_back() {
+        let env = fake(&[("PIGGY_STORE_DIR", "::"), ("XDG_DATA_HOME", "/b/xdg")]);
+        assert_eq!(store_roots_from(&env), vec![PathBuf::from("/b/xdg/piggy")]);
+    }
+
+    fn two_stores() -> (PathBuf, PathBuf) {
+        let base = tempdir();
+        let (rw, ro) = (base.join("rw"), base.join("ro"));
+        std::fs::create_dir_all(rw.join("dir")).unwrap();
+        std::fs::create_dir_all(ro.join("tent")).unwrap();
+        std::fs::write(rw.join("both.ebox"), b"rw").unwrap();
+        std::fs::write(ro.join("both.ebox"), b"ro").unwrap();
+        std::fs::write(ro.join("tent/only-ro.ebox"), b"ro").unwrap();
+        (rw, ro)
+    }
+
+    #[test]
+    fn find_entry_takes_the_first_store_holding_it() {
+        let (rw, ro) = two_stores();
+        let roots = vec![rw.clone(), ro.clone()];
+        assert_eq!(find_entry_in(&roots, "both"), Some(rw.join("both.ebox")));
+        assert_eq!(
+            find_entry_in(&roots, "tent/only-ro"),
+            Some(ro.join("tent/only-ro.ebox"))
+        );
+        assert_eq!(find_entry_in(&roots, "absent"), None);
+    }
+
+    #[test]
+    fn later_store_holding_names_the_store_a_write_would_refuse() {
+        let (rw, ro) = two_stores();
+        let roots = vec![rw.clone(), ro.clone()];
+        assert_eq!(
+            later_store_holding(&roots, "tent/only-ro"),
+            Some(ro.as_path())
+        );
+        assert_eq!(later_store_holding(&roots, "tent"), Some(ro.as_path()));
+        assert_eq!(
+            later_store_holding(&roots, "both"),
+            None,
+            "the write store has it"
+        );
+        assert_eq!(later_store_holding(&roots, "absent"), None, "a new entry");
+        assert_eq!(later_store_holding(&roots[..1], "tent/only-ro"), None);
+    }
+
+    #[test]
+    fn the_refusal_names_both_stores_and_what_to_do() {
+        let msg = not_in_write_store(
+            "edit",
+            "tent/x",
+            Path::new("/ro/store"),
+            Path::new("/rw/store"),
+        );
+        assert!(msg.contains("tent/x is in /ro/store"), "{msg}");
+        assert!(msg.contains("the write store /rw/store"), "{msg}");
+        assert!(msg.contains("piggy pass cp tent/x tent/x"), "{msg}");
+        assert!(msg.contains("put /ro/store first"), "{msg}");
+    }
+
+    #[test]
+    fn a_read_only_write_store_is_refused_naming_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempdir();
+        assert_eq!(read_only_write_store("insert", &root), None);
+        assert_eq!(
+            read_only_write_store("insert", &root.join("not-yet")),
+            None,
+            "a store that does not exist yet is created on the first write"
+        );
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let msg = read_only_write_store("insert", &root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            msg.contains(&format!("the write store {}", root.display())),
+            "{msg}"
+        );
+        assert!(msg.contains("cannot insert entries"), "{msg}");
+        assert!(msg.contains("Put a writable store first"), "{msg}");
     }
 
     #[test]

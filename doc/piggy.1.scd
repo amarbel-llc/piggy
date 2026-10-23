@@ -975,6 +975,29 @@ _PIGGY_STORE_DIR_
 	Overrides the default password storage directory. Default:
 	_$XDG_DATA_HOME/piggy_ or _~/.local/share/piggy_.
 
+	It may name several stores, separated by colons like *PATH*, empty
+	components skipped. There is no escape: a store whose path contains
+	a colon cannot be named here (symlink it to a path without one). The
+	first store is the _write store_:
+
+	- *show*, *show-batch*, *luks*, *zfs* and *secrets* take an entry from
+	  the first store that holds it; an entry an earlier store also holds
+	  is _shadowed_.
+	- *ls* prints one tree per store, headed by the store's path, marking a
+	  shadowed entry *[shadowed by* _STORE_*]*; *find* and *verify* print
+	  one block per store under its path; *grep* searches every entry a
+	  read would reach.
+	- *insert*, *generate* (new entries), *edit*, *rm*, *mv*, *cp*, *init*,
+	  *recipients* and *git* act on the write store only, with its own
+	  *piggy-ids* and git repository. A new entry whose name a later
+	  store holds shadows it, with a note. *edit*, *rm*, *mv* and
+	  *generate --in-place* refuse an entry only a later store holds,
+	  naming both stores: copy it into the write store first with
+	  *piggy pass cp* _NAME_ _NAME_ (the source of *cp* may be in any
+	  store), or put the store holding it first.
+	- A read-only write store (a home-manager store path, for instance)
+	  refuses every write, naming it; put a writable store first.
+
 _PIGGY_UMASK_
 	Sets the umask of all files modified by piggy, by default _077_.
 

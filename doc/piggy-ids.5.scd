@@ -163,7 +163,9 @@ from the entry's directory and stops at the first *piggy-ids* it
 finds.
 
 Set the store root via *PIGGY_STORE_DIR* (default
-_~/.local/share/piggy_).
+_~/.local/share/piggy_). When it names several stores, each keeps its own
+*piggy-ids*, and the walk never leaves the store an entry is in
+(*piggy*(1) ENVIRONMENT VARIABLES).
 
 # COMPARISON WITH PIGGY 1.X
 

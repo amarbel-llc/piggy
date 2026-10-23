@@ -28,7 +28,7 @@ use std::process::{Command, Stdio};
 use crate::crypt;
 use crate::platform::clipboard::{self, ClipPlan, Env as ClipEnv, ProcessRunner};
 use crate::platform::qrcode::{self, Env as QrEnv, Plan as QrPlan};
-use crate::store::store_root;
+use crate::store::{find_entry_in, store_roots};
 
 const DEFAULT_CLIP_TIME_SECS: u64 = 45;
 
@@ -49,21 +49,25 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
 
-    let root = store_root();
-    let passfile = root.join(format!("{}.ebox", opts.path));
-
-    if passfile.is_file() {
+    let roots = store_roots();
+    if let Some(passfile) = find_entry_in(&roots, &opts.path) {
         return handle_file(&opts, &passfile);
     }
 
-    let dir_target = if opts.path.is_empty() {
-        root.clone()
+    if roots.len() > 1 {
+        if let Some(code) = handle_dir_across_stores(&opts, &roots) {
+            return code;
+        }
     } else {
-        root.join(&opts.path)
-    };
-
-    if dir_target.is_dir() {
-        return handle_dir(&opts, &dir_target);
+        let root = &roots[0];
+        let dir_target = if opts.path.is_empty() {
+            root.clone()
+        } else {
+            root.join(&opts.path)
+        };
+        if dir_target.is_dir() {
+            return handle_dir(&opts, &dir_target);
+        }
     }
 
     if opts.path.is_empty() {
@@ -405,6 +409,32 @@ fn handle_dir(opts: &Opts, dir_target: &Path) -> i32 {
         println!("{banner}");
         print_tree(dir_target)
     }
+}
+
+/// The directory listing over several stores (piggy#330), `None` when no
+/// store holds the path as a directory. `-r` annotates each store's tree
+/// with recipients, banner naming the store, without shadow marks.
+fn handle_dir_across_stores(opts: &Opts, roots: &[std::path::PathBuf]) -> Option<i32> {
+    if !opts.recipients {
+        let listing = crate::overlay_tree::render(roots, &opts.path)?;
+        print!("{listing}");
+        return Some(0);
+    }
+    let banner = if opts.path.is_empty() {
+        "Password Store"
+    } else {
+        opts.path.as_str()
+    };
+    let mut code = None;
+    for root in roots {
+        let dir = root.join(&opts.path);
+        if dir.is_dir() {
+            let banner = format!("{banner} ({})", root.display());
+            let rc = crate::tree_recipients::print_tree_with_recipients(&banner, &dir);
+            code = Some(code.unwrap_or(0).max(rc));
+        }
+    }
+    code
 }
 
 /// Shell to `tree -N -C -l --noreport <dir> | tail -n +1 (drop first

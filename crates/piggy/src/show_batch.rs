@@ -531,7 +531,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
         }
     }
 
-    let store_root = store::store_root();
+    let store_roots = store::store_roots();
 
     let total = names.len() as u32;
 
@@ -548,7 +548,7 @@ pub fn run(args: ShowBatchArgs) -> i32 {
     let mut preflight: Vec<PreflightOutcome> = Vec::with_capacity(names.len());
     for raw in &names {
         let canonical = canonicalize_pass_name(raw);
-        let path = pass_name_to_ebox_path(&store_root, raw);
+        let path = pass_name_to_ebox_path_in(&store_roots, raw);
         // --update: if the rendered plaintext is already at least as
         // new as the ebox, skip before even reading the ebox bytes.
         // A missing ebox falls through to the read below so it still
@@ -1115,6 +1115,17 @@ fn batch_detail(names: &[String]) -> String {
 /// Resolve a pass-name to its on-disk ebox path. Mirrors the bash
 /// `cmd_show`: `<store_root>/<pass_name>.ebox`, with a `.ebox` suffix
 /// appended only if the user didn't already supply one.
+/// [`pass_name_to_ebox_path`] in the first store holding the entry
+/// (piggy#330), else in the write store, so a missing entry still
+/// surfaces as `not-found` there.
+fn pass_name_to_ebox_path_in(store_roots: &[PathBuf], raw: &str) -> PathBuf {
+    store_roots
+        .iter()
+        .map(|root| pass_name_to_ebox_path(root, raw))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| pass_name_to_ebox_path(&store_roots[0], raw))
+}
+
 fn pass_name_to_ebox_path(store_root: &Path, raw: &str) -> PathBuf {
     let trimmed = raw.strip_prefix('/').unwrap_or(raw);
     if trimmed.ends_with(".ebox") {

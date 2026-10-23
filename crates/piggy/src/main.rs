@@ -56,6 +56,7 @@ mod insert;
 mod internal_clipboard_restore;
 mod luks;
 mod operator_sign;
+mod overlay_tree;
 mod pigpen_pointer;
 mod platform;
 mod recipients;
