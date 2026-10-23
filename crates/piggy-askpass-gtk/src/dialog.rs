@@ -623,12 +623,77 @@ fn key_action(is_escape: bool, held: bool) -> KeyAction {
 /// height limit (`operator_act_wrap_columns`) assumes.
 const TEXT_WIDTH_CHARS: i32 = 100;
 
+/// The bech32 alphabet a markl-id's body is written in (RFC 0011).
+const BECH32_CHARS: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+/// How many body characters of a markl-id are emphasized after its purpose
+/// and format, and the fewest a token's body needs to be taken for one.
+const EMPHASIZED_BODY_CHARS: usize = 8;
+const MIN_BODY_CHARS: usize = 20;
+
+/// The byte ranges of `text` to show in bold: of each markl-id, its purpose,
+/// format and first [`EMPHASIZED_BODY_CHARS`] body characters (piggy#332
+/// option (a)). Emphasis is an attribute over the plain text, never markup;
+/// the full id is still shown (RFC 0012 §2.6).
+fn markl_id_emphasis(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    let ends = text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')));
+    for (i, c) in ends {
+        if c.is_whitespace() {
+            if let Some(s) = start.take() {
+                if let Some(len) = markl_id_lead_len(&text[s..i]) {
+                    spans.push(s..s + len);
+                }
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    spans
+}
+
+/// The length of a markl-id token's lead (purpose, `@`, format, `-`, first
+/// body characters), or `None` when the token is not a markl-id.
+fn markl_id_lead_len(token: &str) -> Option<usize> {
+    let token = token.trim_end_matches([',', '.', ';', ':', ')']);
+    let (purpose_len, id) = match token.split_once('@') {
+        Some((purpose, id)) => {
+            let ok = !purpose.is_empty()
+                && purpose
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-_/.".contains(c));
+            if !ok {
+                return None;
+            }
+            (purpose.len() + 1, id)
+        }
+        None => (0, token),
+    };
+    let (format, body) = id.split_once('-')?;
+    let format_ok = !format.is_empty()
+        && format
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    let body_ok = body.len() >= MIN_BODY_CHARS && body.chars().all(|c| BECH32_CHARS.contains(c));
+    (format_ok && body_ok).then_some(purpose_len + format.len() + 1 + EMPHASIZED_BODY_CHARS)
+}
+
 /// The act's text, set as plain text so nothing in it is read as markup, in
 /// a monospace face so look-alike characters stay apart, and wrapped at the
-/// width the script's height limit assumes.
+/// width the script's height limit assumes. Each markl-id's lead is bold.
 fn text_label(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.set_use_markup(false);
+    let attrs = pango::AttrList::new();
+    for span in markl_id_emphasis(text) {
+        let mut bold = pango::AttrInt::new_weight(pango::Weight::Bold);
+        bold.set_start_index(span.start as u32);
+        bold.set_end_index(span.end as u32);
+        attrs.insert(bold);
+    }
+    label.set_attributes(Some(&attrs));
     label.set_wrap(true);
     label.set_wrap_mode(pango::WrapMode::WordChar);
     label.set_max_width_chars(TEXT_WIDTH_CHARS);
@@ -736,6 +801,28 @@ mod tests {
         let id = "piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400";
         assert!(id.len() as i32 <= TEXT_WIDTH_CHARS, "{}", id.len());
         assert_eq!(TEXT_WIDTH_CHARS, 100);
+    }
+
+    /// piggy#332 option (a): each markl-id's purpose, format and first body
+    /// characters are emphasized; the text itself is untouched.
+    #[test]
+    fn markl_ids_have_their_leading_characters_emphasized() {
+        let id = "piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400";
+        let text = format!("escalation: merge\nrequest {id}\nright: merge once");
+        let spans = markl_id_emphasis(&text);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        let start = text.find(id).unwrap();
+        let lead = "piggy-record-digest-v1@blake2b256-qqqsyqcy";
+        assert_eq!(spans[0], start..start + lead.len());
+        assert_eq!(&text[spans[0].clone()], lead);
+    }
+
+    #[test]
+    fn an_unqualified_id_and_ordinary_words_are_left_alone() {
+        let bare = "blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400";
+        assert_eq!(markl_id_emphasis(bare), vec![0..19]);
+        assert!(markl_id_emphasis("mail me@example.com, a-b@c").is_empty());
+        assert!(markl_id_emphasis("grant swift-elder six hours").is_empty());
     }
 
     #[test]
