@@ -23,7 +23,7 @@ use std::process::Command;
 
 use crate::git_ops;
 use crate::reencrypt;
-use crate::store::store_roots;
+use crate::store::{sneaky_path_reason, store_roots};
 
 pub fn run_move(args: &[String]) -> i32 {
     run(Op::Move, args)
@@ -288,16 +288,6 @@ fn remove_empty_parents(start: &Path, root: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Mirrors `check_sneaky_paths`: rejects `..` as a whole path component.
-fn sneaky_path_reason(path: &str) -> Option<&'static str> {
-    for component in Path::new(path).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Some("`..` component");
-        }
-    }
-    None
 }
 
 #[derive(Debug)]

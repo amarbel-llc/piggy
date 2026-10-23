@@ -28,7 +28,7 @@ use std::process::{Command, Stdio};
 use crate::crypt;
 use crate::platform::clipboard::{self, ClipPlan, Env as ClipEnv, ProcessRunner};
 use crate::platform::qrcode::{self, Env as QrEnv, Plan as QrPlan};
-use crate::store::{find_entry_in, store_roots};
+use crate::store::{find_entry_in, sneaky_path_reason, store_roots};
 
 const DEFAULT_CLIP_TIME_SECS: u64 = 45;
 
@@ -530,17 +530,6 @@ fn ansi_color_run(input: &[u8]) -> (usize, &[u8]) {
         return (0, &[]);
     }
     (j + 1, &input[..=j])
-}
-
-/// Mirrors `check_sneaky_paths` in piggy.sh / the per-module
-/// `sneaky_path_reason` in `rm.rs`, `init.rs`, `copy_move.rs`.
-fn sneaky_path_reason(path: &str) -> Option<&'static str> {
-    for component in Path::new(path).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Some("`..` component");
-        }
-    }
-    None
 }
 
 #[cfg(test)]

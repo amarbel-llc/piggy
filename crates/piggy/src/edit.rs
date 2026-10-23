@@ -34,13 +34,13 @@
 
 use std::io::{IsTerminal as _, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use crate::crypt;
 use crate::git_ops;
 use crate::platform::tmpdir::SecureTmpdir;
-use crate::store::{find_piggy_ids, store_root};
+use crate::store::{find_piggy_ids, path_parent_for_search, sneaky_path_reason, store_root};
 
 /// Exit code conventions:
 /// - 0: edit succeeded (or "Password unchanged." short-circuit)
@@ -237,25 +237,6 @@ fn random_alphanumeric(n: usize) -> String {
         s.push(ALPHABET[idx] as char);
     }
     s
-}
-
-/// `dirname -- "$path"` projected into the empty-string convention
-/// `find_piggy_ids` expects for "walk from the store root".
-fn path_parent_for_search(path: &str) -> String {
-    let p = PathBuf::from(path);
-    match p.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_string_lossy().into_owned(),
-        _ => String::new(),
-    }
-}
-
-fn sneaky_path_reason(path: &str) -> Option<&'static str> {
-    for component in Path::new(path).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Some("`..` component");
-        }
-    }
-    None
 }
 
 /// Bash:

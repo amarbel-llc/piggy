@@ -40,7 +40,7 @@ use crate::crypt;
 use crate::git_ops;
 use crate::platform::clipboard::{self, ClipPlan, Env as ClipEnv, ProcessRunner};
 use crate::platform::qrcode::{self, Env as QrEnv, Plan as QrPlan};
-use crate::store::{find_piggy_ids, store_root};
+use crate::store::{find_piggy_ids, path_parent_for_search, sneaky_path_reason, store_root};
 
 const DEFAULT_GENERATED_LENGTH: usize = 25;
 const DEFAULT_CLIP_TIME_SECS: u64 = 45;
@@ -446,23 +446,6 @@ fn nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
-}
-
-fn path_parent_for_search(path: &str) -> String {
-    let p = PathBuf::from(path);
-    match p.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_string_lossy().into_owned(),
-        _ => String::new(),
-    }
-}
-
-fn sneaky_path_reason(path: &str) -> Option<&'static str> {
-    for component in Path::new(path).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Some("`..` component");
-        }
-    }
-    None
 }
 
 /// Push `pass` to the clipboard and spawn the deferred-restore worker.

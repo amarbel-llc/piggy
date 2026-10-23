@@ -18,7 +18,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::git_ops;
-use crate::store::store_root;
+use crate::store::{sneaky_path_reason, store_root};
 
 /// Exit code conventions:
 /// - 0: deleted (or user declined the yesno prompt — same as bash)
@@ -227,18 +227,6 @@ fn remove_empty_parents(start: &Path, root: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Mirrors `check_sneaky_paths` in piggy.sh. The bash form checks for
-/// `..` as a whole component (not as a substring of another name like
-/// `..foo`), so we walk components here rather than string-matching.
-fn sneaky_path_reason(path: &str) -> Option<&'static str> {
-    for component in Path::new(path).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Some("`..` component");
-        }
-    }
-    None
 }
 
 /// Print a [y/N] prompt and return true iff the user typed `y` or

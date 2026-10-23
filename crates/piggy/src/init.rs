@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use crate::git_ops;
 use crate::recipients::piggy_ids_output;
 use crate::reencrypt;
-use crate::store::store_root;
+use crate::store::{sneaky_path_reason, store_root};
 
 /// Exit code conventions:
 /// - 0: init succeeded
@@ -207,17 +207,6 @@ fn parse_args(args: &[String]) -> Result<InitOpts, String> {
 
 fn usage_error() -> String {
     "Usage: piggy pass init [-p subfolder] [-k <markl-id> | -g <guid>]".to_string()
-}
-
-/// Reject `..` as a path component, mirroring bash `check_sneaky_paths`.
-/// A bare-substring `..` (e.g. `a..b`) is not rejected.
-fn sneaky_path_reason(path: &str) -> Option<&'static str> {
-    for component in Path::new(path).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Some("`..` component");
-        }
-    }
-    None
 }
 
 /// True iff `key` starts with one of the two accepted markl-ID prefixes.
