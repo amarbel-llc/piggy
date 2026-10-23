@@ -233,6 +233,27 @@ render_context() {
   printf '\n%s\n' "$prompt"
 }
 
+# The input hold of an operator act on the tty (RFC 0012 §2.6): for
+# $operator_act_input_hold seconds after the text is shown nothing typed is
+# echoed, and all of it, a finished line or a partial one, is discarded
+# before the PIN is read. Non-canonical mode with no minimum makes the
+# buffered bytes readable at once, so cat drains them and stops at the
+# first empty read.
+operator_act_input_hold=2
+hold_tty_input() {
+  local saved left
+  saved="$(stty -g <&3)"
+  stty -echo <&3
+  for ((left = operator_act_input_hold; left > 0; left--)); do
+    printf '\rinput held for %ss, keystrokes are discarded ' "$left" >&4
+    sleep 1
+  done
+  printf '\rinput open%40s\n' '' >&4
+  stty -icanon min 0 time 0 <&3
+  cat <&3 >/dev/null
+  stty "$saved" <&3
+}
+
 # Dry-run: emit the rendered context to stderr and exit. No PIN read.
 # Used by the bats test in zz-tests_bats/conformance/piggy_askpass.bats.
 if [[ ${PIGGY_ASKPASS_DRY_RUN:-} == "1" ]]; then
@@ -257,6 +278,9 @@ fi
 if [[ $require != force ]] && [[ -e /dev/tty ]] && (: >/dev/tty) 2>/dev/null; then
   exec 3</dev/tty 4>/dev/tty
   render_context >&4
+  if [[ -n $kind ]]; then
+    hold_tty_input
+  fi
   pin=""
   IFS= read -r -s pin <&3
   echo >&4 # newline after the (silent) input

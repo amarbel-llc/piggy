@@ -555,6 +555,41 @@ STUB_EOF
   assert_output --partial "pty-pin-never"
 }
 
+# bats test_tags=pty
+@test "operator_act_on_the_tty_holds_input_and_discards_what_is_typed" {
+  # RFC 0012 §2.6 (piggy#332): an operator act's tty prompt shows a
+  # visible hold, and a PIN typed during it is neither echoed nor read;
+  # only the line typed after the hold answers.
+  unset PIGGY_ASKPASS_DRY_RUN
+
+  local stub_dir python3_path started elapsed
+  stub_dir="$(mktemp -d "${BATS_TEST_TMPDIR:-/tmp}/piggy-askpass-hold.XXXXXX")"
+  for tool in bash ps tr dirname mkdir date stty sleep cat; do
+    ln -s "$(command -v "$tool")" "$stub_dir/$tool"
+  done
+  python3_path="$(command -v python3)"
+
+  started=$SECONDS
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$stub_dir" SSH_ASKPASS_REQUIRE=never \
+    PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="piggy-test:hold" \
+    BATS_RUN_TMPDIR="$BATS_RUN_TMPDIR" \
+    "$python3_path" "$PWD/zz-tests_bats/helpers/pty-spawn.py" \
+    "$ASKPASS" "Enter PIV PIN" < <(
+      sleep 0.5
+      printf 'early-pin\npartial'
+      sleep 2.5
+      printf 'late-pin\n'
+    )
+  elapsed=$((SECONDS - started))
+
+  assert_success
+  assert_output --partial "input held for 2s"
+  assert_output --partial "late-pin"
+  refute_output --partial "early-pin"
+  refute_output --partial "partiallate-pin"
+  ((elapsed >= 2))
+}
+
 @test "missing_notifier_does_not_block_or_fail_prompt" {
   # When no notifier is reachable (no env var, no terminal-notifier /
   # notify-send on PATH), the script must silently skip the heads-up

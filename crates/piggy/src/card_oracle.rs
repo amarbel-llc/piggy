@@ -42,6 +42,7 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use openssl::bn::BigNumContext;
 use openssl::ec::{EcGroup, EcPoint, PointConversionForm};
@@ -268,10 +269,9 @@ fn pin_route(require: Option<&OsStr>, askpass: Option<&OsStr>) -> Result<PinRout
 fn read_pin_from_tty(
     prompt: &str,
     context: Option<&str>,
+    hold: Option<Duration>,
 ) -> Result<Zeroizing<String>, OracleError> {
-    use std::os::fd::AsRawFd as _;
-
-    let mut tty = std::fs::OpenOptions::new()
+    let tty = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
@@ -281,14 +281,24 @@ fn read_pin_from_tty(
                  SSH_ASKPASS_REQUIRE=never) and /dev/tty is unusable: {e}"
             ))
         })?;
+    prompt_on_tty(tty, prompt, context, hold)
+}
 
-    if let Some(ctx) = context {
-        writeln!(tty, "Context: {ctx}")
-            .map_err(|e| OracleError::Other(format!("write /dev/tty: {e}")))?;
-    }
-    write!(tty, "{prompt} ").map_err(|e| OracleError::Other(format!("write /dev/tty: {e}")))?;
-    tty.flush()
-        .map_err(|e| OracleError::Other(format!("flush /dev/tty: {e}")))?;
+/// RFC 0012 §2.6's input hold for an operator act on the tty route.
+pub(crate) const OPERATOR_ACT_INPUT_HOLD: Duration = Duration::from_secs(2);
+
+/// [`read_pin_from_tty`] on an open terminal. Echo goes off before
+/// anything is shown, so nothing typed early is echoed. With `hold` (an
+/// operator act, RFC 0012 §2.6) the context is shown, a countdown runs for
+/// `hold`, and everything typed meanwhile is discarded before the PIN line
+/// appears.
+fn prompt_on_tty(
+    mut tty: std::fs::File,
+    prompt: &str,
+    context: Option<&str>,
+    hold: Option<Duration>,
+) -> Result<Zeroizing<String>, OracleError> {
+    use std::os::fd::AsRawFd as _;
 
     let fd = tty.as_raw_fd();
     let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
@@ -307,7 +317,20 @@ fn read_pin_from_tty(
         )));
     }
 
-    let read_result = read_tty_line(&mut tty);
+    let shown = (|| {
+        if let Some(ctx) = context {
+            writeln!(tty, "Context: {ctx}")?;
+        }
+        if let Some(hold) = hold {
+            hold_tty_input(&mut tty, hold)?;
+        }
+        write!(tty, "{prompt} ")?;
+        tty.flush()
+    })();
+    let read_result = match shown {
+        Ok(()) => read_tty_line(&mut tty),
+        Err(e) => Err(OracleError::Other(format!("write /dev/tty: {e}"))),
+    };
 
     // Restore echo before surfacing any read error; emit the newline the
     // suppressed echo swallowed so the caller's next line starts clean.
@@ -320,6 +343,29 @@ fn read_pin_from_tty(
         return Err(OracleError::Other("tty returned empty PIN".into()));
     }
     Ok(Zeroizing::new(trimmed))
+}
+
+/// Show a countdown for `hold`, then discard every byte typed meanwhile
+/// (`tcflush(TCIFLUSH)`), so no keystroke made before the hold ended can
+/// answer the prompt.
+fn hold_tty_input(tty: &mut std::fs::File, hold: Duration) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let started = std::time::Instant::now();
+    loop {
+        let left = hold.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        let secs = left.as_millis().div_ceil(1000);
+        write!(tty, "\rinput held for {secs}s, keystrokes are discarded ")?;
+        tty.flush()?;
+        std::thread::sleep(left.min(Duration::from_millis(200)));
+    }
+    writeln!(tty, "\rinput open{:40}", "")?;
+    if unsafe { libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Read one `\n`-terminated line from the (already echo-suppressed) tty.
@@ -378,7 +424,10 @@ pub fn run_askpass_of_kind(
     let require = std::env::var_os("SSH_ASKPASS_REQUIRE");
     let askpass_env = std::env::var_os("SSH_ASKPASS");
     let askpass = match pin_route(require.as_deref(), askpass_env.as_deref())? {
-        PinRoute::Tty => return read_pin_from_tty(prompt, context),
+        PinRoute::Tty => {
+            let hold = kind.map(|_| OPERATOR_ACT_INPUT_HOLD);
+            return read_pin_from_tty(prompt, context, hold);
+        }
         PinRoute::Askpass(path) => path,
     };
     let mut cmd = Command::new(&askpass);
@@ -498,6 +547,67 @@ pub fn askpass_pin_supplier() -> PinSupplier {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// A pty pair: the terminal side a prompt runs on, and the keyboard
+    /// side a test types into and reads the screen from.
+    fn pty_pair() -> (std::fs::File, std::fs::File) {
+        use std::os::fd::FromRawFd as _;
+        let (mut keyboard, mut terminal) = (0, 0);
+        let rc = unsafe {
+            libc::openpty(
+                &mut keyboard,
+                &mut terminal,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(terminal),
+                std::fs::File::from_raw_fd(keyboard),
+            )
+        }
+    }
+
+    /// RFC 0012 §2.6 on the agent's tty route: a PIN typed before the hold
+    /// ends is discarded, never echoed, and only what is typed after the
+    /// hold answers; the hold is shown and lasts its full time.
+    #[test]
+    fn an_operator_act_on_the_tty_holds_and_discards_early_input() {
+        let (terminal, mut keyboard) = pty_pair();
+        let hold = Duration::from_millis(600);
+        let started = std::time::Instant::now();
+        let prompt = std::thread::spawn(move || {
+            prompt_on_tty(terminal, "PIN:", Some("act text"), Some(hold))
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        keyboard.write_all(b"9999\n12").unwrap();
+        std::thread::sleep(hold);
+        keyboard.write_all(b"345678\n").unwrap();
+
+        let pin = prompt.join().unwrap().unwrap();
+        assert_eq!(pin.as_str(), "345678");
+        assert!(started.elapsed() >= hold);
+
+        let mut screen = vec![0u8; 4096];
+        let n = keyboard.read(&mut screen).unwrap();
+        let screen = String::from_utf8_lossy(&screen[..n]);
+        assert!(screen.contains("Context: act text"), "{screen:?}");
+        assert!(screen.contains("input held for"), "{screen:?}");
+        assert!(!screen.contains("9999"), "early input echoed: {screen:?}");
+    }
+
+    /// A routine PIN prompt on the tty has no hold.
+    #[test]
+    fn a_routine_tty_prompt_reads_at_once() {
+        let (terminal, mut keyboard) = pty_pair();
+        let prompt = std::thread::spawn(move || prompt_on_tty(terminal, "PIN:", None, None));
+        std::thread::sleep(Duration::from_millis(100));
+        keyboard.write_all(b"123456\n").unwrap();
+        assert_eq!(prompt.join().unwrap().unwrap().as_str(), "123456");
+    }
 
     /// Write `body` to a tempfile under `dir`, mark it executable,
     /// return its path as a `String`.

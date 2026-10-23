@@ -328,7 +328,10 @@ than 80 characters counting as the lines it wraps to) before any dialog
 opens; it never elides the text. The refusal exits 3 with its reason on
 standard output, naming the limit, and the agent reports the act
 _cancelled_ with that reason, so the caller can shorten the text. A tty
-prompt has no such limit. Any askpass may refuse the same way: exit 3 with
+prompt has no such limit. On a tty, the helper's and the agent's own, an
+operator act holds input the same 2 seconds (RFC 0012 §2.6): the text is
+shown with echo off, a countdown line runs, and everything typed meanwhile,
+a partial line included, is discarded before the PIN line appears. Any askpass may refuse the same way: exit 3 with
 a one-line reason on standard output. Test harnesses must point *SSH_ASKPASS* at
 a non-interactive helper; see *piggy-testing*(7).
 
