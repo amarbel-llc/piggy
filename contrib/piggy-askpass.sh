@@ -83,10 +83,9 @@
 # (quote, escalation or certificate) and puts the namespace and the exact
 # text being signed in PIGGY_ASKPASS_CONTEXT. Each class then gets its own
 # banner, window title, confirm button and dialog, so the prompt cannot be
-# mistaken for a routine PIN prompt, nor an escalation for a quote. In
-# zenity every class is a form whose text opens with a coloured band
-# carrying the class's symbol, so the class is recognisable before a word
-# of the text is read (piggy#319):
+# mistaken for a routine PIN prompt, nor an escalation for a quote. Every
+# class's dialog opens with a coloured band carrying the class's symbol, so
+# the class is recognisable before a word of the text is read (piggy#319):
 #
 #   quote        blue band, ❝; one PIN field; button "Sign quote".
 #   certificate  amber band, ✎; one PIN field; button "Issue certificate".
@@ -94,10 +93,14 @@
 #                word ESCALATE must be typed; button "Grant escalation".
 #                On a tty the word is asked for on a line of its own.
 #
-# With piggy-askpass-gtk on PATH (on Linux the nix wrapper puts it there) it
-# shows every dialog, routine PIN prompts included, instead of zenity, with
-# the same band, text, fields and buttons, but taking focus when it opens;
-# see gtk_operator_act below. PIGGY_ASKPASS_GTK=0 uses zenity instead.
+# The dialogs are piggy-askpass-gtk's (on Linux the nix wrapper puts it on
+# PATH), which also shows the routine PIN prompt; see gtk_operator_act
+# below. An operator act must hold all input for 2 seconds once its text is
+# shown (RFC 0012 §2.6), which zenity cannot do, so without the GTK helper
+# (or with PIGGY_ASKPASS_GTK=0, which keeps zenity for routine prompts) an
+# operator act is refused before any dialog opens, exiting
+# $exit_refused_with_reason with the reason, and the tty, which holds input
+# itself (hold_tty_input), is the only other place one is shown.
 #
 # The text is shown whole, on the dialog that takes the PIN, or the prompt
 # fails (RFC 0012 §2.6); an unknown class fails too. A zenity PIN dialog
@@ -392,73 +395,12 @@ if [[ -z ${WAYLAND_DISPLAY:-} && -z ${DISPLAY:-} ]]; then
   fi
 fi
 
-# The zenity dialogs: the routine PIN prompt and one per operator-act
-# class. Each reads $body and $zenity_timeout, prints the PIN on stdout
-# and returns zenity's exit status, so a cancel or a timeout propagates.
-
+# The routine zenity PIN prompt: reads $body and $zenity_timeout, prints the
+# PIN on stdout and returns zenity's exit status, so a cancel or a timeout
+# propagates. zenity shows no operator act (RFC 0012 §2.6: it cannot hold
+# input); those are refused before this is reached.
 zenity_routine() {
   zenity --timeout="$zenity_timeout" --entry --hide-text --title="$class_title" --text="$body"
-}
-
-# An operator act's text must reach the operator's eyes literally (RFC 0012
-# §2.6), and zenity does not show --text literally. As read in zenity
-# 4.2.1's source: every dialog runs it through g_strcompress, which turns
-# backslash escapes into the characters they name; --forms then parses the
-# result as Pango markup, where `<`, `>` and `&` are syntax and a malformed
-# tag blanks the whole label. The function below undoes exactly that.
-# (The routine prompt predates this and is left byte-for-byte as it was.)
-
-# `\&` because bash 5.2+ reads a bare `&` in the replacement as "the match".
-literal_for_zenity_forms() {
-  local text="$1"
-  text="${text//\\/\\\\}"
-  text="${text//&/\&amp;}"
-  text="${text//</\&lt;}"
-  text="${text//>/\&gt;}"
-  printf '%s' "$text"
-}
-
-# The form text of an operator act: the class's coloured band, which is the
-# only markup in it and is built from the script's own constants, then the
-# act's text, escaped to show literally.
-operator_act_form_text() {
-  printf '<span size="x-large" weight="bold" background="%s" foreground="%s"> %s </span>\n\n%s' \
-    "$class_band_background" "$class_band_foreground" "$class_band" \
-    "$(literal_for_zenity_forms "$body")"
-}
-
-zenity_quote() {
-  zenity --timeout="$zenity_timeout" --forms \
-    --title="$class_title" --ok-label="$class_ok_label" \
-    --text="$(operator_act_form_text)" \
-    --add-password="PIV PIN"
-}
-
-zenity_certificate() {
-  zenity --timeout="$zenity_timeout" --forms \
-    --title="$class_title" --ok-label="$class_ok_label" \
-    --text="$(operator_act_form_text)" \
-    --add-password="PIV PIN"
-}
-
-# The form answers its two fields on two lines: the PIN, then the word.
-zenity_escalation() {
-  local answer typed_pin typed_word
-  answer="$(zenity --timeout="$zenity_timeout" --forms \
-    --title="$class_title" --ok-label="$class_ok_label" \
-    --text="$(operator_act_form_text)" \
-    --separator=$'\n' \
-    --add-password="PIV PIN" \
-    --add-entry="Type $escalation_word to grant")" || return
-  {
-    IFS= read -r typed_pin || true
-    IFS= read -r typed_word || true
-  } <<<"$answer"
-  if [[ $typed_word != "$escalation_word" ]]; then
-    printf '[piggy-askpass] escalation not confirmed: %s was not typed.\n' "$escalation_word" >&2
-    return 1
-  fi
-  printf '%s\n' "$typed_pin"
 }
 
 # The operator-act dialog of piggy-askpass-gtk (crates/piggy-askpass-gtk),
@@ -493,14 +435,6 @@ gtk_routine() {
 # shows; PIGGY_ASKPASS_GTK=0 falls back to zenity.
 gtk_dialogs_enabled() {
   [[ ${PIGGY_ASKPASS_GTK:-1} != 0 ]] && command -v piggy-askpass-gtk >/dev/null 2>&1
-}
-
-operator_act_dialog() {
-  if gtk_dialogs_enabled; then
-    printf 'gtk_operator_act'
-  else
-    printf 'zenity_%s' "$kind"
-  fi
 }
 
 # How many lines $body takes in a PIN dialog: each line, plus one more for
@@ -559,6 +493,13 @@ if gtk_dialogs_enabled || command -v zenity >/dev/null 2>&1; then
         "$body_lines" "$operator_act_max_lines" "$operator_act_wrap_columns"
       exit "$exit_refused_with_reason"
     fi
+    # RFC 0012 §2.6: an operator act is shown only where input can be
+    # held, and zenity's dialogs cannot hold it.
+    if ! gtk_dialogs_enabled; then
+      printf 'refused: zenity cannot hold input\n' >>"$log_path"
+      printf 'this askpass cannot hold input on a zenity dialog, so it does not show an operator act there (RFC 0012 §2.6); put piggy-askpass-gtk on PATH (and leave PIGGY_ASKPASS_GTK unset or 1), or answer the act on a terminal\n'
+      exit "$exit_refused_with_reason"
+    fi
   fi
   # Heads-up: fire BEFORE zenity opens. When the zenity window is
   # hidden / off-screen / on a non-focused display this is the only
@@ -569,7 +510,7 @@ if gtk_dialogs_enabled || command -v zenity >/dev/null 2>&1; then
     dialog="gtk_routine"
   fi
   if [[ -n $kind ]]; then
-    dialog="$(operator_act_dialog)"
+    dialog="gtk_operator_act"
   fi
   if pin="$("$dialog" 2>>"$log_path")"; then
     printf '%s exit=0\n' "$dialog" >>"$log_path"

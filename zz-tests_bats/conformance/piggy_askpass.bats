@@ -868,99 +868,23 @@ refute_zenity_argv_has() {
   refute_zenity_argv_has "--forms"
 }
 
-@test "quote_is_a_form_with_its_own_title_and_button" {
-  run_askpass_against_zenity_stub '123456\n' PIGGY_ASKPASS_KIND=quote
-
-  assert_success
-  assert_output "123456"
-  assert_zenity_argv_has "--forms"
-  assert_zenity_argv_has "--add-password=PIV PIN"
-  refute_zenity_argv_has "--entry"
-  assert_zenity_argv_has "--title=piggy operator act: QUOTE"
-  assert_zenity_argv_has "--ok-label=Sign quote"
-  # Reading the text takes longer than typing a PIN.
-  assert_zenity_argv_has "--timeout=120"
-}
-
-@test "certificate_is_a_form_with_its_own_title_and_button" {
-  run_askpass_against_zenity_stub '123456\n' PIGGY_ASKPASS_KIND=certificate
-
-  assert_success
-  assert_output "123456"
-  assert_zenity_argv_has "--forms"
-  assert_zenity_argv_has "--add-password=PIV PIN"
-  assert_zenity_argv_has "--title=piggy operator act: CERTIFICATE"
-  assert_zenity_argv_has "--ok-label=Issue certificate"
-  refute_zenity_argv_has "--add-entry"
-}
-
-@test "escalation_form_demands_the_typed_word_and_yields_only_the_pin" {
-  run_askpass_against_zenity_stub '123456\nESCALATE\n' PIGGY_ASKPASS_KIND=escalation
-
-  assert_success
-  assert_output "123456"
-  assert_zenity_argv_has "--forms"
-  assert_zenity_argv_has "--add-entry=Type ESCALATE to grant"
-  assert_zenity_argv_has "--title=piggy operator act: ESCALATION (grants authority)"
-  assert_zenity_argv_has "--ok-label=Grant escalation"
-}
-
-@test "escalation_without_the_typed_word_fails_and_yields_no_pin" {
-  run_askpass_against_zenity_stub '123456\nyes\n' PIGGY_ASKPASS_KIND=escalation
-
-  assert_failure 1
-  refute_output --partial "123456"
-}
-
-# piggy#319: the class is recognisable before the text is read, by a band
-# in the class's own colour carrying its own symbol, and no two classes
-# share either.
-@test "each_class_opens_its_form_with_its_own_coloured_band_and_symbol" {
-  local class band seen_bands=""
-  for class in quote certificate escalation; do
-    run_askpass_against_zenity_stub '123456\nESCALATE\n' PIGGY_ASKPASS_KIND="$class"
-    assert_success
-    band=$(grep -o -m1 '<span [^>]*background="#[0-9a-f]*"[^>]*> [^ ]*' "$ZENITY_ARGV") || {
-      echo "no coloured band opens the $class form; got:"
-      cat "$ZENITY_ARGV"
-      return 1
-    }
-    [[ $seen_bands != *"$band"* ]] || {
-      echo "the $class band repeats another class's colour and symbol: $band"
-      return 1
-    }
-    seen_bands+="$band|"
-  done
-  case "$seen_bands" in
-    *'#c01c28'*'⚠'*) ;;
-    *)
-      echo "escalation is not the red ⚠ band: $seen_bands"
-      return 1
-      ;;
-  esac
-}
-
-# zenity does not show --text literally (see the script): the forms dialogs
-# parse Pango markup and interpret backslash escapes. The text of an act
-# must survive both.
+# A text zenity would mangle (markup, a mnemonic underscore, a backslash
+# escape); the GTK helper must get it literally.
 TRICKY_TEXT='grant <b>bold</b> & more; id ecdsa_p256_sig; path a\nb'
 
-assert_zenity_text_has() {
-  grep -qF -- "$1" "$ZENITY_ARGV" || {
-    echo "expected the zenity --text to contain: $1" >&2
-    cat "$ZENITY_ARGV" >&2
-    return 1
-  }
-}
-
-@test "forms_dialogs_escape_markup_and_backslashes_so_the_text_shows_literally" {
+# RFC 0012 §2.6 (piggy#332): zenity cannot hold input, so an operator act is
+# never shown on it. The helper refuses before any dialog opens, with the
+# reason on stdout for the agent to report.
+@test "operator_acts_are_refused_on_zenity_before_any_dialog" {
   local class
-  for class in quote escalation certificate; do
-    run_askpass_against_zenity_stub '123456\nESCALATE\n' \
-      PIGGY_ASKPASS_KIND="$class" PIGGY_ASKPASS_CONTEXT="$TRICKY_TEXT"
-    assert_success
-    assert_zenity_text_has 'grant &lt;b&gt;bold&lt;/b&gt; &amp; more; id ecdsa_p256_sig; path a\\nb'
-    refute_zenity_argv_has '<b>'
+  for class in quote certificate escalation; do
+    run_askpass_against_logging_zenity_stub PIGGY_ASKPASS_KIND="$class"
+
+    assert_failure 3
+    refute_output --partial "123456"
+    assert_output --partial "cannot hold input"
+    assert_output --partial "piggy-askpass-gtk"
+    assert_equal "$(zenity_call_count)" 0
   done
 }
 
@@ -1039,17 +963,6 @@ tall_act_text() {
   assert_equal "$(zenity_call_count)" 0
 }
 
-@test "short_operator_act_text_goes_straight_to_the_pin_dialog" {
-  run_askpass_against_logging_zenity_stub \
-    PIGGY_ASKPASS_KIND=certificate PIGGY_ASKPASS_CONTEXT=$'issue cert\nfor key X'
-
-  assert_success
-  assert_output "123456"
-  assert_equal "$(zenity_call_count)" 1
-  ZENITY_ARGV="$ZENITY_CALLS"
-  assert_zenity_argv_has "--forms"
-}
-
 @test "tall_routine_prompt_is_never_refused_for_its_height" {
   run_askpass_against_logging_zenity_stub \
     PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
@@ -1059,13 +972,6 @@ tall_act_text() {
   assert_equal "$(zenity_call_count)" 1
   ZENITY_ARGV="$ZENITY_CALLS"
   assert_zenity_argv_has "--title=piggy PIV PIN"
-}
-
-@test "explicit_timeout_still_wins_for_an_operator_act" {
-  run_askpass_against_zenity_stub '123456\n' PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_TIMEOUT=9
-
-  assert_success
-  assert_zenity_argv_has "--timeout=9"
 }
 
 # -------- operator acts in piggy-askpass-gtk --------
@@ -1193,13 +1099,26 @@ helper_option() {
   fi
 }
 
-# PIGGY_ASKPASS_GTK=0 is the way back to zenity while the helper is on PATH.
-@test "with_piggy_askpass_gtk_0_the_zenity_dialogs_stay" {
-  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=escalation PIGGY_ASKPASS_GTK=0
+@test "explicit_timeout_still_wins_for_an_operator_act" {
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_TIMEOUT=9
 
   assert_success
-  assert_output "123456"
+  assert_equal "$(helper_option --timeout)" 9
+}
+
+# PIGGY_ASKPASS_GTK=0 is the way back to zenity for a routine prompt; an
+# operator act then has no dialog that can hold input, so it is refused.
+@test "with_piggy_askpass_gtk_0_a_routine_prompt_uses_zenity_and_an_act_is_refused" {
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_GTK=0
+  assert_success
+  assert_line --index 0 "123456"
   assert_equal "$(zenity_call_count)" 1
+  [[ ! -e $HELPER_ARGV ]]
+
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=escalation PIGGY_ASKPASS_GTK=0
+  assert_failure 3
+  assert_output --partial "cannot hold input"
+  assert_equal "$(zenity_call_count)" 0
   [[ ! -e $HELPER_ARGV ]]
 }
 

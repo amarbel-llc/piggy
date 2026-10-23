@@ -307,7 +307,10 @@ dialog, which opens with a band in the class's colour carrying its symbol
 requires the word ESCALATE to be typed, and then a click on its button.
 On Linux every dialog, the routine PIN prompt included, is
 *piggy-askpass-gtk*, which the packaged helper finds on its *PATH*; with
-*PIGGY_ASKPASS_GTK*=0, or where it is absent, they are zenity's. A routine
+*PIGGY_ASKPASS_GTK*=0, or where it is absent, a routine prompt is zenity's
+and an operator act is refused before any dialog opens (exit 3 with the
+reason, reported _cancelled_), since zenity cannot hold input as RFC 0012
+§2.6 requires; such a host answers operator acts on a tty. A routine
 prompt carries a slate PIN REQUEST band, none of the operator-act colours. The helper
 takes focus when it opens and shows the text as plain text. For its first
 2 seconds it takes no input but a cancel, its fields are greyed out, and

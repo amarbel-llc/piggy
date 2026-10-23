@@ -4662,7 +4662,7 @@ explore-fdr0006-a CARD="virtual" PROMPTS="test" RUN="":
        On your own host this is services.piggy-agent.softwareKeys.enable = true.
 
     NOT COVERED BY THE AUTOMATED LANES: yours to judge on a real card and display
-       - what the three zenity dialogs look like, and whether a long text shows whole
+       - what the three operator-act dialogs (piggy-askpass-gtk) look like, and whether a long text shows whole
        - whether the touch notice reaches you where you are looking
        - the attestation chain to a Yubico root, and the real F9 certificate
          (openssl verify -partial_chain -CAfile f9.pem attestation.pem)
