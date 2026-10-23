@@ -1320,7 +1320,7 @@ let
         in
         {
           ok =
-            if pkgs.stdenv.isLinux then
+            if pkgs.stdenv.hostPlatform.isLinux then
               tripped == [ ] && hasUpstream && hasAddTo && softRunsSshAgent && ordered && softLauncher != null
             else
               lib.any (m: lib.hasInfix "`softwareKeys.enable` is Linux-only" m) tripped;
@@ -1426,7 +1426,7 @@ let
             && !(texts ? piggy-agent-plain-software-keys)
             && !(lib.hasInfix "--upstream" plainText)
             && (
-              !pkgs.stdenv.isLinux
+              !pkgs.stdenv.hostPlatform.isLinux
               ||
                 lib.attrNames result.config.systemd.user.services == [
                   "piggy-agent-plain"

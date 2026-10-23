@@ -202,6 +202,8 @@ codemod-pigpen-vectors:
 # the capture-time oracle. Re-run after any piggy-box wire-format change.
 # Linux-only (needs fibby's AF_UNIX pcsc socket); runs on flac (fibby is a
 # virtual card, no hardware).
+#
+# capture the C pivy-box oracle fixtures replayed by piggy-box's offline corpus
 [group('codemod')]
 [linux]
 codemod-capture-pivy-oracle-box: build-rust
@@ -1533,6 +1535,25 @@ test-nix-hm-module:
     exit 1
   fi
 
+# Evaluate nix/hm/eval-test.nix as test-nix-hm-module does, but with
+# abort-on-warn, so the first evaluation warning (piggy#311's stdenv.isLinux
+# deprecation) aborts with a trace naming the expression that raised it.
+#
+# trace the first evaluation warning raised by the hm eval test
+[group('debug')]
+debug-hm-eval-warning-trace:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  expr='let
+    flake = builtins.getFlake (toString ./.);
+    pkgs = flake.inputs.igloo.legacyPackages.${builtins.currentSystem};
+    test = import ./nix/hm/eval-test.nix {
+      inherit pkgs;
+      module = flake.homeManagerModules.piggy-agent;
+    };
+  in test.summary'
+  nix eval --impure --raw --option abort-on-warn true --show-trace --expr "$expr"
+
 # Smoke-test for the `services.piggy-secrets` home-manager module (FDR 0003):
 # evaluates it against synthetic configs and checks the manifest, the
 # out-of-closure ciphertext handling, the oneshot unit, the non-blocking
@@ -2530,6 +2551,8 @@ lint-fmt:
 # not a runtime dep; this builds the `checks.lint-closure-no-pivy` derivation,
 # which greps the piggy closure's store-paths for the pivy store path and fails
 # if a reference ever re-introduces it. The retirement's enforcement gate.
+#
+# assert C pivy is not in the shipped piggy runtime closure
 [group('pre-build')]
 lint-closure-no-pivy:
     #!/usr/bin/env bash
