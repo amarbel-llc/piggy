@@ -400,7 +400,19 @@ fi
 # propagates. zenity shows no operator act (RFC 0012 §2.6: it cannot hold
 # input); those are refused before this is reached.
 zenity_routine() {
-  zenity --timeout="$zenity_timeout" --entry --hide-text --title="$class_title" --text="$body"
+  zenity --timeout="$zenity_timeout" --entry --hide-text --title="$class_title" \
+    --text="$(literal_for_zenity_entry "$body")"
+}
+
+# As read in zenity 4.2.1's source, --entry runs --text through
+# g_strcompress, where `\` starts an escape, and then GTK's mnemonic
+# parsing, where `_` marks the next character, so `PIV_slot_9D` would show
+# as `PIVslot9D` (piggy#306). Doubling both shows the context as it is.
+literal_for_zenity_entry() {
+  local text="$1"
+  text="${text//\\/\\\\}"
+  text="${text//_/__}"
+  printf '%s' "$text"
 }
 
 # The operator-act dialog of piggy-askpass-gtk (crates/piggy-askpass-gtk),

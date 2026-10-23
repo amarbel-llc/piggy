@@ -868,6 +868,22 @@ refute_zenity_argv_has() {
   refute_zenity_argv_has "--forms"
 }
 
+# piggy#306: zenity --entry runs its --text through g_strcompress (a `\`
+# starts an escape) and mnemonic parsing (a `_` marks the next letter), so
+# the routine prompt doubles both to show the context literally.
+@test "routine_zenity_prompt_escapes_backslashes_and_underscores" {
+  run_askpass_against_zenity_stub '123456\n' PIGGY_ASKPASS_CONTEXT='PIV_slot_9D a\nb'
+
+  assert_success
+  assert_output "123456"
+  assert_zenity_argv_has "--entry"
+  grep -qF -- 'Context: PIV__slot__9D a\\nb' "$ZENITY_ARGV" || {
+    echo "the context was not escaped for zenity; got:"
+    cat "$ZENITY_ARGV"
+    return 1
+  }
+}
+
 # A text zenity would mangle (markup, a mnemonic underscore, a backslash
 # escape); the GTK helper must get it literally.
 TRICKY_TEXT='grant <b>bold</b> & more; id ecdsa_p256_sig; path a\nb'
