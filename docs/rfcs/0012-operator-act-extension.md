@@ -18,6 +18,11 @@ amendment-note: >
   transition or an escalation request record, per the new §3.1 table;
   previously it named an escalation request record only. Docs only: the
   agent does not check text shapes, so no implementation changes.
+  Second 2026-10-23 amendment (piggy#332, operator decision): §2.6 gains
+  the input hold (at least 2 seconds, every input including cancel, in the
+  process that shows the text; a surface that cannot hold fails the
+  prompt) and permits emphasis by rendering attributes. Implemented by the
+  askpass and the agent's tty route in the same series.
 ---
 
 # Operator-Act Agent Extension, sshsig Namespaces, and Record Purposes (piggy normative; FDR 0006 wire RFC part 1)
@@ -254,7 +259,26 @@ timeout is `cancelled`.
 An askpass program MUST render the text literally: it MUST NOT
 interpret markup in it (zenity's Pango markup, for instance, so `<` and
 `&` in a text must be escaped or markup disabled), and a program that
-cannot show it in full MUST fail the prompt, as stated above.
+cannot show it in full MUST fail the prompt, as stated above. It MAY
+emphasize parts of the text, such as the leading characters of a
+markl-id, through rendering attributes applied to spans it identifies
+itself (Pango attributes, terminal bold), never by interpreting markup in
+the text; emphasis changes no character and elides none.
+
+**The input hold.** A prompt for an operator act MUST take no input at
+all for at least 2 seconds after the text is first shown: no PIN
+keystroke, no approval, and no cancel. Input arriving during the hold MUST
+be discarded, not queued for after it, and the hold MUST be visible (a
+countdown or an equivalent sign) for as long as it lasts. The hold is kept
+by the process that shows the text (§2.6 above: the askpass program, or
+the card agent on the tty route), and counts from the first display of
+that text: a redraw of the same text does not restart it, and a prompt
+whose text changes starts a new hold. A window manager's close control is
+outside the prompt's reach and MAY end the prompt during the hold; it ends
+it as `cancelled`. A surface that cannot hold input (zenity's dialogs, for
+instance) MUST NOT show an operator act: the program fails the prompt,
+which the agent reports as `cancelled`, so the act is never shown where
+a stray keystroke could approve or answer it.
 
 #### 2.7. Signing
 
