@@ -47,6 +47,13 @@ pub const MAX_UPSTREAM_CONNECTIONS: usize = 64;
 /// array of [`UpstreamStatus`].
 pub const UPSTREAM_STATUS_EXT: &str = "upstream-status@piggy";
 
+/// How long a listing with every upstream unreachable keeps redialing
+/// before it answers the outage (piggy#333); `--upstream-grace`.
+pub const DEFAULT_OUTAGE_GRACE: Duration = Duration::from_secs(3);
+
+/// The longest pause between redials inside the outage grace.
+const MAX_REDIAL_BACKOFF: Duration = Duration::from_secs(1);
+
 /// One upstream's health as self-reported by the agent (the
 /// [`UPSTREAM_STATUS_EXT`] payload element).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -55,6 +62,40 @@ pub struct UpstreamStatus {
     pub reachable: bool,
     /// Identities the upstream served on the probe; 0 when unreachable.
     pub keys: usize,
+    /// Unix seconds at which the upstream entered its current state
+    /// (reachable or not), as this agent observed it (piggy#333). Absent
+    /// from agents predating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+    /// Why the probe failed, when unreachable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// What the pool last saw of one upstream: whether it answered, and
+/// since when.
+#[derive(Clone, Debug, Default)]
+struct UpstreamState {
+    reachable: Option<bool>,
+    since: Option<std::time::SystemTime>,
+}
+
+impl UpstreamState {
+    fn record(&mut self, reachable: bool) {
+        if self.reachable != Some(reachable) {
+            self.reachable = Some(reachable);
+            self.since = Some(std::time::SystemTime::now());
+        }
+    }
+}
+
+/// A failure no answer came back for (connect, IO, a disconnect), which a
+/// redial may cure, as opposed to the upstream refusing.
+fn is_transport_failure(e: &AgentError) -> bool {
+    matches!(
+        e,
+        AgentError::IO(_) | AgentError::Proto(ssh_agent_lib::proto::ProtoError::IO(_))
+    )
 }
 
 /// One configured upstream agent (`--upstream NAME=PATH`). The name is a
@@ -131,11 +172,18 @@ pub fn parse_upstream_specs(specs: &[String]) -> Result<Vec<Upstream>, String> {
 /// Every upstream interaction (connect, list, sign) is bounded by
 /// `timeout`; a dead or slow upstream degrades to "no keys from that
 /// upstream" on listing and an error on signing — it never wedges the
-/// agent or the other upstreams.
+/// agent or the other upstreams. When EVERY upstream is down, the
+/// listing a client sees is an outage, not an empty key list
+/// ([`UpstreamPool::list_identities_or_outage`], piggy#333).
 #[derive(Clone, Debug)]
 pub struct UpstreamPool {
     upstreams: Vec<Upstream>,
     timeout: Duration,
+    /// How long a listing that finds every upstream down redials before
+    /// it reports the outage.
+    outage_grace: Duration,
+    /// Per upstream, in configured order; shared by every clone.
+    states: Arc<std::sync::Mutex<Vec<UpstreamState>>>,
     known_keys: Arc<Mutex<HashMap<KeyData, usize>>>,
     /// Index of the upstream `add_identity` requests are routed to
     /// (`--add-new-keys-to`). `None` refuses adds — piggy's native keys
@@ -173,12 +221,28 @@ impl UpstreamPool {
     }
 
     fn with_connection_limit(upstreams: Vec<Upstream>, timeout: Duration, limit: usize) -> Self {
+        let states = vec![UpstreamState::default(); upstreams.len()];
         Self {
             upstreams,
             timeout,
+            outage_grace: DEFAULT_OUTAGE_GRACE,
+            states: Arc::new(std::sync::Mutex::new(states)),
             known_keys: Arc::new(Mutex::new(HashMap::new())),
             add_new_keys_to: None,
             connections: Arc::new(Semaphore::new(limit)),
+        }
+    }
+
+    /// How long a listing that finds every upstream down redials before it
+    /// reports the outage (`--upstream-grace`).
+    pub fn with_outage_grace(mut self, grace: Duration) -> Self {
+        self.outage_grace = grace;
+        self
+    }
+
+    fn record(&self, upstream: &Upstream, reachable: bool) {
+        if let Some(idx) = self.upstreams.iter().position(|u| u.name == upstream.name) {
+            self.states.lock().expect("upstream states lock")[idx].record(reachable);
         }
     }
 
@@ -266,11 +330,48 @@ impl UpstreamPool {
     /// one slow upstream (the #105 severity-amplifier shape, which this
     /// pool briefly reintroduced).
     pub async fn list_identities(&self) -> Vec<Identity> {
+        self.list_once().await.0
+    }
+
+    /// [`Self::list_identities`], except that when every upstream is down
+    /// it redials with backoff for up to the outage grace and, if none
+    /// answers, fails naming each upstream's error (piggy#333). An empty
+    /// list would tell a client "no such key" during what is an outage. An
+    /// upstream that answers with no keys is an answer, not an outage.
+    pub async fn list_identities_or_outage(&self) -> Result<Vec<Identity>, String> {
+        let deadline = tokio::time::Instant::now() + self.outage_grace;
+        let mut backoff = Duration::from_millis(100);
+        loop {
+            let (identities, failures) = self.list_once().await;
+            let Some(failures) = failures else {
+                return Ok(identities);
+            };
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(format!(
+                    "every upstream agent is unreachable: {}",
+                    failures.join("; ")
+                ));
+            }
+            tokio::time::sleep(backoff.min(deadline - now)).await;
+            backoff = (backoff * 2).min(MAX_REDIAL_BACKOFF);
+        }
+    }
+
+    /// One listing pass, rebuilding the routing map. The second value is
+    /// each upstream's failure when EVERY upstream failed, else `None`.
+    async fn list_once(&self) -> (Vec<Identity>, Option<Vec<String>>) {
         let listed = self.list_all_upstreams().await;
+        let failures: Vec<String> = listed
+            .iter()
+            .zip(&self.upstreams)
+            .filter_map(|(r, u)| r.as_ref().err().map(|e| format!("{}: {e}", u.name)))
+            .collect();
+        let all_failed = !listed.is_empty() && failures.len() == listed.len();
         let mut known_keys: HashMap<KeyData, usize> = HashMap::new();
         let mut identities = Vec::new();
         for (idx, upstream_ids) in listed.into_iter().enumerate() {
-            let Some(upstream_ids) = upstream_ids else {
+            let Ok(upstream_ids) = upstream_ids else {
                 continue;
             };
             // A key served by more than one upstream (the proxy-only
@@ -289,20 +390,20 @@ impl UpstreamPool {
             }
         }
         *self.known_keys.lock().await = known_keys;
-        identities
+        (identities, all_failed.then_some(failures))
     }
 
     /// `request_identities` against every upstream concurrently, each
     /// bounded by `timeout`. Result is in configured-upstream order;
-    /// `None` = that upstream was unreachable / failed / timed out
+    /// `Err` = why that upstream was unreachable / failed / timed out
     /// (logged). Shared by the listing and the `status()` self-report.
-    async fn list_all_upstreams(&self) -> Vec<Option<Vec<Identity>>> {
+    async fn list_all_upstreams(&self) -> Vec<Result<Vec<Identity>, String>> {
         self.for_each_upstream_parallel(|pool, upstream| async move {
             pool.list_one_upstream(&upstream).await
         })
         .await
         .into_iter()
-        .map(Option::flatten)
+        .map(|r| r.unwrap_or_else(|| Err("upstream task failed".into())))
         .collect()
     }
 
@@ -337,30 +438,27 @@ impl UpstreamPool {
         out
     }
 
-    async fn list_one_upstream(&self, upstream: &Upstream) -> Option<Vec<Identity>> {
-        let mut client = match self.connect(upstream).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(upstream = %upstream.name, "skipping unreachable upstream: {e}");
-                return None;
-            }
-        };
-        match timeout(self.timeout, client.request_identities()).await {
-            Ok(Ok(ids)) => {
+    async fn list_one_upstream(&self, upstream: &Upstream) -> Result<Vec<Identity>, String> {
+        let listed = async {
+            let mut client = self.connect(upstream).await?;
+            timeout(self.timeout, client.request_identities())
+                .await
+                .map_err(|_| AgentError::Other("request_identities timed out".into()))?
+        }
+        .await;
+        self.record(upstream, listed.is_ok());
+        match listed {
+            Ok(ids) => {
                 tracing::debug!(
                     upstream = %upstream.name,
                     keys = ids.len(),
                     "listed upstream identities"
                 );
-                Some(ids)
+                Ok(ids)
             }
-            Ok(Err(e)) => {
-                tracing::warn!(upstream = %upstream.name, "request_identities failed: {e}");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(upstream = %upstream.name, "request_identities timed out");
-                None
+            Err(e) => {
+                tracing::warn!(upstream = %upstream.name, "skipping unreachable upstream: {e}");
+                Err(e.to_string())
             }
         }
     }
@@ -369,30 +467,75 @@ impl UpstreamPool {
     /// On a routing-map miss the identities are refreshed once (the key
     /// may have appeared since the last listing) before giving up. The
     /// map lock is only ever held for the lookups, never across IO.
+    ///
+    /// A sign that never got through (the upstream is gone, the connection
+    /// dropped) is retried once after a fresh listing, which redials every
+    /// upstream and may route the key to another backing that serves it
+    /// (piggy#333). A refusal is the upstream's answer, and a timeout may
+    /// be a human still at a prompt; neither is retried.
     pub async fn sign(&self, request: SignRequest) -> Result<Signature, AgentError> {
         let mut idx = self.known_keys.lock().await.get(&request.pubkey).copied();
         if idx.is_none() {
             self.list_identities().await;
             idx = self.known_keys.lock().await.get(&request.pubkey).copied();
         }
-        let upstream = match idx {
-            Some(idx) => self.upstreams[idx].clone(),
-            None => {
-                return Err(AgentError::Other(
-                    "no upstream agent holds the requested key".into(),
-                ));
-            }
+        let Some(idx) = idx else {
+            return Err(AgentError::Other(
+                "no upstream agent holds the requested key".into(),
+            ));
         };
+        let upstream = self.upstreams[idx].clone();
 
         tracing::debug!(upstream = %upstream.name, "routing sign request to upstream");
-        let mut client = self.connect(&upstream).await?;
-        timeout(self.timeout, client.sign(request))
-            .await
-            .map_err(|_| {
+        match self.sign_on(&upstream, request.clone()).await {
+            Err((e, true)) => {
+                tracing::warn!(
+                    upstream = %upstream.name,
+                    "sign got no answer ({e}); redialing and retrying once"
+                );
+                self.list_identities().await;
+                let idx = self.known_keys.lock().await.get(&request.pubkey).copied();
+                let Some(idx) = idx else {
+                    return Err(e);
+                };
+                let upstream = self.upstreams[idx].clone();
+                self.sign_on(&upstream, request).await.map_err(|(e, _)| e)
+            }
+            answered => answered.map_err(|(e, _)| e),
+        }
+    }
+
+    /// One sign round-trip. The flag on an error is true when the request
+    /// never got through (connect failed, the connection dropped): the
+    /// failures a redial may cure.
+    async fn sign_on(
+        &self,
+        upstream: &Upstream,
+        request: SignRequest,
+    ) -> Result<Signature, (AgentError, bool)> {
+        let mut client = self.connect(upstream).await.map_err(|e| {
+            self.record(upstream, false);
+            (e, true)
+        })?;
+        match timeout(self.timeout, client.sign(request)).await {
+            Ok(Ok(signature)) => {
+                self.record(upstream, true);
+                Ok(signature)
+            }
+            Ok(Err(e)) => {
+                let transport = is_transport_failure(&e);
+                self.record(upstream, !transport);
+                Err((e, transport))
+            }
+            // Not retried: the upstream may still be waiting on a human (a
+            // PIN or a touch), and a second request would prompt again.
+            Err(_) => Err((
                 AgentError::Other(
                     format!("upstream {}: sign request timed out", upstream.name).into(),
-                )
-            })?
+                ),
+                false,
+            )),
+        }
     }
 
     /// Forward an extension request to the ONE upstream that listed
@@ -601,14 +744,22 @@ impl UpstreamPool {
     /// payload). Read-only, PIN-free, never errors — an unreachable
     /// upstream reports `reachable: false`.
     pub async fn status(&self) -> Vec<UpstreamStatus> {
-        self.list_all_upstreams()
-            .await
+        let listed = self.list_all_upstreams().await;
+        let states = self.states.lock().expect("upstream states lock").clone();
+        listed
             .into_iter()
             .zip(&self.upstreams)
-            .map(|(ids, upstream)| UpstreamStatus {
+            .zip(states)
+            .map(|((ids, upstream), state)| UpstreamStatus {
                 name: upstream.name.clone(),
-                reachable: ids.is_some(),
-                keys: ids.map_or(0, |ids| ids.len()),
+                reachable: ids.is_ok(),
+                keys: ids.as_ref().map_or(0, |ids| ids.len()),
+                since: state.since.and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                }),
+                last_error: ids.err(),
             })
             .collect()
     }
@@ -672,6 +823,8 @@ pub(super) mod test_support {
         /// `request_identities` (the hung-not-dead upstream the pool's
         /// timeout exists for).
         pub hang_identities: bool,
+        /// Answer every sign with SSH_AGENT_FAILURE.
+        pub refuse_sign: bool,
         /// A proxying agent: answers `request_identities` by listing this
         /// pool, as piggy's own agent does. Pointed at the stub's own
         /// socket it is the cycle piggy#326 guards against.
@@ -686,8 +839,14 @@ pub(super) mod test_support {
                 extensions: Vec::new(),
                 events: Arc::new(std::sync::Mutex::new(Vec::new())),
                 hang_identities: false,
+                refuse_sign: false,
                 relay: None,
             }
+        }
+
+        pub fn refusing_sign(mut self) -> Self {
+            self.refuse_sign = true;
+            self
         }
 
         pub fn relaying_to(mut self, pool: UpstreamPool) -> Self {
@@ -730,6 +889,9 @@ pub(super) mod test_support {
 
         async fn sign(&mut self, _request: SignRequest) -> Result<Signature, AgentError> {
             self.record("sign".into());
+            if self.refuse_sign {
+                return Err(AgentError::Failure);
+            }
             Ok(self.signature.clone())
         }
 
@@ -1184,21 +1346,175 @@ mod tests {
         let pool = pool_of(vec![("live", live_path), ("dead", dead)]);
 
         let st = pool.status().await;
-        assert_eq!(
-            st,
+        let shape: Vec<_> = st
+            .iter()
+            .map(|s| (s.name.as_str(), s.reachable, s.keys))
+            .collect();
+        assert_eq!(shape, vec![("live", true, 1), ("dead", false, 0)]);
+    }
+
+    /// piggy#333: the self-report carries when each upstream's current
+    /// state began and, for a down one, why — so a session can tell an
+    /// outage from a missing key, and how long it has lasted.
+    #[tokio::test]
+    async fn status_reports_since_and_last_error() {
+        let live_path = spawn_stub("st-since", StubUpstream::new(vec![]));
+        let dead = PathBuf::from("/tmp/pgup-nonexistent-since.sock");
+        let pool = pool_of(vec![("live", live_path), ("dead", dead)]);
+
+        let first = pool.status().await;
+        assert!(first[0].since.is_some(), "{first:?}");
+        assert_eq!(first[0].last_error, None);
+        assert!(first[1].since.is_some(), "{first:?}");
+        let err = first[1].last_error.as_deref().unwrap_or_default();
+        assert!(err.contains("No such file"), "{err:?}");
+
+        // A second probe in the same state keeps the state's start time.
+        let second = pool.status().await;
+        assert_eq!(second[1].since, first[1].since);
+    }
+
+    /// Agents predating piggy#333 report no `since`/`last_error`; a new
+    /// health must still parse their payload, and an old one ours.
+    #[test]
+    fn upstream_status_payload_is_compatible_both_ways() {
+        let old: Vec<UpstreamStatus> =
+            serde_json::from_str(r#"[{"name":"a","reachable":true,"keys":2}]"#).unwrap();
+        assert_eq!(old[0].since, None);
+        assert_eq!(old[0].last_error, None);
+
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Pre333 {
+            name: String,
+            reachable: bool,
+            keys: usize,
+        }
+        let reachable = UpstreamStatus {
+            name: "a".into(),
+            reachable: true,
+            keys: 2,
+            since: None,
+            last_error: None,
+        };
+        let json = serde_json::to_string(&reachable).unwrap();
+        serde_json::from_str::<Pre333>(&json).expect("unset fields are not serialized");
+    }
+
+    // -------- total upstream outage (piggy#333) --------
+
+    fn pool_with_grace(paths: Vec<(&str, PathBuf)>, grace: Duration) -> UpstreamPool {
+        pool_of(paths).with_outage_grace(grace)
+    }
+
+    /// Every upstream unreachable: the listing is an outage, not "no keys",
+    /// once the grace is spent redialing.
+    #[tokio::test]
+    async fn every_upstream_down_is_an_outage_after_the_grace() {
+        let pool = pool_with_grace(
             vec![
-                UpstreamStatus {
-                    name: "live".into(),
-                    reachable: true,
-                    keys: 1,
-                },
-                UpstreamStatus {
-                    name: "dead".into(),
-                    reachable: false,
-                    keys: 0,
-                },
-            ]
+                ("a", PathBuf::from("/tmp/pgup-nonexistent-a.sock")),
+                ("b", PathBuf::from("/tmp/pgup-nonexistent-b.sock")),
+            ],
+            Duration::from_millis(400),
         );
+        let started = std::time::Instant::now();
+        let err = pool.list_identities_or_outage().await.unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "gave up after {elapsed:?}"
+        );
+        assert!(elapsed < Duration::from_secs(3), "took {elapsed:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("every upstream agent is unreachable"), "{msg}");
+        assert!(msg.contains("a:") && msg.contains("b:"), "{msg}");
+    }
+
+    /// An upstream that answers with zero keys is an answer, not an outage.
+    #[tokio::test]
+    async fn a_live_upstream_with_no_keys_is_not_an_outage() {
+        let live = spawn_stub("no-keys", StubUpstream::new(vec![]));
+        let pool = pool_with_grace(
+            vec![
+                ("dead", PathBuf::from("/tmp/pgup-nonexistent-nk.sock")),
+                ("live", live),
+            ],
+            Duration::from_secs(5),
+        );
+        let started = std::time::Instant::now();
+        assert!(pool.list_identities_or_outage().await.unwrap().is_empty());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "waited out the grace"
+        );
+    }
+
+    /// An upstream that comes back within the grace is redialed and its
+    /// keys answered.
+    #[tokio::test]
+    async fn an_upstream_back_within_the_grace_is_redialed() {
+        let path = stub_socket_path("comeback");
+        let _ = std::fs::remove_file(&path);
+        let pool = pool_with_grace(vec![("comeback", path)], Duration::from_secs(3));
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            spawn_stub(
+                "comeback",
+                StubUpstream::new(vec![upstream_identity(0xA7, "back")]),
+            );
+        });
+        let ids = pool.list_identities_or_outage().await.unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].comment, "back");
+    }
+
+    fn shared_sign_request() -> SignRequest {
+        SignRequest {
+            pubkey: upstream_identity(0xE7, "shared").pubkey,
+            data: b"payload".to_vec(),
+            flags: 0,
+        }
+    }
+
+    /// The upstream a key was routed to goes away between the listing and
+    /// the sign; the sign re-lists and goes to the other backing that
+    /// serves the same key (posh + RemoteForward, FDR 0001).
+    #[tokio::test]
+    async fn a_sign_whose_upstream_died_is_retried_on_the_live_one() {
+        let first = spawn_stub(
+            "retry-first",
+            StubUpstream::new(vec![upstream_identity(0xE7, "shared")]),
+        );
+        let second = StubUpstream::new(vec![upstream_identity(0xE7, "shared")]);
+        let second_events = second.events.clone();
+        let second = spawn_stub("retry-second", second);
+        let pool = pool_of(vec![("first", first.clone()), ("second", second)]);
+
+        pool.list_identities().await;
+        std::fs::remove_file(&first).unwrap();
+
+        let sig = pool.sign(shared_sign_request()).await.unwrap();
+        assert_eq!(sig, canned_signature());
+        assert!(second_events.lock().unwrap().iter().any(|e| e == "sign"));
+    }
+
+    /// A refusal from the upstream is its answer: no retry.
+    #[tokio::test]
+    async fn a_refused_sign_is_not_retried() {
+        let refusing = StubUpstream::new(vec![upstream_identity(0xE7, "shared")]).refusing_sign();
+        let events = refusing.events.clone();
+        let pool = pool_of(vec![("refusing", spawn_stub("refusing", refusing))]);
+
+        pool.sign(shared_sign_request()).await.unwrap_err();
+        let signs = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| *e == "sign")
+            .count();
+        assert_eq!(signs, 1);
     }
 
     // -------- descriptor safety (piggy#326) --------

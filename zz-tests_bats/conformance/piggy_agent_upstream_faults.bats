@@ -53,8 +53,9 @@ while True:
 
 # Start `piggy agent --proxy-only -a SOCK` with the given --upstream specs,
 # its pid in AGENT_PID. NOFILE, when set, is the descriptor limit it runs
-# under. PCSCLITE_CSOCK_NAME points nowhere: a proxy-only agent never opens
-# PC/SC.
+# under; GRACE the --upstream-grace (default 0: a listing with every upstream
+# down answers at once, piggy#333). PCSCLITE_CSOCK_NAME points nowhere: a
+# proxy-only agent never opens PC/SC.
 _spawn_proxy() {
   local sock="$1" log="$2"
   shift 2
@@ -63,7 +64,8 @@ _spawn_proxy() {
   (
     [[ -n ${NOFILE:-} ]] && ulimit -n "$NOFILE"
     exec env PCSCLITE_CSOCK_NAME="$WORKDIR/no-such-pcscd" \
-      "$PIGGY" agent --proxy-only --agent-timeout 2 "${args[@]}" -a "$sock"
+      "$PIGGY" agent --proxy-only --agent-timeout 2 \
+      --upstream-grace "${GRACE:-0}" "${args[@]}" -a "$sock"
   ) >"$log" 2>&1 &
   AGENT_PID=$!
   PIDS+=("$AGENT_PID")
@@ -101,6 +103,21 @@ for _ in range(count):
     answered += 1
 print(answered)
 ' "$sock" "$count"
+}
+
+# The message type of the agent at SOCK's answer to one REQUEST_IDENTITIES
+# (12 IDENTITIES_ANSWER, 5 FAILURE), then the identity count when it is 12.
+_identities_answer() {
+  python3 -c '
+import socket, struct, sys
+c = socket.socket(socket.AF_UNIX)
+c.settimeout(20)
+c.connect(sys.argv[1])
+c.sendall(struct.pack(">IB", 1, 11))
+length, kind = struct.unpack(">IB", c.recv(5, socket.MSG_WAITALL))
+body = c.recv(length - 1, socket.MSG_WAITALL) if length > 1 else b""
+print(kind, struct.unpack(">I", body[:4])[0] if kind == 12 else "")
+' "$1"
 }
 
 _open_descriptors() {
@@ -167,6 +184,63 @@ function an_upstream_cycle_neither_exhausts_descriptors_nor_kills_the_proxy { # 
   # And both still answer afterwards.
   [[ $(_list_identities "$WORKDIR/b.sock" 3) == 3 ]] || {
     echo "agent B stopped answering after the cycle" >&2
+    return 1
+  }
+}
+
+# piggy#333: with every upstream down a proxy-only agent answers the listing
+# with FAILURE, not an empty IDENTITIES_ANSWER that clients read as "no
+# such key", and it does so only after redialing for the grace.
+function every_upstream_down_answers_failure_after_the_grace { # @test
+  GRACE=1 _spawn_proxy "$WORKDIR/p.sock" "$WORKDIR/p.log" \
+    "a=$WORKDIR/absent-a.sock" "b=$WORKDIR/absent-b.sock"
+  _wait_for_socket "$WORKDIR/p.sock"
+
+  local started answer elapsed
+  started=$SECONDS
+  answer=$(_identities_answer "$WORKDIR/p.sock")
+  elapsed=$((SECONDS - started))
+  [[ $answer == "5 " ]] || {
+    echo "expected FAILURE (5), got: $answer" >&2
+    cat "$WORKDIR/p.log" >&2
+    return 1
+  }
+  ((elapsed >= 1)) || {
+    echo "answered after ${elapsed}s, before the 1s grace" >&2
+    return 1
+  }
+  grep -q 'every upstream agent is unreachable' "$WORKDIR/p.log" || {
+    echo "the agent's log does not name the outage:" >&2
+    cat "$WORKDIR/p.log" >&2
+    return 1
+  }
+}
+
+# piggy#333: an upstream that comes back within the grace is redialed and its
+# answer served, even an empty one: a live upstream with no keys is an answer.
+function an_upstream_back_within_the_grace_is_served { # @test
+  GRACE=10 _spawn_proxy "$WORKDIR/p.sock" "$WORKDIR/p.log" "late=$WORKDIR/late.sock"
+  _wait_for_socket "$WORKDIR/p.sock"
+  # The late upstream: an agent with no keys, bound after 1s.
+  python3 -c '
+import socket, struct, sys, time
+time.sleep(1)
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.listen(8)
+while True:
+    conn, _ = s.accept()
+    conn.recv(5, socket.MSG_WAITALL)
+    conn.sendall(struct.pack(">IBI", 5, 12, 0))
+    conn.close()
+' "$WORKDIR/late.sock" &
+  PIDS+=($!)
+
+  local answer
+  answer=$(_identities_answer "$WORKDIR/p.sock")
+  [[ $answer == "12 0" ]] || {
+    echo "expected an empty IDENTITIES_ANSWER once the upstream came up, got: $answer" >&2
+    cat "$WORKDIR/p.log" >&2
     return 1
   }
 }

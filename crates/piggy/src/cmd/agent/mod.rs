@@ -85,6 +85,16 @@ pub struct AgentArgs {
     #[arg(long = "agent-timeout", value_name = "SECONDS", default_value_t = 5)]
     pub agent_timeout: u64,
 
+    /// Seconds a listing that finds every --upstream unreachable keeps
+    /// redialing before it answers with a failure instead of an empty key
+    /// list (piggy#333). Applies only when the agent has no native keys.
+    #[arg(
+        long = "upstream-grace",
+        value_name = "SECONDS",
+        default_value_t = upstream::DEFAULT_OUTAGE_GRACE.as_secs()
+    )]
+    pub upstream_grace: u64,
+
     /// Card-presence reconcile interval in seconds (piggy#244): how often the
     /// agent re-enumerates to drop a removed card's keys/PIN and adopt a
     /// newly-inserted card. Default 10; a removed card clears after ~3 ticks.
@@ -232,7 +242,8 @@ pub fn run(full_argv: Vec<String>) -> i32 {
                 .join(","),
             "proxying upstream agents"
         );
-        let pool = UpstreamPool::new(upstreams, std::time::Duration::from_secs(cli.agent_timeout));
+        let pool = UpstreamPool::new(upstreams, std::time::Duration::from_secs(cli.agent_timeout))
+            .with_outage_grace(std::time::Duration::from_secs(cli.upstream_grace));
         match cli.add_new_keys_to.as_deref() {
             Some(name) => match pool.with_add_new_keys_to(name) {
                 Ok(pool) => Some(pool),

@@ -80,6 +80,11 @@ two agents cannot silently fight over one path.
 *--agent-timeout* _SECONDS_
 	Per-upstream request timeout for connect, list and sign (default 5).
 
+*--upstream-grace* _SECONDS_
+	How long a listing that finds every upstream unreachable keeps
+	redialing before it answers with a failure (default 3). Applies only
+	when the agent serves no native keys. See *UPSTREAM PROXYING*.
+
 *--proxy-only*
 	Serve no native PIV keys: never open PC/SC, run no card-presence
 	loop, and proxy everything to the upstreams. Requires at least one
@@ -146,6 +151,18 @@ agent multiplexer in between:
 - Add-identity goes to the *--add-new-keys-to* upstream or is refused.
 - A dead upstream degrades the listing to whatever the others serve; it
   does not break the agent. *piggy health* reports each upstream's state.
+- When every upstream is unreachable and the agent serves no native keys
+  (a *--proxy-only* front during an outage of its backings), the listing
+  redials with backoff for *--upstream-grace* seconds and, if none answers,
+  fails with SSH_AGENT_FAILURE rather than answering an empty list: a
+  client then reports an agent error, not a missing key (*ssh-add -l*
+  prints "error fetching identities"). An upstream that answers with no
+  keys is an answer, not an outage.
+- A sign that never reaches its upstream (the socket is gone, the
+  connection dropped) is retried once after a fresh listing, which may
+  route it to another upstream serving the same key. A refusal is not
+  retried, nor is a timeout: the upstream may still be waiting on a PIN or
+  a touch.
 - The agent holds at most 64 upstream connections open at once, across all
   upstreams and clients; a request beyond that fails at once rather than
   opening another socket. An upstream that leads back into the agent (a
@@ -195,7 +212,10 @@ consumes; other agents need not implement them:
 	and whether presence is event-driven.
 
 *upstream-status@piggy*
-	One entry per *--upstream*: name, reachable or not, key count.
+	One entry per *--upstream*: name, reachable or not, key count, the
+	time (Unix seconds) it entered that state as this agent saw it, and,
+	when unreachable, the error. Answered even when the agent's listing
+	fails, so *piggy health* can show why.
 
 # OPERATOR ACTS
 

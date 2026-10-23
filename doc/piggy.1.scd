@@ -712,7 +712,9 @@ commands:
 	self-report; the upstreams are probed with a plain identity request.
 	A *--proxy-only* agent SKIPs the four local-card points and its
 	upstreams are treated as alternatives: a dead one SKIPs while another
-	is live and FAILs only when none is. The service point probes the unit
+	is live and FAILs only when none is. Each upstream point carries
+	*up_since* or *down_since* and, for a dead one, the *error*. The
+	service point probes the unit
 	the agent names via *--service-name*, else the platform default. A
 	further point reports the agent's presence mode (event-driven or poll).
 

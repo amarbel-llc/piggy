@@ -359,7 +359,23 @@ impl PiggyAgent {
         // pubkey served both natively and by an upstream is offered once,
         // as the native entry.
         if !self.upstreams.is_empty() {
-            for id in self.upstreams.list_identities().await {
+            // piggy#333: with no native keys, an outage of every upstream
+            // must not read as "no keys" (ssh then fails with publickey
+            // denied, spinclass with "no slot-9A key"); it answers
+            // SSH_AGENT_FAILURE once the redial grace is spent. With
+            // native keys the agent still has a true answer to give.
+            let upstream_ids = if identities.is_empty() {
+                self.upstreams
+                    .list_identities_or_outage()
+                    .await
+                    .map_err(|outage| {
+                        tracing::warn!("answering request_identities with a failure: {outage}");
+                        AgentError::Other(outage.into())
+                    })?
+            } else {
+                self.upstreams.list_identities().await
+            };
+            for id in upstream_ids {
                 if identities.iter().any(|n| n.pubkey == id.pubkey) {
                     continue;
                 }
@@ -2348,6 +2364,37 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert_eq!(ids[0].pubkey, ed25519_key_data(0x11), "native key first");
         assert_eq!(ids[1].comment, "soft-key");
+    }
+
+    fn dead_pool(tag: &str) -> UpstreamPool {
+        pool_for(std::path::PathBuf::from(format!(
+            "/tmp/pgup-nonexistent-{tag}.sock"
+        )))
+        .with_outage_grace(std::time::Duration::from_millis(200))
+    }
+
+    /// piggy#333: a proxy-only agent whose every upstream is down fails the
+    /// listing rather than answering an empty one.
+    #[tokio::test]
+    async fn request_identities_fails_when_every_upstream_is_down_and_no_native_keys() {
+        let mut agent = PiggyAgent::new(Vec::new())
+            .with_proxy_only(true)
+            .with_upstream_pool(dead_pool("sess-outage"));
+        let err = agent.request_identities().await.unwrap_err();
+        assert!(
+            format!("{err}").contains("every upstream agent is unreachable"),
+            "{err}"
+        );
+    }
+
+    /// With native keys the agent still answers them during an outage.
+    #[tokio::test]
+    async fn request_identities_keeps_native_keys_when_every_upstream_is_down() {
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9A)])
+            .with_upstream_pool(dead_pool("sess-native"));
+        let ids = agent.request_identities().await.unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].pubkey, ed25519_key_data(0x11));
     }
 
     #[tokio::test]

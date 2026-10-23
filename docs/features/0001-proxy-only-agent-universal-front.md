@@ -184,6 +184,7 @@ on fibby, none in the proxy), and health.
 | Lever | Current | Rationale | Change signal |
 |---|---|---|---|
 | `--agent-timeout` (per-upstream connect/list/sign) | 5 s (piggy#215 default) | a hung (not dead) backing costs this per request before the next is tried; dead sockets fail instantly | remote `ssh`/`pass show` stalls of ~5 s become a recurring complaint when a backing is wedged rather than down |
+| `--upstream-grace` (redial window before a total outage answers FAILURE) | 3 s (piggy#333) | long enough to ride a backing's reconnect, short enough that `ssh` fails fast instead of hanging; with no live backing an empty list would read as "no key" | outages that last just past 3 s still breaking `sc spawn`/`git fetch` (raise it), or interactive `ssh` visibly stalling on a host whose backings are simply absent (lower it) |
 | health verdict for a dead proxy-only backing | SKIP while ≥1 other live; FAIL when none | backings are alternatives by design; a red health on every healthy remote host trains people to ignore it | a dead backing that *should* be live going unnoticed for days — then promote it to a warning-class point |
 | stale-socket reclaim probe | `connect` → `ECONNREFUSED` ⇒ reclaim | the only unambiguous dead-listener signal; `ENOENT`/other errors are left alone | a platform whose dead unix sockets report something other than `ECONNREFUSED` |
 

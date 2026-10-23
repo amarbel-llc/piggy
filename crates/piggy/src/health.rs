@@ -502,11 +502,10 @@ pub fn gather() -> Probes {
             ..
         } => {
             let ids = piggy::agent_client::probe_identities(path, PROBE_TIMEOUT);
-            let exts = if ids.is_ok() {
-                Some(piggy::agent_client::probe_extensions(path, PROBE_TIMEOUT))
-            } else {
-                None
-            };
+            // Probed even when the listing failed: a proxy-only agent fails
+            // it when every upstream is down (piggy#333), and the upstream
+            // status is what says why.
+            let exts = Some(piggy::agent_client::probe_extensions(path, PROBE_TIMEOUT));
             let advertises =
                 |ext: &str| matches!(&exts, Some(Ok(names)) if names.iter().any(|n| n == ext));
             // piggy#215 step 5: the status extension is advertised only
@@ -923,14 +922,17 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
 
     // 5 — ecdh extension
     out.push(match &probes.extensions {
-        // gather's contract: extensions is only probed when
-        // request_identities succeeded — so `extensions: None` means
-        // either the socket was never reachable (agent: None) or the
-        // agent failed to answer (agent: Some(Err)). Distinguish the
-        // SKIP reason via probes.agent; the Some(Ok) arm shouldn't
-        // occur under that contract, but evaluate is pure and must not
-        // panic on any input, so it falls back to "agent did not
-        // answer".
+        // The listing failed: point 4 already says so, and an agent that
+        // cannot list cannot decrypt. The extensions were still probed
+        // (piggy#333) so the upstream points can say why.
+        _ if matches!(probes.agent, Some(Err(_))) => CheckResult {
+            name: "agent: advertises ecdh extension".into(),
+            status: Status::Skip("agent did not answer".into()),
+            diags: vec![],
+        },
+        // `extensions: None` means the socket was never reachable
+        // (agent: None); evaluate is pure and must not panic on any
+        // input, so any other shape falls back to "agent did not answer".
         None => CheckResult {
             name: "agent: advertises ecdh extension".into(),
             status: Status::Skip(match &probes.agent {
@@ -1241,10 +1243,22 @@ fn push_upstream_points(out: &mut Vec<CheckResult>, probes: &Probes, proxy_only:
                 } else {
                     Status::Fail
                 };
+                let mut diags = vec![("keys".into(), s.keys.to_string())];
+                if let Some(since) = s.since {
+                    let state = if s.reachable {
+                        "up_since"
+                    } else {
+                        "down_since"
+                    };
+                    diags.push((state.into(), since.to_string()));
+                }
+                if let Some(e) = &s.last_error {
+                    diags.push(("error".into(), e.clone()));
+                }
                 out.push(CheckResult {
                     name: format!("agent: upstream {} answers", s.name),
                     status,
-                    diags: vec![("keys".into(), s.keys.to_string())],
+                    diags,
                 });
             }
         }
@@ -1387,21 +1401,26 @@ mod tests {
     /// piggy#215: the upstream self-report appends one point per
     /// upstream after the base nine — Pass with a keys diag when
     /// reachable, Fail when not, in report order.
+    fn upstream(
+        name: &str,
+        reachable: bool,
+        keys: usize,
+    ) -> piggy::cmd::agent::upstream::UpstreamStatus {
+        piggy::cmd::agent::upstream::UpstreamStatus {
+            name: name.into(),
+            reachable,
+            keys,
+            since: None,
+            last_error: None,
+        }
+    }
+
     #[test]
     fn upstream_points_append_after_base_nine() {
-        use piggy::cmd::agent::upstream::UpstreamStatus;
         let mut probes = healthy_probes();
         probes.upstreams = Some(Ok(vec![
-            UpstreamStatus {
-                name: "soft".into(),
-                reachable: true,
-                keys: 2,
-            },
-            UpstreamStatus {
-                name: "launchd".into(),
-                reachable: false,
-                keys: 0,
-            },
+            upstream("soft", true, 2),
+            upstream("launchd", false, 0),
         ]));
         let results = evaluate(&probes);
         assert_eq!(results.len(), 11);
@@ -1433,7 +1452,6 @@ mod tests {
     #[test]
     fn proxy_only_agent_skips_card_points_and_keeps_plan_shape() {
         use piggy::cmd::agent::mode::AgentMode;
-        use piggy::cmd::agent::upstream::UpstreamStatus;
         let mut probes = healthy_probes();
         probes.agent = Some(Ok(vec!["fwd-key".into()]));
         probes.mode = Some(Ok(AgentMode {
@@ -1446,16 +1464,8 @@ mod tests {
         probes.pcsc = PcscProbe::Error("PC/SC unavailable".into());
         probes.cards = None;
         probes.upstreams = Some(Ok(vec![
-            UpstreamStatus {
-                name: "posh".into(),
-                reachable: true,
-                keys: 1,
-            },
-            UpstreamStatus {
-                name: "fwd".into(),
-                reachable: false,
-                keys: 0,
-            },
+            upstream("posh", true, 1),
+            upstream("fwd", false, 0),
         ]));
         let results = evaluate(&probes);
         assert_eq!(results.len(), 11);
@@ -1495,16 +1505,8 @@ mod tests {
         // With NO live backing the proxy serves nothing: every upstream
         // point FAILs and the run exits 1.
         probes.upstreams = Some(Ok(vec![
-            UpstreamStatus {
-                name: "posh".into(),
-                reachable: false,
-                keys: 0,
-            },
-            UpstreamStatus {
-                name: "fwd".into(),
-                reachable: false,
-                keys: 0,
-            },
+            upstream("posh", false, 0),
+            upstream("fwd", false, 0),
         ]));
         let results = evaluate(&probes);
         assert!(matches!(results[9].status, Status::Fail));
@@ -1512,24 +1514,45 @@ mod tests {
         assert_eq!(exit_code(&results), 1);
     }
 
+    /// piggy#333: during a total outage a proxy-only agent fails its
+    /// listing; the plan keeps its shape, the ecdh point SKIPs behind the
+    /// failed listing, and each upstream point carries when it went down
+    /// and why.
+    #[test]
+    fn proxy_only_total_outage_reports_why_each_upstream_is_down() {
+        use piggy::cmd::agent::mode::AgentMode;
+        let mut probes = healthy_probes();
+        probes.agent = Some(Err("request_identities: Generic agent failure".into()));
+        probes.mode = Some(Ok(AgentMode {
+            proxy_only: true,
+            native_keys: 0,
+            upstreams: 1,
+            service: None,
+            event_driven: false,
+        }));
+        let mut posh = upstream("posh", false, 0);
+        posh.since = Some(1_790_000_000);
+        posh.last_error = Some("connect timed out".into());
+        probes.upstreams = Some(Ok(vec![posh]));
+
+        let results = evaluate(&probes);
+        assert_eq!(results.len(), 10);
+        assert!(matches!(results[3].status, Status::Fail));
+        assert!(matches!(&results[4].status, Status::Skip(r) if r == "agent did not answer"));
+        assert!(matches!(results[9].status, Status::Fail));
+        assert_eq!(diag(&results[9], "down_since"), Some("1790000000"));
+        assert_eq!(diag(&results[9], "error"), Some("connect timed out"));
+    }
+
     /// eng#295: the alternative-backings leniency is proxy-only. On a
     /// card-backed agent upstreams are additive, so a dead one FAILs even
     /// when another is live (the pre-existing piggy#215 verdict).
     #[test]
     fn card_backed_agent_dead_upstream_still_fails_when_another_is_live() {
-        use piggy::cmd::agent::upstream::UpstreamStatus;
         let mut probes = healthy_probes();
         probes.upstreams = Some(Ok(vec![
-            UpstreamStatus {
-                name: "soft".into(),
-                reachable: true,
-                keys: 2,
-            },
-            UpstreamStatus {
-                name: "launchd".into(),
-                reachable: false,
-                keys: 0,
-            },
+            upstream("soft", true, 2),
+            upstream("launchd", false, 0),
         ]));
         let results = evaluate(&probes);
         assert!(matches!(results[10].status, Status::Fail));
@@ -1870,14 +1893,14 @@ mod tests {
     }
 
     /// Matrix row 6: agent connect/protocol error — point 4 fails,
-    /// point 5 SKIPs with "agent did not answer" (gather's contract:
-    /// extensions only probed when identities succeeded, so it is
-    /// None here), point 9 SKIPs.
+    /// point 5 SKIPs with "agent did not answer" whatever the extension
+    /// probe said (it runs even after a failed listing, piggy#333), point 9
+    /// SKIPs.
     #[test]
     fn agent_connect_error_fails_4_skips_5_and_9() {
         let mut probes = healthy_probes();
         probes.agent = Some(Err("connection refused".into()));
-        probes.extensions = None;
+        probes.extensions = Some(Err("connect: connection refused".into()));
         let results = evaluate(&probes);
         assert!(matches!(results[3].status, Status::Fail));
         match &results[4].status {
