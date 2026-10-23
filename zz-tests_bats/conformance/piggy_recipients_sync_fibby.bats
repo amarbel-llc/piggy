@@ -19,13 +19,12 @@
 #   - `-p <subfolder>`: scopes the walk to that subtree (a `1..1` plan), SKIPs
 #     the in-scope ebox, and leaves the sibling subtree's ebox byte-identical.
 #
-# Single-card limitation: with one fibby card every ebox is encrypted to exactly
-# the one recipient piggy-ids declares, so `recipients sync` always SKIPs.
-# Exercising the re-encrypt branch (recipients genuinely changed -> `ok` points
-# + a fresh-ciphertext commit) needs a second, distinct recipient; the
-# `reencrypt_unnecessary` false-cases are covered by Rust unit tests in
-# reencrypt.rs instead. A multi-card/multi-instance fibby harness that would
-# restore the real-crypto re-encrypt proof is tracked in amarbel-llc/piggy#147.
+# With one fibby card every ebox is encrypted to exactly the one recipient
+# piggy-ids declares, so `recipients sync` SKIPs unless the recipients change.
+# The symlink test adds $SECOND_RECIPIENT (a valid P-256 key no card here
+# holds) to piggy-ids first, so its re-encrypt is genuinely required and the
+# card's key keeps the secret decryptable (piggy#264). A multi-card fibby
+# harness for the other re-encrypt cases is tracked in amarbel-llc/piggy#147.
 #
 # Required env (supplied by the
 # `test-bats-conformance-recipients-sync-fibby` recipe):
@@ -36,6 +35,9 @@
 #
 # When invoked via the conformance lane's glob without those env vars set, the
 # suite gracefully skips — same convention as piggy_fibby_pivy_agent_smoke.bats.
+
+# The same off-card recipient t0600-recipients.bats uses.
+SECOND_RECIPIENT="piggy-recipient-v1@pivy_ecdh_p256_pub-qd43050juykyy3lchnnw2caygre8wqmasyk7kvaq7jsnj3wcnrpfve2jwdn"
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
@@ -332,6 +334,12 @@ function recipients_sync_follows_symlink_into_external_dir_via_fibby { # @test
 
   local before
   before="$(_ebox_sha "$ext/linked.ebox")"
+
+  # A second recipient makes the re-encrypt genuinely necessary: with the
+  # one card's recipient alone the ebox is already current and sync would
+  # SKIP it (piggy#264). The card's key stays among the recipients, so the
+  # secret still decrypts through fibby afterwards.
+  printf '%s  # piggy-test: second recipient\n' "$SECOND_RECIPIENT" >>"$store/piggy-ids"
 
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_AUTH_SOCK="$AGENT_SOCK" \
     PIGGY_STORE_DIR="$store" run "$PIGGY_BIN" pass recipients sync
