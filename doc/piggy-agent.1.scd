@@ -313,9 +313,11 @@ reason, reported _cancelled_), since zenity cannot hold input as RFC 0012
 §2.6 requires; such a host answers operator acts on a tty. A routine
 prompt carries a slate PIN REQUEST band, none of the operator-act colours. The helper
 takes focus when it opens and shows the text as plain text. For its first
-2 seconds it takes no input but a cancel, its fields are greyed out, and
-it shakes at any keystroke, so a key meant for another window can neither
-type into it nor confirm the act. A clock in the band shows the time: whole
+2 seconds it takes no input at all, Escape and its Cancel button included
+(RFC 0012 §2.6); its fields and buttons are greyed out, and it shakes at
+any keystroke, so a key meant for another window can neither type into it,
+confirm the act nor dismiss it. Only the window manager's close control,
+which the dialog cannot reach, still ends it then, as a cancel. A clock in the band shows the time: whole
 orange with the seconds of that block counted over it, then, when the
 dialog has a timeout, a green section and a short red one (a tenth of the
 time left after the block, at least 3 seconds) with the used part gone
@@ -327,7 +329,8 @@ Pressing Return to confirm leaves the clock as it is. The helper
 refuses a class it does not know. The dialog that takes the PIN must show
 the act's whole text, and neither PIN dialog scrolls, so the helper
 refuses an act whose rendered prompt is taller than 24 lines (a line longer
-than 80 characters counting as the lines it wraps to) before any dialog
+than 100 characters counting as the lines it wraps to; the dialog wraps
+there, so a markl-id takes one line) before any dialog
 opens; it never elides the text. The refusal exits 3 with its reason on
 standard output, naming the limit, and the agent reports the act
 _cancelled_ with that reason, so the caller can shorten the text. A tty

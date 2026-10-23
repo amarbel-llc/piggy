@@ -16,8 +16,9 @@ use crate::options::{Band, Options};
 const BAND_CSS_CLASS: &str = "piggy-band";
 const DIGIT_CSS_CLASS: &str = "piggy-digit";
 
-/// How long after opening the dialog takes no input but a cancel, so a
-/// keystroke meant for another window cannot fill in or confirm the act.
+/// How long after opening the dialog takes no input at all, a cancel
+/// included (RFC 0012 §2.6), so a keystroke meant for another window cannot
+/// fill in, confirm or dismiss the act.
 const INPUT_BLOCK: Duration = Duration::from_secs(2);
 /// The red section is a tenth of the time after the block, but never shorter
 /// than this: the last stretch before the dialog gives up.
@@ -216,12 +217,15 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
 
     window.set_child(Some(&content));
 
-    // The input block: nothing but a cancel is taken until it ends.
+    // The input block: nothing is taken until it ends, a cancel included
+    // (RFC 0012 §2.6). Only the window manager's close, which the dialog
+    // cannot reach, still ends it, as a cancel.
     let blocked = Rc::new(Cell::new(true));
     for input in &inputs {
         input.set_sensitive(false);
     }
     confirm.set_sensitive(false);
+    cancel.set_sensitive(false);
     let shaking = Rc::new(Cell::new(false));
     // The clock's phase, and how long it has run. Any input once the block
     // has ended pauses the clock for INPUT_PAUSE, so the dialog does not give
@@ -274,17 +278,21 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed(move |_, key, _, _| {
             let is_return = matches!(key, gdk::Key::Return | gdk::Key::KP_Enter);
-            if key == gdk::Key::Escape {
-                finish(Outcome::Cancelled);
-                glib::Propagation::Stop
-            } else if blocked.get() {
-                shake(&content, &shaking);
-                glib::Propagation::Stop
-            } else {
-                if !(return_confirms && is_return) {
-                    pause_clock();
+            match key_action(key == gdk::Key::Escape, blocked.get()) {
+                KeyAction::Cancel => {
+                    finish(Outcome::Cancelled);
+                    glib::Propagation::Stop
                 }
-                glib::Propagation::Proceed
+                KeyAction::Shake => {
+                    shake(&content, &shaking);
+                    glib::Propagation::Stop
+                }
+                KeyAction::Proceed => {
+                    if !(return_confirms && is_return) {
+                        pause_clock();
+                    }
+                    glib::Propagation::Proceed
+                }
             }
         });
         window.add_controller(keys);
@@ -334,6 +342,7 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
         let outcome = outcome.clone();
         let pin_entry = pin_entry.clone();
         let confirm = confirm.clone();
+        let cancel = cancel.clone();
         let digit = digit.clone();
         let lights = lights.clone();
         let clock = clock.clone();
@@ -371,6 +380,7 @@ pub fn run(options: &Options, text: &str) -> Result<Outcome, String> {
                             input.set_sensitive(true);
                         }
                         confirm.set_sensitive(confirm_sensitive_after_block);
+                        cancel.set_sensitive(true);
                         pin_entry.grab_focus();
                         (phase, in_phase) = (Phase::Green, Duration::ZERO);
                     }
@@ -591,6 +601,28 @@ fn band_row(band: Option<&Band>, clock: &impl IsA<gtk::Widget>) -> gtk::Box {
     row
 }
 
+/// What a key does: during the input hold none acts, Escape included (RFC
+/// 0012 §2.6); after it Escape cancels and the rest reach the fields.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyAction {
+    Cancel,
+    Shake,
+    Proceed,
+}
+
+fn key_action(is_escape: bool, held: bool) -> KeyAction {
+    match (held, is_escape) {
+        (true, _) => KeyAction::Shake,
+        (false, true) => KeyAction::Cancel,
+        (false, false) => KeyAction::Proceed,
+    }
+}
+
+/// The width the act's text wraps at, in characters: wide enough for a
+/// fully qualified markl-id (92) on one line, and the width the script's
+/// height limit (`operator_act_wrap_columns`) assumes.
+const TEXT_WIDTH_CHARS: i32 = 100;
+
 /// The act's text, set as plain text so nothing in it is read as markup, in
 /// a monospace face so look-alike characters stay apart, and wrapped at the
 /// width the script's height limit assumes.
@@ -599,7 +631,7 @@ fn text_label(text: &str) -> gtk::Label {
     label.set_use_markup(false);
     label.set_wrap(true);
     label.set_wrap_mode(pango::WrapMode::WordChar);
-    label.set_max_width_chars(80);
+    label.set_max_width_chars(TEXT_WIDTH_CHARS);
     label.set_xalign(0.0);
     label.add_css_class("monospace");
     label
@@ -686,6 +718,24 @@ mod tests {
         assert_eq!(fraction(Duration::from_secs(5), ten), 0.5);
         assert_eq!(fraction(Duration::from_secs(20), ten), 1.0);
         assert_eq!(fraction(Duration::from_secs(1), Duration::ZERO), 1.0);
+    }
+
+    /// RFC 0012 §2.6 (piggy#332): during the hold no key acts, Escape
+    /// included; afterwards Escape cancels and the rest reach the fields.
+    #[test]
+    fn during_the_hold_every_key_shakes_and_none_acts() {
+        assert_eq!(key_action(true, true), KeyAction::Shake);
+        assert_eq!(key_action(false, true), KeyAction::Shake);
+        assert_eq!(key_action(true, false), KeyAction::Cancel);
+        assert_eq!(key_action(false, false), KeyAction::Proceed);
+    }
+
+    #[test]
+    fn the_text_wraps_at_one_hundred_columns_so_a_markl_id_fits_one_line() {
+        // A fully qualified 32-byte digest markl-id is 92 characters.
+        let id = "piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400";
+        assert!(id.len() as i32 <= TEXT_WIDTH_CHARS, "{}", id.len());
+        assert_eq!(TEXT_WIDTH_CHARS, 100);
     }
 
     #[test]

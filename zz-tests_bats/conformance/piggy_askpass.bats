@@ -893,7 +893,7 @@ TRICKY_TEXT='grant <b>bold</b> & more; id ecdsa_p256_sig; path a\nb'
 # A PIN dialog does not scroll, and the dialog that takes the PIN must show
 # the whole text. An operator act whose rendered prompt is taller than the
 # script's operator_act_max_lines (24, long lines counting as the lines they
-# wrap to at 80 characters) is refused before any dialog opens: exit 3, the
+# wrap to at 100 characters) is refused before any dialog opens: exit 3, the
 # reason on stdout naming the limit. A routine prompt is never refused for
 # its height. These run the real script against a stub, so what is pinned
 # is the zenity argv and the exit, not what a real dialog draws.
@@ -1120,6 +1120,19 @@ helper_option() {
   assert_output --partial "cannot hold input"
   assert_equal "$(zenity_call_count)" 0
   [[ ! -e $HELPER_ARGV ]]
+}
+
+# piggy#332: the dialog wraps at 100 columns so a markl-id (92 characters)
+# takes one line; fifteen 90-character lines fit (at 80 columns each would
+# count twice and the act would be refused).
+@test "lines_up_to_one_hundred_columns_count_once" {
+  local text line
+  line="$(printf 'x%.0s' $(seq 1 90))"
+  text="$(for _ in $(seq 1 15); do printf '%s\n' "$line"; done)"
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="$text"
+
+  assert_success
+  assert_output "123456"
 }
 
 @test "tall_operator_act_text_is_refused_before_the_gtk_helper_opens" {

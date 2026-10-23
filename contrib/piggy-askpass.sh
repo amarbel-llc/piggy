@@ -137,7 +137,7 @@ escalation_word="ESCALATE"
 # so the PIN field and its button stay on a laptop screen; anything taller
 # is refused, never elided (RFC 0012 §2.6, piggy#322).
 operator_act_max_lines=24
-operator_act_wrap_columns=80
+operator_act_wrap_columns=100
 
 # The exit status of a prompt refused for a reason the caller can act on,
 # with that reason on stdout instead of a PIN. The agent passes the reason
