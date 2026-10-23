@@ -242,8 +242,13 @@ pub(crate) fn path_parent_for_search(path: &str) -> String {
     }
 }
 
-/// Why a pass-name is a sneaky path (a `..` component), or `None` if it is fine.
+/// Why a pass-name is a sneaky path (absolute, or a `..` component), or
+/// `None` if it is fine. Either would make `root.join(name)` resolve
+/// outside the store (piggy#260).
 pub(crate) fn sneaky_path_reason(path: &str) -> Option<&'static str> {
+    if Path::new(path).is_absolute() {
+        return Some("absolute path");
+    }
     for component in Path::new(path).components() {
         if matches!(component, std::path::Component::ParentDir) {
             return Some("`..` component");
@@ -417,6 +422,17 @@ mod tests {
         assert!(msg.contains("the write store /rw/store"), "{msg}");
         assert!(msg.contains("piggy pass cp tent/x tent/x"), "{msg}");
         assert!(msg.contains("put /ro/store first"), "{msg}");
+    }
+
+    /// piggy#260: an absolute pass-name would make `root.join(name)` leave
+    /// the store, so it is as sneaky as a `..` component.
+    #[test]
+    fn an_absolute_pass_name_is_sneaky() {
+        assert_eq!(sneaky_path_reason("/etc/passwd"), Some("absolute path"));
+        assert_eq!(sneaky_path_reason("a/../b"), Some("`..` component"));
+        assert_eq!(sneaky_path_reason("a/b"), None);
+        assert_eq!(sneaky_path_reason("a..b"), None);
+        assert_eq!(sneaky_path_reason(""), None);
     }
 
     #[test]

@@ -22,7 +22,7 @@ impl ManagementKeySealer for StoreSealer {
         if let Some(reason) = sneaky_path_reason(pass_name) {
             return Err(format!("invalid store path {pass_name:?} ({reason})"));
         }
-        if pass_name.is_empty() || std::path::Path::new(pass_name).is_absolute() {
+        if pass_name.is_empty() {
             return Err(format!(
                 "invalid store path {pass_name:?} (must be a non-empty path relative to the store)"
             ));
@@ -115,7 +115,7 @@ mod tests {
             .prepare("/elsewhere/management-key")
             .err()
             .expect("refused");
-        assert!(err.contains("relative to the store"), "{err}");
+        assert!(err.contains("absolute path"), "{err}");
     }
 
     #[test]
