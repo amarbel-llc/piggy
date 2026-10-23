@@ -85,7 +85,11 @@ pub fn run(args: &[String]) -> i32 {
             // Commit may legitimately fail (nothing to commit, etc) —
             // we mirror the bash behavior of treating that as
             // non-fatal.
-            let _ = git_ops::commit(&work_tree, &format!("Remove {} from store.", opts.path));
+            let _ = git_ops::commit(
+                &work_tree,
+                &format!("Remove {} from store.", opts.path),
+                &[target],
+            );
         }
     }
 

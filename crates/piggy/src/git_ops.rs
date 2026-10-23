@@ -61,6 +61,17 @@ pub(crate) fn is_inside_work_tree(work_tree: &Path) -> bool {
 /// A failing `git commit` is also non-fatal — the bash silently
 /// inherits git's exit code and proceeds.
 pub(crate) fn add_and_commit(work_tree: &Path, path: &Path, message: &str) -> Result<(), i32> {
+    add_and_commit_with(work_tree, path, &[], message)
+}
+
+/// [`add_and_commit`] whose commit also records `also` (paths already
+/// staged by the caller, such as a rename's removed source).
+pub(crate) fn add_and_commit_with(
+    work_tree: &Path,
+    path: &Path,
+    also: &[&Path],
+    message: &str,
+) -> Result<(), i32> {
     let add_status = Command::new("git")
         .arg("-C")
         .arg(work_tree)
@@ -84,20 +95,28 @@ pub(crate) fn add_and_commit(work_tree: &Path, path: &Path, message: &str) -> Re
         return Ok(());
     }
 
-    commit(work_tree, message)
+    let mut paths = vec![path];
+    paths.extend_from_slice(also);
+    commit(work_tree, message, &paths)
 }
 
-/// `git_commit "$message"` from piggy.sh. Honors the
-/// `piggy.signcommits` boolean config; failures are non-fatal and
-/// returned as Ok per the bash behavior.
-pub(crate) fn commit(work_tree: &Path, message: &str) -> Result<(), i32> {
+/// `git_commit "$message"` from piggy.sh, recording only `paths` (`git
+/// commit --only -- <paths>`): a store inside a larger working repository
+/// must not sweep the operator's unrelated staged files into piggy's commit
+/// (piggy#294). Honors the `piggy.signcommits` boolean config; failures are
+/// non-fatal and returned as Ok per the bash behavior.
+pub(crate) fn commit(work_tree: &Path, message: &str, paths: &[&Path]) -> Result<(), i32> {
     let sign = signing_flag(work_tree);
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(work_tree).arg("commit");
     if sign {
         cmd.arg("-S");
     }
-    cmd.arg("-m").arg(message);
+    cmd.arg("-m")
+        .arg(message)
+        .arg("--only")
+        .arg("--")
+        .args(paths);
     match cmd.status() {
         Ok(s) if s.success() => Ok(()),
         _ => Ok(()),

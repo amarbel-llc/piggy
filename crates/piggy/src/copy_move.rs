@@ -185,9 +185,10 @@ fn commit_move(root: &Path, old_path: &Path, old_dir: &Path, new_path: &Path, op
     if !old_path.exists() {
         if let Some(work_tree) = git_ops::find_inner_git_dir(new_path, root) {
             let _ = git_ops::rm(&work_tree, old_path);
-            let _ = git_ops::add_and_commit(
+            let _ = git_ops::add_and_commit_with(
                 &work_tree,
                 new_path,
+                &[old_path],
                 &format!("Rename {} to {}.", opts.old, opts.new),
             );
         }
@@ -197,7 +198,7 @@ fn commit_move(root: &Path, old_path: &Path, old_dir: &Path, new_path: &Path, op
         if let Some(work_tree) = git_ops::find_inner_git_dir(old_path, root) {
             let _ = git_ops::rm(&work_tree, old_path);
             if has_staged_changes(&work_tree, old_path) {
-                let _ = git_ops::commit(&work_tree, &format!("Remove {}.", opts.old));
+                let _ = git_ops::commit(&work_tree, &format!("Remove {}.", opts.old), &[old_path]);
             }
         }
     }
