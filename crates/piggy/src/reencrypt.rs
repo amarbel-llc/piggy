@@ -190,8 +190,7 @@ fn reencrypt_unnecessary(ebox_path: &Path, piggy_ids: &Path) -> bool {
 /// `None` on read/parse failure or any recipient that doesn't map to a
 /// PIV pubkey (e.g. age) — the caller treats `None` as "re-encrypt".
 fn recipients_from_piggy_ids(piggy_ids: &Path) -> Option<RecipientSet> {
-    let text = std::fs::read_to_string(piggy_ids).ok()?;
-    let file = RecipientFile::parse(&text).ok()?;
+    let file = RecipientFile::read(piggy_ids).ok()?;
     let mut set = BTreeSet::new();
     // Compare against the *encryption* recipients only. A `piggy-ids`
     // file may also carry SSH-auth (9A) keys (for `piggy ssh-copy-id`);

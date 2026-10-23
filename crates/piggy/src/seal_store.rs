@@ -37,10 +37,7 @@ impl ManagementKeySealer for StoreSealer {
         }
         let piggy_ids = find_piggy_ids(&root, &path_parent_for_search(pass_name))
             .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))?;
-        let text = std::fs::read_to_string(&piggy_ids)
-            .map_err(|e| format!("reading {}: {e}", piggy_ids.display()))?;
-        let file = RecipientFile::parse(&text)
-            .map_err(|e| format!("parsing {}: {e}", piggy_ids.display()))?;
+        let file = RecipientFile::read(&piggy_ids).map_err(|e| e.to_string())?;
         let recipients = file
             .encryption_recipients()
             .map(|r| r.id().clone())

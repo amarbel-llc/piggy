@@ -173,6 +173,19 @@ impl RecipientFile {
         Ok(Self { recipients })
     }
 
+    /// Read and [`parse`](Self::parse) the `piggy-ids` file at `path`; the
+    /// error names the path and whether reading or parsing failed.
+    pub fn read(path: &std::path::Path) -> Result<Self, ReadError> {
+        let text = std::fs::read_to_string(path).map_err(|source| ReadError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::parse(&text).map_err(|source| ReadError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
     /// Render to canonical form. Each recipient becomes a line:
     /// `<purpose>@<format>-<blech32>` followed by `  # <comment>`
     /// when the recipient has a comment. Trailing newline.
@@ -261,6 +274,23 @@ pub enum ParseError {
     },
     #[error("line {line}: empty token where markl ID was expected")]
     EmptyToken { line: usize },
+}
+
+/// Why [`RecipientFile::read`] failed.
+#[derive(Debug, Error)]
+pub enum ReadError {
+    #[error("reading {}: {source}", path.display())]
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parsing {}: {source}", path.display())]
+    Parse {
+        path: std::path::PathBuf,
+        #[source]
+        source: ParseError,
+    },
 }
 
 /// True iff `id` is a purpose-tagged `piggy-ids` entry: an encryption
@@ -708,6 +738,31 @@ mod tests {
         let second = RecipientFile::parse(&rendered).unwrap();
         assert_eq!(second.recipients(), first.recipients());
         assert_eq!(second.render(), rendered);
+    }
+
+    #[test]
+    fn read_parses_a_file_and_names_the_path_on_failure() {
+        let dir = std::env::temp_dir().join(format!("piggy-ids-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("piggy-ids");
+        std::fs::write(&good, format!("{}  # a\n", sample_id(31).to_wire())).unwrap();
+        assert_eq!(RecipientFile::read(&good).unwrap().recipients().len(), 1);
+
+        let missing = dir.join("absent");
+        let err = RecipientFile::read(&missing).unwrap_err().to_string();
+        assert!(
+            err.starts_with(&format!("reading {}: ", missing.display())),
+            "{err}"
+        );
+
+        let bad = dir.join("bad");
+        std::fs::write(&bad, "-a\n").unwrap();
+        let err = RecipientFile::read(&bad).unwrap_err().to_string();
+        assert!(
+            err.starts_with(&format!("parsing {}: line 1", bad.display())),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

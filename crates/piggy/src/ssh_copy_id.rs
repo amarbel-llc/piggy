@@ -112,10 +112,7 @@ fn split_args(args: &[String]) -> Result<(Option<String>, Vec<String>), String> 
 /// when present, else its markl ID (so an installed key is traceable back
 /// to the source line).
 fn authorized_key_lines(ids_path: &std::path::Path) -> Result<Vec<String>, String> {
-    let text = std::fs::read_to_string(ids_path)
-        .map_err(|e| format!("reading {}: {e}", ids_path.display()))?;
-    let file =
-        RecipientFile::parse(&text).map_err(|e| format!("parsing {}: {e}", ids_path.display()))?;
+    let file = RecipientFile::read(ids_path).map_err(|e| e.to_string())?;
 
     let mut lines = Vec::new();
     for r in file.ssh_auth_recipients() {

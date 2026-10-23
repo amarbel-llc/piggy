@@ -201,10 +201,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, DynErr> {
 }
 
 fn read_recipient_file(path: &Path) -> Result<RecipientFile, DynErr> {
-    let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let file =
-        RecipientFile::parse(&text).map_err(|e| format!("parsing {}: {e}", path.display()))?;
-    Ok(file)
+    Ok(RecipientFile::read(path)?)
 }
 
 fn cmd_validate(path: &Path) -> Result<ExitCode, DynErr> {
