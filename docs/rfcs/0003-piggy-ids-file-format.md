@@ -266,8 +266,8 @@ piggy-recipient-v1@age_x25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8
    attacker-controlled card. Piggy SHOULD treat `piggy-ids` as
    sensitive configuration, store it in a version-controlled and
    reviewed location, and surface visible diffs when it changes
-   (the existing `git_add_file` pattern in `src/piggy.sh` provides
-   this).
+   (the git commit every store write makes, `crates/piggy/src/git_ops.rs`,
+   provides this).
 
 2. **No private key material on disk.** A `piggy-ids` file carries
    only public keys. Loss of the file does not expose secrets;

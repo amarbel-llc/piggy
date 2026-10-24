@@ -274,7 +274,7 @@ framing, §4.3 methods + the `initialize` handshake, and §6 selection. The §5 
 card-identity requirement additionally has card-free unit coverage in
 `crates/piggy/src/card/frontend/tty.rs` and `crates/piggy/src/sign_bytes.rs`.
 
-### Covered requirements (to be implemented with the engine)
+### Covered requirements
 
 | Requirement | Description |
 |---|---|
@@ -284,9 +284,6 @@ card-identity requirement additionally has card-free unit coverage in
 | §4.4 cancellation | A `-32010` error response aborts the operation without retry. |
 | §5 tty identity | A card-scoped tty/askpass prompt names the card (serial + short GUID, CN when available) — piggy#195. |
 | §6 selection | `--frontend jsonrpc` without a usable channel fails before any card op. |
-
-Until the engine exists, the §5 tty card-identity requirement is already
-exercised by `piggy sign-bytes`' prompt tests (`crates/piggy/src/sign_bytes.rs`).
 
 ## Compatibility
 

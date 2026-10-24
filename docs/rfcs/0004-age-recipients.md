@@ -123,10 +123,12 @@ have `age_part_from_markl` produce a real `EboxTplPart` with
 
 ### Decrypt Pipeline
 
-Today, `src/piggy.sh::piggy_decrypt` shells out to the C
-`pivy-box stream decrypt` binary. That binary only knows v1 +
-`PivBox`. Under this RFC, `piggy_decrypt` switches to a new
-`piggy-ids decrypt` Rust subcommand that:
+Today, `crypt::decrypt` (`crates/piggy/src/crypt.rs`) decrypts
+in-process through the Rust stream decrypt, which only knows v1 +
+`PivBox`. (This paragraph first described a bash `piggy_decrypt`
+shelling out to C `pivy-box`; both are gone.) Under this RFC, the
+decrypt path switches to a new `piggy-ids decrypt` Rust subcommand
+that:
 
 1. Reads the ebox stream and parses the template.
 2. Enumerates parts; for each part tries the kind-specific unwrap:
@@ -241,15 +243,17 @@ recipient with `n=1`.
    decrypt dispatcher that handles v1 + v2 ebox files, routing
    PIV parts through the existing path and age parts through
    `age::IdentityFile`.
-7. **`piggy.sh` decrypt re-point.** **TODO** — swap
-   `piggy_decrypt()` and `reencrypt_path()` from
-   `pivy-box stream decrypt` to `piggy-ids decrypt`.
+7. **Decrypt re-point.** **TODO** — route `crypt::decrypt` and the
+   re-encryption walk (`reencrypt.rs`) through the v2-aware decrypt.
+   (Originally `piggy.sh`'s `piggy_decrypt()` and `reencrypt_path()`;
+   the bash path is gone.)
 8. **`flake.nix`.** **TODO** — add `age-plugin-yubikey` to
    `runtimeDeps`.
-9. **bats coverage.** **TODO** — new
-   `zz-tests_bats/t0150-age-recipients.bats` exercising
-   homogeneous-age, homogeneous-pivy (regression), and mixed
-   stores.
+9. **bats coverage.** **Partial** —
+   `zz-tests_bats/t0150-age-recipients.bats` exists and pins today's
+   refusals (age recipients are accepted by `piggy-ids` and rejected
+   at encrypt). **TODO**: round-trips over homogeneous-age,
+   homogeneous-pivy (regression), and mixed stores.
 
 ## References
 

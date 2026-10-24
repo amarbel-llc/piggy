@@ -208,12 +208,12 @@ Do **not** use `--wipe-slot=fido2` for a single-card rotation. It wipes
 
 ### piggy-native: `pivy-luks` (`piggy luks`) — reject
 
-- piggy vendors `vendor/pivy/src/pivy-luks.c` and exposes `piggy luks` as
-  an exec-to-C passthrough. **However, `nix/pivy.nix` does not build it**:
-  it installs only `pivy-tool`, `pivy-agent`, `pivy-box` and
-  `pivy-wire-test`, and the pivy Makefile gates `pivy-luks` behind
-  `USE_LUKS` plus libcryptsetup/json-c. In the nix build, `piggy luks` has
-  no binary to exec.
+- piggy vendors `vendor/pivy/src/pivy-luks.c`, but `nix/pivy.nix` never
+  built it (the pivy Makefile gates it behind `USE_LUKS` plus
+  libcryptsetup/json-c), and the exec-to-C `piggy luks` shortcut was
+  removed in piggy#265. Today's `piggy luks` (piggy#277,
+  `crates/piggy/src/luks.rs`) is a different command: a passphrase
+  keyslot fed from a store entry, not `pivy-luks`'s ebox token.
 - Its design conflicts with the requirement. `pivy-luks format` calls
   `crypt_format` with the ebox holding the raw volume key and **no
   keyslot** ("there is no passphrase that will unlock the volume key",
@@ -223,7 +223,7 @@ Do **not** use `--wipe-slot=fido2` for a single-card rotation. It wipes
   tpm2/pkcs11/fido2 plugins exist), so boot would need a bespoke initrd
   unit with pcscd, the C binary and an interactive PIN/recovery TTY flow.
   It would have the same PIV-PIN-sharing hazard as PKCS#11.
-- exec.rs documents the C luks path as having no planned Rust port.
+- There is no planned Rust port of `pivy-luks`'s token design.
 
 ### piggy-native: `age-plugin-piggy` / `piggy pass` key file — reject
 
@@ -264,7 +264,8 @@ Do **not** use `--wipe-slot=fido2` for a single-card rotation. It wipes
   It was not confirmed to be byte-identical to the target host's eventual pin.
 - piggy adds no code or commands for this feature. The FDR records a
   deliberate decision that the operator's cards unlock disks through
-  FIDO2, outside piggy.
+  FIDO2, outside piggy. (`piggy luks`, piggy#277, is separate: a
+  store-keyed passphrase slot, not boot-time token unlock.)
 
 ## Tuning Levers
 
