@@ -69,6 +69,7 @@ mod show_batch;
 mod sign_bytes;
 mod ssh_copy_id;
 mod store;
+mod store_tree;
 mod tree_recipients;
 mod usage;
 mod verify;

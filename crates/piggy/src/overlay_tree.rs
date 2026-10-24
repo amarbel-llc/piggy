@@ -5,20 +5,9 @@
 //! `show.rs`; this renderer runs only when `PIGGY_STORE_DIR` names
 //! several.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::store::{MAX_WALK_DEPTH, is_ebox};
-
-enum Node {
-    Dir {
-        name: String,
-        children: Vec<Node>,
-    },
-    Entry {
-        name: String,
-        shadowed_by: Option<PathBuf>,
-    },
-}
+use crate::store_tree::{UnreadableSubdir, render_tree, walk_tree};
 
 /// The listing of `sub` (empty for the whole store) across `roots`, or
 /// `None` when no store holds it as a directory.
@@ -41,75 +30,17 @@ pub(crate) fn render(roots: &[PathBuf], sub: &str) -> Option<String> {
             sub
         };
         out.push_str(&format!("{banner} ({})\n", root.display()));
-        let nodes = build(&dir, Path::new(sub), &roots[..i], 0);
-        render_nodes(&nodes, "", &mut out);
+        let earlier = &roots[..i];
+        let tree = walk_tree(&dir, UnreadableSubdir::ShowEmpty).unwrap_or_default();
+        out.push_str(&render_tree(&tree, true, |name, path| {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            match earlier.iter().find(|store| store.join(rel).is_file()) {
+                Some(store) => format!("{name}  [shadowed by {}]", store.display()),
+                None => name.to_string(),
+            }
+        }));
     }
     any.then_some(out)
-}
-
-/// `dir`'s tree, `rel` being its path inside the store, each entry
-/// checked against the `earlier` stores. Prunes `.git`, follows
-/// symlinks, keeps directories and eboxes, sorts by file name — the
-/// shape `tree -l` lists.
-fn build(dir: &Path, rel: &Path, earlier: &[PathBuf], depth: usize) -> Vec<Node> {
-    if depth > MAX_WALK_DEPTH {
-        return Vec::new();
-    }
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut entries: Vec<(String, PathBuf)> = read
-        .filter_map(Result::ok)
-        .filter(|e| e.file_name() != ".git")
-        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
-        .collect();
-    entries.sort();
-
-    let mut nodes = Vec::with_capacity(entries.len());
-    for (name, path) in entries {
-        let Ok(meta) = std::fs::metadata(&path) else {
-            continue;
-        };
-        let rel = rel.join(&name);
-        if meta.is_dir() {
-            nodes.push(Node::Dir {
-                children: build(&path, &rel, earlier, depth + 1),
-                name,
-            });
-        } else if meta.is_file() && is_ebox(&path) {
-            nodes.push(Node::Entry {
-                name: crate::tree_recipients::strip_ebox_suffix(&name),
-                shadowed_by: earlier
-                    .iter()
-                    .find(|root| root.join(&rel).is_file())
-                    .cloned(),
-            });
-        }
-    }
-    nodes
-}
-
-fn render_nodes(nodes: &[Node], prefix: &str, out: &mut String) {
-    for (i, node) in nodes.iter().enumerate() {
-        let last = i + 1 == nodes.len();
-        out.push_str(prefix);
-        out.push_str(if last { "└── " } else { "├── " });
-        match node {
-            Node::Dir { name, children } => {
-                out.push_str(name);
-                out.push('\n');
-                let child_prefix = format!("{prefix}{}", if last { "    " } else { "│   " });
-                render_nodes(children, &child_prefix, out);
-            }
-            Node::Entry { name, shadowed_by } => {
-                out.push_str(name);
-                if let Some(store) = shadowed_by {
-                    out.push_str(&format!("  [shadowed by {}]", store.display()));
-                }
-                out.push('\n');
-            }
-        }
-    }
 }
 
 #[cfg(test)]

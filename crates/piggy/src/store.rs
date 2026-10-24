@@ -183,48 +183,14 @@ pub(crate) fn resolve_target(root: &Path, subpath: Option<&str>) -> Result<PathB
     Ok(canon_target)
 }
 
-/// Walk `root` recursively and collect every `*.ebox` file, sorted
-/// lexicographically. Mirrors the bash `find -L $root -path '*/.git'
-/// -prune -o -iname '*.ebox' -print0` invocation. Follows symlinks
-/// with a bounded depth (MAX_WALK_DEPTH) to handle cycles that bash's
-/// `find -L` warn-and-skips.
+/// Every `*.ebox` under `root`, sorted: the flatten of
+/// [`crate::store_tree::walk_tree`], so the listings walk the same
+/// entries. Mirrors the bash `find -L $root -path '*/.git' -prune -o
+/// -iname '*.ebox' -print0` invocation, with a bounded depth
+/// (MAX_WALK_DEPTH) for the symlink cycles bash's `find -L` warn-and-skips.
 pub(crate) fn collect_eboxes(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    walk(root, 0, &mut out)?;
-    out.sort();
-    Ok(out)
-}
-
-fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if depth > MAX_WALK_DEPTH {
-        return Ok(());
-    }
-    let meta = match std::fs::metadata(dir) {
-        Ok(m) => m,
-        Err(_) => return Ok(()),
-    };
-    if !meta.is_dir() {
-        return Ok(());
-    }
-    let read = std::fs::read_dir(dir)?;
-    for entry in read {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name == ".git" {
-            continue;
-        }
-        let path = entry.path();
-        let file_type = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if file_type.is_dir() {
-            walk(&path, depth + 1, out)?;
-        } else if file_type.is_file() && is_ebox(&path) {
-            out.push(path);
-        }
-    }
-    Ok(())
+    use crate::store_tree::{UnreadableSubdir, ebox_paths, walk_tree};
+    Ok(ebox_paths(&walk_tree(root, UnreadableSubdir::Fail)?))
 }
 
 pub(crate) fn is_ebox(path: &Path) -> bool {

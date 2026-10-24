@@ -25,25 +25,12 @@ use std::path::{Path, PathBuf};
 use piggy_box::ebox::Ebox;
 use piggy_markl::{FormatId, Id as MarklId, PurposeId};
 
-use crate::store::{MAX_WALK_DEPTH, is_ebox};
+use crate::store_tree::{UnreadableSubdir, ebox_paths, render_tree, walk_tree};
 
 /// Minimum number of leading chars shown for a recipient whose prefix
 /// is otherwise unambiguous at a shorter length. Keeps a lone recipient
 /// from collapsing to one or two characters.
 const MIN_PREFIX: usize = 8;
-
-/// One node in the rendered tree.
-enum Node {
-    Dir {
-        name: String,
-        children: Vec<Node>,
-    },
-    Ebox {
-        /// Display name with the `.ebox` suffix stripped.
-        name: String,
-        recipients: RecipientCell,
-    },
-}
 
 /// The recipients of one ebox: either the rendered full markl wire
 /// strings (possibly empty), or a marker that the file didn't parse.
@@ -55,96 +42,40 @@ enum RecipientCell {
 /// Entry point from `show.rs`. Prints `banner` (the "Password Store" /
 /// subpath line), then the annotated tree. Returns a process exit code.
 pub(crate) fn print_tree_with_recipients(banner: &str, dir_target: &Path) -> i32 {
-    let children = match build_tree(dir_target, 0) {
-        Ok(c) => c,
+    // An unreadable subdirectory lists empty rather than aborting the tree.
+    let tree = match walk_tree(dir_target, UnreadableSubdir::ShowEmpty) {
+        Ok(t) => t,
         Err(err) => {
             eprintln!("piggy pass show: walk {}: {err}", dir_target.display());
             return 1;
         }
     };
-
-    // Collect the global distinct recipient set, compute each one's
-    // shortest-unique prefix once, so a recipient renders identically
-    // on every line it appears.
-    let mut distinct: BTreeSet<String> = BTreeSet::new();
-    collect_recipients(&children, &mut distinct);
-    let prefixes = shortest_unique_prefixes(&distinct);
-
-    let mut out = String::new();
-    out.push_str(banner);
-    out.push('\n');
-    render(&children, "", &prefixes, &mut out);
-
-    print!("{out}");
+    print!(
+        "{banner}\n{}",
+        render_with_recipients(&tree, extract_recipients)
+    );
     0
 }
 
-/// Walk `dir` into a `Node` forest, mirroring `store::collect_eboxes`
-/// semantics: prune `.git`, follow symlinks (via `metadata`), bound
-/// depth at `MAX_WALK_DEPTH`, and sort each directory's children by
-/// file name (so output is deterministic and matches `collect_eboxes`'s
-/// lexicographic ordering). Non-ebox files are skipped. Any IO error on
-/// a *subdirectory* — whether the `read_dir` open or a mid-iteration
-/// `DirEntry` failure — propagates out of that recursive call and is
-/// caught by `unwrap_or_default()`, so the subdirectory renders with
-/// empty children (best-effort; never aborts the whole tree). This is a
-/// deliberate softening of `store::walk`, which propagates the same
-/// errors all the way up. The top-level error propagates so the caller
-/// can report it (the target already passed `.is_dir()`).
-fn build_tree(dir: &Path, depth: usize) -> std::io::Result<Vec<Node>> {
-    if depth > MAX_WALK_DEPTH {
-        return Ok(Vec::new());
-    }
-    let mut entries: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name == ".git" {
-            continue;
-        }
-        entries.push((name, entry.path()));
-    }
-    // Sort by file name (raw, including `.ebox`) so dirs and files
-    // interleave alphabetically — same order as `tree(1)` and
-    // `collect_eboxes`.
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut nodes = Vec::with_capacity(entries.len());
-    for (name, path) in entries {
-        let meta = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if meta.is_dir() {
-            let children = build_tree(&path, depth + 1).unwrap_or_default();
-            nodes.push(Node::Dir {
-                name: name.to_string_lossy().into_owned(),
-                children,
-            });
-        } else if meta.is_file() && is_ebox(&path) {
-            nodes.push(Node::Ebox {
-                name: strip_ebox_suffix(&name.to_string_lossy()),
-                recipients: extract_recipients(&path),
-            });
-        }
-    }
-    Ok(nodes)
-}
-
-/// Strip a trailing `.ebox` suffix case-insensitively, matching
-/// [`is_ebox`]'s `eq_ignore_ascii_case` acceptance (so `FOO.EBOX`
-/// renders as `FOO`, not `FOO.EBOX`). Preserves the surviving prefix's
-/// original casing. Mirrors `verify::strip_ebox`; a shared helper is a
-/// followup (see the verify/tree_recipients walk-and-render unification
-/// issue).
-pub(crate) fn strip_ebox_suffix(name: &str) -> String {
-    if name.len() >= ".ebox".len() {
-        let (head, tail) = name.split_at(name.len() - ".ebox".len());
-        if tail.eq_ignore_ascii_case(".ebox") {
-            return head.to_string();
-        }
-    }
-    name.to_string()
+/// The glyphed tree with each ebox annotated by `recipients_of` its path.
+/// Every recipient's shortest-unique prefix is computed once over the
+/// whole listing, so a recipient renders identically on every line.
+fn render_with_recipients(
+    tree: &[crate::store_tree::StoreTree],
+    recipients_of: impl Fn(&Path) -> RecipientCell,
+) -> String {
+    let cells: HashMap<PathBuf, RecipientCell> = ebox_paths(tree)
+        .into_iter()
+        .map(|path| {
+            let cell = recipients_of(&path);
+            (path, cell)
+        })
+        .collect();
+    let distinct = distinct_recipients(cells.values());
+    let prefixes = shortest_unique_prefixes(&distinct);
+    render_tree(tree, true, |name, path| {
+        format!("{name}  {}", format_annotation(&cells[path], &prefixes))
+    })
 }
 
 /// Read an ebox and render every recipient pubkey (across all configs'
@@ -185,25 +116,18 @@ fn render_recipient(pubkey: &[u8]) -> String {
     .unwrap_or_else(|_| "?".to_string())
 }
 
-/// Gather the global distinct set of rendered recipient IDs across the
-/// whole forest, excluding the `"?"` sentinel (it isn't truncatable).
-fn collect_recipients(nodes: &[Node], out: &mut BTreeSet<String>) {
-    for node in nodes {
-        match node {
-            Node::Dir { children, .. } => collect_recipients(children, out),
-            Node::Ebox {
-                recipients: RecipientCell::Ids(ids),
-                ..
-            } => {
-                for id in ids {
-                    if id != "?" {
-                        out.insert(id.clone());
-                    }
-                }
-            }
-            Node::Ebox { .. } => {}
-        }
-    }
+/// The distinct rendered recipient IDs across `cells`, excluding the `"?"`
+/// sentinel (it isn't truncatable).
+fn distinct_recipients<'a>(cells: impl Iterator<Item = &'a RecipientCell>) -> BTreeSet<String> {
+    cells
+        .filter_map(|cell| match cell {
+            RecipientCell::Ids(ids) => Some(ids),
+            RecipientCell::Unparseable => None,
+        })
+        .flatten()
+        .filter(|id| *id != "?")
+        .cloned()
+        .collect()
 }
 
 /// For a sorted distinct set of strings, compute each string's
@@ -253,36 +177,6 @@ fn render_id(id: &str, prefixes: &HashMap<String, usize>) -> String {
     s
 }
 
-/// Recursive tree render with `tree(1)`-style glyphs (plain text, no
-/// ANSI). `prefix` is the accumulated indentation for the current
-/// level.
-fn render(nodes: &[Node], prefix: &str, prefixes: &HashMap<String, usize>, out: &mut String) {
-    let n = nodes.len();
-    for (i, node) in nodes.iter().enumerate() {
-        let is_last = i + 1 == n;
-        let connector = if is_last { "└── " } else { "├── " };
-        let child_prefix = if is_last { "    " } else { "│   " };
-        match node {
-            Node::Dir { name, children } => {
-                out.push_str(prefix);
-                out.push_str(connector);
-                out.push_str(name);
-                out.push('\n');
-                let next = format!("{prefix}{child_prefix}");
-                render(children, &next, prefixes, out);
-            }
-            Node::Ebox { name, recipients } => {
-                out.push_str(prefix);
-                out.push_str(connector);
-                out.push_str(name);
-                out.push_str("  ");
-                out.push_str(&format_annotation(recipients, prefixes));
-                out.push('\n');
-            }
-        }
-    }
-}
-
 /// Format the `[...]` recipient annotation for one ebox leaf.
 fn format_annotation(recipients: &RecipientCell, prefixes: &HashMap<String, usize>) -> String {
     match recipients {
@@ -302,18 +196,6 @@ mod tests {
 
     fn ids(items: &[&str]) -> BTreeSet<String> {
         items.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn strip_ebox_suffix_is_case_insensitive() {
-        // Matches is_ebox's eq_ignore_ascii_case acceptance, preserving
-        // the surviving prefix's casing.
-        assert_eq!(strip_ebox_suffix("jira.env.ebox"), "jira.env");
-        assert_eq!(strip_ebox_suffix("FOO.EBOX"), "FOO");
-        assert_eq!(strip_ebox_suffix("Mixed.EbOx"), "Mixed");
-        // No suffix → unchanged; `.ebox` mid-name is not a suffix.
-        assert_eq!(strip_ebox_suffix("notanebox"), "notanebox");
-        assert_eq!(strip_ebox_suffix("a.eboxname"), "a.eboxname");
     }
 
     #[test]
@@ -386,29 +268,44 @@ mod tests {
         assert_eq!(got, "?");
     }
 
+    use crate::store_tree::StoreTree;
+
     fn r_ids(items: &[&str]) -> RecipientCell {
         RecipientCell::Ids(items.iter().map(|s| s.to_string()).collect())
     }
 
+    fn ebox(name: &str) -> StoreTree {
+        StoreTree::Ebox {
+            name: name.into(),
+            path: PathBuf::from(format!("{name}.ebox")),
+        }
+    }
+
+    /// Recipients keyed by the ebox's file stem, for the fixed trees here.
+    fn by_stem<'a>(table: &'a [(&'a str, RecipientCell)]) -> impl Fn(&Path) -> RecipientCell + 'a {
+        move |path: &Path| {
+            let stem = path.file_stem().unwrap().to_str().unwrap();
+            match table.iter().find(|(name, _)| *name == stem) {
+                Some((_, RecipientCell::Ids(ids))) => RecipientCell::Ids(ids.clone()),
+                _ => RecipientCell::Unparseable,
+            }
+        }
+    }
+
     #[test]
     fn render_tree_glyphs_last_vs_nonlast() {
-        let nodes = vec![
-            Node::Dir {
+        let tree = vec![
+            StoreTree::Dir {
                 name: "etsy".into(),
-                children: vec![Node::Ebox {
-                    name: "jira.env".into(),
-                    recipients: r_ids(&["AAAA1111"]),
-                }],
+                children: vec![ebox("jira.env")],
             },
-            Node::Ebox {
-                name: "fastmail".into(),
-                recipients: r_ids(&["BBBB2222"]),
-            },
+            ebox("fastmail"),
         ];
-        let set = ids(&["AAAA1111", "BBBB2222"]);
-        let prefixes = shortest_unique_prefixes(&set);
-        let mut out = String::new();
-        render(&nodes, "", &prefixes, &mut out);
+        let table = [
+            ("jira.env", r_ids(&["AAAA1111"])),
+            ("fastmail", r_ids(&["BBBB2222"])),
+        ];
+        let prefixes = shortest_unique_prefixes(&ids(&["AAAA1111", "BBBB2222"]));
         // etsy is non-last → ├──, its child is last under │   .
         // fastmail is last → └──.
         let expected = format!(
@@ -416,30 +313,19 @@ mod tests {
             render_id("AAAA1111", &prefixes),
             render_id("BBBB2222", &prefixes),
         );
-        assert_eq!(out, expected);
+        assert_eq!(render_with_recipients(&tree, by_stem(&table)), expected);
     }
 
     #[test]
     fn render_unparseable_shows_question_mark() {
-        let nodes = vec![Node::Ebox {
-            name: "broken".into(),
-            recipients: RecipientCell::Unparseable,
-        }];
-        let mut out = String::new();
-        render(&nodes, "", &HashMap::new(), &mut out);
+        let out = render_with_recipients(&[ebox("broken")], by_stem(&[]));
         assert_eq!(out, "└── broken  [?]\n");
     }
 
     #[test]
     fn render_multiple_recipients_comma_joined() {
-        let set = ids(&["AAAA1111", "BBBB2222"]);
-        let prefixes = shortest_unique_prefixes(&set);
-        let nodes = vec![Node::Ebox {
-            name: "shared".into(),
-            recipients: r_ids(&["AAAA1111", "BBBB2222"]),
-        }];
-        let mut out = String::new();
-        render(&nodes, "", &prefixes, &mut out);
+        let table = [("shared", r_ids(&["AAAA1111", "BBBB2222"]))];
+        let out = render_with_recipients(&[ebox("shared")], by_stem(&table));
         assert!(
             out.contains(", "),
             "expected comma-joined recipients: {out}"
@@ -459,8 +345,10 @@ mod tests {
         p
     }
 
+    /// A store on disk: `.git` and non-ebox files left out, and a file that
+    /// is not a real ebox annotated `[?]`.
     #[test]
-    fn build_tree_prunes_git_and_skips_non_ebox() {
+    fn a_store_on_disk_renders_unparseable_eboxes_as_question_marks() {
         let root = tempdir();
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::write(root.join(".git/config"), b"x").unwrap();
@@ -469,29 +357,10 @@ mod tests {
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/b.ebox"), b"nope").unwrap();
 
-        let nodes = build_tree(&root, 0).unwrap();
-        // Expect: `a.ebox` leaf and `sub` dir; no `.git`, no notes.txt.
-        let names: Vec<&str> = nodes
-            .iter()
-            .map(|n| match n {
-                Node::Dir { name, .. } => name.as_str(),
-                Node::Ebox { name, .. } => name.as_str(),
-            })
-            .collect();
-        assert_eq!(names, vec!["a", "sub"], "got: {names:?}");
-        // The fake ebox bytes won't parse → Unparseable.
-        match &nodes[0] {
-            Node::Ebox {
-                recipients: RecipientCell::Unparseable,
-                ..
-            } => {}
-            other => panic!(
-                "expected Unparseable ebox, got a {}",
-                match other {
-                    Node::Dir { .. } => "dir",
-                    Node::Ebox { .. } => "parseable ebox",
-                }
-            ),
-        }
+        let tree = walk_tree(&root, UnreadableSubdir::ShowEmpty).unwrap();
+        assert_eq!(
+            render_with_recipients(&tree, extract_recipients),
+            "├── a  [?]\n└── sub\n    └── b  [?]\n"
+        );
     }
 }
