@@ -158,8 +158,12 @@ var (
 )
 
 // TODO remove unnecessary references
+var FormatHashSha256 = internal.FormatHashSha256
+
+// FormatIds returns every registered format id, sorted. Aliases from
+// RegisterPurposeIdAlias are not format ids and are not included.
 var (
-	FormatHashSha256        = internal.FormatHashSha256
+	FormatIds               = internal.FormatIds
 	FormatOrEmptyOnNull     = internal.FormatOrEmptyOnNull
 	GetDigestTypeForSigType = internal.GetDigestTypeForSigType
 	GetFormatHashOrError    = internal.GetFormatHashOrError

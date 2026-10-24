@@ -635,7 +635,15 @@ payload does not equal the registered size for the named format. *(test:
 | `ssh_ecdsa_nistp256_pub` | 33       | SSH-suitable ECDSA P-256 public key, SEC1-compressed |
 | `ssh_ed25519_pub`    | 32           | SSH-suitable Ed25519 public key               |
 | `ssh_ecdsa_nistp384_pub` | 49       | SSH-suitable ECDSA P-384 public key, SEC1-compressed |
+| `pigpen_wrap_p256`   | 65           | pigpen key wrap to a P-256 recipient: `Epk_compressed(33) ‖ AEAD(32)` (RFC 0008 §5) |
+| `pigpen_wrap_x25519` | 64           | pigpen key wrap to an X25519 recipient: `Epk(32) ‖ AEAD(32)` (RFC 0008 §5) |
+| `pigpen_header_mac`  | 32           | pigpen header HMAC-SHA256 (RFC 0008 §5)      |
 | `nonce`              | 32           | Random nonce                                 |
+
+The table is gated against the registered formats and their sizes
+(`TestRFC0011FormatTableMatchesRegistry` in
+`go/internal/charlie/markl_registrations/`): a row with no registration,
+a registration with no row, or a size mismatch fails the test.
 
 The `*_ssh` formats carry a bare public-key payload (32 or 33 bytes);
 the SSH-agent integration that produces signatures with these keys is

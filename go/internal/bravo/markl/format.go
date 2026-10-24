@@ -2,6 +2,7 @@ package markl
 
 import (
 	"fmt"
+	"sort"
 
 	"code.linenisgreat.com/piggy/go/internal/0/domain_interfaces"
 	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/errors"
@@ -96,6 +97,20 @@ func RegisterPurposeIdAlias(purposeId, formatId string) {
 	}
 
 	purposeIdToFormatIdAliases[purposeId] = formatId
+}
+
+// FormatIds returns every registered format id, sorted. Aliases from
+// RegisterPurposeIdAlias are not format ids and are not included.
+func FormatIds() []string {
+	ids := make([]string, 0, len(formats))
+
+	for id := range formats {
+		ids = append(ids, id)
+	}
+
+	sort.Strings(ids)
+
+	return ids
 }
 
 func GetFormatOrError(formatId string) (domain_interfaces.MarklFormat, error) {
