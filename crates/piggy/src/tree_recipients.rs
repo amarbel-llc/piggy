@@ -27,10 +27,21 @@ use piggy_markl::{FormatId, Id as MarklId, PurposeId};
 
 use crate::store_tree::{UnreadableSubdir, ebox_paths, render_tree, walk_tree};
 
-/// Minimum number of leading chars shown for a recipient whose prefix
-/// is otherwise unambiguous at a shorter length. Keeps a lone recipient
-/// from collapsing to one or two characters.
-const MIN_PREFIX: usize = 8;
+/// Minimum number of body characters shown past a recipient's constant
+/// `purpose@format-` lead, for a recipient whose prefix is otherwise
+/// unambiguous at a shorter length. Every piggy key shares that lead, so
+/// a floor counted from the start of the ID would show nothing that
+/// identifies a lone recipient (piggy#263).
+const MIN_BODY: usize = 8;
+
+/// Where the blech32 body starts in a rendered markl ID: just past the
+/// `-` that follows the format, or 0 when the string has no such `-`.
+fn body_start(id: &str) -> usize {
+    let format_start = id.find('@').map_or(0, |at| at + 1);
+    id[format_start..]
+        .find('-')
+        .map_or(0, |dash| format_start + dash + 1)
+}
 
 /// The recipients of one ebox: either the rendered full markl wire
 /// strings (possibly empty), or a marker that the file didn't parse.
@@ -132,8 +143,9 @@ fn distinct_recipients<'a>(cells: impl Iterator<Item = &'a RecipientCell>) -> BT
 
 /// For a sorted distinct set of strings, compute each string's
 /// shortest-unique-prefix length: one char past the longest common
-/// prefix it shares with either neighbour, floored at [`MIN_PREFIX`]
-/// and capped at the string's own length. Stable: identical input maps
+/// prefix it shares with either neighbour, floored at [`MIN_BODY`]
+/// characters past its [`body_start`] and capped at the string's own
+/// length. Stable: identical input maps
 /// to identical output regardless of how the set was built (BTreeSet
 /// gives sorted order).
 fn shortest_unique_prefixes(ids: &BTreeSet<String>) -> HashMap<String, usize> {
@@ -151,7 +163,7 @@ fn shortest_unique_prefixes(ids: &BTreeSet<String>) -> HashMap<String, usize> {
             0
         };
         let needed = lcp_prev.max(lcp_next) + 1;
-        let len = needed.max(MIN_PREFIX).min(v[i].len());
+        let len = needed.max(body_start(v[i]) + MIN_BODY).min(v[i].len());
         out.insert(v[i].to_string(), len);
     }
     out
@@ -198,29 +210,43 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    /// piggy#263: a lone recipient shows MIN_BODY body characters past its
+    /// constant `purpose@format-` lead, so its annotation identifies the key
+    /// instead of stopping inside the lead every piggy key shares.
     #[test]
-    fn single_recipient_uses_min_prefix() {
-        let set = ids(&["piggy-recipient-v1@pivy_ecdh_p256_pub-q0p9kkuxlongbody"]);
-        let p = shortest_unique_prefixes(&set);
-        let id = set.iter().next().unwrap();
-        assert_eq!(p[id], MIN_PREFIX);
+    fn single_recipient_shows_min_body_past_the_constant_lead() {
+        let id = "piggy-recipient-v1@pivy_ecdh_p256_pub-q0p9kkuxlongbody";
+        let p = shortest_unique_prefixes(&ids(&[id]));
+        let lead = "piggy-recipient-v1@pivy_ecdh_p256_pub-".len();
+        assert_eq!(p[id], lead + MIN_BODY);
+        assert_eq!(
+            &id[..p[id]],
+            "piggy-recipient-v1@pivy_ecdh_p256_pub-q0p9kkux"
+        );
     }
 
     #[test]
     fn two_recipients_sharing_constant_prefix_diverge_in_body() {
-        // Same `piggy-recipient-v1@pivy_ecdh_p256_pub-` prefix; bodies
-        // diverge at the first body char.
-        let a = "piggy-recipient-v1@pivy_ecdh_p256_pub-q0p9aaaa";
-        let b = "piggy-recipient-v1@pivy_ecdh_p256_pub-qd5taaaa";
+        // Same `piggy-recipient-v1@pivy_ecdh_p256_pub-` lead; bodies
+        // diverge at the second body char, well inside the MIN_BODY floor.
+        let a = "piggy-recipient-v1@pivy_ecdh_p256_pub-q0p9aaaaaaaa";
+        let b = "piggy-recipient-v1@pivy_ecdh_p256_pub-qd5taaaaaaaa";
         let set = ids(&[a, b]);
         let p = shortest_unique_prefixes(&set);
-        let constant = "piggy-recipient-v1@pivy_ecdh_p256_pub-".len();
-        // They share the constant prefix plus the first body char `q`,
-        // diverging at index constant+1 (`0` vs `d`). needed =
-        // (constant+1) + 1.
-        assert_eq!(p[a], constant + 2);
-        assert_eq!(p[b], constant + 2);
-        // The displayed prefixes must actually differ.
+        let lead = "piggy-recipient-v1@pivy_ecdh_p256_pub-".len();
+        assert_eq!(p[a], lead + MIN_BODY);
+        assert_eq!(p[b], lead + MIN_BODY);
+        assert_ne!(&a[..p[a]], &b[..p[b]]);
+    }
+
+    /// Bodies that share more than MIN_BODY characters still extend one past
+    /// the longest common prefix.
+    #[test]
+    fn recipients_sharing_more_than_min_body_extend_past_it() {
+        let a = "piggy-recipient-v1@pivy_ecdh_p256_pub-qqqqqqqqqqa";
+        let b = "piggy-recipient-v1@pivy_ecdh_p256_pub-qqqqqqqqqqb";
+        let p = shortest_unique_prefixes(&ids(&[a, b]));
+        assert_eq!(p[a], a.len());
         assert_ne!(&a[..p[a]], &b[..p[b]]);
     }
 
@@ -238,7 +264,7 @@ mod tests {
 
     #[test]
     fn prefix_capped_at_full_length() {
-        // A short string (< MIN_PREFIX) can't exceed its own length.
+        // A short string (< MIN_BODY) can't exceed its own length.
         let set = ids(&["abc"]);
         let p = shortest_unique_prefixes(&set);
         assert_eq!(p["abc"], 3);
