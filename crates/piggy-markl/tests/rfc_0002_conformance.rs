@@ -11,7 +11,7 @@
 //! decode-from-string match) and asserts each invalid vector fails
 //! with the expected error variant.
 
-use piggy_markl::{FormatId, Id, ParseError, PurposeId, blech32};
+use piggy_markl::{FormatId, Id, ParseError, PurposeError, PurposeId, blech32};
 use serde::Deserialize;
 
 const VECTORS: &str = include_str!("../testdata/0002-markl-id-format-vectors.json");
@@ -161,24 +161,40 @@ fn rfc_0002_invalid_vectors_reject() {
     }
 }
 
-/// Map RFC 0002 error names to piggy-markl error variants.
+/// Map RFC 0011 §4 failure categories to piggy-markl error variants. A
+/// category may cover more than one variant: §7.1 leaves the concrete
+/// error type to the implementation, and piggy-markl names two cases
+/// more finely than §4 does — all-uppercase is `Uppercase` (§4 step 2's
+/// `MixedCase` covers any uppercase), and a second `-` is a data
+/// character outside the alphabet (§4 step 3's `SeparatorMissing`).
 fn matches_expected_error(actual: &ParseError, expected_name: &str) -> bool {
     matches!(
         (actual, expected_name),
-        (ParseError::Blech32(blech32::Error::MixedCase), "MixedCase")
-            | (
-                ParseError::Blech32(blech32::Error::SeparatorMissing),
-                "SeparatorMissing"
-            )
-            | (
-                ParseError::Blech32(blech32::Error::InvalidChecksum),
-                "InvalidChecksum"
-            )
-            | (
-                ParseError::Blech32(blech32::Error::InvalidCharacterInData { .. }),
-                "InvalidCharacter",
-            )
+        (
+            ParseError::Blech32(blech32::Error::MixedCase | blech32::Error::Uppercase),
+            "MixedCase"
+        ) | (
+            ParseError::Blech32(blech32::Error::SeparatorMissing),
+            "SeparatorMissing"
+        ) | (
+            ParseError::Blech32(blech32::Error::InvalidCharacterInData { char: '-', .. }),
+            "SeparatorMissing"
+        ) | (
+            ParseError::Blech32(blech32::Error::InvalidChecksum),
+            "InvalidChecksum"
+        ) | (
+            ParseError::Blech32(blech32::Error::InvalidCharacterInData { .. }),
+            "InvalidCharacter",
+        ) | (ParseError::Blech32(blech32::Error::EmptyHrp), "EmptyHrp")
             | (ParseError::WrongSize { .. }, "WrongSize")
             | (ParseError::Incompatible(_), "IncompatiblePurposeAndFormat")
+            | (
+                ParseError::Purpose(PurposeError::InvalidBarePurpose { .. }),
+                "InvalidPurposeCharset"
+            )
+            | (
+                ParseError::Purpose(PurposeError::UnterminatedQuoted { .. }),
+                "UnterminatedQuotedPurpose"
+            )
     )
 }

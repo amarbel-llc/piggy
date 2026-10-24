@@ -485,11 +485,9 @@ vector and no persisted datum is uppercase, so this narrowing required
 no data migration. The `mixed_case` vector's expectation — rejection —
 is unchanged by the amendment; only its *reason* generalises.
 
-*(test: `TestRFC0002InvalidVectorsRejected/mixed_case` in
-`go/internal/charlie/markl_registrations/` — this test's assertion
-remains correct under the amendment, but its name now understates the
-rule it guards: an all-uppercase vector would also be rejected, and a
-dedicated invalid vector for that case is pending.)*
+*(test: `TestRFC0002InvalidVectorsRejected/mixed_case` and
+`/all_uppercase` in `go/internal/charlie/markl_registrations/`, and the
+Rust replay of the same fixture.)*
 
 ### 3.6. Length
 

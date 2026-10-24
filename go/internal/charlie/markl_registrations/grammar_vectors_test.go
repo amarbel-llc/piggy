@@ -28,11 +28,19 @@ import (
 // an uppercase data portion no longer matches DataChar, so the grammar
 // now rejects mixed_case on its own and asserting it still parses would
 // be asserting the narrowing never happened.
+//
+// The piggy#235 vectors are all structural too: an uppercase body, a
+// second `-` (not a DataChar), an empty Format, and a quoted purpose
+// that never closes.
 var structurallyInvalidVectors = map[string]bool{
 	"missing_separator":           true,
 	"charset_violation":           true,
 	"purpose_contains_whitespace": true,
 	"mixed_case":                  true,
+	"all_uppercase":               true,
+	"multiple_separators":         true,
+	"empty_hrp":                   true,
+	"unterminated_quoted_purpose": true,
 }
 
 // langlangStartRule is marklid.peg's start (first) rule. langlang's

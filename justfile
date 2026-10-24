@@ -168,12 +168,16 @@ codemod-facades:
 # test-go's TestRFC0002VectorsRoundTrip verifies every entry on every run.
 # Scope is piggy-only (piggy purposes + every registered format incl. the #86
 # ssh formats); cross-domain fixture assembly is the #187 RFC. Mirrors madder's
-# codemod-rfc0002-fixture. #183 (#9).
+# codemod-rfc0002-fixture. #183 (#9). Also copies it to
+# crates/piggy-markl/testdata/, which the Rust conformance test replays (the
+# crate's nix source holds only crates/, so it cannot be a symlink);
+# lint-worktree fails when the two copies differ (piggy#235).
 #
 # regenerate the piggy-scoped RFC 0002 conformance fixture
 [group('codemod')]
 codemod-rfc0002-fixture:
     cd go && go test -count=1 -tags 'test rfc0002_generate' -run TestGenerateRFC0002Vectors ./internal/charlie/markl_registrations/...
+    cp go/internal/charlie/markl_registrations/testdata/0002-markl-id-format-vectors.json crates/piggy-markl/testdata/0002-markl-id-format-vectors.json
 
 # Regenerate the normative pigpen-v1 vector file, docs/rfcs/0008-pigpen-vectors.txt
 # (RFC 0008 §10, RFC 0009 §8), from the fixed public test secrets in the Go
@@ -2567,7 +2571,9 @@ lint-closure-no-pivy:
 # net for facade drift — it runs in the `lint` aggregate, so the pre-merge
 # `just` hook fails on committed drift even if the `conformist-pre-commit`
 # repair hook was bypassed. The pre-commit hook does the REPAIR; this does the
-# CHECK (same dewey-facade-export module, two lanes — see flake.nix).
+# CHECK (same dewey-facade-export module, two lanes — see flake.nix). Also
+# fails when the Go and Rust copies of the markl conformance fixture differ
+# (piggy#235; `just codemod-rfc0002-fixture` writes both).
 #
 # run the impure eng-convention checks plus the go/ facade drift CHECK
 [group('pre-build')]
@@ -2576,6 +2582,11 @@ lint-worktree:
     set -euo pipefail
     cfg=$(nix build --no-link --print-out-paths '.#conformist-impure-config')
     conformist check --config-file "$cfg" --tree-root .
+    fixture=0002-markl-id-format-vectors.json
+    cmp -s "go/internal/charlie/markl_registrations/testdata/$fixture" "crates/piggy-markl/testdata/$fixture" || {
+      echo "the markl fixture's Go and Rust copies differ; run: just codemod-rfc0002-fixture" >&2
+      exit 1
+    }
 
 # The justfile convention linters (recipe verbs, orphaned doc summaries)
 # delivered as conformist's profile-pulled artifacts rather than a Nix

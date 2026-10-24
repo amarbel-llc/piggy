@@ -178,6 +178,27 @@ func buildRFC0002Fixture(t *testing.T) rfc0002Fixture {
 		),
 	)
 
+	// Quoted purposes (RFC 0011 §2.1, §2.2, piggy#235): values outside
+	// the bare charset round-trip through the quoted spelling — a space,
+	// non-ASCII runes, the `@` the quote-aware join scan must step over
+	// (piggy#227), and an escaped quote.
+	for _, purposeId := range []string{
+		"my thing",
+		"café/naïve",
+		"a@b",
+		`say "hi"`,
+	} {
+		fixture.Vectors = append(
+			fixture.Vectors,
+			makePurposeVector(
+				t,
+				purposeId,
+				markl.FormatIdHashBlake2b256,
+				sequencePayload(32),
+			),
+		)
+	}
+
 	// Invalid vectors. Each derives from a known-good vector by a
 	// single targeted mutation, so the failure category is unambiguous.
 	fixture.Invalid = buildInvalidVectors(t)
@@ -306,6 +327,46 @@ func buildInvalidVectors(t *testing.T) []rfc0002InvalidVector {
 		})
 	}
 
+	// All uppercase: valid under bech32's uniform-case rule, rejected by
+	// RFC 0011 §3.5's lower-case-only rule.
+	out = append(out, rfc0002InvalidVector{
+		Name:    "all_uppercase",
+		Encoded: string(bytes.ToUpper(good)),
+		Error:   "MixedCase",
+	})
+
+	// A body bearing a second '-' (RFC 0011 §3.2, §4 step 3).
+	{
+		sep := bytes.IndexByte(good, '-')
+		twoDash := append([]byte{}, good[:sep+3]...)
+		twoDash = append(twoDash, '-')
+		twoDash = append(twoDash, good[sep+3:]...)
+		out = append(out, rfc0002InvalidVector{
+			Name:    "multiple_separators",
+			Encoded: string(twoDash),
+			Error:   "SeparatorMissing",
+		})
+	}
+
+	// Empty HRP: the separator is the body's first character (RFC 0011
+	// §4 step 3, normative since piggy#228).
+	{
+		sep := bytes.IndexByte(good, '-')
+		out = append(out, rfc0002InvalidVector{
+			Name:    "empty_hrp",
+			Encoded: string(good[sep:]),
+			Error:   "EmptyHrp",
+		})
+	}
+
+	// A purpose slot that opens a quote and never closes it (RFC 0011
+	// §4 step 1a).
+	out = append(out, rfc0002InvalidVector{
+		Name:    "unterminated_quoted_purpose",
+		Encoded: `"my thing@` + string(good),
+		Error:   "UnterminatedQuotedPurpose",
+	})
+
 	// Missing separator: drop every '-'.
 	{
 		noDash := bytes.ReplaceAll(good, []byte{'-'}, nil)
@@ -388,11 +449,9 @@ func buildInvalidVectors(t *testing.T) []rfc0002InvalidVector {
 		})
 	}
 
-	// Invalid purpose charset: a purpose containing whitespace has no
-	// bare-text-form spelling (RFC 0002 §2.1 purpose-char excludes
-	// whitespace; §2.2 — markl's own text form has no quoting
-	// mechanism). Embedding grammars that need such a purpose (trellis,
-	// hyphence) quote it on their own side before it ever reaches markl.
+	// Invalid purpose charset: a BARE purpose containing whitespace
+	// (RFC 0011 §2.1's bare charset excludes it; the quoted spelling
+	// `"my thing"@…` is the valid form, pinned above).
 	{
 		bad := "my thing@" + string(good)
 		out = append(out, rfc0002InvalidVector{

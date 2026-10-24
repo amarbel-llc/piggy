@@ -279,6 +279,34 @@
       "format": "blake2b256",
       "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
       "encoded": "md@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400"
+    },
+    {
+      "name": "purpose/my thing/blake2b256",
+      "purpose": "my thing",
+      "format": "blake2b256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "\"my thing\"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400"
+    },
+    {
+      "name": "purpose/café/naïve/blake2b256",
+      "purpose": "café/naïve",
+      "format": "blake2b256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "\"café/naïve\"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400"
+    },
+    {
+      "name": "purpose/a@b/blake2b256",
+      "purpose": "a@b",
+      "format": "blake2b256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "\"a@b\"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400"
+    },
+    {
+      "name": "purpose/say \"hi\"/blake2b256",
+      "purpose": "say \"hi\"",
+      "format": "blake2b256",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "\"say \\\"hi\\\"\"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400"
     }
   ],
   "invalid": [
@@ -286,6 +314,26 @@
       "name": "mixed_case",
       "encoded": "sha256-QQQSYQCYQ5RQWZQFPG9SCRGWPUGPZYSNZS23V9CCRYDPK8QARC0S7LCGM6",
       "error": "MixedCase"
+    },
+    {
+      "name": "all_uppercase",
+      "encoded": "SHA256-QQQSYQCYQ5RQWZQFPG9SCRGWPUGPZYSNZS23V9CCRYDPK8QARC0S7LCGM6",
+      "error": "MixedCase"
+    },
+    {
+      "name": "multiple_separators",
+      "encoded": "sha256-qq-qsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6",
+      "error": "SeparatorMissing"
+    },
+    {
+      "name": "empty_hrp",
+      "encoded": "-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6",
+      "error": "EmptyHrp"
+    },
+    {
+      "name": "unterminated_quoted_purpose",
+      "encoded": "\"my thing@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6",
+      "error": "UnterminatedQuotedPurpose"
     },
     {
       "name": "missing_separator",
