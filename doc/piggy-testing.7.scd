@@ -160,6 +160,10 @@ a failing askpass is indistinguishable from a card refusing the PIN) with
 _PIGGY_TEST_FIB_PIN=123456_. Set _PIGGY_TEST_CARD=none_ before loading
 _common.bash_ to opt out (the conformance harness does: those files
 spawn their own fibby); a preset _PCSCLITE_CSOCK_NAME_ is left alone.
+In the sandboxed lane (which sets _PIGGY_BATS_NO_HOST_PCSC_) a test left
+with no card this way gets _PCSCLITE_CSOCK_NAME_ pointed at a socket that
+does not exist, so a command that names no fibby of its own cannot reach
+the host's pcscd and a real card plugged into it (piggy#305).
 Outside the sandbox the harness card needs _target/debug/fibby_ (*just
 build-rust*).
 

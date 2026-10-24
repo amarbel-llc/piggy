@@ -152,6 +152,15 @@ if [[ ${PIGGY_TEST_CARD:-auto} == auto && -z ${PCSCLITE_CSOCK_NAME:-} ]]; then
   fibby_up
 fi
 
+# piggy#305: in the sandboxed default lane (bats.nix sets
+# PIGGY_BATS_NO_HOST_PCSC), a test with no card of its own — the
+# conformance files opt out above and name their fibby per command — gets
+# a dead PC/SC socket, so a command that names none cannot reach the
+# host's pcscd and whatever real card is plugged into it.
+if [[ -n ${PIGGY_BATS_NO_HOST_PCSC:-} && -z ${PCSCLITE_CSOCK_NAME:-} ]]; then
+  export PCSCLITE_CSOCK_NAME="$BATS_TEST_TMPDIR/no-host-pcscd.comm"
+fi
+
 # Pre-init git repo with --separate-git-dir so the actual git data lives
 # outside .git/ (sandcastle blocks writes to .git directories).
 init_test_git() {

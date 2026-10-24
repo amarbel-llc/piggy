@@ -117,6 +117,10 @@ let
         # Matches the REAL_PIVY_BOX convention used by the interop
         # recipe (see justfile). See piggy#116.
         REAL_PIVY_TOOL = "${pivy}/bin/pivy-tool";
+        # piggy#305: zz-tests_bats/common.bash points PC/SC at a dead
+        # socket for any test with no card of its own, so nothing in this
+        # lane reaches the host's pcscd and a real card plugged into it.
+        PIGGY_BATS_NO_HOST_PCSC = "1";
         # Deliberately do NOT export PIGGY_IDS_PATH: when unset, the
         # rust dispatcher falls through to `command -v piggy-ids`,
         # which resolves to the mock symlink in $BATS_TEST_TMPDIR
