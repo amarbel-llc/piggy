@@ -445,6 +445,7 @@ fn print_help() {
          as a real card does after a reset.\n\
          \n\
          Point clients at the socket via PCSCLITE_CSOCK_NAME.\n\
+         SIGTERM or SIGINT removes the sockets and exits 0.\n\
          Set FIBBY_LOG=info|debug|wire for logging."
     );
 }
@@ -474,6 +475,13 @@ fn main() {
         let _ = std::fs::create_dir_all(dir);
     }
 
+    // Before any thread is spawned, so every thread inherits the mask.
+    exit_cleanly_on_sigterm_and_sigint(
+        std::iter::once(args.socket.clone())
+            .chain(args.control_socket.clone())
+            .collect(),
+    );
+
     let backends = match make_backends(&args) {
         Ok(b) => b,
         Err(e) => {
@@ -496,6 +504,42 @@ fn main() {
         eprintln!("fibby: serve failed: {e}");
         std::process::exit(1);
     }
+}
+
+/// piggy#270: block SIGTERM and SIGINT in every thread and take them on a
+/// dedicated `sigwait` thread, which unlinks `sockets` and exits 0 through
+/// libc's `exit`, so atexit handlers (an instrumented build's LLVM profile
+/// writer) run. Must be called before any other thread exists.
+fn exit_cleanly_on_sigterm_and_sigint(sockets: Vec<String>) {
+    // SAFETY: plain libc signal-set calls on a local, zero-initialised set.
+    let set = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        assert_eq!(
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()),
+            0,
+            "pthread_sigmask"
+        );
+        set
+    };
+    std::thread::spawn(move || {
+        let mut signal: libc::c_int = 0;
+        // SAFETY: `set` is a valid signal set; `signal` is a valid out-pointer.
+        if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
+            return;
+        }
+        trace::emit(
+            trace::INFO,
+            "main",
+            &format!("signal {signal}: removing sockets and exiting"),
+        );
+        for socket in &sockets {
+            let _ = std::fs::remove_file(socket);
+        }
+        std::process::exit(0);
+    });
 }
 
 /// piggy#130 control client: connect to a running fibby's `--control-socket`,

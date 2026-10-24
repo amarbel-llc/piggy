@@ -26,7 +26,8 @@
 # .profraw into /coverage, the agent units are stopped cleanly at the
 # end so they flush, and the directory is copied into the test's $out
 # for ./coverage-report.nix to merge. fibby is left uninstrumented
-# (test infrastructure; no SIGTERM handler to flush on).
+# (test infrastructure). It exits through atexit on SIGTERM (piggy#270),
+# so an instrumented fibby would flush its profile if one is wanted.
 {
   pkgs,
   piggy,

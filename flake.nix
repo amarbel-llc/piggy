@@ -278,8 +278,8 @@
           # NOT checks: deliberately outside the merge gate and `nix flake
           # check` until the added wall time is measured (`just
           # test-vm-coverage`). fibby stays uninstrumented: it is test
-          # infrastructure, and it has no SIGTERM handler, so an instrumented
-          # daemon would be killed without flushing its profile anyway.
+          # infrastructure. It exits through atexit on SIGTERM (piggy#270),
+          # so an instrumented fibby would flush its profile if one is wanted.
           vmCoverage = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
             let
               lanes = import ./nix/vm-tests {

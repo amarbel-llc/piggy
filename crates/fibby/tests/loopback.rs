@@ -902,6 +902,40 @@ fn fibby_binary_auto_touch_flag_grants_without_ctl() {
     assert!(!log.contains("TOUCH needed"), "log:\n{log}");
 }
 
+/// piggy#270: SIGTERM and SIGINT end fibby with exit status 0 (so the
+/// process's atexit handlers, the LLVM profile writer among them, run) and
+/// unlink both sockets.
+#[test]
+fn fibby_binary_exits_cleanly_on_sigterm_and_sigint() {
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        let mut fibby = FibbyProcess::start(&[]);
+        let pid = fibby.child.id() as libc::pid_t;
+        assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = fibby.child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "fibby ignored signal {signal}");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "signal {signal}: {status:?}\n{}",
+            fibby.log_text()
+        );
+        assert!(
+            !fibby.socket.exists(),
+            "signal {signal}: socket left behind"
+        );
+        assert!(
+            !fibby.control.exists(),
+            "signal {signal}: control socket left behind"
+        );
+    }
+}
+
 #[test]
 fn fibby_binary_rejects_a_non_numeric_touch_timeout() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_fibby"))
