@@ -1,7 +1,8 @@
 ---
-status: proposed
+status: accepted
 date: 2026-06-22
 amended: 2026-10-12
+accepted: 2026-10-24
 amendment-note: >
   2026-10-12 (FDR 0006 phase (a), piggy#303): §5.2 `card.init` gains the
   `pin_policy` and `touch_policy` params and the `serves_operator_acts`
@@ -40,7 +41,10 @@ Scope is the **command** layer and how it composes with [RFC 0006]'s interaction
 layer on one connection. The v1 method set is the neutral primitives papi needs —
 `card.list`, `card.init`, `card.add_key`, `sign_bytes`; `recipients.*` and `pass.*` methods are
 future work (the latter likely unnecessary in piggy, since papi composes them).
-This specification is expected to be refined as piggy#201 implements it.
+Accepted 2026-10-24: the v1 method set is implemented in
+`crates/piggy/src/manage/` and tested by
+`zz-tests_bats/conformance/piggy_manage_fibby.bats` and
+`piggy_card_add_key_fibby.bats`.
 
 ## Requirements Language
 

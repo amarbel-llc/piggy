@@ -2,8 +2,9 @@
 status: adopted (piggy)
 date: 2026-04-25
 provenance: |
-  Forked from vendor/pivy/docs/rfcs/0002-piv-ecdh-box-encryption.md
-  (upstream "proposed" 2026-03-02). The vendored copy is historical
+  Forked from pivy's docs/rfcs/0002-piv-ecdh-box-encryption.md
+  (https://github.com/amarbel-llc/pivy/blob/master/docs/rfcs/0002-piv-ecdh-box-encryption.md,
+  upstream "proposed" 2026-03-02). The pivy copy is historical
   reference; this file is the normative spec for piggy-box. Updated
   2026-04-25 by #36 to standardize on RFC 7539 ChaCha20-Poly1305
   (12-byte wire IV); earlier text described the OpenSSH variant with
@@ -25,10 +26,15 @@ requirements for implementations that produce or consume Boxes.
 ## Status and Provenance
 
 This document is the normative wire-format spec for `piggy-box`. It was forked
-on 2026-04-25 from `vendor/pivy/docs/rfcs/0002-piv-ecdh-box-encryption.md` so
-that piggy's wire format is anchored independently of the vendored pivy C
-implementation. The vendored copy is preserved as historical reference and may
-diverge.
+on 2026-04-25 from pivy's [`docs/rfcs/0002-piv-ecdh-box-encryption.md`][pivy-0002]
+so that piggy's wire format is anchored independently of the pivy C
+implementation. The pivy copy is preserved as historical reference and may
+diverge. (pivy's RFCs are linked at the archived amarbel-llc/pivy repository,
+not the `vendor/pivy` tree, which the C-pivy retirement removes, #289.)
+
+[pivy-0001]: https://github.com/amarbel-llc/pivy/blob/master/docs/rfcs/0001-ssh-agent-extensions.md
+[pivy-0002]: https://github.com/amarbel-llc/pivy/blob/master/docs/rfcs/0002-piv-ecdh-box-encryption.md
+[pivy-0003]: https://github.com/amarbel-llc/pivy/blob/master/docs/rfcs/0003-box-ebox-formats.adoc
 
 This revision was updated by #36 (2026-04-25) to standardize on RFC 7539 /
 RFC 8439 ChaCha20-Poly1305 AEAD with a 12-byte wire IV (the AEAD nonce, fresh
@@ -61,7 +67,7 @@ KDF.
 The Box primitive serves as the foundation for:
 
 - The `ecdh@joyent.com` and `ecdh-rebox@joyent.com` SSH agent extensions
-  (specified in vendor/pivy/docs/rfcs/0001-ssh-agent-extensions.md)
+  (specified in pivy's [`0001-ssh-agent-extensions.md`][pivy-0001])
 - The Ebox (Enterprise Box) system for at-rest key management with threshold
   recovery
 - The `pivy-box` command-line tool for file encryption
@@ -69,9 +75,9 @@ The Box primitive serves as the foundation for:
 
 This specification covers the Box primitive only. The Ebox format, which
 composes multiple Boxes with Shamir secret sharing for threshold recovery, is
-documented separately in `vendor/pivy/docs/rfcs/0003-box-ebox-formats.adoc`.
-The SSH agent wire protocol for Box operations is specified in
-`vendor/pivy/docs/rfcs/0001-ssh-agent-extensions.md`.
+documented separately in pivy's [`0003-box-ebox-formats.adoc`][pivy-0003].
+The SSH agent wire protocol for Box operations is specified in pivy's
+[`0001-ssh-agent-extensions.md`][pivy-0001].
 
 ## Requirements Language
 
@@ -570,10 +576,10 @@ Replayed by `tests::rfc0002_vectors::vector_a_3`.
 
 ### Informative
 
-- vendor/pivy/docs/rfcs/0001-ssh-agent-extensions.md — pivy SSH agent protocol
-  extensions.
-- vendor/pivy/docs/rfcs/0003-box-ebox-formats.adoc — Ebox format that composes
-  multiple Boxes with Shamir secret sharing.
+- [pivy RFC 0001][pivy-0001] (`0001-ssh-agent-extensions.md`) — pivy SSH
+  agent protocol extensions.
+- [pivy RFC 0003][pivy-0003] (`0003-box-ebox-formats.adoc`) — Ebox format
+  that composes multiple Boxes with Shamir secret sharing.
 - [PIV] NIST SP 800-73-4, "Interfaces for Personal Identity Verification".
 - [libsodium sealed box] libsodium documentation, "Sealed boxes",
   https://doc.libsodium.org/public-key_cryptography/sealed_boxes

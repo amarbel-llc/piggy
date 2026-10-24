@@ -59,11 +59,16 @@ software options are not:
 
 - `fibby`, piggy's pure-Rust virtual PIV card, is a test double. Slot
   keys are plain `[u8; 32]` struct fields
-  (`crates/fibby/src/virtual_card.rs:270-298`). Keys arrive as hex on the
+  (`crates/fibby/src/virtual_card.rs:301-329`). Keys arrive as hex on the
   command line. Both of its sockets are created mode `0777` with no peer
-  check (`crates/fibby/src/server.rs:141`, `:181`). Its wire log dumps
-  PIN bytes. Cards are fixed at start. It has no ed25519, no touch
-  policy, and answers attestation with `6A80`.
+  check (`crates/fibby/src/server.rs:168`, `:209`). Its wire log dumps
+  PIN bytes. It has no ed25519. *(Corrected 2026-10-24: when this FDR
+  was written, cards were fixed at start, there was no touch policy, and
+  attestation answered `6A80`. fibby has since gained runtime insert and
+  remove over its control socket (piggy#130), simulated touch
+  (`crates/fibby/src/touch.rs`), and attestation of generated slots
+  (`crates/fibby/src/attest.rs`; imported, seeded and empty slots still
+  answer `6A80`). None of that changes the holder problem above.)*
 - The Rust `piggy agent` caches the card PIN as a `Zeroizing<String>`
   (`crates/piggy/src/cmd/agent/pins.rs:37`) and nothing more. The C
   `pivy-agent` it replaced locked its memory and kept the PIN on a page
@@ -73,9 +78,12 @@ software options are not:
 - Operator acts (a root certificate, an escalation grant) need a key
   whose every use is a deliberate human act, and a way to show the
   operator the text being signed that a same-uid process cannot
-  subvert. piggy has neither: `piggy card init` provisions only 9A and
-  9D with card-default policies (`crates/piggy/src/card/init_cmd.rs:51`),
-  and nothing binds a displayed text to the bytes a card signs.
+  subvert. piggy had neither: `piggy card init` provisioned only 9A and
+  9D with card-default policies, and nothing bound a displayed text to
+  the bytes a card signs. *(Corrected 2026-10-24: phase (a) since made
+  `card init` provision 9C too, with the operator-act policy
+  (`crates/piggy/src/card/engine.rs`, `slot_policy.rs`; RFC 0007 §5.2),
+  and RFC 0012's `operator-act@piggy` binds the displayed text.)*
 
 The operator's stated goal is that fibby becomes "a proper and safe
 in-memory keystore (with guard pages and flagged not to be core-dumped,
@@ -139,7 +147,7 @@ These definitions and the holder's behaviour per scope are captured in
 manpages when the code lands: a new `piggy-holder(7)` describing the
 service, the scopes and the mint, retire and approval flows (phase (d)),
 and a SCOPES section in `piggy-agent(1)` for the operator-act extension
-(phase (a)).
+(phase (a); landed, alongside an OPERATOR ACTS section).
 
 ## Interface
 
@@ -290,7 +298,7 @@ lifetime timer: validity lives in FDR 0032's certificates.
 
 **PIN policy.** Minted keys carry PIN policy `never`. The agent, which
 today demands a PIN for every slot except 9E
-(`crates/piggy/src/cmd/agent/session.rs:398`), learns to honour a slot's
+(`crates/piggy/src/cmd/agent/session.rs:421`), learns to honour a slot's
 reported policy. Real cards behave as before. No PIN secret exists for a
 minted key; the gates are the socket permission, the caller binding and
 the touch policy.
@@ -310,7 +318,7 @@ operator's real card is kept open as a stricter method.
 `operator-act@piggy` takes a text and an sshsig namespace. The agent
 that is next to the card builds the sshsig itself, shows that exact text
 on the PIN prompt through the existing askpass path
-(`crates/piggy/src/card_oracle.rs:352`, which already carries a context
+(`run_askpass_of_kind`, `crates/piggy/src/card_oracle.rs:419`, which already carries a context
 string to `contrib/piggy-askpass.sh`), and signs. It refuses any slot
 whose attested policy is not PIN-always and touch-always, so 9A can
 never serve an operator act. Because the displaying component is the
@@ -686,7 +694,7 @@ is scheduled, not before.
   agent" states what piggy needs from the answer.
 - **Does `ssh-agent-lib` 0.5 expose the peer socket?** The agent hands
   `listen` a cloneable session today
-  (`crates/piggy/src/cmd/agent/mod.rs:596`). Reading peer credentials
+  (`crates/piggy/src/cmd/agent/mod.rs:578`, `:620`). Reading peer credentials
   needs a per-connection hook. Believed available, not read.
 - **How is the peer's cgroup read without a pid-reuse race?** A pidfd
   from the socket is the likely answer on recent kernels. Not verified.
@@ -694,8 +702,8 @@ is scheduled, not before.
   its first test.
 - **Per-operation latency through agent and fibby.** Unmeasured. Today
   the agent takes one global card lock, reconnects and re-verifies per
-  operation (`session.rs:398-436`); fibby runs one thread per connection
-  with a lock per card (`crates/fibby/src/server.rs:35`, `:156`).
+  operation (`session.rs:415-440`); fibby runs one thread per connection
+  with a lock per card (`crates/fibby/src/server.rs:55`, `:184`).
 - **Does any FDR 0032 consumer need a touch-policy key in its first
   version?** The spinclass session found none; phase (e) is
   forward-looking until one appears.

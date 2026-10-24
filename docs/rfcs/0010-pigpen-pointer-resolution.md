@@ -1,13 +1,15 @@
 ---
-status: draft
+status: accepted
 date: 2026-07-16
+accepted: 2026-10-24
 provenance: |
   Specifies resolution for the pigpen "pointer" face (RFC 0008 §2.2): a
   document that names a resolver plugin by kind + opaque locator instead
   of carrying recipients directly. Motivated by piggy#216 ("piggy-ids
   sourced from a PAPI instance"); scoped as a neutral, papi-agnostic
-  primitive per piggy#191 and papi's own
-  docs/rfcs/0002-piggy-mgmt-constraints.md, so that piggy never contains
+  primitive per piggy#191 and papi's own RFC 0002
+  (docs/rfcs/0002-piggy-mgmt-constraints.md in the papi repository, not
+  this one), so that piggy never contains
   papi-specific (or any other domain-specific) resolution logic. Reached
   via live cross-repo co-design with the papi/bold-cypress session
   working papi#54 (the publisher half); see
@@ -31,7 +33,9 @@ plugin.
 
 ## Status and Provenance
 
-Draft. This RFC is a sibling to RFC 0008 (which it does not modify) and
+Accepted 2026-10-24: implemented in `crates/piggy/src/pigpen_pointer.rs`
+and `go/pkgs/pigpen_resolve`, tested as listed under
+[Conformance Testing](#conformance-testing). This RFC is a sibling to RFC 0008 (which it does not modify) and
 RFC 0009 (whose §3.2 `piggy-ids` sniff gains a third case — see
 [Compatibility](#compatibility)). It specifies protocol and runtime
 behavior, not wire format: RFC 0008 §2.2 already fixed the pointer
@@ -61,8 +65,8 @@ That reading is foreclosed by two standing constraints. First, piggy#191
 removed the `piggy papi` namespace precisely to keep piggy free of
 domain-specific (papi-flavored) logic; piggy's job is signing bytes and
 reading cards, not canonicalization, framing, or trust policy for any
-particular consumer. Second, papi's own
-`docs/rfcs/0002-piggy-mgmt-constraints.md` states this constraint from
+particular consumer. Second, papi's own RFC 0002
+(`docs/rfcs/0002-piggy-mgmt-constraints.md` in the papi repository) states this constraint from
 the papi side of the boundary: piggy is a neutral substrate, and
 higher-level domain logic lives in the systems that consume it, not in
 piggy itself.
@@ -173,8 +177,10 @@ implementation as real usage surfaces either stale-recipient complaints
 (lower it) or resolver-load complaints (raise it).
 
 Callers can force a fresh resolution, bypassing the cache entirely, via
-the `--no-cache` flag or the `PIGGY_PIGPEN_NO_CACHE` environment variable
-(any non-empty value). This is useful when a recipient set is known to
+the `PIGGY_PIGPEN_NO_CACHE` environment variable (any non-empty value).
+There is no command-line flag for it (an earlier draft named a
+`--no-cache` flag; it was dropped on 2026-10-24 rather than added to
+every `pass` command that resolves a pointer). This is useful when a recipient set is known to
 have just changed and the caller does not want to wait out the TTL.
 
 The Go library (`go/pkgs/pigpen_resolve`, piggy#299) does not cache at
@@ -324,6 +330,24 @@ error: failed to resolve pigpen pointer (kind="papi-http", locator="https://exam
 
 No stale cache entry is substituted (§5), even if one exists from a
 previous successful resolution.
+
+## Conformance Testing
+
+| Requirement | Test |
+|---|---|
+Rust tests are in `crates/piggy/src/pigpen_pointer.rs`, bats in
+`zz-tests_bats/t0900-pigpen-pointer.bats`, Go in
+`go/internal/echo/pigpen_resolve/resolve_test.go`.
+
+| Requirement | Test |
+|---|---|
+| §2 discovery on `PATH`; a missing resolver is a named error | `resolver_not_on_path_produces_named_error`; Go `TestResolveRefusesAKindThatIsNotAnExecutableName` |
+| §3 one-shot invocation, stdout is the answer | `resolver_success_returns_stdout_bytes`, `pointer_face_resolves_via_fixture_resolver`; bats `pigpen_pointer_resolves_for_recipients_list`; Go `TestResolveReturnsTheResolversRecipientSet` |
+| §4 the cache: hit within the TTL, miss past it, an edited pointer, `PIGGY_PIGPEN_NO_CACHE` | `fresh_cache_within_ttl_skips_resolver`, `stale_cache_past_ttl_is_not_fresh`, `edited_pointer_is_not_answered_from_the_previous_pointers_cache`, `no_cache_env_var_forces_resolve`; bats `pigpen_pointer_cache_skips_resolver_on_second_call_within_ttl` |
+| §5 hard failure naming the pointer: nonzero exit, oversized output, no recipients, a sealed document; never cached | `resolver_nonzero_exit_surfaces_stderr`, `resolver_output_past_the_size_limit_is_refused`, `pointer_resolving_to_no_recipients_is_refused_and_not_cached`, `pointer_resolving_to_a_sealed_document_is_refused`; bats `pigpen_pointer_resolving_to_no_recipients_is_refused`; Go `TestResolveFailuresNameThePointerAndTheCause`, `TestLoadRecipientsRefusesAPointerThatResolvesToNoRecipients` |
+| §5 the deadline, and a child holding the output open | `resolver_that_never_exits_is_stopped_at_the_deadline`, `resolver_child_holding_the_output_does_not_hold_the_caller`; Go `TestResolveStopsWhenTheContextEnds`, `TestResolveStopsWhenAGrandchildHoldsTheOutputOpen` |
+| §5 the resolver's stderr quoted and bounded | `resolver_stderr_is_quoted_and_bounded`; Go `TestResolverStderrIsQuotedAndBounded` |
+| §5 a relative `PATH` entry is not run | `resolver_in_a_relative_path_entry_is_not_run` |
 
 ## Compatibility
 

@@ -226,7 +226,7 @@ The card agent MUST present, on the same prompt that collects the PIN:
 
 On the askpass route the agent carries the text through the existing
 `PIGGY_ASKPASS_CONTEXT` mechanism (`crates/piggy/src/card_oracle.rs`,
-`run_askpass`) and MUST additionally export `PIGGY_ASKPASS_KIND` set to
+`run_askpass_of_kind`) and MUST additionally export `PIGGY_ASKPASS_KIND` set to
 the display class, so the askpass program can choose a distinct dialog
 (title, icon, type, colour) per class; a routine PIN prompt carries no
 `PIGGY_ASKPASS_KIND`. On the tty route the class and text are rendered
@@ -574,12 +574,14 @@ cannot.
 
 ## Conformance Testing
 
-Conformance tests for this specification live in `zz-tests_bats/` and
-run in the fibby-backed agent lanes (`piggy-testing(7)`), once FDR 0006
-phase (c) gives fibby an attestation key; until then the §2.4 fail-closed
-path is testable against today's fibby, which answers `ATTEST` with
-`6A80`, and the remaining rows run against a real card under the phase
-(a) hand pass (piggy#303).
+Conformance tests for this specification live in
+`zz-tests_bats/conformance/` and run in the fibby-backed agent lanes
+(`piggy-testing(7)`). fibby attests keys generated on it
+(`crates/fibby/src/attest.rs`) and answers `ATTEST` with `6A80` for a
+seeded, imported or empty slot, so both the §2.4 fail-closed path and the
+attested-policy rows run against it; the phase (a) hand pass (piggy#303)
+repeats them on a real card. *(Corrected 2026-10-24: this paragraph was
+written when fibby answered every `ATTEST` with `6A80`.)*
 
 Tests use binary injection via `bats-emo`:
 
@@ -592,8 +594,8 @@ Tests use binary injection via `bats-emo`:
 |-------------|-----------|-------------|
 | §2.1, MUST reject version ≠ 1, bad hash, flags ≠ 0, trailing bytes | `operator_act_request.bats` | malformed requests answer `bad-request` without prompting |
 | §2.3, statuses 2–4 before any prompt | `operator_act_refusals.bats` | the askpass safety net records no prompt on policy, namespace and text refusals |
-| §2.4, refuse when attestation unavailable | `operator_act_policy.bats` | today's fibby (`ATTEST` → 6A80) yields `refused-policy` |
-| §2.4, refuse a PIN-once/touch-cached slot | `operator_act_policy.bats` | fibby slot attesting 9A defaults yields `refused-policy` (phase (c)) |
+| §2.4, refuse when attestation unavailable | `operator_act_policy.bats` | a seeded fibby key (`ATTEST` → 6A80) yields `refused-policy` |
+| §2.4, refuse a PIN-once/touch-cached slot | `operator_act_policy.bats` | a fibby slot attesting 9A defaults yields `refused-policy` |
 | §2.5, displayability | `operator_act_text.bats` | empty, oversize, control-character and invalid-UTF-8 texts yield `refused-text` |
 | §2.6, prompt carries class, text and namespace | `operator_act_prompt.bats` | the test askpass sees `PIGGY_ASKPASS_KIND` equal to the namespace's display class and its banner shows the namespace and the verbatim text |
 | §2.7, verifies with `ssh-keygen -Y verify` | `operator_act_sign.bats` | the returned blob, armored, verifies under the slot key and `-n piggy-quote-v1` |

@@ -74,6 +74,22 @@ decision, so they are listed under *Needs a decision*.
 7. **RFC 0010 L10 and L65 cite `docs/rfcs/0002-piggy-mgmt-constraints.md`**,
    which is papi's document, not piggy's (absent here). Make it a papi URL?
 
+### Decided 2026-10-24 (operator)
+
+1. `--no-cache`: dropped from RFC 0010; the environment variable is the
+   only switch.
+2. and 3. RFC 0010 and RFC 0007 promoted to accepted; RFC 0010 gained a
+   conformance section.
+4. and 5. FDR 0006's and RFC 0012's stale fibby claims and drifted line
+   citations corrected in place, marked as 2026-10-24 corrections; no
+   design change.
+6. RFC 0002's pivy links point at the archived amarbel-llc/pivy
+   repository instead of `vendor/pivy`.
+7. RFC 0010 names papi's RFC 0002 as a cross-repository reference.
+
+Also decided: the Rust markl decoder keeps its finer error names, mapped
+to RFC 0011 §4's categories in its conformance test (piggy#235).
+
 ## Shipped but not in any FDR or RFC
 
 Observed; whether each wants a design record is a judgement call:
