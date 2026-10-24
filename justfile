@@ -1263,7 +1263,9 @@ test-bats-conformance-agentless-fallback-fibby:
 # Fibby-backed gate for `piggy list` blank-card discovery (piggy#193): a no-seed
 # yk5 fibby card presents as uninitialized (no CHUID); assert `piggy list`
 # surfaces it as a card-level `uninitialized` ndjson record with serial, and that
-# a seeded card is NOT mislabelled. Agentless; [linux]-only like the fibby lanes.
+# a seeded card is NOT mislabelled; plus (piggy#87) `piggy list` and `piggy pass
+# recipients list-available` with no card, their record shape, the recipient
+# subset and sort order. Agentless; [linux]-only like the fibby lanes.
 #
 # run the fibby-backed piggy list blank-card discovery bats gate
 [group('post-build')]
@@ -1276,7 +1278,8 @@ test-bats-conformance-list-blank-fibby:
     FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
-      zz-tests_bats/conformance/piggy_list_blank_fibby.bats
+      zz-tests_bats/conformance/piggy_list_blank_fibby.bats \
+      zz-tests_bats/conformance/piggy_list_fibby.bats
 
 # Fibby-backed gate for `piggy card init` (piggy#194): provision a blank yk5
 # fibby end to end through BOTH interaction frontends — the tty/askpass default

@@ -773,8 +773,8 @@ fn main() {
     match cli.cmd {
         // Each `pass` subcommand is wrapped in `stats::timed_pass` so it
         // emits `piggy.pass.<cmd>.<result>` + duration telemetry (stats-me,
-        // best-effort/opt-in). `recipients list-available` is an exec-to-C
-        // passthrough that never returns, so it can't be timed.
+        // best-effort/opt-in). `recipients list-available` execs
+        // `piggy-ids` and never returns, so it can't be timed.
         Command::Pass(args) => match args.cmd {
             PassCommand::Init { rest } => {
                 std::process::exit(piggy::stats::timed_pass("init", || init::run(&rest)))
