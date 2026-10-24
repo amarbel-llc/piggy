@@ -3411,11 +3411,13 @@ clean-rust:
 # --- maintenance: version bump + tag + release ---
 #
 # Three recipes per eng-versioning(7). `version.env` is the single
-# source of truth: `bump-version` is a pure mutation, `tag` reads the
+# source of truth, mirrored into crates/piggy/Cargo.toml and Cargo.lock
+# (piggy#171): `bump-version` is a pure mutation, `tag` reads the
 # current value and pushes the signed tag SET, `release` orchestrates
 # the whole flow (changelog → bump → commit → tag set → fj release).
 # `version.env` is also read by `flake.nix` at eval time and by
-# `crates/piggy/build.rs` at compile time.
+# `crates/piggy/build.rs` at compile time, which fails the build when
+# Cargo.toml's version disagrees with it.
 #
 # MULTI-ARTIFACT RELEASE (mirrors purse-first; eng-versioning(7)): one
 # PIGGY_VERSION covers every artifact in this repo, so piggy and the
@@ -3438,13 +3440,17 @@ clean-rust:
 # when a new sub-directory module must be independently consumable.
 release_tag_prefixes := "v go/v"
 
-# Rewrite the PIGGY_VERSION line in version.env. Touches no other
-# file — committing is `release`'s job. Usage: just bump-version 0.1.1
+# Rewrite the version in its three places: version.env's PIGGY_VERSION,
+# crates/piggy/Cargo.toml's package.version, and that package's Cargo.lock
+# entry. crates/piggy/build.rs fails the build if the first two disagree
+# (piggy#171). Committing is `release`'s job. Usage: just bump-version 0.1.1
 #
 # rewrite the PIGGY_VERSION line in version.env
 [group('maintenance')]
 bump-version new_version:
     sed -E -i "s/^(export PIGGY_VERSION)=.*/\1={{new_version}}/" version.env
+    sed -E -i '0,/^version = ".*"$/s//version = "{{new_version}}"/' crates/piggy/Cargo.toml
+    sed -E -i '/^name = "piggy"$/{n;s/^version = ".*"$/version = "{{new_version}}"/}' Cargo.lock
 
 # Sign + push the full release tag set named after the current
 # version.env: the bare v<sem> plus each release_tag_prefixes entry
@@ -3524,7 +3530,7 @@ release new_version:
     fi
 
     just bump-version "{{new_version}}"
-    git add version.env
+    git add version.env crates/piggy/Cargo.toml Cargo.lock
     git commit -m "$header"
 
     just tag "$msg"

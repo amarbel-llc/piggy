@@ -27,12 +27,10 @@ const DEFAULT_GENERATED_LENGTH: &str = "25";
 pub fn run() -> i32 {
     let clip_time = env_or("PIGGY_CLIP_TIME", DEFAULT_CLIP_TIME);
     let generated_length = env_or("PIGGY_GENERATED_LENGTH", DEFAULT_GENERATED_LENGTH);
-    // Bash `piggy_version_line` was `${PIGGY_VERSION:-dev}` /
-    // `${PIGGY_COMMIT:-unknown}`. The compile-time `env!("PIGGY_VERSION")`
-    // resolves to the build.rs-provided value (which is "dev" for an
-    // unset version.env). Using it preserves the bash fallback shape
-    // for both nix-wrapped and dev `cargo build` paths.
-    let version = env_or("PIGGY_VERSION", env!("PIGGY_VERSION"));
+    // The wrapper's runtime PIGGY_VERSION wins; a dev `cargo build` falls
+    // back to CARGO_PKG_VERSION, which build.rs holds equal to version.env
+    // (piggy#171).
+    let version = env_or("PIGGY_VERSION", env!("CARGO_PKG_VERSION"));
     let commit = env_or("PIGGY_COMMIT", "unknown");
     let editor = env_or("EDITOR", "vi");
 

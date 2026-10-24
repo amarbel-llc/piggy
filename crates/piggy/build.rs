@@ -1,12 +1,15 @@
-// Read PIGGY_VERSION from ../../version.env at build time and re-export
-// it as a rustc env var so the dispatcher binary can use
-// env!("PIGGY_VERSION") in any Rust handler (today: src/version.rs and
-// the usage banner).
+// Guard Cargo.toml's package.version against drifting from version.env,
+// the repo's single version source of truth (eng-versioning(7), piggy#171).
+// `just bump-version` rewrites version.env, this crate's Cargo.toml and its
+// Cargo.lock entry together; this build script fails the build if they ever
+// disagree, so the runtime can trust env!("CARGO_PKG_VERSION").
 //
-// The repo-root version.env is piggy's single source of truth (see
-// eng-versioning(7), piggy CLAUDE.md). flake.nix's piggy derivation reads
-// the same file via builtins.match; this script keeps the dev `cargo
-// build` path consistent.
+// Resolution order for the authoritative version:
+//   1. $PIGGY_VERSION, when set at build time.
+//   2. ../../version.env — the workspace checkout, and the nix build, whose
+//      source keeps version.env at its root.
+// If neither exists (e.g. a published crate tarball), the guard is a no-op
+// and CARGO_PKG_VERSION stands on its own.
 
 use std::env;
 use std::fs;
@@ -18,30 +21,27 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let version_env = manifest_dir.join("../../version.env");
 
-    // Re-run only when version.env changes. cargo:rerun-if-changed takes
-    // a path relative to the crate manifest; pass the canonicalized path
-    // so Cargo's deduplication works regardless of which form we use.
     println!("cargo:rerun-if-changed={}", version_env.display());
+    println!("cargo:rerun-if-env-changed=PIGGY_VERSION");
 
-    let version = match fs::read_to_string(&version_env) {
-        Ok(content) => parse_piggy_version(&content).unwrap_or_else(|| {
-            println!(
-                "cargo:warning=PIGGY_VERSION not found in {}; defaulting to 'dev'",
-                version_env.display()
+    let authoritative = env::var("PIGGY_VERSION")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            fs::read_to_string(&version_env)
+                .ok()
+                .as_deref()
+                .and_then(parse_piggy_version)
+        });
+    if let Some(want) = authoritative {
+        let have = env::var("CARGO_PKG_VERSION").expect("cargo always sets CARGO_PKG_VERSION");
+        if want != have {
+            panic!(
+                "crates/piggy/Cargo.toml version ({have}) disagrees with version.env \
+                 PIGGY_VERSION ({want}); run `just bump-version {want}` to resync"
             );
-            "dev".to_string()
-        }),
-        Err(e) => {
-            println!(
-                "cargo:warning=failed to read {}: {}; defaulting to 'dev'",
-                version_env.display(),
-                e
-            );
-            "dev".to_string()
         }
-    };
-
-    println!("cargo:rustc-env=PIGGY_VERSION={}", version);
+    }
 
     emit_git_commit(&manifest_dir);
 }

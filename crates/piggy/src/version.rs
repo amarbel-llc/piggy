@@ -12,8 +12,8 @@
 //! off the derivations there, so a pin bump shows up here with no code
 //! change — drift stays visible. A dev `cargo build` has no wrapper, so the
 //! component vars are unset and render "unknown"; the version still resolves
-//! via `build.rs`'s compile-time `env!("PIGGY_VERSION")` (the spec-accepted
-//! "dev" behavior, mirroring the Go path's `-X main.version`/`main.commit`).
+//! via `env!("CARGO_PKG_VERSION")`, which `build.rs` guarantees equals
+//! version.env's PIGGY_VERSION (piggy#171).
 //!
 //! Ported from `cmd_version` in `src/piggy.sh` (piggy #96). The bash
 //! `piggy_version_line` helper survives for `cmd_usage` (the `help` banner).
@@ -56,7 +56,7 @@ fn env_or(key: &str, default: &str) -> String {
 pub fn run() -> i32 {
     // Prefer the wrapper-injected runtime value (authoritative for nix
     // builds); fall back to the compile-time value for dev cargo builds.
-    let version = env_or("PIGGY_VERSION", env!("PIGGY_VERSION"));
+    let version = env_or("PIGGY_VERSION", env!("CARGO_PKG_VERSION"));
     // Prefer the wrapper-injected runtime value (nix builds); fall back to the
     // compile-time `build.rs` short-rev for dev `cargo build` (#126); finally
     // `unknown` if neither resolved (e.g. a git-less build with no wrapper).
@@ -83,6 +83,20 @@ mod tests {
             version: "2.4.1".into(),
             rev: "d233902".into(),
         }]
+    }
+
+    /// piggy#171: Cargo.toml's package.version is version.env's
+    /// PIGGY_VERSION, so the compile-time fallback is the real version and
+    /// cargo-native consumers see it too. build.rs fails the build on drift;
+    /// this pins the same fact where `cargo test` reports it.
+    #[test]
+    fn cargo_package_version_is_version_env() {
+        let version_env = include_str!("../../../version.env");
+        let want = version_env
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("export PIGGY_VERSION="))
+            .expect("version.env has an `export PIGGY_VERSION=` line");
+        assert_eq!(env!("CARGO_PKG_VERSION"), want);
     }
 
     #[test]
