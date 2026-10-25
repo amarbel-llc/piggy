@@ -5,7 +5,8 @@ package agent
 import internal "code.linenisgreat.com/piggy/go/internal/delta/agent"
 
 // AgentECDHOracle performs the card-bound P-256 scalar multiplication
-// through an ssh-agent's ecdh@joyent.com extension, which piggy-agent
+// through an ssh-agent's ecdh@code.linenisgreat.com extension (falling
+// back to its legacy alias ecdh@joyent.com), which piggy-agent
 // serves for the PIV slot-9D key and forwards to its upstreams. The private
 // scalar never leaves the card.
 //

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"net"
 	"os"
+	"slices"
 
 	markl "code.linenisgreat.com/piggy/go/internal/bravo/markl"
 	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/errors"
@@ -33,7 +34,10 @@ func ResolveAuthSock() (string, error) {
 }
 
 const (
-	ecdhExtension = "ecdh@joyent.com"
+	// The card ECDH extension's names (piggy#335). The wire encoding is
+	// identical under both.
+	ecdhExtension       = "ecdh@code.linenisgreat.com" // canonical
+	ecdhExtensionLegacy = "ecdh@joyent.com"            // C pivy-agent and pre-#335 piggy-agent
 
 	// SSH agent protocol message numbers (draft-ietf-sshm-ssh-agent).
 	sshAgentSuccess           = 6
@@ -42,8 +46,13 @@ const (
 	p256SharedSecretSize = 32
 )
 
+// ecdhExtensionNames is the order the extension is asked under: canonical
+// first, the legacy alias only when the agent refuses the canonical name.
+var ecdhExtensionNames = []string{ecdhExtension, ecdhExtensionLegacy}
+
 // AgentECDHOracle performs the card-bound P-256 scalar multiplication
-// through an ssh-agent's ecdh@joyent.com extension, which piggy-agent
+// through an ssh-agent's ecdh@code.linenisgreat.com extension (falling
+// back to its legacy alias ecdh@joyent.com), which piggy-agent
 // serves for the PIV slot-9D key and forwards to its upstreams. The private
 // scalar never leaves the card.
 //
@@ -82,9 +91,10 @@ func (oracle AgentECDHOracle) ECDH(self markl.Id, partnerEpk []byte) (secret []b
 
 // agentECDH asks the agent at socketPath for the ECDH of the card key
 // whose SEC1-compressed public half is recipientCompressed against the
-// SEC1-compressed partnerEpk. It is the one ecdh@joyent.com client in this
-// module: the pigpen oracle and the pivy_ecdh_p256_pub IO wrapper both
-// call it.
+// SEC1-compressed partnerEpk. It is the one ecdh@code.linenisgreat.com
+// client in this module (asking under the legacy alias ecdh@joyent.com when
+// the agent refuses the canonical name): the pigpen oracle and the
+// pivy_ecdh_p256_pub IO wrapper both call it.
 func agentECDH(socketPath string, recipientCompressed, partnerEpk []byte) (secret []byte, err error) {
 	cardKey, err := p256SSHKeyBlob(recipientCompressed)
 	if err != nil {
@@ -111,26 +121,35 @@ func agentECDH(socketPath string, recipientCompressed, partnerEpk []byte) (secre
 		return secret, err
 	}
 
-	response, err := client.Extension(ecdhExtension, ecdhRequest(cardKey, partnerKey))
-	if err != nil {
+	request := ecdhRequest(cardKey, partnerKey)
+
+	for _, name := range ecdhExtensionNames {
+		var response []byte
+		response, err = client.Extension(name, request)
 		// x/crypto reports every SSH_AGENT_FAILURE as "extension
-		// unsupported", which misnames the usual causes.
+		// unsupported": an agent that knows only the other name refuses
+		// this way, so try the next one.
 		if errors.Is(err, agent.ErrExtensionUnsupported) {
-			err = errors.Errorf(
-				"the agent refused %s: it does not hold the key, the card was not unlocked, or it does not serve the extension",
-				ecdhExtension,
-			)
+			continue
+		}
+		if err != nil {
+			err = errors.Wrapf(err, "%s extension call", name)
 			return secret, err
 		}
-		err = errors.Wrapf(err, "%s extension call", ecdhExtension)
-		return secret, err
+
+		if secret, err = parseECDHResponse(response, name); err != nil {
+			err = errors.Wrap(err)
+			return secret, err
+		}
+
+		return secret, nil
 	}
 
-	if secret, err = parseECDHResponse(response); err != nil {
-		err = errors.Wrap(err)
-		return secret, err
-	}
-
+	// "Unsupported" misnames the usual causes of the refusal.
+	err = errors.Errorf(
+		"the agent refused %s and %s: it does not hold the key, the card was not unlocked, or it does not serve the extension",
+		ecdhExtension, ecdhExtensionLegacy,
+	)
 	return secret, err
 }
 
@@ -172,9 +191,13 @@ func ecdhRequest(cardKey, partnerKey []byte) []byte {
 //     string(secret) — what piggy-agent sends.
 //   - SSH_AGENT_SUCCESS (6), string(secret) — the framing dewey's pivy
 //     client was written against.
-func parseECDHResponse(response []byte) ([]byte, error) {
+//
+// sent is the extension name the request went out under; the echoed name
+// may be either of ecdhExtensionNames, since a proxying agent echoes the
+// name its upstream answered under.
+func parseECDHResponse(response []byte, sent string) ([]byte, error) {
 	if len(response) == 0 {
-		return nil, errors.Errorf("empty %s response", ecdhExtension)
+		return nil, errors.Errorf("empty %s response", sent)
 	}
 
 	rest := response[1:]
@@ -183,30 +206,30 @@ func parseECDHResponse(response []byte) ([]byte, error) {
 	case sshAgentExtensionResponse:
 		name, after, ok := readSSHString(rest)
 		if !ok {
-			return nil, errors.Errorf("%s response: truncated extension name", ecdhExtension)
+			return nil, errors.Errorf("%s response: truncated extension name", sent)
 		}
-		if string(name) != ecdhExtension {
-			return nil, errors.Errorf("%s response echoes extension %q", ecdhExtension, name)
+		if !slices.Contains(ecdhExtensionNames, string(name)) {
+			return nil, errors.Errorf("%s response echoes extension %q", sent, name)
 		}
 		rest = after
 
 	case sshAgentSuccess:
 
 	default:
-		return nil, errors.Errorf("%s response: unexpected message type %d", ecdhExtension, response[0])
+		return nil, errors.Errorf("%s response: unexpected message type %d", sent, response[0])
 	}
 
 	secret, after, ok := readSSHString(rest)
 	if !ok {
-		return nil, errors.Errorf("%s response: truncated secret", ecdhExtension)
+		return nil, errors.Errorf("%s response: truncated secret", sent)
 	}
 	if len(after) != 0 {
-		return nil, errors.Errorf("%s response: %d trailing bytes", ecdhExtension, len(after))
+		return nil, errors.Errorf("%s response: %d trailing bytes", sent, len(after))
 	}
 	if len(secret) != p256SharedSecretSize {
 		return nil, errors.Errorf(
 			"%s response: secret is %d bytes, want %d",
-			ecdhExtension, len(secret), p256SharedSecretSize,
+			sent, len(secret), p256SharedSecretSize,
 		)
 	}
 

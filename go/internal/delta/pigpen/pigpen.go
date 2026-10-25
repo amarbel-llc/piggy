@@ -34,7 +34,8 @@ type markIdentity = markl.Id
 
 // ECDHOracle performs the card-bound scalar multiplication for a P-256
 // recipient (RFC 0008 §4.3, §7). A WASM host wires this to piggy-agent's
-// ecdh@joyent.com extension; the slot-9D scalar never leaves the card.
+// ecdh@code.linenisgreat.com extension (legacy alias ecdh@joyent.com); the
+// slot-9D scalar never leaves the card.
 type ECDHOracle interface {
 	// ECDH returns the 32-byte X-coordinate of (self_private · partnerEpk),
 	// where self names the card key by its recipient markl ID and

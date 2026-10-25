@@ -332,8 +332,12 @@ func generateEphemeralECDSA() (ssh.PublicKey, error) {
 	return ssh.NewPublicKey(&priv.PublicKey)
 }
 
-func testECDH(client agent.ExtendedAgent, keys []*agent.Key, hardware bool) {
-	name := "ecdh@joyent.com"
+// The card ECDH extension's canonical name and its legacy alias (piggy#335).
+// The agent serves both and echoes the name it was asked under, so each is
+// its own conformance case.
+var ecdhExtensionNames = []string{"ecdh@code.linenisgreat.com", "ecdh@joyent.com"}
+
+func testECDH(client agent.ExtendedAgent, keys []*agent.Key, hardware bool, name string) {
 	if !hardware {
 		fmt.Printf("SKIP: %s — requires --hardware flag\n", name)
 		return
@@ -359,7 +363,7 @@ func testECDH(client agent.ExtendedAgent, keys []*agent.Key, hardware bool) {
 	var flagsBuf [4]byte
 	inner = append(inner, flagsBuf[:]...)
 
-	resp, err := client.Extension("ecdh@joyent.com", wrapInSSHString(inner))
+	resp, err := client.Extension(name, wrapInSSHString(inner))
 	if errors.Is(err, agent.ErrExtensionUnsupported) {
 		fail(name, "agent does not support ecdh extension")
 		return
@@ -380,8 +384,8 @@ func testECDH(client agent.ExtendedAgent, keys []*agent.Key, hardware bool) {
 		fail(name, fmt.Sprintf("failed to read name echo: %v", err))
 		return
 	}
-	if echo != "ecdh@joyent.com" {
-		fail(name, fmt.Sprintf("name echo mismatch: got %q", echo))
+	if echo != name {
+		fail(name, fmt.Sprintf("name echo mismatch: got %q, want %q", echo, name))
 		return
 	}
 	offset = next
@@ -563,7 +567,9 @@ func main() {
 	testSignPrehashNoCard(client)
 	testPinStatus(client)
 
-	testECDH(client, keys, hardware)
+	for _, name := range ecdhExtensionNames {
+		testECDH(client, keys, hardware, name)
+	}
 	testECDHRebox(client, keys, hardware)
 	testAttest(client, keys, hardware)
 

@@ -8,6 +8,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -54,14 +56,29 @@ func TestResolveAuthSockPrefersPiggyThenSSHThenPivy(t *testing.T) {
 	}
 }
 
-// softwareECDHAgent is an in-process ssh-agent that answers the
-// ecdh@joyent.com extension with a software P-256 key, the way a card
-// behind piggy-agent would.
+// The two names of the card ECDH extension, spelled out here rather than
+// taken from the package constants so the tests pin the wire names.
+const (
+	canonicalECDHName = "ecdh@code.linenisgreat.com"
+	legacyECDHName    = "ecdh@joyent.com"
+)
+
+// softwareECDHAgent is an in-process ssh-agent that answers the card ECDH
+// extension (under the names in accepts) with a software P-256 key, the way
+// a card behind piggy-agent would. Any other name is refused with
+// SSH_AGENT_FAILURE, the way C pivy-agent refuses the canonical name.
 type softwareECDHAgent struct {
 	sshagent.ExtendedAgent
 	key     *ecdh.PrivateKey
 	framing ecdhReplyFraming
-	calls   atomic.Int32
+	accepts []string
+	// echo, when set, is the name put in the reply instead of the one asked
+	// for: a proxy that forwarded the request under the other name.
+	echo  string
+	calls atomic.Int32
+
+	askedMu sync.Mutex
+	asked   []string
 }
 
 type sshECDSAKey struct {
@@ -70,11 +87,24 @@ type sshECDSAKey struct {
 	Point   []byte
 }
 
+func (a *softwareECDHAgent) askedNames() []string {
+	a.askedMu.Lock()
+	defer a.askedMu.Unlock()
+	return slices.Clone(a.asked)
+}
+
 func (a *softwareECDHAgent) Extension(extensionType string, contents []byte) ([]byte, error) {
-	if extensionType != "ecdh@joyent.com" {
+	a.askedMu.Lock()
+	a.asked = append(a.asked, extensionType)
+	a.askedMu.Unlock()
+
+	if !slices.Contains(a.accepts, extensionType) {
 		return nil, sshagent.ErrExtensionUnsupported
 	}
 	a.calls.Add(1)
+	if a.echo != "" {
+		extensionType = a.echo
+	}
 
 	// The request is one outer string wrapping
 	// string(card key) string(partner key) uint32(flags).
@@ -140,12 +170,21 @@ func serveSoftwareECDHAgent(
 	framing ecdhReplyFraming,
 ) (socketPath string, served *softwareECDHAgent) {
 	t.Helper()
+	return serveECDHAgent(t, &softwareECDHAgent{
+		key:     key,
+		framing: framing,
+		accepts: []string{legacyECDHName},
+	})
+}
 
-	served = &softwareECDHAgent{
-		ExtendedAgent: sshagent.NewKeyring().(sshagent.ExtendedAgent),
-		key:           key,
-		framing:       framing,
-	}
+// serveECDHAgent listens for served on a fresh unix socket in a temp dir.
+func serveECDHAgent(
+	t *testing.T,
+	served *softwareECDHAgent,
+) (socketPath string, _ *softwareECDHAgent) {
+	t.Helper()
+
+	served.ExtendedAgent = sshagent.NewKeyring().(sshagent.ExtendedAgent)
 	// A unix socket path is capped near 108 bytes and t.TempDir() under a
 	// worktree's TMPDIR overruns it, so bind a relative path from inside
 	// the temp dir instead.
@@ -230,6 +269,76 @@ func openThroughSoftwareAgent(t *testing.T, framing ecdhReplyFraming) {
 	}
 }
 
+// The oracle asks under the canonical name first and falls back to the
+// legacy name only when the agent refuses it (piggy#335), so it works
+// against a new piggy-agent, a pre-#335 piggy-agent or C pivy-agent, and a
+// proxy that answered under the other name.
+func TestAgentECDHOracleSpeaksBothExtensionNames(t *testing.T) {
+	for _, tc := range []struct {
+		label     string
+		accepts   []string
+		echo      string
+		wantAsked []string
+	}{
+		{
+			label:     "an agent serving both names is asked under the canonical one",
+			accepts:   []string{canonicalECDHName, legacyECDHName},
+			wantAsked: []string{canonicalECDHName},
+		},
+		{
+			label:     "an agent serving only the canonical name",
+			accepts:   []string{canonicalECDHName},
+			wantAsked: []string{canonicalECDHName},
+		},
+		{
+			label:     "an agent refusing the canonical name is asked again under the legacy one",
+			accepts:   []string{legacyECDHName},
+			wantAsked: []string{canonicalECDHName, legacyECDHName},
+		},
+		{
+			label:     "a proxy echoing the legacy name for a canonical request",
+			accepts:   []string{canonicalECDHName},
+			echo:      legacyECDHName,
+			wantAsked: []string{canonicalECDHName},
+		},
+		{
+			label:     "a proxy echoing the canonical name for a legacy request",
+			accepts:   []string{legacyECDHName},
+			echo:      canonicalECDHName,
+			wantAsked: []string{canonicalECDHName, legacyECDHName},
+		},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			key, err := ecdh.P256().GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			socketPath, served := serveECDHAgent(t, &softwareECDHAgent{
+				key:     key,
+				framing: framingPiggyAgent,
+				accepts: tc.accepts,
+				echo:    tc.echo,
+			})
+
+			plaintext := []byte("x")
+			sealed, err := pigpen.Seal(plaintext, []markl.Id{p256RecipientID(t, key)}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := sealed.Open(AgentECDHOracle{SocketPath: socketPath}, nil)
+			if err != nil {
+				t.Fatalf("open through the agent: %v", err)
+			}
+			if !bytes.Equal(got, plaintext) {
+				t.Fatalf("plaintext: got %q", got)
+			}
+			if asked := served.askedNames(); !slices.Equal(asked, tc.wantAsked) {
+				t.Fatalf("asked under %q, want %q", asked, tc.wantAsked)
+			}
+		})
+	}
+}
+
 func TestAgentECDHOracleFailsForAKeyTheAgentDoesNotHold(t *testing.T) {
 	held, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
@@ -280,16 +389,20 @@ func TestParseECDHResponse(t *testing.T) {
 		return append(binary.BigEndian.AppendUint32(nil, uint32(len(value))), value...)
 	}
 	secret := bytes.Repeat([]byte{0xab}, 32)
-	name := sshString([]byte(ecdhExtension))
+	name := sshString([]byte(canonicalECDHName))
+	legacyName := sshString([]byte(legacyECDHName))
 	join := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
 
-	for label, response := range map[string][]byte{
-		"piggy-agent framing": join([]byte{29}, name, sshString(secret)),
-		"bare success":        join([]byte{6}, sshString(secret)),
-	} {
-		got, err := parseECDHResponse(response)
-		if err != nil || !bytes.Equal(got, secret) {
-			t.Errorf("%s: %x / %v", label, got, err)
+	for _, sent := range []string{canonicalECDHName, legacyECDHName} {
+		for label, response := range map[string][]byte{
+			"piggy-agent framing, canonical echo": join([]byte{29}, name, sshString(secret)),
+			"piggy-agent framing, legacy echo":    join([]byte{29}, legacyName, sshString(secret)),
+			"bare success":                        join([]byte{6}, sshString(secret)),
+		} {
+			got, err := parseECDHResponse(response, sent)
+			if err != nil || !bytes.Equal(got, secret) {
+				t.Errorf("sent %s, %s: %x / %v", sent, label, got, err)
+			}
 		}
 	}
 
@@ -307,7 +420,7 @@ func TestParseECDHResponse(t *testing.T) {
 		"a length field near 2^32":       join([]byte{6}, []byte{0xff, 0xff, 0xff, 0xff}, secret),
 		"a length field of only 3 bytes": {6, 0, 0, 32},
 	} {
-		if got, err := parseECDHResponse(response); err == nil {
+		if got, err := parseECDHResponse(response, canonicalECDHName); err == nil {
 			t.Errorf("%s: accepted, secret %x", label, got)
 		}
 	}

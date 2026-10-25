@@ -9,7 +9,8 @@ type Document = internal.Document
 
 // ECDHOracle performs the card-bound scalar multiplication for a P-256
 // recipient (RFC 0008 §4.3, §7). A WASM host wires this to piggy-agent's
-// ecdh@joyent.com extension; the slot-9D scalar never leaves the card.
+// ecdh@code.linenisgreat.com extension (legacy alias ecdh@joyent.com); the
+// slot-9D scalar never leaves the card.
 type ECDHOracle = internal.ECDHOracle
 
 // Pointer is the pointer face of a pigpen document (RFC 0008 §2.2): it
