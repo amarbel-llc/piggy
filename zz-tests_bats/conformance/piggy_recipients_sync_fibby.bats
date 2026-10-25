@@ -28,10 +28,9 @@
 #
 # Required env (supplied by the
 # `test-bats-conformance-recipients-sync-fibby` recipe):
-#   PIVY_AGENT=/path/to/pivy-agent  (nix build .#pivy)
 #   FIBBY_BIN=/path/to/fibby        (nix build .#fibby)
-#   PIGGY_BIN=/path/to/piggy        (nix build .#default — real pivy-box +
-#                                    piggy-ids, bypassing common.bash's mocks)
+#   PIGGY_BIN=/path/to/piggy        (nix build .#default — piggy, its agent
+#                                    and piggy-ids, bypassing common.bash's mocks)
 #
 # When invoked via the conformance lane's glob without those env vars set, the
 # suite gracefully skips — same convention as piggy_fibby_pivy_agent_smoke.bats.
@@ -44,9 +43,6 @@ setup() {
   load "$(dirname "$BATS_TEST_FILE")/../lib/fibby.bash"
   export output
 
-  if [[ -z ${PIVY_AGENT:-} ]] || [[ ! -x ${PIVY_AGENT:-/nonexistent} ]]; then
-    skip "PIVY_AGENT unset or not executable; run via just test-bats-conformance-recipients-sync-fibby"
-  fi
   if [[ -z ${FIBBY_BIN:-} ]] || [[ ! -x ${FIBBY_BIN:-/nonexistent} ]]; then
     skip "FIBBY_BIN unset or not executable"
   fi
@@ -174,7 +170,7 @@ _assert_decrypts() {
 function recipients_sync_no_file_skips_already_current_via_fibby { # @test
   export PIGGY_TEST_FIB_PIN=123456
   spawn_fibby --seed-rfc5903-slot-9d-cert
-  spawn_agent
+  spawn_piggy_agent
 
   local store="$WORKDIR/store"
   _init_store_with_secrets "$store" "foo/bar=secret-one" "baz=secret-two"
@@ -236,7 +232,7 @@ function recipients_sync_no_file_skips_already_current_via_fibby { # @test
   _assert_decrypts "$store" "baz" "secret-two"
 
   kill -0 "$AGENT_PID" 2>/dev/null || {
-    echo "pivy-agent died during the sync" >&2
+    echo "piggy agent died during the sync" >&2
     tail -60 "$AGENT_LOG" >&2 || true
     return 1
   }
@@ -254,7 +250,7 @@ function recipients_sync_no_file_skips_already_current_via_fibby { # @test
 function recipients_sync_no_file_p_scopes_subtree_via_fibby { # @test
   export PIGGY_TEST_FIB_PIN=123456
   spawn_fibby --seed-rfc5903-slot-9d-cert
-  spawn_agent
+  spawn_piggy_agent
 
   local store="$WORKDIR/store"
   _init_store_with_secrets "$store" "alpha/cred=in-scope" "beta/cred=untouched"
@@ -316,7 +312,7 @@ function recipients_sync_no_file_p_scopes_subtree_via_fibby { # @test
 function recipients_sync_follows_symlink_into_external_dir_via_fibby { # @test
   export PIGGY_TEST_FIB_PIN=123456
   spawn_fibby --seed-rfc5903-slot-9d-cert
-  spawn_agent
+  spawn_piggy_agent
 
   local store="$WORKDIR/store"
   _init_store_with_secrets "$store" "linked=linked-secret"

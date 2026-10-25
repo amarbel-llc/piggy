@@ -14,7 +14,6 @@
 #
 # Required env (supplied by the
 # `test-bats-conformance-pass-ls-recipients-fibby` recipe):
-#   PIVY_AGENT=/path/to/pivy-agent  (nix build .#pivy)
 #   FIBBY_BIN=/path/to/fibby        (nix build .#fibby)
 #   PIGGY_BIN=/path/to/piggy        (nix build .#default — real pivy-box +
 #                                    piggy-ids, bypassing common.bash's mocks)
@@ -24,7 +23,7 @@
 #
 # NB: recipient extraction is an OFFLINE header read, so unlike the sync lane
 # this test needs no agent/askpass for the assertion itself. We still bring up
-# fibby (to create real eboxes via init/insert); pivy-agent + askpass are wired
+# fibby (to create real eboxes via init/insert); piggy agent + askpass are wired
 # the same way for parity and in case insert ever needs them.
 
 setup() {
@@ -32,9 +31,6 @@ setup() {
   load "$(dirname "$BATS_TEST_FILE")/../lib/fibby.bash"
   export output
 
-  if [[ -z ${PIVY_AGENT:-} ]] || [[ ! -x ${PIVY_AGENT:-/nonexistent} ]]; then
-    skip "PIVY_AGENT unset or not executable; run via just test-bats-conformance-pass-ls-recipients-fibby"
-  fi
   if [[ -z ${FIBBY_BIN:-} ]] || [[ ! -x ${FIBBY_BIN:-/nonexistent} ]]; then
     skip "FIBBY_BIN unset or not executable"
   fi
@@ -119,7 +115,7 @@ _init_store_with_secrets() {
 function pass_show_recipients_annotates_real_eboxes_via_fibby { # @test
   export PIGGY_TEST_FIB_PIN=123456
   spawn_fibby --seed-rfc5903-slot-9d-cert
-  spawn_agent
+  spawn_piggy_agent
 
   local store="$WORKDIR/store"
   _init_store_with_secrets "$store" "foo/bar=secret-one" "baz=secret-two"

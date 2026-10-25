@@ -1,12 +1,13 @@
-# Shared fibby + pivy-agent lifecycle helpers for the conformance lane.
+# Shared fibby + agent lifecycle helpers for the conformance lane.
 #
 # Consumers `load` this from setup() after setting:
-#   FIBBY_BIN  / PIVY_AGENT          — binaries (from the just recipe env)
+#   FIBBY_BIN, and PIGGY_BIN or PIVY_AGENT — binaries (from the just recipe env)
 #   FIBBY_SOCK / FIBBY_LOG           — fibby's pcscd.comm socket + wire log
-#   AGENT_SOCK / AGENT_LOG           — pivy-agent socket + log
+#   AGENT_SOCK / AGENT_LOG           — agent socket + log
 #   WORKDIR                          — short /tmp dir (AF_UNIX sun_path limit)
 # and having exported the test askpass env (SSH_ASKPASS / SSH_ASKPASS_REQUIRE
-# / DISPLAY). spawn_fibby/spawn_agent set FIBBY_PID/AGENT_PID for teardown.
+# / DISPLAY). spawn_fibby and spawn_agent/spawn_piggy_agent set
+# FIBBY_PID/AGENT_PID for teardown.
 
 # Spawn fibby in the virtual backend on the per-test socket. Tracing is set
 # to `wire` so callers can grep the trace. Extra args (e.g.
@@ -118,12 +119,24 @@ fibby_command_apdus() {
   ' "$FIBBY_LOG"
 }
 
-# Spawn pivy-agent pointing at fibby's pcscd.comm socket. -A (all cards) so
+# Spawn C pivy-agent pointing at fibby's pcscd.comm socket. -A (all cards) so
 # we don't have to predict a GUID; -D for foreground; -a for the private
-# socket.
+# socket. Only the C-self smoke test still uses it (piggy#289 Phase 5).
 spawn_agent() {
+  _spawn_agent_with "$PIVY_AGENT" -A -D
+}
+
+# Spawn the Rust `piggy agent` ($PIGGY_BIN) the same way: the agent fixture
+# for lanes whose subject is piggy, not the agent.
+spawn_piggy_agent() {
+  _spawn_agent_with "$PIGGY_BIN" agent -A
+}
+
+# _spawn_agent_with AGENT_CMD... — run it on fibby with `-a $AGENT_SOCK`,
+# logging to AGENT_LOG, and wait for the socket.
+_spawn_agent_with() {
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
-    "$PIVY_AGENT" -A -D -a "$AGENT_SOCK" >"$AGENT_LOG" 2>&1 &
+    "$@" -a "$AGENT_SOCK" >"$AGENT_LOG" 2>&1 &
   AGENT_PID=$!
   local _
   for _ in $(seq 1 50); do

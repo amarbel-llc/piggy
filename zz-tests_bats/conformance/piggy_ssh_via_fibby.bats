@@ -4,24 +4,22 @@
 # deployment shape this whole arc targets. The full stack, no hardware:
 #
 #   fibby (virtual, seeded slot-9D ECDH cert)
-#     <- pcsc -> pivy-agent (advertises ecdh-rebox@joyent.com)
+#     <- pcsc -> `piggy agent`
 #                  <- ssh agent forwarding -> piggy-test-sshd
 #                                               -> remote `piggy pass show`
 #
-# A "remote" `piggy pass show` runs over `ssh -A`, so its
-# `pivy-box stream decrypt` reaches the agent through the FORWARDED socket
-# (an SSH channel back to the local pivy-agent), not a direct path. This is
-# the path #119/#123/#138 all live on; before #138's fix the forwarded
-# rebox SIGABRT'd the agent. Companion to the local (transport-free)
+# A "remote" `piggy pass show` runs over `ssh -A`, so its decrypt reaches
+# the agent through the FORWARDED socket (an SSH channel back to the local
+# agent), not a direct path. This is the path #119/#123/#138 all live on;
+# before #138's fix the forwarded rebox SIGABRT'd the C pivy-agent this lane
+# used until piggy#289 Phase 5. Companion to the local (transport-free)
 # decrypt gate piggy_rebox_decrypts_via_seeded_fibby_slot_9d.
 #
 # Required env (supplied by the
 # `test-bats-conformance-piggy-ssh-via-fibby` recipe):
-#   PIVY_AGENT  (nix build .#pivy)
 #   FIBBY_BIN   (nix build .#fibby)
-#   PIGGY_BIN   (nix build .#default — wrapped piggy: real pivy-box on PATH
-#                + real piggy-ids via PIGGY_IDS_PATH, so common.bash's mock
-#                crypto is bypassed)
+#   PIGGY_BIN   (nix build .#default — wrapped piggy + real piggy-ids via
+#                PIGGY_IDS_PATH, so common.bash's mock crypto is bypassed)
 #   SSHD_BIN    (nix build .#piggy-test-sshd)
 #
 # Without those (e.g. the sandboxed bats-default lane) the suite skips,
@@ -34,7 +32,7 @@ setup() {
   export output
 
   local bin
-  for bin in PIVY_AGENT FIBBY_BIN PIGGY_BIN SSHD_BIN; do
+  for bin in FIBBY_BIN PIGGY_BIN SSHD_BIN; do
     [[ -n ${!bin:-} && -x ${!bin:-/nonexistent} ]] ||
       skip "$bin unset or not executable; run via just test-bats-conformance-piggy-ssh-via-fibby"
   done
@@ -85,7 +83,7 @@ teardown() {
 # the forwarded `show` exercises the rebox decrypt path.
 function piggy_pass_show_decrypts_over_ssh_forwarded_agent { # @test
   spawn_fibby --seed-rfc5903-slot-9d-cert
-  spawn_agent
+  spawn_piggy_agent
 
   local secret="ssh-forwarded-decrypt-135d"
 
@@ -111,7 +109,7 @@ function piggy_pass_show_decrypts_over_ssh_forwarded_agent { # @test
 
   # `ssh -A` forwards SSH_AUTH_SOCK=$AGENT_SOCK; the server injects the
   # forwarded socket into the remote env. PIGGY_AUTH_SOCK is unset, so the
-  # remote piggy decrypts through the forwarded socket -> pivy-agent -> fibby.
+  # remote piggy decrypts through the forwarded socket -> piggy agent -> fibby.
   run ssh_agent_exec "$AGENT_SOCK" \
     "PIGGY_STORE_DIR=$STORE $PIGGY_BIN pass show foo/bar"
   [[ $status -eq 0 ]] || {
@@ -137,7 +135,7 @@ function piggy_pass_show_decrypts_over_ssh_forwarded_agent { # @test
   # The agent must have survived the forwarded rebox (a SIGABRT would reap
   # it), and the GA ECDH must have actually reached fibby's slot 9D.
   kill -0 "$AGENT_PID" 2>/dev/null || {
-    echo "pivy-agent died during the forwarded rebox decrypt" >&2
+    echo "piggy agent died during the forwarded decrypt" >&2
     tail -60 "$AGENT_LOG" >&2 || true
     return 1
   }

@@ -1031,9 +1031,9 @@ test-bats-conformance-fibby-pivy-agent-smoke:
       zz-tests_bats/conformance/piggy_fibby_pivy_agent_smoke.bats
 
 # piggy#135 Phase D: end-to-end SSH-forwarded decrypt lane. Stands up
-# fibby + pivy-agent + piggy-test-sshd and drives a "remote" `piggy pass
+# fibby + `piggy agent` + piggy-test-sshd and drives a "remote" `piggy pass
 # show` over `ssh -A` so the decrypt routes through the forwarded agent
-# socket back to pivy-agent <-> fibby. No hardware. The wrapped piggy
+# socket back to piggy agent <-> fibby. No hardware. The wrapped piggy
 # (.#default) bypasses common.bash's mock crypto (see the smoke recipe);
 # .#piggy-test-sshd is the Go fixture server (#135 Phase A/B). The
 # `just debug-ssh-decrypt-via-fibby` recipe is the non-bats scaffold.
@@ -1044,12 +1044,10 @@ test-bats-conformance-fibby-pivy-agent-smoke:
 test-bats-conformance-piggy-ssh-via-fibby:
     #!/usr/bin/env bash
     set -euo pipefail
-    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
     sshd_out=$(nix build .#piggy-test-sshd --no-link --print-out-paths)
-    PIVY_AGENT="$pivy_out/bin/pivy-agent" \
-      FIBBY_BIN="$fibby_out/bin/fibby" \
+    FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
       SSHD_BIN="$sshd_out/bin/piggy-test-sshd" \
       BATS_TEST_TIMEOUT=90 bats --no-sandbox --tap \
@@ -1200,11 +1198,9 @@ test-bats-conformance-age-plugin-piggy:
     set -euo pipefail
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
-    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     age_out=$(nix build .#age --no-link --print-out-paths)
     FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
-      PIVY_AGENT="$pivy_out/bin/pivy-agent" \
       AGE_BIN="$age_out/bin/age" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/age_plugin_piggy_fibby.bats
@@ -1437,11 +1433,9 @@ test-bats-conformance-manage-fibby:
 test-bats-conformance-recipients-sync-fibby:
     #!/usr/bin/env bash
     set -euo pipefail
-    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
-    PIVY_AGENT="$pivy_out/bin/pivy-agent" \
-      FIBBY_BIN="$fibby_out/bin/fibby" \
+    FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_recipients_sync_fibby.bats
@@ -1460,11 +1454,9 @@ test-bats-conformance-recipients-sync-fibby:
 test-bats-conformance-pass-ls-recipients-fibby:
     #!/usr/bin/env bash
     set -euo pipefail
-    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
-    PIVY_AGENT="$pivy_out/bin/pivy-agent" \
-      FIBBY_BIN="$fibby_out/bin/fibby" \
+    FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_pass_ls_recipients_fibby.bats

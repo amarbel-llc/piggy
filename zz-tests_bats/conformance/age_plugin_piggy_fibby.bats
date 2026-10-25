@@ -17,7 +17,6 @@
 #   FIBBY_BIN=/path/to/fibby        (nix build .#fibby)
 #   PIGGY_BIN=/path/to/piggy        (nix build .#default — provides
 #                                    age-plugin-piggy alongside piggy in bin/)
-#   PIVY_AGENT=/path/to/pivy-agent  (nix build .#pivy)
 #   AGE_BIN=/path/to/age            (nix build .#age — plugin-capable, >=1.1)
 #
 # Without those env vars the suite skips, matching the other hardware lanes.
@@ -28,7 +27,7 @@ setup() {
   export output
 
   local v p
-  for v in FIBBY_BIN PIGGY_BIN PIVY_AGENT AGE_BIN; do
+  for v in FIBBY_BIN PIGGY_BIN AGE_BIN; do
     p="${!v:-}"
     [[ -n $p && -x $p ]] ||
       skip "$v unset or not executable; run via just test-bats-conformance-age-plugin-piggy"
@@ -110,7 +109,7 @@ function age_plugin_piggy_round_trips_a_secret_through_fib { # @test
 
   # 3. Start the agent against fib and decrypt -> the plugin's identity-v1
   #    drives ecdh@joyent.com at the agent; the PIN is prompted on-demand.
-  spawn_agent
+  spawn_piggy_agent
   PIGGY_AUTH_SOCK="$AGENT_SOCK" run "$AGE_BIN" -d -i "$idfile" "$cipher"
   [[ $status -eq 0 ]] || {
     echo "age decrypt exited $status (agent/plugin decrypt failed)" >&2
