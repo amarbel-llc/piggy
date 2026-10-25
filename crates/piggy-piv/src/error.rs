@@ -2,6 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PivError {
+    #[cfg(feature = "pcsc")]
     #[error("PCSC error: {0}")]
     Pcsc(#[from] pcsc::Error),
 

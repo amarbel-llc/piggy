@@ -2,7 +2,7 @@
 default: lint build test
 
 [group('pre-build')]
-lint: lint-fmt lint-rust lint-worktree lint-closure-no-pivy
+lint: lint-fmt lint-rust lint-piggy-piv-portable lint-worktree lint-closure-no-pivy
 
 # --- build ---
 
@@ -2539,6 +2539,30 @@ lint-rust:
     if [ "$(uname -s)" = Linux ]; then
       cargo clippy -p fibby --all-targets --features hardware-proxy -- -D warnings
     fi
+
+# piggy#337: `piggy-piv --no-default-features` is the portable core pigsty
+# links on Android and wasm. It must compile (clippy-clean), and its
+# dependency tree must hold none of the native C crates below. Every
+# piggy-side consumer keeps the default features, so nothing changes for
+# them. The wasm32 `cargo check` the issue also wants needs a wasm-capable
+# toolchain the devShell lacks; this tree check is the cheap stand-in.
+#
+# check piggy-piv builds with no default features and links no native C crate
+[group('pre-build')]
+lint-piggy-piv-portable:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo clippy -p piggy-piv --no-default-features --lib -- -D warnings
+    tree=$(cargo tree -p piggy-piv --no-default-features -e normal --prefix none)
+    bad=0
+    for native in pcsc-sys; do
+      if grep -q "^$native " <<<"$tree"; then
+        echo "piggy-piv --no-default-features still depends on $native:" >&2
+        cargo tree -p piggy-piv --no-default-features -e normal -i "$native" >&2
+        bad=1
+      fi
+    done
+    exit "$bad"
 
 # Read-only formatting gate: builds the `checks.formatting`
 # derivation, which runs the conformist formatters + the eng preset's

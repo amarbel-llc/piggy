@@ -3,8 +3,15 @@ name = "piggy-piv"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Default on: every piggy-side consumer keeps the PC/SC transport.
+# `default-features = false` drops the native pcsclite link so pigsty can
+# drive PIV over its own ApduTransport on Android and wasm (piggy#337).
+default = ["pcsc"]
+pcsc = ["dep:pcsc"]
+
 [dependencies]
-pcsc = "2.9"
+pcsc = { version = "2.9", optional = true }
 hex = "0.4"
 openssl = "0.10"
 ssh-key = { version = "0.6", features = ["alloc", "ecdsa", "rsa", "ed25519"] }

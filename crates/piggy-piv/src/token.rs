@@ -1,6 +1,7 @@
-use crate::transport::{ApduSession, ApduTransport, EndDisposition, PcscTransport, RawApdu};
+use crate::transport::{ApduSession, ApduTransport, EndDisposition, RawApdu};
+#[cfg(feature = "pcsc")]
+use crate::{PivContext, transport::PcscTransport};
 
-use crate::PivContext;
 use crate::apdu::{Apdu, PIV_AID, StatusWord, ga_tag};
 use crate::cert;
 use crate::error::PivError;
@@ -87,6 +88,8 @@ fn parse_serial_response(data: &[u8], sw: StatusWord) -> Option<u32> {
     }
 }
 
+/// The PC/SC entry points (the default-on `pcsc` feature, piggy#337).
+#[cfg(feature = "pcsc")]
 impl PivToken {
     pub fn connect(ctx: &PivContext, reader: &str) -> Result<Self, PivError> {
         Self::connect_inner(ctx, reader, true)
@@ -118,7 +121,9 @@ impl PivToken {
         let transport = PcscTransport::connect(ctx, reader)?;
         Self::from_transport(Box::new(transport), reader, require_chuid)
     }
+}
 
+impl PivToken {
     /// Build a token over any [`ApduTransport`]: the seam a host without
     /// PC/SC (Android NFC/USB) and the in-process test cards use. Same
     /// SELECT / CHUID / serial sequence as [`PivToken::connect`];
@@ -893,6 +898,7 @@ fn parse_ga_response(resp: &[u8]) -> Result<Vec<u8>, PivError> {
     Ok(payload.to_vec())
 }
 
+#[cfg(feature = "pcsc")]
 impl PivContext {
     /// Enumerate all PIV tokens across all readers.
     /// Silently skips readers that don't have PIV cards.
