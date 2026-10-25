@@ -373,7 +373,11 @@ func testECDH(client agent.ExtendedAgent, keys []*agent.Key, hardware bool, name
 		return
 	}
 
-	if len(resp) < 1 || resp[0] != 29 {
+	if len(resp) < 1 {
+		fail(name, "empty response")
+		return
+	}
+	if resp[0] != 29 {
 		fail(name, fmt.Sprintf("expected type 29, got %d", resp[0]))
 		return
 	}
@@ -479,7 +483,11 @@ func testAttest(client agent.ExtendedAgent, keys []*agent.Key, hardware bool) {
 		return
 	}
 
-	if len(resp) < 1 || resp[0] != 29 {
+	if len(resp) < 1 {
+		fail(name, "empty response")
+		return
+	}
+	if resp[0] != 29 {
 		fail(name, fmt.Sprintf("expected type 29, got %d", resp[0]))
 		return
 	}
