@@ -854,8 +854,6 @@ codemod-capture-pivy-oracle-tool-keys-fibby: (_lane-pivy-oracle "tool-keys-fibby
 test-bats-conformance-recipients-add-attached-fibby: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  pivy_tool="$pivy_out/bin/pivy-tool"
   fibby_bin="$PWD/target/debug/fibby"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
 
@@ -1738,8 +1736,6 @@ debug-vm-loop check="vm-piggy-agent" runs="10" logdir="":
 test-rust-integration-fibby: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  pivy_tool="$pivy_out/bin/pivy-tool"
   fibby_bin="$PWD/target/debug/fibby"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
 
