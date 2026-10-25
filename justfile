@@ -650,24 +650,34 @@ test-bats-conformance-interop-fibby: build-rust
 
 # Differential `piggy tool` conformance against C pivy-tool over FIBBY
 # (piggy#289 Phase 3, milestone 3.1a). Brings up fibby seeded with slot
-# 9A (RFC 6979 cert) and 9D (RFC 5903 cert), then runs the read-only ops
-# (`pubkey`/`cert`) through BOTH the Rust `piggy tool` and the C
-# `pivy-tool` and asserts they agree — C is the external contract. As the
-# port grows (3.1b+: list/pinfo/attest/sign/…), add the ops here.
-# Pure-Rust card-under-test, no hardware.
+# 9A (RFC 6979 cert), 9D (RFC 5903 cert) and PINFO, then runs each op
+# through the Rust `piggy tool` and compares it with C `pivy-tool`'s answer
+# for the same card — C is the external contract. C's answers are frozen
+# fixtures under zz-tests_bats/fixtures/pivy-oracle/tool-fibby/ (piggy#285),
+# so this lane needs no C binary. Pure-Rust card-under-test, no hardware.
 #
 # run the fibby-backed differential piggy tool bats gate
 [group('post-build')]
 [linux]
-test-bats-conformance-tool-fibby: build-rust
+test-bats-conformance-tool-fibby: (_lane-tool-fibby "replay")
+
+# Re-record the C pivy-tool answers the tool-fibby lane replays (piggy#285):
+# the same lane with the live C binary from .#pivy, writing
+# zz-tests_bats/fixtures/pivy-oracle/tool-fibby/. Only for a deliberate
+# change of what the port is held to; the recorded files are the contract.
+#
+# re-record the C pivy-tool oracle fixtures for the tool-fibby lane
+[group('codemod')]
+[linux]
+codemod-capture-pivy-oracle-tool-fibby: (_lane-tool-fibby "capture")
+
+[linux]
+_lane-tool-fibby mode: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  pivy_tool="$pivy_out/bin/pivy-tool"
   fibby_bin="$PWD/target/debug/fibby"
   piggy_bin="$PWD/target/debug/piggy"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
-  [[ -x $pivy_tool ]] || { echo "missing $pivy_tool (nix build .#pivy)"; exit 1; }
 
   workdir=$(mktemp -d /tmp/tool-fibby-XXXXXX)
   fibby_sock="$workdir/pcscd.comm"
@@ -683,10 +693,19 @@ test-bats-conformance-tool-fibby: build-rust
   for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
   [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
 
+  # Capture runs the live C pivy-tool and records into $workdir (exposed to
+  # the sandbox), copied into the repo only after the lane passes.
+  capture_env=()
+  if [[ {{ mode }} == capture ]]; then
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths) || exit 1
+    capture_env=(PIGGY_ORACLE_MODE=capture REAL_PIVY_TOOL="$pivy_out/bin/pivy-tool"
+      PIVY_ORACLE_CAPTURE_DIR="$workdir/oracle")
+  fi
+
   # sign/ecdh are PIN-gated; the test askpass supplies fibby's PIN to BOTH
   # piggy tool and C pivy-tool (both honour SSH_ASKPASS).
   askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-  REAL_PIVY_TOOL="$pivy_tool" \
+  env "${capture_env[@]}" \
     PIGGY="$piggy_bin" \
     PCSCLITE_CSOCK_NAME="$fibby_sock" \
     SSH_ASKPASS="$askpass" \
@@ -695,7 +714,15 @@ test-bats-conformance-tool-fibby: build-rust
     PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
-    zz-tests_bats/conformance/piggy_tool_fibby.bats
+    zz-tests_bats/conformance/piggy_tool_fibby.bats || exit 1
+
+  if [[ {{ mode }} == capture ]]; then
+    dest="$PWD/zz-tests_bats/fixtures/pivy-oracle/tool-fibby"
+    rm -rf "$dest"
+    mkdir -p "$(dirname "$dest")"
+    cp -r "$workdir/oracle/tool-fibby" "$dest"
+    echo "recorded $(find "$dest" -name '*.out' | wc -l) cases into $dest"
+  fi
 
 # Differential `piggy tool change-pin`/`change-puk` against C pivy-tool
 # (piggy#289 Phase 3, milestone 3.2a). These rotate card credentials, so

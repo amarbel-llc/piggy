@@ -146,6 +146,18 @@ waits out a *piggy card init* instead of interleaving with it.
 *--hardware-proxy* relays a real card and keeps the wire trace; that is
 how APDU fixtures for new client code are captured.
 
+The differential lanes that held the Rust port to C *pivy-tool* replay
+C's recorded answers instead of running it (piggy#285, ahead of deleting
+the C stack, piggy#289). A lane calls *pivy_oracle* _CASE_ _ARGS_...
+(_lib/pivy_oracle.bash_), which answers with C's stdout and exit status
+for those arguments from _fixtures/pivy-oracle/<lane>/CASE.{out,status}_
+and fails the test when the fixture is missing; *assert_oracle_failure*
+keeps a missing fixture from passing a test that expects C to fail.
+*just codemod-capture-pivy-oracle-<lane>* re-records a lane from the
+live C binary against the same fibby card, which works because fibby's
+seeded keys and RFC 6979 signing make every recorded answer
+reproducible: re-recording an unchanged lane changes no file.
+
 fibby also runs INSIDE the sandboxed default lane (piggy#281, piggy#164):
 the lane injects it as _FIBBY_BIN_, and _common.bash_ calls *fibby_up*
 (default seed: the RFC 5903 slot-9D key, PIN 123456) for every test,

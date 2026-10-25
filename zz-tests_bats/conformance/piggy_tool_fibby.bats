@@ -2,41 +2,44 @@
 # bats file_tags=hardware
 #
 # Differential conformance for the Rust `piggy tool` port (piggy#289
-# Phase 3, milestone 3.1a). For each read-only op, run BOTH the Rust
-# `piggy tool` and the C `pivy-tool` against the SAME fibby card and
-# assert their output agrees — C `pivy-tool` is the external contract the
-# port must satisfy. Covers `pubkey <slot>` (OpenSSH format) and `cert
-# <slot>` (PEM) against fibby's seeded slot 9A (RFC 6979 cert) and 9D
-# (RFC 5903 cert). No PIN is needed for either op.
+# Phase 3, milestone 3.1a). For each op, run the Rust `piggy tool` against
+# a fibby card and compare it with C `pivy-tool` on the SAME card, which is
+# the external contract the port must satisfy. C's answers are frozen
+# fixtures (piggy#285, lib/pivy_oracle.bash): `just
+# codemod-capture-pivy-oracle-tool-fibby` records them from the live C
+# binary; this lane replays them and needs no C. fibby's seeded slot 9A
+# (RFC 6979 cert) and 9D (RFC 5903 cert) and its deterministic signing keep
+# the recorded answers stable.
 #
 # Required env (set by test-bats-conformance-tool-fibby):
 #   PCSCLITE_CSOCK_NAME  fibby's pcsc socket
-#   REAL_PIVY_TOOL       C pivy-tool (nix build .#pivy)
 #   PIGGY                the Rust piggy binary (target/debug/piggy)
+# and, to capture, PIGGY_ORACLE_MODE=capture with REAL_PIVY_TOOL.
 # Skips gracefully when absent.
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
+  load "$(dirname "$BATS_TEST_FILE")/../lib/pivy_oracle.bash"
   export output
+  PIVY_ORACLE_LANE=tool-fibby
 
   if [[ -z ${PCSCLITE_CSOCK_NAME:-} ]]; then
     skip "PCSCLITE_CSOCK_NAME not set (run: just test-bats-conformance-tool-fibby)"
-  fi
-  if [[ -z ${REAL_PIVY_TOOL:-} || ! -x ${REAL_PIVY_TOOL:-} ]]; then
-    skip "REAL_PIVY_TOOL not set (run: just test-bats-conformance-tool-fibby)"
   fi
   if [[ -z ${PIGGY:-} || ! -x ${PIGGY:-} ]]; then
     skip "PIGGY not set or not executable"
   fi
 }
 
-# Assert `piggy tool <args>` and `pivy-tool <args>` produce the same
-# stdout (command substitution strips trailing newlines from both, which
-# is exactly the sshkey_write-has-no-newline normalization we want).
+# Assert `piggy tool <args>` produces the same stdout as `pivy-tool <args>`
+# did (command substitution strips trailing newlines from both, which is
+# exactly the sshkey_write-has-no-newline normalization we want). The
+# oracle case is named after the args.
 _assert_tool_matches() {
-  local rust c
+  local rust c case
+  case="$(IFS=_; printf '%s' "$*")"
   rust="$("$PIGGY" tool "$@")" || fail "piggy tool $* failed (status $?)"
-  c="$("$REAL_PIVY_TOOL" "$@")" || fail "pivy-tool $* failed (status $?)"
+  c="$(pivy_oracle "$case" "$@")" || fail "pivy-tool $* failed (status $?)"
   assert_equal "$rust" "$c"
 }
 
@@ -80,7 +83,7 @@ function sign_9a_matches_c { # @test
   local msg="piggy tool sign differential payload"
   local r="$BATS_TEST_TMPDIR/r.sig" c="$BATS_TEST_TMPDIR/c.sig"
   printf '%s' "$msg" | "$PIGGY" tool -P 123456 sign 9a >"$r" || fail "piggy tool sign failed"
-  printf '%s' "$msg" | "$REAL_PIVY_TOOL" -P 123456 sign 9a >"$c" || fail "pivy-tool sign failed"
+  printf '%s' "$msg" | pivy_oracle sign_9a -P 123456 sign 9a >"$c" || fail "pivy-tool sign failed"
   assert [ -s "$r" ]
   run cmp "$r" "$c"
   assert_success
@@ -102,10 +105,10 @@ function ecdh_9d_matches_c { # @test
   # as the peer, fed to both impls; compare the raw shared secret. `-P`
   # for the PIN, same reason as sign.
   local peer="$BATS_TEST_TMPDIR/peer.pub"
-  "$REAL_PIVY_TOOL" pubkey 9a >"$peer" || fail "pubkey 9a for peer failed"
+  pivy_oracle pubkey_9a pubkey 9a >"$peer" || fail "pubkey 9a for peer failed"
   local r="$BATS_TEST_TMPDIR/r.ss" c="$BATS_TEST_TMPDIR/c.ss"
   "$PIGGY" tool -P 123456 ecdh 9d <"$peer" >"$r" || fail "piggy tool ecdh failed"
-  "$REAL_PIVY_TOOL" -P 123456 ecdh 9d <"$peer" >"$c" || fail "pivy-tool ecdh failed"
+  pivy_oracle ecdh_9d -P 123456 ecdh 9d <"$peer" >"$c" || fail "pivy-tool ecdh failed"
   assert [ -s "$r" ]
   run cmp "$r" "$c"
   assert_success
@@ -125,8 +128,8 @@ function attest_imported_key_fails_like_c { # @test
   run "$PIGGY" tool attest 9d
   assert_failure
   refute_output --partial "BEGIN CERTIFICATE"
-  run "$REAL_PIVY_TOOL" attest 9d
-  assert_failure
+  run pivy_oracle attest_9d attest 9d
+  assert_oracle_failure
   refute_output --partial "BEGIN CERTIFICATE"
 }
 
@@ -136,8 +139,8 @@ function pubkey_empty_slot_fails_like_c { # @test
   run "$PIGGY" tool pubkey 9c
   assert_failure
   refute_output --partial "ecdsa-sha2-nistp256"
-  run "$REAL_PIVY_TOOL" pubkey 9c
-  assert_failure
+  run pivy_oracle pubkey_9c pubkey 9c
+  assert_oracle_failure
 }
 
 function unported_op_is_a_usage_error_not_a_c_fallthrough { # @test
@@ -161,7 +164,7 @@ function list_json_matches_c { # @test
   # BCD-decoded fasc-n, ykpiv+version, the auth/vci/algorithms defaults, and
   # every seeded slot's cert subject/issuer/serial/pubkey). list is PIN-free.
   # The `-j` flag precedes `list` (piggy's tool ops are options-first).
-  run "$REAL_PIVY_TOOL" -j list
+  run pivy_oracle list_json -j list
   assert_success
   local c_out="$output"
   run "$PIGGY" tool -j list
@@ -197,7 +200,7 @@ function req_cert_valid_csr_carries_same_key_as_c { # @test
   # key C's req-cert does (slot 9A's key). openssl is on the devShell PATH.
   local pcsr="$BATS_TEST_TMPDIR/piggy.csr" ccsr="$BATS_TEST_TMPDIR/c.csr"
   "$PIGGY" tool -P 123456 req-cert 9a >"$pcsr" || fail "piggy req-cert failed"
-  "$REAL_PIVY_TOOL" -P 123456 req-cert 9a >"$ccsr" || fail "pivy-tool req-cert failed"
+  pivy_oracle req_cert_9a -P 123456 req-cert 9a >"$ccsr" || fail "pivy-tool req-cert failed"
   # Valid PKCS#10 whose self-signature verifies.
   run openssl req -in "$pcsr" -noout -verify
   assert_success
@@ -229,7 +232,7 @@ function pinfo_matches_c { # @test
   # impls read and print the same fields, so `pinfo` output is byte-identical.
   # -P is passed for C (its assert_pin path) and ignored by piggy's PIN-free
   # read; the seeded PINFO is readable without a PIN either way.
-  run "$REAL_PIVY_TOOL" -P 123456 pinfo
+  run pivy_oracle pinfo -P 123456 pinfo
   assert_success
   local c_out="$output"
   run "$PIGGY" tool pinfo
