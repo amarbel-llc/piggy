@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod apdu;
 pub mod attest;
+pub mod card_ecdh;
 pub mod cert;
 pub mod cert_builder;
 pub mod chuid;

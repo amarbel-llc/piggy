@@ -47,3 +47,5 @@ des = "0.8"
 # fibby's VirtualCard as an in-process ApduTransport (pigsty design §5):
 # the PIV session logic runs against the virtual card without pcscd.
 fibby = { path = "../fibby" }
+# card_ecdh_tests checks the card's ECDH against a software ECDH (piggy#341).
+p256 = { version = "0.13", features = ["ecdh"] }
