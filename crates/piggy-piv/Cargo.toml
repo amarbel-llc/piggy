@@ -12,13 +12,18 @@ edition = "2021"
 # `cargo metadata --features <this crate's features>` across the workspace,
 # and fibby's optional `pcsc` dependency makes a `pcsc` feature name an error
 # there.
-default = ["pcsc-transport"]
+default = ["pcsc-transport", "openssl-api"]
 pcsc-transport = ["dep:pcsc"]
+# The two OpenSSL-shaped APIs piggy itself uses: `display_fields` (DNs in
+# OpenSSL's X509_NAME_oneline form, byte-for-byte with C for `tool list`)
+# and `raw_ed25519_from_spki` (takes an OpenSSL key). Named so as not to
+# collide with any member's `openssl` dependency (see above).
+openssl-api = ["dep:openssl"]
 
 [dependencies]
 pcsc = { version = "2.9", optional = true }
 hex = "0.4"
-openssl = "0.10"
+openssl = { version = "0.10", optional = true }
 ssh-key = { version = "0.6", features = ["alloc", "ecdsa", "rsa", "ed25519"] }
 thiserror = "2"
 tracing = "0.1"
@@ -47,5 +52,8 @@ des = "0.8"
 # fibby's VirtualCard as an in-process ApduTransport (pigsty design §5):
 # the PIV session logic runs against the virtual card without pcscd.
 fibby = { path = "../fibby" }
+# The independent oracle the pure-Rust cert/3DES/digest paths are tested
+# against (piggy#337).
+openssl = "0.10"
 # card_ecdh_tests checks the card's ECDH against a software ECDH (piggy#341).
 p256 = { version = "0.13", features = ["ecdh"] }

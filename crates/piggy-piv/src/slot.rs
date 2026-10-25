@@ -101,6 +101,8 @@ impl PivSlot {
 
     /// Certificate subject, issuer (both `X509_NAME_oneline`), and serial
     /// (`BN_bn2hex`) for `pivy-tool list`, parsed from this slot's cert DER.
+    /// OpenSSL-formatted for byte parity with C, so behind `openssl-api`.
+    #[cfg(feature = "openssl-api")]
     pub fn cert_display_fields(&self) -> Result<(String, String, String), crate::error::PivError> {
         crate::cert::display_fields(&self.cert_der)
     }

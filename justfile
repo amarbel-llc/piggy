@@ -2555,7 +2555,7 @@ lint-piggy-piv-portable:
     cargo clippy -p piggy-piv --no-default-features --lib -- -D warnings
     tree=$(cargo tree -p piggy-piv --no-default-features -e normal --prefix none)
     bad=0
-    for native in pcsc-sys; do
+    for native in pcsc-sys openssl-sys; do
       if grep -q "^$native " <<<"$tree"; then
         echo "piggy-piv --no-default-features still depends on $native:" >&2
         cargo tree -p piggy-piv --no-default-features -e normal -i "$native" >&2

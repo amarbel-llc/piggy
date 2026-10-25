@@ -1,10 +1,7 @@
 use const_oid::ObjectIdentifier;
 use der::{Decode, Tagged};
 use elliptic_curve::sec1::ToEncodedPoint;
-use openssl::bn::BigNumContext;
-use openssl::ec::{EcGroup, EcKey, EcPoint};
-use openssl::ecdsa::EcdsaSig;
-use openssl::nid::Nid;
+#[cfg(feature = "openssl-api")]
 use openssl::x509::X509;
 use ssh_key::PublicKey;
 use ssh_key::public::{EcdsaPublicKey, KeyData};
@@ -38,29 +35,37 @@ pub fn verify_ec_signature(
             ));
         }
     };
-    let nid = match ec {
-        EcdsaPublicKey::NistP256(_) => Nid::X9_62_PRIME256V1,
-        EcdsaPublicKey::NistP384(_) => Nid::SECP384R1,
-        other => {
-            return Err(PivError::UnsupportedAlgorithm(format!(
-                "unsupported CAK curve {:?}",
-                other.curve()
-            )));
+    use p256::ecdsa::signature::hazmat::PrehashVerifier;
+    let crypto = |what: &str, e: &dyn std::fmt::Display| PivError::Crypto(format!("{what}: {e}"));
+    // Pure Rust (piggy#337), as OpenSSL's ECDSA_do_verify did: a
+    // well-formed but non-matching signature is Ok(false).
+    match ec {
+        EcdsaPublicKey::NistP256(_) => {
+            let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(ec.as_sec1_bytes())
+                .map_err(|e| crypto("CAK public key", &e))?;
+            let sig = p256::ecdsa::Signature::from_der(der_sig)
+                .map_err(|e| crypto("CAK signature", &e))?;
+            Ok(key.verify_prehash(prehash, &sig).is_ok())
         }
-    };
-
-    let group = EcGroup::from_curve_name(nid)?;
-    let mut ctx = BigNumContext::new()?;
-    let point = EcPoint::from_bytes(&group, ec.as_sec1_bytes(), &mut ctx)?;
-    let eckey = EcKey::from_public_key(&group, &point)?;
-    let sig = EcdsaSig::from_der(der_sig)?;
-    Ok(sig.verify(prehash, &eckey)?)
+        EcdsaPublicKey::NistP384(_) => {
+            let key = p384::ecdsa::VerifyingKey::from_sec1_bytes(ec.as_sec1_bytes())
+                .map_err(|e| crypto("CAK public key", &e))?;
+            let sig = p384::ecdsa::Signature::from_der(der_sig)
+                .map_err(|e| crypto("CAK signature", &e))?;
+            Ok(key.verify_prehash(prehash, &sig).is_ok())
+        }
+        other => Err(PivError::UnsupportedAlgorithm(format!(
+            "unsupported CAK curve {:?}",
+            other.curve()
+        ))),
+    }
 }
 
 /// Extract the raw 32-byte Ed25519 public key from a parsed SPKI. RFC
 /// 8410 stores Ed25519 keys as the raw point with no inner DER
 /// structure. Shared by [`extract_public_key`] and piggy-ids' slot
 /// classifier (which needs the raw bytes as a markl payload).
+#[cfg(feature = "openssl-api")]
 pub fn raw_ed25519_from_spki(
     pkey: &openssl::pkey::PKeyRef<openssl::pkey::Public>,
 ) -> Result<[u8; 32], PivError> {
@@ -201,6 +206,7 @@ pub fn extract_public_key(cert_der: &[u8]) -> Result<(PivAlgorithm, PublicKey), 
 /// C, …); an OID with no short name falls back to its text form. Byte-exact
 /// with C for the common printable-DN case (the only case the fibby differential
 /// and virtually all real certs exercise); exotic-byte DNs are approximated.
+#[cfg(feature = "openssl-api")]
 fn name_oneline(name: &openssl::x509::X509NameRef) -> String {
     let mut out = String::new();
     for entry in name.entries() {
@@ -245,6 +251,7 @@ pub fn ec_sec1_point(cert_der: &[u8]) -> Result<Vec<u8>, PivError> {
 /// uppercase, even-length) from a DER cert, for the `piggy tool list` port.
 /// The serial goes through the same `BN_bn2hex` as C (`BigNum::to_hex_str`), so
 /// it is byte-identical; the DNs are byte-identical for printable names.
+#[cfg(feature = "openssl-api")]
 pub fn display_fields(cert_der: &[u8]) -> Result<(String, String, String), PivError> {
     let cert = X509::from_der(cert_der)?;
     let subject = name_oneline(cert.subject_name());
@@ -253,10 +260,15 @@ pub fn display_fields(cert_der: &[u8]) -> Result<(String, String, String), PivEr
     Ok((subject, issuer, serial))
 }
 
-#[cfg(test)]
+// The OpenSSL oracle the pure-Rust paths are held to needs the
+// `openssl-api` feature (default on).
+#[cfg(all(test, feature = "openssl-api"))]
 mod tests {
     use super::*;
-    use openssl::ec::PointConversionForm;
+    use openssl::bn::BigNumContext;
+    use openssl::ec::{EcGroup, EcKey, PointConversionForm};
+    use openssl::ecdsa::EcdsaSig;
+    use openssl::nid::Nid;
 
     fn p256_pubkey(key: &EcKey<openssl::pkey::Private>) -> KeyData {
         let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();

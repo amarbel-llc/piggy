@@ -43,6 +43,7 @@ pub enum PivError {
     #[error("unsupported algorithm: {0}")]
     UnsupportedAlgorithm(String),
 
+    #[cfg(feature = "openssl-api")]
     #[error("OpenSSL error: {0}")]
     Openssl(#[from] openssl::error::ErrorStack),
 
