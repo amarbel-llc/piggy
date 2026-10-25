@@ -311,7 +311,9 @@ impl Session for PiggyAgent {
         let start = std::time::Instant::now();
         // Label the metric with the extension name (bare, so it matches
         // the C agent: e.g. ecdh@joyent.com -> piggy.agent.ecdh_joyent_com).
-        let op = extension.name.as_str().to_owned();
+        // Both ECDH names (piggy#335) share that legacy label, so the
+        // pinned `piggy.agent.*` mirror is unchanged.
+        let op = crate::ecdh_ext::metric_label(extension.name.as_str()).to_owned();
         let res = self.extension_inner(extension).await;
         crate::stats::agent_op(&op, crate::stats::outcome_of(&res), start.elapsed());
         res
@@ -517,7 +519,8 @@ impl PiggyAgent {
                     "query",
                     "session-bind@openssh.com",
                     "pin-status@joyent.com",
-                    "ecdh@joyent.com",
+                    crate::ecdh_ext::CANONICAL,
+                    crate::ecdh_ext::LEGACY,
                     "ecdh-rebox@joyent.com",
                     "ykpiv-attest@joyent.com",
                     // eng#295: the role self-report `piggy health` reads.
@@ -593,10 +596,15 @@ impl PiggyAgent {
             // remote-host role) front a forwarded card-backed agent for
             // `piggy pass show` decrypts (eng#295). Without upstreams the
             // miss is the refusal it always was.
-            "ecdh@joyent.com" | "ecdh-rebox@joyent.com" | "ykpiv-attest@joyent.com" => {
+            // The ECDH extension answers under both its canonical name and
+            // the legacy alias (piggy#335) and echoes the name it was asked.
+            name if crate::ecdh_ext::is_ecdh(name)
+                || name == "ecdh-rebox@joyent.com"
+                || name == "ykpiv-attest@joyent.com" =>
+            {
                 let details = extension.details.clone().into_bytes();
                 let native = match extension.name.as_str() {
-                    "ecdh@joyent.com" => self.handle_ecdh(&details).await,
+                    n if crate::ecdh_ext::is_ecdh(n) => self.handle_ecdh(n, &details).await,
                     "ecdh-rebox@joyent.com" => self.handle_ecdh_rebox(&details).await,
                     _ => self.handle_attest(&details).await,
                 };
@@ -608,7 +616,17 @@ impl PiggyAgent {
                             extension = %extension.name,
                             "card key not served natively; forwarding to upstreams"
                         );
-                        self.upstreams.forward_extension(extension).await
+                        let first = self.upstreams.forward_extension(extension.clone()).await;
+                        if first.is_ok() || extension.name.as_str() != crate::ecdh_ext::CANONICAL {
+                            first
+                        } else {
+                            // A C pivy-agent or a pre-#335 piggy upstream
+                            // knows only the legacy name; its echo passes
+                            // through unchanged (the client accepts either).
+                            let mut legacy = extension;
+                            legacy.name = crate::ecdh_ext::LEGACY.into();
+                            self.upstreams.forward_extension(legacy).await
+                        }
                     }
                     Err(NativeExtError::KeyNotNative(msg)) => Err(AgentError::Other(msg.into())),
                 }
@@ -992,7 +1010,13 @@ impl PiggyAgent {
         Self::find_key(&keys, pubkey).ok_or_else(|| AgentError::Other("key not found".into()))
     }
 
-    async fn handle_ecdh(&mut self, details: &[u8]) -> Result<Option<Extension>, NativeExtError> {
+    /// Serve the card ECDH extension; `name` is the name it was asked under
+    /// (canonical or legacy, piggy#335), echoed in the response.
+    async fn handle_ecdh(
+        &mut self,
+        name: &str,
+        details: &[u8],
+    ) -> Result<Option<Extension>, NativeExtError> {
         let inner = read_ssh_string(details, 0)
             .map_err(|e| AgentError::Other(e.into()))?
             .0;
@@ -1076,7 +1100,7 @@ impl PiggyAgent {
         secret.zeroize();
 
         Ok(Some(Extension {
-            name: "ecdh@joyent.com".into(),
+            name: name.to_string(),
             details: resp.into(),
         }))
     }
@@ -2803,6 +2827,101 @@ mod tests {
     #[tokio::test]
     async fn ecdh_rebox_native_miss_forwards_to_upstream() {
         assert_forwarded("rebox-fwd", rebox_request_for_foreign_recipient()).await;
+    }
+
+    // -------- piggy#335: canonical ECDH name beside the legacy alias --------
+
+    #[tokio::test]
+    async fn query_advertises_both_ecdh_names() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        let resp = agent
+            .extension(ext_request("query"))
+            .await
+            .unwrap()
+            .expect("query response");
+        let names = decode_flat_query_names(&resp.details.clone().into_bytes());
+        assert!(
+            names.iter().any(|n| n == crate::ecdh_ext::CANONICAL),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == crate::ecdh_ext::LEGACY),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn both_ecdh_names_share_the_pinned_metric_label() {
+        assert_eq!(
+            crate::ecdh_ext::metric_label(crate::ecdh_ext::CANONICAL),
+            crate::ecdh_ext::LEGACY
+        );
+        assert_eq!(
+            crate::ecdh_ext::metric_label(crate::ecdh_ext::LEGACY),
+            crate::ecdh_ext::LEGACY
+        );
+        assert_eq!(crate::ecdh_ext::metric_label("query"), "query");
+    }
+
+    fn ecdh_request_for_foreign_key_named(name: &str) -> Extension {
+        let mut req = ecdh_request_for_foreign_key();
+        req.name = name.into();
+        req
+    }
+
+    #[tokio::test]
+    async fn ecdh_canonical_native_miss_forwards_under_the_canonical_name() {
+        assert_forwarded(
+            "ecdh-canon-fwd",
+            ecdh_request_for_foreign_key_named(crate::ecdh_ext::CANONICAL),
+        )
+        .await;
+    }
+
+    /// A canonical request missed natively and refused by an upstream that
+    /// knows only the legacy name (C pivy-agent, a pre-#335 piggy) is
+    /// retried under the legacy name; the legacy echo passes through.
+    #[tokio::test]
+    async fn ecdh_canonical_native_miss_retries_legacy_on_a_legacy_only_upstream() {
+        let stub =
+            upstream_stub::StubUpstream::new(vec![]).with_extensions(&[crate::ecdh_ext::LEGACY]);
+        let events = stub.events.clone();
+        let path = upstream_stub::spawn_stub("ecdh-canon-legacy", stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+
+        let resp = agent
+            .extension(ecdh_request_for_foreign_key_named(
+                crate::ecdh_ext::CANONICAL,
+            ))
+            .await
+            .unwrap()
+            .expect("forwarded response");
+        assert_eq!(resp.name.as_str(), crate::ecdh_ext::LEGACY);
+        assert_eq!(resp.details.clone().into_bytes(), b"stub-echo");
+        let seen = events.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                format!("ext:{}", crate::ecdh_ext::CANONICAL),
+                format!("ext:{}", crate::ecdh_ext::LEGACY),
+            ]
+        );
+    }
+
+    /// A legacy request is never retried under any other name.
+    #[tokio::test]
+    async fn ecdh_legacy_native_miss_refused_upstream_is_not_retried() {
+        let stub = upstream_stub::StubUpstream::new(vec![]);
+        let events = stub.events.clone();
+        let path = upstream_stub::spawn_stub("ecdh-legacy-refused", stub);
+        let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+
+        agent
+            .extension(ecdh_request_for_foreign_key())
+            .await
+            .unwrap_err();
+        let seen = events.lock().unwrap().clone();
+        assert_eq!(seen, vec![format!("ext:{}", crate::ecdh_ext::LEGACY)]);
     }
 
     #[tokio::test]

@@ -23,6 +23,7 @@ pub mod agent_client;
 pub mod card;
 pub mod card_oracle;
 pub mod cmd;
+pub mod ecdh_ext;
 pub mod ecdsa_sig;
 pub mod manage;
 pub mod operator_act;
