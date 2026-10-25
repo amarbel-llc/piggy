@@ -27,6 +27,12 @@ x509-cert = "0.2"
 der = "0.7"
 const-oid = "0.9"
 spki = "0.7"
+# Reading a slot cert's public key without OpenSSL (piggy#337): normalize an
+# EC point to SEC1 uncompressed, and parse an RSA SPKI. All already in the lock.
+p256 = "0.13"
+p384 = "0.13"
+elliptic-curve = { version = "0.13", features = ["sec1"] }
+pkcs1 = "0.7"
 
 [dev-dependencies]
 # fibby's VirtualCard as an in-process ApduTransport (pigsty design §5):
