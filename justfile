@@ -337,7 +337,7 @@ test: validate-grammar test-grammar-vectors test-bats-default test-bats-conforma
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
+_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -590,18 +590,15 @@ debug-box-agentless-fibby-nosandbox: build-rust
     BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
     zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
 
-# Box interop against FIBBY — the fibby companion to
+# Box decrypt interop against FIBBY — the fibby companion to
 # test-bats-conformance-interop, part of the fib→fibby retirement
-# (docs/plans/2026-06-15-retire-fib-for-fibby.md, Phase 1 spike). Runs the
-# SAME two card-agnostic interop bats files against fibby's virtual slot 9D:
-#   - piggy_box_interop.bats: `piggy box tpl create/show` reaches C pivy-box,
-#     which reads fibby's 9D pubkey for a local-guid template (PIN-free).
-#   - piggy_box_decrypt_interop.bats: Rust `piggy-ids encrypt` → C `pivy-box
-#     stream decrypt` against fibby's 9D ECDH (VERIFY PIN + GENERAL AUTHENTICATE).
-# Proves the C pivy-box ↔ fibby path, the last box lane still pinned to fib.
-# Pure-Rust card-under-test, no Java/jcardsim/hardware.
+# (docs/plans/2026-06-15-retire-fib-for-fibby.md, Phase 1 spike):
+# piggy_box_decrypt_interop.bats runs Rust `piggy-ids encrypt` → C `pivy-box
+# stream decrypt` against fibby's 9D ECDH (VERIFY PIN + GENERAL AUTHENTICATE).
+# Pure-Rust card-under-test, no Java/jcardsim/hardware. The template interop
+# is test-bats-conformance-box-interop-fibby.
 #
-# run the fibby-backed pivy-box interop bats gate
+# run the fibby-backed pivy-box decrypt interop bats gate
 [group('post-build')]
 [linux]
 test-bats-conformance-interop-fibby: build-rust
@@ -645,8 +642,26 @@ test-bats-conformance-interop-fibby: build-rust
     PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
-    zz-tests_bats/conformance/piggy_box_interop.bats \
     zz-tests_bats/conformance/piggy_box_decrypt_interop.bats
+
+# Template-format interop between `piggy box tpl create/show` and C pivy-box
+# against FIBBY: the template piggy writes is one C read, and piggy reads
+# the one C writes (fibby's 9D pubkey, local-guid, PIN-free). C's side is
+# frozen fixtures under zz-tests_bats/fixtures/pivy-oracle/box-interop-fibby/
+# (piggy#285), so the lane needs no C binary.
+#
+# run the fibby-backed pivy-box template interop bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-box-interop-fibby: (_lane-pivy-oracle "box-interop-fibby" "piggy_box_interop.bats" "replay")
+
+# Re-record the C pivy-box templates and verdicts the box-interop-fibby lane
+# replays (piggy#285): the same lane with the live C binary.
+#
+# re-record the C pivy-box oracle fixtures for the box-interop-fibby lane
+[group('codemod')]
+[linux]
+codemod-capture-pivy-oracle-box-interop-fibby: (_lane-pivy-oracle "box-interop-fibby" "piggy_box_interop.bats" "capture")
 
 # Differential `piggy tool` conformance against C pivy-tool over FIBBY
 # (piggy#289 Phase 3, milestone 3.1a). Brings up fibby seeded with slot
@@ -767,7 +782,7 @@ _lane-pivy-oracle lane file mode: build-rust
   if [[ {{ mode }} == capture ]]; then
     pivy_out=$(nix build .#pivy --no-link --print-out-paths) || exit 1
     capture_env=(PIGGY_ORACLE_MODE=capture REAL_PIVY_TOOL="$pivy_out/bin/pivy-tool"
-      PIVY_ORACLE_CAPTURE_DIR="$workdir/oracle")
+      REAL_PIVY_BOX="$pivy_out/bin/pivy-box" PIVY_ORACLE_CAPTURE_DIR="$workdir/oracle")
   fi
   askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
   env "${capture_env[@]}" \
