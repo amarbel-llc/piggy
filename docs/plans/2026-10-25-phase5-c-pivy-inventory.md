@@ -1,9 +1,19 @@
 # #289 Phase 5 precondition: inventory of C pivy in the justfile and bats
 
 Status: inventory only (2026-10-25), not work. Phase 5 starts only when all
-its preconditions hold: #285 done (landed in 58dd3fb), the post-Phase-4
-soak recorded by the operator, #272–#278 closed or triaged, and this
-inventory. Line numbers are of `justfile` at 5ecfed0 and drift.
+its preconditions hold. Precondition state, 2026-10-25:
+- #285: done (58dd3fb).
+- The post-Phase-4 soak: recorded clean by the operator on #289.
+- #272–#278: triaged by the operator.
+  - #277 and #278 closed.
+  - #274 kept open for Ed25519 (RSA never).
+  - #276 kept open for AES management keys. That is a real gap for
+    YubiKey 5.7+ cards, so it still blocks.
+  - #272, #273 and #275 to close once their per-op follow-ups are filed.
+- This inventory: written; the coordinator still has to check it.
+
+Line numbers are of `justfile` at 5ecfed0 and drift. "What each C
+deletion needs", below, is the one-page view.
 
 48 recipes run C pivy in their body (comment-only mentions excluded). 13 of
 them are in the merge gate (`test`, directly or via
@@ -61,17 +71,6 @@ key (management-key territory). It **needs an independent check before
 deletion**; candidate: a frozen C-recorded authentication transcript
 replayed against piggy's key, decided with the operator.
 
-### Coverage removed
-
-For the Phase 5 soak record to weigh:
-
-- 10d0584: the four agent-fixture lanes no longer show, incidentally, that
-  piggy decrypts through the C pivy-agent (including the forwarded path of
-  ssh-via-fibby). They now exercise `piggy agent`.
-- 58dd3fb (#285): the live-C decrypt of a freshly encrypted ebox
-  (piggy_box_decrypt_interop.bats); the oracle-box corpus covers
-  capture-time eboxes, and the RFC 0002 vectors pin the encoder.
-
 ## (c) C-self tests — 4 recipes, delete with the C build
 
 | Recipe (line) | Aggregate | What it tests |
@@ -95,6 +94,34 @@ debug-tool-list-capture. Via helper scripts
 debug-fibby-roundtrip and its -capture, -capture-test-vector and -via-fib
 wrappers, debug-fibby-piggy-roundtrip. `helpers/piggy-throwaway-guard.sh
 --probe` and `explore/explore_local_guid_pcsc.bats` also run C.
+
+## What each C deletion needs
+
+One row per thing Phase 5 deletes. A deletion is ready when its "needs"
+column is met.
+
+| Delete | Needs first | Coverage it removes |
+|---|---|---|
+| card-init's `pivy-tool set-admin` proof (test-bats-conformance-card-init-fibby) | an independent check of the recovered management key: candidate, a frozen C-recorded mgmt-key auth transcript replayed against piggy's key (operator decision) | C confirming piggy's recovered mgmt key authenticates |
+| pivy_tool_admin_key.bats and its `.#pivy` use in test-bats-conformance | nothing (C-self) | C pivy-tool's own `-K default` parsing |
+| piggy_fibby_pivy_agent_smoke.bats + its recipe | nothing (C-self) | C pivy-agent against fibby (identities, 9A/9C sign, rebox) |
+| pivy_agent_hardware.bats + test-bats-conformance-pivy-agent-hardware | nothing (C-self, card lane) | C pivy-agent on a real card |
+| explore-pivy-tool-bats | nothing (likely already broken since Phase 4, I) | none |
+| the 23 debug/explore recipes and the helper scripts (fibby-roundtrip.sh, fibby-piggy-roundtrip.sh, piggy-throwaway-guard.sh `--probe`) | per recipe: port it to piggy if it is still a useful dev loop, else delete. `debug-yk-throwaway-*` and `piggy-throwaway-guard.sh` guard real throwaway cards, so they need piggy equivalents before deletion | debugging conveniences only |
+| the oracle capture paths (`codemod-capture-pivy-oracle-*`, the capture branch of `_lane-pivy-oracle` / `_lane-tool-fibby`, the capture half of lib/pivy_oracle.bash, codemod-capture-pivy-oracle-box) | nothing; the frozen fixtures stay as the contract | the ability to re-record C's answers (a deliberate contract change would need the C build back) |
+| `piggy pivy <tool>` passthrough (`exec::exec_pivy`) | nothing (already finds no `pivy-*` on PATH since Phase 4) | none for users (the soak recorded no use of it) |
+| the C build: vendor/pivy, nix/pivy.nix, `.#pivy`, lint-closure-no-pivy's subject | everything above | — |
+
+## Coverage already removed (for the soak record to weigh)
+
+- 58dd3fb (#285): the live-C decrypt of a freshly encrypted ebox
+  (piggy_box_decrypt_interop.bats); the oracle-box corpus covers
+  capture-time eboxes, the RFC 0002 vectors pin the encoder.
+- 58dd3fb (#285): the C pivy-agent baseline of the pin-on-demand lane
+  (it compared nothing against piggy).
+- 10d0584: the four agent-fixture lanes no longer show, incidentally, that
+  piggy decrypts through the C pivy-agent (ssh-via-fibby's forwarded path
+  included); they exercise `piggy agent`.
 
 ## Suggested order (proposal)
 
