@@ -1427,6 +1427,7 @@ version = "0.1.0"
 dependencies = [
  "const-oid",
  "der",
+ "des",
  "elliptic-curve",
  "fibby",
  "hex",
@@ -1435,6 +1436,7 @@ dependencies = [
  "p384",
  "pcsc",
  "pkcs1",
+ "sha2",
  "spki",
  "ssh-key",
  "thiserror",

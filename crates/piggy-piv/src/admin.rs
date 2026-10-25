@@ -15,7 +15,7 @@
 //! 5.7+ default) are a follow-up — [`PinSession::authenticate_admin`] errors
 //! clearly on any other algorithm rather than mis-authenticating.
 
-use openssl::symm::{Cipher, Crypter, Mode};
+use des::cipher::{BlockEncrypt, KeyInit};
 
 use crate::apdu::{Apdu, alg, ga_tag};
 use crate::error::PivError;
@@ -112,21 +112,18 @@ fn parse_witness(resp: &[u8]) -> Result<Vec<u8>, PivError> {
 }
 
 /// 3DES-EDE3 ECB single-block encryption, no padding. The witness is exactly
-/// one 8-byte block.
+/// one 8-byte block. Pure Rust (`des`), as fibby's card side is (piggy#337).
 fn des3_ecb_encrypt(key: &[u8], block: &[u8]) -> Result<Vec<u8>, PivError> {
-    let cipher = Cipher::des_ede3();
-    let mut c = Crypter::new(cipher, Mode::Encrypt, key, None)
-        .map_err(|e| PivError::Other(format!("3DES init: {e}")))?;
-    c.pad(false);
-    let mut out = vec![0u8; block.len() + cipher.block_size()];
-    let mut n = c
-        .update(block, &mut out)
-        .map_err(|e| PivError::Other(format!("3DES encrypt: {e}")))?;
-    n += c
-        .finalize(&mut out[n..])
-        .map_err(|e| PivError::Other(format!("3DES finalize: {e}")))?;
-    out.truncate(n);
-    Ok(out)
+    let cipher = des::TdesEde3::new_from_slice(key)
+        .map_err(|_| PivError::Other(format!("3DES init: key is {} bytes, not 24", key.len())))?;
+    let mut out: [u8; 8] = block.try_into().map_err(|_| {
+        PivError::Other(format!(
+            "3DES encrypt: block is {} bytes, not 8",
+            block.len()
+        ))
+    })?;
+    cipher.encrypt_block((&mut out).into());
+    Ok(out.to_vec())
 }
 
 #[cfg(test)]
@@ -165,6 +162,8 @@ mod tests {
         let enc = des3_ecb_encrypt(&DEFAULT_ADMIN_KEY, &witness).unwrap();
         assert_eq!(enc.len(), 8);
 
+        // OpenSSL is the independent implementation (piggy#337 oracle).
+        use openssl::symm::{Cipher, Crypter, Mode};
         let cipher = Cipher::des_ede3();
         let mut d = Crypter::new(cipher, Mode::Decrypt, &DEFAULT_ADMIN_KEY, None).unwrap();
         d.pad(false);
@@ -173,6 +172,13 @@ mod tests {
         n += d.finalize(&mut out[n..]).unwrap();
         out.truncate(n);
         assert_eq!(out, witness);
+    }
+
+    #[test]
+    fn des3_ecb_rejects_wrong_key_and_block_lengths() {
+        assert!(des3_ecb_encrypt(&DEFAULT_ADMIN_KEY[..16], &[0u8; 8]).is_err());
+        assert!(des3_ecb_encrypt(&DEFAULT_ADMIN_KEY, &[0u8; 7]).is_err());
+        assert!(des3_ecb_encrypt(&DEFAULT_ADMIN_KEY, &[0u8; 16]).is_err());
     }
 
     #[test]

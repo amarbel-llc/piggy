@@ -83,7 +83,7 @@ pub fn build_self_signed_cert(
     };
 
     let tbs_der = tbs.to_der().map_err(der_err)?;
-    let digest = openssl::hash::hash(md, &tbs_der)?;
+    let digest = md(&tbs_der);
     let sig_der = sign_digest(&digest)?;
 
     let cert = Certificate {
@@ -134,7 +134,7 @@ pub fn build_csr(
     };
 
     let info_der = info.to_der().map_err(der_err)?;
-    let digest = openssl::hash::hash(md, &info_der)?;
+    let digest = md(&info_der);
     let sig_der = sign_digest(&digest)?;
 
     let csr = CertReq {
@@ -149,30 +149,28 @@ fn der_err<E: std::fmt::Display>(e: E) -> PivError {
     PivError::Other(format!("x509 build: {e}"))
 }
 
+/// A message digest over the DER the builders sign (pure Rust, piggy#337).
+type Digest = fn(&[u8]) -> Vec<u8>;
+
+fn sha256(data: &[u8]) -> Vec<u8> {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(data).to_vec()
+}
+
+fn sha384(data: &[u8]) -> Vec<u8> {
+    use sha2::Digest as _;
+    sha2::Sha384::digest(data).to_vec()
+}
+
 /// The ASN.1 parameters an EC cert/CSR needs: the named-curve OID, the
 /// ECDSA-with-SHA signature OID, and the matching digest. EC-only (P-256/P-384)
 /// — the cert and CSR builders share this so a non-EC key is rejected once.
 fn ec_params(
     algorithm: PivAlgorithm,
-) -> Result<
-    (
-        ObjectIdentifier,
-        ObjectIdentifier,
-        openssl::hash::MessageDigest,
-    ),
-    PivError,
-> {
+) -> Result<(ObjectIdentifier, ObjectIdentifier, Digest), PivError> {
     match algorithm {
-        PivAlgorithm::EcP256 => Ok((
-            OID_PRIME256V1,
-            OID_ECDSA_SHA256,
-            openssl::hash::MessageDigest::sha256(),
-        )),
-        PivAlgorithm::EcP384 => Ok((
-            OID_SECP384R1,
-            OID_ECDSA_SHA384,
-            openssl::hash::MessageDigest::sha384(),
-        )),
+        PivAlgorithm::EcP256 => Ok((OID_PRIME256V1, OID_ECDSA_SHA256, sha256)),
+        PivAlgorithm::EcP384 => Ok((OID_SECP384R1, OID_ECDSA_SHA384, sha384)),
         other => Err(PivError::Other(format!(
             "cert/CSR building only supports ECDSA P-256/P-384, not {other:?}"
         ))),
