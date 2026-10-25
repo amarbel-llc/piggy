@@ -1,5 +1,5 @@
 use crate::transport::{ApduSession, ApduTransport, EndDisposition, RawApdu};
-#[cfg(feature = "pcsc")]
+#[cfg(feature = "pcsc-transport")]
 use crate::{PivContext, transport::PcscTransport};
 
 use crate::apdu::{Apdu, PIV_AID, StatusWord, ga_tag};
@@ -88,8 +88,8 @@ fn parse_serial_response(data: &[u8], sw: StatusWord) -> Option<u32> {
     }
 }
 
-/// The PC/SC entry points (the default-on `pcsc` feature, piggy#337).
-#[cfg(feature = "pcsc")]
+/// The PC/SC entry points (the default-on `pcsc-transport` feature, piggy#337).
+#[cfg(feature = "pcsc-transport")]
 impl PivToken {
     pub fn connect(ctx: &PivContext, reader: &str) -> Result<Self, PivError> {
         Self::connect_inner(ctx, reader, true)
@@ -898,7 +898,7 @@ fn parse_ga_response(resp: &[u8]) -> Result<Vec<u8>, PivError> {
     Ok(payload.to_vec())
 }
 
-#[cfg(feature = "pcsc")]
+#[cfg(feature = "pcsc-transport")]
 impl PivContext {
     /// Enumerate all PIV tokens across all readers.
     /// Silently skips readers that don't have PIV cards.

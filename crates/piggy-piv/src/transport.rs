@@ -3,14 +3,14 @@
 //!
 //! [`PivToken`](crate::token::PivToken) and
 //! [`PinSession`](crate::token::PinSession) talk to a card only through
-//! these traits. `PcscTransport` (the default-on `pcsc` feature) is the
+//! these traits. `PcscTransport` (the default-on `pcsc-transport` feature) is the
 //! PC/SC implementation every existing caller gets through
 //! `PivToken::connect`; a test, or a host without PC/SC (Android
 //! NFC/USB), supplies its own and hands it to `PivToken::from_transport`.
 
 use crate::error::PivError;
 
-#[cfg(feature = "pcsc")]
+#[cfg(feature = "pcsc-transport")]
 pub use crate::pcsc_transport::PcscTransport;
 
 /// Bound on retries when `SCardBeginTransaction` returns

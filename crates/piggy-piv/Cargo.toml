@@ -7,8 +7,13 @@ edition = "2021"
 # Default on: every piggy-side consumer keeps the PC/SC transport.
 # `default-features = false` drops the native pcsclite link so pigsty can
 # drive PIV over its own ApduTransport on Android and wasm (piggy#337).
-default = ["pcsc"]
-pcsc = ["dep:pcsc"]
+#
+# Named `pcsc-transport`, not `pcsc`: cargo-auditable (the nix build) runs
+# `cargo metadata --features <this crate's features>` across the workspace,
+# and fibby's optional `pcsc` dependency makes a `pcsc` feature name an error
+# there.
+default = ["pcsc-transport"]
+pcsc-transport = ["dep:pcsc"]
 
 [dependencies]
 pcsc = { version = "2.9", optional = true }

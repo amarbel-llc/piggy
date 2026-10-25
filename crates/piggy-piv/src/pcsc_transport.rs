@@ -1,5 +1,5 @@
 //! The PC/SC implementation of the transport seam
-//! ([`crate::transport`]), behind the default-on `pcsc` feature so a
+//! ([`crate::transport`]), behind the default-on `pcsc-transport` feature so a
 //! `default-features = false` build links no pcsclite (piggy#337).
 
 use pcsc::{Disposition, Protocols, ShareMode};
