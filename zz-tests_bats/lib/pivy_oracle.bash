@@ -39,6 +39,11 @@ pivy_oracle() {
     local status=0
     "$REAL_PIVY_TOOL" "$@" >"$base.out" || status=$?
     printf '%s\n' "$status" >"$base.status"
+    # A lane whose C call changes the card defines this to put the card
+    # back, so the Rust side starts from the state C did, as in replay.
+    if declare -F pivy_oracle_after_capture >/dev/null; then
+      pivy_oracle_after_capture
+    fi
   fi
 
   [[ -f $base.out && -f $base.status ]] || {

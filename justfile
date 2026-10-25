@@ -732,29 +732,55 @@ _lane-tool-fibby mode: build-rust
 # per-test pcsc socket. No host-path exposure: fibby runs in-sandbox as a
 # child of the test, so it and the test share the sandbox /tmp.
 #
+# C's answers are frozen fixtures under
+# zz-tests_bats/fixtures/pivy-oracle/tool-pin-fibby/ (piggy#285), so the lane
+# needs no C binary.
+#
 # run the fibby-backed differential piggy tool PIN/PUK bats gate
 [group('post-build')]
 [linux]
-test-bats-conformance-tool-pin-fibby: build-rust
+test-bats-conformance-tool-pin-fibby: (_lane-tool-pin-fibby "replay")
+
+# Re-record the C pivy-tool answers the tool-pin-fibby lane replays
+# (piggy#285), each on a fresh card: the same lane with the live C binary.
+#
+# re-record the C pivy-tool oracle fixtures for the tool-pin-fibby lane
+[group('codemod')]
+[linux]
+codemod-capture-pivy-oracle-tool-pin-fibby: (_lane-tool-pin-fibby "capture")
+
+[linux]
+_lane-tool-pin-fibby mode: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  pivy_tool="$pivy_out/bin/pivy-tool"
   fibby_bin="$PWD/target/debug/fibby"
   piggy_bin="$PWD/target/debug/piggy"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
-  [[ -x $pivy_tool ]] || { echo "missing $pivy_tool (nix build .#pivy)"; exit 1; }
+  workdir=$(mktemp -d /tmp/tool-pin-fibby-XXXXXX)
+  trap 'rm -rf "$workdir"' EXIT
+  capture_env=()
+  if [[ {{ mode }} == capture ]]; then
+    pivy_out=$(nix build .#pivy --no-link --print-out-paths) || exit 1
+    capture_env=(PIGGY_ORACLE_MODE=capture REAL_PIVY_TOOL="$pivy_out/bin/pivy-tool"
+      PIVY_ORACLE_CAPTURE_DIR="$workdir/oracle")
+  fi
   askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-  FIBBY_BIN="$fibby_bin" \
-    REAL_PIVY_TOOL="$pivy_tool" \
+  env "${capture_env[@]}" \
+    FIBBY_BIN="$fibby_bin" \
     PIGGY="$piggy_bin" \
     SSH_ASKPASS="$askpass" \
     SSH_ASKPASS_REQUIRE=force \
     DISPLAY="" \
     PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
-    BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
-    zz-tests_bats/conformance/piggy_tool_pin_fibby.bats
+    BATS_TEST_TIMEOUT=60 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
+    zz-tests_bats/conformance/piggy_tool_pin_fibby.bats || exit 1
+  if [[ {{ mode }} == capture ]]; then
+    dest="$PWD/zz-tests_bats/fixtures/pivy-oracle/tool-pin-fibby"
+    rm -rf "$dest"
+    cp -r "$workdir/oracle/tool-pin-fibby" "$dest"
+    echo "recorded $(find "$dest" -name '*.out' | wc -l) cases into $dest"
+  fi
 
 # `piggy tool factory-reset` conformance (piggy#289 Phase 3 Tier 2 /
 # piggy#291): the YubicoPIV RESET (INS 0xFB) that wipes the PIV applet. Each
