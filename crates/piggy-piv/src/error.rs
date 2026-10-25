@@ -5,6 +5,10 @@ pub enum PivError {
     #[error("PCSC error: {0}")]
     Pcsc(#[from] pcsc::Error),
 
+    /// A non-PC/SC transport (a scripted test card, an NFC link) failed.
+    #[error("transport error: {0}")]
+    Transport(String),
+
     #[error("TLV parse error: {message}")]
     Tlv { message: String },
 

@@ -1,4 +1,4 @@
-use pcsc::{Disposition, Protocols, ShareMode, Transaction};
+use crate::transport::{ApduSession, ApduTransport, EndDisposition, PcscTransport, RawApdu};
 
 use crate::PivContext;
 use crate::apdu::{Apdu, PIV_AID, StatusWord, ga_tag};
@@ -8,15 +8,8 @@ use crate::guid::Guid;
 use crate::slot::{self, PivAlgorithm, PivSlot};
 use crate::tlv::{TlvReader, TlvWriter};
 
-/// Bound on retries when `SCardBeginTransaction` returns
-/// `SCARD_W_RESET_CARD`. C pivy (vendor/pivy/src/piv.c::piv_txn_begin)
-/// loops unboundedly; the bounded form fails fast against a stuck card
-/// while still tolerating routine reset windows between connect() and
-/// transaction acquisition. See piggy#56 decision 5.
-const PIN_SESSION_RESET_RETRY_CAP: u32 = 3;
-
-/// RAII guard wrapping a single `SCardBeginTransaction` /
-/// `SCardEndTransaction` lifetime against a [`PivToken`].
+/// RAII guard wrapping a single transaction lifetime on the token's
+/// transport against a [`PivToken`].
 ///
 /// All PIN-using card operations (`verify_pin`, `sign_prehash`,
 /// `ecdh_derive`) live on this type. They are reachable **only**
@@ -28,11 +21,11 @@ const PIN_SESSION_RESET_RETRY_CAP: u32 = 3;
 /// Drop semantics: when the session ends — either via the explicit
 /// [`PinSession::end`] terminator or via an implicit drop after an
 /// early-return `?` — the underlying transaction is ended with
-/// `Disposition::ResetCard` if any successful `verify_pin` ran
-/// during the session, and `Disposition::LeaveCard` otherwise. The
+/// `EndDisposition::ResetCard` if any successful `verify_pin` ran
+/// during the session, and `EndDisposition::LeaveCard` otherwise. The
 /// `ResetCard` disposition clears PIN-verified state on the card so
 /// it does not leak across sessions. Drop swallows
-/// `SCardEndTransaction` errors and logs them via `tracing::warn`;
+/// end-of-transaction errors and logs them via `tracing::warn`;
 /// the explicit `end` propagates them.
 ///
 /// The session does NOT mirror C pivy's `piv_clear_pin` attempt
@@ -43,10 +36,10 @@ const PIN_SESSION_RESET_RETRY_CAP: u32 = 3;
 /// [`PivToken::begin_pin_session`] does on every session it opens.
 pub struct PinSession<'tok> {
     /// `Option` so [`PinSession::end`] can consume the transaction
-    /// without `Drop` re-running over `self.txn`. `None` only
+    /// without `Drop` re-running over `self.session`. `None` only
     /// transiently inside `end`; outside that path it is always
     /// `Some`.
-    txn: Option<Transaction<'tok>>,
+    session: Option<Box<dyn ApduSession + 'tok>>,
     /// True after at least one successful `verify_pin` call within
     /// this session. Drives the end-disposition decision.
     pin_verified: bool,
@@ -59,7 +52,7 @@ const PIV_TAG_CHUID: u32 = 0x5FC102;
 const CHUID_TAG_GUID: u32 = 0x34;
 
 pub struct PivToken {
-    card: pcsc::Card,
+    transport: Box<dyn ApduTransport>,
     guid: Guid,
     reader_name: String,
     /// YubiKey factory serial, cached at connect() time. `None` only for
@@ -122,14 +115,23 @@ impl PivToken {
         reader: &str,
         require_chuid: bool,
     ) -> Result<Self, PivError> {
-        let cstr = std::ffi::CString::new(reader).map_err(|e| PivError::Other(e.to_string()))?;
-        let card = ctx
-            .pcsc_context()
-            .connect(&cstr, ShareMode::Shared, Protocols::ANY)?;
+        let transport = PcscTransport::connect(ctx, reader)?;
+        Self::from_transport(Box::new(transport), reader, require_chuid)
+    }
+
+    /// Build a token over any [`ApduTransport`]: the seam a host without
+    /// PC/SC (Android NFC/USB) and the in-process test cards use. Same
+    /// SELECT / CHUID / serial sequence as [`PivToken::connect`];
+    /// `require_chuid` as in [`PivToken::connect_allowing_uninitialized`].
+    pub fn from_transport(
+        transport: Box<dyn ApduTransport>,
+        reader_name: &str,
+        require_chuid: bool,
+    ) -> Result<Self, PivError> {
         let mut token = Self {
-            card,
+            transport,
             guid: Guid::from_bytes(&[0; 16])?,
-            reader_name: reader.to_string(),
+            reader_name: reader_name.to_string(),
             yk_serial: None,
             yk_serial_diag: None,
             initialized: false,
@@ -157,7 +159,7 @@ impl PivToken {
     }
 
     fn transmit(&self, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord), PivError> {
-        transmit_on(&self.card, apdu)
+        transmit_on(&*self.transport, apdu)
     }
 
     fn select_piv(&mut self) -> Result<(), PivError> {
@@ -509,63 +511,16 @@ impl PivToken {
     /// reset the card's PIN-verified state between this token's
     /// `verify_pin` and subsequent sign/ECDH calls.
     ///
-    /// Retries on `SCardBeginTransaction → SCARD_W_RESET_CARD` by
-    /// `SCardReconnect`-ing and retrying. Bounded by
-    /// [`PIN_SESSION_RESET_RETRY_CAP`] (= 3); a card stuck in a
-    /// reset loop fails fast rather than hanging the agent.
+    /// Over PC/SC, the transport retries `SCardBeginTransaction →
+    /// SCARD_W_RESET_CARD` with a bounded reconnect; see
+    /// [`crate::transport::PcscTransport`]'s `begin_transaction`.
     ///
     /// Mirrors the lifecycle structure of
     /// `vendor/pivy/src/piv.c::piv_txn_begin` but does not (yet)
     /// attempt `piv_clear_pin` before disposition. See the
     /// [`PinSession`] type docs.
     pub fn begin_pin_session(&mut self) -> Result<PinSession<'_>, PivError> {
-        // Two-phase retry: prepare the card for transaction
-        // acquisition (running `reconnect` if a prior call would have
-        // returned ResetCard), then acquire once and return. The
-        // prepare phase NEVER retains the success borrow across
-        // iterations — the local enum below carries only owned
-        // values out of each iteration's match, so the borrow
-        // checker can see iterations as independent.
-        //
-        // The two-phase approach has a tiny race window: another
-        // PC/SC client could reset the card between the prepare loop
-        // exiting and the final `transaction()` below. That
-        // ResetCard surfaces as `PivError::Pcsc` to the caller (not
-        // retried). The window is the same shape as C pivy's
-        // `piv_txn_begin`'s race between its `SCardReconnect`
-        // success and the `goto retry`'s next `SCardBeginTransaction`,
-        // and hasn't been reported as a real problem there.
-        enum Peek {
-            Ready,
-            NeedsReconnect,
-            Fatal(pcsc::Error),
-        }
-        for attempt in 1..=PIN_SESSION_RESET_RETRY_CAP {
-            let peek: Peek = match self.card.transaction() {
-                Ok(_txn_dropped) => Peek::Ready,
-                Err(pcsc::Error::ResetCard) if attempt < PIN_SESSION_RESET_RETRY_CAP => {
-                    Peek::NeedsReconnect
-                }
-                Err(e) => Peek::Fatal(e),
-            };
-            match peek {
-                Peek::Ready => break,
-                Peek::NeedsReconnect => {
-                    tracing::warn!(
-                        attempt = attempt,
-                        cap = PIN_SESSION_RESET_RETRY_CAP,
-                        "SCardBeginTransaction returned SCARD_W_RESET_CARD; reconnecting",
-                    );
-                    self.card.reconnect(
-                        ShareMode::Shared,
-                        Protocols::ANY,
-                        Disposition::ResetCard,
-                    )?;
-                }
-                Peek::Fatal(e) => return Err(PivError::Pcsc(e)),
-            }
-        }
-        let txn = self.card.transaction().map_err(PivError::Pcsc)?;
+        let session = self.transport.begin_transaction()?;
         // SELECT PIV again, inside the transaction, every time. The token
         // selected it at connect, but another client's session may have
         // ended with ResetCard since (every PIN-verified session does, see
@@ -573,12 +528,12 @@ impl PivToken {
         // APDU would come back 0x6D00 (piggy#323, #325). Inside the
         // transaction nothing can deselect it again before the session's
         // own APDUs run.
-        let (_, sw) = transmit_on(&txn, &Apdu::select(PIV_AID))?;
+        let (_, sw) = transmit_on(&*session, &Apdu::select(PIV_AID))?;
         if !sw.is_success() {
             return Err(PivError::Apdu { sw: sw.as_u16() });
         }
         Ok(PinSession {
-            txn: Some(txn),
+            session: Some(session),
             pin_verified: false,
         })
     }
@@ -587,7 +542,7 @@ impl PivToken {
 impl<'tok> PinSession<'tok> {
     /// Verify the PIV PIN inside the active transaction. PIN-verified
     /// state set by this call is owned by the session and is cleared
-    /// when the session ends (via `Disposition::ResetCard`).
+    /// when the session ends (via `EndDisposition::ResetCard`).
     pub fn verify_pin(&mut self, pin: &str) -> Result<(), PivError> {
         if pin.len() > 8 {
             return Err(PivError::Other(format!(
@@ -693,24 +648,21 @@ impl<'tok> PinSession<'tok> {
     /// Explicit termination: end the transaction with the
     /// appropriate disposition (`ResetCard` if any `verify_pin`
     /// succeeded in this session, `LeaveCard` otherwise) and return
-    /// any error from `SCardEndTransaction`.
+    /// any error from ending the transport's transaction
+    /// (`SCardEndTransaction` over PC/SC).
     ///
-    /// On error the `Transaction` is dropped, which itself runs
-    /// `SCardEndTransaction(SCARD_LEAVE_CARD)` again as a backstop;
-    /// pcscd handles the redundancy.
-    ///
-    /// After `end` returns, `Drop` is a no-op (`self.txn` is `None`).
+    /// After `end` returns, `Drop` is a no-op (`self.session` is `None`).
     pub fn end(mut self) -> Result<(), PivError> {
         let disposition = self.disposition();
-        let txn = self.txn.take().expect("PinSession::end called twice");
-        txn.end(disposition).map_err(|(_, e)| PivError::Pcsc(e))
+        let session = self.session.take().expect("PinSession::end called twice");
+        session.end(disposition)
     }
 
-    fn disposition(&self) -> Disposition {
+    fn disposition(&self) -> EndDisposition {
         if self.pin_verified {
-            Disposition::ResetCard
+            EndDisposition::ResetCard
         } else {
-            Disposition::LeaveCard
+            EndDisposition::LeaveCard
         }
     }
 
@@ -777,26 +729,23 @@ impl<'tok> PinSession<'tok> {
     /// write-op modules (`admin`, `keygen`, `put_data`) can build on the same
     /// transaction the PIN/sign/ECDH ops use.
     pub(crate) fn transmit(&self, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord), PivError> {
-        let txn = self
-            .txn
-            .as_ref()
-            .expect("PinSession transmit after end/drop");
-        // pcsc::Transaction: Deref<Target = pcsc::Card>, so &**txn is
-        // a &pcsc::Card. transmit_on routes APDU + GET RESPONSE chain
-        // through it identically to PivToken::transmit.
-        transmit_on(txn, apdu)
+        // transmit_on routes APDU + GET RESPONSE chain through the
+        // session identically to PivToken::transmit.
+        transmit_on(
+            &**self
+                .session
+                .as_ref()
+                .expect("PinSession transmit after end/drop"),
+            apdu,
+        )
     }
 }
 
 impl<'tok> Drop for PinSession<'tok> {
     fn drop(&mut self) {
-        if let Some(txn) = self.txn.take() {
-            let disp = if self.pin_verified {
-                Disposition::ResetCard
-            } else {
-                Disposition::LeaveCard
-            };
-            if let Err((_, e)) = txn.end(disp) {
+        if let Some(session) = self.session.take() {
+            let disp = self.disposition();
+            if let Err(e) = session.end(disp) {
                 tracing::warn!(
                     error = %e,
                     pin_verified = self.pin_verified,
@@ -807,14 +756,14 @@ impl<'tok> Drop for PinSession<'tok> {
     }
 }
 
-/// Send an APDU on `card`, handle GET RESPONSE chaining (SW 61xx),
+/// Send an APDU on `link`, handle GET RESPONSE chaining (SW 61xx),
 /// and return the assembled payload plus the final status word.
-/// Shared body for `PivToken::transmit` and `PinSession::transmit`
-/// (the latter goes through `pcsc::Transaction`'s `Deref<Target=Card>`).
-fn transmit_on(card: &pcsc::Card, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord), PivError> {
+/// Shared body for `PivToken::transmit` (over the transport) and
+/// `PinSession::transmit` (over the open session), so every transport
+/// gets the same chaining and status-word handling.
+fn transmit_on(link: &dyn RawApdu, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord), PivError> {
     let cmd = apdu.to_bytes();
-    let mut resp_buf = vec![0u8; 4096];
-    let resp = card.transmit(&cmd, &mut resp_buf)?;
+    let resp = link.transmit_raw(&cmd)?;
     let len = resp.len();
     if len < 2 {
         return Err(PivError::Other("response too short for status word".into()));
@@ -830,8 +779,7 @@ fn transmit_on(card: &pcsc::Card, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord), 
             let mut get_resp = Apdu::new(0x00, 0xC0, 0x00, 0x00);
             get_resp.le = Some(chain_sw.remaining_bytes());
             let cmd2 = get_resp.to_bytes();
-            let mut resp_buf2 = vec![0u8; 4096];
-            let resp2 = card.transmit(&cmd2, &mut resp_buf2)?;
+            let resp2 = link.transmit_raw(&cmd2)?;
             let len2 = resp2.len();
             if len2 < 2 {
                 return Err(PivError::Other("chained response too short".into()));
@@ -1015,5 +963,163 @@ mod tests {
     fn parse_serial_none_on_short_response() {
         let data = [0x00, 0x00, 0x01]; // only 3 bytes
         assert_eq!(parse_serial_response(&data, sw(0x90, 0x00)), None);
+    }
+
+    use crate::transport::{ApduSession, ApduTransport, EndDisposition, RawApdu};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    /// Shared state of a scripted card: canned responses (`data ‖ SW`),
+    /// every command sent, and every transaction end disposition.
+    #[derive(Default)]
+    struct Script {
+        responses: VecDeque<Vec<u8>>,
+        sent: Vec<Vec<u8>>,
+        ended: Vec<EndDisposition>,
+    }
+
+    // Arc<Mutex<..>>, not Rc<RefCell<..>>: the transport traits are Send.
+    struct ScriptedTransport(Arc<Mutex<Script>>);
+    struct ScriptedSession(Arc<Mutex<Script>>);
+
+    fn scripted(responses: &[&[u8]]) -> (Box<dyn ApduTransport>, Arc<Mutex<Script>>) {
+        let script = Arc::new(Mutex::new(Script {
+            responses: responses.iter().map(|r| r.to_vec()).collect(),
+            ..Default::default()
+        }));
+        (Box::new(ScriptedTransport(script.clone())), script)
+    }
+
+    fn pop_response(script: &Mutex<Script>, command: &[u8]) -> Result<Vec<u8>, PivError> {
+        let mut s = script.lock().unwrap();
+        s.sent.push(command.to_vec());
+        s.responses
+            .pop_front()
+            .ok_or_else(|| PivError::Transport("script exhausted".into()))
+    }
+
+    impl RawApdu for ScriptedTransport {
+        fn transmit_raw(&self, command: &[u8]) -> Result<Vec<u8>, PivError> {
+            pop_response(&self.0, command)
+        }
+    }
+    impl ApduTransport for ScriptedTransport {
+        fn begin_transaction<'a>(&'a mut self) -> Result<Box<dyn ApduSession + 'a>, PivError> {
+            Ok(Box::new(ScriptedSession(self.0.clone())))
+        }
+    }
+    impl RawApdu for ScriptedSession {
+        fn transmit_raw(&self, command: &[u8]) -> Result<Vec<u8>, PivError> {
+            pop_response(&self.0, command)
+        }
+    }
+    impl ApduSession for ScriptedSession {
+        fn end(self: Box<Self>, disposition: EndDisposition) -> Result<(), PivError> {
+            self.0.lock().unwrap().ended.push(disposition);
+            Ok(())
+        }
+    }
+
+    const OK: &[u8] = &[0x90, 0x00];
+    const NOT_FOUND: &[u8] = &[0x6A, 0x82];
+    const INS_NOT_SUPPORTED: &[u8] = &[0x6D, 0x00];
+
+    /// A factory-blank, non-YubiKey card's answers to the connect
+    /// sequence: SELECT PIV, GET DATA CHUID (absent), PIV GET_SERIAL
+    /// (unsupported), SELECT OTP applet (absent), re-SELECT PIV.
+    const BLANK_CONNECT: [&[u8]; 5] = [OK, NOT_FOUND, INS_NOT_SUPPORTED, NOT_FOUND, OK];
+
+    /// `BLANK_CONNECT` followed by `then`.
+    fn blank_card_then(then: &[&[u8]]) -> (Box<dyn ApduTransport>, Arc<Mutex<Script>>) {
+        let responses: Vec<&[u8]> = BLANK_CONNECT.iter().chain(then).copied().collect();
+        scripted(&responses)
+    }
+
+    /// A factory-blank card over any transport.
+    fn blank_card_script() -> (Box<dyn ApduTransport>, Arc<Mutex<Script>>) {
+        blank_card_then(&[])
+    }
+
+    #[test]
+    fn from_transport_selects_piv_and_reports_a_blank_card() {
+        let (transport, script) = blank_card_script();
+        let token = PivToken::from_transport(transport, "scripted 00 00", false)
+            .expect("blank card connects on the tolerant path");
+        assert!(!token.is_initialized());
+        assert_eq!(token.reader_name(), "scripted 00 00");
+        let sent = &script.lock().unwrap().sent;
+        // The first command is SELECT of the PIV AID, byte for byte.
+        assert_eq!(sent[0], Apdu::select(PIV_AID).to_bytes());
+    }
+
+    #[test]
+    fn from_transport_strict_refuses_a_card_without_chuid() {
+        let (transport, _script) = blank_card_script();
+        // PivToken has no Debug, so no unwrap_err.
+        let Err(err) = PivToken::from_transport(transport, "scripted 00 00", true) else {
+            panic!("strict connect accepted a card without a CHUID");
+        };
+        assert!(matches!(err, PivError::Apdu { sw: 0x6A82 }), "got {err:?}");
+    }
+
+    #[test]
+    fn pin_session_runs_select_and_verify_through_the_session_and_resets_on_end() {
+        // connect: 5 responses; begin_pin_session: SELECT; verify_pin: OK.
+        let (transport, script) = blank_card_then(&[OK, OK]);
+        let mut token = PivToken::from_transport(transport, "scripted 00 00", false).unwrap();
+        {
+            let mut session = token.begin_pin_session().expect("session");
+            session.verify_pin("123456").expect("verify");
+        } // dropped: pin was verified, so the card is reset
+        let s = script.lock().unwrap();
+        assert_eq!(
+            s.sent[5],
+            Apdu::select(PIV_AID).to_bytes(),
+            "SELECT again inside the transaction"
+        );
+        assert_eq!(
+            s.sent[6],
+            vec![
+                0x00, 0x20, 0x00, 0x80, 0x08, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF
+            ],
+            "VERIFY with the PIN padded to 8 bytes"
+        );
+        assert_eq!(s.ended, vec![EndDisposition::ResetCard]);
+    }
+
+    #[test]
+    fn pin_session_without_a_verify_leaves_the_card() {
+        let (transport, script) = blank_card_then(&[OK]);
+        let mut token = PivToken::from_transport(transport, "scripted 00 00", false).unwrap();
+        token
+            .begin_pin_session()
+            .expect("session")
+            .end()
+            .expect("end");
+        assert_eq!(
+            script.lock().unwrap().ended,
+            vec![EndDisposition::LeaveCard]
+        );
+    }
+
+    #[test]
+    fn get_response_chaining_is_done_by_the_token_not_the_transport() {
+        // SELECT ok; CHUID answered in two chunks: first `AA` + SW 61 01,
+        // then `BB` + 90 00, so read_chuid sees `AA BB` and parses (fails
+        // as a bad CHUID, which is fine: the point is the second command).
+        let (transport, script) = scripted(&[
+            OK,
+            &[0xAA, 0x61, 0x01],
+            &[0xBB, 0x90, 0x00],
+            INS_NOT_SUPPORTED,
+            INS_NOT_SUPPORTED,
+        ]);
+        let _ = PivToken::from_transport(transport, "scripted 00 00", false);
+        let s = script.lock().unwrap();
+        assert_eq!(
+            s.sent[2],
+            vec![0x00, 0xC0, 0x00, 0x00, 0x01],
+            "GET RESPONSE for the 1 remaining byte"
+        );
     }
 }
