@@ -1,8 +1,13 @@
-//! Client-side SSH agent support for the `ecdh@joyent.com` extension.
+//! Client-side SSH agent support for the card ECDH extension.
 //!
-//! The piggy-agent (and the C pivy-agent) implements the `ecdh@joyent.com`
-//! SSH-agent extension: send the agent a "self" public-key blob (identifying
-//! a card-resident key) and a "partner" ephemeral public-key blob, and the
+//! The piggy-agent implements the ECDH SSH-agent extension under
+//! `ecdh@code.linenisgreat.com` and its legacy alias `ecdh@joyent.com`
+//! (the only name C pivy-agent knows; see [`crate::ecdh_ext`], piggy#335).
+//! The oracle asks under the canonical name first and falls back to the
+//! legacy one when the agent refuses it.
+//!
+//! Send the agent a "self" public-key blob (identifying a card-resident
+//! key) and a "partner" ephemeral public-key blob, and the
 //! agent returns the raw ECDH shared secret computed on the card. This
 //! module is the client side of that call, packaged behind the abstract
 //! [`piggy_box::oracle::EcdhOracle`] trait introduced in checkpoint 2 of
@@ -32,7 +37,8 @@ use tokio::net::UnixStream;
 use tokio::runtime::Runtime;
 
 /// ECDH oracle backed by a `piggy-agent` (or any SSH agent speaking the
-/// `ecdh@joyent.com` extension) reachable over a Unix-domain socket.
+/// ECDH extension under either name, [`crate::ecdh_ext::NAMES`])
+/// reachable over a Unix-domain socket.
 ///
 /// Construction pins the socket path; each `ecdh` call opens a fresh
 /// connection and tears it down when the call returns.
@@ -71,30 +77,68 @@ impl EcdhOracle for AgentEcdhOracle {
         let request_bytes = encode_ecdh_request(self_pubkey_ssh_blob, partner_pubkey_ssh_blob, 0);
         let socket_path = self.socket_path.clone();
 
+        // piggy#335: the canonical name first, the legacy name only when the
+        // agent refused the extension call (C pivy-agent, a pre-#335 piggy).
         self.runtime.block_on(async move {
-            let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
-                OracleError::Transport(format!("connect {}: {e}", socket_path.display()))
-            })?;
-            let mut client = Client::new(stream);
-
-            let response = client
-                .extension(Extension {
-                    name: "ecdh@joyent.com".into(),
-                    details: request_bytes.into(),
-                })
-                .await
-                .map_err(|e| OracleError::Transport(format!("extension call: {e}")))?;
-
-            let ext = response.ok_or_else(|| {
-                OracleError::Protocol(
-                    "agent returned SUCCESS instead of ExtensionResponse".to_string(),
-                )
-            })?;
-
-            decode_ecdh_response(ext.details.as_ref())
-                .map_err(|e| OracleError::Protocol(e.to_string()))
+            let mut last_refusal = None;
+            for name in crate::ecdh_ext::NAMES {
+                match ecdh_once(&socket_path, name, &request_bytes).await {
+                    Ok(secret) => return Ok(secret),
+                    Err(EcdhAttemptError::Refused(e)) => last_refusal = Some(e),
+                    Err(EcdhAttemptError::Fatal(e)) => return Err(e),
+                }
+            }
+            Err(last_refusal.expect("NAMES is non-empty"))
         })
     }
+}
+
+/// How one ECDH attempt under one name failed: `Refused` is a failure of
+/// the extension call itself (an agent that does not serve this name
+/// answers SSH_AGENT_FAILURE), worth retrying under the other name;
+/// `Fatal` (unreachable socket, a reply the agent did send but that does
+/// not decode) is returned at once.
+enum EcdhAttemptError {
+    Refused(OracleError),
+    Fatal(OracleError),
+}
+
+/// One ECDH extension round-trip under `name` on a fresh connection.
+/// The reply's echoed name is not checked: a proxy may answer a canonical
+/// request with the legacy echo of an older upstream.
+async fn ecdh_once(
+    socket_path: &Path,
+    name: &str,
+    request_bytes: &[u8],
+) -> Result<Vec<u8>, EcdhAttemptError> {
+    let stream = UnixStream::connect(socket_path).await.map_err(|e| {
+        EcdhAttemptError::Fatal(OracleError::Transport(format!(
+            "connect {}: {e}",
+            socket_path.display()
+        )))
+    })?;
+    let mut client = Client::new(stream);
+
+    let response = client
+        .extension(Extension {
+            name: name.into(),
+            details: request_bytes.to_vec().into(),
+        })
+        .await
+        .map_err(|e| {
+            EcdhAttemptError::Refused(OracleError::Transport(format!(
+                "extension call ({name}): {e}"
+            )))
+        })?;
+
+    let ext = response.ok_or_else(|| {
+        EcdhAttemptError::Fatal(OracleError::Protocol(
+            "agent returned SUCCESS instead of ExtensionResponse".to_string(),
+        ))
+    })?;
+
+    decode_ecdh_response(ext.details.as_ref())
+        .map_err(|e| EcdhAttemptError::Fatal(OracleError::Protocol(e.to_string())))
 }
 
 /// Send an `SSH_AGENTC_UNLOCK` with `pin` to the agent at `socket_path`.
@@ -718,6 +762,152 @@ mod tests {
         );
     }
 
+    // -------- piggy#335: canonical ECDH name first, legacy fallback --------
+
+    /// A minimal agent serving the ECDH extension under `serves` only,
+    /// answering with `reply` and refusing every other name with
+    /// SSH_AGENT_FAILURE. `seen` logs every extension name asked.
+    #[derive(Clone)]
+    struct EcdhStub {
+        serves: Vec<&'static str>,
+        reply: Vec<u8>,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[ssh_agent_lib::async_trait]
+    impl Session for EcdhStub {
+        async fn extension(
+            &mut self,
+            request: Extension,
+        ) -> Result<Option<Extension>, ssh_agent_lib::error::AgentError> {
+            self.seen.lock().unwrap().push(request.name.clone());
+            if self.serves.contains(&request.name.as_str()) {
+                return Ok(Some(Extension {
+                    name: request.name,
+                    details: self.reply.clone().into(),
+                }));
+            }
+            Err(ssh_agent_lib::error::AgentError::Failure)
+        }
+    }
+
+    /// Serve `stub` on a fresh `/tmp` socket from its own thread and
+    /// runtime (the oracle blocks on its own). Bound before returning, so
+    /// the oracle can connect at once.
+    fn serve_ecdh_stub(tag: &str, stub: EcdhStub) -> PathBuf {
+        let path = PathBuf::from("/tmp").join(format!("pgac{}-{tag}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind ecdh stub");
+        listener.set_nonblocking(true).expect("nonblocking");
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("stub runtime")
+                .block_on(async move {
+                    let listener =
+                        tokio::net::UnixListener::from_std(listener).expect("tokio listener");
+                    let _ = ssh_agent_lib::agent::listen(listener, stub).await;
+                });
+        });
+        path
+    }
+
+    const STUB_SECRET: [u8; 32] = [0x42; 32];
+
+    fn ecdh_stub(serves: &[&'static str], reply: Vec<u8>) -> EcdhStub {
+        EcdhStub {
+            serves: serves.to_vec(),
+            reply,
+            seen: Default::default(),
+        }
+    }
+
+    fn well_formed_reply() -> Vec<u8> {
+        let mut v = (STUB_SECRET.len() as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(&STUB_SECRET);
+        v
+    }
+
+    /// Against an agent serving both names, the oracle's first and only
+    /// request goes out under the canonical name.
+    #[test]
+    fn oracle_ecdh_asks_canonical_name_first() {
+        let stub = ecdh_stub(
+            &[crate::ecdh_ext::CANONICAL, crate::ecdh_ext::LEGACY],
+            well_formed_reply(),
+        );
+        let seen = stub.seen.clone();
+        let path = serve_ecdh_stub("ecdh-both", stub);
+        let mut oracle = AgentEcdhOracle::new(&path).expect("construct");
+        let secret = oracle.ecdh(b"self-blob", b"partner-blob").expect("ecdh");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(secret, STUB_SECRET);
+        assert_eq!(*seen.lock().unwrap(), vec![crate::ecdh_ext::CANONICAL]);
+    }
+
+    /// Against an agent that refuses the canonical name (C pivy-agent, a
+    /// pre-#335 piggy), the second request goes out under the legacy name
+    /// and succeeds.
+    #[test]
+    fn oracle_ecdh_falls_back_to_legacy_name_on_refusal() {
+        let stub = ecdh_stub(&[crate::ecdh_ext::LEGACY], well_formed_reply());
+        let seen = stub.seen.clone();
+        let path = serve_ecdh_stub("ecdh-legacy", stub);
+        let mut oracle = AgentEcdhOracle::new(&path).expect("construct");
+        let secret = oracle.ecdh(b"self-blob", b"partner-blob").expect("ecdh");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(secret, STUB_SECRET);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![crate::ecdh_ext::CANONICAL, crate::ecdh_ext::LEGACY]
+        );
+    }
+
+    /// An agent that answered the canonical name with bad bytes is a
+    /// protocol error, returned at once: no legacy retry.
+    #[test]
+    fn oracle_ecdh_protocol_error_does_not_fall_back() {
+        let stub = ecdh_stub(
+            &[crate::ecdh_ext::CANONICAL, crate::ecdh_ext::LEGACY],
+            vec![0x00, 0x00],
+        );
+        let seen = stub.seen.clone();
+        let path = serve_ecdh_stub("ecdh-garbage", stub);
+        let mut oracle = AgentEcdhOracle::new(&path).expect("construct");
+        let err = oracle
+            .ecdh(b"self-blob", b"partner-blob")
+            .expect_err("garbage reply must fail");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(err, OracleError::Protocol(_)),
+            "expected Protocol, got {err:?}"
+        );
+        assert_eq!(*seen.lock().unwrap(), vec![crate::ecdh_ext::CANONICAL]);
+    }
+
+    /// An agent refusing both names surfaces the last (legacy) refusal as
+    /// a transport-class error after exactly two requests.
+    #[test]
+    fn oracle_ecdh_refused_under_both_names_is_transport_error() {
+        let stub = ecdh_stub(&[], well_formed_reply());
+        let seen = stub.seen.clone();
+        let path = serve_ecdh_stub("ecdh-none", stub);
+        let mut oracle = AgentEcdhOracle::new(&path).expect("construct");
+        let err = oracle
+            .ecdh(b"self-blob", b"partner-blob")
+            .expect_err("refused under both names");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(err, OracleError::Transport(_)),
+            "expected Transport, got {err:?}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![crate::ecdh_ext::CANONICAL, crate::ecdh_ext::LEGACY]
+        );
+    }
+
     /// `piggy_auth_sock_override` returns the var only when set and
     /// non-empty. No other test reads `PIGGY_AUTH_SOCK`, so mutating it
     /// process-wide here is race-free; we restore it on exit regardless.
@@ -751,11 +941,9 @@ mod tests {
 
     use std::time::Duration;
 
-    /// Test-local copy of the ecdh extension name, assembled by
-    /// concatenation so editing tools cannot mangle the email-like
-    /// literal (see CLAUDE.md). The canonical `health::ECDH_EXT` lives
-    /// in the binary crate, out of reach of this library module.
-    const ECDH_EXT: &str = concat!("ecdh@", "joyent.com");
+    /// The legacy ecdh extension name (piggy#335), as the query fixtures
+    /// below have always spelled it.
+    const ECDH_EXT: &str = crate::ecdh_ext::LEGACY;
 
     /// Missing socket surfaces a connect error string, not a panic/hang.
     #[test]

@@ -16,10 +16,6 @@ use std::time::Duration;
 /// `not ok` timeouts on slow readers/agents.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The extension piggy decrypts require. Built by concatenation so
-/// editing tools cannot mangle the literal (see CLAUDE.md memory).
-pub const ECDH_EXT: &str = concat!("ecdh@", "joyent.com");
-
 /// Point-1 name. Platform-specific because the agent runs under a
 /// different service manager per OS: a systemd `.service` unit on Linux,
 /// a launchd agent on macOS. ndjson consumers keying on the point name
@@ -950,15 +946,27 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
             status: Status::Fail,
             diags: vec![("error".into(), e.clone())],
         },
-        Some(Ok(names)) => CheckResult {
-            name: "agent: advertises ecdh extension".into(),
-            status: if names.iter().any(|n| n == ECDH_EXT) {
-                Status::Pass
-            } else {
-                Status::Fail
-            },
-            diags: vec![("advertised".into(), names.join(", "))],
-        },
+        // piggy#335: either the canonical name or the legacy alias serves
+        // piggy decrypts; the diag says which one the agent advertised.
+        Some(Ok(names)) => {
+            let found = piggy::ecdh_ext::NAMES
+                .into_iter()
+                .find(|ecdh| names.iter().any(|n| n == ecdh));
+            let mut diags = Vec::new();
+            if let Some(name) = found {
+                diags.push(("ecdh_name".into(), name.to_string()));
+            }
+            diags.push(("advertised".into(), names.join(", ")));
+            CheckResult {
+                name: "agent: advertises ecdh extension".into(),
+                status: if found.is_some() {
+                    Status::Pass
+                } else {
+                    Status::Fail
+                },
+                diags,
+            }
+        }
     });
 
     // eng#295: a proxy-only agent (per its own `agent-mode@piggy`
@@ -1334,7 +1342,7 @@ mod tests {
                 stat_detail: "unix socket".into(),
             },
             agent: Some(Ok(vec!["card-a".into(), "card-b".into(), "card-c".into()])),
-            extensions: Some(Ok(vec![ECDH_EXT.into(), "other-ext".into()])),
+            extensions: Some(Ok(vec![piggy::ecdh_ext::LEGACY.into(), "other-ext".into()])),
             upstreams: None,
             mode: None,
             pcsc: PcscProbe::Ok,
@@ -1880,6 +1888,47 @@ mod tests {
         let results = evaluate(&probes);
         assert!(matches!(results[4].status, Status::Fail));
         assert_eq!(diag(&results[4], "advertised"), Some("other-ext"));
+    }
+
+    /// piggy#335: an agent advertising only the canonical ECDH name (a
+    /// future piggy that dropped the alias) passes point 5.
+    #[test]
+    fn ecdh_canonical_name_alone_passes_point_5() {
+        let mut probes = healthy_probes();
+        probes.extensions = Some(Ok(vec![
+            piggy::ecdh_ext::CANONICAL.into(),
+            "other-ext".into(),
+        ]));
+        let results = evaluate(&probes);
+        assert!(matches!(results[4].status, Status::Pass));
+        assert_eq!(
+            diag(&results[4], "ecdh_name"),
+            Some(piggy::ecdh_ext::CANONICAL)
+        );
+    }
+
+    /// piggy#335: an agent advertising only the legacy ECDH name (C
+    /// pivy-agent, a pre-#335 piggy) still passes point 5.
+    #[test]
+    fn ecdh_legacy_name_alone_passes_point_5() {
+        let mut probes = healthy_probes();
+        probes.extensions = Some(Ok(vec![piggy::ecdh_ext::LEGACY.into(), "other-ext".into()]));
+        let results = evaluate(&probes);
+        assert!(matches!(results[4].status, Status::Pass));
+        assert_eq!(
+            diag(&results[4], "ecdh_name"),
+            Some(piggy::ecdh_ext::LEGACY)
+        );
+    }
+
+    /// piggy#335: neither ECDH name advertised fails point 5.
+    #[test]
+    fn ecdh_neither_name_fails_point_5() {
+        let mut probes = healthy_probes();
+        probes.extensions = Some(Ok(vec!["query".into(), "other-ext".into()]));
+        let results = evaluate(&probes);
+        assert!(matches!(results[4].status, Status::Fail));
+        assert_eq!(diag(&results[4], "ecdh_name"), None);
     }
 
     /// Matrix row 5: the query extension itself is unsupported or

@@ -1,5 +1,6 @@
-//! End-to-end integration test for the `ecdh@joyent.com` SSH-agent
-//! extension, exercising the real piggy-agent backed by a virtual PIV card.
+//! End-to-end integration test for the card ECDH SSH-agent extension
+//! (`ecdh@code.linenisgreat.com`, legacy alias `ecdh@joyent.com`,
+//! piggy#335), exercising the real piggy-agent backed by a virtual PIV card.
 //!
 //! Checkpoint 2 of issue #32. Checkpoint 1 added the pure encode/decode
 //! routines; this test proves they are wired to the agent correctly by
@@ -16,9 +17,13 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use piggy::agent_client::{AgentEcdhOracle, unlock_agent_pin};
+use piggy::agent_client::{AgentEcdhOracle, probe_extensions, unlock_agent_pin};
+use piggy_box::agent_ext::{decode_ecdh_response, encode_ecdh_request};
 use piggy_box::oracle::EcdhOracle;
 use piggy_piv::{PivAlgorithm, PivContext};
+use ssh_agent_lib::agent::Session;
+use ssh_agent_lib::client::Client;
+use ssh_agent_lib::proto::Extension;
 use ssh_key::PublicKey;
 use ssh_key::public::{EcdsaPublicKey, KeyData};
 
@@ -205,8 +210,62 @@ fn ecdh_roundtrip_against_real_agent() {
 
     eprintln!("ECDH round-trip OK: 32-byte shared secret matches local computation");
 
+    // ---- piggy#335: both names advertised, served, and echoed ----
+    let advertised =
+        probe_extensions(&sock, Duration::from_secs(5)).expect("query the agent's extensions");
+    assert!(
+        advertised.iter().any(|n| n == piggy::ecdh_ext::CANONICAL),
+        "{advertised:?}"
+    );
+    assert!(
+        advertised.iter().any(|n| n == piggy::ecdh_ext::LEGACY),
+        "{advertised:?}"
+    );
+    for name in piggy::ecdh_ext::NAMES {
+        let reply = raw_ecdh_extension(&sock, name, &self_blob, &partner_blob);
+        assert_eq!(reply.name.as_str(), name, "agent must echo the name asked");
+        let secret = decode_ecdh_response(reply.details.as_ref()).expect("decode ecdh reply");
+        assert_eq!(secret, expected_bytes, "ECDH under {name} disagrees");
+    }
+
+    // A second oracle call after the probe: it goes out under the
+    // canonical name first and still agrees.
+    let again = oracle
+        .ecdh(&self_blob, &partner_blob)
+        .expect("agent-computed ECDH, second call");
+    assert_eq!(again, expected_bytes);
+
     // `guard` drops here, tearing down the child agent.
     drop(guard);
+}
+
+/// Send one ECDH extension request under `name` on a fresh connection
+/// and return the agent's raw reply, so the test can see the echoed name
+/// (the oracle hides it).
+fn raw_ecdh_extension(
+    sock: &std::path::Path,
+    name: &str,
+    self_blob: &[u8],
+    partner_blob: &[u8],
+) -> Extension {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(async {
+        let stream = tokio::net::UnixStream::connect(sock)
+            .await
+            .expect("connect agent");
+        let mut client = Client::new(stream);
+        client
+            .extension(Extension {
+                name: name.to_string(),
+                details: encode_ecdh_request(self_blob, partner_blob, 0).into(),
+            })
+            .await
+            .unwrap_or_else(|e| panic!("ecdh under {name}: {e}"))
+            .unwrap_or_else(|| panic!("ecdh under {name}: plain SUCCESS"))
+    })
 }
 
 /// Allocate a per-test temp directory for the agent socket.
