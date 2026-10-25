@@ -1,12 +1,14 @@
-// Embed piggy's version+commit into `age-plugin-piggy` so `--version` reports
-// `age-plugin-piggy <version>+<commit>` per eng-versioning(7), matching the
-// rest of the piggy stack.
+// Guard Cargo.toml's package.version against drifting from the repo-root
+// version.env, piggy's single version source (eng-versioning(7); the same
+// guard crates/piggy/build.rs runs, piggy#171), so `--version` can trust
+// env!("CARGO_PKG_VERSION"). The authoritative version is $PIGGY_VERSION
+// when set at build time, else ../../version.env; with neither (a published
+// tarball) the guard is a no-op.
 //
-// `PIGGY_VERSION` comes from the repo-root `version.env` (piggy's single
-// source of truth) at compile time. `PIGGY_COMMIT` comes from `git rev-parse`
-// in dev builds; in the nix sandbox (no `.git`) it stays unset and the
-// flake's makeWrapper `--set PIGGY_COMMIT` supplies the runtime value — the
-// same split `crates/piggy/build.rs` uses.
+// `PIGGY_COMMIT` comes from `git rev-parse` in dev builds; in the nix
+// sandbox (no `.git`) it stays unset and the flake's makeWrapper `--set
+// PIGGY_COMMIT` supplies the runtime value — the same split
+// `crates/piggy/build.rs` uses.
 
 use std::env;
 use std::fs;
@@ -18,12 +20,26 @@ fn main() {
     let version_env = manifest_dir.join("../../version.env");
 
     println!("cargo:rerun-if-changed={}", version_env.display());
+    println!("cargo:rerun-if-env-changed=PIGGY_VERSION");
 
-    let version = match fs::read_to_string(&version_env) {
-        Ok(content) => parse_piggy_version(&content).unwrap_or_else(|| "dev".to_string()),
-        Err(_) => "dev".to_string(),
-    };
-    println!("cargo:rustc-env=PIGGY_VERSION={version}");
+    let authoritative = env::var("PIGGY_VERSION")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            fs::read_to_string(&version_env)
+                .ok()
+                .as_deref()
+                .and_then(parse_piggy_version)
+        });
+    if let Some(want) = authoritative {
+        let have = env::var("CARGO_PKG_VERSION").expect("cargo always sets CARGO_PKG_VERSION");
+        if want != have {
+            panic!(
+                "crates/age-plugin-piggy/Cargo.toml version ({have}) disagrees with \
+                 version.env PIGGY_VERSION ({want}); run `just bump-version {want}` to resync"
+            );
+        }
+    }
 
     emit_git_commit(&manifest_dir);
 }

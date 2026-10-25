@@ -1,6 +1,8 @@
 [package]
 name = "age-plugin-piggy"
-version = "0.1.0"
+# Must equal version.env's PIGGY_VERSION; build.rs fails the build when it
+# does not. Bump via `just bump-version`. See eng-versioning(7).
+version = "0.1.23"
 edition = "2021"
 license = "MPL-2.0"
 description = "age plugin: PIV/agent-backed P-256 identities for piggy (decrypt via piggy-agent ECDH)"

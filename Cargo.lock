@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "age-plugin-piggy"
-version = "0.1.0"
+version = "0.1.23"
 dependencies = [
  "age-core",
  "age-plugin",

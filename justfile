@@ -3440,17 +3440,20 @@ clean-rust:
 # when a new sub-directory module must be independently consumable.
 release_tag_prefixes := "v go/v"
 
-# Rewrite the version in its three places: version.env's PIGGY_VERSION,
-# crates/piggy/Cargo.toml's package.version, and that package's Cargo.lock
-# entry. crates/piggy/build.rs fails the build if the first two disagree
-# (piggy#171). Committing is `release`'s job. Usage: just bump-version 0.1.1
+# Rewrite the version everywhere it lives: version.env's PIGGY_VERSION, and
+# the package.version of crates/piggy and crates/age-plugin-piggy with their
+# Cargo.lock entries. Each crate's build.rs fails the build if its version
+# disagrees with version.env (piggy#171). Committing is `release`'s job.
+# Usage: just bump-version 0.1.1
 #
 # rewrite the PIGGY_VERSION line in version.env
 [group('maintenance')]
 bump-version new_version:
     sed -E -i "s/^(export PIGGY_VERSION)=.*/\1={{new_version}}/" version.env
-    sed -E -i '0,/^version = ".*"$/s//version = "{{new_version}}"/' crates/piggy/Cargo.toml
-    sed -E -i '/^name = "piggy"$/{n;s/^version = ".*"$/version = "{{new_version}}"/}' Cargo.lock
+    for crate in piggy age-plugin-piggy; do \
+      sed -E -i '0,/^version = ".*"$/s//version = "{{new_version}}"/' "crates/$crate/Cargo.toml"; \
+      sed -E -i "/^name = \"$crate\"\$/{n;s/^version = \".*\"\$/version = \"{{new_version}}\"/}" Cargo.lock; \
+    done
 
 # Sign + push the full release tag set named after the current
 # version.env: the bare v<sem> plus each release_tag_prefixes entry
@@ -3530,7 +3533,7 @@ release new_version:
     fi
 
     just bump-version "{{new_version}}"
-    git add version.env crates/piggy/Cargo.toml Cargo.lock
+    git add version.env crates/piggy/Cargo.toml crates/age-plugin-piggy/Cargo.toml Cargo.lock
     git commit -m "$header"
 
     just tag "$msg"

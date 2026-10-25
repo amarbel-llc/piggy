@@ -2,7 +2,8 @@
 name = "piggy"
 # Must equal version.env's PIGGY_VERSION; build.rs fails the build when it
 # does not (piggy#171). Bump via `just bump-version`, which rewrites both
-# and the Cargo.lock entry, rather than editing this line. See
+# and the Cargo.lock entry (and age-plugin-piggy's), rather than editing
+# this line. See
 # eng-versioning(7).
 version = "0.1.23"
 edition = "2021"

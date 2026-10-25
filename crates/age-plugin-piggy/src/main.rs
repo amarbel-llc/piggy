@@ -44,10 +44,11 @@ fn main() -> io::Result<()> {
         Some("generate") => generate::run(parse_guid(&args[1..])),
         Some("convert") => convert::run(args.get(1).map(String::as_str)),
         Some("--version" | "-V") => {
-            // eng-versioning(7): `age-plugin-piggy <version>+<commit>`, sourced
-            // from piggy's version.env / git (via build.rs) and overridable at
-            // runtime by the flake wrapper's --set, mirroring `piggy version`.
-            let version = runtime_or("PIGGY_VERSION", env!("PIGGY_VERSION"));
+            // eng-versioning(7): `age-plugin-piggy <version>+<commit>`. The
+            // version is CARGO_PKG_VERSION, which build.rs holds equal to
+            // version.env; the flake wrapper's --set overrides both at runtime,
+            // mirroring `piggy version`.
+            let version = runtime_or("PIGGY_VERSION", env!("CARGO_PKG_VERSION"));
             let commit = runtime_or(
                 "PIGGY_COMMIT",
                 option_env!("PIGGY_COMMIT").unwrap_or("unknown"),
@@ -99,4 +100,20 @@ fn print_usage() {
         "  convert <markl-id | hex-pubkey>   same, but offline from an existing piggy recipient"
     );
     eprintln!("  --version                         print the version");
+}
+
+#[cfg(test)]
+mod tests {
+    /// Cargo.toml's package.version is version.env's PIGGY_VERSION, so the
+    /// compile-time `--version` fallback is the real version (piggy#171's
+    /// guard, applied to this crate). build.rs fails the build on drift.
+    #[test]
+    fn cargo_package_version_is_version_env() {
+        let version_env = include_str!("../../../version.env");
+        let want = version_env
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("export PIGGY_VERSION="))
+            .expect("version.env has an `export PIGGY_VERSION=` line");
+        assert_eq!(env!("CARGO_PKG_VERSION"), want);
+    }
 }
