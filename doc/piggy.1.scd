@@ -700,7 +700,8 @@ commands:
 
 *health* [*--format* _auto_|_tap_|_ndjson_] [*-v*, *--verbose*] [*--sign-test*]
 	Read-only, PIN-free checks of the piggy layer: the agent socket, its
-	identities and the *ecdh@joyent.com* extension, pcscd, attached cards
+	identities and the *ecdh@code.linenisgreat.com* extension (or its
+	legacy alias *ecdh@joyent.com*), pcscd, attached cards
 	and their 9D slots, and the agent's service unit. Nine fixed points,
 	then the conditional ones described below;
 	TAP-14 on a tty, tap-ndjson(7) otherwise; exit 0 iff no point fails
@@ -1052,8 +1053,9 @@ _PIGGY_AUTH_SOCK_
 	*piggy box stream decrypt*). When
 	set and non-empty, it overrides _SSH_AUTH_SOCK_ for piggy's own decrypts
 	only; when unset, piggy uses _SSH_AUTH_SOCK_. Use it to route decrypts at
-	a piggy-agent that advertises the _ecdh@joyent.com_ extension rather than
-	through an upstream agent that may not.
+	a piggy-agent that advertises the _ecdh@code.linenisgreat.com_ extension
+	(or its legacy alias _ecdh@joyent.com_) rather than through an upstream
+	agent that may not.
 
 _SECURE_TMPDIR_
 	If set, skip automatic secure temporary directory creation (ramdisk on

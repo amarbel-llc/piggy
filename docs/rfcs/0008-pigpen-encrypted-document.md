@@ -377,7 +377,8 @@ file key `FK` to a recipient compressed P-256 public key `Qr`:
    ID `pigpen-wrap-v1@pigpen_wrap_p256-<blech32>`.
 
 To **unwrap** with the card: parse `Epk` and `C` from the wrap blob,
-obtain `S` by asking piggy-agent (the `ecdh@joyent.com` extension) to
+obtain `S` by asking piggy-agent (the `ecdh@code.linenisgreat.com`
+extension, also answered under its legacy name `ecdh@joyent.com`) to
 compute the ECDH of the card's slot-9D key against `Epk` — the private
 scalar never leaves the card — then re-derive `Kw` and AEAD-decrypt `C`.
 This is exactly the path `age-plugin-piggy` already exercises against
@@ -481,7 +482,8 @@ from RFC 0003.
    recipients.
 
 4. **Card-bound decryption.** P-256 recipients decrypt only via
-   piggy-agent's `ecdh@joyent.com` extension; the slot-9D private scalar
+   piggy-agent's `ecdh@code.linenisgreat.com` extension (legacy alias
+   `ecdh@joyent.com`); the slot-9D private scalar
    never leaves the card. A pigpen document encrypted to only P-256
    recipients cannot be decrypted in a pure-software (e.g. WASM) context
    without an injected ECDH oracle backed by a card (§7).

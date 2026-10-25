@@ -34,7 +34,7 @@ Still open:
 - **Task 9a: done, differently.** dewey v0.5.0's `age` package has no recipient-only IO wrapper, so on Sasha's decision piggy builds one directly on `filippo.io/age` (`go/internal/delta/age/format_family_agex25519_pub.go`). It is encrypt-only; reading through it returns `ErrNoIdentity`.
 - **`pivy_ecdh_p256_pub` IO wrapper: switched to piggy's ECDH client**, also on Sasha's decision, after madder confirmed by run that dewey's client cannot read piggy-agent's reply. A request to remove dewey's agent ECDH client is filed against purse-first.
 - **Not addressed from the second review:** `open`-stage reject vectors pass on any error and do not pin which one; there is no truncation-at-a-chunk-boundary vector (it would put about 130 KB of hex in the file); and a mutation check that the low-order X25519 vectors fail without the Rust fix was not run.
-- **Rust pointer parser.** `piggy_pigpen::Pointer::parse` is laxer than the new Go `ParsePointer` (it accepts a repeated tag, a second type line and a body). Aligning it is a follow-up.
+- **Rust pointer parser.** Done. Read side by side on 2026-10-25, `crates/piggy-pigpen/src/document.rs:398` (`Pointer::parse`) and `go/internal/delta/pigpen/pointer.go:21` (`ParsePointer`) reject the same shapes: a second `!` type line, a body, a repeated or foreign `-` line, a missing tag, an invalid kind.
 
 ## Triage of #210 (done, no blocker)
 

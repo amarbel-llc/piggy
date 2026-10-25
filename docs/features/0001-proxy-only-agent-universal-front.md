@@ -70,7 +70,8 @@ forwarding.
 Agent changes that make the role work (all also active on card-backed
 agents):
 
-- **Native-miss fallthrough for the card extensions.** `ecdh@joyent.com`,
+- **Native-miss fallthrough for the card extensions.** `ecdh@joyent.com`
+  (since piggy#335 also its canonical name `ecdh@code.linenisgreat.com`),
   `ecdh-rebox@joyent.com`, and `ykpiv-attest@joyent.com` used to resolve
   the card key against native keys only and hard-fail on a miss. Now a
   *native miss* with upstreams configured forwards the request to the

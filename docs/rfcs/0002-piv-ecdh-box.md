@@ -67,7 +67,9 @@ KDF.
 The Box primitive serves as the foundation for:
 
 - The `ecdh@joyent.com` and `ecdh-rebox@joyent.com` SSH agent extensions
-  (specified in pivy's [`0001-ssh-agent-extensions.md`][pivy-0001])
+  (specified in pivy's [`0001-ssh-agent-extensions.md`][pivy-0001]; piggy's
+  agent also answers the former under its canonical name
+  `ecdh@code.linenisgreat.com`, piggy#335)
 - The Ebox (Enterprise Box) system for at-rest key management with threshold
   recovery
 - The `pivy-box` command-line tool for file encryption

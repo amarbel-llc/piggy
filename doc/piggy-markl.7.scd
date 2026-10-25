@@ -67,7 +67,8 @@ _internal/delta/agent_, _delta/age_, _delta/pigpen_
 	bytes to hash to notice a changed set), and *ParsePointer*. It imports
 	no _os/exec_ and stays wasm-buildable. _pkgs/agent_ adds
 	*AgentECDHOracle*, which opens a sealed document through an agent's
-	_ecdh@joyent.com_ extension, and *ResolveAuthSock*
+	_ecdh@code.linenisgreat.com_ extension (falling back to the legacy
+	_ecdh@joyent.com_), and *ResolveAuthSock*
 	(_PIGGY_AUTH_SOCK_, then _SSH_AUTH_SOCK_, then the legacy
 	_PIVY_AUTH_SOCK_). An agent that could not be asked or that refused
 	is reported as *agent.ErrAgent*; test with *agent.IsErrAgent*, which

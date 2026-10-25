@@ -142,7 +142,9 @@ agent multiplexer in between:
 - A sign request is answered natively when the key is on a card here,
   else routed to the upstream that listed it.
 - Extension requests the agent owns (the piggy card extensions
-  *ecdh@joyent.com*, *ecdh-rebox@joyent.com*, *ykpiv-attest@joyent.com*)
+  *ecdh@code.linenisgreat.com*, answered under its legacy name
+  *ecdh@joyent.com* as well, *ecdh-rebox@joyent.com*,
+  *ykpiv-attest@joyent.com*)
   are answered natively when the key is served here; on a _native miss_
   (the key is not one of ours) they fall through to the first upstream
   that supports them. A genuine error in a request the agent owns is never

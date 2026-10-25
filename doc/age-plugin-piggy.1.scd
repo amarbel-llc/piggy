@@ -23,7 +23,9 @@ the smart card.
 against the recipient's public key. No card or agent is touched.
 
 *Decryption* delegates the P-256 scalar-multiplication to *piggy-agent*
-over the *ecdh@joyent.com* SSH-agent extension (forwardable over SSH).
+over the *ecdh@code.linenisgreat.com* SSH-agent extension (forwardable
+over SSH; an agent that knows only the legacy name *ecdh@joyent.com* is
+asked under that name instead).
 The card performs the ECDH on demand; the plugin never sees a private
 scalar and nothing is written to disk. The agent owns any PIN or touch
 prompt.
@@ -81,7 +83,8 @@ identity); both encode only the public key.
 _PIGGY_AUTH_SOCK_
 	SSH-agent socket used for the decrypt-path ECDH. Preferred over
 	_SSH_AUTH_SOCK_ when set and non-empty. Point it at a *piggy-agent*
-	that advertises *ecdh@joyent.com*.
+	that advertises *ecdh@code.linenisgreat.com* (or the legacy
+	*ecdh@joyent.com*).
 
 _SSH_AUTH_SOCK_
 	Fallback agent socket when _PIGGY_AUTH_SOCK_ is unset.
