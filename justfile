@@ -336,7 +336,7 @@ test: validate-grammar test-grammar-vectors test-bats-default test-bats-conforma
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby
+_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -1275,6 +1275,29 @@ test-bats-conformance-list-blank-fibby:
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_list_blank_fibby.bats \
       zz-tests_bats/conformance/piggy_list_fibby.bats
+
+# Fibby-backed gate for `piggy health`'s healthy path (piggy#158): fibby
+# seeded 9A + 9D + CHUID and a Rust `piggy agent` on it give no failing
+# point and an all-green ndjson summary; an agent serving a blank card beside
+# the provisioned one fails the cross-check with its restart hint. The
+# degraded paths are t0800-health.bats in the default lane. [linux]-only like
+# the other fibby lanes.
+#
+# run the fibby-backed piggy health all-green bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-health-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    # PIGGY satisfies the parent common.bash loader without a cargo build;
+    # the test itself drives PIGGY_BIN only.
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_health_fibby.bats
 
 # Fibby-backed gate for `piggy card init` (piggy#194): provision a blank yk5
 # fibby end to end through BOTH interaction frontends — the tty/askpass default
