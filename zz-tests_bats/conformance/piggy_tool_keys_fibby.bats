@@ -7,8 +7,10 @@
 # fibby_up, teardown -> fibby_down; factory 3DES admin key, seeded 9D cert,
 # and a pinned scalar for GENERATE on slot 9A so keygen is deterministic).
 # The contract is checked against C pivy-tool:
-#   - write-cert: after either impl writes a cert to a slot, BOTH impls read
-#     back exactly that cert; a wrong current admin key fails on both;
+#   - write-cert: piggy writes the cert object C writes for the same cert
+#     (read from fibby's wire log), so each reads back what the other wrote,
+#     and piggy reads back exactly the written cert; a wrong current admin
+#     key fails;
 #   - generate: with the 9A scalar pinned, both impls' GENERATE returns the
 #     same key, so `generate 9a -a eccp256` prints the identical pubkey line
 #     (the self-signed cert side effect has a random serial and legitimately
@@ -16,11 +18,17 @@
 #   - generate -i/-t (piggy#303): with a PIN and touch policy, both impls send
 #     the same GENERATE ASYMMETRIC header and data field (the AA/AB policy
 #     tags), read from fibby's wire log;
+#   - import: both install the same slot key.
 # Both are ported for the 9A/9C/9D/9E cert slots; generate models the EC
 # algorithms (eccp256/eccp384) only.
 #
+# C's answers and wire bytes are frozen fixtures (piggy#285,
+# lib/pivy_oracle.bash); `just codemod-capture-pivy-oracle-tool-keys-fibby`
+# re-records them, giving piggy a fresh card again after each C call.
+#
 # Required env (set by test-bats-conformance-tool-keys-fibby):
-#   FIBBY_BIN, REAL_PIVY_TOOL, PIGGY.
+#   FIBBY_BIN, PIGGY; to capture, PIGGY_ORACLE_MODE=capture with
+#   REAL_PIVY_TOOL and PIVY_ORACLE_CAPTURE_DIR.
 
 # RFC 6979 §A.2.5 P-256 private scalar — a known test key with a known pubkey.
 GEN_9A_SCALAR=c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721
@@ -29,73 +37,87 @@ GEN_9A_SCALAR=c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721
 # throwaway P-256 test key embedded in import_installs_same_key_as_c.
 IMPORT_PUB="ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBC6+EqXFg1uIJbWoqn6xLnMzWvCZapGuw72uZB5Y/lRkDOXkqwomEj+zFr/bRhjDLhlh8eJv2XYHIeOI81eoNOA="
 
+FIBBY_SEEDS=(--seed-rfc5903-slot-9d-cert --seed-chuid
+  --generate-slot-9a-priv "$GEN_9A_SCALAR")
+
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   load "$PIGGY_BATS_DIR/lib/fibby.bash"
+  load "$PIGGY_BATS_DIR/lib/pivy_oracle.bash"
   export output
-  if [[ -z ${REAL_PIVY_TOOL:-} || ! -x ${REAL_PIVY_TOOL:-} ]]; then
-    skip "REAL_PIVY_TOOL not set (run: just test-bats-conformance-tool-keys-fibby)"
-  fi
+  PIVY_ORACLE_LANE=tool-keys-fibby
   if [[ -z ${PIGGY:-} || ! -x ${PIGGY:-} ]]; then
     skip "PIGGY not set or not executable"
   fi
-  fibby_up --seed-rfc5903-slot-9d-cert --seed-chuid \
-    --generate-slot-9a-priv "$GEN_9A_SCALAR"
+  fibby_up "${FIBBY_SEEDS[@]}"
 }
 
 teardown() {
   fibby_down
 }
 
+pivy_oracle_reset_card() {
+  fibby_down
+  fibby_up "${FIBBY_SEEDS[@]}"
+}
+
 # A 24-byte 3DES admin key that is NOT the factory key (differs in non-parity
 # key bits — see piggy_tool_admin_fibby.bats for the DES parity subtlety).
 WRONG_KEY=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7
 
-function write_cert_piggy_writes_both_read_it_back { # @test
-  # Capture the seeded 9D cert, delete it, write it back via piggy, and
-  # confirm BOTH impls read the restored cert identically.
-  local certfile="$BATS_TEST_TMPDIR/orig9d.pem"
-  "$REAL_PIVY_TOOL" cert 9d >"$certfile"
-  [[ -s $certfile ]] || fail "no seeded 9D cert to start"
+# The seeded 9D cert as C reads it, into FILE.
+_c_cert_9d_into() {
+  pivy_oracle cert_9d cert 9d >"$1" || fail "C could not read the seeded 9D cert"
+  [[ -s $1 ]] || fail "no seeded 9D cert to start"
+}
+
+# The data field of every PUT DATA the card was sent, one per line,
+# reassembled across command chaining (CLA 10 continues, CLA 00 ends) so a
+# chained short write and an extended one compare equal.
+_put_data_fields() {
+  local apdu data=""
+  while IFS= read -r apdu; do
+    [[ -n $apdu ]] || continue
+    data+="$(_apdu_header_and_data "$apdu" | cut -d' ' -f2)"
+    if [[ ${apdu:0:2} != 10 ]]; then
+      printf '%s\n' "$data"
+      data=""
+    fi
+  done < <(_command_apdus_with_ins db)
+}
+
+# The last 9D cert object (tag 5FC10B) written to the card.
+_sent_9d_cert_object() { _put_data_fields | grep '^5c035fc10b' | tail -1; }
+
+# piggy and C write byte-identical 9D cert objects for the same cert, so
+# each reads back what the other wrote; piggy's read of its own write
+# closes the loop.
+function write_cert_writes_what_c_writes_and_reads_it_back { # @test
+  local certfile="$BATS_TEST_TMPDIR/orig9d.pem" c_wire
+  _c_cert_9d_into "$certfile"
+  pivy_oracle write_cert_9d write-cert 9d <"$certfile" >"$BATS_TEST_TMPDIR/c.out" ||
+    fail "C write-cert 9d failed"
+  c_wire="$(pivy_oracle_note write_cert_9d.wire _sent_9d_cert_object)" ||
+    fail "no recorded C cert object"
+  pivy_oracle_fresh_card
   run "$PIGGY" tool delete-cert 9d
   assert_success
   run "$PIGGY" tool cert 9d
   assert_failure
   # piggy writes the cert back (mgmt auth with the factory key, then PUT DATA).
-  run bash -c "'$PIGGY' tool write-cert 9d < '$certfile'"
+  run "$PIGGY" tool write-cert 9d <"$certfile"
   assert_success
-  assert_output ""
-  # Both impls read back exactly the written cert.
-  local want
-  want="$(cat "$certfile")"
+  assert_output "$(<"$BATS_TEST_TMPDIR/c.out")"
+  assert_equal "$(_sent_9d_cert_object)" "$c_wire"
   run "$PIGGY" tool cert 9d
   assert_success
-  assert_output "$want"
-  run "$REAL_PIVY_TOOL" cert 9d
-  assert_success
-  assert_output "$want"
-}
-
-function write_cert_c_writes_piggy_reads_it_back { # @test
-  # The mirror: C writes the cert, piggy must read back exactly that cert.
-  local certfile="$BATS_TEST_TMPDIR/orig9d.pem"
-  "$REAL_PIVY_TOOL" cert 9d >"$certfile"
-  [[ -s $certfile ]] || fail "no seeded 9D cert to start"
-  run "$PIGGY" tool delete-cert 9d
-  assert_success
-  run bash -c "'$REAL_PIVY_TOOL' write-cert 9d < '$certfile'"
-  assert_success
-  local want
-  want="$(cat "$certfile")"
-  run "$PIGGY" tool cert 9d
-  assert_success
-  assert_output "$want"
+  assert_output "$(<"$certfile")"
 }
 
 function write_cert_wrong_admin_key_fails { # @test
   # A wrong current admin key fails the mgmt auth, so the slot is untouched.
   local certfile="$BATS_TEST_TMPDIR/orig9d.pem"
-  "$REAL_PIVY_TOOL" cert 9d >"$certfile"
+  _c_cert_9d_into "$certfile"
   run bash -c "'$PIGGY' tool -K '$WRONG_KEY' write-cert 9d < '$certfile'"
   assert_failure
   # The original 9D cert is still readable — the failed write did not replace it.
@@ -108,9 +130,10 @@ function generate_9a_matches_c { # @test
   # both impls' GENERATE returns the same pubkey. Compare the printed
   # public-key line (stderr stripped; the self-signed cert side effect
   # legitimately differs by random serial and is not compared).
-  run bash -c "'$REAL_PIVY_TOOL' -P 123456 -a eccp256 generate 9a 2>/dev/null"
-  assert_success
-  local c_out="$output"
+  local c_out
+  c_out="$(pivy_oracle generate_9a -P 123456 -a eccp256 generate 9a 2>/dev/null)" ||
+    fail "C generate 9a failed"
+  pivy_oracle_fresh_card
   run bash -c "'$PIGGY' tool -P 123456 -a eccp256 generate 9a 2>/dev/null"
   assert_success
   [[ "$output" == "$c_out" ]] || fail "generate pubkey differs: C=[$c_out] piggy=[$output]"
@@ -174,11 +197,12 @@ function generate_9c_with_policy_matches_c { # @test
   # C's default 9C cert template (user-email) needs an `email` cert variable,
   # hence its -D; that only shapes the self-signed cert, which is not compared.
   _fresh_card_for_9c_generate
-  run bash -c "'$REAL_PIVY_TOOL' -P 123456 -a eccp256 -i always -t always \
-    -D email=piggy-test@example.invalid generate 9c 2>'$BATS_TEST_TMPDIR/c.err'"
-  [[ $status -eq 0 ]] || fail "C generate 9c failed: $(cat "$BATS_TEST_TMPDIR/c.err"; tail -40 "$FIBBY_LOG")"
-  local c_out="$output" c_apdu
-  c_apdu="$(_command_apdus_with_ins 47)"
+  local c_out c_apdu
+  c_out="$(pivy_oracle generate_9c -P 123456 -a eccp256 -i always -t always \
+    -D email=piggy-test@example.invalid generate 9c 2>"$BATS_TEST_TMPDIR/c.err")" ||
+    fail "C generate 9c failed: $(cat "$BATS_TEST_TMPDIR/c.err"; tail -40 "$FIBBY_LOG")"
+  c_apdu="$(pivy_oracle_note generate_9c.wire _command_apdus_with_ins 47)" ||
+    fail "no recorded C GENERATE"
 
   _fresh_card_for_9c_generate
   run bash -c "'$PIGGY' tool -P 123456 -a eccp256 -i always -t always generate 9c \
@@ -235,16 +259,18 @@ EOF
   # generate-override seed is unused by IMPORT (which installs the key
   # directly). Capture the resulting slot public key (key blob only — the
   # self-signed cert subject naturally differs per impl).
-  run bash -c "'$REAL_PIVY_TOOL' -P 123456 import 9a < '$keyfile'"
-  assert_success
+  pivy_oracle import_9a -P 123456 import 9a <"$keyfile" >/dev/null ||
+    fail "C import 9a failed"
   local c_key
-  c_key=$("$REAL_PIVY_TOOL" pubkey 9a | awk '{print $1, $2}')
-  # piggy imports the SAME key into 9A (overwriting); the slot key must match.
-  run bash -c "'$PIGGY' tool -P 123456 import 9a < '$keyfile'"
+  c_key=$(pivy_oracle import_9a_pubkey pubkey 9a | awk '{print $1, $2}')
+  pivy_oracle_fresh_card
+  # piggy imports the SAME key into 9A of a fresh card; the slot key must
+  # match (piggy's `pubkey` is held to C's by the tool-fibby lane).
+  run "$PIGGY" tool -P 123456 import 9a <"$keyfile"
   assert_success
   assert_output ""
   local p_key
-  p_key=$("$REAL_PIVY_TOOL" pubkey 9a | awk '{print $1, $2}')
+  p_key=$("$PIGGY" tool pubkey 9a | awk '{print $1, $2}')
   [[ -n $c_key && "$c_key" == "$p_key" ]] \
     || fail "import key mismatch: C=[$c_key] piggy=[$p_key]"
   # And it is exactly the imported key's public key.

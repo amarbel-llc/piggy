@@ -739,7 +739,7 @@ _lane-tool-fibby mode: build-rust
 # run the fibby-backed differential piggy tool PIN/PUK bats gate
 [group('post-build')]
 [linux]
-test-bats-conformance-tool-pin-fibby: (_lane-tool-pin-fibby "replay")
+test-bats-conformance-tool-pin-fibby: (_lane-pivy-oracle "tool-pin-fibby" "piggy_tool_pin_fibby.bats" "replay")
 
 # Re-record the C pivy-tool answers the tool-pin-fibby lane replays
 # (piggy#285), each on a fresh card: the same lane with the live C binary.
@@ -747,16 +747,21 @@ test-bats-conformance-tool-pin-fibby: (_lane-tool-pin-fibby "replay")
 # re-record the C pivy-tool oracle fixtures for the tool-pin-fibby lane
 [group('codemod')]
 [linux]
-codemod-capture-pivy-oracle-tool-pin-fibby: (_lane-tool-pin-fibby "capture")
+codemod-capture-pivy-oracle-tool-pin-fibby: (_lane-pivy-oracle "tool-pin-fibby" "piggy_tool_pin_fibby.bats" "capture")
 
+# One fibby-backed frozen-oracle lane (piggy#285): run conformance/FILE in
+# MODE replay (no C binary) or capture (live C pivy-tool, then copy the
+# recordings into fixtures/pivy-oracle/LANE). Each test brings up its own
+# fibby in-sandbox; the capture writes under the exposed workdir because the
+# sandboxed lane cannot write the repo.
 [linux]
-_lane-tool-pin-fibby mode: build-rust
+_lane-pivy-oracle lane file mode: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
   fibby_bin="$PWD/target/debug/fibby"
   piggy_bin="$PWD/target/debug/piggy"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
-  workdir=$(mktemp -d /tmp/tool-pin-fibby-XXXXXX)
+  workdir=$(mktemp -d /tmp/{{ lane }}-XXXXXX)
   trap 'rm -rf "$workdir"' EXIT
   capture_env=()
   if [[ {{ mode }} == capture ]]; then
@@ -774,11 +779,11 @@ _lane-tool-pin-fibby mode: build-rust
     PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=60 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
-    zz-tests_bats/conformance/piggy_tool_pin_fibby.bats || exit 1
+    zz-tests_bats/conformance/{{ file }} || exit 1
   if [[ {{ mode }} == capture ]]; then
-    dest="$PWD/zz-tests_bats/fixtures/pivy-oracle/tool-pin-fibby"
+    dest="$PWD/zz-tests_bats/fixtures/pivy-oracle/{{ lane }}"
     rm -rf "$dest"
-    cp -r "$workdir/oracle/tool-pin-fibby" "$dest"
+    cp -r "$workdir/oracle/{{ lane }}" "$dest"
     echo "recorded $(find "$dest" -name '*.out' | wc -l) cases into $dest"
   fi
 
@@ -831,7 +836,7 @@ test-bats-conformance-tool-factory-reset-fibby: build-rust
 # run the fibby-backed differential piggy tool set-admin bats gate
 [group('post-build')]
 [linux]
-test-bats-conformance-tool-admin-fibby: (_lane-tool-admin-fibby "replay")
+test-bats-conformance-tool-admin-fibby: (_lane-pivy-oracle "tool-admin-fibby" "piggy_tool_admin_fibby.bats" "replay")
 
 # Re-record the C pivy-tool answers and wire bytes the tool-admin-fibby lane
 # replays (piggy#285), each on a fresh card: the same lane with the live C
@@ -840,70 +845,31 @@ test-bats-conformance-tool-admin-fibby: (_lane-tool-admin-fibby "replay")
 # re-record the C pivy-tool oracle fixtures for the tool-admin-fibby lane
 [group('codemod')]
 [linux]
-codemod-capture-pivy-oracle-tool-admin-fibby: (_lane-tool-admin-fibby "capture")
+codemod-capture-pivy-oracle-tool-admin-fibby: (_lane-pivy-oracle "tool-admin-fibby" "piggy_tool_admin_fibby.bats" "capture")
 
-[linux]
-_lane-tool-admin-fibby mode: build-rust
-  #!/usr/bin/env bash
-  set -uo pipefail
-  fibby_bin="$PWD/target/debug/fibby"
-  piggy_bin="$PWD/target/debug/piggy"
-  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
-  workdir=$(mktemp -d /tmp/tool-admin-fibby-XXXXXX)
-  trap 'rm -rf "$workdir"' EXIT
-  capture_env=()
-  if [[ {{ mode }} == capture ]]; then
-    pivy_out=$(nix build .#pivy --no-link --print-out-paths) || exit 1
-    capture_env=(PIGGY_ORACLE_MODE=capture REAL_PIVY_TOOL="$pivy_out/bin/pivy-tool"
-      PIVY_ORACLE_CAPTURE_DIR="$workdir/oracle")
-  fi
-  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-  env "${capture_env[@]}" \
-    FIBBY_BIN="$fibby_bin" \
-    PIGGY="$piggy_bin" \
-    SSH_ASKPASS="$askpass" \
-    SSH_ASKPASS_REQUIRE=force \
-    DISPLAY="" \
-    PIGGY_TEST_FIB_PIN=123456 \
-    {{ fence-tmpdir-linux }} \
-    BATS_TEST_TIMEOUT=60 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
-    zz-tests_bats/conformance/piggy_tool_admin_fibby.bats || exit 1
-  if [[ {{ mode }} == capture ]]; then
-    dest="$PWD/zz-tests_bats/fixtures/pivy-oracle/tool-admin-fibby"
-    rm -rf "$dest"
-    cp -r "$workdir/oracle/tool-admin-fibby" "$dest"
-    echo "recorded $(find "$dest" -name '*.out' | wc -l) cases into $dest"
-  fi
-
-# Differential `piggy tool` key-surface ops (write-cert, later generate)
+# Differential `piggy tool` key-surface ops (write-cert, generate, import)
 # against C pivy-tool (piggy#289 Phase 3.4). These mutate slot material, so
 # each test brings up its OWN fresh fibby (fibby_up in setup, seeded 9D
 # cert). --allow-local-binding is for the per-test pcsc socket; fibby runs
 # in-sandbox as a child of the test.
 #
+# C's answers and the bytes it wrote to the card are frozen fixtures under
+# zz-tests_bats/fixtures/pivy-oracle/tool-keys-fibby/ (piggy#285), so the
+# lane needs no C binary.
+#
 # run the fibby-backed differential piggy tool key-surface bats gate
 [group('post-build')]
 [linux]
-test-bats-conformance-tool-keys-fibby: build-rust
-  #!/usr/bin/env bash
-  set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  pivy_tool="$pivy_out/bin/pivy-tool"
-  fibby_bin="$PWD/target/debug/fibby"
-  piggy_bin="$PWD/target/debug/piggy"
-  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
-  [[ -x $pivy_tool ]] || { echo "missing $pivy_tool (nix build .#pivy)"; exit 1; }
-  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-  FIBBY_BIN="$fibby_bin" \
-    REAL_PIVY_TOOL="$pivy_tool" \
-    PIGGY="$piggy_bin" \
-    SSH_ASKPASS="$askpass" \
-    SSH_ASKPASS_REQUIRE=force \
-    DISPLAY="" \
-    PIGGY_TEST_FIB_PIN=123456 \
-    {{ fence-tmpdir-linux }} \
-    BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
-    zz-tests_bats/conformance/piggy_tool_keys_fibby.bats
+test-bats-conformance-tool-keys-fibby: (_lane-pivy-oracle "tool-keys-fibby" "piggy_tool_keys_fibby.bats" "replay")
+
+# Re-record the C pivy-tool answers and wire bytes the tool-keys-fibby lane
+# replays (piggy#285), each on a fresh card: the same lane with the live C
+# binary.
+#
+# re-record the C pivy-tool oracle fixtures for the tool-keys-fibby lane
+[group('codemod')]
+[linux]
+codemod-capture-pivy-oracle-tool-keys-fibby: (_lane-pivy-oracle "tool-keys-fibby" "piggy_tool_keys_fibby.bats" "capture")
 
 # recipients add --all-attached against FIBBY — the fibby companion to
 # test-bats-conformance-recipients-add-attached, part of the fib→fibby
