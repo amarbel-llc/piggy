@@ -157,10 +157,13 @@ keeps a missing fixture from passing a test that expects C to fail.
 live C binary against the same fibby card, which works because fibby's
 seeded keys and RFC 6979 signing make every recorded answer
 reproducible: re-recording an unchanged lane changes no file. A lane whose
-C call changes the card (a PIN change) defines *pivy_oracle_after_capture*
-to bring up a fresh card after it, so the Rust side starts where C did in
-both modes, and calls *pivy_oracle* in the test's own shell rather than
-under *run*, so the test sees that card.
+C call changes the card (a PIN change, a key rotation) defines
+*pivy_oracle_reset_card* and calls *pivy_oracle_fresh_card* after the C
+call, in the test's own shell rather than under *run*, so the Rust side
+starts on the fresh card C started on in both modes. Before that reset,
+*pivy_oracle_note* _CASE_ _FUNC_... records what _FUNC_ prints (the bytes
+C wrote, read from _FIBBY_LOG_), so a lane can compare the card writes
+of the two implementations as well as their output.
 
 fibby also runs INSIDE the sandboxed default lane (piggy#281, piggy#164):
 the lane injects it as _FIBBY_BIN_, and _common.bash_ calls *fibby_up*

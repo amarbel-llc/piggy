@@ -18,9 +18,13 @@
 
 PIVY_ORACLE_DIR="$PIGGY_BATS_DIR/fixtures/pivy-oracle"
 
-# pivy_oracle CASE ARGS... — C pivy-tool's stdout for ARGS, with its exit
-# status as this function's status.
-pivy_oracle() {
+pivy_oracle_capturing() {
+  [[ ${PIGGY_ORACLE_MODE:-replay} == capture ]]
+}
+
+# _pivy_oracle_record CASE CMD... — in capture mode run CMD and record its
+# stdout and status as CASE; in both modes answer with the recording.
+_pivy_oracle_record() {
   local case="$1"
   shift
   [[ -n ${PIVY_ORACLE_LANE:-} ]] || {
@@ -29,21 +33,16 @@ pivy_oracle() {
   }
   local base="$PIVY_ORACLE_DIR/$PIVY_ORACLE_LANE/$case"
 
-  if [[ ${PIGGY_ORACLE_MODE:-replay} == capture ]]; then
-    [[ -x ${REAL_PIVY_TOOL:-} && -n ${PIVY_ORACLE_CAPTURE_DIR:-} ]] || {
-      echo "pivy_oracle: capture needs REAL_PIVY_TOOL and PIVY_ORACLE_CAPTURE_DIR" >&2
+  if pivy_oracle_capturing; then
+    [[ -n ${PIVY_ORACLE_CAPTURE_DIR:-} ]] || {
+      echo "pivy_oracle: capture needs PIVY_ORACLE_CAPTURE_DIR" >&2
       return 99
     }
     base="$PIVY_ORACLE_CAPTURE_DIR/$PIVY_ORACLE_LANE/$case"
     mkdir -p "$(dirname "$base")"
     local status=0
-    "$REAL_PIVY_TOOL" "$@" >"$base.out" || status=$?
+    "$@" >"$base.out" || status=$?
     printf '%s\n' "$status" >"$base.status"
-    # A lane whose C call changes the card defines this to put the card
-    # back, so the Rust side starts from the state C did, as in replay.
-    if declare -F pivy_oracle_after_capture >/dev/null; then
-      pivy_oracle_after_capture
-    fi
   fi
 
   [[ -f $base.out && -f $base.status ]] || {
@@ -52,6 +51,34 @@ pivy_oracle() {
   }
   cat "$base.out"
   return "$(<"$base.status")"
+}
+
+# pivy_oracle CASE ARGS... — C pivy-tool's stdout for ARGS, with its exit
+# status as this function's status.
+pivy_oracle() {
+  if pivy_oracle_capturing && [[ ! -x ${REAL_PIVY_TOOL:-} ]]; then
+    echo "pivy_oracle: capture needs REAL_PIVY_TOOL" >&2
+    return 99
+  fi
+  local case="$1"
+  shift
+  _pivy_oracle_record "$case" "${REAL_PIVY_TOOL:-pivy-tool}" "$@"
+}
+
+# pivy_oracle_note CASE FUNC... — what FUNC printed just after C ran (in
+# capture mode), e.g. the bytes C wrote, read from fibby's wire log.
+pivy_oracle_note() {
+  _pivy_oracle_record "$@"
+}
+
+# pivy_oracle_fresh_card — capture mode only: C changed the card, so call
+# the lane's pivy_oracle_reset_card to give the Rust side the fresh card C
+# started on, as replay does. Call it in the test's own shell, not under
+# `run`, so the test sees the new card.
+pivy_oracle_fresh_card() {
+  if pivy_oracle_capturing; then
+    pivy_oracle_reset_card
+  fi
 }
 
 # After `run pivy_oracle ...`: C failed, and not because the fixture was

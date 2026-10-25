@@ -7,36 +7,46 @@
 # mgmt key / a slot cert / the Key History object), so each test gets its
 # OWN fresh fibby card (setup -> fibby_up, teardown -> fibby_down; factory
 # 3DES admin key, seeded 9D cert). The contract is checked BOTH ways:
-#   - observable output: both C pivy-tool and piggy tool exit 0 and print
-#     nothing on a successful rotation/delete/update, and both fail on a
-#     wrong current admin key;
-#   - card state / wire: after C rotates FACTORY -> KEY_A, piggy can only
-#     rotate KEY_A -> KEY_B if KEY_A is genuinely the active key; after
-#     either impl deletes the 9D cert, BOTH read it as gone; and both emit
-#     an identical PUT DATA 5FC10C on the wire for update-keyhist (the Key
-#     History object has no ported read-back path — piggy#290 — so the
-#     differential is on the write APDU bytes in fibby's wire trace).
-# set-admin is 3DES-only (AES/`random`/`@file`/`-R` fall through to C);
-# delete-cert is ported for the 9A/9C/9D/9E cert slots.
+#   - observable output: piggy tool exits and prints as C pivy-tool did for
+#     the same operation on a fresh card (exit 0 and nothing on a success,
+#     a failure on a wrong current admin key);
+#   - card state / wire: piggy's write lands (a rotated key authenticates,
+#     a deleted cert reads as gone), and piggy sends the card the same data
+#     C sent for the same operation, read from fibby's wire trace: the new
+#     management key, the emptied 9D cert object, the Key History object.
+#     Equal bytes on the card are what make "C deletes, piggy reads it gone"
+#     and its mirror hold without running C.
+# C's answers and wire bytes are frozen fixtures (piggy#285,
+# lib/pivy_oracle.bash); `just codemod-capture-pivy-oracle-tool-admin-fibby`
+# re-records them, giving piggy a fresh card again after each C call.
+# set-admin is 3DES-only; delete-cert is ported for the 9A/9C/9D/9E cert
+# slots.
 #
 # Required env (set by test-bats-conformance-tool-admin-fibby):
-#   FIBBY_BIN, REAL_PIVY_TOOL, PIGGY, FIBBY_LOG.
+#   FIBBY_BIN, PIGGY; to capture, PIGGY_ORACLE_MODE=capture with
+#   REAL_PIVY_TOOL and PIVY_ORACLE_CAPTURE_DIR.
+
+FIBBY_SEEDS=(--seed-rfc5903-slot-9d-cert --seed-chuid)
 
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   load "$PIGGY_BATS_DIR/lib/fibby.bash"
+  load "$PIGGY_BATS_DIR/lib/pivy_oracle.bash"
   export output
-  if [[ -z ${REAL_PIVY_TOOL:-} || ! -x ${REAL_PIVY_TOOL:-} ]]; then
-    skip "REAL_PIVY_TOOL not set (run: just test-bats-conformance-tool-admin-fibby)"
-  fi
+  PIVY_ORACLE_LANE=tool-admin-fibby
   if [[ -z ${PIGGY:-} || ! -x ${PIGGY:-} ]]; then
     skip "PIGGY not set or not executable"
   fi
-  fibby_up --seed-rfc5903-slot-9d-cert --seed-chuid
+  fibby_up "${FIBBY_SEEDS[@]}"
 }
 
 teardown() {
   fibby_down
+}
+
+pivy_oracle_reset_card() {
+  fibby_down
+  fibby_up "${FIBBY_SEEDS[@]}"
 }
 
 # Two distinct 24-byte (48 hex) 3DES admin keys, neither the factory key
@@ -47,28 +57,66 @@ teardown() {
 KEY_A=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7
 KEY_B=c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7
 
+# Every APDU data byte sent to the card so far, as one lowercase hex string.
+_sent_hex() {
+  sed -nE 's/^\[fibby:apdu>\] [0-9a-f]{4}  (.*) \|.*\|$/\1/p' "$FIBBY_LOG" | tr -d ' \n'
+}
+
+# The objects written: the 3DES management key (`03 9B 18 <key>`), the 9D
+# cert object's PUT DATA head (`5C 03 5F C1 0B 53 <len>`), and the Key
+# History object (`5C 03 5F C1 0C 53 06 <body>`). Framing around them
+# differs (C uses extended-length APDUs, piggy short ones); the data does
+# not.
+_sent_mgmt_key() { _sent_hex | grep -oE '039b18[0-9a-f]{48}' | tail -1; }
+_sent_9d_cert_put() { _sent_hex | grep -oE '5c035fc10b53[0-9a-f]{2}' | tail -1; }
+_sent_keyhist() { _sent_hex | grep -oE '5c035fc10c5306[0-9a-f]{12}' | tail -1; }
+
+# Run C (the oracle) for CASE with ARGS on the fresh card, record what it
+# wrote with the WIRE helper, then give piggy a fresh card and run `piggy
+# tool ARGS`: same success or failure, same output on a success. Leaves C's
+# wire bytes in $C_WIRE.
+_assert_like_c() {
+  local case="$1" wire="$2"
+  shift 2
+  local c_file="$BATS_TEST_TMPDIR/$case.c" c_status=0
+  pivy_oracle "$case" "$@" >"$c_file" || c_status=$?
+  ((c_status != 99)) || fail "pivy_oracle had no fixture for $case"
+  C_WIRE=""
+  if [[ -n $wire ]]; then
+    C_WIRE="$(pivy_oracle_note "$case.wire" "$wire")" ||
+      fail "no recorded C wire bytes for $case"
+  fi
+  pivy_oracle_fresh_card
+  local c_output
+  c_output="$(<"$c_file")"
+  run "$PIGGY" tool "$@"
+  if (((status == 0) != (c_status == 0))); then
+    fail "piggy tool $* exited $status; C exited $c_status"
+  fi
+  if ((c_status == 0)); then
+    assert_output "$c_output"
+  fi
+}
+
 function set_admin_rotates_key_matches_c_and_takes_effect { # @test
-  # C rotates FACTORY -> KEY_A (exit 0, no output).
-  run "$REAL_PIVY_TOOL" -K default set-admin "$KEY_A"
-  assert_success
+  _assert_like_c set_admin _sent_mgmt_key -K default set-admin "$KEY_A"
   assert_output ""
-  # piggy rotates KEY_A -> KEY_B on the same card. This can only authenticate
-  # if C's rotation actually installed KEY_A — so success proves it took.
+  # piggy installed the same key C did.
+  assert_equal "$(_sent_mgmt_key)" "$C_WIRE"
+  [[ $C_WIRE == 039b18$KEY_A ]] || fail "C wrote an unexpected key object: $C_WIRE"
+  # And it took: KEY_A now authenticates, then KEY_B does.
   run "$PIGGY" tool -K "$KEY_A" set-admin "$KEY_B"
   assert_success
   assert_output ""
-  # piggy rotates KEY_B -> default, proving KEY_B is now the active key.
   run "$PIGGY" tool -K "$KEY_B" set-admin default
   assert_success
   assert_output ""
 }
 
 function set_admin_wrong_current_key_fails_like_c { # @test
-  # The card still holds the factory key; authenticating with KEY_A must fail
-  # on both impls (a failed mgmt-key auth does not rotate anything).
-  run "$REAL_PIVY_TOOL" -K "$KEY_A" set-admin "$KEY_B"
-  assert_failure
-  run "$PIGGY" tool -K "$KEY_A" set-admin "$KEY_B"
+  # The card holds the factory key; authenticating with KEY_A fails on both
+  # (a failed mgmt-key auth rotates nothing).
+  _assert_like_c set_admin_wrong "" -K "$KEY_A" set-admin "$KEY_B"
   assert_failure
   # The factory key still works — piggy can rotate FACTORY -> KEY_A.
   run "$PIGGY" tool -K default set-admin "$KEY_A"
@@ -87,32 +135,19 @@ function set_admin_default_current_key_is_the_factory_key { # @test
   assert_failure
 }
 
-function delete_cert_clears_the_9d_slot_both_see_it_gone { # @test
-  # The seeded 9D cert is readable by both impls to start.
-  run "$PIGGY" tool cert 9d
+function cert_9d_reads_like_c_before_a_delete { # @test
+  _assert_like_c cert_9d "" cert 9d
   assert_success
-  run "$REAL_PIVY_TOOL" cert 9d
-  assert_success
-  # piggy deletes the 9D cert (mgmt auth with the factory key, then PUT DATA
-  # empty at the cert tag). Silent success, matching C.
-  run "$PIGGY" tool delete-cert 9d
-  assert_success
-  assert_output ""
-  # Now BOTH impls read the slot as having no certificate — piggy's delete
-  # cleared the object in the same way C recognises as empty.
-  run "$PIGGY" tool cert 9d
-  assert_failure
-  run "$REAL_PIVY_TOOL" cert 9d
-  assert_failure
 }
 
-function delete_cert_c_delete_piggy_sees_it_gone { # @test
-  # The mirror: C deletes the 9D cert, piggy must then read it as gone.
-  run "$REAL_PIVY_TOOL" delete-cert 9d
-  assert_success
+# piggy and C empty the 9D cert object with the same PUT DATA, so either
+# one's delete reads as gone to both: this covers piggy deleting what C
+# reads and C deleting what piggy reads.
+function delete_cert_writes_what_c_writes_and_reads_gone { # @test
+  _assert_like_c delete_cert_9d _sent_9d_cert_put delete-cert 9d
+  assert_output ""
+  assert_equal "$(_sent_9d_cert_put)" "$C_WIRE"
   run "$PIGGY" tool cert 9d
-  assert_failure
-  run "$REAL_PIVY_TOOL" cert 9d
   assert_failure
 }
 
@@ -125,38 +160,14 @@ function delete_cert_wrong_admin_key_fails { # @test
   assert_success
 }
 
-# Extract the PUT DATA *data field* written to the Key History tag 5F C1 0C
-# from fibby's wire trace — the `5C 03 5F C1 0C 53 <len> <body>` object,
-# independent of the ISO 7816-4 length framing around it. (C pivy-tool frames
-# PUT DATA with extended-length `00 DB 3F FF 00 00 <Lc> …`, piggy with short
-# `00 DB 3F FF <Lc> …`; both are valid and the card stores the identical
-# object, so the meaningful differential is the data field, not the framing.)
-# The `53` distinguishes the PUT object from the bare `5C 03 5F C1 0C` GET
-# DATA request; the fresh-card body is 6 bytes (`C1 01 00 C2 01 00`).
-_keyhist_put_objects() {
-  sed -nE 's/^\[fibby:apdu>\] [0-9a-f]{4}  (.*) \|.*\|$/\1/p' "$FIBBY_LOG" \
-    | tr -d ' \n' | grep -oE '5c035fc10c5306[0-9a-f]{12}'
-}
-
+# update-keyhist has no ported read-back path (piggy#290), so the
+# differential is on the write: the Key History object piggy writes is
+# byte-identical to C's.
 function update_keyhist_wire_matches_c { # @test
-  # update-keyhist has no ported read-back path (piggy#290), so the
-  # differential is on the write: run both impls against the same card and
-  # assert the Key History object each writes (the PUT DATA data field) is
-  # byte-identical.
-  run "$REAL_PIVY_TOOL" update-keyhist
-  assert_success
+  _assert_like_c update_keyhist _sent_keyhist update-keyhist
   assert_output ""
-  run "$PIGGY" tool update-keyhist
-  assert_success
-  assert_output ""
-  local objs n uniq
-  objs=$(_keyhist_put_objects)
-  n=$(printf '%s\n' "$objs" | grep -c .)
-  uniq=$(printf '%s\n' "$objs" | sort -u | grep -c .)
-  [[ $n -ge 2 ]] || fail "expected >=2 keyhist PUT DATA objects (C + piggy), got $n: $objs"
-  [[ $uniq -eq 1 ]] || fail "C and piggy wrote different keyhist objects: $objs"
-  # And it is the expected fresh-card object: 53 06 C1 01 00 (oncard=0)
-  # C2 01 00 (offcard=0), no URL.
-  [[ $objs == *"5c035fc10c5306c10100c20100"* ]] \
-    || fail "unexpected keyhist object bytes: $objs"
+  assert_equal "$(_sent_keyhist)" "$C_WIRE"
+  # The expected fresh-card object: 53 06 C1 01 00 (oncard=0) C2 01 00
+  # (offcard=0), no URL.
+  assert_equal "$C_WIRE" "5c035fc10c5306c10100c20100"
 }

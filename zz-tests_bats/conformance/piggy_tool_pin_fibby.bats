@@ -41,20 +41,20 @@ teardown() {
 }
 
 # Capture only: C changed the card; give piggy the fresh card C started on.
-pivy_oracle_after_capture() {
+pivy_oracle_reset_card() {
   fibby_down
   fibby_up "${FIBBY_SEEDS[@]}"
 }
 
-# `piggy tool ARGS` exits and prints as C pivy-tool did for ARGS (case CASE).
-# pivy_oracle runs in this shell, not under `run`: in capture mode its
-# after-capture hook replaces the card, and the test must see the new one.
+# `piggy tool ARGS` exits and prints as C pivy-tool did for ARGS (case CASE),
+# from the same fresh card.
 _assert_like_c() {
   local case="$1"
   shift
   local c_file="$BATS_TEST_TMPDIR/$case.c" c_status=0
   pivy_oracle "$case" "$@" >"$c_file" || c_status=$?
   ((c_status != 99)) || fail "pivy_oracle had no fixture for $case"
+  pivy_oracle_fresh_card
   local c_output
   c_output="$(<"$c_file")"
   run "$PIGGY" tool "$@"
