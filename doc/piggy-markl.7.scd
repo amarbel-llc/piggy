@@ -123,17 +123,19 @@ _go/gomod2nix.toml_ pins the module's externals for consumers
 
 # GATES
 
-*just build-go* and *just test-go* (compile, _go test -count=1 -tags test_)
-are in the *build* and *test* aggregates. _-count=1_ is deliberate: the
-go test cache tracks only files opened under the module root, and it
-answered "ok (cached)" after a vector file under _docs/rfcs/_ changed.
-For the same reason the tests read their vector files through
-_testdata/_ symlinks that point at _docs/rfcs/_; a new test that reads a
-file outside _go/_ must do the same. The two _cmd/_ binaries build with
-*buildGoApplication* self-consuming _go-pkgs-test_; the conformance
-binary's check phase runs _go vet -tags test ./..._ over the whole
-module, so a source-filter regression or a stale _gomod2nix.toml_ fails
-the gate. The library itself has no *buildGoModule* gate: facade drift
+*just build-go* (compile) and *just test-go* are in the *build* and
+*test* aggregates. *test-go* builds _checks.<system>.go-vet_ and
+_go-tests_: the module vetted and tested in the nix sandbox, one cached
+run per package (godyn(7) VET and TESTS, with the _test_ tag and graphs
+derived at evaluation time), so only an edited package's cone re-runs,
+and it prints one ok/FAIL line per package. The sandbox holds only
+_go-pkgs-test_, the _go/_ tree, so the vector files the tests read from
+_docs/rfcs/_ are real copies under the package's _testdata/_; *just
+lint-worktree* fails when a copy differs from its source, and a new test
+that reads a file outside _go/_ needs a copy and a line there too. The
+two _cmd/_ binaries build with godyn (*buildGoAuto*) self-consuming
+_go-pkgs-test_, so a source-filter regression or a stale
+_gomod2nix.toml_ fails the gate. The library itself has no *buildGoModule* gate: facade drift
 is what guards it, repaired at commit time by the *conformist-pre-commit*
 hook's dewey-facade-export lane and checked at the gate by *just
 lint-worktree*. Go is not covered by *nix fmt*; *just codemod-fmt-go*

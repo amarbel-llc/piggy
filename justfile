@@ -29,10 +29,10 @@ build-nix:
     # catch flake.nix / vendorHash regressions at the merge gate rather
     # than only when `just debug-piggy-test-sshd` or the Phase D bats run.
     nix build .#piggy-test-sshd --no-link --show-trace
-    # And piggy-agent-conformance: a buildGoApplication that self-consumes
-    # go-pkgs-test and runs `go vet -tags test ./...` over the WHOLE go/
-    # module in checkPhase, so a source-filter regression or a stale
-    # go/gomod2nix.toml fails the merge gate here (piggy#183).
+    # And piggy-agent-conformance: a godyn build (buildGoAuto) that
+    # self-consumes go-pkgs-test, so a source-filter regression or a stale
+    # go/gomod2nix.toml fails the merge gate here (piggy#183). The whole-module
+    # vet + tests are `just test-go` (checks.go-vet / go-tests, piggy#340).
     nix build .#piggy-agent-conformance --no-link --show-trace
 
 # Cargo-build the workspace; on Linux with no ARGS, also build fibby with
@@ -91,9 +91,9 @@ update-go:
 # Regenerate go/gomod2nix.toml from go/go.mod|go.sum after a dep change (run
 # right after `update-go`, the sibling lockfile update). gomod2nix is on the
 # devShell PATH; `nix run .#gomod2nix` is the reload-independent fallback. A
-# maintenance leaf (not a `build`-verb aggregate member): buildGoApplication is
+# maintenance leaf (not a `build`-verb aggregate member): the nix Go builds are
 # the freshness GATE (a stale toml fails the piggy-agent-conformance /
-# piggy-test-sshd builds in build-nix), so this is the manual REPAIR. The
+# piggy-test-sshd builds in build-nix and test-go), so this is the manual REPAIR. The
 # conformist subdir freshness lane is deferred to conformist#79 (the stock
 # gomod2nix linter is tree-root-only).
 #
@@ -110,13 +110,23 @@ update-gomod2nix:
 build-go:
     cd go && go build ./...
 
-# `-tags test` activates dewey's test_ui harness (dewey/pkgs/test_ui is behind
-# //go:build test, mirroring madder's own `go test -tags test` convention).
+# The go/ module's tests and vet in the nix sandbox, one cached run per
+# package (godyn(7) TESTS and VET; checks.<system>.go-tests and go-vet,
+# piggy#189): only an edited package's cone re-runs. Built with `-tags
+# test`, which activates dewey's
+# test_ui harness (dewey/pkgs/test_ui is behind //go:build test, mirroring
+# madder's own `go test -tags test` convention). Prints one ok/FAIL line per
+# package.
 #
 # run the go/ module's test suite
 [group('post-build')]
 test-go:
-    cd go && go test -count=1 -tags test ./...
+    #!/usr/bin/env bash
+    set -euo pipefail
+    system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
+    nix build ".#checks.${system}.go-vet" --no-link --print-build-logs
+    out=$(nix build ".#checks.${system}.go-tests" --no-link --print-out-paths --print-build-logs)
+    cat "$out"
 
 # piggy-pigpen (RFC 0008/0009 prototype): a pure-RustCrypto, wasm-buildable
 # crate INTENTIONALLY excluded from the cargo workspace (root Cargo.toml
@@ -188,12 +198,15 @@ codemod-rfc0002-fixture:
 # it or from each other. Output is deterministic; a no-op run leaves no diff.
 # `-count=1` defeats the go test cache: the generator's effect is the file it
 # writes, and a cached "ok" would skip the write and leave a stale or
-# hand-edited file in place.
+# hand-edited file in place. The generator writes the go/ testdata copy
+# (go/ is its own nix source, so it cannot be a symlink, piggy#189); this
+# copies it to the normative file, and lint-worktree fails when they differ.
 #
 # regenerate the normative pigpen-v1 vector file
 [group('codemod')]
 codemod-pigpen-vectors:
     cd go && go test -count=1 -tags 'test pigpen_vectors_generate' -run TestGeneratePigpenVectors ./internal/delta/pigpen/...
+    cp go/internal/delta/pigpen/testdata/0008-pigpen-vectors.txt docs/rfcs/0008-pigpen-vectors.txt
 
 # Capture the pivy-oracle differential corpus (piggy#164 Phase 1 item 2).
 # Encrypt a matrix of plaintexts to fibby's RFC 5903 slot-9D key with the
@@ -2584,8 +2597,11 @@ lint-closure-no-pivy:
 # `just` hook fails on committed drift even if the `conformist-pre-commit`
 # repair hook was bypassed. The pre-commit hook does the REPAIR; this does the
 # CHECK (same dewey-facade-export module, two lanes — see flake.nix). Also
-# fails when the Go and Rust copies of the markl conformance fixture differ
-# (piggy#235; `just codemod-rfc0002-fixture` writes both).
+# fails when a copied conformance fixture differs from its source: the Go
+# and Rust copies of the markl fixture (piggy#235; `just
+# codemod-rfc0002-fixture` writes both), and the go/ testdata copies of the
+# docs/rfcs vectors the Go tests read (piggy#189: go/ is its own nix source,
+# so they cannot be symlinks).
 #
 # run the impure eng-convention checks plus the go/ facade drift CHECK
 [group('pre-build')]
@@ -2594,11 +2610,20 @@ lint-worktree:
     set -euo pipefail
     cfg=$(nix build --no-link --print-out-paths '.#conformist-impure-config')
     conformist check --config-file "$cfg" --tree-root .
-    fixture=0002-markl-id-format-vectors.json
-    cmp -s "go/internal/charlie/markl_registrations/testdata/$fixture" "crates/piggy-markl/testdata/$fixture" || {
-      echo "the markl fixture's Go and Rust copies differ; run: just codemod-rfc0002-fixture" >&2
-      exit 1
-    }
+    markl=go/internal/charlie/markl_registrations/testdata
+    drift=0
+    while read -r copy source fix; do
+      cmp -s "$copy" "$source" || {
+        echo "$copy differs from $source; $fix" >&2
+        drift=1
+      }
+    done <<EOF
+    $markl/0002-markl-id-format-vectors.json crates/piggy-markl/testdata/0002-markl-id-format-vectors.json run: just codemod-rfc0002-fixture
+    $markl/0011-identifier-vectors.txt docs/rfcs/0011-identifier-vectors.txt copy the docs/rfcs file over the copy
+    $markl/0011-markl-id-format.md docs/rfcs/0011-markl-id-format.md copy the docs/rfcs file over the copy
+    go/internal/delta/pigpen/testdata/0008-pigpen-vectors.txt docs/rfcs/0008-pigpen-vectors.txt run: just codemod-pigpen-vectors
+    EOF
+    exit "$drift"
 
 # The justfile convention linters (recipe verbs, orphaned doc summaries)
 # delivered as conformist's profile-pulled artifacts rather than a Nix

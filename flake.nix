@@ -657,74 +657,71 @@
             coverage = true;
           };
 
-          # The two Go test binaries piggy's bats lanes need, now built from the
-          # unified go/ module (code.linenisgreat.com/piggy/go) via
-          # buildGoApplication self-consuming the go-pkgs-test producer output
-          # (rich-acacia's canonical self-consume, RFC 0001 § Self-consumption): a
-          # source-filter regression OR a stale go/gomod2nix.toml fails the build
-          # HERE, in piggy's gate, rather than in a downstream consumer's. Building
-          # from the unified module is why the #183/#188 "no buildGoModule for the
-          # LIBRARY" ruling still holds — the library is gated by the dagnabit
-          # facade check; these are BINARIES, always built, now from one module.
-          # goFlakeInputs bridges dewey so it resolves hermetically.
-          piggy-agent-conformance = pkgs.buildGoApplication {
+          # The two Go test binaries piggy's bats lanes need, built from the
+          # unified go/ module (code.linenisgreat.com/piggy/go) self-consuming the
+          # go-pkgs-test producer output (rich-acacia's canonical self-consume,
+          # RFC 0001 § Self-consumption): a source-filter regression OR a stale
+          # go/gomod2nix.toml fails the build HERE, in piggy's gate, rather than in
+          # a downstream consumer's. buildGoAuto picks godyn (godyn(7), piggy#340)
+          # on every system igloo supports, buildGoApplication elsewhere (bgaArgs).
+          # The whole-module type-check floor these once carried as a `go vet -tags
+          # test ./...` checkPhase is now checks.go-vet + checks.go-tests (the
+          # piggy-go-tests instance below). Each binary is named after its cmd/ dir
+          # (= pname). goFlakeInputs bridges dewey so it resolves hermetically.
+          mkGoTestBinary =
+            { pname, description }:
+            (pkgs.buildGoAuto {
+              inherit pname;
+              version = piggyVersion;
+
+              src = go-pkgs-test;
+              modules = ./go/gomod2nix.toml;
+              inherit goFlakeInputs;
+
+              subPackages = [ "cmd/${pname}" ];
+              bgaArgs = {
+                pwd = go-pkgs-test;
+                go = pkgs-master.go_1_26;
+                GOTOOLCHAIN = "local";
+              };
+            }).overrideAttrs
+              (_: {
+                meta = with pkgs.lib; {
+                  inherit description;
+                  homepage = "https://code.linenisgreat.com/piggy";
+                  license = licenses.mpl20;
+                  platforms = platforms.linux ++ platforms.darwin;
+                };
+              });
+
+          piggy-agent-conformance = mkGoTestBinary {
             pname = "piggy-agent-conformance";
-            version = piggyVersion;
-
-            src = go-pkgs-test;
-            pwd = go-pkgs-test;
-            modules = ./go/gomod2nix.toml;
-            inherit goFlakeInputs;
-
-            subPackages = [ "cmd/piggy-agent-conformance" ];
-            go = pkgs-master.go_1_26;
-            GOTOOLCHAIN = "local";
-
-            # buildGoApplication's stock goCheckHook tests only subPackages (cmd/,
-            # no _test.go), so the whole-module registry packages would never be
-            # exercised from the filtered tree. Override checkPhase with the blessed
-            # self-consume floor: `go vet -tags test ./...` type-checks EVERY
-            # package (incl. _test.go under the test tag) against go-pkgs-test, so a
-            # dropped source file fails here. vet (not test): no network / no card
-            # in the nix sandbox.
-            checkPhase = ''
-              runHook preCheck
-              go vet -tags test ./...
-              runHook postCheck
-            '';
-
-            meta = with pkgs.lib; {
-              description = "Go-based SSH agent conformance tests for piggy";
-              homepage = "https://code.linenisgreat.com/piggy";
-              license = licenses.mpl20;
-              platforms = platforms.linux ++ platforms.darwin;
-            };
+            description = "Go-based SSH agent conformance tests for piggy";
           };
 
           # Go test-only SSH server for the hardware-free SSH-over-fibby bats lane
-          # (piggy#135 Phase A). Same unified-module buildGoApplication shape as
-          # piggy-agent-conformance; build-only (its cmd/ import graph is the
-          # validation — the whole-module vet self-consume rides on the primary
-          # binary above). Named after its cmd/ dir, so no postInstall rename.
-          piggy-test-sshd = pkgs.buildGoApplication {
+          # (piggy#135 Phase A).
+          piggy-test-sshd = mkGoTestBinary {
             pname = "piggy-test-sshd";
+            description = "Go-based test-only SSH server for piggy's SSH-over-fibby bats lane";
+          };
+
+          # go/'s test suite, hermetically and per package (piggy#189, #340):
+          # godyn(7) TESTS over the go-pkgs-test producer output, with the
+          # graphs derived at evaluation time (no committed graph). A second
+          # instance carrying the `test` tag, as `go test -tags test` does
+          # (dewey's test_ui harness and the //go:build test helpers);
+          # passthru.checkAll realises every package's run.
+          piggy-go-tests = pkgs.buildGodynModule {
+            pname = "piggy-go-tests";
             version = piggyVersion;
 
             src = go-pkgs-test;
-            pwd = go-pkgs-test;
             modules = ./go/gomod2nix.toml;
             inherit goFlakeInputs;
 
-            subPackages = [ "cmd/piggy-test-sshd" ];
-            go = pkgs-master.go_1_26;
-            GOTOOLCHAIN = "local";
-
-            meta = with pkgs.lib; {
-              description = "Go-based test-only SSH server for piggy's SSH-over-fibby bats lane";
-              homepage = "https://code.linenisgreat.com/piggy";
-              license = licenses.mpl20;
-              platforms = platforms.linux ++ platforms.darwin;
-            };
+            tags = [ "test" ];
+            tests = true;
           };
 
           # Sandboxed bats lane. See ./bats.nix for the lane builder and
@@ -968,6 +965,13 @@
 
           checks = {
             bats-default = batsLib.batsLaneOutputs.bats-default;
+            # Every go/ package's tests, in the sandbox (piggy#189). Driven
+            # from `just test-go`.
+            go-tests = piggy-go-tests.passthru.checkAll;
+            # Every go/ package vetted per package, test tag on (godyn(7) VET):
+            # with go-tests, the whole-module floor the old `go vet -tags test
+            # ./...` checkPhase was. Driven from `just test-go`.
+            go-vet = piggy-go-tests.passthru.vetAll;
             # Read-only CI gate: builds in /nix/store off a source
             # snapshot, runs the conformist formatters + the eng preset's
             # file-based linters, and fails if any file would change. Driven
