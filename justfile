@@ -337,7 +337,7 @@ test: validate-grammar test-grammar-vectors test-bats-default test-bats-conforma
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-interop-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
+_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -589,60 +589,6 @@ debug-box-agentless-fibby-nosandbox: build-rust
     {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap \
     zz-tests_bats/conformance/piggy_box_decrypt_agentless.bats
-
-# Box decrypt interop against FIBBY — the fibby companion to
-# test-bats-conformance-interop, part of the fib→fibby retirement
-# (docs/plans/2026-06-15-retire-fib-for-fibby.md, Phase 1 spike):
-# piggy_box_decrypt_interop.bats runs Rust `piggy-ids encrypt` → C `pivy-box
-# stream decrypt` against fibby's 9D ECDH (VERIFY PIN + GENERAL AUTHENTICATE).
-# Pure-Rust card-under-test, no Java/jcardsim/hardware. The template interop
-# is test-bats-conformance-box-interop-fibby.
-#
-# run the fibby-backed pivy-box decrypt interop bats gate
-[group('post-build')]
-[linux]
-test-bats-conformance-interop-fibby: build-rust
-  #!/usr/bin/env bash
-  set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  export PATH="$pivy_out/bin:$PATH"
-  pivy_tool="$pivy_out/bin/pivy-tool"
-  real_pivy_box="$pivy_out/bin/pivy-box"
-  fibby_bin="$PWD/target/debug/fibby"
-  piggy_bin="$PWD/target/debug/piggy"
-  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
-
-  workdir=$(mktemp -d /tmp/pbox-interop-fibby-XXXXXX)
-  fibby_sock="$workdir/pcscd.comm"
-  fibby_log="$workdir/fibby.log"
-  fibby_pid=""
-  cleanup() { [[ -n "$fibby_pid" ]] && kill "$fibby_pid" 2>/dev/null || true; rm -rf "$workdir"; }
-  trap cleanup EXIT
-
-  echo "=== Starting fibby (virtual, --seed-rfc5903-slot-9d-cert) ==="
-  FIBBY_LOG=wire "$fibby_bin" --socket "$fibby_sock" --backend virtual \
-    --seed-rfc5903-slot-9d-cert >"$fibby_log" 2>&1 &
-  fibby_pid=$!
-  for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
-  [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
-
-  echo "=== discover fibby GUID via pivy-tool list ==="
-  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
-  [[ -n $guid ]] || { echo "no GUID from fibby"; cat "$fibby_log"; exit 1; }
-  echo "  guid: $guid"
-
-  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-  INTEROP_GUID="$guid" \
-    REAL_PIVY_BOX="$real_pivy_box" \
-    PIGGY="$piggy_bin" \
-    PCSCLITE_CSOCK_NAME="$fibby_sock" \
-    SSH_ASKPASS="$askpass" \
-    SSH_ASKPASS_REQUIRE=force \
-    DISPLAY="" \
-    PIGGY_TEST_FIB_PIN=123456 \
-    {{ fence-tmpdir-linux }} \
-    BATS_TEST_TIMEOUT=30 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
-    zz-tests_bats/conformance/piggy_box_decrypt_interop.bats
 
 # Template-format interop between `piggy box tpl create/show` and C pivy-box
 # against FIBBY: the template piggy writes is one C read, and piggy reads
@@ -1108,11 +1054,10 @@ test-bats-conformance-piggy-ssh-via-fibby:
       BATS_TEST_TIMEOUT=90 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_ssh_via_fibby.bats
 
-# piggy#58: prompt-on-demand PIN entry parity. Drives a slot-9D decrypt
-# at the agent (via PIGGY_AUTH_SOCK) WITHOUT pushing a PIN first, so the
-# agent must fork SSH_ASKPASS on demand. Baselines the C pivy-agent; the
-# Rust `piggy agent` is held to the same scenario once re-pointed. Uses
-# the wrapped piggy (.#default, real pivy-box) over fibby — no hardware,
+# piggy#58: prompt-on-demand PIN entry. Drives a slot-9D decrypt at the
+# Rust `piggy agent` (via PIGGY_AUTH_SOCK) WITHOUT pushing a PIN first, so
+# the agent must fork SSH_ASKPASS on demand. No C binary (piggy#285). Uses
+# the wrapped piggy (.#default) over fibby — no hardware,
 # no SSH forwarding (unlike piggy-ssh-via-fibby). Agent dev-loop: this is
 # the CI gate for the #58 prompt-on-demand work. [linux]-only like the
 # other fibby lanes (fibby's PCSCLITE_CSOCK_NAME redirect is ignored by
@@ -1124,11 +1069,9 @@ test-bats-conformance-piggy-ssh-via-fibby:
 test-bats-conformance-agent-pin-on-demand:
     #!/usr/bin/env bash
     set -euo pipefail
-    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
-    PIVY_AGENT="$pivy_out/bin/pivy-agent" \
-      FIBBY_BIN="$fibby_out/bin/fibby" \
+    FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_agent_pin_on_demand.bats

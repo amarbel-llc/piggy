@@ -1,13 +1,12 @@
 #! /usr/bin/env bats
 #
-# piggy#58 — prompt-on-demand PIN entry parity between the C `pivy-agent`
-# and the Rust `piggy agent`.
+# piggy#58 — prompt-on-demand PIN entry in the Rust `piggy agent`.
 #
 # The agent must prompt for the PIV PIN ON DEMAND via SSH_ASKPASS when a
-# decrypt needs a PIN and none has been pushed via `ssh-add -X`. The C
-# pivy-agent does this ("get PIN at first use"); the Rust agent grows the
-# same behavior in piggy#58. This file pins the behavior against the C
-# agent first (the baseline) so the Rust impl can be held to it.
+# decrypt needs a PIN and none has been pushed via `ssh-add -X`, as the C
+# pivy-agent did ("get PIN at first use"; piggy#58). The C agent once ran
+# here as a baseline, but nothing compared its output with piggy's, so it
+# went with piggy#285.
 #
 # The scenario is the slot-9D ECDH decrypt path, hardware-free over fibby:
 # seed fibby's 9D slot, start the agent WITHOUT pre-seeding a PIN, then run
@@ -19,7 +18,6 @@
 #
 # Required env (supplied by the
 # `test-bats-conformance-agent-pin-on-demand` recipe):
-#   PIVY_AGENT=/path/to/pivy-agent  (nix build .#pivy)
 #   FIBBY_BIN=/path/to/fibby        (nix build .#fibby)
 #   PIGGY_BIN=/path/to/piggy        (nix build .#default — real pivy-box)
 #
@@ -31,11 +29,8 @@ setup() {
   load "$(dirname "$BATS_TEST_FILE")/../lib/fibby.bash"
   export output
 
-  if [[ -z ${PIVY_AGENT:-} ]] || [[ ! -x ${PIVY_AGENT:-/nonexistent} ]]; then
-    skip "PIVY_AGENT unset or not executable; run via just test-bats-conformance-agent-pin-on-demand"
-  fi
   if [[ -z ${FIBBY_BIN:-} ]] || [[ ! -x ${FIBBY_BIN:-/nonexistent} ]]; then
-    skip "FIBBY_BIN unset or not executable"
+    skip "FIBBY_BIN unset or not executable; run via just test-bats-conformance-agent-pin-on-demand"
   fi
   if [[ -z ${PIGGY_BIN:-} ]] || [[ ! -x ${PIGGY_BIN:-/nonexistent} ]]; then
     skip "PIGGY_BIN unset or not executable"
@@ -74,9 +69,8 @@ teardown() {
   teardown_test_home 2>/dev/null || true
 }
 
-# Spawn an agent (C pivy-agent or Rust `piggy agent`) pointed at fibby,
-# binding the private AGENT_SOCK. $@ is the agent command + flags, sans
-# `-a <socket>` (appended here). Both agents honor -A (all cards) and -a.
+# Spawn the agent pointed at fibby, binding the private AGENT_SOCK. $@ is
+# the agent command + flags, sans `-a <socket>` (appended here).
 _spawn_agent_cmd() {
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$@" -a "$AGENT_SOCK" >"$AGENT_LOG" 2>&1 &
   AGENT_PID=$!
@@ -174,18 +168,10 @@ _pin_on_demand_scenario() {
   }
 }
 
-# Baseline: the C pivy-agent prompts for the PIN on demand via SSH_ASKPASS
-# and completes the slot-9D decrypt. This is the behavior the Rust agent
-# must match (piggy#58).
-function c_pivy_agent_prompts_for_pin_on_demand_via_askpass { # @test
-  _pin_on_demand_scenario "$PIVY_AGENT" -A -D
-}
-
-# Parity: the Rust `piggy agent` (now on the dispatch path, piggy#58) must
-# match the C baseline — prompt for the PIN on demand and complete the
-# slot-9D decrypt — AND additionally propagate request context to the
-# askpass child via PIGGY_ASKPASS_CONTEXT (#33/#35), plus spawn the
-# per-card presence reconcile loop (piggy#244).
+# The Rust `piggy agent` (piggy#58) prompts for the PIN on demand and
+# completes the slot-9D decrypt, as the C pivy-agent did, AND propagates
+# request context to the askpass child via PIGGY_ASKPASS_CONTEXT (#33/#35),
+# plus spawns the per-card presence reconcile loop (piggy#244).
 function rust_piggy_agent_prompts_on_demand_and_propagates_context { # @test
   _pin_on_demand_scenario "$PIGGY_BIN" agent -A
 
