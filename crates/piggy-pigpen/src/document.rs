@@ -10,8 +10,9 @@ const TYPE_TAG: &str = "pigpen-v1";
 const POINTER_TYPE_TAG: &str = "pigpen-pointer-v1";
 
 /// Card-bound ECDH for a P-256 recipient (RFC 0008 §4.3, §7). A wasm host
-/// wires this to piggy-agent's `ecdh@joyent.com`; the slot-9D scalar
-/// never leaves the card.
+/// wires this to piggy-agent's card ECDH extension ([`crate::ecdh_ext`]);
+/// natively the `agent` feature's `AgentEcdhOracle` does. The slot-9D
+/// scalar never leaves the card.
 pub trait EcdhOracle {
     /// X-coordinate of (self_private · partner_epk), 32 bytes.
     fn ecdh(&self, self_recipient: &Id, partner_epk: &[u8]) -> Result<[u8; 32]>;

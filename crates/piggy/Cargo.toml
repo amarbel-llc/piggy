@@ -29,7 +29,9 @@ piggy-ids = { path = "../piggy-ids" }
 # Direct dep so `pigpen_pointer::resolve_piggy_ids_path` can sniff a
 # `piggy-ids` path for a pigpen recipient-set/pointer face (RFC 0009 §3.2)
 # and convert a recipient-set document to RFC 0003 text. See piggy#216.
-piggy-pigpen = { path = "../piggy-pigpen" }
+# Also the home of the ECDH extension names (`ecdh_ext`); the `agent`
+# feature brings the pure-Rust oracle the integration test exercises.
+piggy-pigpen = { path = "../piggy-pigpen", features = ["agent"] }
 # Direct dep so `show_batch::classify_piv_error` can match against
 # `pcsc::Error::NoSmartcard | ReaderUnavailable | RemovedCard` for the
 # RFC 0005 `card-absent` mapping. Transitive via `piggy-piv` already;

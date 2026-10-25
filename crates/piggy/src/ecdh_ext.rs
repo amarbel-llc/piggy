@@ -1,24 +1,11 @@
 //! Names of the agent's card ECDH extension (piggy#335).
 //!
-//! The extension was inherited from C pivy-agent as `ecdh@joyent.com`.
-//! piggy now owns the protocol, so the canonical name is
-//! `ecdh@code.linenisgreat.com`; the legacy name stays an alias for as
-//! long as anything might speak it (indefinitely, per piggy#335). The wire
-//! encoding is identical under both names. Literals are assembled by
-//! concatenation so editing tools cannot mangle the email-like strings.
+//! The names themselves (`CANONICAL`, `LEGACY`, `NAMES`, `is_ecdh`) are
+//! defined once in [`piggy_pigpen::ecdh_ext`], which the pure-Rust pigpen
+//! agent oracle also uses, and re-exported here; this module adds only
+//! the agent's telemetry label.
 
-/// The name piggy clients send first and the agent prefers.
-pub const CANONICAL: &str = concat!("ecdh@", "code.linenisgreat.com");
-
-/// The name C pivy-agent and every piggy before #335 speak.
-pub const LEGACY: &str = concat!("ecdh@", "joyent.com");
-
-/// Both names, canonical first: the order a client tries them in.
-pub const NAMES: [&str; 2] = [CANONICAL, LEGACY];
-
-pub fn is_ecdh(name: &str) -> bool {
-    NAMES.contains(&name)
-}
+pub use piggy_pigpen::ecdh_ext::{CANONICAL, LEGACY, NAMES, is_ecdh};
 
 /// The telemetry label for an extension request. The `piggy.agent.*`
 /// category is pinned byte-identical to the C agent's mirror

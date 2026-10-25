@@ -15,12 +15,21 @@
 //! `wasm32-unknown-unknown`. See `docs/plans/2026-06-24-pigpen-wasm.md`.
 //!
 //! Card-bound P-256 decryption is abstracted behind [`EcdhOracle`] so a
-//! wasm host supplies the scalar multiplication (piggy-agent's
-//! `ecdh@joyent.com`) without the module linking any card transport.
+//! wasm host supplies the scalar multiplication (piggy-agent's card ECDH
+//! extension, [`ecdh_ext`]) without the module linking any card transport.
+//!
+//! A native host can use [`agent::AgentEcdhOracle`] (Cargo feature
+//! `agent`), a std-only oracle that speaks to piggy-agent over its Unix
+//! socket. It is the one piece of this crate that does I/O, so it is off
+//! by default and the default build stays wasm-clean.
 
 mod crypto;
 mod document;
 mod hyphence;
+
+#[cfg(feature = "agent")]
+pub mod agent;
+pub mod ecdh_ext;
 
 pub use document::{
     Document, EcdhOracle, Pointer, Recipient, SealInputs, X25519Identity, recipient_id,

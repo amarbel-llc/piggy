@@ -130,10 +130,11 @@ test-go:
 build-pigpen:
     cd crates/piggy-pigpen && cargo build
 
-# test the standalone piggy-pigpen crate, which the workspace excludes
+# test the standalone piggy-pigpen crate, which the workspace excludes, with
+# every feature on (so the `agent` oracle's stub-agent tests run in the gate)
 [group('post-build')]
 test-pigpen:
-    cd crates/piggy-pigpen && cargo test
+    cd crates/piggy-pigpen && cargo test --all-features
 
 # Regenerate the go/ module's pkgs/ facades in place — the apply-mode inverse of
 # `just lint-worktree`'s facade CHECK, and the codemod sibling of

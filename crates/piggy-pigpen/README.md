@@ -40,8 +40,12 @@ cargo build --manifest-path crates/piggy-pigpen/Cargo.toml --target wasm32-unkno
 | `src/hyphence.rs` | minimal hyphence framing (RFC 0001 subset) |
 | `src/crypto.rs` | pigpen-v1 crypto suite (wraps, STREAM payload, header MAC) |
 | `src/document.rs` | document model, hyphence codec, `seal`/`open`, `EcdhOracle` |
+| `src/ecdh_ext.rs` | the agent card-ECDH extension names (canonical + legacy alias, piggy#335) |
+| `src/agent.rs` | feature `agent` (off by default): `AgentEcdhOracle`, a std-only oracle over piggy-agent's Unix socket — the crate's only I/O |
 
 Card-bound P-256 decryption is abstracted behind the `EcdhOracle` trait,
 so a wasm host supplies the scalar multiplication (piggy-agent's
-`ecdh@joyent.com`) without the module linking any card transport. The
-sibling Go implementation lives at `go/internal/delta/pigpen/`.
+`ecdh@code.linenisgreat.com`, legacy alias `ecdh@joyent.com`) without the
+module linking any card transport; natively, the `agent` feature's
+`AgentEcdhOracle` asks the agent over its Unix socket. The sibling Go
+implementation lives at `go/internal/delta/pigpen/`.

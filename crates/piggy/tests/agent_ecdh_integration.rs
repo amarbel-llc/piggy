@@ -13,8 +13,9 @@
 //! both. Plain `cargo test` / `just test-rust` will skip this file.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use piggy::agent_client::{AgentEcdhOracle, probe_extensions, unlock_agent_pin};
@@ -86,23 +87,27 @@ impl Drop for AgentGuard {
     }
 }
 
-#[test]
-fn ecdh_roundtrip_against_real_agent() {
-    // ---- Gating ----
+/// Both tests drive the one fibby card through their own agent; run them
+/// one at a time so neither sees the other's agent mid-transaction.
+static CARD: Mutex<()> = Mutex::new(());
+
+/// The gated environment: the `piggy` binary under test, or `None` (skip)
+/// when the fibby recipe did not set `PCSCLITE_CSOCK_NAME` / `PIGGY_BIN`.
+fn integration_piggy_bin() -> Option<PathBuf> {
     let pcscd_sock = match std::env::var("PCSCLITE_CSOCK_NAME") {
         Ok(v) if !v.is_empty() => v,
         _ => {
             eprintln!(
                 "PCSCLITE_CSOCK_NAME not set — skipping (run via `just test-rust-integration-fibby`)"
             );
-            return;
+            return None;
         }
     };
     let piggy_bin = match std::env::var("PIGGY_BIN") {
         Ok(v) if !v.is_empty() => PathBuf::from(v),
         _ => {
             eprintln!("PIGGY_BIN not set — skipping");
-            return;
+            return None;
         }
     };
     assert!(
@@ -112,12 +117,16 @@ fn ecdh_roundtrip_against_real_agent() {
     );
     eprintln!("using pcscd socket: {pcscd_sock}");
     eprintln!("using piggy bin:    {}", piggy_bin.display());
+    Some(piggy_bin)
+}
 
-    // ---- Spawn piggy-agent ----
+/// Spawn `piggy agent` on a fresh socket, wait for it, and unlock its PIN
+/// (fibby's 123456). The guard tears the agent down on drop.
+fn spawn_unlocked_agent(piggy_bin: &Path) -> (AgentGuard, PathBuf) {
     let tempdir = tempdir();
     let sock = tempdir.join("agent.sock");
 
-    let mut cmd = Command::new(&piggy_bin);
+    let mut cmd = Command::new(piggy_bin);
     cmd.arg("agent")
         .arg("-A") // all-cards
         .arg("-D") // foreground debug
@@ -130,16 +139,15 @@ fn ecdh_roundtrip_against_real_agent() {
         .unwrap_or_else(|e| panic!("spawn piggy-agent: {e}"));
     let mut guard = AgentGuard { child };
 
-    // ---- Wait for the socket ----
     wait_for_socket(&sock, Duration::from_secs(5), &mut guard);
-
-    // ---- Unlock the agent PIN ----
     unlock_agent_pin(&sock, "123456").expect("unlock");
+    (guard, sock)
+}
 
-    // ---- Read card's 9D pubkey ----
-    // Reach into the same pcscd that the agent child is using. The agent
-    // and this test contend for the reader, but pcscd serializes access
-    // via its transaction lock — both can probe the card successfully.
+/// The card's slot-9D public key, read over the same pcscd the agent uses.
+/// The agent and this test contend for the reader, but pcscd serializes
+/// access via its transaction lock — both can probe the card successfully.
+fn read_card_9d() -> PublicKey {
     let ctx = PivContext::new().expect("PivContext");
     let tokens = ctx.enumerate_tokens().expect("enumerate_tokens");
     let token = tokens
@@ -152,19 +160,34 @@ fn ecdh_roundtrip_against_real_agent() {
         PivAlgorithm::EcP256,
         "test assumes 9D was generated with eccp256 (just load-fib + pivy-tool -a eccp256 generate 9d)"
     );
+    slot_9d.public_key().clone()
+}
+
+/// The raw SEC1 bytes of a P-256 SSH public key.
+fn p256_sec1_bytes(key: &PublicKey) -> Vec<u8> {
+    match key.key_data() {
+        KeyData::Ecdsa(EcdsaPublicKey::NistP256(p)) => p.as_bytes().to_vec(),
+        other => panic!("expected NistP256, got {other:?}"),
+    }
+}
+
+#[test]
+fn ecdh_roundtrip_against_real_agent() {
+    let Some(piggy_bin) = integration_piggy_bin() else {
+        return;
+    };
+    let _card = CARD.lock().unwrap_or_else(|e| e.into_inner());
+    let (guard, sock) = spawn_unlocked_agent(&piggy_bin);
 
     // self_pubkey_ssh_blob: the SSH-wire encoding of the card's 9D pubkey.
     // That is: ssh_string("ecdsa-sha2-nistp256") | ssh_string("nistp256") |
     // ssh_string(SEC1 uncompressed point), which is exactly what
     // `ssh_key::PublicKey::to_bytes` produces for an Ecdsa KeyData.
-    let self_pubkey: PublicKey = slot_9d.public_key().clone();
+    let self_pubkey: PublicKey = read_card_9d();
     let self_blob = self_pubkey.to_bytes().expect("encode self pubkey");
 
     // Extract the raw SEC1 bytes for local p256 use.
-    let card_sec1_bytes = match self_pubkey.key_data() {
-        KeyData::Ecdsa(EcdsaPublicKey::NistP256(p)) => p.as_bytes().to_vec(),
-        other => panic!("expected NistP256, got {other:?}"),
-    };
+    let card_sec1_bytes = p256_sec1_bytes(&self_pubkey);
     let card_p256_pubkey =
         p256::PublicKey::from_sec1_bytes(&card_sec1_bytes).expect("p256 parse card pubkey");
 
@@ -236,6 +259,41 @@ fn ecdh_roundtrip_against_real_agent() {
     assert_eq!(again, expected_bytes);
 
     // `guard` drops here, tearing down the child agent.
+    drop(guard);
+}
+
+/// The pure-Rust pigpen oracle (no tokio, no OpenSSL) opens a document
+/// sealed to the card's 9D key through the real agent — the path madder's
+/// Rust CLI and pigsty take.
+#[test]
+fn pigpen_opens_through_the_pure_rust_oracle_against_real_agent() {
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use piggy_pigpen::Document;
+    use piggy_pigpen::agent::AgentEcdhOracle as PigpenAgentOracle;
+
+    let Some(piggy_bin) = integration_piggy_bin() else {
+        return;
+    };
+    let _card = CARD.lock().unwrap_or_else(|e| e.into_inner());
+    let (guard, sock) = spawn_unlocked_agent(&piggy_bin);
+
+    let card_sec1 = p256_sec1_bytes(&read_card_9d());
+    let compressed = p256::PublicKey::from_sec1_bytes(&card_sec1)
+        .expect("p256 parse card pubkey")
+        .to_encoded_point(true)
+        .as_bytes()
+        .to_vec();
+    assert_eq!(compressed.len(), 33);
+    let id = piggy_pigpen::recipient_id(piggy_markl::FormatId::PivyEcdhP256Pub, compressed)
+        .expect("recipient id");
+
+    let doc = Document::seal(b"pigsty hello", &[id]).expect("seal");
+    let oracle = PigpenAgentOracle::new(&sock);
+    let plaintext = doc
+        .open(Some(&oracle), &[])
+        .expect("open through the agent");
+    assert_eq!(plaintext, b"pigsty hello");
+
     drop(guard);
 }
 
