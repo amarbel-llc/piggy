@@ -83,7 +83,7 @@ _put_data_fields() {
       printf '%s\n' "$data"
       data=""
     fi
-  done < <(_command_apdus_with_ins db)
+  done < <(fibby_command_apdus db)
 }
 
 # The last 9D cert object (tag 5FC10B) written to the card.
@@ -142,25 +142,6 @@ function generate_9a_matches_c { # @test
     || fail "unexpected generate output: $output"
 }
 
-# Every command APDU with instruction byte INS (two lowercase hex digits) in
-# fibby's wire log, one per line as contiguous hex. The log hex-dumps each
-# command as `[fibby:apdu>] OFFSET  b0 b1 ... |ascii|`, 16 bytes a line, so
-# an APDU is the `0000` line plus the `apdu>` lines that follow it.
-_command_apdus_with_ins() {
-  awk -v ins="$1" '
-    $1 == "[fibby:apdu>]" {
-      if ($2 == "0000") {
-        if (grab) print ""
-        grab = ($4 == ins)
-      }
-      if (grab) for (i = 3; i <= NF && $i !~ /^\|/; i++) printf "%s", $i
-      next
-    }
-    grab { print ""; grab = 0 }
-    END { if (grab) print "" }
-  ' "$FIBBY_LOG"
-}
-
 # Diagnostic only: a command APDU (contiguous hex) reduced to `CLA INS P1 P2`
 # and its data field, whichever length encoding it used (short `Lc`, or
 # extended `00 LcHi LcLo`). Lets a failure message say whether two APDUs
@@ -201,14 +182,14 @@ function generate_9c_with_policy_matches_c { # @test
   c_out="$(pivy_oracle generate_9c -P 123456 -a eccp256 -i always -t always \
     -D email=piggy-test@example.invalid generate 9c 2>"$BATS_TEST_TMPDIR/c.err")" ||
     fail "C generate 9c failed: $(cat "$BATS_TEST_TMPDIR/c.err"; tail -40 "$FIBBY_LOG")"
-  c_apdu="$(pivy_oracle_note generate_9c.wire _command_apdus_with_ins 47)" ||
+  c_apdu="$(pivy_oracle_note generate_9c.wire fibby_command_apdus 47)" ||
     fail "no recorded C GENERATE"
 
   _fresh_card_for_9c_generate
   run bash -c "'$PIGGY' tool -P 123456 -a eccp256 -i always -t always generate 9c \
     2>'$BATS_TEST_TMPDIR/piggy.err'"
   local p_status="$status" p_out="$output" p_apdu
-  p_apdu="$(_command_apdus_with_ins 47)"
+  p_apdu="$(fibby_command_apdus 47)"
 
   # Exactly one GENERATE each, for slot 9C, carrying AA 01 03 (PIN always)
   # and AB 01 02 (touch always).

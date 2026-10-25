@@ -99,6 +99,25 @@ fibby_down() {
   return 0
 }
 
+# Every command APDU with instruction byte INS (two lowercase hex digits)
+# in fibby's wire log, one per line as contiguous hex. The log hex-dumps
+# each command as `[fibby:apdu>] OFFSET  b0 b1 ... |ascii|`, 16 bytes a
+# line, so an APDU is the `0000` line plus the `apdu>` lines that follow.
+fibby_command_apdus() {
+  awk -v ins="$1" '
+    $1 == "[fibby:apdu>]" {
+      if ($2 == "0000") {
+        if (grab) print ""
+        grab = ($4 == ins)
+      }
+      if (grab) for (i = 3; i <= NF && $i !~ /^\|/; i++) printf "%s", $i
+      next
+    }
+    grab { print ""; grab = 0 }
+    END { if (grab) print "" }
+  ' "$FIBBY_LOG"
+}
+
 # Spawn pivy-agent pointing at fibby's pcscd.comm socket. -A (all cards) so
 # we don't have to predict a GUID; -D for foreground; -a for the private
 # socket.

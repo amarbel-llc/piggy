@@ -791,36 +791,29 @@ _lane-pivy-oracle lane file mode: build-rust
 # piggy#291): the YubicoPIV RESET (INS 0xFB) that wipes the PIV applet. Each
 # test brings up its OWN fresh fibby (fibby_up in setup), some seeded with the
 # PIN+PUK already blocked (--seed-pin-puk-blocked) so the reset is permitted.
-# C's factory-reset is tty-only (RPP_REQUIRE_TTY) and can't run headless, so
-# this is a STATE differential (piggy resets, then both C and piggy read the
-# card blank) plus precondition + confirmation-gate checks. `expect` (on the
-# devShell PATH) drives the interactive /dev/tty `YES` prompt. --allow-local-
-# binding is for the per-test pcsc socket; the askpass net is set per piggy#35
-# though factory-reset needs no PIN (its precondition is a BLOCKED PIN).
+# Piggy sends the RESET command C sends (from fibby's wire log) and the card
+# reads blank, plus precondition + confirmation-gate checks. `expect` (on the
+# devShell PATH) drives the interactive /dev/tty `YES` prompt, C's tty-only
+# one included. --allow-local-binding is for the per-test pcsc socket; the
+# askpass net is set per piggy#35 though factory-reset needs no PIN (its
+# precondition is a BLOCKED PIN).
+#
+# C's RESET command is a frozen fixture under
+# zz-tests_bats/fixtures/pivy-oracle/tool-factory-reset-fibby/ (piggy#285),
+# so the lane needs no C binary.
 #
 # run the fibby-backed piggy tool factory-reset bats gate
 [group('post-build')]
 [linux]
-test-bats-conformance-tool-factory-reset-fibby: build-rust
-  #!/usr/bin/env bash
-  set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  pivy_tool="$pivy_out/bin/pivy-tool"
-  fibby_bin="$PWD/target/debug/fibby"
-  piggy_bin="$PWD/target/debug/piggy"
-  [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
-  [[ -x $pivy_tool ]] || { echo "missing $pivy_tool (nix build .#pivy)"; exit 1; }
-  askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
-  FIBBY_BIN="$fibby_bin" \
-    REAL_PIVY_TOOL="$pivy_tool" \
-    PIGGY="$piggy_bin" \
-    SSH_ASKPASS="$askpass" \
-    SSH_ASKPASS_REQUIRE=force \
-    DISPLAY="" \
-    PIGGY_TEST_FIB_PIN=123456 \
-    {{ fence-tmpdir-linux }} \
-    BATS_TEST_TIMEOUT=60 bats --allow-local-binding --tap \
-    zz-tests_bats/conformance/piggy_tool_factory_reset_fibby.bats
+test-bats-conformance-tool-factory-reset-fibby: (_lane-pivy-oracle "tool-factory-reset-fibby" "piggy_tool_factory_reset_fibby.bats" "replay")
+
+# Re-record the C pivy-tool RESET command the tool-factory-reset-fibby lane
+# replays (piggy#285), on a fresh card: the same lane with the live C binary.
+#
+# re-record the C pivy-tool oracle fixtures for the tool-factory-reset-fibby lane
+[group('codemod')]
+[linux]
+codemod-capture-pivy-oracle-tool-factory-reset-fibby: (_lane-pivy-oracle "tool-factory-reset-fibby" "piggy_tool_factory_reset_fibby.bats" "capture")
 
 # Differential `piggy tool set-admin` against C pivy-tool (piggy#289 Phase
 # 3, milestone 3.3a). Rotates the card's PIV management key, so each test
