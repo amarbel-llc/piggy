@@ -1427,6 +1427,7 @@ version = "0.1.0"
 dependencies = [
  "const-oid",
  "der",
+ "fibby",
  "hex",
  "openssl",
  "pcsc",

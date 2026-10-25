@@ -20,3 +20,8 @@ x509-cert = "0.2"
 der = "0.7"
 const-oid = "0.9"
 spki = "0.7"
+
+[dev-dependencies]
+# fibby's VirtualCard as an in-process ApduTransport (pigsty design §5):
+# the PIV session logic runs against the virtual card without pcscd.
+fibby = { path = "../fibby" }
