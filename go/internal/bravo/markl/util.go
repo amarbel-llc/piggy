@@ -15,7 +15,6 @@ import (
 	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/files"
 	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/interfaces"
 	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/pool"
-	"code.linenisgreat.com/purse-first/libs/dewey/pkgs/ui"
 )
 
 func SetHexStringFromAbsolutePath(
@@ -227,13 +226,11 @@ func IsNull(id domain_interfaces.MarklId) (ok bool) {
 		return true
 	}
 
+	// An id whose IsNull panics counts as null.
 	defer func() {
-		if r := recover(); r == nil {
-			return
+		if r := recover(); r != nil {
+			ok = true
 		}
-
-		ui.Debug().Printf("checking null for id resulted in panic: %q", id)
-		ok = true
 	}()
 
 	ok = id.IsNull()
