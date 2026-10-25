@@ -10,14 +10,13 @@
 # piggy-piv (PIN-free) and writes it as the store's recipient. The
 # `--seed-rfc5903-slot-9d-cert` seed also installs the canonical CHUID, so
 # fibby presents as an initialized card with a stable GUID — exactly what
-# `piggy-ids detect-pubkey` / `pivy-tool list` need. No agent or PIN is
+# `piggy-ids detect-pubkey` / `piggy tool -j list` need. No agent or PIN is
 # required for init, so unlike the sync/ls-recipients fibby lanes this test
 # brings up fibby only.
 #
 # Required env (supplied by the `test-bats-conformance-init-fibby` recipe):
 #   FIBBY_BIN=/path/to/fibby      (nix build .#fibby)
-#   PIGGY_BIN=/path/to/piggy      (nix build .#default — real pivy-box + piggy-ids)
-#   PIVY_TOOL=/path/to/pivy-tool  (nix build .#pivy — for GUID discovery)
+#   PIGGY_BIN=/path/to/piggy      (nix build .#default — piggy + piggy-ids)
 #
 # When invoked via the conformance glob without those env vars set, the
 # suite gracefully skips — same convention as the other fibby lanes.
@@ -101,16 +100,12 @@ function init_no_args_auto_detects_fibby_card { # @test
 
 # `piggy pass init -g <guid>` against the explicitly-named fibby GUID writes
 # the same recipient. The GUID comes from fibby's seeded CHUID, discovered
-# via `pivy-tool list` (mirrors the dance in the fib-backed init lane).
+# via `piggy tool -j list`.
 function init_with_explicit_guid_fibby { # @test
-  [[ -n ${PIVY_TOOL:-} ]] && [[ -x ${PIVY_TOOL:-/nonexistent} ]] || {
-    skip "PIVY_TOOL unset or not executable; cannot discover GUID"
-  }
-
   local guid
-  guid="$(PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIVY_TOOL" list 2>&1 |
-    grep -oiE '[0-9a-f]{32}' | head -1)"
-  [[ -n $guid ]] || skip "no GUID found from pivy-tool list against fibby"
+  guid="$(PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" tool -j list |
+    grep -oE '"guid":"[0-9A-Fa-f]{32}"' | head -1 | cut -d'"' -f4)"
+  [[ -n $guid ]] || fail "no GUID from piggy tool -j list against fibby"
 
   local store="$WORKDIR/store-g"
   mkdir -p "$store"

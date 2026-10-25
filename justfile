@@ -498,9 +498,6 @@ test-bats-conformance-protocol: build-rust
 test-bats-conformance-box-agentless-fibby: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  export PATH="$pivy_out/bin:$PATH"
-  pivy_tool="$pivy_out/bin/pivy-tool"
   fibby_bin="$PWD/target/debug/fibby"
   piggy_bin="$PWD/target/debug/piggy"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
@@ -519,8 +516,8 @@ test-bats-conformance-box-agentless-fibby: build-rust
   for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
   [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
 
-  echo "=== discover fibby GUID via pivy-tool list ==="
-  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+  echo "=== discover fibby GUID via piggy tool -j list ==="
+  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$piggy_bin" tool -j list | grep -oE '"guid":"[0-9A-Fa-f]{32}"' | head -1 | cut -d'"' -f4)
   [[ -n $guid ]] || { echo "no GUID from fibby"; cat "$fibby_log"; exit 1; }
   echo "  guid: $guid"
 
@@ -565,9 +562,6 @@ test-bats-conformance-box-agentless-fibby: build-rust
 debug-box-agentless-fibby-nosandbox: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  export PATH="$pivy_out/bin:$PATH"
-  pivy_tool="$pivy_out/bin/pivy-tool"
   fibby_bin="$PWD/target/debug/fibby"
   piggy_bin="$PWD/target/debug/piggy"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
@@ -586,8 +580,8 @@ debug-box-agentless-fibby-nosandbox: build-rust
   for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
   [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
 
-  echo "=== discover fibby GUID via pivy-tool list ==="
-  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+  echo "=== discover fibby GUID via piggy tool -j list ==="
+  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$piggy_bin" tool -j list | grep -oE '"guid":"[0-9A-Fa-f]{32}"' | head -1 | cut -d'"' -f4)
   [[ -n $guid ]] || { echo "no GUID from fibby"; cat "$fibby_log"; exit 1; }
   echo "  guid: $guid"
 
@@ -895,11 +889,9 @@ test-bats-conformance-recipients-add-attached-fibby: build-rust
 test-bats-conformance-init-fibby:
     #!/usr/bin/env bash
     set -euo pipefail
-    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
-    PIVY_TOOL="$pivy_out/bin/pivy-tool" \
-      FIBBY_BIN="$fibby_out/bin/fibby" \
+    FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_pass_init_fibby.bats
@@ -922,9 +914,8 @@ test-bats-conformance-init-fibby:
 test-bats-conformance-show-batch-fibby: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  pivy_tool="$pivy_out/bin/pivy-tool"
   fibby_bin="$PWD/target/debug/fibby"
+  piggy_bin="$PWD/target/debug/piggy"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
 
   workdir=$(mktemp -d /tmp/show-batch-fibby-XXXXXX)
@@ -941,8 +932,8 @@ test-bats-conformance-show-batch-fibby: build-rust
   for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
   [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
 
-  echo "=== discover fibby GUID via pivy-tool list ==="
-  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+  echo "=== discover fibby GUID via piggy tool -j list ==="
+  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$piggy_bin" tool -j list | grep -oE '"guid":"[0-9A-Fa-f]{32}"' | head -1 | cut -d'"' -f4)
   [[ -n $guid ]] || { echo "no GUID from fibby"; cat "$fibby_log"; exit 1; }
   echo "  guid: $guid"
 
@@ -974,9 +965,8 @@ test-bats-conformance-show-batch-fibby: build-rust
 test-bats-conformance-secrets-reconcile-fibby: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
-  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
-  pivy_tool="$pivy_out/bin/pivy-tool"
   fibby_bin="$PWD/target/debug/fibby"
+  piggy_bin="$PWD/target/debug/piggy"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
 
   workdir=$(mktemp -d /tmp/secrets-reconcile-fibby-XXXXXX)
@@ -993,7 +983,7 @@ test-bats-conformance-secrets-reconcile-fibby: build-rust
   for _ in $(seq 1 50); do [[ -S $fibby_sock ]] && break; sleep 0.1; done
   [[ -S $fibby_sock ]] || { echo "fibby socket never appeared"; cat "$fibby_log"; exit 1; }
 
-  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$pivy_tool" list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
+  guid=$(PCSCLITE_CSOCK_NAME="$fibby_sock" "$piggy_bin" tool -j list | grep -oE '"guid":"[0-9A-Fa-f]{32}"' | head -1 | cut -d'"' -f4)
   [[ -n $guid ]] || { echo "no GUID from fibby"; cat "$fibby_log"; exit 1; }
 
   unset SSH_AUTH_SOCK PIGGY_AUTH_SOCK
