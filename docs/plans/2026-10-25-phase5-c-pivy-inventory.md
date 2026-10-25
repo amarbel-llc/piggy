@@ -50,6 +50,28 @@ launcher is `lib/fibby.bash:126`:
 | test-bats-conformance-recipients-sync-fibby (1449) | piggy_recipients_sync_fibby.bats (47) |
 | test-bats-conformance-pass-ls-recipients-fibby (1472) | piggy_pass_ls_recipients_fibby.bats (35) |
 
+### Progress (2026-10-25)
+
+Substituted, nothing of the C stack deleted: the two dead builds
+(f1b8dc5), the five GUID lookups (3e69f3a), the four agent-fixture lanes
+(10d0584). Kept until Phase 5 by coordinator decision:
+test-bats-conformance-card-init-fibby's `pivy-tool set-admin` proof of the
+recovered management key. A piggy swap would have piggy confirm its own
+key (management-key territory). It **needs an independent check before
+deletion**; candidate: a frozen C-recorded authentication transcript
+replayed against piggy's key, decided with the operator.
+
+### Coverage removed
+
+For the Phase 5 soak record to weigh:
+
+- 10d0584: the four agent-fixture lanes no longer show, incidentally, that
+  piggy decrypts through the C pivy-agent (including the forwarded path of
+  ssh-via-fibby). They now exercise `piggy agent`.
+- 58dd3fb (#285): the live-C decrypt of a freshly encrypted ebox
+  (piggy_box_decrypt_interop.bats); the oracle-box corpus covers
+  capture-time eboxes, and the RFC 0002 vectors pin the encoder.
+
 ## (c) C-self tests — 4 recipes, delete with the C build
 
 | Recipe (line) | Aggregate | What it tests |
