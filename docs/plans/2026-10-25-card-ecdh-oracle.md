@@ -1,8 +1,8 @@
 # piggy#341: a card ECDH oracle for pigpen, over any PIV transport
 
-Status: design note (2026-10-25). The PIV-side core is being built
-fibby-backed; the crate boundary for the pigpen adapter is an open
-decision.
+Status: design note (2026-10-25). The PIV-side core landed in f25b910,
+fibby-backed. The adapter boundary is decided: option (c), the adapter
+lives in pigsty (coordinator, 2026-10-26).
 
 ## What pigsty needs
 
@@ -81,7 +81,6 @@ which crate depends on which.
 | (b) piggy-pigpen gains an optional `card` feature depending on piggy-piv (`default-features = false`) | piggy-pigpen stops being a leaf. piggy-piv and its dependencies enter pigpen's own lock. That stays pure Rust only once #337 removes OpenSSL. |
 | (c) The adapter lives in pigsty | No boundary change in piggy. pigsty writes ten lines of glue; the PIV crypto (point check, ECDH, PIN handling) stays in piggy-piv. |
 
-Recommendation (inference): (c) now, and (a) when pigpen is promoted into
-the workspace (RFC 0009 cutover). By then the adapter moves into piggy with
-no API change to `CardEcdh`. This is a decision for the operator or
-coordinator; the core above lands either way.
+Decided (coordinator, 2026-10-26): (c) now; revisit (a) when pigpen is
+promoted into the workspace (RFC 0009 cutover). At that point the adapter
+can move into piggy with no API change to `CardEcdh`.
