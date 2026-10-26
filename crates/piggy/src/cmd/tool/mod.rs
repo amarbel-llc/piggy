@@ -65,11 +65,12 @@
 //!   (`name`/`affiliation`/`expiry`/`serial`/`issuer`, optional
 //!   `organization`, `yubico`; matches C `cmd_pinfo`). The card models the
 //!   object PIN-free; a real card's PIN-gated read is a tracked follow-up.
-//! - `piggy tool -j list` — the JSON card listing (matches C `cmd_list`'s `-j`
-//!   branch byte-for-byte). Only the JSON mode is ported; bare `list` (human)
-//!   and `list -p` (parseable) stay usage errors → `piggy pivy tool list`. The
-//!   `-j`/`--json` flag must precede `list` (options-first, like piggy's other
-//!   `tool` ops).
+//! - `piggy tool [-j|-p] list` — the card listing in C `cmd_list`'s human,
+//!   `-p` parseable or `-j` JSON form, byte-for-byte for what piggy reads
+//!   (piggy#345). The mode flag must precede `list` (options-first, like
+//!   piggy's other `tool` ops).
+//! - `piggy tool version` — piggy's bare version on one line, the shape of C
+//!   `pivy-tool version` (which prints pivy's own version; piggy#348).
 //! - `piggy tool factory-reset` — wipe the PIV applet via YubicoPIV RESET
 //!   (INS 0xFB; the card requires the PIN and PUK both blocked first, else
 //!   SW 6985). Gated by a confirmation: a typed `YES` on the controlling tty,
@@ -84,8 +85,8 @@
 //!
 //! As of the 3.6 cutover (piggy#289, mirroring the `box` cutover in #165)
 //! `piggy tool` is Rust — NOT a superset that falls back to C. [`run`]
-//! returns the exit code directly; an unported op (`list` without `-j`,
-//! `version`, `init`) or an unmodeled option
+//! returns the exit code directly; an unported op (`init`) or an unmodeled
+//! option
 //! (whatever [`parse`] rejects — e.g. an RSA/Ed25519 `-a`, a pivy debug
 //! flag) is a usage error (exit 2), not a silent hop to `pivy-tool`. The
 //! full C `pivy-tool` surface stays reachable via `piggy pivy tool` while
@@ -123,8 +124,19 @@ struct Invocation {
     pin_policy: PinPolicy,
     /// `-t <policy>`: pivy-tool's touch policy for a key `generate` creates.
     touch_policy: TouchPolicy,
+    /// `list`'s output mode: human (default), `-p` parseable, or `-j` JSON.
+    list_mode: ListMode,
     op: String,
     positionals: Vec<String>,
+}
+
+/// `piggy tool list` output modes, as C `cmd_list` picks them: `-j` wins over
+/// `-p`, and neither is the human table.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ListMode {
+    Human,
+    Parseable,
+    Json,
 }
 
 /// Parse `piggy tool <args>` into an [`Invocation`], or `None` if the op is
@@ -137,6 +149,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
     let mut admin_key = None;
     let mut alg = None;
     let mut json = false;
+    let mut parseable = false;
     let mut force = false;
     let mut cn = None;
     let mut pin_policy = PinPolicy::Default;
@@ -170,6 +183,11 @@ fn parse(args: &[String]) -> Option<Invocation> {
             // ignore it (as C does), so accepting it here is never an error.
             "-j" | "--json" => {
                 json = true;
+                i += 1;
+            }
+            // pivy-tool's global parseable flag; like `-j`, only `list` reads it.
+            "-p" => {
+                parseable = true;
                 i += 1;
             }
             // piggy-native: skip the `factory-reset` confirmation. Only
@@ -225,15 +243,17 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "list"
             | "factory-reset"
             | "req-cert"
+            | "version"
     ) {
         return None;
     }
-    // Only the JSON list mode is ported: bare `list` (human) and `list -p`
-    // (parseable) stay a usage error pointing at `piggy pivy tool list`, so an
-    // unmodeled `-p` and a no-`-j` `list` both fall through here.
-    if op == "list" && !json {
-        return None;
-    }
+    let list_mode = if json {
+        ListMode::Json
+    } else if parseable {
+        ListMode::Parseable
+    } else {
+        ListMode::Human
+    };
     // Only `generate` applies a key policy. Accepting `-i`/`-t` elsewhere
     // (e.g. on `import`) would leave the operator believing a policy was set
     // on a key that got the card default.
@@ -270,7 +290,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
     // (C errors "too many arguments").
     if matches!(
         op.as_str(),
-        "update-keyhist" | "pinfo" | "list" | "factory-reset"
+        "update-keyhist" | "pinfo" | "list" | "factory-reset" | "version"
     ) && !positionals.is_empty()
     {
         return None;
@@ -306,6 +326,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
         cn,
         pin_policy,
         touch_policy,
+        list_mode,
         op,
         positionals,
     })
@@ -366,9 +387,22 @@ pub fn run(args: &[String]) -> i32 {
         "list" => cmd_list(&inv),
         "factory-reset" => cmd_factory_reset(&inv),
         "req-cert" => cmd_req_cert(&inv),
+        "version" => cmd_version(),
         // parse() only returns these ops.
         _ => unreachable!(),
     }
+}
+
+/// `piggy tool version`: piggy's bare version, the value `piggy version`'s
+/// self-line carries (wrapper-injected `PIGGY_VERSION`, else this crate's),
+/// in C `pivy-tool version`'s one-line shape (piggy#348).
+fn cmd_version() -> i32 {
+    let version = std::env::var("PIGGY_VERSION")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    println!("{version}");
+    0
 }
 
 /// Print the `piggy tool` usage banner and return exit code 2, for an
@@ -379,11 +413,12 @@ fn usage() -> i32 {
     eprintln!("piggy tool: unsupported operation or option");
     eprintln!(
         "supported: pubkey, cert, attest, sign, ecdh, change-pin, change-puk, \
-         reset-pin, set-admin, delete-cert, update-keyhist, write-cert, generate, import"
+         reset-pin, set-admin, delete-cert, update-keyhist, write-cert, generate, import, \
+         pinfo, list, factory-reset, req-cert, version"
     );
     eprintln!(
-        "for the rest of the pivy-tool surface (list, pinfo, version, init, \
-         req-cert, factory-reset, RSA/Ed25519, …) use: piggy pivy tool <args>"
+        "for the rest of the pivy-tool surface (init, RSA/Ed25519, …) \
+         use: piggy pivy tool <args>"
     );
     2
 }
@@ -1519,11 +1554,10 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// `piggy tool list -j`: emit one JSON object per PIV token, byte-for-byte like
-/// C `pivy-tool -j list` (`cmd_list`'s JSON branch). Read-only and PIN-free.
+/// `piggy tool [-j|-p] list`: describe every PIV token, byte-for-byte like C
+/// `pivy-tool list` in the same mode (`cmd_list`). Read-only and PIN-free.
 ///
-/// Only the JSON mode is ported; bare `list` (human) and `list -p` (parseable)
-/// stay usage errors → `piggy pivy tool list`. The token-capability fields
+/// The token-capability fields
 /// (`auth`, `vci_supported`, `algorithms`) use the no-Discovery-object defaults,
 /// which are what a YubiKey reports (its SELECT FCI is AID-only and it publishes
 /// no Discovery object); a non-YubiKey PIV card that publishes a Discovery
@@ -1564,11 +1598,13 @@ fn cmd_list(inv: &Invocation) -> i32 {
                 continue;
             }
         }
-        match list_json_for_token(token) {
-            Ok(line) => {
-                out.push_str(&line);
-                out.push('\n');
-            }
+        let rendered = match inv.list_mode {
+            ListMode::Json => list_json_for_token(token).map(|line| line + "\n"),
+            ListMode::Parseable => list_parseable_for_token(token),
+            ListMode::Human => list_human_for_token(token),
+        };
+        match rendered {
+            Ok(text) => out.push_str(&text),
             Err(e) => {
                 eprintln!("piggy tool {op}: {e}");
                 return 1;
@@ -1670,6 +1706,107 @@ fn list_json_for_token(token: &PivToken) -> Result<String, piggy_piv::PivError> 
     s.push('}');
 
     s.push('}');
+    Ok(s)
+}
+
+/// The standard-slot keys `list` reports, in C's `piv_slot_next` order; empty
+/// slots are absent.
+fn listed_slots(token: &PivToken) -> Vec<piggy_piv::slot::PivSlot> {
+    piggy_piv::slot::STANDARD_SLOTS
+        .iter()
+        .filter_map(|&id| token.read_slot(id).ok())
+        .collect()
+}
+
+/// Build one token's `-p list` line, matching C `cmd_list`'s parseable branch:
+/// `reader:guid:chuid:ykpiv:version:serial:algs` then one `:<ID>[;subject;type;bits]`
+/// field per slot id 9A..9E (9B included, so always bare).
+fn list_parseable_for_token(token: &PivToken) -> Result<String, piggy_piv::PivError> {
+    let version = token.read_ykpiv_version();
+    let [major, minor, patch] = version.unwrap_or([0, 0, 0]);
+    let serial = version
+        .and_then(|_| token.read_ykpiv_piv_serial())
+        .unwrap_or(0);
+    let mut s = format!(
+        "{}:{}:true:{}:{major}.{minor}.{patch}:{serial}:",
+        token.reader_name(),
+        token.guid().to_hex(),
+        version.is_some(),
+    );
+    // No algorithm list: the no-Discovery-object default (see cmd_list docs).
+    let slots = listed_slots(token);
+    for id in 0x9Au8..0x9F {
+        match slots.iter().find(|slot| slot.id() == id) {
+            None => s.push_str(&format!(":{id:02X}")),
+            Some(slot) => {
+                let (subject, _, _) = slot.cert_display_fields()?;
+                s.push_str(&format!(
+                    ":{id:02X};{subject};{};{}",
+                    slot.key_type(),
+                    slot.key_bits()
+                ));
+            }
+        }
+    }
+    s.push('\n');
+    Ok(s)
+}
+
+/// Build one token's human `list` block, matching C `cmd_list`'s default
+/// branch for what piggy reads: the fields piggy does not parse (cardcap, the
+/// SELECT FCI's applet label/uri, extended-length APDU support, a Discovery
+/// object's auth/VCI/algorithms) take the defaults the JSON mode uses.
+fn list_human_for_token(token: &PivToken) -> Result<String, piggy_piv::PivError> {
+    let guid_hex = token.guid().to_hex();
+    let chuid = token.chuid();
+    let mut s = String::new();
+    let mut field = |name: &str, value: &str| s.push_str(&format!("{name:>10}: {value}\n"));
+    field("card", &guid_hex[..guid_hex.len().min(8)]);
+    field("device", token.reader_name());
+    field("chuid", if chuid.signed { "ok, signed" } else { "ok" });
+    field("guid", &guid_hex);
+    if let Some(ch) = &chuid.cardholder {
+        field("owner", &hex_lower(ch));
+    }
+    if let Some(fascn) = &chuid.fascn {
+        field("fasc-n", &fascn.to_pivy_string());
+    }
+    if let Some(e) = chuid.expiry.as_deref() {
+        let b = e.as_bytes();
+        if b.len() == 8 && b[0].is_ascii_digit() {
+            field("expiry", &format!("{}-{}-{}", &e[..4], &e[4..6], &e[6..]));
+        }
+    }
+    if let Some(v) = token.read_ykpiv_version() {
+        field(
+            "yubico",
+            &format!(
+                "implements YubicoPIV extensions (v{}.{}.{})",
+                v[0], v[1], v[2]
+            ),
+        );
+        if let Some(serial) = token.read_ykpiv_piv_serial() {
+            field("serial", &serial.to_string());
+        }
+    }
+    field("auth", "PIN*");
+    s.push_str(&format!("{:>10}:\n", "slots"));
+    s.push_str(&format!(
+        "{:>10} {:<3}  {:<7}  {:<4}  {:<30}\n",
+        "", "ID", "TYPE", "BITS", "CERTIFICATE"
+    ));
+    for slot in listed_slots(token) {
+        let (subject, _, _) = slot.cert_display_fields()?;
+        s.push_str(&format!(
+            "{:>10} {:<3x}  {:<7}  {:<4}  {:<30}\n",
+            "",
+            slot.id(),
+            slot.key_type(),
+            slot.key_bits(),
+            subject
+        ));
+    }
+    s.push('\n');
     Ok(s)
 }
 
@@ -1811,7 +1948,9 @@ fn select_token(guid_prefix: Option<&str>) -> Result<PivToken, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{generated_key_openssh_line, is_admin_key_arg, is_supported_cert_slot, parse};
+    use super::{
+        ListMode, generated_key_openssh_line, is_admin_key_arg, is_supported_cert_slot, parse,
+    };
 
     /// The P-256 base point, uncompressed: a valid public key to render.
     const P256_G: &str = "046B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C2964FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5";
@@ -1861,9 +2000,15 @@ mod tests {
         assert!(parse(&argv(&["-K", "default", "-P", "123456", "import", "9a"])).is_some());
         assert!(parse(&argv(&["pinfo"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "pinfo"])).is_some());
-        // `list` is ported only in its JSON mode; `-j`/`--json` must precede it.
-        assert!(parse(&argv(&["-j", "list"])).is_some());
-        assert!(parse(&argv(&["--json", "list"])).is_some());
+        // `list` in all three modes; the mode flag precedes it, and `-j` wins
+        // over `-p` as in C.
+        let mode = |a: &[&str]| parse(&argv(a)).map(|inv| inv.list_mode);
+        assert_eq!(mode(&["list"]), Some(ListMode::Human));
+        assert_eq!(mode(&["-p", "list"]), Some(ListMode::Parseable));
+        assert_eq!(mode(&["-j", "list"]), Some(ListMode::Json));
+        assert_eq!(mode(&["--json", "list"]), Some(ListMode::Json));
+        assert_eq!(mode(&["-p", "-j", "list"]), Some(ListMode::Json));
+        assert!(parse(&argv(&["version"])).is_some());
         assert!(parse(&argv(&["-g", "ABCD", "-j", "list"])).is_some());
         // `factory-reset` is claimed with or without the confirmation bypass.
         assert!(parse(&argv(&["factory-reset"])).is_some());
@@ -1880,11 +2025,9 @@ mod tests {
         assert!(parse(&argv(&["-P", "123456", "sign", "9a"])).is_some());
         assert!(parse(&argv(&["-P", "123456", "-P", "654321", "change-pin"])).is_some());
         // Still-unported ops are rejected (run() maps None to a usage error).
-        // Bare `list` (human) and `list -p` (parseable) are NOT ported.
-        assert!(parse(&argv(&["list"])).is_none());
         assert!(parse(&argv(&["-j", "list", "9a"])).is_none()); // list takes no positionals
         assert!(parse(&argv(&["init"])).is_none());
-        assert!(parse(&argv(&["version"])).is_none());
+        assert!(parse(&argv(&["version", "x"])).is_none()); // version takes no positionals
         // set-admin key forms this port does not model → C.
         assert!(parse(&argv(&["set-admin", "random"])).is_none());
         assert!(parse(&argv(&["set-admin", "@keyfile"])).is_none());

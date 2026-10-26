@@ -4578,8 +4578,15 @@ debug-tool-list-capture:
     echo "=== C: pivy-tool list (human, for reference) ==="
     PCSCLITE_CSOCK_NAME="$fibby_sock" timeout 30 "$pivy_tool" list </dev/null
     echo
-    echo "=== piggy: piggy tool list -j (once ported; usage error until then) ==="
-    PCSCLITE_CSOCK_NAME="$fibby_sock" timeout 30 "$piggy_bin" tool list -j </dev/null || true
+    echo "=== C: pivy-tool -p list (parseable, piggy#345) ==="
+    PCSCLITE_CSOCK_NAME="$fibby_sock" timeout 30 "$pivy_tool" -p list </dev/null
+    echo
+    for args in "-j list" "list" "-p list"; do
+      echo "=== piggy: piggy tool $args ==="
+      # shellcheck disable=SC2086 # $args is the deliberately split option list
+      PCSCLITE_CSOCK_NAME="$fibby_sock" timeout 30 "$piggy_bin" tool $args </dev/null || true
+      echo
+    done
 
 # piggy#248 event-driven wake dev-loop: prove fibby's new WAIT_READER_STATE_CHANGE
 # (register + reader-state array + async 8-byte notify on `fibby ctl`) actually

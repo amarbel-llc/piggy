@@ -33,6 +33,19 @@ function version_lists_pcsclite_row_but_not_pivy { # @test
   refute_line --regexp '^pivy[[:space:]]'
 }
 
+# `piggy tool version` keeps C `pivy-tool version`'s shape, one bare version
+# line, but reports piggy's version, the one in `piggy version`'s self-line
+# (piggy#348).
+function tool_version_is_the_bare_piggy_version { # @test
+  run "$PIGGY" version
+  assert_success
+  local want="${lines[0]#piggy }"
+  want="${want%%+*}"
+  run "$PIGGY" tool version
+  assert_success
+  assert_output "$want"
+}
+
 function help_header_is_self_line_without_component_table { # @test
   run "$PIGGY" help
   assert_success

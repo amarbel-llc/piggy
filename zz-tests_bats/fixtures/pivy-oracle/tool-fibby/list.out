@@ -1,0 +1,14 @@
+      card: 191755CF
+    device: Virtual PCD piggy fibby 00 00
+     chuid: ok
+      guid: 191755CFF39EFE522C07A383275BBEB1
+    fasc-n: 0000-0000-000000-0-1/commercial:0000/employee:0000000000
+    expiry: 2036-05-28
+     xapdu: supports extended-length APDUs
+    yubico: implements YubicoPIV extensions (v4.3.5)
+      auth: PIN*
+     slots:
+           ID   TYPE     BITS  CERTIFICATE                   
+           9a   ECDSA    256   /CN=fibby-test-slot-9a        
+           9d   ECDSA    256   /CN=fibby-test-slot-9d        
+

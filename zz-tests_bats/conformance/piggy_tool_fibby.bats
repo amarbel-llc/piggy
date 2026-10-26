@@ -145,9 +145,9 @@ function pubkey_empty_slot_fails_like_c { # @test
 
 function unported_op_is_a_usage_error_not_a_c_fallthrough { # @test
   # As of the 3.6 cutover (piggy#289) `piggy tool` no longer falls back to C:
-  # an unported op like `list` is a usage error (exit 2) that points at the
+  # an unported op like `init` is a usage error (exit 2) that points at the
   # `piggy pivy tool` escape hatch, NOT a silent hop to `pivy-tool`.
-  run "$PIGGY" tool list
+  run "$PIGGY" tool init
   assert_failure 2
   assert_output --partial "piggy pivy tool"
   refute_output --partial "guid:"
@@ -178,17 +178,25 @@ piggy=[$output]"
   assert_output --partial '"slots":{"9a":{"name":"piv-auth"'
 }
 
-# Bare `list` (human) and `list -p` (parseable) are NOT ported: only the JSON
-# mode is. They must be usage errors (exit 2) pointing at `piggy pivy tool`,
-# never a silent hop to C.
-function list_non_json_is_a_usage_error { # @test
+# Bare `list` (human) and `-p list` (parseable) print what C pivy-tool
+# printed for the same fibby card (piggy#345).
+#
+# One deliberate difference: C prints `xapdu: supports extended-length APDUs`
+# from an extended-length SELECT probe piggy does not send, so the line is
+# stripped from C's frozen answer before comparing (piggy(1) TOOL).
+function list_human_matches_c { # @test
+  local rust c
+  rust="$("$PIGGY" tool list)" || fail "piggy tool list failed (status $?)"
+  c="$(pivy_oracle list list)" || fail "pivy-tool list failed (status $?)"
+  assert_equal "$rust" "$(grep -v '^ *xapdu: ' <<<"$c")"
   run "$PIGGY" tool list
-  assert_failure 2
-  assert_output --partial "piggy pivy tool"
-  refute_output --partial '"short_id"'
+  assert_output --partial "guid: 191755CFF39EFE522C07A383275BBEB1"
+}
+
+function list_parseable_matches_c { # @test
+  _assert_tool_matches -p list
   run "$PIGGY" tool -p list
-  assert_failure 2
-  assert_output --partial "piggy pivy tool"
+  assert_output --partial ":191755CFF39EFE522C07A383275BBEB1:"
 }
 
 function req_cert_valid_csr_carries_same_key_as_c { # @test
