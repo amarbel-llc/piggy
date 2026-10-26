@@ -62,10 +62,21 @@ fn start_server(path: &std::path::Path, cards: Vec<VirtualCard>) {
     thread::spawn(move || {
         let _ = server::serve(serve_path.to_str().unwrap(), backends, None);
     });
-    // Wait for the socket to appear.
+    wait_until_listening(path);
+}
+
+/// Block until `path` accepts a connection. The socket file exists from
+/// `bind()`, before `listen()`, so waiting on the file alone lets a client
+/// connect into that gap and get ECONNREFUSED under load (piggy#344). The
+/// probe connection is closed at once; the server reads EOF and drops it.
+fn wait_until_listening(path: &std::path::Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !path.exists() {
-        assert!(Instant::now() < deadline, "server socket never appeared");
+    while UnixStream::connect(path).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "server socket {} never accepted a connection",
+            path.display()
+        );
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -474,11 +485,8 @@ fn start_server_with_control(
             Some(control_path.to_str().unwrap()),
         );
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !(path.exists() && control.exists()) {
-        assert!(Instant::now() < deadline, "server sockets never appeared");
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_until_listening(path);
+    wait_until_listening(control);
 }
 
 /// Send one control command to fibby's control socket and return its reply.

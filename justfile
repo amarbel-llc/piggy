@@ -1520,6 +1520,26 @@ debug-stale-bats-procs KILL="0":
 test-rust *ARGS:
     cargo test {{ARGS}}
 
+# Flake hunt (piggy#344): build fibby's loopback test once, then run it RUNS
+# times and count the failures. Exits non-zero if any run failed.
+#
+# run fibby's loopback test RUNS times in a loop and count the failures
+[group('debug')]
+debug-fibby-loopback-loop runs="50":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    cargo test -q -p fibby --test loopback --no-run || exit 1
+    failed=0
+    for ((i = 1; i <= {{runs}}; i++)); do
+      if ! out=$(cargo test -q -p fibby --test loopback 2>&1); then
+        failed=$((failed + 1))
+        echo "run $i FAILED:"
+        grep -E 'panicked|FAILED|refused' <<<"$out" | head -n 5
+      fi
+    done
+    echo "{{runs}} runs, $failed failed"
+    ((failed == 0))
+
 # Smoke-test for the `services.piggy-agent` home-manager module (#52).
 # Evaluates the module against synthetic configs and verifies the option
 # schema, both platform code paths, and every assertion. Reports
