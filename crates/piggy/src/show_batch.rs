@@ -801,6 +801,9 @@ pub(crate) fn with_batch_unlock<R>(
     batch: impl FnOnce(Option<&mut BatchOracle<'_, '_>>, Option<&mut AgentEcdhOracle>) -> R,
 ) -> Result<BatchUnlocked<R>, String> {
     let route = parse_unlock_route(std::env::var_os("PIGGY_UNLOCK").as_deref())?;
+    let agent_socket = piggy::agent_client::piggy_auth_sock_override()
+        .or_else(|| std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty()))
+        .map(PathBuf::from);
     // Card-first: ANY failure to find a card (no PCSC, no matching card) is
     // not fatal while an agent is available. `ctx` is bound for the whole
     // function so the PCSC context outlives the session.
@@ -816,6 +819,35 @@ pub(crate) fn with_batch_unlock<R>(
                     .to_string()
             }),
         },
+    };
+    // piggy#351: under `auto` a matching local card yields to an agent that
+    // offers a different recipient key, so a host with a card of its own
+    // and no display unlocks through the forwarded card, whose agent asks
+    // for the PIN at the card's end. A `--frontend jsonrpc` batch keeps the
+    // card: its caller asked to supply the PIN itself.
+    let card = match (card, agent_socket.as_deref()) {
+        (Ok((token, (local_key, curve))), Some(sock))
+            if route == UnlockRoute::Auto && frontend_kind == FrontendKind::Tty =>
+        {
+            match piggy::agent_client::probe_ecdsa_points(sock, AGENT_PROBE_TIMEOUT) {
+                Ok(agent_keys)
+                    if agent_offers_other_recipient(&agent_keys, &local_key, targets) =>
+                {
+                    Err(format!(
+                        "the agent offers a recipient key the local card {} does not hold",
+                        token.guid().to_hex()
+                    ))
+                }
+                Ok(_) => Ok((token, (local_key, curve))),
+                Err(e) => {
+                    tracing::debug!(
+                        "{operation}: agent key list unavailable, keeping the card: {e}"
+                    );
+                    Ok((token, (local_key, curve)))
+                }
+            }
+        }
+        (card, _) => card,
     };
 
     match card {
@@ -865,9 +897,6 @@ pub(crate) fn with_batch_unlock<R>(
             "{card_err}; agent fallback disabled (PIGGY_UNLOCK=card)"
         )),
         Err(card_err) => {
-            let agent_socket = piggy::agent_client::piggy_auth_sock_override()
-                .or_else(|| std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty()))
-                .map(PathBuf::from);
             let agent = agent_socket.and_then(|sock| match AgentEcdhOracle::new(&sock) {
                 Ok(o) => Some(o),
                 Err(e) => {
@@ -1254,6 +1283,23 @@ fn candidate_matches_any(candidate: &[u8], targets: &[RecipientTarget]) -> bool 
         .iter()
         .any(|(pubkey, _)| pubkey.as_slice() == candidate)
 }
+
+/// True when the agent offers a recipient key other than `local_key`, the
+/// matching local card's: a card the agent reaches and this host does not,
+/// typically one forwarded from the operator's workstation (piggy#351).
+fn agent_offers_other_recipient(
+    agent_keys: &[Vec<u8>],
+    local_key: &[u8],
+    targets: &[RecipientTarget],
+) -> bool {
+    agent_keys
+        .iter()
+        .any(|key| key.as_slice() != local_key && candidate_matches_any(key, targets))
+}
+
+/// How long [`with_batch_unlock`] waits for the agent's key list before it
+/// keeps the local card. Listing never prompts.
+const AGENT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Per-ebox failure carrying both the diagnostic to emit and a
 /// "fatal for the whole batch" flag. PIN exhaustion or card removal
@@ -2182,6 +2228,38 @@ mod tests {
             classify_piv_error(&PivError::Other("weird APDU".into())),
             BatchFailure::Other(_)
         ));
+    }
+
+    /// piggy#351: the agent wins over a matching local card only when it
+    /// offers a recipient key that card does not hold (a forwarded card).
+    /// The workstation shape, an agent serving the same local card, keeps
+    /// the card, as does an agent offering no recipient key at all.
+    #[test]
+    fn agent_offers_other_recipient_only_for_a_different_recipient_key() {
+        use super::agent_offers_other_recipient;
+        use piggy_box::piv_box::EcCurve;
+
+        let local = vec![0x04, 1, 1];
+        let forwarded = vec![0x04, 2, 2];
+        let stranger = vec![0x04, 3, 3];
+        let targets = vec![
+            (local.clone(), EcCurve::NistP256),
+            (forwarded.clone(), EcCurve::NistP256),
+        ];
+
+        assert!(agent_offers_other_recipient(
+            &[local.clone(), forwarded.clone()],
+            &local,
+            &targets
+        ));
+        assert!(agent_offers_other_recipient(&[forwarded], &local, &targets));
+        assert!(!agent_offers_other_recipient(
+            &[local.clone()],
+            &local,
+            &targets
+        ));
+        assert!(!agent_offers_other_recipient(&[stranger], &local, &targets));
+        assert!(!agent_offers_other_recipient(&[], &local, &targets));
     }
 
     #[test]

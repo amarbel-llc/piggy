@@ -256,10 +256,10 @@ in
       default = "auto";
       description = ''
         Backend the reconcile unit unlocks with, exported as `PIGGY_UNLOCK`
-        (see piggy(1)): `auto` a matching local card, else the agent; `card`
-        the local card only; `agent` the agent only, so the PIN is asked for
-        where the agent's card is. Use `agent` on a host that has a card of
-        its own but has no display or tty to prompt for it.
+        (see piggy(1)): `auto` a matching local card, else the agent, and the
+        agent when it offers a recipient key the local card does not hold
+        (a forwarded card); `card` the local card only; `agent` the agent
+        only, so the PIN is asked for where the agent's card is.
       '';
     };
 

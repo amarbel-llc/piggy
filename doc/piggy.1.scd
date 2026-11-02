@@ -258,11 +258,14 @@ commands:
 
 	With no matching card attached, the batch goes to the agent
 	(_PIGGY_AUTH_SOCK_, else _SSH_AUTH_SOCK_), and the agent that holds the
-	card asks for the PIN on its own host. A matching local card always
-	wins over the agent, so on a host that has a card of its own and also
-	reaches a forwarded agent, the prompt is raised here, with this host's
-	askpass; set _PIGGY_UNLOCK_=_agent_ to send the batch to the agent
-	instead. *secrets reconcile* unlocks the same way.
+	card asks for the PIN on its own host. A matching local card is
+	preferred, unless the agent offers a recipient key that card does not
+	hold (a card forwarded from another host): then the batch goes to the
+	agent, so a host with a card of its own but no display unlocks through
+	the forwarded card, prompted at the card's end. The agent's key list is
+	read for this, which never prompts. *--frontend jsonrpc* always keeps
+	the local card, and _PIGGY_UNLOCK_ overrides the choice either way.
+	*secrets reconcile* unlocks the same way.
 
 *pass verify* [_subpath_]
 	Decrypt every ebox file under the store (or the specified
@@ -1072,7 +1075,9 @@ _PIGGY_AUTH_SOCK_
 _PIGGY_UNLOCK_
 	Which backend *pass show-batch* and *secrets reconcile* unlock their
 	batch with: _auto_ (the default, also when unset or empty) a matching
-	local card, else the agent; _card_ a matching local card only; _agent_
+	local card, else the agent, and the agent when it offers a recipient
+	key the local card does not hold (see *pass show-batch*); _card_ a
+	matching local card only; _agent_
 	the agent only, without enumerating local cards, so the PIN is asked
 	for by whichever agent holds the card, at the card's end when the agent
 	is forwarded. Any other value is an error.

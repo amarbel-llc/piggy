@@ -312,6 +312,41 @@ pub fn probe_identities(socket_path: &Path, timeout: Duration) -> Result<Vec<Str
     })
 }
 
+/// List the agent's ECDSA P-256/P-384 keys as SEC1-uncompressed points,
+/// the form ebox recipients are compared in. Same bounded, never-prompting
+/// shape as [`probe_identities`]; other key types are left out.
+pub fn probe_ecdsa_points(socket_path: &Path, timeout: Duration) -> Result<Vec<Vec<u8>>, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+
+    let socket_path = socket_path.to_path_buf();
+
+    runtime.block_on(async move {
+        tokio::time::timeout(timeout, async {
+            let stream = UnixStream::connect(&socket_path)
+                .await
+                .map_err(|e| format!("connect {}: {e}", socket_path.display()))?;
+            let mut client = Client::new(stream);
+            let ids = client
+                .request_identities()
+                .await
+                .map_err(|e| format!("request_identities: {e}"))?;
+            Ok(ids
+                .into_iter()
+                .filter_map(|i| match i.pubkey {
+                    KeyData::Ecdsa(EcdsaPublicKey::NistP256(p)) => Some(p.as_bytes().to_vec()),
+                    KeyData::Ecdsa(EcdsaPublicKey::NistP384(p)) => Some(p.as_bytes().to_vec()),
+                    _ => None,
+                })
+                .collect())
+        })
+        .await
+        .map_err(|_| format!("timeout after {timeout:?}"))?
+    })
+}
+
 /// Send the `query` extension and decode the supported-extension list.
 ///
 /// Same fresh-connection/timeout shell as [`probe_identities`]. A plain
