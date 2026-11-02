@@ -85,6 +85,7 @@ let
   # assertion on agentSocket below.
   unitEnvironment =
     lib.optional (cfg.agentSocket != null) "PIGGY_AUTH_SOCK=${cfg.agentSocket}"
+    ++ lib.optional (cfg.unlock != "auto") "PIGGY_UNLOCK=${cfg.unlock}"
     ++ lib.optionals (cfg.askpass != null) [
       "SSH_ASKPASS=${cfg.askpass}"
       "SSH_ASKPASS_REQUIRE=force"
@@ -243,6 +244,22 @@ in
         Absolute path of the agent socket exported to the reconcile unit as
         `PIGGY_AUTH_SOCK`, used when no local card serves the batch. `null`
         leaves the unit to the ambient `SSH_AUTH_SOCK`.
+      '';
+    };
+
+    unlock = mkOption {
+      type = types.enum [
+        "auto"
+        "card"
+        "agent"
+      ];
+      default = "auto";
+      description = ''
+        Backend the reconcile unit unlocks with, exported as `PIGGY_UNLOCK`
+        (see piggy(1)): `auto` a matching local card, else the agent; `card`
+        the local card only; `agent` the agent only, so the PIN is asked for
+        where the agent's card is. Use `agent` on a host that has a card of
+        its own but has no display or tty to prompt for it.
       '';
     };
 

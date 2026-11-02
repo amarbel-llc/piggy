@@ -256,6 +256,14 @@ commands:
 	(*not-found*, *pin-cancelled*, *pin-incorrect*, *card-locked*,
 	*card-absent*, *decrypt-failed*, *io-error*, *internal*).
 
+	With no matching card attached, the batch goes to the agent
+	(_PIGGY_AUTH_SOCK_, else _SSH_AUTH_SOCK_), and the agent that holds the
+	card asks for the PIN on its own host. A matching local card always
+	wins over the agent, so on a host that has a card of its own and also
+	reaches a forwarded agent, the prompt is raised here, with this host's
+	askpass; set _PIGGY_UNLOCK_=_agent_ to send the batch to the agent
+	instead. *secrets reconcile* unlocks the same way.
+
 *pass verify* [_subpath_]
 	Decrypt every ebox file under the store (or the specified
 	_subpath_ within it) and emit a tree-decorated ok/not-ok report
@@ -1060,6 +1068,14 @@ _PIGGY_AUTH_SOCK_
 	a piggy-agent that advertises the _ecdh@code.linenisgreat.com_ extension
 	(or its legacy alias _ecdh@joyent.com_) rather than through an upstream
 	agent that may not.
+
+_PIGGY_UNLOCK_
+	Which backend *pass show-batch* and *secrets reconcile* unlock their
+	batch with: _auto_ (the default, also when unset or empty) a matching
+	local card, else the agent; _card_ a matching local card only; _agent_
+	the agent only, without enumerating local cards, so the PIN is asked
+	for by whichever agent holds the card, at the card's end when the agent
+	is forwarded. Any other value is an error.
 
 _SECURE_TMPDIR_
 	If set, skip automatic secure temporary directory creation (ramdisk on

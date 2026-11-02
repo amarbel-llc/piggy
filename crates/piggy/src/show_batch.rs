@@ -752,13 +752,42 @@ pub(crate) struct BatchUnlocked<R> {
     pub(crate) session_end_error: Option<String>,
 }
 
+/// Which backend [`with_batch_unlock`] may open, from `PIGGY_UNLOCK`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnlockRoute {
+    /// A matching local card, else the agent (unset, empty or `auto`).
+    Auto,
+    /// A matching local card only; never the agent.
+    Card,
+    /// The agent only; local cards are not enumerated, so the PIN is asked
+    /// for by whichever agent holds the card (on a forwarded agent, at the
+    /// card's end).
+    Agent,
+}
+
+/// Parse `PIGGY_UNLOCK`; an unknown value is an error, never a silent
+/// `auto`.
+pub(crate) fn parse_unlock_route(value: Option<&std::ffi::OsStr>) -> Result<UnlockRoute, String> {
+    match value.map(|v| v.to_str()) {
+        None => Ok(UnlockRoute::Auto),
+        Some(Some("" | "auto")) => Ok(UnlockRoute::Auto),
+        Some(Some("card")) => Ok(UnlockRoute::Card),
+        Some(Some("agent")) => Ok(UnlockRoute::Agent),
+        Some(other) => Err(format!(
+            "PIGGY_UNLOCK={}: expected auto, card or agent",
+            other.unwrap_or("<non-UTF-8>")
+        )),
+    }
+}
+
 /// Open ONE unlock backend for a batch of eboxes and run `batch` against it:
 /// the first attached card whose 9D slot matches any of `targets` (holding a
 /// single PIN session, so the PIN is prompted at most once — the RFC 0005
 /// promise), else the forwarded agent (`PIGGY_AUTH_SOCK`, else
-/// `SSH_AUTH_SOCK`; the agent owns its own PIN cache). `batch` receives
-/// exactly one `Some`. `names` are the entries the PIN authorizes, shown in
-/// the prompt; `operation` names the command in it.
+/// `SSH_AUTH_SOCK`; the agent owns its own PIN cache). `PIGGY_UNLOCK`
+/// restricts that to the card or to the agent ([`UnlockRoute`]). `batch`
+/// receives exactly one `Some`. `names` are the entries the PIN authorizes,
+/// shown in the prompt; `operation` names the command in it.
 ///
 /// `Err` carries a single-line reason when no backend could be opened (no
 /// matching card and no agent, frontend setup, session begin); `batch` has
@@ -771,14 +800,16 @@ pub(crate) fn with_batch_unlock<R>(
     operation: &str,
     batch: impl FnOnce(Option<&mut BatchOracle<'_, '_>>, Option<&mut AgentEcdhOracle>) -> R,
 ) -> Result<BatchUnlocked<R>, String> {
+    let route = parse_unlock_route(std::env::var_os("PIGGY_UNLOCK").as_deref())?;
     // Card-first: ANY failure to find a card (no PCSC, no matching card) is
     // not fatal while an agent is available. `ctx` is bound for the whole
     // function so the PCSC context outlives the session.
     let target_slot = piggy_box::template::DEFAULT_SLOT;
-    let ctx = PivContext::new();
+    let ctx = (route != UnlockRoute::Agent).then(PivContext::new);
     let card = match &ctx {
-        Err(e) => Err(format!("PCSC unavailable: {e}")),
-        Ok(ctx) => match ctx.enumerate_tokens() {
+        None => Err("local cards skipped (PIGGY_UNLOCK=agent)".to_string()),
+        Some(Err(e)) => Err(format!("PCSC unavailable: {e}")),
+        Some(Ok(ctx)) => match ctx.enumerate_tokens() {
             Err(e) => Err(format!("PCSC enumerate failed: {e}")),
             Ok(tokens) => select_card_for_targets(tokens, targets, target_slot).ok_or_else(|| {
                 "no attached PIV card has a 9D slot matching any of the ebox's recipients"
@@ -830,6 +861,9 @@ pub(crate) fn with_batch_unlock<R>(
         // No local card served the batch: fall back to the forwarded agent
         // (lazy-connecting, mirrors `cmd::pivy_box`), else fail naming both
         // routes.
+        Err(card_err) if route == UnlockRoute::Card => Err(format!(
+            "{card_err}; agent fallback disabled (PIGGY_UNLOCK=card)"
+        )),
         Err(card_err) => {
             let agent_socket = piggy::agent_client::piggy_auth_sock_override()
                 .or_else(|| std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty()))
@@ -1587,6 +1621,20 @@ fn frontend_err_to_batch_failure(e: &FrontendError) -> BatchFailure {
     }
 }
 
+/// Say that a cancelled PIN prompt was for a card attached HERE, prompted
+/// HERE, and how to send the batch to the agent instead: on a host that
+/// both has a card and reaches a forwarded agent, the local card wins
+/// (piggy#351), and the bare askpass error does not say so.
+fn name_local_card(failure: BatchFailure, guid_hex: &str) -> BatchFailure {
+    match failure {
+        BatchFailure::PinCancelled(msg) => BatchFailure::PinCancelled(format!(
+            "{msg} (PIN prompt for the local card {guid_hex}; \
+             PIGGY_UNLOCK=agent unlocks through the agent instead)"
+        )),
+        other => other,
+    }
+}
+
 /// Session-aware ECDH oracle. Held across the whole show-batch run so
 /// the single `verify_pin` early in the batch authenticates every
 /// subsequent `ecdh_derive` against the same card transaction.
@@ -1685,7 +1733,10 @@ impl<'sess, 'tok> EcdhOracle for BatchOracle<'sess, 'tok> {
             let pin = match self.frontend.request_secret(req) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.last_failure = Some(frontend_err_to_batch_failure(&e));
+                    self.last_failure = Some(name_local_card(
+                        frontend_err_to_batch_failure(&e),
+                        &self.card.guid,
+                    ));
                     return Err(OracleError::Other("PIN supply failed".into()));
                 }
             };
@@ -2130,6 +2181,57 @@ mod tests {
         assert!(matches!(
             classify_piv_error(&PivError::Other("weird APDU".into())),
             BatchFailure::Other(_)
+        ));
+    }
+
+    #[test]
+    fn unlock_route_parses_known_values_and_rejects_others() {
+        use super::{UnlockRoute, parse_unlock_route};
+        use std::ffi::OsStr;
+
+        assert_eq!(parse_unlock_route(None), Ok(UnlockRoute::Auto));
+        assert_eq!(
+            parse_unlock_route(Some(OsStr::new(""))),
+            Ok(UnlockRoute::Auto)
+        );
+        assert_eq!(
+            parse_unlock_route(Some(OsStr::new("auto"))),
+            Ok(UnlockRoute::Auto)
+        );
+        assert_eq!(
+            parse_unlock_route(Some(OsStr::new("card"))),
+            Ok(UnlockRoute::Card)
+        );
+        assert_eq!(
+            parse_unlock_route(Some(OsStr::new("agent"))),
+            Ok(UnlockRoute::Agent)
+        );
+        let err = parse_unlock_route(Some(OsStr::new("Agent"))).unwrap_err();
+        assert!(err.contains("PIGGY_UNLOCK=Agent"), "got: {err}");
+    }
+
+    /// piggy#351: a cancelled local-card prompt names the card and the way
+    /// to the agent; other failures pass through untouched.
+    #[test]
+    fn name_local_card_annotates_only_pin_cancelled() {
+        use super::{BatchFailure, name_local_card};
+
+        let BatchFailure::PinCancelled(msg) = name_local_card(
+            BatchFailure::PinCancelled("askpass exited with exit status: 2".into()),
+            "c291d27b",
+        ) else {
+            panic!("PinCancelled must stay PinCancelled");
+        };
+        assert!(
+            msg.starts_with("askpass exited with exit status: 2"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("local card c291d27b"), "got: {msg}");
+        assert!(msg.contains("PIGGY_UNLOCK=agent"), "got: {msg}");
+
+        assert!(matches!(
+            name_local_card(BatchFailure::PinBlocked, "c291d27b"),
+            BatchFailure::PinBlocked
         ));
     }
 
