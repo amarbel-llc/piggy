@@ -2254,7 +2254,7 @@ mod tests {
         ));
         assert!(agent_offers_other_recipient(&[forwarded], &local, &targets));
         assert!(!agent_offers_other_recipient(
-            &[local.clone()],
+            std::slice::from_ref(&local),
             &local,
             &targets
         ));
