@@ -90,6 +90,32 @@ transaction for the batch, and the JSON-RPC frontend sees the PIN request).
   a new host: the agent that prompts is the one that holds the forwarded
   card, whose owner forwarded it.
 
+## Repro results (2026-11-02, counterparts on nikulin and twerk)
+
+- **Card-first, confirmed.** N5b on nikulin, with piggy 0.1.23, an askpass of `false`, and no PIN reaching the card, reported `pin-cancelled` (V). v0.1.23 selects the card the same way, and that kind comes only from its local-card path (R). So nikulin decrypted with its own card.
+- **twerk's card is a recipient** of all four manifest eboxes, next to nikulin's card and a third card (V, from offline `pass ls -r` plus T2). With piggy ≥ 3b1c454 the `auto` route sees the forwarded agent offer that key and unlocks through twerk.
+- **The forward is live** on nikulin's `~/.local/state/ssh/piggy-agent.sock` and serves twerk's card (V). twerk's agent runs `piggy-askpass.sh` with `SSH_ASKPASS_REQUIRE=force`; its unit has no display variables, so the helper re-derives the display itself.
+- N6 (the real reconcile) waits for the piggy bump on nikulin.
+
+### Circus follow-up: twerk's forward shadows nikulin's own agent socket
+
+nikulin runs its own card-backed `piggy-agent` on
+`~/.local/state/ssh/piggy-agent.sock`, and twerk `RemoteForward`s its agent
+onto that same path. The forward replaced the socket file: its mtime is later
+than the unit's start (V). While the operator's ssh session is up, nikulin's
+own agent is unreachable by path. Once the session ends, the path no longer
+reaches either agent. Then `services.piggy-secrets` (whose `agentSocket`
+defaults to that path) finds no agent, keeps the local card, and fails closed
+with `pin-cancelled` naming the card (I). The reconcile unit therefore
+unlocks through twerk only while the forward is up.
+
+Fix belongs in circus's host config, not piggy:
+- forward to a distinct path (e.g. `…/piggy-agent-forwarded.sock`);
+- either point `services.piggy-secrets.agentSocket` at that path, or run
+  nikulin's agent with `--upstream forwarded=<that path>`. The latter is
+  piggy FDR 0001's one-socket shape, and piggy#295 tracks local versus
+  forwarded agents sharing a socket.
+
 ## Repro plan (counterparts)
 
 Nothing below needs the PIN until step N6, and nothing prints a secret.
