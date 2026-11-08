@@ -11,7 +11,7 @@ approval-note: >
   the operator's tty, including a local posh attach, is a privileged
   channel. Implementations conform to this text; the conformance suite
   lands with FDR 0006 phase (a) (piggy#303).
-amended: 2026-10-23
+amended: 2026-11-08
 amendment-note: >
   2026-10-23 (piggy#332, circus EPIC 0001 D1/D4): the `piggy-escalation-v1`
   text shape names the record the act signs, which is a grant, a profile
@@ -23,6 +23,16 @@ amendment-note: >
   process that shows the text; a surface that cannot hold fails the
   prompt) and permits emphasis by rendering attributes. Implemented by the
   askpass and the agent's tty route in the same series.
+  Third amendment, 2026-11-08 (operator ruling relayed through
+  circus/eager-holly; asked by barker FDR 0001 P2): §2.6 and §3 gain a
+  fourth display class, `approval`, with the namespace
+  `piggy-approval-v1` for decisions that grant no right (acknowledgements,
+  deploy approvals). Docs first: the agent, the askpass dialogs and the
+  conformance rows follow as piggy FDR 0007 item I2 (piggy#355). A
+  conforming agent serves the namespace from that series on; an agent
+  built before it carries the older registry and answers
+  `refused-namespace`, which is what an older agent does, not conformance
+  to this text.
 ---
 
 # Operator-Act Agent Extension, sshsig Namespaces, and Record Purposes (piggy normative; FDR 0006 wire RFC part 1)
@@ -216,10 +226,12 @@ grant, "a record by the card over the request's digest", is the model.
 
 The card agent MUST present, on the same prompt that collects the PIN:
 
-- the act's **display class** (§3: `quote`, `escalation` or
-  `certificate`), rendered so that the prompt is visibly different from
-  a routine PIN prompt and an `escalation` is visibly different from a
-  `quote`;
+- the act's **display class** (§3: `quote`, `escalation`, `certificate`
+  or `approval`), rendered so that the prompt is visibly different from
+  a routine PIN prompt, an `escalation` is visibly different from a
+  `quote`, and an `approval` is visibly different from an `escalation`
+  (it grants nothing, and its prompt MUST NOT use the escalation
+  banner's words);
 - the card identity and slot (as `piggy health` names them);
 - the `namespace`;
 - the `text`, verbatim.
@@ -341,6 +353,7 @@ the agent does not check but a verifier of that act kind MUST.
 | `piggy-quote-v1`          | `operator-act@piggy`  | `quote`       | A quote of operator input already in the ledger (FDR 0032 D10). The text MUST be the recorded input verbatim, followed by one line `ledger <markl-id>` naming the transcript stanza it was taken from (`piggy-record-digest-v1@…`). A verifier MUST resolve that stanza and MUST fail if its recorded input differs from the quoted text. The quote adds the operator's touch to words the ledger already holds; it never introduces words. |
 | `piggy-escalation-v1`     | `operator-act@piggy`  | `escalation`  | An escalation grant (FDR 0032 D11). The text MUST name the record the act signs by markl-id (`piggy-record-digest-v1@…`), which is one of the kinds in §3.1, and state in words what that kind's row says. A first grant to a grantee that holds no rights yet is an escalation too, as is a widening of an existing grant; the namespace does not tell the two apart, so a verifier that needs to know reads it from the named record, or from the text when the requesting system has the text say so. |
 | `piggy-certificate-v1`    | `operator-act@piggy`  | `certificate` | A card-signed certificate or enrollment (FDR 0032 D2 root certificate, D15 enrollment blessing). The text MUST name the certified public key and the certificate request record by markl-id. |
+| `piggy-approval-v1`       | `operator-act@piggy`  | `approval`    | A decision that grants no right (registered 2026-11-08 on the operator's ruling; asked by barker FDR 0001 P2): an acknowledgement such as a deadman ack, a deploy or release approval, a go or no-go. The text MUST name the decision record by markl-id (`piggy-record-digest-v1@…`) and state in words what is decided, what it applies to (the deploy, the host, the run) and its bound (a time, or one run). The decision record's grammar and canonical bytes are the requesting system's (circus for deploys and acks, barker for acts sent from the phone), as §3.1's kinds are their owners'. A verifier MUST NOT accept an approval where a grant, a profile transition or an escalation request is expected (§3.1). Served by agents from piggy#355 on (piggy FDR 0007 item I2); an older agent answers `refused-namespace`. |
 | `piggy-record-v1`         | ordinary sign request | none          | A signed record (FDR 0032 D8) signed by a principal's own key through `ssh-keygen -Y sign -n piggy-record-v1` or an equivalent agent sign request; the message is the record's canonical bytes as troupe's RFC defines them. Not an operator act. |
 
 `operator-act@piggy` MUST refuse (`refused-namespace`) any namespace not
@@ -383,7 +396,7 @@ Two purposes are registered in RFC 0011 §6.1's sense, owned by piggy
 
 | Purpose                 | Owner | Compatible formats            | Description |
 |-------------------------|-------|-------------------------------|-------------|
-| `piggy-record-digest-v1` | piggy | `sha256`, `blake2b256`        | Digest of a signed record's canonical bytes (FDR 0032 D8). This is the `H(message)` of a `piggy-record-v1` sshsig when the hash algorithm matches, and the value a `prev` set, a `ledger` line in a quote, and an escalation request name. |
+| `piggy-record-digest-v1` | piggy | `sha256`, `blake2b256`        | Digest of a signed record's canonical bytes (FDR 0032 D8). This is the `H(message)` of a `piggy-record-v1` sshsig when the hash algorithm matches, and the value a `prev` set, a `ledger` line in a quote, an escalation request name, and an approval's decision record name. |
 | `piggy-record-sig-v1`    | piggy | `ed25519_sig`, `ecdsa_p256_sig` | The raw signature over a record: the `signature` field of the sshsig blob with its SSH framing stripped to the fixed-width form RFC 0011 §5 defines (as `papi-doc-sig-v1` does). The sshsig blob remains the authoritative, self-describing form; this purpose names it in a markl-id slot. |
 
 Whether a record carries the sshsig blob, the markl-id of its raw
@@ -513,7 +526,8 @@ Code's own JSONL under a harness-generated uuid, and that the
 merkle-stable transcript identity belongs to FDR 0032 D8 / slice 2 in
 troupe's transcript seam. Until a resolvable stanza id exists, a
 `piggy-quote-v1` text cannot be formed, and operator acts use the
-`escalation` and `certificate` classes only.
+`escalation`, `certificate` and (once served, piggy#355) `approval`
+classes only.
 
 **The display surface is privileged.** §2.6 states the requirement:
 nothing in an agent scope may write to what the operator reads the
@@ -601,6 +615,7 @@ Tests use binary injection via `bats-emo`:
 | §2.7, verifies with `ssh-keygen -Y verify` | `operator_act_sign.bats` | the returned blob, armored, verifies under the slot key and `-n piggy-quote-v1` |
 | §2.8, proxy forwards unchanged, never prompts | `operator_act_proxy.bats` | a `--proxy-only` front relays request and response byte-for-byte; the prompt fires in the card agent only |
 | §3, namespace registry | `operator_act_refusals.bats` | `git`, `file`, `piggy-record-v1` and an unregistered name yield `refused-namespace` |
+| §2.6 and §3, the `approval` class | pending (piggy FDR 0007 item I2, piggy#355) | the prompt carries `PIGGY_ASKPASS_KIND=approval` and a banner distinct from the escalation banner |
 | §5, attestation bundle shape | `attestation_bundle.bats` | the export has exactly the five parts in order and the three key spellings agree |
 
 ## Compatibility
