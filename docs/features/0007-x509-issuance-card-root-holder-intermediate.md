@@ -408,7 +408,7 @@ session did not hear them directly.
 | 2 | root `pathlen` | 1, so the pilot root also signs the later intermediate |
 | 3 | approval display class | RFC 0012 gains a fourth display class, `approval`, with the namespace `piggy-approval-v1` (acks, deploy approvals); not a bend of `escalation`. Amended in RFC 0012 the same day; implementation is item I2 |
 | 4 | licence (piggy#327) | MPL-2.0 for the library crates; the main `piggy` package stays GPL-2.0-or-later. Not legal advice. Item I3 |
-| 5 | sshsig or a hyphence tree | **Shape C** (ruled 2026-11-08, in session): sshsig stays the signature and RFC 0012's wire layer is unchanged; the signed, displayed text becomes a `piggy-act-v1` hyphence document carrying producer, class, named records and bounds. A comparison of C and A was written for the operator as a Google Doc the same day. Follow-up design, this session: the `piggy-act-v1` type definition, the class-equals-namespace verifier rule, and the RFC 0012 §3 text-shape amendment |
+| 5 | sshsig or a hyphence tree | **Shape C** (ruled 2026-11-08, in session): sshsig stays the signature and RFC 0012's wire layer is unchanged; the signed, displayed text becomes a `piggy-act-v1` hyphence document carrying producer, class, named records and bounds. A comparison of C and A was written for the operator as a Google Doc the same day; his comments on it add: the metadata **is** the prompt and is shown in full, never folded; the body may be empty, the head carrying the whole permission declaratively through nested hyphence documents, in a permissions language expressive enough for any permission (his words: "turing complete"); and in any signed hyphence document the signature is its own metadata field, never the type-line lock (unlike RFC 0008's MAC). Two further rulings the same day, in session: **producers are registered per domain, for free**: each system registers its own producer names for itself (as RFC 0011 lets a system own its purpose prefix), and a producer's trust comes from its key's chain to the card, not from a piggy list; piggy supports whoever registers for themselves and enables their chains. And **each act is a small certificate**: the card's key is a CA, every document below it is a signed hyphence document whose power comes only from its chain to the CA, trust is structural and mechanical, not linguistic, the language is the adding and dropping of privileges along the chain, and the privileges to support are those of spinclass FDR 0032 and its epic. RFC 0008 may need an amendment to fit (the signature as its own field). Ownership (ruled the same day): piggy owns the envelope and the chain rules (the signed-document format, the signature field and canonical bytes, chain verification from the card's key, the generic add and drop of privileges); the privilege vocabulary is spinclass's (FDR 0032, FDR 0034). piggy is upstream of spinclass, so piggy's record does not cite spinclass normatively; spinclass's needs inform piggy's design as requirements. Record: a new **RFC 0013**, reviewed through a user-stories tab beside it in a Google Doc. Also the RFC 0012 §3 text-shape amendment and the RFC 0008 question |
 
 ### Implementation items ruled 2026-11-08
 
@@ -608,10 +608,14 @@ that exists on every host without piggy.
 
 - **Transport and placement.** Which transport carries the CSR, and on
   which host the signer runs (circus and the operator).
-- **The `piggy-act-v1` document (Shape C, ruled).** Its field set and
-  grammars, whether `producer` values are registered or free, how the
-  prompt renders the metadata block, and the RFC 0012 §3 amendment that
-  follows. Design here, then an RFC amendment for the operator.
+- **Signed hyphence documents as a certificate chain (Shape C, ruled).**
+  The `piggy-act-v1` field set and grammars, the signature field and
+  what the signed bytes are, how a chain from the card's key to a
+  producer's key to an act is expressed and verified, how privileges are
+  added and dropped along it (the vocabulary is spinclass FDR 0032's),
+  and the RFC 0012 §3 and RFC 0008 amendments that follow. A design
+  record of its own, reviewed through a user-stories tab, then the
+  amendments for the operator.
 - **The root key and operator acts.** A PIN-always, touch-always key in
   slot 82 satisfies RFC 0012 §2.4 and so may serve operator acts if a
   card agent lists it (V). Either the agent refuses operator acts for
