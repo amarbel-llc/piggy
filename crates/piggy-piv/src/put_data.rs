@@ -22,13 +22,16 @@ pub mod object_tag {
 }
 
 /// Map a key slot id to its certificate data-object tag (the inverse of what
-/// `slot::slot_to_cert_tag` does for reads), for the slots provisioning writes.
+/// `slot::slot_to_cert_tag` does for reads), for the slots provisioning writes:
+/// the four named key slots and the retired key-management slots 82..95. The
+/// YubiKey attestation slot F9 is not a write target.
 pub fn cert_tag_for_slot(slot_id: u8) -> Option<u32> {
     match slot_id {
         0x9A => Some(object_tag::CERT_9A),
         0x9C => Some(object_tag::CERT_9C),
         0x9D => Some(object_tag::CERT_9D),
         0x9E => Some(object_tag::CERT_9E),
+        0x82..=0x95 => crate::slot::slot_to_cert_tag(slot_id),
         _ => None,
     }
 }
@@ -166,7 +169,13 @@ mod tests {
     fn cert_tag_for_slot_maps_key_slots() {
         assert_eq!(cert_tag_for_slot(0x9A), Some(0x5FC105));
         assert_eq!(cert_tag_for_slot(0x9D), Some(0x5FC10B));
-        assert_eq!(cert_tag_for_slot(0x82), None);
+        // Retired slots 82..95 map to 5FC10D..5FC120 (SP 800-73-4).
+        assert_eq!(cert_tag_for_slot(0x82), Some(0x5FC10D));
+        assert_eq!(cert_tag_for_slot(0x95), Some(0x5FC120));
+        // The attestation slot and non-slots are not write targets.
+        assert_eq!(cert_tag_for_slot(0xF9), None);
+        assert_eq!(cert_tag_for_slot(0x9B), None);
+        assert_eq!(cert_tag_for_slot(0x96), None);
     }
 
     #[test]

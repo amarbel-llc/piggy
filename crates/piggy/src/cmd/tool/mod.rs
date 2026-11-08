@@ -36,8 +36,9 @@
 //! - `piggy tool delete-cert <slot>` — clear a slot's certificate object
 //!   (mgmt-key mutual auth, then PUT DATA at the slot's cert tag with an
 //!   empty body; matches C `cmd_delete_cert`). The current key comes from
-//!   `-K` (`default` or hex). Ported for the cert-holding slots
-//!   9A/9C/9D/9E; retired and other slots fall through to C.
+//!   `-K` (`default` or hex). Takes the key slots 9A/9C/9D/9E and the
+//!   retired slots 82..95 (as do `write-cert`, `generate`, `import` and
+//!   `req-cert`); F9 and other ids are a usage error.
 //! - `piggy tool update-keyhist` — rescan the retired key slots and rewrite
 //!   the PIV Key History object (mgmt-key mutual auth, then PUT DATA at
 //!   `5FC10C`; matches C `cmd_update_keyhist`). `oncard` is recomputed from
@@ -46,21 +47,20 @@
 //! - `piggy tool write-cert <slot>` — read an X.509 cert (DER or PEM) from
 //!   stdin and write it to the slot's cert object (mgmt-key mutual auth,
 //!   then PUT DATA; matches C `cmd_write_cert`). The current key comes from
-//!   `-K` (`default` or hex). Ported for the cert-holding slots 9A/9C/9D/9E;
-//!   retired and other slots fall through to C.
+//!   `-K` (`default` or hex). Slots 9A/9C/9D/9E and 82..95.
 //! - `piggy tool generate <slot> -a <alg> [-i <pin-policy>] [-t <touch-policy>]`
 //!   — generate a new key pair (GENERATE ASYMMETRIC under mgmt auth),
 //!   self-sign a minimal cert for it (PIN-gated), and print the new public
 //!   key (matches C `cmd_generate`). `-i`/`-t` set the YubicoPIV PIN and touch
 //!   policy; without them no policy tag is sent.
-//!   Modeled for the EC algorithms `eccp256`/`eccp384` on slots 9A/9C/9D/9E;
-//!   RSA/Ed25519 and other slots fall through to C. Needs `-K` (mgmt) and a
+//!   Modeled for the EC algorithms `eccp256`/`eccp384` on slots 9A/9C/9D/9E
+//!   and 82..95; RSA/Ed25519 is a usage error. Needs `-K` (mgmt) and a
 //!   PIN (`-P` or askpass, for the self-sign).
 //! - `piggy tool import <slot>` — read an OpenSSH private key from stdin,
 //!   import it (YubicoPIV IMPORT ASYMMETRIC), self-sign a minimal cert
 //!   (PIN-gated), and write it (matches C `cmd_import`). EC P-256/P-384 only
 //!   (piggy is EC-only); an RSA/Ed25519 key errors, pointing to `piggy pivy
-//!   tool import`. Needs `-K` (mgmt) and a PIN. Ported for slots 9A/9C/9D/9E.
+//!   tool import`. Needs `-K` (mgmt) and a PIN. Slots 9A/9C/9D/9E and 82..95.
 //! - `piggy tool pinfo` — read and print the PIV Printed Information object
 //!   (`name`/`affiliation`/`expiry`/`serial`/`issuer`, optional
 //!   `organization`, `yubico`; matches C `cmd_pinfo`). The card models the
@@ -275,8 +275,8 @@ fn parse(args: &[String]) -> Option<Invocation> {
         }
     }
     // `generate` requires `-a <alg>` and this port models only the EC
-    // algorithms (eccp256/eccp384); a missing or RSA/Ed25519 `-a` falls
-    // through to C, as does an unsupported slot.
+    // algorithms (eccp256/eccp384); a missing or RSA/Ed25519 `-a` is a usage
+    // error, as is a slot outside 9A/9C/9D/9E and 82..95.
     if op == "generate" {
         let slot = positionals.first()?;
         if positionals.len() != 1
@@ -303,9 +303,9 @@ fn parse(args: &[String]) -> Option<Invocation> {
             return None;
         }
     }
-    // `delete-cert`, `write-cert`, `import`, and `req-cert` claim only the slots
-    // this port maps a cert tag for (9A/9C/9D/9E); retired and other slots fall
-    // through to C. (import's key TYPE is unknown until stdin is read, so a
+    // `delete-cert`, `write-cert`, `import`, and `req-cert` claim the key slots
+    // (9A/9C/9D/9E and retired 82..95); F9 and anything else is a usage
+    // error. (import's key TYPE is unknown until stdin is read, so a
     // non-EC key is handled in cmd_import, not here; req-cert's non-EC rejection
     // is likewise in cmd_req_cert once the slot key is read.)
     if matches!(
@@ -351,12 +351,18 @@ fn is_admin_key_arg(s: &str) -> bool {
         || (!s.is_empty() && s.len().is_multiple_of(2) && s.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
-/// Whether a slot argument names one of the key slots this port maps a cert
-/// data-object tag for (9A/9C/9D/9E). Retired slots (82..95) and others fall
-/// through to C `pivy-tool`, which handles the full range.
+/// Whether a slot argument names a key slot the write ops (`generate`,
+/// `write-cert`, `req-cert`, `import`, `delete-cert`) may target: the named
+/// key slots 9A/9C/9D/9E and the retired key-management slots 82..95. The
+/// attestation slot F9 and anything else is refused.
 fn is_supported_cert_slot(s: &str) -> bool {
     let hex = s.strip_prefix("0x").unwrap_or(s);
-    matches!(u8::from_str_radix(hex, 16), Ok(0x9A | 0x9C | 0x9D | 0x9E))
+    u8::from_str_radix(hex, 16).is_ok_and(is_key_slot)
+}
+
+/// The key slots: 9A/9C/9D/9E and the retired key-management slots 82..95.
+fn is_key_slot(slot_id: u8) -> bool {
+    matches!(slot_id, 0x9A | 0x9C | 0x9D | 0x9E | 0x82..=0x95)
 }
 
 /// Dispatch `piggy tool <args>`, returning the process exit code. As of the
@@ -754,13 +760,14 @@ fn cmd_req_cert(inv: &Invocation) -> i32 {
 /// `piggy tool ecdh <slot>`: read an OpenSSH public key from stdin and
 /// write the raw ECDH shared secret (the card's GENERAL AUTHENTICATE
 /// output) to stdout — matching C `pivy-tool`'s `piv_ecdh` + `fwrite`.
-/// PIN-gated; only the EC key slots 9A/9C/9D/9E can do ECDH.
+/// PIN-gated; the key slots 9A/9C/9D/9E and the retired key-management slots
+/// 82..95 can do ECDH (not the attestation slot F9).
 fn cmd_ecdh(inv: &Invocation) -> i32 {
     let slot_id = match slot_arg(inv, "ecdh") {
         Ok(s) => s,
         Err(code) => return code,
     };
-    if !matches!(slot_id, 0x9A | 0x9C | 0x9D | 0x9E) {
+    if !is_key_slot(slot_id) {
         eprintln!("piggy tool ecdh: PIV slot {slot_id:02X} cannot be used for ECDH");
         return 1;
     }
@@ -1078,8 +1085,7 @@ fn resolve_admin_key(arg: &str) -> Result<Vec<u8>, String> {
 /// matching C `pivy-tool`'s `cmd_delete_cert` (mgmt-key mutual auth with the
 /// current key, then PUT DATA at the slot's cert tag with an empty body). The
 /// current key comes from `-K` (`default` or hex; default: the factory 3DES
-/// key). Ported for the cert-holding slots 9A/9C/9D/9E; retired and other
-/// slots fall through to C. On a YubiKey <5.7 (fibby's model) this clears only
+/// key). Slots 9A/9C/9D/9E and the retired 82..95. On a YubiKey <5.7 (fibby's model) this clears only
 /// the cert, not the private key, exactly as C does. No stdout on success.
 fn cmd_delete_cert(inv: &Invocation) -> i32 {
     let op = "delete-cert";
@@ -1173,9 +1179,8 @@ fn cmd_update_keyhist(inv: &Invocation) -> i32 {
 /// from stdin and write it to the slot's cert object — matching C
 /// `pivy-tool`'s `cmd_write_cert` (mgmt-key mutual auth, then PUT DATA at the
 /// slot's cert tag wrapping the DER as `70 <cert> 71 00`). The current key
-/// comes from `-K` (`default` or hex). Ported for the cert-holding slots
-/// 9A/9C/9D/9E; retired and other slots fall through to C. No stdout on
-/// success, matching C.
+/// comes from `-K` (`default` or hex). Slots 9A/9C/9D/9E and the retired
+/// 82..95. No stdout on success, matching C.
 fn cmd_write_cert(inv: &Invocation) -> i32 {
     let op = "write-cert";
     let slot_id = match slot_arg(inv, op) {
@@ -1245,8 +1250,8 @@ fn parse_cert_input(bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// card, self-sign a minimal cert for it, and print the new public key —
 /// matching C `pivy-tool`'s `cmd_generate` (GENERATE ASYMMETRIC under mgmt
 /// auth, then a PIN-gated self-signed cert). Modeled for the EC algorithms
-/// (`eccp256`, `eccp384`) on the cert-holding slots 9A/9C/9D/9E; other
-/// algorithms/slots fall through to C. The generated key is random on real
+/// (`eccp256`, `eccp384`) on slots 9A/9C/9D/9E and the retired 82..95; other
+/// algorithms are a usage error. The generated key is random on real
 /// hardware (so the printed pubkey differs per run); the self-signed cert C
 /// writes carries a random serial (a side effect that legitimately differs).
 /// Prints `<openssh-pubkey> PIV_slot_XX@<GUID>`, matching C's format (a bare
@@ -1949,7 +1954,8 @@ fn select_token(guid_prefix: Option<&str>) -> Result<PivToken, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListMode, generated_key_openssh_line, is_admin_key_arg, is_supported_cert_slot, parse,
+        ListMode, generated_key_openssh_line, is_admin_key_arg, is_key_slot,
+        is_supported_cert_slot, parse,
     };
 
     /// The P-256 base point, uncompressed: a valid public key to render.
@@ -2034,23 +2040,35 @@ mod tests {
         assert!(parse(&argv(&["-K", "@keyfile", "set-admin", "default"])).is_none());
         assert!(parse(&argv(&["set-admin"])).is_none()); // missing new key
         assert!(parse(&argv(&["set-admin", "default", "extra"])).is_none());
-        // delete-cert only claims the cert-holding slots; others fall to C.
-        assert!(parse(&argv(&["delete-cert", "82"])).is_none()); // retired slot
+        // The write ops claim the key slots, retired 82..95 included (the
+        // pilot CA root lives in 82); F9 and non-slots are refused.
+        assert!(parse(&argv(&["delete-cert", "82"])).is_some());
+        assert!(parse(&argv(&["delete-cert", "95"])).is_some());
+        assert!(parse(&argv(&["write-cert", "82"])).is_some());
+        assert!(parse(&argv(&["-a", "eccp256", "generate", "82"])).is_some());
+        assert!(
+            parse(&argv(&[
+                "-K", "default", "-a", "eccp256", "-i", "always", "-t", "always", "generate", "82"
+            ]))
+            .is_some()
+        );
+        assert!(parse(&argv(&["import", "95"])).is_some());
+        assert!(parse(&argv(&["req-cert", "82"])).is_some());
+        assert!(parse(&argv(&["delete-cert", "96"])).is_none()); // past the retired range
         assert!(parse(&argv(&["delete-cert", "f9"])).is_none()); // attestation slot
         assert!(parse(&argv(&["delete-cert"])).is_none()); // missing slot
         assert!(parse(&argv(&["-K", "@keyfile", "delete-cert", "9d"])).is_none());
         // update-keyhist takes no positionals.
         assert!(parse(&argv(&["update-keyhist", "9d"])).is_none());
         assert!(parse(&argv(&["-K", "@keyfile", "update-keyhist"])).is_none());
-        // write-cert only claims the cert-holding slots.
-        assert!(parse(&argv(&["write-cert", "82"])).is_none()); // retired slot
+        assert!(parse(&argv(&["write-cert", "f9"])).is_none()); // attestation slot
         assert!(parse(&argv(&["write-cert"])).is_none()); // missing slot
         assert!(parse(&argv(&["-K", "@keyfile", "write-cert", "9d"])).is_none());
         // generate requires -a and an EC algorithm on a cert slot.
         assert!(parse(&argv(&["generate", "9a"])).is_none()); // no -a
         assert!(parse(&argv(&["-a", "rsa2048", "generate", "9a"])).is_none()); // RSA -> C
         assert!(parse(&argv(&["-a", "ed25519", "generate", "9a"])).is_none()); // Ed25519 -> C
-        assert!(parse(&argv(&["-a", "eccp256", "generate", "82"])).is_none()); // retired slot
+        assert!(parse(&argv(&["-a", "eccp256", "generate", "f9"])).is_none()); // attestation slot
         assert!(parse(&argv(&["-a", "eccp256", "generate"])).is_none()); // no slot
         // generate's policy options take pivy-tool's names only.
         let inv = parse(&argv(&[
@@ -2078,15 +2096,14 @@ mod tests {
         // honoured a policy it ignores.
         assert!(parse(&argv(&["-i", "always", "import", "9c"])).is_none());
         assert!(parse(&argv(&["-t", "default", "pubkey", "9c"])).is_none());
-        // import claims only cert slots (key type is checked in cmd_import).
-        assert!(parse(&argv(&["import", "82"])).is_none()); // retired slot
+        // import claims only key slots (key type is checked in cmd_import).
+        assert!(parse(&argv(&["import", "f9"])).is_none()); // attestation slot
         assert!(parse(&argv(&["import"])).is_none()); // no slot
         // pinfo takes no positionals.
         assert!(parse(&argv(&["pinfo", "9d"])).is_none());
         // factory-reset takes no positionals.
         assert!(parse(&argv(&["factory-reset", "9a"])).is_none());
-        // req-cert claims only the EC cert slots.
-        assert!(parse(&argv(&["req-cert", "82"])).is_none()); // retired slot
+        // req-cert claims only the key slots.
         assert!(parse(&argv(&["req-cert", "f9"])).is_none()); // attestation slot
         assert!(parse(&argv(&["req-cert"])).is_none()); // no slot
         // An option we don't model → C handles the whole invocation.
@@ -2134,11 +2151,20 @@ mod tests {
     }
 
     #[test]
-    fn is_supported_cert_slot_covers_9a_9c_9d_9e() {
-        for s in ["9a", "9A", "9c", "9d", "9e", "0x9d"] {
+    fn is_supported_cert_slot_covers_named_and_retired_slots() {
+        for s in [
+            "9a", "9A", "9c", "9d", "9e", "0x9d", "82", "8a", "95", "0x82",
+        ] {
             assert!(is_supported_cert_slot(s), "{s}");
         }
-        for s in ["82", "95", "f9", "9b", "zz", ""] {
+        // ecdh's runtime guard is the same set.
+        for id in [0x9Au8, 0x9C, 0x9D, 0x9E, 0x82, 0x95] {
+            assert!(is_key_slot(id), "{id:02X}");
+        }
+        for id in [0x81u8, 0x96, 0xF9, 0x9B] {
+            assert!(!is_key_slot(id), "{id:02X}");
+        }
+        for s in ["81", "96", "f9", "9b", "zz", ""] {
             assert!(!is_supported_cert_slot(s), "{s}");
         }
     }

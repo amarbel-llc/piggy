@@ -111,10 +111,20 @@ on a PIV card. piggy does not currently expose a flag to choose a
 different slot; non-9D slot selection requires the *-i* (interactive)
 mode, which hands control to *pivy-box*'s interactive template builder.
 
-There is no piggy code today that reads from or writes to the retired
-slots specifically. Adding such support is a feature decision (not a
-bug fix) and is out of scope for this reference page; see *piggy*(1)
-for the user-facing CLI.
+piggy reads and writes the retired slots as ordinary key slots:
+
+- Card enumeration reads the certificate of every slot 82h-95h that has
+  one, so *piggy list* and *piggy-agent*(1) see their keys alongside
+  9A/9C/9D/9E (the agent's slot filter can exclude them).
+- *piggy tool pubkey*, *cert*, *attest* and *sign* accept any slot that
+  holds a certificate, retired slots included; *piggy tool
+  update-keyhist* counts the retired slots that hold one.
+- *piggy tool generate*, *import*, *write-cert*, *req-cert*,
+  *delete-cert* and *ecdh* take 9A/9C/9D/9E and 82h-95h, and refuse F9
+  and every other id. *generate*'s *-i* and *-t* set a retired-slot
+  key's PIN and touch policy as they do for a named slot.
+- *piggy pass recipients list-available* treats 82h-95h, like 9D, as
+  recipient-eligible; see *piggy*(1).
 
 # PORTABILITY CONSIDERATIONS
 
