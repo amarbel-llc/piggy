@@ -1,0 +1,727 @@
+---
+status: proposed
+date: 2026-11-08
+---
+
+# Signed Hyphence Acts: the `piggy-act-v1` document and its certificate chain (piggy normative)
+
+> **Status of this draft.** Written on the operator's rulings of 2026-11-08
+> (Shape C and the comments on "Operator acts: Shape C versus Shape A"),
+> for the operator's review through a user-stories tab beside this text.
+> Not yet approved; nothing is built. The hyphence RFCs this text builds
+> on are themselves `proposed`. Evidence labels in the notes: **V** read in
+> a named file at piggy master `f7f0db9` or in the sibling repositories
+> named; **I** inference; **U** unknown; **R** an operator ruling, dated.
+
+## Abstract
+
+This document specifies `piggy-act-v1`, a hyphence document that carries
+one signed act: a certificate of a key, a grant or narrowing of rights, an
+escalation, an approval, or a revocation. The signature is an SSH
+signature (sshsig) over the document's canonical bytes, carried in the
+document as its own metadata field, so one artefact is both the thing the
+operator saw at the PIN prompt and the thing a verifier checks. Acts form
+a chain rooted at the operator's PIV card: a certifying act's power comes
+only from a valid path to a card-signed root, rights only shrink along a
+path unless the card signs the step, and validity is decided by walking
+the path. Trust is structural and mechanical; the document's words carry
+no authority.
+
+## Introduction
+
+RFC 0012 made an operator act an sshsig over a text the agent shows at the
+PIN prompt, with per-namespace conventions for what that text must say.
+Those conventions were linguistic: a verifier had to read words. The
+operator ruled on 2026-11-08 (R, in session) that the text becomes a
+hyphence document whose metadata is the prompt and carries the whole
+permission structurally; that each act is a small certificate under the
+card as a CA; that trust is structural and mechanical, not linguistic; that
+the language is the adding and dropping of privileges along the chain;
+that a producer registers itself for free and is trusted through its
+chain, not through a list piggy keeps; and that the signature is its own
+metadata field, never the type-line lock.
+
+This RFC is piggy's part: the document (the envelope), what is signed and
+how, and the chain rules (who may certify whom, how rights move, how
+validity and revocation work, how a verifier walks). The right vocabulary
+that rides in the document is the consumer's. The needs of the first
+consumers shaped this text; piggy is upstream of them, so nothing below
+cites them normatively.
+
+Scope: the `piggy-act-v1` document; its canonical bytes; the seal (key,
+namespace, hash, signature); the act digest; two markl purposes; the
+chain rules; the verification algorithm; the display rule; the mapping
+onto RFC 0012's namespaces. Out of scope: the right vocabularies (the
+consumers'); where acts are stored and found (the consumers'); the request
+and decision records an act names; the holder that keeps software keys
+(FDR 0006).
+
+Terms: **act** is one `piggy-act-v1` document; **head** is its hyphence
+metadata section; **body** is its optional hyphence body; **seal** is the
+four fields that let a verifier rebuild the sshsig; **certifying act** is
+a `root` or `link`, which binds a key to a principal and forms the chain;
+**annotating act** is a `grant`, `narrow`, `escalation`, `approval` or
+`revocation`, which attaches to the chain by naming acts; **chain** is the
+path of certifying acts from one act to a card-signed root; **card act**
+is an act signed through `operator-act@piggy` (RFC 0012); **software
+act** is an act signed by a principal's own key through an ordinary agent
+sign request; **principal** is an identity named by the platform that runs
+it, opaque to piggy; **trust anchor** is a card public key a verifier
+trusts as a root signer.
+
+## Requirements Language
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD",
+"SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be
+interpreted as described in RFC 2119.
+
+## Specification
+
+### 1. The document
+
+An act is a hyphence document (hyphence RFC 0001, RFC 0002, RFC 0003) whose
+type line is `! piggy-act-v1`. Its head carries the act in field lines
+(hyphence RFC 0002 field content, `- key = value`). Its body is OPTIONAL
+and informational.
+
+A head MAY contain only: `#` description lines, `- key = value` field
+lines, and the `! piggy-act-v1` type line, plus `%` comments (which are
+not signed, §3.1). A bare `-` tag or reference line, a `<` line, an `@`
+blob line, a quoted field name, or a type-line lock MUST be refused.
+
+A head-only act is the normal case (R: "the body can be empty entirely").
+When a body is present it MUST be shown with the head (§6) and a verifier
+MUST NOT derive any authorization from it; it is a human note. The whole
+canonical form, body included, obeys RFC 0012 §2.5's character rules
+(UTF-8; no C0 or C1 control character other than LF and TAB).
+
+A field value is a hyphence `FieldValue` (V hyphence
+`hyphence-content.peg`: a markl-id, a quoted string, or a bare word). A
+markl-id whose purpose slot is bare needs no quoting (V, RFC 0011 §2.2
+and the peg's `FieldValue <- MarklTerm / String / Bareword`). A bare word
+MUST NOT contain a hyphence reserved rune, so a value that would (a space,
+a comma, a quote) MUST be written as a quoted string; the fields below are
+chosen so that no value needs quoting.
+
+### 2. Fields
+
+Field names are hyphence identifiers. piggy owns the unprefixed names
+below; a consumer MAY add fields whose names carry its own prefix and a
+colon (`spinclass:profile = dev`; V the peg admits an interior `:` followed
+by an identifier rune). Prefixed fields MUST be carried and signed (§3)
+and MUST be ignored by the chain rules (§4). An unprefixed field this
+document does not define MUST be refused. A field marked **set** is
+repeatable, one line per value, and its values form a set (§3.1 orders
+them); every other field MUST appear at most once.
+
+| Field | Values | Required | Meaning |
+|---|---|---|---|
+| `kind` | `root`, `link`, `grant`, `narrow`, `escalation`, `approval`, `revocation` | yes | the chain operation (§4.1) |
+| `producer` | a namespaced identifier, `<domain>:<name>` | yes | the program that built the act, named in its own domain; no piggy registry (§7) |
+| `subject` | a principal id (opaque, no reserved runes) | all kinds except `approval`, `revocation` | the principal the act is about |
+| `subject-key` | markl-id of a public key, purpose `piggy-principal_pub-v1`, format `ssh_ed25519_pub` or `ssh_ecdsa_nistp256_pub` | `root`, `link` | the key being certified |
+| `object` | a markl-id or an opaque id | `grant`; optional on `escalation`, `revocation` | the thing the rights are over, in the consumer's naming |
+| `issuer` | a principal id, or `operator` | yes | who signs; `operator` iff `key` is a trust anchor (§5.1) |
+| `issuer-key` | markl-id of the signing public key: purpose `piggy-piv_sig-v1` for a card act, `piggy-principal_pub-v1` for a software act | yes | equals `key` |
+| `issuer-record` | act digest (§3.5) | every software act; MUST be absent on a card act | the certifying act that binds `issuer-key` to `issuer` |
+| `right` | a namespaced string, `<domain>:<name>`; **set** | `root`, `link`, `grant`, `narrow`, `escalation` | one right; the vocabulary is the consumer's; piggy checks set relations only |
+| `names` | act digest (§3.5); **set** | `narrow`, `escalation`, `revocation`; optional on `approval` | the **acts** this act modifies, supersedes or revokes (§4) |
+| `records` | a markl-id digest of a record that is not an act; **set** | `approval`; `escalation` SHOULD; `root` and `link` SHOULD | the consumer's records this act answers or decides (a request, a decision); opaque to piggy, never resolved by §5 |
+| `prev` | record digest; **set** | optional | parents in the consumer's history (a DAG) |
+| `not-before` | timestamp (below) | optional | not valid before |
+| `not-after` | timestamp (below) | every card certifying act (`root`, card `link`); optional elsewhere | hard expiry (§4.5) |
+| `issued-at` | timestamp (below) | yes | when signed, as the issuer claims; informational, never used by §4 or §5 |
+| `assurance` | `piggy:hardware`, `piggy:software`, or a consumer's `<domain>:<name>` | yes | how the signing key was exercised (§4.7) |
+| `nonce` | a bare word | optional | uniqueness when a consumer needs it |
+| `key` | markl-id of the signing public key, spelled exactly as `issuer-key` | yes (seal) | the sshsig `publickey` |
+| `namespace` | an RFC 0012 §3 namespace | yes (seal) | the sshsig namespace |
+| `hash` | `sha256` or `sha512` | yes (seal) | the sshsig hash algorithm |
+| `signature` | markl-id, purpose `piggy-record-sig-v1`, format `ed25519_sig` or `ecdsa_p256_sig` | yes (seal) | the raw signature, SSH framing stripped (RFC 0012 §4) |
+
+`issuer-key` and `key` MUST be equal; both exist so the seal is
+self-contained and the chain edge is explicit. For a `narrow`, `issuer`
+MUST equal `subject`. A prefixed field MAY repeat; its values form a set.
+
+**Timestamps** are RFC 3339 in the one spelling
+`YYYY-MM-DDThh:mm:ssZ`: UTC, uppercase `T` and `Z`, whole seconds, no
+offset. Any other RFC 3339 spelling MUST be refused, so equal instants
+have equal bytes.
+
+**Key payloads.** RFC 0011 §5 defines `ssh_ed25519_pub` as the 32-byte
+raw public key and `ssh_ecdsa_nistp256_pub` as the 33-byte SEC1
+compressed point (V). A verifier rebuilds the sshsig `publickey` blob
+(RFC 4253 §6.6) as: for Ed25519, `string "ssh-ed25519"`, `string <32
+bytes>`; for P-256, `string "ecdsa-sha2-nistp256"`, `string "nistp256"`,
+`string <65-byte uncompressed point>` obtained by decompressing the
+payload (RFC 5656 §3.1). A payload that does not decompress MUST be
+refused.
+
+### 3. Canonical bytes, the seal and the act digest
+
+#### 3.1. Canonical form
+
+The **canonical form** of an act is the byte string a conforming hyphence
+encoder emits (hyphence RFC 0001 "Encoder Behavior", RFC 0002, RFC 0003)
+for the document after these normalizations, in order:
+
+1. every `%` comment and every trailing comment is removed;
+2. each `#` line is trimmed of leading and trailing whitespace, empty
+   ones are dropped, and the rest are joined with single spaces into one
+   `#` line, placed first; an act with no description has none;
+3. the field lines are ordered: piggy's fields in the order of the §2
+   table, then every prefixed field sorted by field name as bytes; within
+   a **set** field the values are sorted as bytes over their parsed
+   (unquoted) values, and duplicates removed;
+4. the `signature` line is removed;
+5. the type line `! piggy-act-v1`, with no lock, comes last;
+6. field lines are written in hyphence's spaced canonical spelling,
+   `- key = value` (V hyphence RFC 0003, "canonical emission: spacing").
+   A value is bare when hyphence allows it; otherwise it is a
+   double-quoted string in which `\` and `"` are written `\\` and `\"`,
+   a tab is written `\t`, and every other character is itself (the
+   `String` production hyphence imports from piggy's `marklid.peg`, V
+   `hyphence-content.peg`; the quoting piggy-markl's `quote_purpose`
+   applies). A markl-id's purpose slot is bare when it can be;
+7. the opening and closing `---` boundaries are included; if a body with
+   at least one byte is present, the separator line and the body bytes
+   follow unchanged; a separator followed by no bytes is not a body, and
+   the document then ends with the closing boundary's line feed.
+
+Two acts whose parsed content is equal MUST have equal canonical form,
+whatever order, spacing or comments they arrived with.
+
+#### 3.2. What is signed
+
+The canonical form (§3.1) is the **text** in RFC 0012's sense: what the
+agent shows at the PIN prompt and what it hashes. The signed data is
+`PROTOCOL.sshsig` §3 over that text with the act's `namespace` and `hash`,
+exactly as RFC 0012 §2.7 computes it. Nothing else is signed; the
+`signature` field, the comments and the arrival order of lines are not.
+
+A producer MUST send the canonical form as the `operator-act@piggy` text
+(card act) or as the message of an ordinary sign request (software act).
+The agent does not canonicalize; a producer that sends a non-canonical
+document obtains a signature every verifier refuses.
+
+#### 3.3. The seal
+
+After signing, the producer adds the `signature` field: the sshsig blob's
+`signature` field with its SSH framing stripped to the fixed-width form
+RFC 0011 §5 defines, under `piggy-record-sig-v1` (RFC 0012 §4). The other
+three seal fields (`key`, `namespace`, `hash`) are written before signing
+and are inside the signed bytes.
+
+A sealed act and a detached sshsig blob are equivalent: the blob is
+rebuilt from the four seal fields (`PROTOCOL.sshsig` §2: `publickey` from
+`key`, `namespace`, empty `reserved`, `hash_algorithm` from `hash`,
+`signature` re-framed from the field) and the text is the canonical form.
+A verifier MAY verify either way; `ssh-keygen -Y verify` over the rebuilt
+blob and the canonical form MUST accept exactly the signatures §5.2 step 2
+accepts. A verifier given a detached blob MUST check that the blob's
+namespace and public key equal the `namespace` and `key` fields.
+
+#### 3.4. Size
+
+The canonical form of a card act MUST NOT exceed RFC 0012 §2.5's 4096
+bytes. A producer SHOULD keep it to what one prompt shows without
+scrolling (Limitations). A software act has no prompt and no size rule
+beyond its carrier's.
+
+#### 3.5. The act digest
+
+An act is named by its **act digest**: a markl-id under
+`piggy-record-digest-v1` (RFC 0012 §4) over the **sealed canonical form**,
+which is the canonical form of §3.1 with the `signature` line present, in
+its table position. Producers MUST emit `blake2b256`; verifiers MUST
+accept `blake2b256` and `sha256`. Because the signature is inside the
+digested bytes, two signings of one head are two acts.
+
+### 4. Chain rules
+
+#### 4.1. Kinds
+
+| `kind` | Class | Signer | Effect |
+|---|---|---|---|
+| `root` | certifying | the card (`issuer = operator`) | binds `subject-key` to `subject`, grants its `right` set and sets a hard `not-after`; starts a chain |
+| `link` | certifying | a certified principal (software) or the card | binds `subject-key` to a child `subject` with a `right` set ⊆ the issuer's effective rights; a **card `link`** is bounded by nothing, MUST carry `not-after`, and starts a chain like a `root` |
+| `grant` | annotating | a certified principal or the card | gives `subject` the `right` set over `object`; software: ⊆ the issuer's effective rights |
+| `narrow` | annotating | the subject's own key only (`issuer = subject`) | shrinks the effective rights of each act in `names` (all of which MUST have this `subject`) to their intersection with this `right` set |
+| `escalation` | annotating | the card | sets the effective rights of the one certifying act or `grant` in `names` whose `subject` is this act's `subject` to this `right` set, which MAY exceed anything in the chain; `names` MAY also hold earlier `escalation` and `narrow` acts on that act, which it supersedes; SHOULD list the request in `records` |
+| `approval` | annotating | the card | records a decision that confers no right; MUST list the decision in `records` |
+| `revocation` | annotating | the card, or the key that signed the revoked act | ends the validity of every act in `names` and of every certifying act below a revoked certifying act |
+
+**Card acts have no `issuer-record`.** The card's key is the trust anchor
+(§5.1), not a certified key, so a card act's chain edge is the anchor
+itself; a card certifying act (a `root`, or a card `link`) is a **chain
+start**. **Software acts MUST have one**, and it MUST resolve to a valid
+certifying act whose `subject-key` equals this act's `key` and whose
+`subject` equals this act's `issuer`.
+
+`names` holds acts only; a verifier resolves every entry and answers
+undetermined when it cannot (§5.3). `records` holds the consumer's
+records; piggy never resolves them, and a consumer's verifier checks them
+by its own rules.
+
+#### 4.2. Rights move down, never up, without the card
+
+A right is an opaque namespaced string; piggy checks set relations only
+(byte equality of values). For a software `link` or `grant`, the `right`
+set MUST be a subset of the issuer's effective rights at verification
+time; a verifier MUST refuse one that is not. A `narrow` MUST be signed by
+its subject's own key and can only remove. Only an `escalation`, a card
+act, may add. A card `link` or `grant` is bounded by nothing but the
+operator's judgement at the prompt.
+
+#### 4.3. Effective rights
+
+The **effective rights** of a certifying act C are computed from its
+chain start down:
+
+1. a chain start (`root`, card `link`): its `right` set.
+2. a software `link`: its `right` set ∩ the effective rights of its
+   issuer's certifying act.
+3. Then the valid `escalation` acts naming C that are not superseded (not
+   named by another valid escalation): if there is exactly one, replace
+   the set with its `right` set; if there are several, C is
+   **invalid** (conflicting escalations) until one supersedes the others.
+4. Then every valid `narrow` naming C that is not superseded by the
+   applied escalation: intersect with its `right` set. Issue order is
+   irrelevant: a narrow cuts an escalation that does not name it, so the
+   card restores a narrowed right only by an escalation that names the
+   narrow.
+
+The effective rights of a `grant` G over its `object` are G's `right` set,
+then steps 3 and 4 applied with escalations and narrows naming G. A
+`grant`'s rights belong to its `subject` over its `object` only; they
+never flow into the subject's certifying chain. An `escalation` or
+`narrow` has no effective rights of its own; `approval` and `revocation`
+confer none.
+
+Annotating acts are found by what they name, not by walking from them: a
+verifier MUST consult its source of acts for every valid `escalation`,
+`narrow` and `revocation` naming any act it evaluates (§5.3 when it
+cannot).
+
+#### 4.4. Where a principal's key comes from
+
+A software act's `issuer` is a principal, and its `key` MUST be bound to
+that principal by the certifying act its `issuer-record` names. A
+`grant`'s `subject` and a `narrow`'s `subject` are principals whose keys
+are bound by their own certifying chains; a verifier that must act on a
+grant finds the grantee's current certifying act by `subject` in its
+store and checks that chain too.
+
+#### 4.5. Validity and expiry
+
+An act is **valid** at time T when: its signature verifies (§5.2); its
+`not-before`, if any, is not after T; its effective expiry is after T; it
+is not revoked; and, for a software act, its `issuer-record` act is valid
+at T. The **effective expiry** is: of a card certifying act, its own
+`not-after`, which it MUST carry; of a software act (certifying or
+annotating), the earliest of its own `not-after` and its issuer's
+certifying act's effective expiry; of a card annotating act, its own
+`not-after`, and none if it carries none (it then ends only by
+revocation or supersession). Renewal is a new chain start; nothing below
+needs re-signing unless its own `not-after` has passed.
+
+#### 4.6. Revocation
+
+A `revocation` is an act and is valid under §4.5. It revokes each act in
+`names` from the moment a verifier learns of it. A software `revocation`
+MUST be signed by the same `key` that signed each act it names; a card
+`revocation` MAY name any act. A revoked certifying act invalidates every
+certifying act whose chain passes through it and every annotating act
+whose `issuer-record` resolves through it. A `revocation` MUST NOT be
+named by another `revocation`: revocations are final. Where verifiers
+obtain revocations is the consumers' concern; a verifier that cannot
+consult any revocation source MUST answer undetermined (§5.3).
+
+#### 4.7. Assurance
+
+`assurance` says how the signing key was exercised. piggy defines two
+values and leaves the rest to consumers: `piggy:hardware` MUST be, and
+MUST only be, the value of a card act (a key that satisfies RFC 0012 §2.4,
+exercised with PIN and touch; the verifier knows this because the act's
+`namespace` is a card namespace and its `key` is a trust anchor);
+`piggy:software` is the value of an act signed by a principal's held key
+with nothing else claimed. Any other value is a consumer's
+(`barker:device`), MUST be on a software act, and is opaque to piggy;
+what it means and what operations require it are the consumer's rules.
+
+#### 4.8. Namespaces and kinds
+
+The seal's `namespace` MUST be registered in RFC 0012 §3, and the `kind`
+MUST be allowed for it:
+
+| `namespace` | Signer | `issuer` | Allowed `kind` |
+|---|---|---|---|
+| `piggy-certificate-v1` | card | `operator` | `root`, `link`, `revocation` |
+| `piggy-escalation-v1` | card | `operator` | `escalation`, `grant` |
+| `piggy-approval-v1` | card | `operator` | `approval` |
+| `piggy-record-v1` | a principal's own key, ordinary sign request | a principal | `link`, `grant`, `narrow`, `revocation` |
+
+`piggy-quote-v1` carries no act (a quote is a retrieval, RFC 0012 §3). A
+verifier MUST refuse any pairing this table does not list, an `issuer` the
+row does not allow, and an `assurance` inconsistent with the row (§4.7).
+This table replaces the per-namespace text shapes of RFC 0012 §3 for every
+act (Compatibility).
+
+### 5. Verification
+
+#### 5.1. Trust anchors
+
+A verifier holds a set of card public keys it trusts as root signers:
+keys whose RFC 0012 §5 attestation bundle it has checked, or an
+allowed-signers file naming them. piggy defines no distribution for the
+set; the verifier's owner does. `issuer = operator` MUST be used, and MUST
+only be used, when `key` is in that set.
+
+#### 5.2. Algorithm
+
+Given an act A, a time T and a store S of acts:
+
+1. Parse A; refuse a type other than `piggy-act-v1`, a line kind §1
+   forbids, a duplicate non-set field, an unknown unprefixed field, a
+   missing required field, or a value outside §2.
+2. Compute the canonical form (§3.1) from the parsed document and the
+   signed data (§3.2); verify `signature` under `key` with the algorithm
+   the key type requires. Refuse on failure.
+3. Check `issuer-key = key`; check the `namespace`, `kind`, `issuer` and
+   `assurance` rules (§4.7, §4.8); for a `narrow`, check
+   `issuer = subject`.
+4. If A is a card act: `key` MUST be a trust anchor; `issuer-record` MUST
+   be absent; a card certifying act MUST carry `not-after`. Otherwise
+   resolve `issuer-record` in S to a certifying act P; refuse if missing,
+   if P's `subject-key` is not `key` or P's `subject` is not `issuer`, or
+   if P is not valid at T (this algorithm, recursively, depth capped).
+5. For a software act, apply the kind's rule (§4.1, §4.2) against the
+   effective rights of P. A card act is bounded by no P (§4.2).
+6. Resolve every act in `names`; answer undetermined if one cannot be
+   resolved; refuse if an entry is not of a kind the §4.1 row allows, or
+   has a `subject` the row requires to match and it does not. Collect
+   from S the valid `escalation`, `narrow` and `revocation` acts naming A
+   (and, for a certifying A, naming any act on its chain); compute
+   effective rights (§4.3) and effective expiry (§4.5); refuse if
+   expired, not yet valid, revoked (§4.6), or invalid under §4.3 step 3.
+7. Return the verdict.
+
+A verifier MAY memoize a valid act until its effective expiry or until it
+learns of a `revocation`, `narrow` or `escalation` naming it or any act
+on its chain.
+
+#### 5.3. The result
+
+The answer is one of: **valid**, with the effective expiry, the
+`assurance`, the chain start's `key`, and for a certifying act or `grant`
+its effective rights (for a `grant`, with its `object`); **invalid**, with
+the step of §5.2 that failed and the act digest; **undetermined**, when an
+act in `names` or `issuer-record` could not be resolved or no revocation
+source was reachable. A consumer MUST NOT treat undetermined as valid.
+`records` entries are returned as given and are the consumer's to check.
+
+#### 5.4. The reference verifier
+
+piggy provides the verifier and the canonicalization of §3.1 as a library
+and a CLI verb (working name `piggy act verify`), with a pluggable store
+interface, so every consumer runs the same rules. Consumers MAY implement
+their own against the vectors of Conformance Testing.
+
+### 6. Display
+
+For a card act the canonical form is the text RFC 0012 §2.5 and §2.6
+govern: the agent MUST show it verbatim and in full, every head line, with
+the class banner, card and slot, and namespace RFC 0012 §2.6 requires (R:
+"since metadata IS the prompt, show it"). As RFC 0012 §2.6 allows, the
+askpass MAY wrap long lines and MAY emphasize spans (`kind`, `subject`,
+`right`, `not-after`, the body); it MUST NOT omit, truncate or reorder
+lines. A software act has no display.
+
+### 7. Producers
+
+A producer is any program that builds a canonical act, obtains its
+signature and adds the seal. It names itself in `producer` with an
+identifier in its own domain (`barker:act-v1`, `piggy:operator-sign-v1`),
+which is inside the signed bytes. piggy keeps no registry of producers
+(R): a domain registers its own names for itself, and a producer's acts
+carry authority because the key that signed them is bound by a valid
+chain, never because of the name. A verifier MAY apply its own policy to
+`producer` (accept only names it knows) and MUST NOT grant anything on its
+strength.
+
+### 8. Purposes
+
+Two markl purposes are registered in RFC 0011 §6.1's sense, owned by
+piggy, to be added to RFC 0011's table and to `crates/piggy-markl` with
+the reference verifier:
+
+| Purpose | Owner | Compatible formats | Description |
+|---|---|---|---|
+| `piggy-principal_pub-v1` | piggy | `ssh_ed25519_pub`, `ssh_ecdsa_nistp256_pub` | the public key of a principal certified by a `piggy-act-v1` certifying act |
+
+`piggy-record-digest-v1` and `piggy-record-sig-v1` (RFC 0012 §4) are
+reused unchanged: the first names an act (§3.5), the second its raw
+signature (§3.3).
+
+### 9. Examples
+
+Spelling note: the two card examples are the canonical form (§3.1), which
+is what the operator saw; their producers add the `signature` line after
+`hash` afterwards. The software example is shown sealed (§3.5), with its
+`signature` line.
+
+A card root for a human-started session, blessed at session start; its
+`records` line is the enrollment request it answers. The operator saw
+exactly these lines under the `certificate` banner, entered the PIN,
+touched:
+
+    ---
+    # root: operator blesses session 72dca00c
+    - kind = root
+    - producer = troupe:root-v1
+    - subject = clown:72dca00c-1c93-41d1-a2ad-9e530b9e30ee
+    - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-…
+    - issuer = operator
+    - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-…
+    - right = spinclass:check
+    - right = spinclass:close
+    - right = spinclass:grant
+    - right = spinclass:merge
+    - right = spinclass:observe
+    - right = spinclass:profile:dev
+    - records = piggy-record-digest-v1@blake2b256-…
+    - not-after = 2026-11-09T23:00:00Z
+    - issued-at = 2026-11-08T23:00:00Z
+    - assurance = piggy:hardware
+    - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-…
+    - namespace = piggy-certificate-v1
+    - hash = sha256
+    ! piggy-act-v1
+    ---
+
+A narrowing the session performs on itself, no prompt (a software act;
+`names` is the root above):
+
+    ---
+    # narrow: drop merge for the rest of the day
+    - kind = narrow
+    - producer = spinclass:narrow-v1
+    - subject = clown:72dca00c-1c93-41d1-a2ad-9e530b9e30ee
+    - issuer = clown:72dca00c-1c93-41d1-a2ad-9e530b9e30ee
+    - issuer-key = piggy-principal_pub-v1@ssh_ed25519_pub-…
+    - issuer-record = piggy-record-digest-v1@blake2b256-…
+    - right = spinclass:check
+    - right = spinclass:close
+    - right = spinclass:grant
+    - right = spinclass:observe
+    - right = spinclass:profile:dev
+    - names = piggy-record-digest-v1@blake2b256-…
+    - issued-at = 2026-11-08T23:30:00Z
+    - assurance = piggy:software
+    - key = piggy-principal_pub-v1@ssh_ed25519_pub-…
+    - namespace = piggy-record-v1
+    - hash = sha256
+    - signature = piggy-record-sig-v1@ed25519_sig-…
+    ! piggy-act-v1
+    ---
+
+An escalation answering a request record, at the card; `names` holds the
+worker's `link` (whose rights it replaces) and `records` the request:
+
+    ---
+    # escalation: merge for worker 138b6dd2, one run
+    - kind = escalation
+    - producer = troupe:escalation-v1
+    - subject = clown:138b6dd2-5023-4957-b7c2-05e8dc8ee6e5
+    - issuer = operator
+    - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-…
+    - right = spinclass:close
+    - right = spinclass:merge
+    - right = spinclass:observe
+    - names = piggy-record-digest-v1@blake2b256-…
+    - records = piggy-record-digest-v1@blake2b256-…
+    - not-after = 2026-11-09T01:00:00Z
+    - issued-at = 2026-11-08T23:40:00Z
+    - assurance = piggy:hardware
+    - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-…
+    - namespace = piggy-escalation-v1
+    - hash = sha256
+    ! piggy-act-v1
+    ---
+
+Verifying a signature by hand on any host: rebuild the sshsig from the
+seal, write the canonical form (the sealed act minus its `signature`
+line) to a file, and
+
+    ssh-keygen -Y verify -f allowed_signers -I operator \
+      -n piggy-escalation-v1 -s act.sig < act.canonical
+
+The chain walk (§5.2 steps 4 to 6) is the reference verifier's.
+
+## Security Considerations
+
+- **The words carry nothing.** Authorization comes from `kind`, the
+  `right` set, the chain and the seal; a body or description, however
+  persuasive, is ignored by §5. An attacker who gets the operator to sign
+  a head obtains the power the head says, which is why the head is shown
+  in full (§6) and why a right is a short opaque token the operator can
+  read.
+- **Canonicalization is in the trust path.** A divergence between
+  producer and verifier makes a good act fail (safe). A verifier that
+  accepted arrival bytes without recomputing could let two documents
+  share a signature; §5.2 step 2 always recomputes from the parsed
+  document.
+- **Namespace and kind are both inside the signed bytes**, and the
+  namespace is bound a second time by `PROTOCOL.sshsig`. A signature for
+  one kind cannot be replayed as another (§4.8).
+- **The ordinary sign path can only narrow.** A software act is an
+  ordinary sign request under `piggy-record-v1`, which RFC 0012 §2.7
+  leaves unguarded by design; under §4.2 such an act can give away a
+  subset of what its signer holds and nothing more, so a compromised
+  principal cannot raise itself or its children.
+- **Expiry rests on the chain start.** Verifiers' clocks decide validity;
+  `issued-at` is a claim and is used by nothing. Every card certifying act
+  carries a hard expiry; a long-lived software link is bounded by the card
+  act above it.
+- **Revocation reach.** A verifier that cannot reach a revocation source
+  answers undetermined (§5.3); consumers that treat undetermined as valid
+  defeat revocation, and §5.3 forbids it.
+- **Prefixed fields are signed but ignored by the chain rules**, so a
+  consumer field cannot widen rights by being misread, and it cannot be
+  stripped without breaking the signature.
+- **Prompt size.** A head too long for one screen invites skimming; §3.4
+  and the Limitations bound it.
+
+## Conformance Testing
+
+Conformance tests for this specification live in
+`zz-tests_bats/conformance/` and `docs/rfcs/0013-vectors.txt` (written
+with the reference verifier). Tests use binary injection via `bats-emo`:
+
+    require_bin PIGGY piggy
+    require_bin FIBBY fibby
+
+### Covered Requirements
+
+| Requirement | Test File | Description |
+|-------------|-----------|-------------|
+| §1, §5.2 step 1, line and field rules | `act_refusals.bats` | a bare `-` line, an `@` line, a type-line lock, a duplicate `kind`, an unknown unprefixed field, a missing `issuer-key`, a card act with `issuer-record`, are refused |
+| §2, set fields | `act_canonical.bats` | repeated `right` and `names` values arriving in any order and with duplicates canonicalize to one sorted set |
+| §3.1, canonical form is order-, spacing- and comment-insensitive | `act_canonical.bats` | the same act in three line orders, unspaced, with comments, yields one canonical form and one digest |
+| §3.2, §3.3, seal equivalence | `act_seal.bats` | a sealed act rebuilt as a detached sshsig verifies under `ssh-keygen -Y verify`, and vice versa; a blob whose namespace differs from the field is refused |
+| §3.4, size | `act_refusals.bats` | a canonical form over 4096 bytes is refused by the agent as `refused-text` |
+| §3.5, act digest | `act_canonical.bats` | the digest covers the signature; re-signing yields a new digest |
+| §4.1, §5.2 step 4, chain edge | `act_chain.bats` | a software act whose `issuer-record` names an act with another `subject-key` or `subject` is refused; a card act with a non-anchor key is refused |
+| §4.2, rights never widen without the card | `act_chain.bats` | a software `link` or `grant` with a right its issuer lacks is refused; a `narrow` signed by another key is refused |
+| §4.3, effective rights | `act_chain.bats` | an `escalation` naming a `link` replaces its set; a `narrow` intersects it whatever the issue order; two unsuperseded escalations on one act make it invalid; an escalation naming the narrow lifts it |
+| §4.1, §5.2 step 6, `names` and `records` | `act_chain.bats` | an escalation whose `names` entry is not an act, or has another subject, is refused; an unresolvable `names` entry answers undetermined; a `records` entry is never resolved |
+| §4.5, effective expiry | `act_chain.bats` | a child whose root has expired is invalid; a child with no `not-after` inherits the root's |
+| §4.6, revocation | `act_chain.bats` | an act below a revoked `link` is invalid; a software revocation by a different key is refused; a revocation naming a revocation is refused |
+| §4.7, §4.8, namespace, kind, issuer, assurance | `act_refusals.bats` | an `escalation` under `piggy-record-v1`, a `narrow` under a card namespace, `piggy:hardware` on a software act, are refused |
+| §5.3, undetermined | `act_chain.bats` | an unresolvable `issuer-record` and an unreachable revocation source answer undetermined, never valid |
+| §6, the prompt shows the whole head | `operator_act_prompt.bats` | the test askpass receives every head line verbatim in canonical order |
+
+## Compatibility
+
+- **RFC 0012** stays the wire RFC for card acts: the extension, status
+  codes, display rules and namespace registry are unchanged. These parts
+  of its text are amended when this RFC is accepted:
+  - §3's per-namespace text shapes for `piggy-certificate-v1`,
+    `piggy-escalation-v1` and `piggy-approval-v1` become "the text is a
+    `piggy-act-v1` document (RFC 0013) whose `kind` RFC 0013 §4.8 allows";
+    the `piggy-quote-v1` row is unchanged.
+  - §3's `piggy-record-v1` row, "the message is the record's canonical
+    bytes as troupe's RFC defines them", gains: "or a `piggy-act-v1`
+    software act (RFC 0013)".
+  - §3.1 (the kinds an escalation names) is read through §4.1 here: a
+    grant or widening is an `escalation` naming the act it replaces; a
+    profile transition, which confers no right, is an `approval` naming
+    the transition record.
+  - §1 Scope's "the signed-record grammar and canonicalization" stays out
+    of RFC 0012's scope; this RFC defines the grammar for acts only.
+  - §4's note that the carrier of a record's signature is the consumer's
+    decision stands for records that are not acts.
+- **RFC 0011** gains the purpose of §8 by amendment to its §6.1.
+- **RFC 0008 (pigpen)** carries its header MAC in the type-line lock, which
+  the operator's ruling disallows for signatures. A MAC is not a
+  signature and this RFC does not amend RFC 0008; whether pigpen should
+  move its MAC to a field, and whether a pigpen document may carry an act's
+  signature over its sealed header, is an open question for the operator.
+  Until ruled, a sealed record that must be acted on is named from an act
+  by digest, not signed in place.
+- **Consumers' existing records.** A consumer whose records are not
+  hyphence documents keeps them and names them from acts by digest.
+  Whether a consumer moves its own records onto `piggy-act-v1` is its
+  decision.
+- **Version.** A change to the canonical form, the seal, the digest, or a
+  non-additive change to the field set is `piggy-act-v2`; adding an
+  optional unprefixed field is an amendment to §2.
+
+## Limitations and deviations from the rulings
+
+- **Nesting is by reference.** The operator's comment asked for the head
+  to carry the permission "through nested hyphence documents". A hyphence
+  head cannot contain another document (a metadata line cannot contain a
+  line feed, V hyphence RFC 0001), so the tree is built of references by
+  digest (`names`, `prev`, `object`, prefixed fields) that a verifier
+  resolves from the consumers' store. Stated here as a deviation for the
+  operator to accept or overrule.
+- **The permissions language is a set algebra, not a program.** The
+  operator asked for a language expressive enough for any permission.
+  This RFC gives: opaque rights, subset on the way down, replacement by
+  escalation, intersection by narrowing, an `object` on grants, and
+  consumer fields for anything richer. Anything that needs computation
+  over rights (predicates, conditions) lives in the consumer's own fields
+  and verifier. Stated as a deviation for the operator.
+- **One prompt.** A card act's head must fit a prompt (4096 bytes hard,
+  about fifteen lines comfortable). A large right set is the consumer's
+  to compress (a profile right instead of a list).
+- **piggy does not distribute.** Where acts, revocations and trust
+  anchors are stored and found is the consumers'.
+- **Who may revoke.** This draft lets the signing key revoke what it
+  signed without the card. The operator may want revocation to be the
+  card's alone.
+- **Banner for card revocations.** A card `revocation` is signed under
+  `piggy-certificate-v1` and so appears under the `certificate` banner,
+  also when it revokes an `escalation` or `approval`. A distinct class
+  would need an RFC 0012 amendment; flagged for the operator.
+- **A narrow outlives a later escalation unless named.** By §4.3 step 4,
+  a self-narrow keeps cutting until the card names it in an escalation.
+  Deliberate (the card always wins, but has to say so); flagged for the
+  operator.
+
+## Tuning Levers
+
+| Lever | Current | Rationale | Change signal |
+|---|---|---|---|
+| chain depth cap | 32 | a stack never needs more; bounds a verifier's work | a legitimate tree exceeds it |
+| card-act head size | 4096 bytes hard (RFC 0012); about 1200 characters recommended | one screen, no scrolling | operators report skimming, or producers hit the cap |
+| time precision | seconds, UTC | enough for expiry; no sub-second clocks across hosts | a consumer needs finer |
+| memoization | until effective expiry or an annotating act on the chain is learned | verifiers are called often | a revocation is observed to be missed |
+| digest format emitted | `blake2b256` | matches the record purposes' existing use | a consumer needs sha256 only |
+
+## References
+
+### Normative
+
+- OpenSSH `PROTOCOL.sshsig` §2 and §3 — the sshsig blob and signed data.
+- RFC 4253 §6.6 — SSH public key blob encoding.
+- piggy RFC 0012 — the `operator-act@piggy` extension, display rules, the
+  namespace registry (§3), the record purposes (§4), the attestation
+  bundle (§5).
+- piggy RFC 0011 — markl-id format and the purpose and format registries;
+  §2.2 for embedding a purposed id in a host grammar.
+- hyphence RFC 0001 (the document), RFC 0002 (content grammar), RFC 0003
+  (markl atomic locks) and `hyphence-content.peg` — the carrier and its
+  canonical emission. All three are `proposed` at the time of writing.
+- RFC 2119 — requirement keywords. RFC 3339 — timestamps.
+
+### Informative
+
+- piggy FDR 0007, decision 5 (the rulings this RFC implements); piggy FDR
+  0006 (the holder behind software keys).
+- piggy RFC 0008 — pigpen, for the MAC-in-lock construction this RFC does
+  not follow.
+- The needs of the first consumers (spinclass's principal, handle and
+  profile records; barker's acts from the phone) informed the field set
+  and the chain rules; piggy is upstream of them and does not cite them
+  normatively.
