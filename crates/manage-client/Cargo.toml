@@ -2,6 +2,7 @@
 name = "manage-client"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 
 # Test-only helper: a scripted JSON-RPC *command client* for the `piggy manage`
 # conformance lane (piggy#201, RFC 0007). The inverse of card-frontend-server —

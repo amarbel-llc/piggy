@@ -2,6 +2,7 @@
 name = "card-frontend-server"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 
 # Test-only helper: a scripted JSON-RPC frontend server for the `piggy card
 # init` JSON-RPC conformance lane (piggy#194, RFC 0006 §4). Mirrors the

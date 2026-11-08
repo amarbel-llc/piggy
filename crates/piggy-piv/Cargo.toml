@@ -2,6 +2,7 @@
 name = "piggy-piv"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 
 [features]
 # Default on: every piggy-side consumer keeps the PC/SC transport.

@@ -2,6 +2,7 @@
 name = "piggy-askpass-gtk"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 description = "The GTK dialog contrib/piggy-askpass.sh shows an operator act's PIN prompt in"
 # No license field until piggy#327 decides this crate's licence.
 publish = false

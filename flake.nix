@@ -174,6 +174,15 @@
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.pcsclite ];
             nativeBuildInputs = [ pkgs.pkg-config ];
             doCheck = false;
+            meta = with pkgs.lib; {
+              description = "Piggy rust workspace (piggy CLI + piggy-piv library)";
+              homepage = "https://code.linenisgreat.com/piggy";
+              # The piggy CLI is GPL-2.0-or-later; the library crates MPL-2.0.
+              license = [
+                licenses.gpl2Plus
+                licenses.mpl20
+              ];
+            };
           };
         };
       withIntelMac =
@@ -351,8 +360,7 @@
 
           # The operator-act dialog contrib/piggy-askpass.sh prefers on Linux
           # (crates/piggy-askpass-gtk). Its own derivation and Cargo.lock: it
-          # links GTK 4, which the workspace build must not need. No licence
-          # in meta until piggy#327 decides the crate's licence.
+          # links GTK 4, which the workspace build must not need.
           piggy-askpass-gtk = pkgs.rustPlatform.buildRustPackage {
             pname = "piggy-askpass-gtk";
             version = "0.1.0";
@@ -363,6 +371,7 @@
             meta = {
               description = "GTK dialog for piggy operator-act PIN prompts";
               homepage = "https://code.linenisgreat.com/piggy";
+              license = pkgs.lib.licenses.mpl20;
               mainProgram = "piggy-askpass-gtk";
               platforms = pkgs.lib.platforms.linux;
             };
@@ -444,7 +453,11 @@
                 meta = with pkgs.lib; {
                   description = "Piggy rust workspace (piggy CLI + piggy-piv library)";
                   homepage = "https://code.linenisgreat.com/piggy";
-                  license = licenses.mpl20;
+                  # The piggy CLI is GPL-2.0-or-later; the library crates MPL-2.0.
+                  license = [
+                    licenses.gpl2Plus
+                    licenses.mpl20
+                  ];
                   platforms = platforms.linux ++ platforms.darwin;
                 };
               }

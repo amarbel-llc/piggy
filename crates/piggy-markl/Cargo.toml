@@ -2,6 +2,7 @@
 name = "piggy-markl"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 # Prototype shim for the markl ID format used by amarbel-llc/madder.
 # Hand-ported from the Go reference at
 # https://github.com/amarbel-llc/madder/tree/main/go/internal/{alfa/blech32,bravo/markl}

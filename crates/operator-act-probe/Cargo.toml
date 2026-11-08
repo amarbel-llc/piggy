@@ -2,6 +2,7 @@
 name = "operator-act-probe"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 
 # Test-only helper: a raw `operator-act@piggy` client for the RFC 0012
 # conformance lanes. `piggy operator-sign` refuses to send a request it can

@@ -2,6 +2,7 @@
 name = "fibby"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 description = "Pure-Rust virtual PIV smart card that speaks the pcsc-lite client protocol directly (no pcscd / vsmartcard)."
 
 [[bin]]

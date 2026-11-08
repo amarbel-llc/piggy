@@ -2,6 +2,7 @@
 name = "piggy-pigpen"
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 description = "Prototype of the pigpen encrypted-document format (piggy RFC 0008) — pure-Rust, wasm-buildable"
 
 # This crate is intentionally NOT a member of the piggy workspace (see the
