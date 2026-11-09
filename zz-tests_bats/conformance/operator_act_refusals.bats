@@ -64,6 +64,30 @@ function key_nobody_serves_is_no_such_key { # @test
   _assert_no_prompt "an unserved key"
 }
 
+# piggy#308: a card the agent served, pulled and dropped by the presence
+# reconcile before the request arrives, is card-absent (status 6, which the
+# CLI treats as worth retrying), not no-such-key (status 1). No prompt.
+function a_card_pulled_after_the_reconcile_is_card_absent { # @test
+  operator_act_stack_up
+  local key_hex _
+  key_hex=$(operator_act_public_key 9C | awk '{print $2}' | base64 -d | od -An -tx1 | tr -d ' \n')
+  [[ -n $key_hex ]] || operator_act_fail "no 9C key served before the unplug"
+
+  "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" remove "$OPERATOR_ACT_READER" >/dev/null ||
+    operator_act_fail "fibby ctl remove failed"
+  for _ in $(seq 1 150); do
+    operator_act_public_key 9C | grep -q . || break
+    sleep 0.1
+  done
+  if operator_act_public_key 9C | grep -q .; then
+    operator_act_fail "the agent still serves 9C after the card was removed"
+  fi
+
+  operator_act_probe "$AGENT_SOCK" --key-hex "$key_hex"
+  assert_probe_status 6 "card-absent"
+  _assert_no_prompt "a pulled card"
+}
+
 function declined_prompt_is_cancelled_and_nothing_is_signed { # @test
   spawn_operator_card
   OPERATOR_ACT_AGENT_REFUSES_PROMPTS=1 spawn_card_agent

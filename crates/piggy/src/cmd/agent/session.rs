@@ -60,6 +60,11 @@ pub struct CachedKey {
 #[derive(Clone)]
 pub struct PiggyAgent {
     keys: Arc<Mutex<Vec<CachedKey>>>,
+    /// Every card key this agent has served in its lifetime (at startup, or
+    /// listed since). A request for one of them after its card left is
+    /// `card-absent`, which a caller retries; `no-such-key` is kept for a key
+    /// this agent never served (RFC 0012 §2.3, piggy#308).
+    once_served: Arc<Mutex<Vec<KeyData>>>,
     /// Per-card PIN cache (piggy#177): verified PINs keyed by GUID plus the
     /// not-yet-verified `ssh-add -X` offer. Shared with the probe loop.
     pins: Arc<Mutex<PinCache>>,
@@ -115,8 +120,10 @@ struct AcquiredPin {
 
 impl PiggyAgent {
     pub fn new(keys: Vec<CachedKey>) -> Self {
+        let once_served = keys.iter().map(|k| k.public_key.clone()).collect();
         Self {
             keys: Arc::new(Mutex::new(keys)),
+            once_served: Arc::new(Mutex::new(once_served)),
             pins: Arc::new(Mutex::new(PinCache::new())),
             prompt_lock: Arc::new(Mutex::new(())),
             card_lock: Arc::new(Mutex::new(())),
@@ -356,6 +363,8 @@ impl PiggyAgent {
                 })
                 .collect()
         };
+        self.remember_served(identities.iter().map(|i| &i.pubkey))
+            .await;
         // piggy#215: offer upstream keys AFTER the native PIV keys (ssh
         // tries identities in offer order, and native keys must win). A
         // pubkey served both natively and by an upstream is offered once,
@@ -828,6 +837,10 @@ impl PiggyAgent {
                     // the caller takes this agent for one without the
                     // extension. The prompt may still be up over there.
                     Some(Err(unanswered)) => refuse(Status::Error, unanswered),
+                    None if self.was_served(public_key.key_data()).await => refuse(
+                        Status::CardAbsent,
+                        "the card holding that key is not present".into(),
+                    ),
                     None => refuse(Status::NoSuchKey, "no agent here serves that key".into()),
                 };
             }
@@ -1003,6 +1016,21 @@ impl PiggyAgent {
             hash,
             &encoded,
         )))
+    }
+
+    /// Add `keys` to the record of card keys this agent has served.
+    async fn remember_served<'a>(&self, keys: impl Iterator<Item = &'a KeyData>) {
+        let mut once_served = self.once_served.lock().await;
+        for key in keys {
+            if !once_served.contains(key) {
+                once_served.push(key.clone());
+            }
+        }
+    }
+
+    /// Whether this agent has ever served `pubkey` from a card.
+    async fn was_served(&self, pubkey: &KeyData) -> bool {
+        self.once_served.lock().await.contains(pubkey)
     }
 
     async fn find_cached_key(&self, pubkey: &KeyData) -> Result<CachedKey, AgentError> {
@@ -3063,6 +3091,50 @@ mod tests {
         assert_eq!(
             operator_act_status(&mut agent, request).await,
             act::Status::NoSuchKey
+        );
+    }
+
+    /// piggy#308: a key this agent served, whose card the presence reconcile
+    /// has since dropped, is card-absent (worth retrying), not no-such-key.
+    #[tokio::test]
+    async fn operator_act_for_a_served_key_whose_card_left_is_card_absent() {
+        let mut agent = PiggyAgent::new(vec![cached_ed25519(0x11, 0x9C)]);
+        // The reconcile drops the removed card's keys from the shared set.
+        agent.keys_handle().lock().await.clear();
+
+        let request = operator_act_request(
+            ed25519_key_data(0x11),
+            "piggy-escalation-v1",
+            "sha512",
+            b"grant",
+        );
+        assert_eq!(
+            operator_act_status(&mut agent, request).await,
+            act::Status::CardAbsent
+        );
+    }
+
+    /// A key adopted after startup is remembered once the agent has listed it.
+    #[tokio::test]
+    async fn operator_act_remembers_keys_listed_after_startup() {
+        let mut agent = PiggyAgent::new(Vec::new());
+        agent
+            .keys_handle()
+            .lock()
+            .await
+            .push(cached_ed25519(0x22, 0x9C));
+        agent.request_identities().await.unwrap();
+        agent.keys_handle().lock().await.clear();
+
+        let request = operator_act_request(
+            ed25519_key_data(0x22),
+            "piggy-escalation-v1",
+            "sha512",
+            b"grant",
+        );
+        assert_eq!(
+            operator_act_status(&mut agent, request).await,
+            act::Status::CardAbsent
         );
     }
 

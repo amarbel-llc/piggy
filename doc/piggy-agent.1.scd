@@ -258,7 +258,10 @@ what an agent without the extension returns. Its detail tells apart the
 answers a status shares: a PIN prompt that was dismissed, timed out or
 failed is _cancelled_ with *no PIN from the askpass:* and its reason; a PIN
 the card did not take is _error_ with *wrong PIN (*_N_* retries left)*, *PIN
-blocked*, or *PIN verify failed:* and the card's answer.
+blocked*, or *PIN verify failed:* and the card's answer. A key the agent has
+served since it started, whose card has since been removed, is _card-absent_
+(worth asking again once the card is back); _no-such-key_ is kept for a key it
+never served and no upstream holds.
 
 So that the extension is the only way to such a signature, an ordinary sign
 request whose data is sshsig signed data under one of those three namespaces
