@@ -203,8 +203,11 @@ for the document after these normalizations, in order:
    are `\\`, `\"` and `\t`. A markl-id's purpose slot is bare when RFC
    0011 §2.1's bare purpose charset allows it, else quoted with the join
    after the closing quote. The typed head reader and this canonical
-   emission are hyphence's (its Rust crate and Go package, 2026-11-09
-   ruling); this RFC composes them and adds the ordering above;
+   emission are hyphence's: hyphence RFC 0005 (canonical emission) is the
+   normative text, implemented in its Rust crate (`rust/hyphence`,
+   `Head::encode`) and Go package (`go/hyphence/head.go`) as of hyphence
+   master `7438bdf8` (2026-11-09 ruling); this RFC composes them and adds
+   the ordering above;
 7. the opening and closing `---` boundaries are included; if a body with
    at least one byte is present, the separator line and the body bytes
    follow unchanged; a separator followed by no bytes is not a body, and
@@ -859,8 +862,11 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 - piggy RFC 0011 — markl-id format and the purpose and format registries;
   §2.2 for embedding a purposed id in a host grammar.
 - hyphence RFC 0001 (the document), RFC 0002 (content grammar), RFC 0003
-  (markl atomic locks) and `hyphence-content.peg` — the carrier and its
-  canonical emission. All three are `proposed` at the time of writing.
+  (markl atomic locks), RFC 0005 (canonical emission: spacing, quoting,
+  bareness, prefix order; the typed head model) and `hyphence-content.peg`
+  — the carrier and its canonical emission. All are `proposed` at the time
+  of writing; RFC 0005 landed with hyphence master `7438bdf8` on
+  2026-11-09.
 - cutting-garden RFC 0014 (trellis) and `0014-trellis.peg`, with
   cutting-garden FDR 0028 (ajour) defining the stencil fragment — the
   body's grammar (§4.9). Both `proposed` or in draft at the time of

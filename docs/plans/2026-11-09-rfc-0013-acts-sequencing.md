@@ -127,7 +127,7 @@ order is visible, labelled as held.
 | Slice | Issue |
 |---|---|
 | S1 | piggy#356 |
-| S2a | hyphence worker session `hyphence/smart-plum` (spawned 2026-11-09; its own record lands in hyphence) |
+| S2a | **landed** 2026-11-09 by hyphence/smart-plum: hyphence master `7438bdf8ebec0e7a95934a7cd1a169b6033c3264`; crate `rust/hyphence` (package `hyphence`: `Head::{decode, from_document, to_document, encode, fields, type_line}`, `Line`, `Value`, `MarklId`, `Digest`); Go twin `go/hyphence/head.go`; normative text hyphence RFC 0005 `docs/rfcs/0005-canonical-emission.md`; spec `docs/plans/2026-11-09-typed-head.md`. Pin from piggy as `hyphence = { git = <hyphence remote>, rev = "7438bdf8…" }`. Known Go-only divergence: Go reports a body only when at least one byte follows; Rust returns `Some(empty)`; piggy passes `None` for no body, so neither side sees it |
 | S2b | piggy#357 |
 | S3 | piggy#358 |
 | S4 | piggy#359 |
