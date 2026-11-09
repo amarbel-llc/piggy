@@ -14,16 +14,15 @@
 //!
 //! `-e` and `-m` are mutually exclusive. `-f` skips the overwrite
 //! prompt when the target already exists. `check_sneaky_paths`
-//! rejects `..`-bearing paths. The handler ends by calling
-//! `git_ops::add_and_commit` to track the new entry if the store is
-//! inside a git work tree.
+//! rejects `..`-bearing paths. The write goes through the shared
+//! [`crate::store::StoreEntry`] path, which commits the new entry if the
+//! store is inside a git work tree.
 
 use std::io::{BufRead as _, IsTerminal as _, Read as _, Write as _};
 use std::os::unix::io::AsRawFd as _;
 
 use crate::crypt;
-use crate::git_ops;
-use crate::store::{find_piggy_ids, path_parent_for_search, sneaky_path_reason, store_root};
+use crate::store::{StoreEntry, sneaky_path_reason, store_root};
 
 /// Exit code conventions:
 /// - 0: inserted (or user declined the yesno overwrite prompt — same
@@ -49,13 +48,19 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("{refusal}");
         return 1;
     }
-    let passfile = root.join(format!("{}.ebox", opts.path));
     if let Some(note) = crate::store::shadow_note(&opts.path) {
         eprintln!("{note}");
     }
+    let entry = match StoreEntry::resolve(root, &opts.path) {
+        Ok(e) => e,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return 1;
+        }
+    };
 
     if !opts.force
-        && passfile.exists()
+        && entry.ebox.exists()
         && !confirm(&format!(
             "An entry already exists for {}. Overwrite it?",
             opts.path
@@ -64,46 +69,27 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
 
-    let parent = passfile.parent().unwrap_or(&root);
-    if let Err(err) = std::fs::create_dir_all(parent) {
-        eprintln!("piggy pass insert: create {}: {}", parent.display(), err);
+    if let Err(err) = entry.create_parent() {
+        eprintln!("piggy pass insert: {err}");
         return 1;
     }
-
-    // `find_piggy_ids` wants a subfolder relative to the store root.
-    // The bash uses `dirname -- "$path"`; if the path has no `/` it's
-    // `.`, which we pass through as empty so `find_piggy_ids` walks
-    // from the store root.
-    let subfolder = path_parent_for_search(&opts.path);
-    let piggy_ids = match find_piggy_ids(&root, &subfolder)
-        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
-    {
-        Ok(p) => p,
-        Err(msg) => {
-            eprintln!("Error: {msg}");
-            return 1;
-        }
-    };
 
     let plaintext = match collect_plaintext(opts.mode, &opts.path) {
         Ok(b) => b,
         Err(rc) => return rc,
     };
 
-    if let Err(err) = crypt::encrypt(&piggy_ids, &passfile, std::io::Cursor::new(plaintext)) {
+    if let Err(err) = crypt::encrypt(
+        &entry.piggy_ids,
+        &entry.ebox,
+        std::io::Cursor::new(plaintext),
+    ) {
         eprintln!("piggy pass insert: {err}");
         eprintln!("Encryption aborted.");
         return 1;
     }
 
-    if let Some(work_tree) = git_ops::find_inner_git_dir(&passfile, &root) {
-        let _ = git_ops::add_and_commit(
-            &work_tree,
-            &passfile,
-            &format!("Add given password for {} to store.", opts.path),
-        );
-    }
-
+    entry.commit(&format!("Add given password for {} to store.", opts.path));
     0
 }
 
@@ -379,16 +365,6 @@ mod tests {
     fn parse_strips_trailing_slash_from_path() {
         let o = parse_args(&s(&["folder/sub/"])).unwrap();
         assert_eq!(o.path, "folder/sub");
-    }
-
-    #[test]
-    fn parent_for_search_strips_basename() {
-        assert_eq!(path_parent_for_search("a/b/c"), "a/b");
-    }
-
-    #[test]
-    fn parent_for_search_returns_empty_for_top_level() {
-        assert_eq!(path_parent_for_search("cred1"), "");
     }
 
     #[test]

@@ -37,10 +37,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::crypt;
-use crate::git_ops;
 use crate::platform::clipboard::{self, ClipPlan, Env as ClipEnv, ProcessRunner};
 use crate::platform::qrcode::{self, Env as QrEnv, Plan as QrPlan};
-use crate::store::{find_piggy_ids, path_parent_for_search, sneaky_path_reason, store_root};
+use crate::store::{StoreEntry, sneaky_path_reason, store_root};
 
 const DEFAULT_GENERATED_LENGTH: usize = 25;
 const DEFAULT_CLIP_TIME_SECS: u64 = 45;
@@ -81,27 +80,21 @@ pub fn run(args: &[String]) -> i32 {
             eprintln!("{note}");
         }
     }
-    let passfile = root.join(format!("{}.ebox", opts.path));
-    let parent = passfile.parent().unwrap_or(&root);
-    if let Err(err) = std::fs::create_dir_all(parent) {
-        eprintln!("piggy pass generate: create {}: {}", parent.display(), err);
-        return 1;
-    }
-
-    let subfolder = path_parent_for_search(&opts.path);
-    let piggy_ids = match find_piggy_ids(&root, &subfolder)
-        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
-    {
-        Ok(p) => p,
+    let entry = match StoreEntry::resolve(root, &opts.path) {
+        Ok(e) => e,
         Err(msg) => {
             eprintln!("Error: {msg}");
             return 1;
         }
     };
+    if let Err(err) = entry.create_parent() {
+        eprintln!("piggy pass generate: {err}");
+        return 1;
+    }
 
     if !opts.inplace
         && !opts.force
-        && passfile.exists()
+        && entry.ebox.exists()
         && !confirm(&format!(
             "An entry already exists for {}. Overwrite it?",
             opts.path
@@ -130,9 +123,9 @@ pub fn run(args: &[String]) -> i32 {
     };
 
     let result = if opts.inplace {
-        encrypt_in_place(&piggy_ids, &passfile, &pass)
+        encrypt_in_place(&entry.piggy_ids, &entry.ebox, &pass)
     } else {
-        encrypt_fresh(&piggy_ids, &passfile, &pass)
+        encrypt_fresh(&entry.piggy_ids, &entry.ebox, &pass)
     };
     if let Err(err) = result {
         eprintln!("piggy pass generate: {err}");
@@ -140,13 +133,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let verb = if opts.inplace { "Replace" } else { "Add" };
-    if let Some(work_tree) = git_ops::find_inner_git_dir(&passfile, &root) {
-        let _ = git_ops::add_and_commit(
-            &work_tree,
-            &passfile,
-            &format!("{verb} generated password for {}.", opts.path),
-        );
-    }
+    entry.commit(&format!("{verb} generated password for {}.", opts.path));
 
     if opts.clip {
         return clip_password(pass.as_bytes(), &opts.path);

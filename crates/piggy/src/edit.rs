@@ -38,9 +38,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::crypt;
-use crate::git_ops;
 use crate::platform::tmpdir::SecureTmpdir;
-use crate::store::{find_piggy_ids, path_parent_for_search, sneaky_path_reason, store_root};
+use crate::store::{StoreEntry, sneaky_path_reason, store_root};
 
 /// Exit code conventions:
 /// - 0: edit succeeded (or "Password unchanged." short-circuit)
@@ -65,24 +64,18 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("{refusal}");
         return 1;
     }
-    let root = store_root();
-    let passfile = root.join(format!("{path}.ebox"));
-    let parent = passfile.parent().unwrap_or(&root);
-    if let Err(err) = std::fs::create_dir_all(parent) {
-        eprintln!("piggy pass edit: create {}: {}", parent.display(), err);
-        return 1;
-    }
-
-    let subfolder = path_parent_for_search(&path);
-    let piggy_ids = match find_piggy_ids(&root, &subfolder)
-        .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
-    {
-        Ok(p) => p,
+    let entry = match StoreEntry::resolve(store_root(), &path) {
+        Ok(e) => e,
         Err(msg) => {
             eprintln!("Error: {msg}");
             return 1;
         }
     };
+    if let Err(err) = entry.create_parent() {
+        eprintln!("piggy pass edit: {err}");
+        return 1;
+    }
+    let passfile = &entry.ebox;
 
     // Allocate the secure tmpdir. Held until function exit; Drop
     // shreds + removes the directory (disk fallback) or rm -rf's the
@@ -101,7 +94,7 @@ pub fn run(args: &[String]) -> i32 {
         // check (line 308) but NOT for the priming decrypt (line
         // 303). The priming decrypt write-redirects stdout to
         // $tmp_file; stderr passes through. Mirror.
-        match crypt::decrypt(&passfile) {
+        match crypt::decrypt(passfile) {
             Ok(bytes) => {
                 if let Err(err) = std::fs::write(&tmp_file, &bytes) {
                     eprintln!("piggy pass edit: write {}: {}", tmp_file.display(), err);
@@ -134,7 +127,7 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
 
-    if is_unchanged(&passfile, &tmp_file) {
+    if is_unchanged(passfile, &tmp_file) {
         eprintln!("Password unchanged.");
         return 1;
     }
@@ -152,7 +145,7 @@ pub fn run(args: &[String]) -> i32 {
                 return 1;
             }
         };
-        match crypt::encrypt(&piggy_ids, &passfile, tmp_input) {
+        match crypt::encrypt(&entry.piggy_ids, passfile, tmp_input) {
             Ok(()) => break,
             Err(err) => {
                 eprintln!("piggy pass edit: {err}");
@@ -163,14 +156,7 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    if let Some(work_tree) = git_ops::find_inner_git_dir(&passfile, &root) {
-        let _ = git_ops::add_and_commit(
-            &work_tree,
-            &passfile,
-            &format!("{action} password for {path} using {editor}."),
-        );
-    }
-
+    entry.commit(&format!("{action} password for {path} using {editor}."));
     0
 }
 
@@ -355,16 +341,6 @@ mod tests {
         let joined = secure.join(&name);
         assert_eq!(joined.parent(), Some(secure.as_path()));
         assert!(name.contains("-folder-cred1.txt"));
-    }
-
-    #[test]
-    fn path_parent_for_search_strips_basename() {
-        assert_eq!(path_parent_for_search("a/b/c"), "a/b");
-    }
-
-    #[test]
-    fn path_parent_for_search_returns_empty_for_top_level() {
-        assert_eq!(path_parent_for_search("cred1"), "");
     }
 
     #[test]

@@ -258,10 +258,84 @@ pub(crate) fn find_piggy_ids(root: &Path, subfolder: &str) -> Result<PathBuf, St
     ))
 }
 
+/// Where a write to one pass-name lands: its `.ebox` under the store root,
+/// and the `piggy-ids` (pigpen pointer resolved) whose recipients it is
+/// encrypted to. The one write path behind `pass insert`, `generate`,
+/// `edit` and the management-key escrow (piggy#261). The steps are
+/// separate so a caller can order them around its own work (the escrow
+/// seals before touching the card and commits only after it succeeds).
+/// The pass-name must already have passed [`sneaky_path_reason`].
+pub(crate) struct StoreEntry {
+    pub(crate) root: PathBuf,
+    pub(crate) ebox: PathBuf,
+    pub(crate) piggy_ids: PathBuf,
+}
+
+impl StoreEntry {
+    pub(crate) fn resolve(root: PathBuf, pass_name: &str) -> Result<Self, String> {
+        let ebox = root.join(format!("{pass_name}.ebox"));
+        let piggy_ids = find_piggy_ids(&root, &path_parent_for_search(pass_name))
+            .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))?;
+        Ok(StoreEntry {
+            root,
+            ebox,
+            piggy_ids,
+        })
+    }
+
+    pub(crate) fn create_parent(&self) -> Result<(), String> {
+        let parent = self.ebox.parent().unwrap_or(&self.root);
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))
+    }
+
+    /// Record the `.ebox` in the store's git history, if the store is a
+    /// git work tree. Best-effort, as `pass insert` has always been.
+    pub(crate) fn commit(&self, message: &str) {
+        if let Some(work_tree) = crate::git_ops::find_inner_git_dir(&self.ebox, &self.root) {
+            let _ = crate::git_ops::add_and_commit(&work_tree, &self.ebox, message);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn path_parent_for_search_is_dirname_with_empty_for_top_level() {
+        assert_eq!(path_parent_for_search("a/b/c"), "a/b");
+        assert_eq!(path_parent_for_search("cred1"), "");
+    }
+
+    #[test]
+    fn store_entry_takes_the_nearest_piggy_ids() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("team")).unwrap();
+        std::fs::write(root.join("piggy-ids"), "").unwrap();
+        std::fs::write(root.join("team/piggy-ids"), "").unwrap();
+
+        let nested = StoreEntry::resolve(root.clone(), "team/deep/cred").unwrap();
+        assert_eq!(nested.ebox, root.join("team/deep/cred.ebox"));
+        assert_eq!(nested.piggy_ids, root.join("team/piggy-ids"));
+
+        let top = StoreEntry::resolve(root.clone(), "cred").unwrap();
+        assert_eq!(top.piggy_ids, root.join("piggy-ids"));
+
+        nested.create_parent().unwrap();
+        assert!(root.join("team/deep").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn store_entry_without_piggy_ids_is_refused() {
+        let root = tempdir();
+        let err = StoreEntry::resolve(root.clone(), "cred")
+            .err()
+            .expect("refused");
+        assert!(err.contains("no piggy-ids"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     struct FakeEnv(HashMap<&'static str, OsString>);
 
