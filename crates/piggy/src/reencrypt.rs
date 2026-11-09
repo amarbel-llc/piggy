@@ -96,6 +96,10 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
         return 1;
     }
 
+    // The store as the resolved targets spell it, to tell a link whose
+    // target is inside the store from one into a tracked tree outside it.
+    let store_resolved = std::fs::canonicalize(&store).unwrap_or_else(|_| store.clone());
+
     // One decryptor for the whole walk: agent connection and card PIN are
     // paid once, not once per ebox.
     let mut decryptor = piggy::cmd::pivy_box::Decryptor::from_env();
@@ -107,28 +111,30 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
         // suffix). Matches bash $passfile_display; used as the TAP
         // point description. Uses the store-side `path`, not the
         // resolved target.
-        let display = display_name(path, &store);
+        let mut display = display_name(path, &store);
 
-        // Find the nearest piggy-ids for this file's directory. This
-        // walks up from the STORE-SIDE path, so a symlink picks up the
-        // piggy-ids governing its store location (the rcm-farm case has
-        // a single store-side piggy-ids governing everything). Every
-        // entry MUST produce exactly one point so the count matches the
-        // `1..N` plan — the early-out arms emit `not ok`, never a silent
-        // `continue`.
-        let passfile_dir = match path.parent() {
-            Some(p) => p,
-            None => {
-                let _ = tap.not_ok(n, &display, "no parent directory");
-                any_failed = true;
-                continue;
-            }
+        // Find the nearest piggy-ids for the file being rewritten. A link
+        // whose target is inside the store takes the recipients of the
+        // scope holding the TARGET (piggy#148): the file encrypted is the
+        // target's, and re-encrypting it to the link's scope would change
+        // who can read it behind the user's back. A link into a tracked
+        // tree outside the store (the rcm-farm case) has no scope of its
+        // own there, so it keeps the store-side lookup. Every entry MUST
+        // produce exactly one point so the count matches the `1..N` plan:
+        // the early-out arms emit `not ok`, never a silent `continue`.
+        let link_subfolder = store_subfolder(path.parent(), &store);
+        let target_in_store = real.strip_prefix(&store_resolved).ok();
+        let target_subfolder = target_in_store.map(|rel| {
+            rel.parent()
+                .unwrap_or(Path::new(""))
+                .to_string_lossy()
+                .into_owned()
+        });
+        let Some(subfolder) = target_subfolder.clone().or(link_subfolder.clone()) else {
+            let _ = tap.not_ok(n, &display, "no parent directory");
+            any_failed = true;
+            continue;
         };
-        let subfolder = passfile_dir
-            .strip_prefix(&store)
-            .unwrap_or(passfile_dir)
-            .to_string_lossy()
-            .into_owned();
         let piggy_ids = match find_piggy_ids(&store, &subfolder)
             .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
         {
@@ -139,6 +145,21 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
                 continue;
             }
         };
+        // Say so when the two scopes differ, so the cross-scope resolution
+        // is visible in the TAP stream.
+        if let (Some(target_rel), Some(link_subfolder)) = (target_in_store, &link_subfolder) {
+            let link_piggy_ids = find_piggy_ids(&store, link_subfolder).ok();
+            if link_piggy_ids.as_deref() != Some(piggy_ids.as_path()) {
+                display = format!(
+                    "{display} (target {} takes its recipients from {})",
+                    display_name(&store.join(target_rel), &store),
+                    piggy_ids
+                        .strip_prefix(&store)
+                        .unwrap_or(&piggy_ids)
+                        .display()
+                );
+            }
+        }
 
         if reencrypt_unnecessary(path, &piggy_ids) {
             let _ = tap.skip(n, &display, "recipients already current");
@@ -160,6 +181,18 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
     }
 
     i32::from(any_failed)
+}
+
+/// The store-relative subfolder of a store-side directory, or `None` when
+/// there is no directory.
+fn store_subfolder(dir: Option<&Path>, store: &Path) -> Option<String> {
+    let dir = dir?;
+    Some(
+        dir.strip_prefix(store)
+            .unwrap_or(dir)
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// True iff `ebox_path` already encrypts to exactly the recipient set

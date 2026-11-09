@@ -73,6 +73,39 @@ function reencryption_preserves_links_and_rewrites_target { # @test
   assert_output --partial "$INITIAL_PASSWORD"
 }
 
+# piggy#148: a link in one recipient scope whose target lives in another
+# scope of the same store is re-encrypted to the recipients of the scope
+# that holds the TARGET, never the link's. Here work/ declares only the
+# harness card and personal/ adds a second recipient; re-encrypting work/
+# must leave personal/real.ebox encrypted to personal's set (so it is
+# already current and untouched), and the TAP line says where the
+# recipients came from.
+function cross_scope_link_uses_the_targets_recipients { # @test
+  local secondary="piggy-recipient-v1@pivy_ecdh_p256_pub-qd43050juykyy3lchnnw2caygre8wqmasyk7kvaq7jsnj3wcnrpfve2jwdn"
+  mkdir -p "$PIGGY_STORE_DIR/work" "$PIGGY_STORE_DIR/personal"
+  printf '%s\n' "$PIGGY_TEST_RECIPIENT" >"$PIGGY_STORE_DIR/work/piggy-ids"
+  printf '%s\n%s\n' "$PIGGY_TEST_RECIPIENT" "$secondary" >"$PIGGY_STORE_DIR/personal/piggy-ids"
+  git -C "$PIGGY_STORE_DIR" add -A >/dev/null
+  git -C "$PIGGY_STORE_DIR" commit -q -m "piggy-test: two scopes" >/dev/null
+
+  echo "$INITIAL_PASSWORD" | "$PIGGY" pass insert -e personal/real
+  ln -s ../personal/real.ebox "$PIGGY_STORE_DIR/work/shared.ebox"
+  git -C "$PIGGY_STORE_DIR" add -A >/dev/null
+  git -C "$PIGGY_STORE_DIR" commit -q -m "piggy-test: cross-scope link" >/dev/null
+  cp "$PIGGY_STORE_DIR/personal/real.ebox" "$BATS_TEST_TMPDIR/before.ebox"
+
+  run "$PIGGY" pass recipients sync -p work
+  assert_success
+  assert_output --partial "work/shared"
+  assert_output --partial "personal/piggy-ids"
+
+  cmp "$PIGGY_STORE_DIR/personal/real.ebox" "$BATS_TEST_TMPDIR/before.ebox" ||
+    fail "the target was re-encrypted to the link's scope"
+  run "$PIGGY" pass show personal/real
+  assert_success
+  assert_output --partial "$INITIAL_PASSWORD"
+}
+
 function password_survives_all_transformations { # @test
   echo "$INITIAL_PASSWORD" | "$PIGGY" pass insert -e folder/cred1
   create_test_template "$PIGGY_STORE_DIR/anotherfolder"
