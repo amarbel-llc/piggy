@@ -41,16 +41,21 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
-const USAGE: &str =
-    "Usage: piggy ssh-copy-id [--ids <piggy-ids>] [ssh-copy-id options] [user@]host";
+const USAGE: &str = "Usage: piggy ssh-copy-id [--ids <piggy-ids>] [ssh-copy-id options] [user@]host\n\
+     \x20      piggy ssh-copy-id --render [--ids <piggy-ids>]";
 
 fn run_inner(args: &[String]) -> Result<i32, String> {
-    if args.is_empty() {
-        return Err(format!("missing [user@]host\n{USAGE}"));
+    let SplitArgs {
+        ids_override,
+        render,
+        passthrough,
+    } = split_args(args)?;
+    if render && !passthrough.is_empty() {
+        return Err(format!(
+            "--render prints to stdout and takes no host or ssh-copy-id options\n{USAGE}"
+        ));
     }
-
-    let (ids_override, passthrough) = split_args(args)?;
-    if passthrough.is_empty() {
+    if !render && passthrough.is_empty() {
         return Err(format!("missing [user@]host\n{USAGE}"));
     }
 
@@ -75,6 +80,14 @@ fn run_inner(args: &[String]) -> Result<i32, String> {
         ));
     }
 
+    if render {
+        let mut out = std::io::stdout().lock();
+        for line in &lines {
+            writeln!(out, "{line}").map_err(|e| format!("writing stdout: {e}"))?;
+        }
+        return Ok(0);
+    }
+
     let tmp = write_pubkey_file(&lines)?;
     let status = run_ssh_copy_id(&tmp, &passthrough);
     // Public keys, no secrecy concern — but don't litter $TMPDIR.
@@ -83,16 +96,25 @@ fn run_inner(args: &[String]) -> Result<i32, String> {
     status
 }
 
-/// Pull the piggy-only `--ids <path>` / `--ids=<path>` flag out of the
-/// argv, returning `(ids_override, passthrough)`. Every other argument —
-/// including the `[user@]host` and any `ssh-copy-id` options (`-p`, `-o`,
-/// …) — is forwarded verbatim to `ssh-copy-id`.
-fn split_args(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+struct SplitArgs {
+    ids_override: Option<String>,
+    render: bool,
+    passthrough: Vec<String>,
+}
+
+/// Pull the piggy-only flags (`--ids <path>` / `--ids=<path>`, `--render`)
+/// out of the argv. Every other argument — including the `[user@]host`
+/// and any `ssh-copy-id` options (`-p`, `-o`, …) — is forwarded verbatim
+/// to `ssh-copy-id`.
+fn split_args(args: &[String]) -> Result<SplitArgs, String> {
     let mut ids_override = None;
+    let mut render = false;
     let mut passthrough = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
-        if arg == "--ids" {
+        if arg == "--render" {
+            render = true;
+        } else if arg == "--ids" {
             let path = it
                 .next()
                 .ok_or_else(|| format!("--ids requires a path argument\n{USAGE}"))?;
@@ -103,7 +125,11 @@ fn split_args(args: &[String]) -> Result<(Option<String>, Vec<String>), String> 
             passthrough.push(arg.clone());
         }
     }
-    Ok((ids_override, passthrough))
+    Ok(SplitArgs {
+        ids_override,
+        render,
+        passthrough,
+    })
 }
 
 /// Parse the `piggy-ids` file and render each slot-9A SSH-auth recipient

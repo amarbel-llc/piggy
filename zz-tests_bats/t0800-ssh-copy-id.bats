@@ -67,6 +67,33 @@ function ssh_copy_id_reads_ids_override { # @test
   assert_output "$SSH_9A_LINE_PREFIX bob"
 }
 
+# piggy#169: --render prints the authorized_keys lines on stdout, in file
+# order, without a host and without running ssh-copy-id, so a declarative
+# consumer can generate an authorized_keys artifact from a piggy-ids file.
+function ssh_copy_id_render_prints_lines_without_a_host { # @test
+  local custom="$BATS_TEST_TMPDIR/custom-ids"
+  cat >"$custom" <<-EOF
+		$SSH_9A  # alice
+		$RECIPIENT_9D  # decrypt key (9D)
+		$SSH_9A  # bob
+	EOF
+
+  run "$PIGGY" ssh-copy-id --render --ids "$custom"
+  assert_success
+  assert_output "$SSH_9A_LINE_PREFIX alice
+$SSH_9A_LINE_PREFIX bob"
+  assert [ ! -e "$SSH_COPY_ID_ARGV_FILE" ]
+}
+
+function ssh_copy_id_render_refuses_a_host { # @test
+  cat >"$PIGGY_STORE_DIR/piggy-ids" <<-EOF
+		$SSH_9A  # alice
+	EOF
+  run "$PIGGY" ssh-copy-id --render alice@example.invalid
+  assert_failure
+  assert [ ! -e "$SSH_COPY_ID_ARGV_FILE" ]
+}
+
 function ssh_copy_id_requires_a_host { # @test
   cat >"$PIGGY_STORE_DIR/piggy-ids" <<-EOF
 		$SSH_9A  # alice

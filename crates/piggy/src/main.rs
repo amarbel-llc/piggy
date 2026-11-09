@@ -138,6 +138,10 @@ enum Command {
     /// `piggy-ids`; every other argument — including `[user@]host` and any
     /// `ssh-copy-id` options — passes through to `ssh-copy-id`. The 9D
     /// encryption recipients in the same file are ignored.
+    ///
+    /// `--render` prints the authorized_keys lines on stdout in file order
+    /// instead, takes no host and runs no `ssh-copy-id` — for generating an
+    /// `authorized_keys` artifact from a piggy-ids file without any card.
     #[command(name = "ssh-copy-id")]
     SshCopyId {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

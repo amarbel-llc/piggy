@@ -12,6 +12,8 @@ piggy - PIV smart-card backed password store and agent
 
 *piggy ssh-copy-id* [*--ids* _PATH_] [_SSH-COPY-ID-OPTIONS_]... [_user_@]_host_
 
+*piggy ssh-copy-id* *--render* [*--ids* _PATH_]
+
 *piggy sign-bytes* *--slot* _9a_|_9c_ [*--guid* _GUID_] [*--format* _raw_|_der_] [*-P* _PIN_]
 
 *piggy operator-sign* *--namespace* _NAMESPACE_ [*--slot* _9c_|_9a_] [*--guid* _GUID_] [*--hash* _sha512_|_sha256_]
@@ -467,9 +469,16 @@ commands:
 	with *piggy list --format=human* and add it with *piggy pass
 	recipients add*.
 
+	*--render* prints the same _authorized_keys_ lines on stdout, one per
+	9A key in file order, and runs nothing else: it takes no host and no
+	*ssh-copy-id* options. No card or PIN is involved, so it renders
+	identities whose card is absent; use it to generate an
+	_authorized_keys_ file from a *piggy-ids* file.
+
 	```
 	piggy ssh-copy-id alice@server.example
 	piggy ssh-copy-id --ids ./team-ids -p 2222 deploy@host
+	piggy ssh-copy-id --render --ids ./team-ids > authorized_keys
 	```
 
 *sign-bytes* *--slot* _9a_|_9c_ [*--guid* _GUID_] [*--format* _raw_|_der_] [*-P* _PIN_]
