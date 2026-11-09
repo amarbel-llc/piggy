@@ -416,14 +416,18 @@ argument values) ride in two places, both inside the signed bytes:
   espalier stream).
 - **The body.** When present it MUST be a document in the **stencil
   fragment** of trellis (cutting-garden RFC 0014; the fragment is defined
-  by cutting-garden FDR 0028, "ajour", and is theirs to change: espalier
-  plus id-less typed nodes, locked ids, the field operators, value lists,
-  `^` negation and the tags `deny` and `subtree`; no sigils, closures,
-  reverse edges, version subpaths or OR-groups; the list is cutting-garden's
-  and may grow, a `+` creation-allowance node being under discussion). It
+  by cutting-garden FDR 0028, "ajour", and is theirs to change; as ruled
+  2026-11-09 17:40: espalier, plus in the id slot the null id `_` (a
+  pattern over existing objects) and the temp id `+` (an object that does
+  not exist yet: a creation allowance), locked ids, the full field-operator
+  set, value lists, `^` negation and the reserved tags `deny` and
+  `subtree`; no sigils, closures, reverse edges, version subpaths or
+  OR-groups; the PEG production for `_` and `+` is cutting-garden#395). It
   is signed as its bytes stand (§3.1 step 7); no canonical form is defined
   for it and none is needed, so a producer MAY write it in any input
-  spelling FDR 0028 accepts, and the prompt shows those bytes. piggy's reference verifier checks only that the body obeys RFC
+  spelling FDR 0028 defines (the nested canonical form, or the heading
+  rendering once the fragment's reader canonicalizes on read), and the
+  prompt shows those bytes. piggy's reference verifier checks only that the body obeys RFC
   0012 §2.5's character rules and otherwise treats it as opaque bytes.
 
 Every `profile` edge and every body on a chain is a **layer**, from the
@@ -435,9 +439,9 @@ only; the layers above remain. A `narrow`'s layer is added.
 **A `profile` layer is a stencil; a body is a patch.** A stencil admits
 only what it names. A patch is transparent where it says nothing, and
 every leaf it has carries `deny`: a body MAY only deny, and a tightening
-of an allowance is spelled as a deny with a condition. A body with a leaf
-that does not carry `deny` is malformed, and an enforcer MUST treat the
-act as admitting nothing. A smaller allow-set is a new profile pinned by
+of an allowance is spelled as a deny with a condition; a `+` node appears
+in a patch only with `deny`. A body with a leaf that does not carry `deny`
+is malformed, and an enforcer MUST treat the act as admitting nothing. A smaller allow-set is a new profile pinned by
 `profile`, never a body.
 
 The **stencil stack** is the rule the consumer's enforcer applies to the
