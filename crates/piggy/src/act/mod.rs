@@ -9,6 +9,7 @@
 
 pub mod cli;
 mod fields;
+pub mod seal;
 
 use std::fmt;
 
@@ -53,6 +54,10 @@ pub enum Rule {
     /// A `namespace`/`kind`/`issuer`/`assurance` combination §4.8 does not
     /// list. Never raised by [`parse`].
     NamespacePairing,
+    /// §5.2 step 2: the signature does not verify under `key`, or a detached
+    /// sshsig does not match the seal fields (§3.3). Never raised by
+    /// [`parse`].
+    Signature,
 }
 
 impl Rule {
@@ -70,6 +75,7 @@ impl Rule {
             Rule::Value => "value",
             Rule::Body => "body",
             Rule::NamespacePairing => "namespace-pairing",
+            Rule::Signature => "signature",
         }
     }
 }
@@ -288,6 +294,32 @@ impl Act {
     /// not sealed.
     pub fn sealed_canonical(&self) -> Option<Vec<u8>> {
         self.field("signature").map(|_| self.encode(true))
+    }
+
+    /// This act sealed with `signature` (a `piggy-record-sig-v1` id); any
+    /// earlier signature is replaced.
+    pub fn with_signature(&self, signature: &piggy_markl::Id) -> Act {
+        // A piggy-markl id always has a well-formed digest slot, and the
+        // record-sig purpose is spelled bare.
+        let wire = signature.to_wire();
+        let (_, digest) = piggy_markl::split_purpose_slot(&wire);
+        let value = Value::Markl(hyphence::MarklId {
+            purpose: signature.purpose().map(|p| p.as_str().to_owned()),
+            digest: hyphence::Digest::parse(digest).expect("a piggy-markl digest slot"),
+        });
+
+        let mut fields: Vec<_> = self
+            .fields
+            .iter()
+            .filter(|(name, _)| name != "signature")
+            .cloned()
+            .collect();
+        fields.push(("signature".to_owned(), value));
+
+        Act {
+            fields: canonical_order(fields),
+            ..self.clone()
+        }
     }
 
     /// The single value of a non-set field.

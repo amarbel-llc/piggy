@@ -18,6 +18,16 @@ piggy - PIV smart-card backed password store and agent
 
 *piggy act canon* [_FILE_]
 
+*piggy act verify* *--seal-only* [_FILE_]
+
+*piggy act digest* [*--sha256*] [_FILE_]
+
+*piggy act detach* *--signature* _OUT_ [_FILE_]
+
+*piggy act attach* *--signature* _SIG_ [_FILE_]
+
+*piggy act key* [*--card*] [_PUBFILE_]
+
 *piggy help*
 
 *piggy version*
@@ -577,12 +587,52 @@ commands:
 	_value_ or _body_. *canon* does not check the signature, the
 	namespace-and-kind pairing or the chain.
 
-	Exit status: *0* canonical form written; *1* refused; *2* usage error;
-	*3* the input could not be read.
+	Exit status, for every *act* verb: *0* done; *1* refused (for
+	*verify*, the act is invalid); *2* usage error; *3* an input could not
+	be read or an output written.
 
 	```
 	piggy act canon < grant.act > grant.canonical
 	```
+
+*act verify* *--seal-only* [_FILE_]
+	Check a sealed act's _signature_ under its _key_ over the canonical
+	form, with the _namespace_ and _hash_ the seal names (RFC 0013 §5.2
+	steps 1 and 2), and print *valid* and the act digest. Ed25519 and ECDSA
+	P-256 keys are accepted; a P-256 _key_ that is not a point on the curve
+	is refused as _value_, a signature that does not verify as
+	_signature_. *--seal-only* is required: the chain walk (trust anchors,
+	_issuer-record_, rights, expiry, revocation) is not built yet.
+
+*act digest* [*--sha256*] [_FILE_]
+	Print a sealed act's digest (RFC 0013 §3.5): a
+	_piggy-record-digest-v1_ markl id over the sealed canonical form, the
+	_signature_ line included, so two signings of one act are two digests
+	unless the signature scheme is deterministic. _blake2b256_ unless
+	*--sha256*.
+
+*act detach* *--signature* _OUT_ [_FILE_]
+	Write a sealed act's canonical form to stdout and the sshsig rebuilt
+	from its seal, armored, to _OUT_ (RFC 0013 §3.3). The pair is what
+	*ssh-keygen -Y verify* checks, with *-n* the act's _namespace_.
+
+*act attach* *--signature* _SIG_ [_FILE_]
+	Join a detached sshsig (armored, as *ssh-keygen -Y sign* writes it, or
+	raw) to its act and write the sealed act to stdout. The signature's
+	namespace, public key and hash algorithm must be the act's _namespace_,
+	_key_ and _hash_, and the signature must verify, or it is refused as
+	_signature_. *attach* signs nothing.
+
+	```
+	piggy act canon act > act.canonical
+	ssh-keygen -Y sign -f key -n piggy-record-v1 -O hashalg=sha256 act.canonical
+	piggy act attach --signature act.canonical.sig act > act.sealed
+	```
+
+*act key* [*--card*] [_PUBFILE_]
+	Print the _key_ value for an OpenSSH Ed25519 or ECDSA P-256 public key:
+	a _piggy-principal_pub-v1_ markl id, or with *--card* a
+	_piggy-piv_sig-v1_ one (a card's slot-9C key).
 
 *card init* [*--serial* _N_|*--guid* _HEX_|*--reader* _NAME_] [*--allow-reprovision*] [*--pin-policy* _SLOT_=_POLICY_]... [*--touch-policy* _SLOT_=_POLICY_]... [*--seal-management-key*[=_PASS-NAME_]|*--no-seal-management-key*] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]
 	Provision a factory-blank PIV card in one step: write the CHUID (a fresh

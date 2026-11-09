@@ -21,8 +21,21 @@
 #                 quoted-field-name | duplicate-field | unknown-field |
 #                 missing-field | forbidden-field | value | body
 #
-# Every key, digest and signature is a markl test value (a 0x00, 0x01, ...
-# payload); none verifies. Seal verification has its own vectors.
+# Every digest and signature is a markl test value (a 0x00, 0x01, ...
+# payload) and none verifies; seal verification is tested from real
+# signatures (crates/piggy/src/act/seal.rs, act_seal.bats). The P-256 key is
+# a real point (the public key of the scalar 0x0909...09), since a P-256
+# payload that does not decompress is refused (§2 "Key payloads").
+
+name: refuse/p256-key-off-the-curve
+outcome: refuse
+rule: value
+document:
+| ---
+| - kind = approval
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| ! piggy-act-v1
+| ---
 
 name: canonical/root-already-canonical
 outcome: canonical
@@ -34,14 +47,14 @@ document:
 | - subject = clown:72dca00c
 | - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - right = spinclass:check
 | - right = spinclass:merge
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - not-after = 2026-11-09T23:00:00Z
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-certificate-v1
 | - hash = sha256
 | - spinclass:profile = dev
@@ -55,14 +68,14 @@ canonical:
 | - subject = clown:72dca00c
 | - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - right = spinclass:check
 | - right = spinclass:merge
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - not-after = 2026-11-09T23:00:00Z
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-certificate-v1
 | - hash = sha256
 | - spinclass:profile = dev
@@ -78,14 +91,14 @@ document:
 | - hash = sha256
 | - right = spinclass:merge
 | - namespace = piggy-certificate-v1
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - assurance = piggy:hardware
 | - issued-at = 2026-11-08T23:00:00Z
 | - not-after = 2026-11-09T23:00:00Z
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - right = spinclass:check
 | - right = spinclass:merge
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - issuer = operator
 | - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
 | - subject = clown:72dca00c
@@ -101,14 +114,14 @@ canonical:
 | - subject = clown:72dca00c
 | - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - right = spinclass:check
 | - right = spinclass:merge
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - not-after = 2026-11-09T23:00:00Z
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-certificate-v1
 | - hash = sha256
 | - spinclass:profile = dev
@@ -126,14 +139,14 @@ document:
 | - subject-key=piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
 | # session 72dca00c
 | - issuer='operator'
-| - issuer-key=piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key=piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - right=spinclass:check
 | - right=spinclass:merge
 | - records="piggy-record-digest-v1"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - not-after=2026-11-09T23:00:00Z
 | - issued-at=2026-11-08T23:00:00Z
 | - assurance=piggy:hardware
-| - key=piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key=piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace=piggy-certificate-v1
 | - hash=sha256
 | - spinclass:profile=dev
@@ -147,14 +160,14 @@ canonical:
 | - subject = clown:72dca00c
 | - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - right = spinclass:check
 | - right = spinclass:merge
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - not-after = 2026-11-09T23:00:00Z
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-certificate-v1
 | - hash = sha256
 | - spinclass:profile = dev
@@ -172,7 +185,7 @@ document:
 | - subject = clown:72dca00c
 | - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - right = spinclass:check
 | % another
 | - right = spinclass:merge
@@ -180,7 +193,7 @@ document:
 | - not-after = 2026-11-09T23:00:00Z
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-certificate-v1
 | - hash = sha256
 | - spinclass:profile = dev
@@ -195,14 +208,14 @@ canonical:
 | - subject = clown:72dca00c
 | - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - right = spinclass:check
 | - right = spinclass:merge
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - not-after = 2026-11-09T23:00:00Z
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-certificate-v1
 | - hash = sha256
 | - spinclass:profile = dev
@@ -285,11 +298,11 @@ document:
 | - kind = approval
 | - producer = troupe:approval-v1
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-approval-v1
 | - hash = sha512
 | ! piggy-act-v1
@@ -302,11 +315,11 @@ canonical:
 | - kind = approval
 | - producer = troupe:approval-v1
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-approval-v1
 | - hash = sha512
 | ! piggy-act-v1
@@ -322,11 +335,11 @@ document:
 | - kind = approval
 | - producer = troupe:approval-v1
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-approval-v1
 | - hash = sha256
 | ! piggy-act-v1
@@ -337,11 +350,11 @@ canonical:
 | - kind = approval
 | - producer = troupe:approval-v1
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-approval-v1
 | - hash = sha256
 | ! piggy-act-v1
@@ -354,11 +367,11 @@ document:
 | - kind = approval
 | - producer = troupe:approval-v1
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-approval-v1
 | - hash = sha256
 | - spinclass:note = 'two words\tand a "tab"'
@@ -370,11 +383,11 @@ canonical:
 | - kind = approval
 | - producer = troupe:approval-v1
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-approval-v1
 | - hash = sha256
 | - spinclass:note = single
@@ -591,7 +604,7 @@ document:
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-approval-v1
 | - hash = sha256
 | ! piggy-act-v1
@@ -607,11 +620,11 @@ document:
 | - subject = clown:72dca00c
 | - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - right = spinclass:check
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-certificate-v1
 | - hash = sha256
 | ! piggy-act-v1
@@ -645,12 +658,12 @@ document:
 | - kind = approval
 | - producer = troupe:approval-v1
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - issuer-record = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-approval-v1
 | - hash = sha256
 | ! piggy-act-v1
@@ -698,7 +711,7 @@ outcome: refuse
 rule: value
 document:
 | ---
-| - subject-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - subject-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | ! piggy-act-v1
 | ---
 
@@ -755,11 +768,11 @@ document:
 | - kind = approval
 | - producer = troupe:approval-v1
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-approval-v1
 | - hash = sha256
 | ! piggy-act-v1
@@ -775,11 +788,11 @@ document:
 | - kind = approval
 | - producer = troupe:approval-v1
 | - issuer = operator
-| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 | - issued-at = 2026-11-08T23:00:00Z
 | - assurance = piggy:hardware
-| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 | - namespace = piggy-approval-v1
 | - hash = sha256
 | ! piggy-act-v1

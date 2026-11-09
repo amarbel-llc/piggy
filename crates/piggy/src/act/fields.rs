@@ -193,6 +193,15 @@ pub fn check(shape: Shape, value: &Value) -> Option<String> {
                         FormatId::SshEd25519Pub | FormatId::SshEcdsaNistp256Pub
                     )
             });
+            // §2 "Key payloads": a P-256 payload that does not decompress is
+            // a value outside §2 (§5.2 step 1).
+            if let Ok(id) = &id {
+                if ok && id.format() == FormatId::SshEcdsaNistp256Pub {
+                    if let Err(refusal) = super::seal::decompress_p256(id.data()) {
+                        return Some(refusal.detail);
+                    }
+                }
+            }
             (!ok).then(|| {
                 let names: Vec<_> = purposes.iter().map(PurposeId::as_str).collect();
                 format!(

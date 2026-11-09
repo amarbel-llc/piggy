@@ -69,6 +69,12 @@ base64 = "0.22"
 # under `act`, the piggy-act-v1 document of piggy RFC 0013 §3.1. Pinned to
 # the rev that landed `Head`; outputHashes in flake.nix track it.
 hyphence = { git = "https://code.linenisgreat.com/hyphence", rev = "7438bdf8ebec0e7a95934a7cd1a169b6033c3264" }
+# The act seal (RFC 0013 §3): P-256 point decompression and ECDSA verify,
+# Ed25519 verify, and the blake2b256 act digest. p256 and ed25519-dalek are
+# already in the lock closure (via ssh-key).
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+ed25519-dalek = "2"
+blake2 = "0.10"
 
 [dev-dependencies]
 # tokio's test-util feature enables `tokio::time::pause` / `advance` and

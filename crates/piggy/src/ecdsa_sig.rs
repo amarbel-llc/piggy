@@ -108,6 +108,35 @@ pub fn ssh_ecdsa_blob_to_der(blob: &[u8]) -> Result<Vec<u8>, String> {
     Ok(der)
 }
 
+/// The raw fixed-width `r‖s` payload as the inner blob of an SSH ECDSA
+/// signature, `string(mpint r) || string(mpint s)`: the inverse of
+/// [`ssh_ecdsa_blob_to_der`] followed by [`der_to_raw_rs`]. Each half is
+/// minimally encoded (leading zeros dropped, one `0x00` restored when the
+/// high bit is set), as RFC 4251 §5 requires of an mpint.
+pub fn raw_rs_to_ssh_ecdsa_blob(rs: &[u8]) -> Result<Vec<u8>, String> {
+    if rs.is_empty() || !rs.len().is_multiple_of(2) {
+        return Err(format!(
+            "raw ECDSA signature is {} bytes, not two equal halves",
+            rs.len()
+        ));
+    }
+    let (r, s) = rs.split_at(rs.len() / 2);
+
+    let mut out = Vec::with_capacity(rs.len() + 10);
+    for half in [r, s] {
+        let first_significant = half.iter().position(|&b| b != 0).unwrap_or(half.len());
+        let significant = &half[first_significant..];
+        let pad = significant.first().is_some_and(|&b| b & 0x80 != 0);
+        let len = significant.len() + usize::from(pad);
+        out.extend_from_slice(&(len as u32).to_be_bytes());
+        if pad {
+            out.push(0x00);
+        }
+        out.extend_from_slice(significant);
+    }
+    Ok(out)
+}
+
 /// Read an SSH `string` (u32 big-endian length prefix + payload) from `data`
 /// at `offset`. Returns `(payload, next_offset)`. Every bound is checked so a
 /// malformed length can never index out of range.

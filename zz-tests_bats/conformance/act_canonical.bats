@@ -15,7 +15,7 @@ setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
 }
 
-K_SIG=piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+K_SIG=piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra
 K_PRINCIPAL=piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
 D_BLAKE=piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
 D_SHA=piggy-record-digest-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6
