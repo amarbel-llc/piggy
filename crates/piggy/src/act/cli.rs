@@ -12,11 +12,12 @@
 //!   to its unsealed act after checking its namespace, key and hash against
 //!   the seal fields (§3.3); the sealed act on stdout.
 //! - `key [--card] [PUBFILE]`: the `key` value for an OpenSSH public key.
-//! - `seal [--guid GUID] [FILE]`: sign an unsealed act through the agent
-//!   (card namespaces through operator-act@piggy, piggy-record-v1 through an
-//!   ordinary sign request) and write the sealed act. Its exit codes are
-//!   `piggy operator-sign`'s: 1 refused, 3 no agent serves it, 4 not signed
-//!   this time.
+//! - `seal [FILE]`: sign an unsealed act through the agent with the key its
+//!   `key` names (card namespaces through operator-act@piggy,
+//!   piggy-record-v1 through an ordinary sign request) and write the sealed
+//!   act. Its exit codes are `piggy operator-sign`'s: 1 refused (and, as
+//!   there, an unreadable input or a failed write), 3 no agent serves it, 4
+//!   not signed this time.
 //!
 //! FILE is stdin when absent or `-`. A refusal is on stderr as
 //! `refused (<rule>): <detail>`, the rule the stable name of what was broken.
@@ -29,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
-use super::produce::{SealError, seal_act};
+use super::produce::{SealError, check_before_signing, seal_act};
 use super::seal::{self, DigestFormat};
 use super::{Act, Refusal, parse};
 use crate::operator_act::armor;
@@ -91,10 +92,6 @@ enum ActCommand {
     /// (the canonical form is the prompt), piggy-record-v1 through an
     /// ordinary sign request with the act's `key`.
     Seal {
-        /// GUID (hex, or a prefix) of the card, when the agent serves slot 9C
-        /// for more than one.
-        #[arg(long)]
-        guid: Option<String>,
         /// The act to read; stdin when absent or `-`.
         file: Option<PathBuf>,
     },
@@ -152,7 +149,7 @@ pub fn run(args: &[String]) -> i32 {
         ActCommand::Digest { sha256, file } => ("digest", digest(sha256, file.as_deref())),
         ActCommand::Detach { signature, file } => ("detach", detach(&signature, file.as_deref())),
         ActCommand::Attach { signature, file } => ("attach", attach(&signature, file.as_deref())),
-        ActCommand::Seal { guid, file } => ("seal", seal(guid.as_deref(), file.as_deref())),
+        ActCommand::Seal { file } => ("seal", seal(file.as_deref())),
         ActCommand::Key { card, file } => ("key", key(card, file.as_deref())),
     };
 
@@ -161,6 +158,9 @@ pub fn run(args: &[String]) -> i32 {
             let mut stdout = std::io::stdout().lock();
             match stdout.write_all(&output).and_then(|()| stdout.flush()) {
                 Ok(()) => 0,
+                // As operator-sign: a failed write after the act was signed is
+                // a refusal, never "nothing serves it".
+                Err(_) if verb == "seal" => EXIT_REFUSED,
                 Err(_) => EXIT_INPUT,
             }
         }
@@ -233,16 +233,26 @@ fn attach(signature: &Path, file: Option<&Path>) -> Result<Vec<u8>, Failure> {
         .ok_or_else(|| input_failure("attach produced no seal".into()))
 }
 
-fn seal(guid: Option<&str>, file: Option<&Path>) -> Result<Vec<u8>, Failure> {
-    let act = read_act(file)?;
+fn seal(file: Option<&Path>) -> Result<Vec<u8>, Failure> {
+    // `piggy operator-sign` answers an unreadable input with 1, and 3 means
+    // only "nothing serves the signature"; seal keeps that contract.
+    let act = read_act(file).map_err(|f| Failure {
+        exit: if f.exit == EXIT_INPUT {
+            EXIT_REFUSED
+        } else {
+            f.exit
+        },
+        ..f
+    })?;
     let as_failure = |e: SealError| Failure {
         exit: e.exit_code(),
         message: e.message().to_owned(),
     };
 
-    // The pairing is checked before the socket is looked for, so an act the
-    // namespace forbids is refused the same way with or without an agent.
-    act.check_namespace_pairing()?;
+    // The act's own checks run before the socket is looked for, so an act
+    // a verifier would refuse is refused the same way with or without an
+    // agent, and never reaches a prompt.
+    check_before_signing(&act).map_err(as_failure)?;
     let socket = crate::agent_client::piggy_auth_sock_override()
         .or_else(|| std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty()))
         .ok_or_else(|| {
@@ -251,10 +261,11 @@ fn seal(guid: Option<&str>, file: Option<&Path>) -> Result<Vec<u8>, Failure> {
             ))
         })?;
 
-    let sealed = seal_act(&act, Path::new(&socket), guid).map_err(as_failure)?;
-    sealed
-        .sealed_canonical()
-        .ok_or_else(|| input_failure("seal produced no signature".into()))
+    let sealed = seal_act(&act, Path::new(&socket)).map_err(as_failure)?;
+    sealed.sealed_canonical().ok_or_else(|| Failure {
+        exit: EXIT_REFUSED,
+        message: "seal produced no signature".into(),
+    })
 }
 
 fn key(card: bool, file: Option<&Path>) -> Result<Vec<u8>, Failure> {

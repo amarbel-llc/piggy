@@ -218,6 +218,62 @@ pub fn operator_act(
     hash: crate::operator_act::HashAlgorithm,
     text: &[u8],
 ) -> Result<(crate::operator_act::Response, ssh_key::PublicKey), OperatorActError> {
+    let guid_hint = guid_hint.map(str::to_string);
+    operator_act_with(
+        socket_path,
+        move |identities| {
+            let comments: Vec<String> = identities.iter().map(|i| i.comment.clone()).collect();
+            select_signing_identity(&comments, slot_id, guid_hint.as_deref())
+                .map_err(OperatorActError::NoKey)
+        },
+        namespace,
+        hash,
+        text,
+    )
+}
+
+/// [`operator_act`] with the key chosen by equality: the identity whose
+/// public key blob (RFC 4253 §6.6) is `public_key`. A key the agent does not
+/// serve is `NoKey` before any request is sent, so no prompt is raised for
+/// a key that could not sign the act (RFC 0013 §3.3).
+pub fn operator_act_with_key(
+    socket_path: &Path,
+    public_key: &[u8],
+    namespace: &str,
+    hash: crate::operator_act::HashAlgorithm,
+    text: &[u8],
+) -> Result<(crate::operator_act::Response, ssh_key::PublicKey), OperatorActError> {
+    let public_key = public_key.to_vec();
+    operator_act_with(
+        socket_path,
+        move |identities| {
+            identities
+                .iter()
+                .position(|identity| {
+                    ssh_key::PublicKey::new(identity.pubkey.clone(), "")
+                        .to_bytes()
+                        .is_ok_and(|blob| blob == public_key)
+                })
+                .ok_or_else(|| {
+                    OperatorActError::NoKey(
+                        "the agent does not serve the act's `key` (is the right card attached?)"
+                            .into(),
+                    )
+                })
+        },
+        namespace,
+        hash,
+        text,
+    )
+}
+
+fn operator_act_with(
+    socket_path: &Path,
+    select: impl FnOnce(&[ssh_agent_lib::proto::Identity]) -> Result<usize, OperatorActError>,
+    namespace: &str,
+    hash: crate::operator_act::HashAlgorithm,
+    text: &[u8],
+) -> Result<(crate::operator_act::Response, ssh_key::PublicKey), OperatorActError> {
     use crate::operator_act::{EXTENSION, Request, Response};
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -227,7 +283,6 @@ pub fn operator_act(
     let socket_path = socket_path.to_path_buf();
     let namespace = namespace.to_string();
     let text = text.to_vec();
-    let guid_hint = guid_hint.map(str::to_string);
 
     runtime.block_on(async move {
         let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
@@ -238,9 +293,7 @@ pub fn operator_act(
             .request_identities()
             .await
             .map_err(|e| OperatorActError::Unreachable(format!("request_identities: {e}")))?;
-        let comments: Vec<String> = identities.iter().map(|i| i.comment.clone()).collect();
-        let index = select_signing_identity(&comments, slot_id, guid_hint.as_deref())
-            .map_err(OperatorActError::NoKey)?;
+        let index = select(&identities)?;
         let identity = &identities[index];
         let public_key = ssh_key::PublicKey::new(identity.pubkey.clone(), identity.comment.clone());
         let key = public_key

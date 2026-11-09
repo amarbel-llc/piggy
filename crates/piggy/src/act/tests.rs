@@ -210,6 +210,34 @@ fn descriptions_trim_drop_empties_and_join() {
     assert_eq!(merge_descriptions(&[" ".to_owned()]), Ok(None));
 }
 
+/// §5.2 step 3, the part a producer checks before any prompt.
+#[test]
+fn issuer_binding_needs_issuer_key_to_be_key_and_a_narrow_signed_by_its_subject() {
+    let narrow = vectors()
+        .into_iter()
+        .find(|v| v.name == "canonical/narrow-sealed-sets-sort-on-parsed-bytes")
+        .map(|v| text(&v.document))
+        .unwrap();
+    assert_eq!(
+        parse(narrow.as_bytes()).unwrap().check_issuer_binding(),
+        Ok(())
+    );
+
+    let other_issuer = narrow.replace("- issuer = clown:72dca00c", "- issuer = clown:other");
+    let other_key = narrow.replacen(
+        "- issuer-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx",
+        "- issuer-key = piggy-principal_pub-v1@ssh_ecdsa_nistp256_pub-qfcnt7j0myaqnh8f3wlksx6tln6sulqdvd2wv2hmp0lj5dpfv9ux2v2ndra",
+        1,
+    );
+    for doc in [other_issuer, other_key] {
+        let act = parse(doc.as_bytes()).unwrap();
+        assert_eq!(
+            act.check_issuer_binding().map_err(|r| r.rule),
+            Err(Rule::IssuerBinding)
+        );
+    }
+}
+
 #[test]
 fn canon_does_not_apply_the_pairing() {
     let doc = text(&approval().canonical()).replace("- kind = approval", "- kind = escalation");

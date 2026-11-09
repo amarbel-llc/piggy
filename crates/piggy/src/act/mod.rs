@@ -55,6 +55,9 @@ pub enum Rule {
     /// A `namespace`/`kind`/`issuer`/`assurance` combination §4.8 does not
     /// list. Never raised by [`parse`].
     NamespacePairing,
+    /// §5.2 step 3's other rules: `issuer-key` is not `key`, or a `narrow`'s
+    /// `issuer` is not its `subject`. Never raised by [`parse`].
+    IssuerBinding,
     /// §5.2 step 2: the signature does not verify under `key`, or a detached
     /// sshsig does not match the seal fields (§3.3). Never raised by
     /// [`parse`].
@@ -76,6 +79,7 @@ impl Rule {
             Rule::Value => "value",
             Rule::Body => "body",
             Rule::NamespacePairing => "namespace-pairing",
+            Rule::IssuerBinding => "issuer-binding",
             Rule::Signature => "signature",
         }
     }
@@ -507,6 +511,23 @@ impl Act {
             }
         }
 
+        Ok(())
+    }
+
+    /// The rest of RFC 0013 §5.2 step 3: `issuer-key` equals `key`, and a
+    /// `narrow`'s `issuer` is its `subject`. Like the pairing, a producer
+    /// applies it before asking for a signature; canonicalizing does not.
+    pub fn check_issuer_binding(&self) -> Result<(), Refusal> {
+        let spelled = |name| self.field(name).map(parsed_bytes);
+        if spelled("issuer-key") != spelled("key") {
+            return refuse(Rule::IssuerBinding, "`issuer-key` is not `key`");
+        }
+        if self.kind() == "narrow" && self.text("issuer") != self.text("subject") {
+            return refuse(
+                Rule::IssuerBinding,
+                "a narrow is signed by its subject: `issuer` must be `subject`",
+            );
+        }
         Ok(())
     }
 

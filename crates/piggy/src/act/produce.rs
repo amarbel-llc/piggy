@@ -4,9 +4,9 @@
 //! anything else (so a forbidden act never reaches a prompt), then obtain a
 //! signature over the canonical form and seal the act with it:
 //!
-//! - a card namespace through `operator-act@piggy` (RFC 0012) on slot 9C,
-//!   the canonical form being the text the operator reads, so the operator
-//!   sees exactly the signed bytes;
+//! - a card namespace through `operator-act@piggy` (RFC 0012) with the card
+//!   key the act's `key` names, the canonical form being the text the
+//!   operator reads, so the operator sees exactly the signed bytes;
 //! - `piggy-record-v1` through an ordinary agent sign request with the key
 //!   the act's `key` names.
 //!
@@ -19,12 +19,10 @@
 use std::path::Path;
 
 use super::{Act, Refusal, seal};
-use crate::agent_client::{AgentSignError, OperatorActError, agent_sign_with_key, operator_act};
+use crate::agent_client::{
+    AgentSignError, OperatorActError, agent_sign_with_key, operator_act_with_key,
+};
 use crate::operator_act::{HashAlgorithm, Status, displayable_text, signed_data, sshsig_blob};
-
-/// The slot whose key signs card acts: PIV Digital Signature, the slot
-/// `piggy card init` gives PIN-always, touch-always (FDR 0006).
-const CARD_SLOT: u8 = 0x9C;
 
 /// Why no sealed act was written, grouped as `piggy operator-sign` groups
 /// its exits so a caller scripts against the same codes.
@@ -67,10 +65,19 @@ impl From<Refusal> for SealError {
     }
 }
 
-/// Seal `act` through the agent at `socket`. `guid` narrows the card when
-/// the agent serves slot 9C for more than one.
-pub fn seal_act(act: &Act, socket: &Path, guid: Option<&str>) -> Result<Act, SealError> {
+/// The checks that need nothing but the act, run before any agent is asked
+/// so that no act a verifier would refuse ever reaches a prompt: the §4.8
+/// pairing and the rest of §5.2 step 3.
+pub fn check_before_signing(act: &Act) -> Result<(), SealError> {
     act.check_namespace_pairing()?;
+    act.check_issuer_binding()?;
+    Ok(())
+}
+
+/// Seal `act` through the agent at `socket`. The signing key is the one the
+/// act's `key` names, matched by equality, never by slot or card.
+pub fn seal_act(act: &Act, socket: &Path) -> Result<Act, SealError> {
+    check_before_signing(act)?;
 
     let canonical = act.canonical();
     let namespace = act.text("namespace").unwrap_or_default();
@@ -79,7 +86,7 @@ pub fn seal_act(act: &Act, socket: &Path, guid: Option<&str>) -> Result<Act, Sea
     let key = seal::public_key_blob(&seal::seal_key(act)?)?;
 
     let sshsig = if act.is_card_act() {
-        card_sshsig(socket, guid, namespace, hash, &canonical)?
+        card_sshsig(socket, &key, namespace, hash, &canonical)?
     } else {
         let data = signed_data(namespace, hash, &canonical);
         let signature = agent_sign_with_key(socket, &key, &data).map_err(|e| match e {
@@ -96,7 +103,7 @@ pub fn seal_act(act: &Act, socket: &Path, guid: Option<&str>) -> Result<Act, Sea
 
 fn card_sshsig(
     socket: &Path,
-    guid: Option<&str>,
+    key: &[u8],
     namespace: &str,
     hash: HashAlgorithm,
     canonical: &[u8],
@@ -112,8 +119,8 @@ fn card_sshsig(
         )));
     }
 
-    let (response, _key) = operator_act(socket, CARD_SLOT, guid, namespace, hash, canonical)
-        .map_err(|e| match e {
+    let (response, _key) =
+        operator_act_with_key(socket, key, namespace, hash, canonical).map_err(|e| match e {
             OperatorActError::Unreachable(_) | OperatorActError::NotServed(_) => {
                 SealError::NotServed(e.to_string())
             }

@@ -105,6 +105,18 @@ function a_kind_the_namespace_forbids_is_refused_before_the_agent { # @test
   [[ $stderr == *"refused (namespace-pairing)"* ]] || fail "$stderr"
 }
 
+function an_issuer_key_that_is_not_key_is_refused_before_the_agent { # @test
+  local other
+  other=$("$PIGGY" act key "$DIR/stranger.pub")
+  _software_act "$DIR/ed25519" | sed "s|^- issuer-key = .*|- issuer-key = $other|" >"$DIR/act"
+  run -1 --separate-stderr "$PIGGY" act seal "$DIR/act"
+  [[ $stderr == *"refused (issuer-binding)"* ]] || fail "$stderr"
+}
+
+function an_unreadable_input_exits_1_not_3 { # @test
+  PIGGY_AUTH_SOCK="$AGENT_SOCK" run -1 --separate-stderr "$PIGGY" act seal "$DIR/no-such-act"
+}
+
 function a_key_the_agent_does_not_hold_is_refused { # @test
   _software_act "$DIR/stranger" >"$DIR/act"
   PIGGY_AUTH_SOCK="$AGENT_SOCK" run -1 --separate-stderr "$PIGGY" act seal "$DIR/act"

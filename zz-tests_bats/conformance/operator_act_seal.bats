@@ -89,6 +89,23 @@ function a_kind_the_namespace_forbids_raises_no_prompt { # @test
     operator_act_fail "a forbidden act raised a PIN prompt"
 }
 
+function a_card_key_the_agent_does_not_serve_raises_no_prompt { # @test
+  operator_act_stack_up
+  _card_root >"$WORKDIR/act"
+  # Another card's key: the act names a key this agent cannot sign with,
+  # so it is refused by key equality before any request reaches the card.
+  ssh-keygen -q -t ecdsa -b 256 -N '' -f "$WORKDIR/other-card"
+  local other
+  other=$("$PIGGY_BIN" act key --card "$WORKDIR/other-card.pub")
+  sed -i "s|^- issuer-key = .*|- issuer-key = $other|; s|^- key = .*|- key = $other|" "$WORKDIR/act"
+
+  PIGGY_AUTH_SOCK="$AGENT_SOCK" run --separate-stderr "$PIGGY_BIN" act seal "$WORKDIR/act"
+  [[ $status -eq 1 && $stderr == *"does not serve the act's \`key\`"* ]] ||
+    operator_act_fail "want a refusal naming the key"
+  [[ $(operator_act_prompt_count "$AGENT_LOG") -eq 0 ]] ||
+    operator_act_fail "a key the agent does not serve raised a PIN prompt"
+}
+
 function a_cancelled_prompt_exits_4_and_writes_nothing { # @test
   OPERATOR_ACT_AGENT_REFUSES_PROMPTS=1 operator_act_stack_up
   _card_root >"$WORKDIR/act"
