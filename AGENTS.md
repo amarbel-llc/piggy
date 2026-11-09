@@ -22,6 +22,7 @@ Piggy is a passwordstore.org fork that replaces GPG encryption with PIV smart ca
 | piggy-ci(7) | what the merge gate runs (`just` = `lint build test`); there is no hosted CI |
 | piggy-testing(7) | how every test tier works: bats over mocks, bats over fibby, the NixOS VM lanes, coverage; the PIN-prompt safety net; PC/SC-in-sandbox and platform gotchas |
 | piggy-markl(7) | the `go/` markl-id module: layout, producer/consumer bridge, grammar gates, the frozen grammar export contract, terminology |
+| piggy-acts(7) | operator acts in plain words: the chain, rights versus conditions, the stencil stack (how the conditions on a chain of acts combine), what piggy checks and what the consumer's enforcer checks |
 
 Design records live in `docs/features/` (FDRs), `docs/rfcs/` and `docs/plans/`; `docs/rfcs/0002` (piggy-box wire format, with bit-exact vectors replayed in tests), `0003` (piggy-ids), `0006`/`0007` (management interaction and command protocols), `0010` (pigpen pointer resolution), `0011` (markl-id format + the §7.3 identifier corpus), `0012` (the `operator-act@piggy` extension, sshsig namespaces, record purposes and the attestation bundle) are normative.
 

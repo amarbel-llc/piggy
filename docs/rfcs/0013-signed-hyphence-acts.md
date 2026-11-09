@@ -1,6 +1,6 @@
 ---
 status: proposed
-date: 2026-11-08
+date: 2026-11-09
 ---
 
 # Signed Hyphence Acts: the `piggy-act-v1` document and its certificate chain (piggy normative)
@@ -12,6 +12,16 @@ date: 2026-11-08
 > on are themselves `proposed`. Evidence labels in the notes: **V** read in
 > a named file at piggy master `f7f0db9` or in the sibling repositories
 > named; **I** inference; **U** unknown; **R** an operator ruling, dated.
+>
+> **Amended 2026-11-09** on the operator's rulings in "Operator acts: where
+> the permission lives" (the review document): the body is an espalier
+> stream and the head may pin a capability profile by digest (Shape E);
+> conditions are stacked, never compared, and piggy compares only rights
+> and numbers (circus EPIC 0001 decision 3, adopted); `deny` is admitted in
+> a body with one spelling. The head consolidation (dropping the derivable
+> `issuer`, `issuer-key`, `namespace`, `hash`, `assurance`, `issued-at`)
+> awaits the operator's ruling on the two prompt renderings and is not in
+> this text. The mechanism's plain-words explanation is `piggy-acts(7)`.
 
 ## Abstract
 
@@ -25,7 +35,10 @@ a chain rooted at the operator's PIV card: a certifying act's power comes
 only from a valid path to a card-signed root, rights only shrink along a
 path unless the card signs the step, and validity is decided by walking
 the path. Trust is structural and mechanical; the document's words carry
-no authority.
+no authority. The fine conditions under which rights are used ride beside
+the head, as a capability profile pinned by digest or as an espalier tree
+in the body, and are stacked along the chain, never compared: a call is
+admitted only where every layer admits it.
 
 ## Introduction
 
@@ -81,8 +94,8 @@ interpreted as described in RFC 2119.
 
 An act is a hyphence document (hyphence RFC 0001, RFC 0002, RFC 0003) whose
 type line is `! piggy-act-v1`. Its head carries the act in field lines
-(hyphence RFC 0002 field content, `- key = value`). Its body is OPTIONAL
-and informational.
+(hyphence RFC 0002 field content, `- key = value`). Its body is OPTIONAL;
+when present it is an espalier stream of conditions (§4.9).
 
 A head MAY contain only: `#` description lines, `- key = value` field
 lines, and the `! piggy-act-v1` type line, plus `%` comments (which are
@@ -90,10 +103,12 @@ not signed, §3.1). A bare `-` tag or reference line, a `<` line, an `@`
 blob line, a quoted field name, or a type-line lock MUST be refused.
 
 A head-only act is the normal case (R: "the body can be empty entirely").
-When a body is present it MUST be shown with the head (§6) and a verifier
-MUST NOT derive any authorization from it; it is a human note. The whole
-canonical form, body included, obeys RFC 0012 §2.5's character rules
-(UTF-8; no C0 or C1 control character other than LF and TAB).
+When a body is present it MUST be shown with the head (§6), it is signed
+as its bytes stand (§3.1 step 7), and it is a tree of conditions for the
+consumer's enforcer (§4.9). piggy's verifier derives no authorization from
+it and never evaluates it (R 2026-11-09, Shape E). The whole canonical
+form, body included, obeys RFC 0012 §2.5's character rules (UTF-8; no C0
+or C1 control character other than LF and TAB).
 
 A field value is a hyphence `FieldValue` (V hyphence
 `hyphence-content.peg`: a markl-id, a quoted string, or a bare word). A
@@ -121,6 +136,7 @@ them); every other field MUST appear at most once.
 | `subject` | a principal id (opaque, no reserved runes) | all kinds except `approval`, `revocation` | the principal the act is about |
 | `subject-key` | markl-id of a public key, purpose `piggy-principal_pub-v1`, format `ssh_ed25519_pub` or `ssh_ecdsa_nistp256_pub` | `root`, `link` | the key being certified |
 | `object` | a markl-id or an opaque id | `grant`; optional on `escalation`, `revocation` | the thing the rights are over, in the consumer's naming |
+| `profile` | a hyphence RFC 0003 locked edge, `<name>@<digest>`, naming a capability profile document | optional on `root`, `link`, `grant`, `escalation`, `narrow` | the condition tree the rights are enforced under (§4.9); the digest pins it; piggy never resolves or parses it |
 | `issuer` | a principal id, or `operator` | yes | who signs; `operator` iff `key` is a trust anchor (§5.1) |
 | `issuer-key` | markl-id of the signing public key: purpose `piggy-piv_sig-v1` for a card act, `piggy-principal_pub-v1` for a software act | yes | equals `key` |
 | `issuer-record` | act digest (§3.5) | every software act; MUST be absent on a card act | the certifying act that binds `issuer-key` to `issuer` |
@@ -272,6 +288,14 @@ its subject's own key and can only remove. Only an `escalation`, a card
 act, may add. A card `link` or `grant` is bounded by nothing but the
 operator's judgement at the prompt.
 
+**Conditions are stacked, never compared** (R 2026-11-09). piggy compares
+between a child act and its parent only what is cheap and always
+decidable: the `right` set, by subset. A `profile` edge or a body is never
+compared by piggy to the one above it; every profile and body on a chain
+is a layer, and the consumer's enforcer admits a call only where every
+layer admits it (§4.9). A layer can therefore only remove, whatever it
+says, and no containment check over conditions is needed anywhere.
+
 #### 4.3. Effective rights
 
 The **effective rights** of a certifying act C are computed from its
@@ -366,6 +390,53 @@ row does not allow, and an `assurance` inconsistent with the row (§4.7).
 This table replaces the per-namespace text shapes of RFC 0012 §3 for every
 act (Compatibility).
 
+#### 4.9. Conditions: the profile edge and the body (the stencil stack)
+
+The `right` set is the coarse ceiling. The fine conditions under which a
+right is used (which tools, which paths, which recipe groups, which
+argument values) ride in two places, both inside the signed bytes:
+
+- **The `profile` edge.** A hyphence RFC 0003 locked edge,
+  `<name>@<digest>`, naming a capability profile document. piggy does not
+  define that document, resolve it or parse it; the digest pins it and the
+  signature covers the pin. The document's shape is the consumer's (the
+  first consumers write it as a hyphence document whose body is an
+  espalier stream).
+- **The body.** When present it MUST be an espalier stream (cutting-garden
+  RFC 0014, "Isometry": a trellis literal per root, every atom ground). It
+  is signed as its bytes stand (§3.1 step 7); no canonical form is defined
+  for it and none is needed. piggy's reference verifier checks only that
+  the body obeys RFC 0012 §2.5's character rules and otherwise treats it
+  as opaque bytes.
+
+Every `profile` edge and every body on a chain is a **layer**, from the
+chain start down, together with the layers of every valid `escalation`
+and `narrow` naming an act on that chain. An `escalation` that carries a
+`profile` or a body replaces, for the act it names, that act's own layer
+only; the layers above remain. A `narrow`'s layer is added.
+
+The **stencil stack** is the rule the consumer's enforcer applies to the
+layers at call time, and the only meaning piggy assigns them:
+
+1. a call is admitted only where every layer admits it;
+2. a layer that says nothing about a value is not an admission of it;
+3. a `deny` in any layer refuses, where `deny` is the one trailing tag the
+   consumer's node types give it (the first consumers: after the type,
+   where `subtree` goes).
+
+Because every layer must admit, a layer can only remove, and a child
+cannot widen what its parent allows however it is written. piggy's
+verifier therefore never compares one layer with another (§4.2); it
+returns them with the verdict (§5.3). What a node, a tag or a condition
+means, and which program evaluates them, is the consumer's: the evaluator
+sits where the call is dispatched, never in piggy.
+
+The grammar dependency runs piggy → hyphence → trellis (V
+`0014-trellis.peg`), so this section cites trellis without piggy's
+verifier parsing it; the citation binds the producers that write bodies
+and the enforcers that read them. `piggy-acts(7)` explains the stencil
+stack in plain words.
+
 ### 5. Verification
 
 #### 5.1. Trust anchors
@@ -382,7 +453,8 @@ Given an act A, a time T and a store S of acts:
 
 1. Parse A; refuse a type other than `piggy-act-v1`, a line kind §1
    forbids, a duplicate non-set field, an unknown unprefixed field, a
-   missing required field, or a value outside §2.
+   missing required field, a value outside §2, or a body outside RFC 0012
+   §2.5's character rules (§4.9).
 2. Compute the canonical form (§3.1) from the parsed document and the
    signed data (§3.2); verify `signature` under `key` with the algorithm
    the key type requires. Refuse on failure.
@@ -413,11 +485,14 @@ on its chain.
 
 The answer is one of: **valid**, with the effective expiry, the
 `assurance`, the chain start's `key`, and for a certifying act or `grant`
-its effective rights (for a `grant`, with its `object`); **invalid**, with
-the step of §5.2 that failed and the act digest; **undetermined**, when an
-act in `names` or `issuer-record` could not be resolved or no revocation
-source was reachable. A consumer MUST NOT treat undetermined as valid.
-`records` entries are returned as given and are the consumer's to check.
+its effective rights (for a `grant`, with its `object`) and its layers
+(§4.9: the `profile` edge and body of every act on the chain and of every
+applied `escalation` and `narrow`, as given, in chain order); **invalid**,
+with the step of §5.2 that failed and the act digest; **undetermined**,
+when an act in `names` or `issuer-record` could not be resolved or no
+revocation source was reachable. A consumer MUST NOT treat undetermined
+as valid. `records` entries and the layers are returned as given and are
+the consumer's to check and to enforce.
 
 #### 5.4. The reference verifier
 
@@ -548,6 +623,37 @@ worker's `link` (whose rights it replaces) and `records` the request:
     ! piggy-act-v1
     ---
 
+A software `link` under Shape E: the head pins the child's capability
+profile by digest and the body adds one layer, a `deny` on a path (its
+node types are the consumer's; shown sealed):
+
+    ---
+    # link: manager hands the reviewer a read-only tree
+    - kind = link
+    - producer = spinclass:link-v1
+    - subject = clown:a1b2c3d4-…
+    - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-…
+    - issuer = clown:72dca00c-1c93-41d1-a2ad-9e530b9e30ee
+    - issuer-key = piggy-principal_pub-v1@ssh_ed25519_pub-…
+    - issuer-record = piggy-record-digest-v1@blake2b256-…
+    - profile = engineer-reviewer@blake2b256-…
+    - right = just-us:run:group:test
+    - right = moxy:kind:read
+    - not-after = 2026-11-10T06:00:00Z
+    - issued-at = 2026-11-09T22:15:00Z
+    - assurance = piggy:software
+    - key = piggy-principal_pub-v1@ssh_ed25519_pub-…
+    - namespace = piggy-record-v1
+    - hash = sha256
+    - signature = piggy-record-sig-v1@ed25519_sig-…
+    ! piggy-act-v1
+    ---
+
+    [moxy !clown-plugin-v1
+      [-> folio !mcp-server-v1
+        [-> read !mcp-tool-v1
+          [-> file:circus/.worktrees/_/infra/secrets !fs-path-v1 deny]]]]
+
 Verifying a signature by hand on any host: rebuild the sshsig from the
 seal, write the canonical form (the sealed act minus its `signature`
 line) to a file, and
@@ -560,11 +666,16 @@ The chain walk (§5.2 steps 4 to 6) is the reference verifier's.
 ## Security Considerations
 
 - **The words carry nothing.** Authorization comes from `kind`, the
-  `right` set, the chain and the seal; a body or description, however
-  persuasive, is ignored by §5. An attacker who gets the operator to sign
-  a head obtains the power the head says, which is why the head is shown
-  in full (§6) and why a right is a short opaque token the operator can
-  read.
+  `right` set, the chain and the seal; a description, however persuasive,
+  is ignored by §5, and a body is a layer that can only remove (§4.9). An
+  attacker who gets the operator to sign a head obtains the power the head
+  says, which is why the head is shown in full (§6) and why a right is a
+  short opaque token the operator can read.
+- **Layers cannot widen.** Under the stencil stack every layer must admit
+  a call, so a body or profile written by a child, however it is written,
+  removes and never adds; the containment comparison that a per-link
+  check would need (and that is undecidable for some predicates) is
+  never performed.
 - **Canonicalization is in the trust path.** A divergence between
   producer and verifier makes a good act fail (safe). A verifier that
   accepted arrival bytes without recomputing could let two documents
@@ -619,6 +730,7 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 | §4.7, §4.8, namespace, kind, issuer, assurance | `act_refusals.bats` | an `escalation` under `piggy-record-v1`, a `narrow` under a card namespace, `piggy:hardware` on a software act, are refused |
 | §5.3, undetermined | `act_chain.bats` | an unresolvable `issuer-record` and an unreachable revocation source answer undetermined, never valid |
 | §6, the prompt shows the whole head | `operator_act_prompt.bats` | the test askpass receives every head line verbatim in canonical order |
+| §4.9, the body is signed verbatim and returned opaque | `act_body.bats` | an act with a body verifies; one byte changed in the body fails; the verdict returns the `profile` edge and body bytes unchanged; a body with a C0 control character is refused |
 
 ## Compatibility
 
@@ -652,26 +764,35 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
   hyphence documents keeps them and names them from acts by digest.
   Whether a consumer moves its own records onto `piggy-act-v1` is its
   decision.
+- **The 2026-11-09 amendment** adds the optional `profile` field and gives
+  the body a meaning (§4.9) where it had none. No act with a body had been
+  produced; `piggy-act-v1` is unchanged.
 - **Version.** A change to the canonical form, the seal, the digest, or a
   non-additive change to the field set is `piggy-act-v2`; adding an
   optional unprefixed field is an amendment to §2.
 
 ## Limitations and deviations from the rulings
 
-- **Nesting is by reference.** The operator's comment asked for the head
-  to carry the permission "through nested hyphence documents". A hyphence
-  head cannot contain another document (a metadata line cannot contain a
-  line feed, V hyphence RFC 0001), so the tree is built of references by
-  digest (`names`, `prev`, `object`, prefixed fields) that a verifier
-  resolves from the consumers' store. Stated here as a deviation for the
-  operator to accept or overrule.
-- **The permissions language is a set algebra, not a program.** The
-  operator asked for a language expressive enough for any permission.
-  This RFC gives: opaque rights, subset on the way down, replacement by
-  escalation, intersection by narrowing, an `object` on grants, and
-  consumer fields for anything richer. Anything that needs computation
-  over rights (predicates, conditions) lives in the consumer's own fields
-  and verifier. Stated as a deviation for the operator.
+- **Nesting is by reference, and the body is the one tree.** The
+  operator's comment asked for the head to carry the permission "through
+  nested hyphence documents". A hyphence head cannot contain another
+  document (a metadata line cannot contain a line feed, V hyphence RFC
+  0001), so the head holds references by digest (`names`, `prev`,
+  `object`, `profile`) that a verifier or enforcer resolves from the
+  consumers' store, and the one tree an act carries inline is its espalier
+  body (§4.9, R 2026-11-09).
+- **The head is a set algebra; the conditions are stacked.** The head
+  gives opaque rights, subset on the way down, replacement by escalation,
+  intersection by narrowing, an `object` on grants. Everything finer is a
+  layer (a pinned profile, a body) that the consumer's enforcer stacks
+  (§4.9). piggy evaluates no condition. Ruled 2026-11-09, replacing the
+  deviation this item recorded.
+- **Head size and the derivable fields.** Six fields (`issuer`,
+  `issuer-key`, `namespace`, `hash`, `assurance`, `issued-at`) can be
+  derived from `kind`, `key` and the signature's format or are
+  informational. Dropping them takes a card root from fifteen fixed lines
+  to nine. Pending the operator's ruling on the two prompt renderings in
+  the review document.
 - **One prompt.** A card act's head must fit a prompt (4096 bytes hard,
   about fifteen lines comfortable). A large right set is the consumer's
   to compress (a profile right instead of a list).
@@ -713,6 +834,10 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 - hyphence RFC 0001 (the document), RFC 0002 (content grammar), RFC 0003
   (markl atomic locks) and `hyphence-content.peg` — the carrier and its
   canonical emission. All three are `proposed` at the time of writing.
+- cutting-garden RFC 0014 (trellis; the "Isometry" section defines
+  espalier, its ground fragment) and `0014-trellis.peg` — the body's
+  grammar (§4.9). `proposed` at the time of writing. piggy's verifier
+  never parses a body; the citation binds body producers and enforcers.
 - RFC 2119 — requirement keywords. RFC 3339 — timestamps.
 
 ### Informative
@@ -722,6 +847,9 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 - piggy RFC 0008 — pigpen, for the MAC-in-lock construction this RFC does
   not follow.
 - The needs of the first consumers (spinclass's principal, handle and
-  profile records; barker's acts from the phone) informed the field set
-  and the chain rules; piggy is upstream of them and does not cite them
-  normatively.
+  profile records; barker's acts from the phone; circus EPIC 0001's
+  capability profiles and its "narrowing is stacking" decision, which §4.9
+  adopts) informed the field set and the chain rules; piggy is upstream of
+  them and does not cite them normatively.
+- `piggy-acts(7)`, the plain-words explanation of the chain and the
+  stencil stack.
