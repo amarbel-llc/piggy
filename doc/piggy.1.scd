@@ -16,6 +16,8 @@ piggy - PIV smart-card backed password store and agent
 
 *piggy operator-sign* *--namespace* _NAMESPACE_ [*--slot* _9c_|_9a_] [*--guid* _GUID_] [*--hash* _sha512_|_sha256_]
 
+*piggy act canon* [_FILE_]
+
 *piggy help*
 
 *piggy version*
@@ -556,6 +558,30 @@ commands:
 
 	```
 	piggy operator-sign --namespace piggy-escalation-v1 < grant.txt > grant.sig
+	```
+
+*act canon* [_FILE_]
+	Read a _piggy-act-v1_ document (piggy RFC 0013; _FILE_, or stdin when
+	it is absent or _-_) and write its canonical form to stdout: the bytes a
+	producer signs and the agent shows at the PIN prompt. Comments are
+	dropped, the description lines merged into one, the fields put in the
+	RFC's table order with set values sorted and deduplicated, the
+	_signature_ line removed, and the body, when there is one, carried byte
+	for byte. Two acts with the same content have the same canonical form
+	whatever order, spacing or comments they arrived with.
+
+	A document that is not an act is refused on stderr as
+	*refused (*_RULE_*):* _detail_, where _RULE_ names the rule it broke:
+	_envelope_, _type_, _type-lock_, _line-kind_, _quoted-field-name_,
+	_duplicate-field_, _unknown-field_, _missing-field_, _forbidden-field_,
+	_value_ or _body_. *canon* does not check the signature, the
+	namespace-and-kind pairing or the chain.
+
+	Exit status: *0* canonical form written; *1* refused; *2* usage error;
+	*3* the input could not be read.
+
+	```
+	piggy act canon < grant.act > grant.canonical
 	```
 
 *card init* [*--serial* _N_|*--guid* _HEX_|*--reader* _NAME_] [*--allow-reprovision*] [*--pin-policy* _SLOT_=_POLICY_]... [*--touch-policy* _SLOT_=_POLICY_]... [*--seal-management-key*[=_PASS-NAME_]|*--no-seal-management-key*] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]

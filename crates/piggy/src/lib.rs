@@ -19,6 +19,7 @@
 //!   `r‖s` or `(r, s)`), used by both the agent's SSH-signature path
 //!   and `piggy sign-bytes`.
 
+pub mod act;
 pub mod agent_client;
 pub mod card;
 pub mod card_oracle;

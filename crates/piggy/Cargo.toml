@@ -65,6 +65,10 @@ tap-dancer = { git = "https://github.com/amarbel-llc/tap", tag = "v0.1.12" }
 # closure (transitive via ssh-agent-lib); the explicit entry makes the
 # encode/decode use-site legal.
 base64 = "0.22"
+# The typed hyphence head reader and canonical encoder (hyphence RFC 0005)
+# under `act`, the piggy-act-v1 document of piggy RFC 0013 §3.1. Pinned to
+# the rev that landed `Head`; outputHashes in flake.nix track it.
+hyphence = { git = "https://code.linenisgreat.com/hyphence", rev = "7438bdf8ebec0e7a95934a7cd1a169b6033c3264" }
 
 [dev-dependencies]
 # tokio's test-util feature enables `tokio::time::pause` / `advance` and

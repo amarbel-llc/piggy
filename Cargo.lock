@@ -869,6 +869,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyphence"
+version = "0.2.0"
+source = "git+https://code.linenisgreat.com/hyphence?rev=7438bdf8ebec0e7a95934a7cd1a169b6033c3264#7438bdf8ebec0e7a95934a7cd1a169b6033c3264"
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1339,6 +1344,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "hex",
+ "hyphence",
  "libc",
  "openssl",
  "p256",

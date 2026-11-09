@@ -1,0 +1,708 @@
+# piggy-act-v1 conformance vectors (piggy RFC 0013, "Conformance Testing").
+#
+# Replayed by crates/piggy/src/act/tests.rs from its copy at
+# crates/piggy/testdata/0013-vectors.txt (the nix source of the piggy crate
+# holds crates/ only); `just lint-worktree` fails when the copy drifts.
+#
+# Records are separated by blank lines. Each line is "key: value", except
+# that a document is written one line per "| " line (the text after "| " is
+# the line, and a lone "|" is an empty line); every document line ends in
+# LF. Keys:
+#
+#   name          record name
+#   outcome       canonical | refuse
+#   document      the input (as "| " lines)
+#   body-hex      lowercase hex appended to "document": body bytes a "| "
+#                 line cannot carry (control characters, invalid UTF-8)
+#   canonical     (canonical) the canonical form, RFC 0013 §3.1
+#   sealed        (canonical, sealed acts) the sealed canonical form, §3.5
+#   rule          (refuse) the rule that refuses it, as `piggy act canon`
+#                 names it: envelope | type | type-lock | line-kind |
+#                 quoted-field-name | duplicate-field | unknown-field |
+#                 missing-field | forbidden-field | value | body
+#
+# Every key, digest and signature is a markl test value (a 0x00, 0x01, ...
+# payload); none verifies. Seal verification has its own vectors.
+
+name: canonical/root-already-canonical
+outcome: canonical
+document:
+| ---
+| # root: operator blesses session 72dca00c
+| - kind = root
+| - producer = troupe:root-v1
+| - subject = clown:72dca00c
+| - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - right = spinclass:check
+| - right = spinclass:merge
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - not-after = 2026-11-09T23:00:00Z
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-certificate-v1
+| - hash = sha256
+| - spinclass:profile = dev
+| ! piggy-act-v1
+| ---
+canonical:
+| ---
+| # root: operator blesses session 72dca00c
+| - kind = root
+| - producer = troupe:root-v1
+| - subject = clown:72dca00c
+| - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - right = spinclass:check
+| - right = spinclass:merge
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - not-after = 2026-11-09T23:00:00Z
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-certificate-v1
+| - hash = sha256
+| - spinclass:profile = dev
+| ! piggy-act-v1
+| ---
+
+name: canonical/root-reordered-with-duplicate-rights
+outcome: canonical
+document:
+| ---
+| ! piggy-act-v1
+| - spinclass:profile = dev
+| - hash = sha256
+| - right = spinclass:merge
+| - namespace = piggy-certificate-v1
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - assurance = piggy:hardware
+| - issued-at = 2026-11-08T23:00:00Z
+| - not-after = 2026-11-09T23:00:00Z
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - right = spinclass:check
+| - right = spinclass:merge
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer = operator
+| - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - subject = clown:72dca00c
+| - producer = troupe:root-v1
+| - kind = root
+| # root: operator blesses session 72dca00c
+| ---
+canonical:
+| ---
+| # root: operator blesses session 72dca00c
+| - kind = root
+| - producer = troupe:root-v1
+| - subject = clown:72dca00c
+| - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - right = spinclass:check
+| - right = spinclass:merge
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - not-after = 2026-11-09T23:00:00Z
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-certificate-v1
+| - hash = sha256
+| - spinclass:profile = dev
+| ! piggy-act-v1
+| ---
+
+name: canonical/root-unspaced-quoted-split-description
+outcome: canonical
+document:
+| ---
+| #   	root: operator blesses
+| - kind=root
+| - producer="troupe:root-v1"
+| - subject=clown:72dca00c
+| - subject-key=piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| # session 72dca00c
+| - issuer='operator'
+| - issuer-key=piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - right=spinclass:check
+| - right=spinclass:merge
+| - records="piggy-record-digest-v1"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - not-after=2026-11-09T23:00:00Z
+| - issued-at=2026-11-08T23:00:00Z
+| - assurance=piggy:hardware
+| - key=piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace=piggy-certificate-v1
+| - hash=sha256
+| - spinclass:profile=dev
+| ! piggy-act-v1
+| ---
+canonical:
+| ---
+| # root: operator blesses session 72dca00c
+| - kind = root
+| - producer = troupe:root-v1
+| - subject = clown:72dca00c
+| - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - right = spinclass:check
+| - right = spinclass:merge
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - not-after = 2026-11-09T23:00:00Z
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-certificate-v1
+| - hash = sha256
+| - spinclass:profile = dev
+| ! piggy-act-v1
+| ---
+
+name: canonical/root-with-comments
+outcome: canonical
+document:
+| ---
+| % a comment the operator never sees
+| # root: operator blesses session 72dca00c
+| - kind = root
+| - producer = troupe:root-v1 % a trailing comment
+| - subject = clown:72dca00c
+| - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - right = spinclass:check
+| % another
+| - right = spinclass:merge
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - not-after = 2026-11-09T23:00:00Z
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-certificate-v1
+| - hash = sha256
+| - spinclass:profile = dev
+| ! piggy-act-v1
+| % a trailing comment line
+| ---
+canonical:
+| ---
+| # root: operator blesses session 72dca00c
+| - kind = root
+| - producer = troupe:root-v1
+| - subject = clown:72dca00c
+| - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - right = spinclass:check
+| - right = spinclass:merge
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - not-after = 2026-11-09T23:00:00Z
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-certificate-v1
+| - hash = sha256
+| - spinclass:profile = dev
+| ! piggy-act-v1
+| ---
+
+name: canonical/narrow-sealed-sets-sort-on-parsed-bytes
+outcome: canonical
+document:
+| ---
+| # narrow: drop merge
+| - signature = piggy-record-sig-v1@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cy4lu83
+| - kind = narrow
+| - producer = spinclass:narrow-v1
+| - subject = clown:72dca00c
+| - issuer = clown:72dca00c
+| - issuer-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - issuer-record = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - right = spinclass:check
+| - right = "roustabout:grammar:x"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - right = aaa:x
+| - names = piggy-record-digest-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6
+| - names = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - names = piggy-record-digest-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6
+| - issued-at = 2026-11-08T23:30:00Z
+| - assurance = piggy:software
+| - key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - namespace = piggy-record-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+canonical:
+| ---
+| # narrow: drop merge
+| - kind = narrow
+| - producer = spinclass:narrow-v1
+| - subject = clown:72dca00c
+| - issuer = clown:72dca00c
+| - issuer-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - issuer-record = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - right = aaa:x
+| - right = "roustabout:grammar:x"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - right = spinclass:check
+| - names = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - names = piggy-record-digest-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6
+| - issued-at = 2026-11-08T23:30:00Z
+| - assurance = piggy:software
+| - key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - namespace = piggy-record-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+sealed:
+| ---
+| # narrow: drop merge
+| - kind = narrow
+| - producer = spinclass:narrow-v1
+| - subject = clown:72dca00c
+| - issuer = clown:72dca00c
+| - issuer-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - issuer-record = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - right = aaa:x
+| - right = "roustabout:grammar:x"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - right = spinclass:check
+| - names = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - names = piggy-record-digest-v1@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6
+| - issued-at = 2026-11-08T23:30:00Z
+| - assurance = piggy:software
+| - key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - namespace = piggy-record-v1
+| - hash = sha256
+| - signature = piggy-record-sig-v1@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cy4lu83
+| ! piggy-act-v1
+| ---
+
+name: canonical/approval-with-body
+outcome: canonical
+document:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-approval-v1
+| - hash = sha512
+| ! piggy-act-v1
+| ---
+|
+| [moxy !clown-plugin-v1
+| 	[-> folio !mcp-server-v1 deny]]
+canonical:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-approval-v1
+| - hash = sha512
+| ! piggy-act-v1
+| ---
+|
+| [moxy !clown-plugin-v1
+| 	[-> folio !mcp-server-v1 deny]]
+
+name: canonical/empty-body-is-no-body
+outcome: canonical
+document:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-approval-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+|
+canonical:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-approval-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+
+name: canonical/opaque-values-quoted-only-when-they-must-be
+outcome: canonical
+document:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-approval-v1
+| - hash = sha256
+| - spinclass:note = 'two words\tand a "tab"'
+| - spinclass:note = "single"
+| ! piggy-act-v1
+| ---
+canonical:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-approval-v1
+| - hash = sha256
+| - spinclass:note = single
+| - spinclass:note = "two words\tand a \"tab\""
+| ! piggy-act-v1
+| ---
+
+name: refuse/quoted-field-name-after-a-comment
+outcome: refuse
+rule: quoted-field-name
+document:
+| ---
+| - kind = approval
+| % a comment that is not a metadata line
+| - "nonce" = abc
+| ! piggy-act-v1
+| ---
+
+name: refuse/unclosed-metadata-section
+outcome: refuse
+rule: envelope
+document:
+| ---
+| - kind = root
+
+name: refuse/body-only-document-has-no-type
+outcome: refuse
+rule: type
+document:
+| kind = root
+
+name: refuse/no-type-line
+outcome: refuse
+rule: type
+document:
+| ---
+| - kind = approval
+| ---
+
+name: refuse/other-type
+outcome: refuse
+rule: type
+document:
+| ---
+| - kind = approval
+| ! piggy-act-v2
+| ---
+
+name: refuse/locked-type-line
+outcome: refuse
+rule: type-lock
+document:
+| ---
+| - kind = approval
+| ! piggy-act-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ---
+
+name: refuse/bare-tag-line
+outcome: refuse
+rule: line-kind
+document:
+| ---
+| - kind = approval
+| - urgent
+| ! piggy-act-v1
+| ---
+
+name: refuse/reference-line
+outcome: refuse
+rule: line-kind
+document:
+| ---
+| - kind = approval
+| - one/uno@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ! piggy-act-v1
+| ---
+
+name: refuse/angle-line
+outcome: refuse
+rule: line-kind
+document:
+| ---
+| < kind = approval
+| ! piggy-act-v1
+| ---
+
+name: refuse/blob-line
+outcome: refuse
+rule: line-kind
+document:
+| ---
+| - kind = approval
+| @ blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ! piggy-act-v1
+| ---
+
+name: refuse/quoted-field-name
+outcome: refuse
+rule: quoted-field-name
+document:
+| ---
+| - "kind" = approval
+| ! piggy-act-v1
+| ---
+
+name: refuse/duplicate-kind
+outcome: refuse
+rule: duplicate-field
+document:
+| ---
+| - kind = approval
+| - kind = root
+| ! piggy-act-v1
+| ---
+
+name: refuse/unknown-unprefixed-field
+outcome: refuse
+rule: unknown-field
+document:
+| ---
+| - kind = approval
+| - colour = red
+| ! piggy-act-v1
+| ---
+
+name: refuse/missing-issuer-key
+outcome: refuse
+rule: missing-field
+document:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-approval-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+
+name: refuse/card-root-without-not-after
+outcome: refuse
+rule: missing-field
+document:
+| ---
+| - kind = root
+| - producer = troupe:root-v1
+| - subject = clown:72dca00c
+| - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - right = spinclass:check
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-certificate-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+
+name: refuse/software-act-without-issuer-record
+outcome: refuse
+rule: missing-field
+document:
+| ---
+| - kind = narrow
+| - producer = spinclass:narrow-v1
+| - subject = clown:72dca00c
+| - issuer = clown:72dca00c
+| - issuer-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - right = spinclass:check
+| - names = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:30:00Z
+| - assurance = piggy:software
+| - key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - namespace = piggy-record-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+
+name: refuse/card-act-with-issuer-record
+outcome: refuse
+rule: forbidden-field
+document:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - issuer-record = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-approval-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+
+name: refuse/timestamp-with-offset
+outcome: refuse
+rule: value
+document:
+| ---
+| - kind = approval
+| - issued-at = "2026-11-08T23:00:00+00:00"
+| ! piggy-act-v1
+| ---
+
+name: refuse/unknown-kind
+outcome: refuse
+rule: value
+document:
+| ---
+| - kind = bless
+| ! piggy-act-v1
+| ---
+
+name: refuse/hash-sha1
+outcome: refuse
+rule: value
+document:
+| ---
+| - hash = sha1
+| ! piggy-act-v1
+| ---
+
+name: refuse/unregistered-namespace
+outcome: refuse
+rule: value
+document:
+| ---
+| - namespace = git
+| ! piggy-act-v1
+| ---
+
+name: refuse/subject-key-under-a-slot-purpose
+outcome: refuse
+rule: value
+document:
+| ---
+| - subject-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| ! piggy-act-v1
+| ---
+
+name: refuse/subject-with-a-space
+outcome: refuse
+rule: value
+document:
+| ---
+| - subject = "clown 72dca00c"
+| ! piggy-act-v1
+| ---
+
+name: refuse/names-not-a-record-digest
+outcome: refuse
+rule: value
+document:
+| ---
+| - names = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| ! piggy-act-v1
+| ---
+
+name: refuse/value-with-a-line-feed
+outcome: refuse
+rule: value
+document:
+| ---
+| - nonce = "a\nb"
+| ! piggy-act-v1
+| ---
+
+name: refuse/card-act-signed-by-a-principal-key
+outcome: refuse
+rule: value
+document:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - issuer-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| - namespace = piggy-approval-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+
+name: refuse/body-with-an-escape
+outcome: refuse
+rule: body
+document:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-approval-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+|
+body-hex: 1b5b33316d68696464656e0a
+
+name: refuse/body-not-utf8
+outcome: refuse
+rule: body
+document:
+| ---
+| - kind = approval
+| - producer = troupe:approval-v1
+| - issuer = operator
+| - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - issued-at = 2026-11-08T23:00:00Z
+| - assurance = piggy:hardware
+| - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg
+| - namespace = piggy-approval-v1
+| - hash = sha256
+| ! piggy-act-v1
+| ---
+|
+body-hex: 61ff0a

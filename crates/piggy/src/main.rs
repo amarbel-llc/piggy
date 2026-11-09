@@ -169,6 +169,14 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
+
+    /// Read, canonicalize and check piggy-act-v1 documents (RFC 0013).
+    /// `act` owns its argv parsing (`canon [FILE]`).
+    #[command(name = "act", disable_help_flag = true)]
+    Act {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
     /// Manage PIV cards (provisioning).
     Card(CardArgs),
     /// Declarative ebox-backed secret files (FDR 0003).
@@ -878,6 +886,8 @@ fn main() {
         }
 
         Command::OperatorSign { rest } => std::process::exit(operator_sign::run(&rest)),
+
+        Command::Act { rest } => std::process::exit(piggy::act::cli::run(&rest)),
 
         Command::Card(args) => match args.cmd {
             CardCommand::Init {

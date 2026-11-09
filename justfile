@@ -2644,6 +2644,7 @@ lint-worktree:
     $markl/0011-identifier-vectors.txt docs/rfcs/0011-identifier-vectors.txt copy the docs/rfcs file over the copy
     $markl/0011-markl-id-format.md docs/rfcs/0011-markl-id-format.md copy the docs/rfcs file over the copy
     go/internal/delta/pigpen/testdata/0008-pigpen-vectors.txt docs/rfcs/0008-pigpen-vectors.txt run: just codemod-pigpen-vectors
+    crates/piggy/testdata/0013-vectors.txt docs/rfcs/0013-vectors.txt copy the docs/rfcs file over the copy
     EOF
     exit "$drift"
 

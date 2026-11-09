@@ -166,6 +166,7 @@
               lockFile = ./Cargo.lock;
               outputHashes = {
                 "tap-dancer-0.1.12" = "sha256-tZ30ATmSKh10fY8hRwH+ZY+Hz0Pvpg7/yA9chYSdlvI=";
+                "hyphence-0.2.0" = "sha256-MPIlK5JA4yAhN9EkYYfSWuDaVXb4Zb2tX23ynQG89wY=";
               };
             };
             buildInputs = [
@@ -399,6 +400,7 @@
             lockFile = ./Cargo.lock;
             outputHashes = {
               "tap-dancer-0.1.12" = "sha256-tZ30ATmSKh10fY8hRwH+ZY+Hz0Pvpg7/yA9chYSdlvI=";
+              "hyphence-0.2.0" = "sha256-MPIlK5JA4yAhN9EkYYfSWuDaVXb4Zb2tX23ynQG89wY=";
             };
           };
 
