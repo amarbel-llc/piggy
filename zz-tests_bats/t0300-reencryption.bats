@@ -153,6 +153,21 @@ function out_of_store_link_uses_the_links_recipients_and_says_so { # @test
   assert_output --regexp '# cross-scope: work/linked -> .*/outside/real\.ebox \(outside the store\), recipients from work/piggy-ids'
 }
 
+# A store reached through a symlink spells each piggy-ids two ways; an
+# ordinary entry must not be reported as cross-scope.
+function store_through_a_symlink_reports_no_false_cross_scope { # @test
+  mkdir -p "$PIGGY_STORE_DIR/work"
+  printf '%s\n' "$PIGGY_TEST_RECIPIENT" >"$PIGGY_STORE_DIR/work/piggy-ids"
+  echo "$INITIAL_PASSWORD" | "$PIGGY" pass insert -e work/plain
+  git -C "$PIGGY_STORE_DIR" add -A >/dev/null
+  git -C "$PIGGY_STORE_DIR" commit -q -m "piggy-test: work scope" >/dev/null
+  ln -s "$PIGGY_STORE_DIR" "$BATS_TEST_TMPDIR/store-link"
+
+  PIGGY_STORE_DIR="$BATS_TEST_TMPDIR/store-link" run "$PIGGY" pass recipients sync -p work
+  assert_success
+  refute_output --partial "cross-scope"
+}
+
 function password_survives_all_transformations { # @test
   echo "$INITIAL_PASSWORD" | "$PIGGY" pass insert -e folder/cred1
   create_test_template "$PIGGY_STORE_DIR/anotherfolder"

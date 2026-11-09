@@ -202,8 +202,14 @@ fn cross_scope_note(
     let recipients_from = ids_file.strip_prefix(store).unwrap_or(ids_file).display();
     match target_in_store {
         Some(target_rel) => {
+            // Compared canonically: a store reached through a symlink spells
+            // the same file two ways (store-relative versus resolved).
             let link_ids = find_piggy_ids(store, link_subfolder?).ok();
-            if link_ids.as_deref() == Some(ids_file) {
+            let same_file = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => a == b,
+            };
+            if link_ids.is_some_and(|l| same_file(&l, ids_file)) {
                 return None;
             }
             let target = display_name(&store.join(target_rel), store);

@@ -210,6 +210,8 @@ let
             # The real C pivy-tool for pivy_tool_admin_key.bats (piggy#116),
             # in its own lane only, so only `nix build .#bats-c-pivy` builds
             # C. Matches the REAL_PIVY_BOX convention of the interop recipe.
+            # This lane covers that file only: the pivy-agent smoke skips here
+            # (no PIVY_AGENT) and runs via its own recipe in test-optional.
             laneEnv = lib.optionalAttrs (tag == "c-pivy") {
               REAL_PIVY_TOOL = "${pivy}/bin/pivy-tool";
             };
