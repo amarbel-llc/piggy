@@ -63,6 +63,13 @@ secrets are encrypted to (*piggy-ids*(5)). A _piggy-ids_ in a sub-folder
 governs the entries in and below it. Manage it with *piggy pass init* and
 *piggy pass recipients*.
 
+An entry that is a symbolic link is re-encrypted where its target lives: to
+the _piggy-ids_ nearest the target when the target is inside the store, else
+to the one nearest the link. When those recipients are not the link's own
+scope's, the re-encryption report says so in a comment line before the
+entry's point: *# cross-scope:* _link_ *->* _target_*, recipients from*
+_dir_*/piggy-ids*.
+
 Bare *piggy* (no subcommand) and bare *piggy pass* (no nested subcommand) both
 print top-level help instead of acting on the store.
 

@@ -96,14 +96,61 @@ function cross_scope_link_uses_the_targets_recipients { # @test
 
   run "$PIGGY" pass recipients sync -p work
   assert_success
-  assert_output --partial "work/shared"
-  assert_output --partial "personal/piggy-ids"
+  assert_line "# cross-scope: work/shared -> personal/real, recipients from personal/piggy-ids"
+  assert_output --regexp 'ok [0-9]+ - work/shared # SKIP'
 
   cmp "$PIGGY_STORE_DIR/personal/real.ebox" "$BATS_TEST_TMPDIR/before.ebox" ||
     fail "the target was re-encrypted to the link's scope"
   run "$PIGGY" pass show personal/real
   assert_success
   assert_output --partial "$INITIAL_PASSWORD"
+}
+
+# piggy#148: a target an earlier (link-side) walk left encrypted to the
+# link's scope is repaired to its own scope's recipients, and reported.
+function cross_scope_link_repairs_a_target_encrypted_to_the_links_scope { # @test
+  local secondary="piggy-recipient-v1@pivy_ecdh_p256_pub-qd43050juykyy3lchnnw2caygre8wqmasyk7kvaq7jsnj3wcnrpfve2jwdn"
+  mkdir -p "$PIGGY_STORE_DIR/work" "$PIGGY_STORE_DIR/personal"
+  printf '%s\n' "$PIGGY_TEST_RECIPIENT" >"$PIGGY_STORE_DIR/work/piggy-ids"
+  # personal/real is first encrypted while personal/ has work's set ...
+  printf '%s\n' "$PIGGY_TEST_RECIPIENT" >"$PIGGY_STORE_DIR/personal/piggy-ids"
+  echo "$INITIAL_PASSWORD" | "$PIGGY" pass insert -e personal/real
+  # ... then personal/ gains a recipient without a walk, so the file is
+  # still encrypted to the link's (work's) set.
+  printf '%s\n%s\n' "$PIGGY_TEST_RECIPIENT" "$secondary" >"$PIGGY_STORE_DIR/personal/piggy-ids"
+  ln -s ../personal/real.ebox "$PIGGY_STORE_DIR/work/shared.ebox"
+  git -C "$PIGGY_STORE_DIR" add -A >/dev/null
+  git -C "$PIGGY_STORE_DIR" commit -q -m "piggy-test: stale cross-scope target" >/dev/null
+
+  run "$PIGGY" pass recipients sync -p work
+  assert_success
+  assert_line "# cross-scope: work/shared -> personal/real, recipients from personal/piggy-ids"
+  assert_output --regexp 'ok [0-9]+ - work/shared$'
+
+  # Now encrypted to personal's set: a walk of personal/ has nothing to do.
+  run "$PIGGY" pass recipients sync -p personal
+  assert_success
+  assert_output --regexp 'ok [0-9]+ - personal/real # SKIP'
+  run "$PIGGY" pass show personal/real
+  assert_success
+  assert_output --partial "$INITIAL_PASSWORD"
+}
+
+# piggy#148: a link to a file outside the store keeps the link's scope, and
+# the walk says so.
+function out_of_store_link_uses_the_links_recipients_and_says_so { # @test
+  local outside="$BATS_TEST_TMPDIR/outside"
+  mkdir -p "$outside" "$PIGGY_STORE_DIR/work"
+  printf '%s\n' "$PIGGY_TEST_RECIPIENT" >"$PIGGY_STORE_DIR/work/piggy-ids"
+  echo "$INITIAL_PASSWORD" | "$PIGGY" pass insert -e work/tmp
+  mv "$PIGGY_STORE_DIR/work/tmp.ebox" "$outside/real.ebox"
+  ln -s "$outside/real.ebox" "$PIGGY_STORE_DIR/work/linked.ebox"
+  git -C "$PIGGY_STORE_DIR" add -A >/dev/null
+  git -C "$PIGGY_STORE_DIR" commit -q -m "piggy-test: out-of-store link" >/dev/null
+
+  run "$PIGGY" pass recipients sync -p work
+  assert_success
+  assert_output --regexp '# cross-scope: work/linked -> .*/outside/real\.ebox \(outside the store\), recipients from work/piggy-ids'
 }
 
 function password_survives_all_transformations { # @test

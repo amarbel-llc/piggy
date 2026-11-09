@@ -111,15 +111,15 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
         // suffix). Matches bash $passfile_display; used as the TAP
         // point description. Uses the store-side `path`, not the
         // resolved target.
-        let mut display = display_name(path, &store);
+        let display = display_name(path, &store);
 
         // Find the nearest piggy-ids for the file being rewritten. A link
         // whose target is inside the store takes the recipients of the
-        // scope holding the TARGET (piggy#148): the file encrypted is the
-        // target's, and re-encrypting it to the link's scope would change
-        // who can read it behind the user's back. A link into a tracked
-        // tree outside the store (the rcm-farm case) has no scope of its
-        // own there, so it keeps the store-side lookup. Every entry MUST
+        // scope holding the TARGET (piggy#148): a file's recipients are
+        // decided by where it lives, and re-encrypting it to the link's
+        // scope would change who can read it behind its owners' backs. A
+        // link to a file outside the store (the rcm-farm case) has no
+        // scope there, so it keeps the link-side lookup. Every entry MUST
         // produce exactly one point so the count matches the `1..N` plan:
         // the early-out arms emit `not ok`, never a silent `continue`.
         let link_subfolder = store_subfolder(path.parent(), &store);
@@ -130,14 +130,12 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
                 .to_string_lossy()
                 .into_owned()
         });
-        let Some(subfolder) = target_subfolder.clone().or(link_subfolder.clone()) else {
+        let Some(subfolder) = target_subfolder.or(link_subfolder.clone()) else {
             let _ = tap.not_ok(n, &display, "no parent directory");
             any_failed = true;
             continue;
         };
-        let piggy_ids = match find_piggy_ids(&store, &subfolder)
-            .and_then(|p| crate::pigpen_pointer::resolve_piggy_ids_path(&p))
-        {
+        let ids_file = match find_piggy_ids(&store, &subfolder) {
             Ok(p) => p,
             Err(err) => {
                 let _ = tap.not_ok(n, &display, &err);
@@ -145,21 +143,24 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
                 continue;
             }
         };
-        // Say so when the two scopes differ, so the cross-scope resolution
-        // is visible in the TAP stream.
-        if let (Some(target_rel), Some(link_subfolder)) = (target_in_store, &link_subfolder) {
-            let link_piggy_ids = find_piggy_ids(&store, link_subfolder).ok();
-            if link_piggy_ids.as_deref() != Some(piggy_ids.as_path()) {
-                display = format!(
-                    "{display} (target {} takes its recipients from {})",
-                    display_name(&store.join(target_rel), &store),
-                    piggy_ids
-                        .strip_prefix(&store)
-                        .unwrap_or(&piggy_ids)
-                        .display()
-                );
-            }
+        if let Some(note) = cross_scope_note(
+            &display,
+            target_in_store,
+            real,
+            &ids_file,
+            link_subfolder.as_deref(),
+            &store,
+        ) {
+            let _ = tap.comment(&note);
         }
+        let piggy_ids = match crate::pigpen_pointer::resolve_piggy_ids_path(&ids_file) {
+            Ok(p) => p,
+            Err(err) => {
+                let _ = tap.not_ok(n, &display, &err);
+                any_failed = true;
+                continue;
+            }
+        };
 
         if reencrypt_unnecessary(path, &piggy_ids) {
             let _ = tap.skip(n, &display, "recipients already current");
@@ -181,6 +182,40 @@ pub fn run(target: &Path, verbose: bool) -> i32 {
     }
 
     i32::from(any_failed)
+}
+
+/// The TAP comment for a link whose recipients do not come from the link's
+/// own scope (piggy#148), or `None` for an ordinary entry:
+/// `cross-scope: <link> -> <target>, recipients from <dir>/piggy-ids`.
+/// A target inside the store is named store-relative and reported only
+/// when its scope differs from the link's; a target outside the store is
+/// named by its path and always reported, since its recipients are the
+/// link's by default rather than by where it lives.
+fn cross_scope_note(
+    link_display: &str,
+    target_in_store: Option<&Path>,
+    real: &Path,
+    ids_file: &Path,
+    link_subfolder: Option<&str>,
+    store: &Path,
+) -> Option<String> {
+    let recipients_from = ids_file.strip_prefix(store).unwrap_or(ids_file).display();
+    match target_in_store {
+        Some(target_rel) => {
+            let link_ids = find_piggy_ids(store, link_subfolder?).ok();
+            if link_ids.as_deref() == Some(ids_file) {
+                return None;
+            }
+            let target = display_name(&store.join(target_rel), store);
+            Some(format!(
+                "cross-scope: {link_display} -> {target}, recipients from {recipients_from}"
+            ))
+        }
+        None => Some(format!(
+            "cross-scope: {link_display} -> {} (outside the store), recipients from {recipients_from}",
+            real.display()
+        )),
+    }
 }
 
 /// The store-relative subfolder of a store-side directory, or `None` when
@@ -343,6 +378,11 @@ mod tap {
         pub fn not_ok(&mut self, n: usize, name: &str, message: &str) -> std::io::Result<()> {
             writeln!(self.out, "not ok {n} - {name}")?;
             self.yaml(&[("message", message), ("severity", "fail")])
+        }
+
+        /// A `# …` comment line; TAP consumers ignore it.
+        pub fn comment(&mut self, text: &str) -> std::io::Result<()> {
+            writeln!(self.out, "# {text}")
         }
 
         /// `Bail out!` — a pre-plan fatal that aborts the whole walk.
