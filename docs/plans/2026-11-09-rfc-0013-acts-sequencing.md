@@ -59,7 +59,8 @@ owning session.
 | # | Slice | Depends on | Gate | Size |
 |---|---|---|---|---|
 | S1 | Registry: `piggy-principal_pub-v1` purpose (RFC 0011 §6.1, `crates/piggy-markl`, `go/.../markl_registrations`, the RFC 0011 vectors) | none | now | small |
-| S2 | The act document: a Rust reader and canonical encoder for the `piggy-act-v1` head (hyphence RFC 0001 framing, RFC 0002 field lines, RFC 0003 locked edges for `profile`), the §2 field table with refusals (§5.2 step 1), the body carried verbatim with the §4.9 character check, the canonical form (§3.1), `piggy act canon`; `docs/rfcs/0013-vectors.txt` started; `act_refusals.bats`, `act_canonical.bats` | S1 | now | large |
+| S2a | **hyphence lane** (ruled 2026-11-09: hyphence owns the typed head reader and the canonical encoder, in Rust and Go): a typed model of every RFC 0002/0003 line kind (fields with value kinds markl-id, quoted string, bare word; tags; locked references and type line; descriptions; comments), a canonical encoder with RFC 0003 spaced spelling and quoting and a caller-supplied order for `-` lines, the shared vector corpus extended, the Go twin in lockstep. Markl ids stay text; no blech32 decoding. Spawned as a hyphence worker session; piggy pins the result as a cargo git dependency | none | now | medium |
+| S2b | The act document, in piggy over the hyphence crate and piggy-markl: the §2 field table with refusals (§5.2 step 1), set-field sorting and dedup, description merging, `signature` removal, type line last, the body carried verbatim with the §4.9 character check, the canonical form (§3.1) as the composition of those steps with hyphence's encoder, `piggy act canon`; `docs/rfcs/0013-vectors.txt` started; `act_refusals.bats`, `act_canonical.bats`. Can start on the field table and refusals before S2a lands | S1, S2a | now | medium |
 | S3 | The seal: rebuild the sshsig from the four seal fields, verify under `key` for Ed25519 and P-256, the act digest (§3.5), `piggy act verify --seal-only` (working name) answering valid or invalid for the signature alone, `ssh-keygen -Y verify` interop both ways; `act_seal.bats`, `act_body.bats` (body signed verbatim, one byte changed fails) | S2 | now | medium |
 | S4 | Producing acts: `piggy act seal` takes an unsealed head (and optional body), canonicalizes, checks the §4.8 namespace and kind table statically, obtains the signature (card via the existing `operator-sign` path for card namespaces; the agent's ordinary sign path for `piggy-record-v1`), and emits the sealed act. This is the primitive the Go consumers call instead of writing a canonicalizer | S3 | now | medium |
 | S5 | Display: the agent shows a `piggy-act-v1` text as RFC 0013 §6 requires (every head line, canonical order), the askpass emphasis of `kind`, `subject`, `right`, `not-after` in `piggy-askpass-gtk` as a MAY; `operator_act_prompt.bats`; answers piggy#332 and #329 from RFC 0013 | S2 | now | medium |
@@ -73,16 +74,16 @@ order is visible, labelled as held.
 
 ## 4. Order and parallelism
 
-    S1 ─┐
-        ├─► S2 ─► S3 ─► S4 ──────────────► S6 ─► S7 ─► S8
-        │         └──► S5 (parallel with S4)
-     acceptance pass ──────────────────────┘
+    S1 ──┐
+    S2a ─┼─► S2b ─► S3 ─► S4 ──────────────► S6 ─► S7 ─► S8
+         │           └──► S5 (parallel with S4)
+     acceptance pass ───────────────────────┘
 
-- S1 is a half-day and unblocks the vectors in S2.
-- S2 is the long pole. It is the first Rust hyphence field-content
-  implementation in piggy; its reader and encoder should be written so
-  `crates/piggy-pigpen` can adopt them later (RFC 0008 Compatibility), but
-  that adoption is not in this plan.
+- S1 is a half-day and unblocks the vectors in S2b.
+- S2a (hyphence) and S2b (piggy) run in parallel; S2b's field table and
+  refusals need no hyphence code, its canonical encoder does. S2a is the
+  long pole. `crates/piggy-pigpen`'s minimal framing is slated to adopt the
+  hyphence crate later (RFC 0008 Compatibility); not in this plan.
 - S3 reuses `operator_act.rs`'s `sshsig_blob`, `signed_data` and
   `ecdsa_sig.rs`; new code is the seal field mapping and the digest.
 - S4 and S5 run in parallel once S3 and S2 land respectively; S5 touches
@@ -110,7 +111,7 @@ order is visible, labelled as held.
 
 ## 6. Loose ends recorded, not scheduled
 
-- `crates/piggy-pigpen/src/hyphence.rs` duplication once S2 lands (RFC
+- `crates/piggy-pigpen/src/hyphence.rs` duplication once S2a lands (RFC
   0008 Compatibility names the cutover).
 - Who may revoke (RFC 0013 Limitations); the card-revocation banner; a
   narrow outliving an escalation unless named. All flagged for the
@@ -121,10 +122,22 @@ order is visible, labelled as held.
   pass; S5 touches the same agent code and should land after it or be
   rebased over it.
 
-## 7. Records to update when the issues are filed
+## 7. Records (filed 2026-11-09)
 
-- piggy#26: a comment pointing here, with S1 as "Recommended next" for a
-  worker and the acceptance pass as the operator's item.
+| Slice | Issue |
+|---|---|
+| S1 | piggy#356 |
+| S2a | hyphence worker session `hyphence/smart-plum` (spawned 2026-11-09; its own record lands in hyphence) |
+| S2b | piggy#357 |
+| S3 | piggy#358 |
+| S4 | piggy#359 |
+| S5 | piggy#360 |
+| S6 | piggy#361 (held) |
+| S7 | piggy#362 (held) |
+| S8 | piggy#363 (held) |
+
+- piggy#26: a comment pointing here, with S1 and S2b as "Recommended next"
+  for a worker and the acceptance pass as the operator's item.
 - `org://personal/_tags.org` proj `-card_signature_language` (the piggy
   side of this track) and `-ajour` (the cutting-garden side): status lines
   naming the issue numbers.

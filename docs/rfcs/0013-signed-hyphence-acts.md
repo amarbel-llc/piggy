@@ -194,12 +194,17 @@ for the document after these normalizations, in order:
 5. the type line `! piggy-act-v1`, with no lock, comes last;
 6. field lines are written in hyphence's spaced canonical spelling,
    `- key = value` (V hyphence RFC 0003, "canonical emission: spacing").
-   A value is bare when hyphence allows it; otherwise it is a
-   double-quoted string in which `\` and `"` are written `\\` and `\"`,
-   a tab is written `\t`, and every other character is itself (the
-   `String` production hyphence imports from piggy's `marklid.peg`, V
-   `hyphence-content.peg`; the quoting piggy-markl's `quote_purpose`
-   applies). A markl-id's purpose slot is bare when it can be;
+   A value is bare when hyphence allows it (a valid bare word under the
+   strict sigil rule); otherwise it is a double-quoted string with the
+   escape set the hyphence canonical encoder applies, which is
+   piggy-markl's `quote_purpose` set (`\\`, `\"`, `\n`, `\t`, `\r`, `\a`,
+   `\b`, `\f`, `\v`; every other character itself). For an act, which
+   admits no control character but TAB (§1), the escapes that can occur
+   are `\\`, `\"` and `\t`. A markl-id's purpose slot is bare when RFC
+   0011 §2.1's bare purpose charset allows it, else quoted with the join
+   after the closing quote. The typed head reader and this canonical
+   emission are hyphence's (its Rust crate and Go package, 2026-11-09
+   ruling); this RFC composes them and adds the ordering above;
 7. the opening and closing `---` boundaries are included; if a body with
    at least one byte is present, the separator line and the body bytes
    follow unchanged; a separator followed by no bytes is not a body, and
@@ -431,8 +436,9 @@ act as admitting nothing. A smaller allow-set is a new profile pinned by
 The **stencil stack** is the rule the consumer's enforcer applies to the
 layers at call time, and the only meaning piggy assigns them:
 
-1. a call is admitted only where every stencil admits it and no patch
-   denies it;
+1. a call is admitted only where there is at least one stencil, every
+   stencil admits it and no layer denies it; a stack with no stencil admits
+   nothing;
 2. a stencil that says nothing about a value is not an admission of it (a
    patch that says nothing is transparent);
 3. a `deny` in any layer refuses, where `deny` is the one trailing tag the
