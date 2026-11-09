@@ -170,6 +170,15 @@ fn verify_p256(key: &Id, signature: &Id, data: &[u8]) -> Result<bool, Refusal> {
     let Ok(signature) = p256::ecdsa::Signature::from_slice(signature.data()) else {
         return Ok(false);
     };
+    // (r, n - s) verifies wherever (r, s) does; with the signature inside
+    // the act digest, admitting both would let anyone mint a second act
+    // from a sealed one. Only the low-S form seals.
+    if signature.normalize_s().is_some() {
+        return refuse(
+            Rule::Signature,
+            "a P-256 signature must be in low-S form (s <= n/2)",
+        );
+    }
     Ok(key.verify(data, &signature).is_ok())
 }
 
@@ -235,9 +244,11 @@ pub fn attach(act: &Act, sshsig: &[u8]) -> Result<Act, Refusal> {
         a if a == ED25519.as_bytes() => (FormatId::Ed25519Sig, data.to_vec()),
         a if a == ECDSA_P256.as_bytes() => (
             FormatId::EcdsaP256Sig,
-            ssh_ecdsa_blob_to_der(data)
-                .and_then(|der| der_to_raw_rs(&der, 32))
-                .or_else(|e| refuse(Rule::Signature, e))?,
+            low_s(
+                &ssh_ecdsa_blob_to_der(data)
+                    .and_then(|der| der_to_raw_rs(&der, 32))
+                    .or_else(|e| refuse(Rule::Signature, e))?,
+            )?,
         ),
         other => {
             return refuse(
@@ -253,6 +264,19 @@ pub fn attach(act: &Act, sshsig: &[u8]) -> Result<Act, Refusal> {
     let signature = Id::new(Some(PurposeId::PiggyRecordSigV1), format, raw)
         .or_else(|e| refuse(Rule::Signature, e.to_string()))?;
     Ok(act.with_signature(&signature))
+}
+
+/// A raw P-256 `r‖s` in low-S form: ssh-keygen (OpenSSL) and a PIV card
+/// emit high-S about half the time, and only the low-S twin seals. The
+/// normalized signature still verifies under `ssh-keygen -Y verify`.
+pub fn low_s(raw: &[u8]) -> Result<Vec<u8>, Refusal> {
+    let signature = p256::ecdsa::Signature::from_slice(raw)
+        .or_else(|_| refuse(Rule::Signature, "not a P-256 r||s signature"))?;
+    Ok(signature
+        .normalize_s()
+        .unwrap_or(signature)
+        .to_bytes()
+        .to_vec())
 }
 
 /// The fields of an unarmored sshsig blob (PROTOCOL.sshsig §2).
@@ -541,6 +565,46 @@ mod tests {
             Some(digest)
         );
         assert_eq!(act_digest(&card_approval(), DigestFormat::Blake2b256), None);
+    }
+
+    /// The re-encoding (r, n - s) of a valid P-256 signature also verifies
+    /// under plain ECDSA. Since the act digest covers the signature, a
+    /// verifier that admitted both would let anyone mint a second act, with
+    /// a second digest, from a sealed one.
+    #[test]
+    fn the_high_s_twin_of_a_p256_seal_is_refused() {
+        let sealed = sign_p256(&card_approval());
+        let Some(Value::Markl(id)) = sealed.field("signature") else {
+            panic!("sealed");
+        };
+        let signature = p256::ecdsa::Signature::from_slice(markl(id).unwrap().data()).unwrap();
+        let (r, s) = signature.split_scalars();
+        let twin = p256::ecdsa::Signature::from_scalars(r, -*s).unwrap();
+        let twin = Id::new(
+            Some(PurposeId::PiggyRecordSigV1),
+            FormatId::EcdsaP256Sig,
+            twin.to_bytes().to_vec(),
+        )
+        .unwrap();
+        let twin = sealed.with_signature(&twin);
+
+        assert_ne!(
+            act_digest(&twin, DigestFormat::Blake2b256),
+            act_digest(&sealed, DigestFormat::Blake2b256)
+        );
+        assert_eq!(verify_seal(&sealed), Ok(()));
+        assert_eq!(
+            verify_seal(&twin).map_err(|r| r.rule),
+            Err(Rule::Signature),
+            "the n - s twin verified"
+        );
+
+        // A high-S signature from outside (ssh-keygen, a card) is attached
+        // in its low-S form: the twin's blob seals into the original act.
+        let blob = detached_sshsig(&twin).unwrap();
+        let unsealed = parse(&sealed.canonical()).unwrap();
+        let attached = attach(&unsealed, &blob).unwrap();
+        assert_eq!(attached.sealed_canonical(), sealed.sealed_canonical());
     }
 
     #[test]

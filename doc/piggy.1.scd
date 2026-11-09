@@ -601,7 +601,11 @@ commands:
 	steps 1 and 2), and print *valid* and the act digest. Ed25519 and ECDSA
 	P-256 keys are accepted; a P-256 _key_ that is not a point on the curve
 	is refused as _value_, a signature that does not verify as
-	_signature_. *--seal-only* is required: the chain walk (trust anchors,
+	_signature_. A P-256 signature must be in low-S form: its twin
+	(_r_, _n_ - _s_) verifies under plain ECDSA, and since the act digest
+	covers the signature, admitting both would make two acts of one.
+	*attach* normalizes what it is given, so an *ssh-keygen* signature
+	always seals. *--seal-only* is required: the chain walk (trust anchors,
 	_issuer-record_, rights, expiry, revocation) is not built yet.
 
 *act digest* [*--sha256*] [_FILE_]
