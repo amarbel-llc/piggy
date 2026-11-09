@@ -1255,8 +1255,7 @@ mod tests {
         // AEAD math runs. wycheproof's bit-flip-the-tag adversarial
         // coverage lives in groups whose AAD is non-empty (filtered
         // out by piggy's empty-AAD call shape) and is therefore NOT
-        // covered here. See piggy#90 for the design discussion of
-        // alternative ways to recover that adversarial reach.
+        // covered here; the two tests below recover it.
         #[test]
         fn wycheproof_chacha20_poly1305_round_trip_and_iv_validation() {
             let set = TestSet::load(TestName::ChaCha20Poly1305).expect("load wycheproof set");
@@ -1341,6 +1340,119 @@ mod tests {
                 "wycheproof ChaCha20Poly1305 produced \
                  {valid_seen} valid / {invalid_seen} invalid vectors — \
                  expected both buckets populated; group/aad filter is wrong",
+            );
+        }
+
+        /// The valid vectors piggy's call shape can carry: 256-bit key,
+        /// 96-bit nonce, 128-bit tag, empty AAD.
+        fn piggy_shaped_valid_vectors() -> Vec<wycheproof::aead::Test> {
+            let set = TestSet::load(TestName::ChaCha20Poly1305).expect("load wycheproof set");
+            let tests: Vec<_> = set
+                .test_groups
+                .into_iter()
+                .filter(|g| g.key_size == 256 && g.tag_size == 128 && g.nonce_size == 96)
+                .flat_map(|g| g.tests)
+                .filter(|tc| tc.aad.is_empty() && tc.result == TestResult::Valid)
+                .collect();
+            assert!(!tests.is_empty(), "no piggy-shaped valid vectors");
+            tests
+        }
+
+        /// Adversarial coverage through piggy's own wrapper (piggy#90,
+        /// option B). Wycheproof's tamper vectors all carry AAD, which the
+        /// wrapper cannot take, so every piggy-shaped valid vector is
+        /// tampered here instead: each tag bit flipped, each ciphertext
+        /// byte flipped, the tag truncated by a byte and extended by one.
+        /// The wrapper must reject every variant.
+        #[test]
+        fn wycheproof_chacha20_poly1305_tampered_valid_vectors_are_rejected() {
+            let mut variants = 0usize;
+            for tc in piggy_shaped_valid_vectors() {
+                let mut framed = tc.ct.to_vec();
+                framed.extend_from_slice(&tc.tag);
+                let tag_start = tc.ct.len();
+
+                let mut tampered: Vec<(String, Vec<u8>)> = Vec::new();
+                for bit in 0..tc.tag.len() * 8 {
+                    let mut v = framed.clone();
+                    v[tag_start + bit / 8] ^= 1 << (bit % 8);
+                    tampered.push((format!("tag bit {bit} flipped"), v));
+                }
+                for byte in 0..tc.ct.len() {
+                    let mut v = framed.clone();
+                    v[byte] ^= 0x01;
+                    tampered.push((format!("ct byte {byte} flipped"), v));
+                }
+                tampered.push(("tag truncated".into(), framed[..framed.len() - 1].to_vec()));
+                let mut extended = framed.clone();
+                extended.push(0);
+                tampered.push(("tag extended".into(), extended));
+
+                for (what, v) in tampered {
+                    variants += 1;
+                    assert!(
+                        chacha20_poly1305_decrypt(&tc.key, &tc.nonce, &v).is_err(),
+                        "tcId {} ({}): {what} was accepted",
+                        tc.tc_id,
+                        tc.comment,
+                    );
+                }
+            }
+            assert!(variants > 0);
+        }
+
+        /// The published Wycheproof vectors, AAD included, through the
+        /// openssl entry point piggy's wrapper delegates to (piggy#90,
+        /// option C): the bit-flip-the-tag vectors upstream ships run as
+        /// published. The wrapper's own call shape is covered by the two
+        /// tests above.
+        #[test]
+        fn wycheproof_chacha20_poly1305_openssl_primitive_full_set() {
+            use openssl::symm::{Cipher, decrypt_aead};
+
+            let set = TestSet::load(TestName::ChaCha20Poly1305).expect("load wycheproof set");
+            let (mut valid_seen, mut invalid_seen) = (0usize, 0usize);
+            for group in &set.test_groups {
+                if group.key_size != 256 || group.tag_size != 128 || group.nonce_size != 96 {
+                    continue;
+                }
+                for tc in &group.tests {
+                    let got = decrypt_aead(
+                        Cipher::chacha20_poly1305(),
+                        &tc.key,
+                        Some(&tc.nonce),
+                        &tc.aad,
+                        &tc.ct,
+                        &tc.tag,
+                    );
+                    match tc.result {
+                        TestResult::Valid => {
+                            valid_seen += 1;
+                            assert_eq!(
+                                got.as_deref().ok(),
+                                Some(tc.pt.as_slice()),
+                                "tcId {} ({}): valid vector",
+                                tc.tc_id,
+                                tc.comment,
+                            );
+                        }
+                        TestResult::Invalid => {
+                            invalid_seen += 1;
+                            assert!(
+                                got.is_err(),
+                                "tcId {} ({}): invalid vector accepted (flags={:?})",
+                                tc.tc_id,
+                                tc.comment,
+                                tc.flags,
+                            );
+                        }
+                        TestResult::Acceptable => {}
+                    }
+                }
+            }
+            assert!(
+                valid_seen > 0 && invalid_seen > 0,
+                "{valid_seen} valid / {invalid_seen} invalid: the group filter is wrong",
             );
         }
     }
