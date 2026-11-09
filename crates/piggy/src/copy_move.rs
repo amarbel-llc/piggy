@@ -239,14 +239,21 @@ fn has_staged_changes(work_tree: &Path, path: &Path) -> bool {
 }
 
 /// Shell out to `mv`/`cp` to preserve the bash overwrite semantics:
-/// `-f` when forced or stdin is not a TTY, `-i` otherwise. `cp` adds
-/// `-r` so directory copies work. Both run with `-v`, matching bash.
+/// `-f` when forced or stdin is not a TTY, `-i` otherwise. Both run with
+/// `-v`, matching bash.
+///
+/// `cp` runs `-R -L`: recursive, and dereferencing every symlink, so a copy
+/// is always an independent file (piggy#149). GNU `cp -r` keeps a link as a
+/// link, and the re-encryption after the copy follows a link to the
+/// source's backing file (a symlink-farm store's tracked tree); a copy must
+/// never reach back into its source. `-R` and `-L` are POSIX, so BSD and
+/// GNU agree. `mv` moves a link as the link.
 fn transfer(op: Op, old_path: &Path, new_path: &Path, force: bool) -> bool {
     let interactive = if force { "-f" } else { "-i" };
     let mut cmd = Command::new(op.command_label());
     cmd.arg(interactive);
     if op == Op::Copy {
-        cmd.arg("-r");
+        cmd.arg("-R").arg("-L");
     }
     cmd.arg("-v").arg(old_path).arg(new_path);
     matches!(cmd.status(), Ok(s) if s.success())

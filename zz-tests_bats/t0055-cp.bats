@@ -68,6 +68,36 @@ function original_intact_after_all_copies { # @test
   assert_output "$INITIAL_PASSWORD"
 }
 
+# piggy#149: copying an entry that is a symlink (a store kept as a symlink
+# farm into a tracked tree) makes an independent copy. The re-encryption the
+# copy triggers for its new folder's recipients rewrites the copy only, never
+# the source's backing file.
+function copy_of_a_symlinked_entry_leaves_the_source_untouched { # @test
+  local tracked="$BATS_TEST_TMPDIR/tracked"
+  mkdir -p "$tracked"
+  mv "$PIGGY_STORE_DIR/cred1.ebox" "$tracked/cred1.ebox"
+  ln -s "$tracked/cred1.ebox" "$PIGGY_STORE_DIR/cred1.ebox"
+  cp "$tracked/cred1.ebox" "$BATS_TEST_TMPDIR/before.ebox"
+
+  # A subfolder with a different recipient set, so the copy is re-encrypted.
+  local secondary="piggy-recipient-v1@pivy_ecdh_p256_pub-qd43050juykyy3lchnnw2caygre8wqmasyk7kvaq7jsnj3wcnrpfve2jwdn"
+  mkdir -p "$PIGGY_STORE_DIR/other"
+  printf '%s\n%s\n' "$PIGGY_TEST_RECIPIENT" "$secondary" >"$PIGGY_STORE_DIR/other/piggy-ids"
+  git -C "$PIGGY_STORE_DIR" add -A >/dev/null
+  git -C "$PIGGY_STORE_DIR" commit -q -m "piggy-test: other/ recipients" >/dev/null
+
+  run "$PIGGY" pass cp -f cred1 other/cred1
+  assert_success
+  cmp "$tracked/cred1.ebox" "$BATS_TEST_TMPDIR/before.ebox" ||
+    fail "the copy rewrote the source's backing file"
+  [[ -L $PIGGY_STORE_DIR/cred1.ebox ]] || fail "the source is no longer a symlink"
+  [[ ! -L $PIGGY_STORE_DIR/other/cred1.ebox ]] || fail "the copy is a symlink to the source"
+
+  run "$PIGGY" pass show other/cred1
+  assert_success
+  assert_output "$INITIAL_PASSWORD"
+}
+
 function git_consistent_after_copies { # @test
   "$PIGGY" pass cp cred1 cred2
   "$PIGGY" pass cp cred1 directory/
