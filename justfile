@@ -140,8 +140,9 @@ test-go:
 build-pigpen:
     cd crates/piggy-pigpen && cargo build
 
-# test the standalone piggy-pigpen crate, which the workspace excludes, with
-# every feature on (so the `agent` oracle's stub-agent tests run in the gate)
+# Every feature on, so the `agent` oracle's stub-agent tests run in the gate.
+#
+# test the standalone piggy-pigpen crate with every feature on
 [group('post-build')]
 test-pigpen:
     cd crates/piggy-pigpen && cargo test --all-features
