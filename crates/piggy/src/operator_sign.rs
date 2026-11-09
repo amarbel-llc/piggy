@@ -66,8 +66,9 @@ fn failure(exit: Exit) -> impl Fn(String) -> Failure {
     disable_help_subcommand = true
 )]
 struct OperatorSignCli {
-    /// The sshsig namespace: piggy-quote-v1, piggy-escalation-v1 or
-    /// piggy-certificate-v1. It selects how the agent presents the prompt.
+    /// The sshsig namespace: piggy-quote-v1, piggy-escalation-v1,
+    /// piggy-certificate-v1 or piggy-approval-v1. It selects how the agent
+    /// presents the prompt.
     #[arg(long)]
     namespace: String,
     /// PIV slot to sign with. The agent refuses a slot whose key is not

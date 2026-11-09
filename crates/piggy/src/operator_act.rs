@@ -27,6 +27,9 @@ pub enum DisplayClass {
     Quote,
     Escalation,
     Certificate,
+    /// A decision that grants no right (an acknowledgement, a deploy
+    /// approval); deliberately not an escalation.
+    Approval,
 }
 
 impl DisplayClass {
@@ -36,6 +39,7 @@ impl DisplayClass {
             Self::Quote => "quote",
             Self::Escalation => "escalation",
             Self::Certificate => "certificate",
+            Self::Approval => "approval",
         }
     }
 }
@@ -49,15 +53,17 @@ pub fn display_class(namespace: &str) -> Option<DisplayClass> {
         "piggy-quote-v1" => Some(DisplayClass::Quote),
         "piggy-escalation-v1" => Some(DisplayClass::Escalation),
         "piggy-certificate-v1" => Some(DisplayClass::Certificate),
+        "piggy-approval-v1" => Some(DisplayClass::Approval),
         _ => None,
     }
 }
 
 /// The namespaces [`display_class`] accepts, for help text.
-pub const NAMESPACES: [&str; 3] = [
+pub const NAMESPACES: [&str; 4] = [
     "piggy-quote-v1",
     "piggy-escalation-v1",
     "piggy-certificate-v1",
+    "piggy-approval-v1",
 ];
 
 /// The digest an sshsig is made over (RFC 0012 §2.1).
@@ -546,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_three_act_namespaces_have_a_display_class() {
+    fn only_the_four_act_namespaces_have_a_display_class() {
         assert_eq!(display_class("piggy-quote-v1"), Some(DisplayClass::Quote));
         assert_eq!(
             display_class("piggy-escalation-v1"),
@@ -556,6 +562,11 @@ mod tests {
             display_class("piggy-certificate-v1"),
             Some(DisplayClass::Certificate)
         );
+        assert_eq!(
+            display_class("piggy-approval-v1"),
+            Some(DisplayClass::Approval)
+        );
+        assert_eq!(DisplayClass::Approval.as_str(), "approval");
         for refused in [
             "git",
             "file",
@@ -716,6 +727,17 @@ mod tests {
         assert_eq!(
             context,
             "operator act: escalation\ncard 5da19c98, slot 9C\nnamespace piggy-escalation-v1\n\ngrant X\nfor 24h"
+        );
+        let context = prompt_context(
+            DisplayClass::Approval,
+            "5da19c98",
+            0x9C,
+            "piggy-approval-v1",
+            "approve deploy of piggy 0.1.24",
+        );
+        assert_eq!(
+            context,
+            "operator act: approval\ncard 5da19c98, slot 9C\nnamespace piggy-approval-v1\n\napprove deploy of piggy 0.1.24"
         );
     }
 }

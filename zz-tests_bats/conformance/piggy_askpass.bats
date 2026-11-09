@@ -836,7 +836,7 @@ refute_zenity_argv_has() {
 
 @test "kind_banners_differ_per_class_and_a_routine_prompt_has_none" {
   local class
-  for class in quote escalation certificate; do
+  for class in quote escalation certificate approval; do
     PIGGY_ASKPASS_KIND="$class" run "$ASKPASS" "Enter PIV PIN"
     assert_success
     assert_output --partial "OPERATOR ACT: ${class^^}"
@@ -893,7 +893,7 @@ TRICKY_TEXT='grant <b>bold</b> & more; id ecdsa_p256_sig; path a\nb'
 # reason on stdout for the agent to report.
 @test "operator_acts_are_refused_on_zenity_before_any_dialog" {
   local class
-  for class in quote certificate escalation; do
+  for class in quote certificate escalation approval; do
     run_askpass_against_logging_zenity_stub PIGGY_ASKPASS_KIND="$class"
 
     assert_failure 3
@@ -956,7 +956,7 @@ tall_act_text() {
 
 @test "tall_operator_act_text_is_refused_before_any_dialog_with_the_limit_named" {
   local class
-  for class in quote certificate escalation; do
+  for class in quote certificate escalation approval; do
     run_askpass_against_logging_zenity_stub \
       PIGGY_ASKPASS_KIND="$class" PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
 
@@ -1038,7 +1038,7 @@ helper_option() {
 
 @test "operator_acts_use_the_gtk_helper_with_their_class_and_never_zenity" {
   local class title
-  for class in quote certificate escalation; do
+  for class in quote certificate escalation approval; do
     run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND="$class"
 
     assert_success
@@ -1046,6 +1046,7 @@ helper_option() {
     assert_equal "$(zenity_call_count)" 0
     title="piggy operator act: ${class^^}"
     [[ $class == escalation ]] && title+=" (grants authority)"
+    [[ $class == approval ]] && title+=" (grants no right)"
     assert_equal "$(helper_option --title)" "$title"
     assert_equal "$(helper_option --timeout)" 120
     [[ $(helper_option --band-background) == '#'?????? ]]
@@ -1066,6 +1067,32 @@ helper_option() {
     echo "a quote asked for the typed word"
     return 1
   fi
+}
+
+# piggy#355: an approval grants no right, so its dialog must never borrow
+# the escalation's words, colour or typed word.
+@test "an_approval_dialog_says_it_grants_no_right_and_never_reads_as_an_escalation" {
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=approval
+  assert_success
+  assert_equal "$(helper_option --ok-label)" "Approve"
+  assert_equal "$(helper_option --band)" "✔  APPROVAL — approving a decision; grants no right"
+  [[ $(helper_option --band-background) != "#c01c28" ]]
+  if grep -qxF -- --confirm-word "$HELPER_ARGV"; then
+    echo "an approval asked for the escalation's typed word"
+    return 1
+  fi
+  if grep -qiE -- 'GRANTING AUTHORITY|ESCALAT' "$HELPER_ARGV"; then
+    echo "an approval's dialog reused the escalation's words; got:"
+    cat "$HELPER_ARGV"
+    return 1
+  fi
+}
+
+@test "an_approval_banner_says_it_grants_no_right" {
+  PIGGY_ASKPASS_KIND=approval run "$ASKPASS" "Enter PIV PIN"
+  assert_success
+  assert_output --partial "OPERATOR ACT: APPROVAL — you are approving a decision; this grants no right"
+  refute_output --partial "GRANTING AUTHORITY"
 }
 
 # The helper sets the text as plain text, so the script hands it over

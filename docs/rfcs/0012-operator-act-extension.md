@@ -526,8 +526,7 @@ Code's own JSONL under a harness-generated uuid, and that the
 merkle-stable transcript identity belongs to FDR 0032 D8 / slice 2 in
 troupe's transcript seam. Until a resolvable stanza id exists, a
 `piggy-quote-v1` text cannot be formed, and operator acts use the
-`escalation`, `certificate` and (once served, piggy#355) `approval`
-classes only.
+`escalation`, `certificate` and `approval` classes only.
 
 **The display surface is privileged.** §2.6 states the requirement:
 nothing in an agent scope may write to what the operator reads the
@@ -615,7 +614,7 @@ Tests use binary injection via `bats-emo`:
 | §2.7, verifies with `ssh-keygen -Y verify` | `operator_act_sign.bats` | the returned blob, armored, verifies under the slot key and `-n piggy-quote-v1` |
 | §2.8, proxy forwards unchanged, never prompts | `operator_act_proxy.bats` | a `--proxy-only` front relays request and response byte-for-byte; the prompt fires in the card agent only |
 | §3, namespace registry | `operator_act_refusals.bats` | `git`, `file`, `piggy-record-v1` and an unregistered name yield `refused-namespace` |
-| §2.6 and §3, the `approval` class | pending (piggy FDR 0007 item I2, piggy#355) | the prompt carries `PIGGY_ASKPASS_KIND=approval` and a banner distinct from the escalation banner |
+| §2.6 and §3, the `approval` class | `operator_act_prompt.bats`, `piggy_askpass.bats` | the prompt carries `PIGGY_ASKPASS_KIND=approval` and a banner distinct from the escalation banner |
 | §5, attestation bundle shape | `attestation_bundle.bats` | the export has exactly the five parts in order and the three key spellings agree |
 
 ## Compatibility

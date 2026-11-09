@@ -26,7 +26,7 @@ teardown() {
 function prompt_kind_is_the_namespaces_display_class { # @test
   operator_act_stack_up
   local pair namespace class
-  for pair in piggy-quote-v1=quote piggy-escalation-v1=escalation piggy-certificate-v1=certificate; do
+  for pair in piggy-quote-v1=quote piggy-escalation-v1=escalation piggy-certificate-v1=certificate piggy-approval-v1=approval; do
     namespace=${pair%%=*}
     class=${pair##*=}
     : >"$AGENT_LOG"
@@ -55,6 +55,27 @@ function prompt_shows_card_slot_namespace_and_the_text_verbatim { # @test
     operator_act_fail "the context does not open with the display class"
   grep -qxF "card $guid8, slot 9C" "$AGENT_LOG" || operator_act_fail "the context does not name card and slot"
   grep -qxF "namespace piggy-escalation-v1" "$AGENT_LOG" ||
+    operator_act_fail "the context does not name the namespace"
+  local line
+  while IFS= read -r line; do
+    grep -qxF -- "$line" "$AGENT_LOG" ||
+      operator_act_fail "the context is missing this line of the text, verbatim: '$line'"
+  done <<<"$text"
+}
+
+# piggy#355: an approval (grants no right) is shown with its own class, its
+# namespace and its text verbatim, like the other three.
+function approval_prompt_shows_its_class_namespace_and_text_verbatim { # @test
+  operator_act_stack_up
+  local text=$'piggy-test: approve the deploy of piggy 0.1.24 to the test host, for one run\ndecision piggy-record-digest-v1@sha256-example'
+  operator_sign_via "$AGENT_SOCK" "$text" --namespace piggy-approval-v1
+  [[ $status -eq 0 ]] || operator_act_fail "operator-sign under piggy-approval-v1 failed"
+
+  grep -qx '\[piggy-test-askpass\] operator act kind: approval' "$AGENT_LOG" ||
+    operator_act_fail "the prompt did not carry kind approval"
+  grep -qF "(context: operator act: approval" "$AGENT_LOG" ||
+    operator_act_fail "the context does not open with the approval class"
+  grep -qxF "namespace piggy-approval-v1" "$AGENT_LOG" ||
     operator_act_fail "the context does not name the namespace"
   local line
   while IFS= read -r line; do
