@@ -370,10 +370,12 @@ _test-vm-linux-only:
 
 # Sandboxed bats lane: runs every top-level t*.bats NOT tagged
 # `# bats file_tags=hardware` inside the nix build sandbox. See
-# ./bats.nix for the lane builder and CLAUDE.md "Architecture" for the
-# tag convention. This replaces the previous `test-bats-piggy` recipe
-# as the authoritative gate for the core suite; the bare-`bats`
-# fallback lives at `test-bats-piggy-local` for fast iteration.
+# ./bats.nix for the lane builder and piggy-testing(7) for the tag
+# convention. This replaces the previous `test-bats-piggy` recipe as the
+# authoritative gate for the core suite; the bare-`bats` fallback lives
+# at `test-bats-piggy-local` for fast iteration. `test-bats-conformance`
+# also runs the non-hardware conformance files outside the sandbox; the
+# dual coverage is intentional (piggy#117, piggy-testing(7)).
 #
 # run the sandboxed bats lane via nix build .#bats-default
 [group('post-build')]
@@ -1760,7 +1762,8 @@ test-rust-integration-fibby: build-rust
   # card-unlock reads the PIN from the test askpass; the agent tests
   # supply it via the unlock protocol and ignore these. Setting them
   # globally is harmless and keeps a stray pivy decrypt-path prompt from
-  # ever reaching the operator's real askpass (CLAUDE.md safety net).
+  # ever reaching the operator's real askpass (piggy-testing(7) PIN PROMPT
+  # SAFETY NET).
   export PIGGY_TEST_FIB_PIN=123456
   askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
   export SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=""
