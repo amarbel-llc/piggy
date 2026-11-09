@@ -23,6 +23,27 @@ use crate::tlv::TlvReader;
 /// and length bytes.
 const YK_POLICY_OID_BODY: &[u8] = &[0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xC4, 0x0A, 0x03, 0x08];
 
+/// Whether the slot attestation certificate `attestation_der` is signed by
+/// the card's attestation certificate `intermediate_der` (the one read from
+/// slot F9). `Ok(false)` is a signature that does not check out; `Err` is a
+/// certificate that could not be read. The one check behind the operator-act
+/// handler's policy gate and `piggy card export-attestation`'s bundle (RFC
+/// 0012 §2.4, §5); whether F9 chains to a Yubico root is the verifier's.
+#[cfg(feature = "openssl-api")]
+pub fn attestation_signed_by(
+    attestation_der: &[u8],
+    intermediate_der: &[u8],
+) -> Result<bool, String> {
+    let attestation = openssl::x509::X509::from_der(attestation_der)
+        .map_err(|e| format!("the slot attestation: {e}"))?;
+    let intermediate = openssl::x509::X509::from_der(intermediate_der)
+        .map_err(|e| format!("the card's attestation certificate: {e}"))?;
+    intermediate
+        .public_key()
+        .and_then(|key| attestation.verify(&key))
+        .map_err(|e| e.to_string())
+}
+
 /// Extract `(PinPolicy, TouchPolicy)` from a YubiKey attestation cert.
 ///
 /// Returns `PivError::Tlv` if the cert can't be walked far enough to

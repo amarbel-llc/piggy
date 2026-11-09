@@ -754,6 +754,74 @@ fn operator_act_prompts_held(
     cancels.len() >= OPERATOR_ACT_CANCEL_LIMIT
 }
 
+/// An operator-act request for a key held here that passed every check that
+/// needs neither the card nor the operator.
+struct JudgedAct {
+    request: crate::operator_act::Request,
+    hash: crate::operator_act::HashAlgorithm,
+    class: crate::operator_act::DisplayClass,
+    text: String,
+}
+
+/// The checks RFC 0012 makes before the card is touched and before any
+/// prompt, in order, so a refusal never costs the operator a PIN. `Err` is
+/// the one refusal: its status and detail.
+fn judge_operator_act_request(
+    details: &[u8],
+    act_cancels: &mut std::collections::VecDeque<std::time::Instant>,
+) -> Result<JudgedAct, (crate::operator_act::Status, String)> {
+    use crate::operator_act::{self as act, Status};
+
+    let request = act::Request::decode(details)
+        .ok_or((Status::BadRequest, "malformed operator-act request".into()))?;
+    let hash = act::HashAlgorithm::parse(&request.hash_algorithm).ok_or_else(|| {
+        (
+            Status::BadRequest,
+            format!(
+                "hash algorithm {:?} is not sha256 or sha512",
+                request.hash_algorithm
+            ),
+        )
+    })?;
+    let class = act::display_class(&request.namespace).ok_or_else(|| {
+        (
+            Status::RefusedNamespace,
+            format!(
+                "namespace {:?} is not registered for operator acts",
+                request.namespace
+            ),
+        )
+    })?;
+    let text = act::check_text(&request.text)
+        .map_err(|problem| (Status::RefusedText, problem.to_string()))?
+        .to_owned();
+
+    // The last check before the card and the prompt: a connection whose
+    // recent acts the operator kept dismissing raises no more dialogs for a
+    // while (RFC 0012 Security Considerations, piggy#309).
+    if operator_act_prompts_held(act_cancels, std::time::Instant::now()) {
+        tracing::warn!(
+            limit = OPERATOR_ACT_CANCEL_LIMIT,
+            window_secs = OPERATOR_ACT_CANCEL_WINDOW.as_secs(),
+            "refusing an operator act without a prompt: this connection's recent acts were cancelled"
+        );
+        return Err((
+            Status::RefusedPolicy,
+            format!(
+                "too many cancelled operator acts on this connection ({OPERATOR_ACT_CANCEL_LIMIT} within {}s); no prompt raised",
+                OPERATOR_ACT_CANCEL_WINDOW.as_secs()
+            ),
+        ));
+    }
+
+    Ok(JudgedAct {
+        request,
+        hash,
+        class,
+        text,
+    })
+}
+
 /// The answer to an `operator-act@piggy` request: one this agent decided, or
 /// the upstream's own answer relayed unchanged (RFC 0012 §2.8).
 enum OperatorActAnswer {
@@ -790,12 +858,7 @@ fn check_operator_act_attestation(
     let intermediate = token
         .read_slot(0xF9)
         .map_err(|e| format!("slot {slot:02X}: no card attestation certificate ({e})"))?;
-    let chains = openssl::x509::X509::from_der(&attestation)
-        .and_then(|att| {
-            let issuer = openssl::x509::X509::from_der(intermediate.cert_der())?;
-            let issuer_key = issuer.public_key()?;
-            att.verify(&issuer_key)
-        })
+    let chains = piggy_piv::attest::attestation_signed_by(&attestation, intermediate.cert_der())
         .map_err(|e| format!("slot {slot:02X}: attestation chain unreadable ({e})"))?;
     if !chains {
         return Err(format!(
@@ -880,55 +943,16 @@ impl PiggyAgent {
             }
         };
 
-        let Some(request) = act::Request::decode(details) else {
-            return refuse(Status::BadRequest, "malformed operator-act request".into());
+        let JudgedAct {
+            request,
+            hash,
+            class,
+            text,
+        } = match judge_operator_act_request(details, &mut self.act_cancels) {
+            Ok(judged) => judged,
+            Err((status, detail)) => return refuse(status, detail),
         };
-        let Some(hash) = act::HashAlgorithm::parse(&request.hash_algorithm) else {
-            return refuse(
-                Status::BadRequest,
-                format!(
-                    "hash algorithm {:?} is not sha256 or sha512",
-                    request.hash_algorithm
-                ),
-            );
-        };
-
-        let Some(class) = act::display_class(&request.namespace) else {
-            return refuse(
-                Status::RefusedNamespace,
-                format!(
-                    "namespace {:?} is not registered for operator acts",
-                    request.namespace
-                ),
-            );
-        };
-        let Some(text) = act::displayable_text(&request.text) else {
-            return refuse(
-                Status::RefusedText,
-                format!(
-                    "the text must be 1 to {} bytes of UTF-8 with no control characters other than newline and tab",
-                    act::MAX_TEXT_BYTES
-                ),
-            );
-        };
-
-        // The last check before the card and the prompt: a connection whose
-        // recent acts the operator kept dismissing raises no more dialogs
-        // for a while (RFC 0012 Security Considerations, piggy#309).
-        if operator_act_prompts_held(&mut self.act_cancels, std::time::Instant::now()) {
-            tracing::warn!(
-                limit = OPERATOR_ACT_CANCEL_LIMIT,
-                window_secs = OPERATOR_ACT_CANCEL_WINDOW.as_secs(),
-                "refusing an operator act without a prompt: this connection's recent acts were cancelled"
-            );
-            return refuse(
-                Status::RefusedPolicy,
-                format!(
-                    "too many cancelled operator acts on this connection ({OPERATOR_ACT_CANCEL_LIMIT} within {}s); no prompt raised",
-                    OPERATOR_ACT_CANCEL_WINDOW.as_secs()
-                ),
-            );
-        }
+        let text = text.as_str();
 
         {
             let _card_guard = self.card_lock.lock().await;

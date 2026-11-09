@@ -20,9 +20,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use piggy::agent_client::{OperatorActError, operator_act, piggy_auth_sock_override};
-use piggy::operator_act::{
-    HashAlgorithm, MAX_TEXT_BYTES, NAMESPACES, Status, armor, display_class, displayable_text,
-};
+use piggy::operator_act::{HashAlgorithm, NAMESPACES, Status, TextProblem, armor, display_class};
 
 /// Why nothing was signed, as the process exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,21 +125,14 @@ fn check_namespace(namespace: &str) -> Result<(), String> {
 
 /// What the agent would answer `refused-text`.
 fn check_text(text: &[u8]) -> Result<(), String> {
-    if displayable_text(text).is_some() {
-        return Ok(());
-    }
-    Err(if text.is_empty() {
-        "no text on stdin; an operator act signs the text the operator reads".to_string()
-    } else if text.len() > MAX_TEXT_BYTES {
-        format!(
-            "the text is {} bytes; an operator act carries at most {MAX_TEXT_BYTES}",
-            text.len()
-        )
-    } else {
-        "the text must be UTF-8 with no control characters other than newline and tab, \
-         so the prompt shows exactly what is signed"
-            .to_string()
-    })
+    piggy::operator_act::check_text(text)
+        .map(|_| ())
+        .map_err(|problem| match problem {
+            TextProblem::Empty => "no text on stdin; an operator act signs the text the operator \
+                                   reads"
+                .to_string(),
+            other => other.to_string(),
+        })
 }
 
 fn agent_socket() -> Result<PathBuf, String> {
@@ -262,7 +253,7 @@ mod tests {
         assert!(check_text(b"grant: merge to master\n").is_ok());
         assert!(check_text(b"").unwrap_err().contains("no text"));
         assert!(
-            check_text(&vec![b'a'; MAX_TEXT_BYTES + 1])
+            check_text(&vec![b'a'; piggy::operator_act::MAX_TEXT_BYTES + 1])
                 .unwrap_err()
                 .contains("at most")
         );

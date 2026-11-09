@@ -65,11 +65,9 @@ pub fn assemble_bundle(
             "the card's attestation is for a different key than the slot certificate holds".into(),
         );
     }
-    // `verify` is Ok(false) for a signature that does not check out.
-    let signed_by_card = intermediate
-        .public_key()
-        .and_then(|key| attestation.verify(&key))
-        .map_err(|e| format!("verify the slot attestation: {e}"))?;
+    let signed_by_card =
+        piggy_piv::attest::attestation_signed_by(attestation_der, intermediate_der)
+            .map_err(|e| format!("verify the slot attestation: {e}"))?;
     if !signed_by_card {
         return Err(
             "the slot attestation is not signed by the card's attestation certificate".into(),

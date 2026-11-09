@@ -29,4 +29,5 @@ pub mod ecdsa_sig;
 pub mod manage;
 pub mod operator_act;
 pub mod sign_core;
+pub mod ssh_wire;
 pub mod stats;

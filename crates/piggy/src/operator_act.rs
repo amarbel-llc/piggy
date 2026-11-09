@@ -174,45 +174,11 @@ pub struct Request {
     pub text: Vec<u8>,
 }
 
-fn put_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_be_bytes());
-}
-
-fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {
-    put_u32(out, bytes.len() as u32);
-    out.extend_from_slice(bytes);
-}
-
-/// A cursor over SSH wire fields. Every read is bounds-checked.
-struct Reader<'a> {
-    rest: &'a [u8],
-}
-
-impl<'a> Reader<'a> {
-    fn u32(&mut self) -> Option<u32> {
-        let (head, tail) = self.rest.split_first_chunk::<4>()?;
-        self.rest = tail;
-        Some(u32::from_be_bytes(*head))
-    }
-
-    fn string(&mut self) -> Option<&'a [u8]> {
-        let len = self.u32()? as usize;
-        if self.rest.len() < len {
-            return None;
-        }
-        let (head, tail) = self.rest.split_at(len);
-        self.rest = tail;
-        Some(head)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.rest.is_empty()
-    }
-}
+use crate::ssh_wire::{Reader, put_string, put_u32};
 
 /// Unwrap the one outer `string contents` an extension's payload is.
 fn contents(details: &[u8]) -> Option<&[u8]> {
-    let mut reader = Reader { rest: details };
+    let mut reader = Reader::new(details);
     let inner = reader.string()?;
     reader.is_empty().then_some(inner)
 }
@@ -222,13 +188,11 @@ fn contents(details: &[u8]) -> Option<&[u8]> {
 /// refuse a request, for a key it does not hold, just because this build
 /// would not understand the rest.
 pub fn request_key(details: &[u8]) -> Option<&[u8]> {
-    let mut reader = Reader {
-        rest: contents(details).or_else(|| {
-            // Trailing bytes after the outer string are the key holder's
-            // to refuse; the key is still where it is.
-            Reader { rest: details }.string()
-        })?,
-    };
+    let mut reader = Reader::new(contents(details).or_else(|| {
+        // Trailing bytes after the outer string are the key holder's
+        // to refuse; the key is still where it is.
+        Reader::new(details).string()
+    })?);
     reader.u32()?;
     reader.string()
 }
@@ -253,9 +217,7 @@ impl Request {
     /// that is not UTF-8, or any trailing byte (version 1 has no extension
     /// point).
     pub fn decode(details: &[u8]) -> Option<Self> {
-        let mut reader = Reader {
-            rest: contents(details)?,
-        };
+        let mut reader = Reader::new(contents(details)?);
         if reader.u32()? != VERSION {
             return None;
         }
@@ -319,9 +281,7 @@ impl Response {
     }
 
     pub fn decode(details: &[u8]) -> Option<Self> {
-        let mut reader = Reader {
-            rest: contents(details)?,
-        };
+        let mut reader = Reader::new(contents(details)?);
         if reader.u32()? != VERSION {
             return None;
         }
@@ -336,17 +296,57 @@ impl Response {
     }
 }
 
-/// The text as the operator can be shown it, or `None` when it is not
-/// displayable (RFC 0012 §2.5): empty, over [`MAX_TEXT_BYTES`], not UTF-8, or
-/// holding a C0 or C1 control other than LF and TAB. Terminal escapes could
-/// otherwise reflow or hide what the operator reads before the PIN.
-pub fn displayable_text(text: &[u8]) -> Option<&str> {
-    if text.is_empty() || text.len() > MAX_TEXT_BYTES {
-        return None;
+/// Why a text cannot be an operator act's text (RFC 0012 §2.5): the one
+/// reason the agent answers `refused-text` with and a client says before
+/// asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextProblem {
+    Empty,
+    TooLong(usize),
+    /// Not UTF-8, or holding a C0 or C1 control other than LF and TAB.
+    NotDisplayable,
+}
+
+impl std::fmt::Display for TextProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TextProblem::Empty => {
+                f.write_str("no text: an operator act signs the text the operator reads")
+            }
+            TextProblem::TooLong(len) => write!(
+                f,
+                "the text is {len} bytes; an operator act carries at most {MAX_TEXT_BYTES}"
+            ),
+            TextProblem::NotDisplayable => f.write_str(
+                "the text must be UTF-8 with no control characters other than newline and tab, \
+                 so the prompt shows exactly what is signed",
+            ),
+        }
     }
-    let text = std::str::from_utf8(text).ok()?;
+}
+
+/// The text as the operator can be shown it, or why it cannot be (RFC 0012
+/// §2.5). Terminal escapes could otherwise reflow or hide what the operator
+/// reads before the PIN.
+pub fn check_text(text: &[u8]) -> Result<&str, TextProblem> {
+    if text.is_empty() {
+        return Err(TextProblem::Empty);
+    }
+    if text.len() > MAX_TEXT_BYTES {
+        return Err(TextProblem::TooLong(text.len()));
+    }
+    let text = std::str::from_utf8(text).map_err(|_| TextProblem::NotDisplayable)?;
     let allowed = |c: char| c == '\n' || c == '\t' || !c.is_control();
-    text.chars().all(allowed).then_some(text)
+    if text.chars().all(allowed) {
+        Ok(text)
+    } else {
+        Err(TextProblem::NotDisplayable)
+    }
+}
+
+/// [`check_text`] when only whether matters.
+pub fn displayable_text(text: &[u8]) -> Option<&str> {
+    check_text(text).ok()
 }
 
 /// The bytes the slot key signs (PROTOCOL.sshsig §3), with `reserved`
@@ -372,9 +372,7 @@ pub fn signed_data(namespace: &str, hash: HashAlgorithm, text: &[u8]) -> Vec<u8>
 /// Only the prefix is read: whatever follows a registered namespace, the
 /// signature would verify under it.
 pub fn namespace_of_signed_data(data: &[u8]) -> Option<&'static str> {
-    let mut reader = Reader {
-        rest: data.strip_prefix(SSHSIG_MAGIC)?,
-    };
+    let mut reader = Reader::new(data.strip_prefix(SSHSIG_MAGIC)?);
     let namespace = reader.string()?;
     NAMESPACES
         .into_iter()
@@ -607,7 +605,7 @@ mod tests {
     #[test]
     fn signed_data_is_the_sshsig_layout() {
         let data = signed_data("piggy-quote-v1", HashAlgorithm::Sha256, b"hello");
-        let mut reader = Reader { rest: &data[6..] };
+        let mut reader = Reader::new(&data[6..]);
         assert_eq!(&data[..6], b"SSHSIG");
         assert_eq!(reader.string().unwrap(), b"piggy-quote-v1");
         assert_eq!(reader.string().unwrap(), b"", "reserved is empty");
@@ -690,15 +688,13 @@ mod tests {
             &signature,
         );
         assert_eq!(&blob[..6], b"SSHSIG");
-        let mut reader = Reader { rest: &blob[6..] };
+        let mut reader = Reader::new(&blob[6..]);
         assert_eq!(reader.u32(), Some(1));
         assert_eq!(reader.string().unwrap(), b"keyblob");
         assert_eq!(reader.string().unwrap(), b"piggy-quote-v1");
         assert_eq!(reader.string().unwrap(), b"");
         assert_eq!(reader.string().unwrap(), b"sha256");
-        let mut sig = Reader {
-            rest: reader.string().unwrap(),
-        };
+        let mut sig = Reader::new(reader.string().unwrap());
         assert_eq!(sig.string().unwrap(), b"ecdsa-sha2-nistp256");
         assert_eq!(sig.string().unwrap(), b"sigdata");
         assert!(reader.is_empty() && sig.is_empty());

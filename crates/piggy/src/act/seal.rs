@@ -17,6 +17,7 @@ use sha2::Sha256;
 use super::{Act, Refusal, Rule, refuse};
 use crate::ecdsa_sig::{der_to_raw_rs, raw_rs_to_ssh_ecdsa_blob, ssh_ecdsa_blob_to_der};
 use crate::operator_act::{HashAlgorithm, signed_data, ssh_signature, sshsig_blob};
+use crate::ssh_wire::{Reader, put_string};
 
 const SSHSIG_MAGIC: &[u8] = b"SSHSIG";
 const ED25519: &str = "ssh-ed25519";
@@ -234,9 +235,7 @@ pub fn attach(act: &Act, sshsig: &[u8]) -> Result<Act, Refusal> {
         return refuse(Rule::Signature, "the sshsig's hash algorithm is not `hash`");
     }
 
-    let mut reader = Reader {
-        rest: blob.signature,
-    };
+    let mut reader = Reader::new(blob.signature);
     let (Some(algorithm), Some(data)) = (reader.string(), reader.string()) else {
         return refuse(Rule::Signature, "a malformed SSH signature");
     };
@@ -289,9 +288,7 @@ struct SshSig<'a> {
 
 impl<'a> SshSig<'a> {
     fn decode(blob: &'a [u8]) -> Option<Self> {
-        let mut reader = Reader {
-            rest: blob.strip_prefix(SSHSIG_MAGIC)?,
-        };
+        let mut reader = Reader::new(blob.strip_prefix(SSHSIG_MAGIC)?);
         if reader.u32()? != 1 {
             return None;
         }
@@ -300,7 +297,7 @@ impl<'a> SshSig<'a> {
         let _reserved = reader.string()?;
         let hash_algorithm = reader.string()?;
         let signature = reader.string()?;
-        reader.rest.is_empty().then_some(SshSig {
+        reader.is_empty().then_some(SshSig {
             public_key,
             namespace,
             hash_algorithm,
@@ -328,33 +325,6 @@ pub fn unarmor(input: &[u8]) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(joined)
         .ok()
-}
-
-struct Reader<'a> {
-    rest: &'a [u8],
-}
-
-impl<'a> Reader<'a> {
-    fn u32(&mut self) -> Option<u32> {
-        let (head, rest) = self.rest.split_first_chunk::<4>()?;
-        self.rest = rest;
-        Some(u32::from_be_bytes(*head))
-    }
-
-    fn string(&mut self) -> Option<&'a [u8]> {
-        let len = usize::try_from(self.u32()?).ok()?;
-        if self.rest.len() < len {
-            return None;
-        }
-        let (head, rest) = self.rest.split_at(len);
-        self.rest = rest;
-        Some(head)
-    }
-}
-
-fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-    out.extend_from_slice(bytes);
 }
 
 /// The `key` value for an OpenSSH public key line (`ssh-ed25519 AAAA…` or
