@@ -26,6 +26,13 @@ follow it); everything else is a proposal. Nothing below is built.
   pinning a stencil), conditions stacked never compared, `deny` admitted,
   the derivable head fields stay written out and are judged live first.
   All in RFC 0013's 2026-11-09 amendment and `piggy-acts(7)`.
+- Later the same day: one opus worker starts S1, S2b and S3 now (the body
+  is opaque bytes to piggy, so the ajour grammar rework the operator is
+  doing with cutting-garden does not touch them); the **acceptance pass is
+  deferred until the ajour grammar settles**, because §4.9 cites the
+  stencil fragment; the FDR 0028 open items are deferred the same way; the
+  hyphence worker stays idle in case the rework needs an RFC 0005 or
+  content-grammar amendment.
 
 ## 2. What exists today (V)
 
