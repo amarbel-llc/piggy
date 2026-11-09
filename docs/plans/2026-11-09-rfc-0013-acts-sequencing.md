@@ -106,6 +106,23 @@ order is visible, labelled as held.
   `piggy-act-v1` with a `profile` edge or stays a record named from an act
   by digest; the "inherited unchanged" sentence in FDR 0034 Verification
   against the strict stencil rule (cutting-garden/swift-plum's point).
+  **Answered 2026-11-09**, spinclass master `7b43d36b` (FDR 0034, "Grants
+  as piggy RFC 0013 acts", proposed; operator rulings marked RULE): the
+  profile-grant becomes a `piggy-act-v1`; rights spelled
+  `"spinclass:profile:<name>"@<digest>` (a markl-id right, §2); the bound
+  profile is the act's one `profile` edge; the root blessing is a card
+  `grant` under `piggy-escalation-v1` with `object = spinclass:profiles`
+  (RULE); widening is an `escalation` naming the widened act; narrowing
+  links are software grants under `piggy-record-v1`, unsigned spinclass
+  records until FDR 0032 slice 1 (RULE). Store: a directory of sealed acts,
+  no stdin adapter; a caller flag asserting the store is the complete
+  revocation source (RULE for piggy). Verdict: one JSON object per outcome,
+  schema `piggy-act-verdict-v1` (verdict, act, at, kind, subject, object,
+  effective_expiry, assurance, chain_start_key, chain[], rights[], layers[]
+  with role stencil|patch, prefixed fields as sets; invalid adds
+  failed_step/failed_act/reason; undetermined adds unresolved[]); exit 0
+  valid, 1 invalid, 2 undetermined. Input to S6 (piggy#361). The "inherited
+  unchanged" sentence was dropped at spinclass `fcd103ad`.
 - cutting-garden (ajour, FDR 0028): the stencil fragment's conformance
   vectors, named so RFC 0013's vectors can point at them; the stencil and
   patch distinction in `ajour(7)`.

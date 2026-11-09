@@ -160,6 +160,14 @@ them); every other field MUST appear at most once.
 self-contained and the chain edge is explicit. For a `narrow`, `issuer`
 MUST equal `subject`. A prefixed field MAY repeat; its values form a set.
 
+**The Required column is also the admission list.** A field whose cell
+names kinds (as required or as optional) is admitted on those kinds only;
+on any other kind its presence MUST be refused (§5.2 step 1). A field whose
+cell is `yes`, `optional`, or `optional elsewhere` is admitted on every
+kind. So `right` MUST NOT appear on an `approval` or a `revocation`,
+`subject-key` only on `root` and `link`, `names` never on `root`, `link`
+or `grant`, and `profile` never on `approval` or `revocation`.
+
 **Timestamps** are RFC 3339 in the one spelling
 `YYYY-MM-DDThh:mm:ssZ`: UTC, uppercase `T` and `Z`, whole seconds, no
 offset. Any other RFC 3339 spelling MUST be refused, so equal instants
@@ -239,14 +247,28 @@ RFC 0011 §5 defines, under `piggy-record-sig-v1` (RFC 0012 §4). The other
 three seal fields (`key`, `namespace`, `hash`) are written before signing
 and are inside the signed bytes.
 
+**Low-S.** An ECDSA P-256 `signature` MUST be in low-S form (`s ≤ n/2`,
+where `n` is the curve order). A producer normalizes a signature it
+obtains (from a card, from `ssh-keygen`, from any library) by replacing
+`s` with `n − s` when `s > n/2` before writing the seal; the normalized
+signature still verifies everywhere. A verifier MUST refuse a `signature`
+with `s > n/2` at §5.2 step 2. An Ed25519 `signature` MUST be canonical
+(RFC 8032 §5.1.7: `S < L`), which strict verifiers already enforce. Both
+rules exist because an act is named by a digest over its sealed bytes
+(§3.5): without them, anyone holding a sealed act could re-encode its
+signature into a second valid act with a second name, and a revocation or
+narrow naming the first would miss the twin.
+
 A sealed act and a detached sshsig blob are equivalent: the blob is
 rebuilt from the four seal fields (`PROTOCOL.sshsig` §2: `publickey` from
 `key`, `namespace`, empty `reserved`, `hash_algorithm` from `hash`,
 `signature` re-framed from the field) and the text is the canonical form.
 A verifier MAY verify either way; `ssh-keygen -Y verify` over the rebuilt
-blob and the canonical form MUST accept exactly the signatures §5.2 step 2
-accepts. A verifier given a detached blob MUST check that the blob's
-namespace and public key equal the `namespace` and `key` fields.
+blob and the canonical form accepts every signature §5.2 step 2 accepts,
+and §5.2 step 2 additionally refuses the high-S and non-canonical
+encodings above, which OpenSSH accepts. A verifier given a detached blob
+MUST check that the blob's namespace and public key equal the `namespace`
+and `key` fields, and MUST apply the low-S rule to its signature.
 
 #### 3.4. Size
 
@@ -262,7 +284,11 @@ An act is named by its **act digest**: a markl-id under
 which is the canonical form of §3.1 with the `signature` line present, in
 its table position. Producers MUST emit `blake2b256`; verifiers MUST
 accept `blake2b256` and `sha256`. Because the signature is inside the
-digested bytes, two signings of one head are two acts.
+digested bytes, two signings of one head by a randomized signer (a card,
+`ssh-keygen`) are two acts; a deterministic signer (Ed25519, ECDSA under
+RFC 6979) re-signing one head with one key yields the same act. With the
+low-S and canonical-S rules of §3.3, a given sealed act has exactly one
+valid encoding and so one name.
 
 ### 4. Chain rules
 
@@ -485,8 +511,13 @@ Given an act A, a time T and a store S of acts:
 
 1. Parse A; refuse a type other than `piggy-act-v1`, a line kind §1
    forbids, a duplicate non-set field, an unknown unprefixed field, a
-   missing required field, a value outside §2, or a body outside RFC 0012
-   §2.5's character rules (§4.9).
+   missing required field, a field on a kind that does not admit it (§2,
+   the admission list), a value outside §2 (including a P-256 key payload
+   that does not decompress to a point on the curve, §2 "Key payloads"),
+   or a body outside RFC 0012 §2.5's character rules (§4.9). A
+   canonicalizer that does not carry curve arithmetic MAY defer the
+   decompression check to step 2, but a verifier MUST refuse such a key
+   before step 2 reports a signature result.
 2. Compute the canonical form (§3.1) from the parsed document and the
    signed data (§3.2); verify `signature` under `key` with the algorithm
    the key type requires. Refuse on failure.
@@ -685,7 +716,12 @@ node types are the consumer's; shown sealed):
     [moxy !clown-plugin-v1
       [-> folio !mcp-server-v1
         [-> read !mcp-tool-v1
-          [-> file:circus/.worktrees/_/infra/secrets !fs-path-v1 deny]]]]
+          [-> file:circus/.worktrees/_/infra/secrets !fs-path-v1 subtree deny]]]]
+
+(`subtree deny`, not `deny` alone: under the fragment's matching rule a
+node without `subtree` matches only its exact id, so a bare `deny` on the
+folder would leave every file under it admitted by the parent's
+allowance. Caught by cutting-garden's writing probe, 2026-11-09.)
 
 Verifying a signature by hand on any host: rebuild the sshsig from the
 seal, write the canonical form (the sealed act minus its `signature`
@@ -714,6 +750,12 @@ The chain walk (§5.2 steps 4 to 6) is the reference verifier's.
   accepted arrival bytes without recomputing could let two documents
   share a signature; §5.2 step 2 always recomputes from the parsed
   document.
+- **Signature malleability would forge act names.** ECDSA accepts both
+  `(r, s)` and `(r, n − s)`; since an act's name digests its signature,
+  a second encoding is a second name for the same authority, which a
+  revocation or narrow naming the first would miss. §3.3's low-S rule and
+  Ed25519's canonical-S rule leave one encoding per sealed act. Found by
+  the #358 implementation's review, 2026-11-09.
 - **Namespace and kind are both inside the signed bytes**, and the
   namespace is bound a second time by `PROTOCOL.sshsig`. A signature for
   one kind cannot be replayed as another (§4.8).
@@ -751,7 +793,7 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 | §1, §5.2 step 1, line and field rules | `act_refusals.bats` | a bare `-` line, an `@` line, a type-line lock, a duplicate `kind`, an unknown unprefixed field, a missing `issuer-key`, a card act with `issuer-record`, are refused |
 | §2, set fields | `act_canonical.bats` | repeated `right` and `names` values arriving in any order and with duplicates canonicalize to one sorted set |
 | §3.1, canonical form is order-, spacing- and comment-insensitive | `act_canonical.bats` | the same act in three line orders, unspaced, with comments, yields one canonical form and one digest |
-| §3.2, §3.3, seal equivalence | `act_seal.bats` | a sealed act rebuilt as a detached sshsig verifies under `ssh-keygen -Y verify`, and vice versa; a blob whose namespace differs from the field is refused |
+| §3.2, §3.3, seal equivalence | `act_seal.bats` | a sealed act rebuilt as a detached sshsig verifies under `ssh-keygen -Y verify`, and vice versa; a blob whose namespace differs from the field is refused; a P-256 signature re-encoded as `(r, n − s)` is refused and a high-S `ssh-keygen` signature is normalized to low-S before sealing |
 | §3.4, size | `act_refusals.bats` | a canonical form over 4096 bytes is refused by the agent as `refused-text` |
 | §3.5, act digest | `act_canonical.bats` | the digest covers the signature; re-signing yields a new digest |
 | §4.1, §5.2 step 4, chain edge | `act_chain.bats` | a software act whose `issuer-record` names an act with another `subject-key` or `subject` is refused; a card act with a non-anchor key is refused |
