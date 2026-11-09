@@ -53,9 +53,10 @@ An act carries two kinds of permission, and they are checked differently.
 	The fine detail: which tools, which paths, which recipe groups, which
 	argument values. Conditions live in a *capability profile*, a tree of
 	allowed things that the act pins by digest (the *profile* line), or in
-	the act's body, a smaller tree written in the same format (espalier,
-	cutting-garden RFC 0014). Conditions are never compared between a
-	child and its parent. They are stacked. The next section says what
+	the act's body, a patch written in the same family of formats (the
+	stencil fragment of trellis, cutting-garden RFC 0014 and FDR 0028)
+	that may only take things away. Conditions are never compared between
+	a child and its parent. They are stacked. The next section says what
 	that means.
 
 # THE STENCIL STACK
@@ -74,9 +75,11 @@ Three rules, and nothing else:
   stencil. A link adds a second. A self-narrow adds a third. None is
   removed while the chain stands.
 - *Nobody cuts a hole in someone else's stencil.* A child may add a
-  stencil with fewer holes, or with a solid patch (a *deny*) over a hole
-  the parent left open. It cannot widen a hole above it, because the
-  light still has to pass the parent's sheet.
+  stencil with fewer holes (a new profile), or a *patch*: a solid piece
+  laid over a hole the parent left open (a *deny* in the act's body). A
+  patch is transparent where it says nothing; it can only cover. The
+  child cannot widen a hole above it, because the light still has to
+  pass the parent's sheet.
 - *Only the card hands out a stencil with more holes.* That is an
   escalation. It sits in the stack in place of the stencil it names, so
   the stencils above it still apply.
@@ -101,9 +104,10 @@ walks the chain and answers in this order. Any "no" refuses the call.
 
 - Is the tool present in every stencil on the chain? A tool absent from
   any one of them is forbidden; absence is the default.
-- Does any stencil say *deny* for this value (this path, this argument)?
-- Does at least one stencil say *allow* for every value the call
-  constrains? A value no stencil mentions is refused, not admitted.
+- Does any patch say *deny* for this value (this path, this argument)?
+- Does every stencil say *allow* for every value the call constrains? A
+  value a stencil does not mention is refused by that stencil, not
+  admitted; only patches are transparent where they are silent.
 - Is the tool's right in the last act's right set, and in every act above
   it?
 - Is the chain itself sound: every signature good, nothing expired,
