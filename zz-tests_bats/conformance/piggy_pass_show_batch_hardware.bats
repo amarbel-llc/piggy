@@ -4,7 +4,8 @@
 # Hardware-tagged conformance for `piggy pass show-batch`. Companion to
 # piggy_pass_show_batch.bats — the sandbox file covers usage validation
 # and the non-card error surface; this one covers the card-required
-# cases that need real PCSC + a real PIV card (fib or fibby):
+# cases that need real PCSC + a PIV card (fibby, via
+# `just test-bats-conformance-show-batch-fibby`):
 #
 #   1. Single-ebox happy path (decrypt + 0600 atomic write).
 #   2. N>1 batch with the single-PIN guarantee (RFC 0005 marquee
@@ -44,9 +45,10 @@ setup() {
 
   OUT_DIR="$BATS_TEST_TMPDIR/show-batch-out"
 
-  # Detect fib's 9D pubkey via real PCSC and write a single-recipient
+  # Detect the card's 9D pubkey via real PCSC and write a single-recipient
   # piggy-ids file. Reused by every test in this file to seal eboxes
-  # the BatchOracle CAN match against fib.
+  # the BatchOracle CAN match against the card. (The FIB_/fib_ names
+  # predate the retired fib card, piggy#365; the card is fibby now.)
   FIB_PIGGY_IDS="$BATS_TEST_TMPDIR/fib-piggy-ids"
   local fib_recipient
   fib_recipient="$("$PIGGY_IDS_REAL" detect-pubkey --guid "$INTEROP_GUID")"
@@ -67,13 +69,13 @@ setup() {
   mkdir -p "$PIGGY_STORE_DIR"
 }
 
-# Seal `plaintext` to FIB's 9D pubkey and write the ebox to
+# Seal `plaintext` to the card's 9D pubkey and write the ebox to
 # $PIGGY_STORE_DIR/<name>.ebox.
 seal_to_fib() {
   local name="$1" plaintext="$2"
   printf '%s' "$plaintext" |
     "$PIGGY_IDS_REAL" encrypt "$FIB_PIGGY_IDS" >"$PIGGY_STORE_DIR/${name}.ebox" ||
-    fail "encrypt to fib for $name failed (status $?)"
+    fail "encrypt to the card for $name failed (status $?)"
 }
 
 # Seal `plaintext` to the foreign (off-card) recipient.
@@ -85,7 +87,7 @@ seal_to_foreign() {
 }
 
 function show_batch_single_ebox_happy_path { # @test
-  # 1. Seal one ebox to fib's 9D pubkey.
+  # 1. Seal one ebox to the card's 9D pubkey.
   seal_to_fib "test1" "hello world"
 
   # 2. show-batch should decrypt it cleanly.
@@ -198,7 +200,7 @@ function show_batch_wrong_card_emits_bail_out { # @test
 }
 
 function show_batch_heterogeneous_batch_per_ebox_failure { # @test
-  # First ebox sealed to fib (matches → drives card selection);
+  # First ebox sealed to the card (matches → drives card selection);
   # second sealed to the off-card recipient. The first decrypts
   # cleanly, the second hits the BatchOracle's NoKey path. Same
   # P-256 curve on both sides, so check_curve_mismatch returns
@@ -234,8 +236,8 @@ function show_batch_heterogeneous_batch_per_ebox_failure { # @test
 }
 
 # NOTE: the SIGINT-midbatch bail-out case used to live here but raced
-# wall-clock for a mid-batch window — it relied on a slow cold-fib ECDH
-# (~5–10s/decrypt) to deliver SIGINT after the first decrypt but before the
+# wall-clock for a mid-batch window — it relied on the retired fib card's
+# slow cold jCardSim ECDH (~5–10s/decrypt) to deliver SIGINT after the first decrypt but before the
 # rest. On a fast backend like fibby the whole batch completes before the
 # signal lands, so the test was inherently backend-speed-dependent (#176).
 # The loop's bail-at-boundary control flow (item record emitted, remaining

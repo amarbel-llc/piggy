@@ -3,9 +3,9 @@
 #
 # age-plugin-piggy end-to-end over fibby.
 #
-# Derive the age recipient + identity from fib's slot-9D public key
+# Derive the age recipient + identity from fibby's seeded slot-9D public key
 # (`age-plugin-piggy generate`), encrypt a secret with `age`, then decrypt it
-# back through piggy-agent's `ecdh@joyent.com` extension against fib, with the
+# back through piggy-agent's `ecdh@joyent.com` extension against fibby, with the
 # PIN supplied on-demand. A successful round-trip is the hardware-crypto
 # confirmation of the load-bearing assumption the unit tests can only pin in
 # software: that the agent's ECDH output is the X-coordinate the piv-p256
@@ -69,11 +69,11 @@ teardown() {
   teardown_test_home 2>/dev/null || true
 }
 
-function age_plugin_piggy_round_trips_a_secret_through_fib { # @test
+function age_plugin_piggy_round_trips_a_secret_through_fibby { # @test
   export PIGGY_TEST_FIB_PIN=123456
   spawn_fibby --seed-rfc5903-slot-9d-cert
 
-  # 1. Derive the age recipient + identity from fib's slot-9D public key.
+  # 1. Derive the age recipient + identity from fibby's seeded slot-9D public key.
   #    Read-only, PIN-free: no agent yet, just a cert read off fibby.
   local idfile="$WORKDIR/identity.txt"
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" run "$AGE_PLUGIN_PIGGY" generate
@@ -107,7 +107,7 @@ function age_plugin_piggy_round_trips_a_secret_through_fib { # @test
     return 1
   }
 
-  # 3. Start the agent against fib and decrypt -> the plugin's identity-v1
+  # 3. Start the agent against fibby and decrypt -> the plugin's identity-v1
   #    drives ecdh@joyent.com at the agent; the PIN is prompted on-demand.
   spawn_piggy_agent
   PIGGY_AUTH_SOCK="$AGENT_SOCK" run "$AGE_BIN" -d -i "$idfile" "$cipher"
@@ -126,7 +126,7 @@ function age_plugin_piggy_round_trips_a_secret_through_fib { # @test
     return 1
   }
 
-  # 4. The decrypt really reached fib's slot-9D ECDH via an on-demand prompt.
+  # 4. The decrypt really reached fibby's slot-9D ECDH via an on-demand prompt.
   grep -q "GA ECDH 9D -> 9000" "$FIBBY_LOG" || {
     echo "no successful slot-9D GA ECDH in fibby trace" >&2
     tail -80 "$FIBBY_LOG" >&2 || true

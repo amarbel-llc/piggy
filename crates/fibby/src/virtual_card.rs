@@ -69,11 +69,10 @@ const YK5_ATR: &[u8] = &[
 /// - `79 07 4F 05 A0 00 00 03 08` — coexistent tag allocation
 ///   authority (RID-only portion of the PIV AID).
 ///
-/// Trailing SW 9000 is added by the caller. fib's PivApplet does NOT
-/// emit this — it prepends its 30-byte applet identity string into a
-/// 121-byte FCI. A separate `Model::FibPivApplet` variant or an
-/// embedded fib-specific constant would close that gap; out of scope
-/// for the current YK4/YK5 alignment.
+/// Trailing SW 9000 is added by the caller. The retired jCardSim/PivApplet
+/// card (fib, piggy#365) did NOT emit this — it prepended its 30-byte
+/// applet identity string into a 121-byte FCI — which is why the frozen
+/// jCardSim captures' SELECT responses differ from fibby's.
 const CANONICAL_REAL_CARD_PIV_FCI: &[u8] = &[
     0x61, 0x11, 0x4F, 0x06, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00, 0x79, 0x07, 0x4F, 0x05, 0xA0, 0x00,
     0x00, 0x03, 0x08,
@@ -127,11 +126,9 @@ impl Model {
     ///   Wet-env captures confirm real YubiKey 4 firmware 4.3.5 and
     ///   real YubiKey 5 firmware 5.2.7 emit byte-identical responses
     ///   on every PIV SELECT — that's the canonical real-card PIV
-    ///   FCI, shared by both profiles. fib's PivApplet, by contrast,
-    ///   prepends its applet identity string and emits a 121-byte
-    ///   FCI; aligning fib requires either a `Model::FibPivApplet`
-    ///   variant or the wet-env-captured PivApplet bytes embedded
-    ///   here — deferred.
+    ///   FCI, shared by both profiles. The retired jCardSim/PivApplet
+    ///   card (fib), by contrast, prepended its applet identity string
+    ///   and emitted a 121-byte FCI; fibby does not model it.
     pub fn select_fci_bytes(self) -> &'static [u8] {
         match self {
             // Both YubiKey models emit the canonical 19-byte real-card
@@ -181,11 +178,11 @@ impl Model {
     ///   4 we captured against on 2026-05-31.
     /// - `Yk5` → `(5, 2, 7)`, captured wet-env on 2026-05-31 against a
     ///   real YubiKey 5 firmware 5.2.7. This used to be `(5, 4, 0)` as
-    ///   a placeholder that happened to match fib's PivApplet
-    ///   emulation; now that we have real YK5 wire, Yk5 reflects real
-    ///   silicon. fib's `5.4.0` advertisement no longer byte-matches
-    ///   Yk5 — that's a separate concern best handled by a
-    ///   `Model::FibPivApplet` variant or by accepting the gap.
+    ///   a placeholder that happened to match the retired jCardSim/
+    ///   PivApplet card's (fib's) emulation; now that we have real YK5
+    ///   wire, Yk5 reflects real silicon. The frozen jCardSim captures'
+    ///   `5.4.0` advertisement no longer byte-matches Yk5, a gap the
+    ///   replay test accepts.
     pub fn firmware_version(self) -> [u8; 3] {
         match self {
             Model::Yk4 => [0x04, 0x03, 0x05],
@@ -2694,10 +2691,10 @@ impl VirtualCard {
     /// `6A 88` (referenced data not found).
     ///
     /// Tag numbers 01/02/04 and the two-byte policy are those C pivy reads
-    /// (`ykpiv_get_metadata`, vendor/pivy/src/piv.c) and the fib capture
-    /// shows (tests/fixtures/apdu/fib-yk54-roundtrip.fixture, `00 F7 00
+    /// (`ykpiv_get_metadata`, vendor/pivy/src/piv.c) and the frozen jCardSim
+    /// capture shows (tests/fixtures/apdu/fib-yk54-roundtrip.fixture, `00 F7 00
     /// 9D`). The origin VALUES are Yubico's documented ones and are not
-    /// confirmed by anything in this repository: that fib capture reports
+    /// confirmed by anything in this repository: that jCardSim capture reports
     /// `03 01 00` for a generated key.
     fn handle_get_metadata(&mut self, slot: u8) -> Vec<u8> {
         let point = self
@@ -2821,10 +2818,10 @@ fn validated_policy(pin: Option<u8>, touch: Option<u8>) -> Option<[u8; 2]> {
 ///
 /// Real wet-env captures show pivy-tool's PIV path picking encoding
 /// per card: YubiKey 4 negotiates extended-length and uses it for
-/// GET/PUT DATA, while fib's PivApplet falls back to short-form after
-/// rejecting extended (the `6986` error we see in the fib init
-/// fixture). Without both encodings, GET DATA against a YK4 capture
-/// would never match.
+/// GET/PUT DATA, while the retired jCardSim/PivApplet card (fib) fell
+/// back to short-form after rejecting extended (the `6986` error in the
+/// frozen jCardSim init capture). Without both encodings, GET DATA
+/// against a YK4 capture would never match.
 fn apdu_body(apdu: &[u8]) -> Option<&[u8]> {
     if apdu.len() < 5 {
         return None;
@@ -3419,8 +3416,8 @@ mod tests {
         let resp = c.transmit(&[0x00, 0xFD, 0x00, 0x00, 0x00]).unwrap();
         // 5.2.7 + 9000; byte-equal to the YubiKey 5 firmware 5.2.7
         // wire response captured 2026-05-31. (Previously this asserted
-        // 5.4.0 from a placeholder that happened to match fib's
-        // PivApplet emulation.)
+        // 5.4.0 from a placeholder that happened to match the retired
+        // jCardSim/PivApplet card's (fib's) emulation.)
         assert_eq!(resp, vec![0x05, 0x02, 0x07, 0x90, 0x00]);
     }
 
@@ -3486,7 +3483,7 @@ mod tests {
     #[test]
     fn yk_serial_returns_6d00_on_yk4_matching_real_silicon() {
         let mut c = VirtualCard::with_model(Model::Yk4);
-        // Both short-form `00 F8 00 00 00` (fib-style) and extended-
+        // Both short-form `00 F8 00 00 00` (jCardSim-style) and extended-
         // length `00 F8 00 00 00 00 00` (YK4-style) should return 6D00
         // on a YK4 model. Captures showed the YK4 firmware doesn't
         // implement this vendor extension.

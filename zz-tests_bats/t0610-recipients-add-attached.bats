@@ -1,10 +1,13 @@
 # bats file_tags=hardware
 #
-# Requires fib (virtual PIV) + pcscd reachable via PCSCLITE_CSOCK_NAME
-# + the real (non-mock) piggy-ids binary. Excluded from the sandboxed
-# `bats-default` lane; runs only via `just test-bats-piggy` (which
-# expects fib to be brought up externally) or the matching conformance
-# recipe.
+# Tier-1 mock tests: every case drives common.bash's mock piggy-ids
+# through PIGGY_TEST_DETECT_ALL_SUPPORTED / _UNSUPPORTED, so no card,
+# pcscd or real piggy-ids is needed. The `hardware` tag is a leftover
+# from when this file needed the retired fib card (piggy#365); it still
+# keeps the file out of the sandboxed `bats-default` lane, so today it
+# runs only via `just test-bats-piggy-local`. Dropping the tag is
+# piggy#368. The live-card cases are
+# conformance/piggy_recipients_add_attached.bats.
 setup() {
   load "$(dirname "$BATS_TEST_FILE")/common.bash"
   init_test_git

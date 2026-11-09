@@ -180,7 +180,11 @@ no-op), so a file needs no teardown of its own. The harness
 also points _SSH_ASKPASS_ at a *piggy_install_helper_as* copy of the test
 askpass (the sandbox has no _/usr/bin/env_ for the helper's shebang, and
 a failing askpass is indistinguishable from a card refusing the PIN) with
-_PIGGY_TEST_FIB_PIN=123456_. Set _PIGGY_TEST_CARD=none_ before loading
+_PIGGY_TEST_FIB_PIN=123456_. The names _PIGGY_TEST_FIB_PIN_ and
+_PIGGY_TEST_FIB_MGMT_KEY_ are historical (the defaults of fib, the retired
+jCardSim card, piggy#365) and are kept because the PIN safety net and the
+VM lanes read them. Set
+_PIGGY_TEST_CARD=none_ before loading
 _common.bash_ to opt out (the conformance harness does: those files
 spawn their own fibby); a preset _PCSCLITE_CSOCK_NAME_ is left alone.
 In the sandboxed lane (which sets _PIGGY_BATS_NO_HOST_PCSC_) a test left

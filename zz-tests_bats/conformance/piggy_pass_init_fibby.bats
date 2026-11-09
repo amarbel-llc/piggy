@@ -1,12 +1,10 @@
 #! /usr/bin/env bats
 #
-# Fibby-backed conformance for `piggy pass init`'s auto-detect path —
-# the pure-Rust counterpart to the fib-backed conformance/piggy_pass_init.bats.
-# Same two cases (no-args auto-detect, explicit `-g <guid>`), but driven
-# against fibby's virtual slot 9D instead of the Java `fib` card.
+# Fibby-backed conformance for `piggy pass init`'s auto-detect path: two
+# cases (no-args auto-detect, explicit `-g <guid>`) driven against fibby's
+# virtual slot 9D. It replaced the retired fib card's init lane (piggy#365).
 #
-# This is part of the fib→fibby retirement (docs/plans/2026-06-15-retire-fib-for-fibby.md,
-# Phase 1 spike): `piggy pass init` reads the card's slot-9D pubkey via
+# `piggy pass init` reads the card's slot-9D pubkey via
 # piggy-piv (PIN-free) and writes it as the store's recipient. The
 # `--seed-rfc5903-slot-9d-cert` seed also installs the canonical CHUID, so
 # fibby presents as an initialized card with a stable GUID — exactly what

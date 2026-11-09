@@ -1,5 +1,5 @@
 //! End-to-end integration test for the direct-PCSC card unlock path
-//! (`CardEcdhOracle`) against a live fib-backed PIV card.
+//! (`CardEcdhOracle`) against a live PIV card (fibby, or a pinned real card).
 //!
 //! Issue #31. Mirrors the shape of `unlock_ebox_agent_integration.rs`
 //! but skips the `piggy agent` spawn — the card oracle talks straight to
@@ -25,7 +25,7 @@ use ssh_key::public::{EcdsaPublicKey, KeyData};
 fn unlock_ebox_against_real_card() {
     // ---- Gating ----
     // Two modes enable this test; otherwise it no-ops:
-    //  - fib mode: `PCSCLITE_CSOCK_NAME` points at the fib socket.
+    //  - fibby mode: `PCSCLITE_CSOCK_NAME` points at the fibby socket.
     //  - hardware mode: `PIGGY_TEST_CARD_GUID` pins the test to ONE specific
     //    real card, so it never touches a co-resident prod card.
     // `PIGGY_TEST_FIB_PIN` supplies the card PIN (via the test askpass) in
@@ -59,7 +59,7 @@ fn unlock_ebox_against_real_card() {
         let ctx = PivContext::new().expect("PivContext");
         let tokens = ctx.enumerate_tokens().expect("enumerate_tokens");
         // In hardware mode pin to the requested GUID so a co-resident prod
-        // card is never selected; in fib mode take the only token present.
+        // card is never selected; in fibby mode take the only token present.
         let token = if want_guid.is_empty() {
             tokens
                 .first()
@@ -121,7 +121,7 @@ fn unlock_ebox_against_real_card() {
     // The recipe wires SSH_ASKPASS to the refusing test askpass (plus
     // SSH_ASKPASS_REQUIRE=force per the harness safety net) and sets
     // PIGGY_TEST_FIB_PIN so the askpass non-interactively returns the
-    // fib PIN. Under force, an unset SSH_ASKPASS surfaces as a clear
+    // card PIN. Under force, an unset SSH_ASKPASS surfaces as a clear
     // error ("no PIN source") rather than a GUI dialog or a tty
     // fallback (#166).
     let mut oracle = CardEcdhOracle::new(askpass_pin_supplier()).expect("build CardEcdhOracle");

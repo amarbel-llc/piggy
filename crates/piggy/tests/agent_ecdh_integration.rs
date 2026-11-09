@@ -158,7 +158,7 @@ fn read_card_9d() -> PublicKey {
     assert_eq!(
         slot_9d.algorithm(),
         PivAlgorithm::EcP256,
-        "test assumes 9D was generated with eccp256 (just load-fib + pivy-tool -a eccp256 generate 9d)"
+        "test assumes 9D holds a P-256 key (test-rust-integration-fibby seeds it via fibby --seed-rfc5903-slot-9d-cert)"
     );
     slot_9d.public_key().clone()
 }

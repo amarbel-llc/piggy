@@ -5,7 +5,10 @@
 //!
 //! The fixtures live at `tests/fixtures/apdu/*.fixture` and are derived
 //! from the captures under `tests/fixtures/captures/{yubikey,fib}/` via
-//! `cargo run --bin wire-to-apdu-fixtures -- <capture.log>`.
+//! `cargo run --bin wire-to-apdu-fixtures -- <capture.log>`. The `fib`
+//! directory and the `fib-yk54-*` fixtures are frozen captures from the
+//! retired jCardSim/PivApplet card (fib, piggy#365); they keep their
+//! names, and this file calls them the jCardSim captures.
 //!
 //! Adversarial framing: until `VirtualCard` actually implements PIV,
 //! these fixtures encode what it *must eventually do*. The strict
@@ -20,7 +23,7 @@ use fibby::backend::Backend;
 use fibby::virtual_card::{Model, VirtualCard};
 
 const YK4_FIXTURE: &str = "tests/fixtures/apdu/yk4-roundtrip.fixture";
-const FIB_YK54_FIXTURE: &str = "tests/fixtures/apdu/fib-yk54-roundtrip.fixture";
+const JCARDSIM_YK54_FIXTURE: &str = "tests/fixtures/apdu/fib-yk54-roundtrip.fixture";
 const YK4_TEST_VECTOR_FIXTURE: &str = "tests/fixtures/apdu/yk4-test-vector-roundtrip.fixture";
 const YK4_TEST_VECTOR_PIVY_FIXTURE: &str =
     "tests/fixtures/apdu/yk4-test-vector-roundtrip-pivy.fixture";
@@ -52,11 +55,11 @@ fn slot_9d_priv_for(fixture_path: &str) -> Option<[u8; 32]> {
 ///
 /// - `yk4-*` fixtures captured against the real YubiKey 4 (fw 4.3.5)
 ///   pair with [`Model::Yk4`].
-/// - `fib-yk54-*` fixtures pair with [`Model::Yk5`] because fib's
-///   PivApplet advertises as "YubicoPIV v5.4.0" (same firmware tuple
-///   `Model::Yk5` returns from `firmware_version()`).
+/// - `fib-yk54-*` (jCardSim capture) fixtures pair with [`Model::Yk5`]
+///   because the jCardSim PivApplet advertised as "YubicoPIV v5.4.0"
+///   (same firmware major as `Model::Yk5`'s `firmware_version()`).
 ///
-/// Without this per-fixture pairing, fib fixtures would always
+/// Without this per-fixture pairing, jCardSim fixtures would always
 /// replay against the default `Yk4` profile and miss matched-count
 /// improvements on every per-model dispatch (GET VERSION, ATR-derived
 /// behavior, etc.). Three flows (`roundtrip`, `list`, `init`) × two
@@ -70,12 +73,12 @@ const ALL_FIXTURES: &[(&str, Model)] = &[
     // to `Model::Yk5` with that firmware version and the canonical
     // real-card SELECT FCI both real YK families share.
     ("tests/fixtures/apdu/yk5-list.fixture", Model::Yk5),
-    // fib pairs with `Model::Yk5` even though fib's PivApplet
-    // advertises firmware 5.4.0 (not 5.2.7) and a 121-byte FCI
-    // (not the canonical 19-byte). The mismatch costs ~3 matched
-    // pairs per fib fixture; aligning would need a separate
-    // `Model::FibPivApplet` variant, deferred.
-    (FIB_YK54_FIXTURE, Model::Yk5),
+    // The jCardSim captures pair with `Model::Yk5` even though the
+    // PivApplet advertised firmware 5.4.0 (not 5.2.7) and a 121-byte
+    // FCI (not the canonical 19-byte). The mismatch costs ~3 matched
+    // pairs per jCardSim fixture; fibby does not model PivApplet, so
+    // the gap is accepted.
+    (JCARDSIM_YK54_FIXTURE, Model::Yk5),
     ("tests/fixtures/apdu/fib-yk54-list.fixture", Model::Yk5),
     ("tests/fixtures/apdu/fib-yk54-init.fixture", Model::Yk5),
     // Test-vector captures (piggy#134) — same RFC 6979 §A.2.5 scalar
@@ -187,7 +190,7 @@ fn is_select_piv(apdu: &[u8]) -> bool {
     // ISO 7816-4 short-form: byte[4] = Lc (1 byte, 1..=255), AID follows.
     // Extended-length: byte[4] = 0x00 (extended-form marker), byte[5..7]
     // = Lc (2 bytes BE), AID follows. YK4's pivy-tool uses extended-form
-    // in the wet-env capture; fib accepts both.
+    // in the wet-env capture; the jCardSim captures use short-form.
     let body = &apdu[4..];
     let aid: &[u8] = if body[0] == 0x00 && body.len() >= 3 {
         let lc = u16::from_be_bytes([body[1], body[2]]) as usize;
@@ -260,7 +263,7 @@ fn fixtures_contain_select_piv_with_fci_response() {
 }
 
 /// `VirtualCard`'s SELECT PIV response today is a stub FCI — different
-/// bytes from real silicon (and from fib's PivApplet), but identical
+/// bytes from real silicon (and from the jCardSim captures' PivApplet), but identical
 /// *shape*: leading FCI tag 0x61, trailing SW 0x9000. This asserts
 /// the shape match, *not* byte equality. When step-5 work produces a
 /// byte-faithful FCI, the `full_byte_replay_*` tests below take over
@@ -394,10 +397,11 @@ fn replay_progress_against_real_silicon_is_logged() {
     }
 }
 
-/// The three fib (Java PivApplet) fixtures, a subset of [`ALL_FIXTURES`].
-/// All pair with `Model::Yk5` today (fib advertises fw 5.4.0).
-const FIB_FIXTURES: &[&str] = &[
-    FIB_YK54_FIXTURE,
+/// The three jCardSim capture (Java PivApplet) fixtures, a subset of
+/// [`ALL_FIXTURES`]. All pair with `Model::Yk5` (the PivApplet advertised
+/// fw 5.4.0).
+const JCARDSIM_FIXTURES: &[&str] = &[
+    JCARDSIM_YK54_FIXTURE,
     "tests/fixtures/apdu/fib-yk54-list.fixture",
     "tests/fixtures/apdu/fib-yk54-init.fixture",
 ];
@@ -412,26 +416,27 @@ fn status_word(resp: &[u8]) -> &[u8] {
     }
 }
 
-/// Documented status-word divergences between fibby and the captured fib
-/// wire, keyed by `(fixture_path, pair_index)`. Each entry says why fibby
-/// differs and which slice (if any) resolves it. The differential gate
+/// Documented status-word divergences between fibby and the jCardSim
+/// capture wire, keyed by `(fixture_path, pair_index)`. Each entry says why
+/// fibby differs and which slice (if any) resolves it. The differential gate
 /// below asserts these are the ONLY SW divergences AND that each still
 /// diverges — a now-agreeing entry is flagged stale so the gate
-/// auto-tightens as the resolving slices land. Indices are stable: the fib
-/// fixtures are static committed captures.
+/// auto-tightens as the resolving slices land. Indices are stable: the
+/// jCardSim fixtures are frozen committed captures.
 ///
-/// An entry here records a *known* fibby↔fib difference; it does NOT mean
-/// fib is right. Several entries exist precisely because fibby is correct
-/// (matches a real YubiKey) and fib is not. See the ORACLE HIERARCHY note
-/// on [`fib_fixtures_agree_on_status_word_except_documented_divergences`]
-/// before adding entries or "fixing" fibby to match fib.
-const FIB_SW_DIVERGENCES: &[(&str, usize, &str)] = &[
-    // fib emits a spurious first-SELECT per vsmartcard reconnect (6986/6D00
-    // before the real FCI); fibby SELECTs cleanly every time. A capture
-    // artifact of fib's reconnect behavior — permanent.
-    (FIB_YK54_FIXTURE, 0, "reconnect first-SELECT artifact"),
-    (FIB_YK54_FIXTURE, 15, "reconnect first-SELECT artifact"),
-    (FIB_YK54_FIXTURE, 27, "reconnect first-SELECT artifact"),
+/// An entry here records a *known* fibby↔jCardSim difference; it does NOT
+/// mean jCardSim is right. Several entries exist precisely because fibby is
+/// correct (matches a real YubiKey) and jCardSim is not. See the ORACLE
+/// HIERARCHY note on
+/// [`jcardsim_fixtures_agree_on_status_word_except_documented_divergences`]
+/// before adding entries or "fixing" fibby to match jCardSim.
+const JCARDSIM_SW_DIVERGENCES: &[(&str, usize, &str)] = &[
+    // The jCardSim card emitted a spurious first-SELECT per vsmartcard
+    // reconnect (6986/6D00 before the real FCI); fibby SELECTs cleanly every
+    // time. A capture artifact of that reconnect behavior — permanent.
+    (JCARDSIM_YK54_FIXTURE, 0, "reconnect first-SELECT artifact"),
+    (JCARDSIM_YK54_FIXTURE, 15, "reconnect first-SELECT artifact"),
+    (JCARDSIM_YK54_FIXTURE, 27, "reconnect first-SELECT artifact"),
     (
         "tests/fixtures/apdu/fib-yk54-list.fixture",
         0,
@@ -442,41 +447,41 @@ const FIB_SW_DIVERGENCES: &[(&str, usize, &str)] = &[
         0,
         "reconnect first-SELECT artifact",
     ),
-    // fib chains the slot-9A cert read (GET DATA -> 61xx, then GET RESPONSE);
+    // jCardSim chains the slot-9A cert read (GET DATA -> 61xx, then GET RESPONSE);
     // fibby returns 6A82 (cert absent) until 0xC0 chaining + cert seeding
     // land. Resolved by Phase 2.
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         12,
         "Phase 2: chained cert read (GET DATA 61xx)",
     ),
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         24,
         "Phase 2: chained cert read (GET DATA 61xx)",
     ),
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         35,
         "Phase 2: chained cert read (GET DATA 61xx)",
     ),
     // GET RESPONSE (0xC0) unimplemented — fibby returns 6D00. Phase 2.
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         13,
         "Phase 2: GET RESPONSE (0xC0) unimplemented",
     ),
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         25,
         "Phase 2: GET RESPONSE (0xC0) unimplemented",
     ),
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         36,
         "Phase 2: GET RESPONSE (0xC0) unimplemented",
     ),
-    // GET METADATA (0xF7) for slot 9D — fib serves the on-card-generated key's
+    // GET METADATA (0xF7) for slot 9D — jCardSim serves the on-card-generated key's
     // metadata (algorithm/policy/origin + that key's pubkey); fibby's 9D is
     // empty in replay because the generating session's scalar/pubkey aren't on
     // tape (same unreplayable root cause as the 9D ECDH entry below). Permanent
@@ -484,83 +489,87 @@ const FIB_SW_DIVERGENCES: &[(&str, usize, &str)] = &[
     // METADATA would still return a no-key SW here. A future fixture that seeds
     // a 9D key would let an implemented 0xF7 agree.
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         14,
         "permanent: on-card-generated 9D key (no key to serve metadata)",
     ),
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         26,
         "permanent: on-card-generated 9D key (no key to serve metadata)",
     ),
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         37,
         "permanent: on-card-generated 9D key (no key to serve metadata)",
     ),
-    // fib's PivApplet defaults to 5 PIN retries (63 C5) vs YubiKey's 3
-    // (63 C3). Resolved by Phase 1 (Model::FibPivApplet per-model retry).
+    // The jCardSim PivApplet defaults to 5 PIN retries (63 C5) vs YubiKey's 3
+    // (63 C3). fibby matches YubiKey; with fib retired (piggy#365) there is
+    // no PivApplet model to add, so this is permanent.
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         39,
-        "Phase 1: fib PIN-retry default 5 vs YubiKey 3",
+        "permanent: jCardSim PIN-retry default 5 vs YubiKey 3",
     ),
-    // fib's slot-9D key was generated on-card; its scalar can't be seeded,
-    // so fibby's empty-slot 6A88 vs fib's 9000 ECDH is unreplayable. Permanent.
+    // The jCardSim slot-9D key was generated on-card; its scalar can't be
+    // seeded, so fibby's empty-slot 6A88 vs the capture's 9000 ECDH is
+    // unreplayable. Permanent.
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         41,
         "permanent: on-card-generated 9D key (no scalar to seed)",
     ),
-    // fib returns 9000 to VERIFY P1=0xFF (clear verify status); fibby returns
-    // 6A80, matching the real YubiKey 4 wet-env capture. fibby is correct for
-    // YubiKey — permanent fib-vs-YubiKey divergence.
+    // jCardSim returns 9000 to VERIFY P1=0xFF (clear verify status); fibby
+    // returns 6A80, matching the real YubiKey 4 wet-env capture. fibby is
+    // correct for YubiKey — permanent jCardSim-vs-YubiKey divergence.
     (
-        FIB_YK54_FIXTURE,
+        JCARDSIM_YK54_FIXTURE,
         42,
-        "permanent: VERIFY P1=0xFF; fibby matches YubiKey (6A80) not fib (9000)",
+        "permanent: VERIFY P1=0xFF; fibby matches YubiKey (6A80) not jCardSim (9000)",
     ),
 ];
 
-/// Differential gate (piggy#135): fibby and fib must return the same status
-/// word for every captured fib APDU, except the documented divergences in
-/// [`FIB_SW_DIVERGENCES`]. This is intentionally looser than byte-replay —
-/// it tolerates fib's card-identity byte differences (126-byte PivApplet
-/// FCI, fw 5.4.0, serial) since those don't change the SW — but unlike
-/// `replay_progress_against_real_silicon_is_logged` it *asserts*, so any new
-/// fibby<->fib protocol-behavior divergence is caught. Static fixtures, so
-/// it runs in CI with no live fib / Java / pcscd.
+/// Differential gate (piggy#135): fibby must return the same status word as
+/// the jCardSim capture for every captured APDU, except the documented
+/// divergences in [`JCARDSIM_SW_DIVERGENCES`]. This is intentionally looser
+/// than byte-replay — it tolerates the PivApplet's card-identity byte
+/// differences (126-byte FCI, fw 5.4.0, serial) since those don't change the
+/// SW — but unlike `replay_progress_against_real_silicon_is_logged` it
+/// *asserts*, so any new fibby<->jCardSim protocol-behavior divergence is
+/// caught. Frozen fixtures, so it runs in CI with no Java / pcscd (the live
+/// jCardSim card, fib, is retired: piggy#365).
 ///
 /// ORACLE HIERARCHY — read before "fixing" a failure here. fibby's
 /// correctness oracle is the **real YubiKey** (the `yk4-*` / `yk5-*`
 /// captures and the `full_byte_replay_*` byte-replay tests) and the PIV
-/// spec. `fib` (the Java PivApplet) is a *differential second opinion*, NOT
-/// an oracle — it has its own quirks that real silicon does not (e.g. it
-/// answers VERIFY `P1=0xFF` with `9000` where a YubiKey returns `6A80`, and
-/// defaults to 5 PIN retries vs 3).
+/// spec. The jCardSim capture (the Java PivApplet) is a *differential second
+/// opinion*, NOT an oracle — it has its own quirks that real silicon does not
+/// (e.g. it answers VERIFY `P1=0xFF` with `9000` where a YubiKey returns
+/// `6A80`, and defaults to 5 PIN retries vs 3).
 ///
 /// So when this gate reports a NEW divergence, do NOT reflexively change
-/// fibby to match fib. Instead: (1) determine which side matches a real
+/// fibby to match jCardSim. Instead: (1) determine which side matches a real
 /// YubiKey / the PIV spec; (2) if fibby is the correct one, add a
-/// `FIB_SW_DIVERGENCES` entry whose reason records that fibby matches
-/// YubiKey, not fib (see the `P1=0xFF` and PIN-retry entries for the
+/// `JCARDSIM_SW_DIVERGENCES` entry whose reason records that fibby matches
+/// YubiKey, not jCardSim (see the `P1=0xFF` and PIN-retry entries for the
 /// pattern); (3) only change fibby if it is genuinely wrong vs YubiKey /
-/// the spec, and validate that change against the YubiKey captures, not fib.
+/// the spec, and validate that change against the YubiKey captures, not
+/// jCardSim.
 ///
-/// fib-specific behavior that real silicon lacks belongs in a separate
-/// `Model::FibPivApplet` profile (Phase 1), never in the YubiKey models.
+/// PivApplet-specific behavior that real silicon lacks never belongs in the
+/// YubiKey models.
 #[test]
-fn fib_fixtures_agree_on_status_word_except_documented_divergences() {
+fn jcardsim_fixtures_agree_on_status_word_except_documented_divergences() {
     let mut unexpected: Vec<String> = Vec::new();
     let mut fired: std::collections::HashSet<(&str, usize)> = std::collections::HashSet::new();
 
-    for &fixture in FIB_FIXTURES {
+    for &fixture in JCARDSIM_FIXTURES {
         let pairs = parse_fixture(&workspace_relative(fixture));
         let mut card = VirtualCard::with_model(Model::Yk5);
         card.connect(2, 3).unwrap();
         // Same pre-seeding as the progress diagnostic: data objects the
         // capture shows were already present, and the per-session mgmt-key
-        // witness. (fib's 9D key is on-card-generated, so no scalar to seed.)
+        // witness. (The jCardSim 9D key is on-card-generated, so no scalar to seed.)
         for (tag, value) in extract_data_object_seed(&pairs) {
             card.seed_data_object(tag, value);
         }
@@ -574,7 +583,7 @@ fn fib_fixtures_agree_on_status_word_except_documented_divergences() {
             if status_word(&got) == status_word(&p.response) {
                 continue;
             }
-            if FIB_SW_DIVERGENCES
+            if JCARDSIM_SW_DIVERGENCES
                 .iter()
                 .any(|&(f, idx, _)| f == fixture && idx == i)
             {
@@ -585,7 +594,7 @@ fn fib_fixtures_agree_on_status_word_except_documented_divergences() {
                 let p2 = p.request.get(3).copied().unwrap_or(0);
                 unexpected.push(format!(
                     "{fixture} [{i}] INS={ins:#04x} P1={p1:#04x} P2={p2:#04x}: \
-                     fibby SW={} fib SW={}",
+                     fibby SW={} jCardSim SW={}",
                     hex_preview(status_word(&got)),
                     hex_preview(status_word(&p.response)),
                 ));
@@ -593,7 +602,7 @@ fn fib_fixtures_agree_on_status_word_except_documented_divergences() {
         }
     }
 
-    let stale: Vec<String> = FIB_SW_DIVERGENCES
+    let stale: Vec<String> = JCARDSIM_SW_DIVERGENCES
         .iter()
         .filter(|&&(f, idx, _)| !fired.contains(&(f, idx)))
         .map(|&(f, idx, reason)| format!("{f} [{idx}] ({reason})"))
@@ -601,12 +610,12 @@ fn fib_fixtures_agree_on_status_word_except_documented_divergences() {
 
     assert!(
         unexpected.is_empty(),
-        "fibby<->fib status-word divergence not in FIB_SW_DIVERGENCES:\n  {}",
+        "fibby<->jCardSim status-word divergence not in JCARDSIM_SW_DIVERGENCES:\n  {}",
         unexpected.join("\n  ")
     );
     assert!(
         stale.is_empty(),
-        "stale FIB_SW_DIVERGENCES entries (fibby now agrees with fib — remove them):\n  {}",
+        "stale JCARDSIM_SW_DIVERGENCES entries (fibby now agrees with jCardSim — remove them):\n  {}",
         stale.join("\n  ")
     );
 }
@@ -751,16 +760,16 @@ fn full_byte_replay_against_yk4_fixture() {
     full_byte_replay(&workspace_relative(YK4_FIXTURE), Model::Yk4);
 }
 
-/// Strict byte-equal replay against the fib (PivApplet, advertising as
-/// YK 5.4.0) capture. The fib path differs from real silicon in known
-/// ways (no Yubico factory-root attestation, different CHUID timing);
-/// when this passes byte-equally, `VirtualCard` has reached parity
-/// with PivApplet — the precondition for retiring `fib` from the bats
-/// lane (design-doc step 6).
+/// Strict byte-equal replay against the jCardSim capture (PivApplet,
+/// advertising as YK 5.4.0). The jCardSim card differs from real silicon
+/// in known ways (no Yubico factory-root attestation, different CHUID
+/// timing); when this passes byte-equally, `VirtualCard` has reached
+/// parity with PivApplet. (The live jCardSim card, fib, was retired
+/// without waiting for that parity: piggy#365.)
 #[test]
 #[ignore = "VirtualCard PIV applet in progress; see #131 + design-doc step 5"]
-fn full_byte_replay_against_fib_yk54_fixture() {
-    full_byte_replay(&workspace_relative(FIB_YK54_FIXTURE), Model::Yk5);
+fn full_byte_replay_against_jcardsim_yk54_capture() {
+    full_byte_replay(&workspace_relative(JCARDSIM_YK54_FIXTURE), Model::Yk5);
 }
 
 fn full_byte_replay(fixture: &Path, model: Model) {

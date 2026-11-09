@@ -514,13 +514,12 @@ test-bats-conformance-protocol: build-rust
     --tap zz-tests_bats/conformance/piggy_agent_protocol.bats
 
 
-# Agentless box decrypt against FIBBY (the Rust VirtualCard) — the fibby
-# companion to the piggy_box_decrypt_agentless test above (which runs against
-# fib/jcardsim). Brings up fibby with a seeded slot-9D ECDH key, then runs the
-# SAME card-agnostic bats test against it: Rust `piggy-ids encrypt` ->
+# Agentless box decrypt against FIBBY (the Rust VirtualCard). Brings up fibby
+# with a seeded slot-9D ECDH key, then runs the card-agnostic
+# piggy_box_decrypt_agentless bats test against it: Rust `piggy-ids encrypt` ->
 # `piggy box stream decrypt` with no agent -> Rust CardEcdhOracle -> fibby's
 # 9D ECDH (piggy#57). Pure-Rust card-under-test, no Java/jcardsim/hardware, so
-# it runs in the default `just test` lane unlike the fib interop recipe.
+# it runs in the default `just test` lane.
 #
 # run the fibby-backed agentless box decrypt bats gate
 [group('post-build')]
@@ -862,11 +861,10 @@ test-bats-conformance-tool-keys-fibby: (_lane-pivy-oracle "tool-keys-fibby" "pig
 [linux]
 codemod-capture-pivy-oracle-tool-keys-fibby: (_lane-pivy-oracle "tool-keys-fibby" "piggy_tool_keys_fibby.bats" "capture")
 
-# recipients add --all-attached against FIBBY — the fibby companion to
-# test-bats-conformance-recipients-add-attached, part of the fib→fibby
-# retirement (docs/plans/2026-06-15-retire-fib-for-fibby.md, Phase 3).
+# recipients add --all-attached against FIBBY (the retired fib card's lane
+# moved here, piggy#365; docs/plans/2026-06-15-retire-fib-for-fibby.md).
 # Brings up fibby (virtual backend, seeded slot 9D + canonical CHUID/GUID)
-# and runs the SAME piggy_recipients_add_attached.bats against it: the live
+# and runs piggy_recipients_add_attached.bats against it: the live
 # card is added on top of an existing foreign recipient, and the already-a-
 # recipient case is a no-op. The RSA-9D "unsupported" case was dropped (fibby
 # is P-256-only; that path is unit-tested — see the bats file's note).
@@ -905,9 +903,8 @@ test-bats-conformance-recipients-add-attached-fibby: build-rust
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
     zz-tests_bats/conformance/piggy_recipients_add_attached.bats
 
-# Fibby-backed `piggy pass init` auto-detect lane — the pure-Rust
-# counterpart to test-bats-conformance-init, part of the fib→fibby
-# retirement (docs/plans/2026-06-15-retire-fib-for-fibby.md). Drives
+# Fibby-backed `piggy pass init` auto-detect lane (it replaced the retired
+# fib card's init lane, piggy#365). Drives
 # `piggy pass init` (no-args + explicit -g) against fibby's seeded slot
 # 9D (which also installs the canonical CHUID/GUID). PIN-free, no agent.
 # [linux]-only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect
@@ -926,10 +923,9 @@ test-bats-conformance-init-fibby:
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_pass_init_fibby.bats
 
-# show-batch against FIBBY — the fibby companion to
-# test-bats-conformance-show-batch, part of the fib→fibby retirement
-# (docs/plans/2026-06-15-retire-fib-for-fibby.md, Phase 1). Brings up fibby
-# (virtual backend, seeded slot 9D + canonical CHUID/GUID) and runs the SAME
+# show-batch against FIBBY (the retired fib card's lane moved here,
+# piggy#365). Brings up fibby
+# (virtual backend, seeded slot 9D + canonical CHUID/GUID) and runs the
 # card-agnostic piggy_pass_show_batch_hardware.bats against it: single-ebox
 # decrypt, the single-PIN-across-N guarantee, wrong-card bail-out, and the
 # heterogeneous per-ebox failure path — all through show-batch's agentless
@@ -1213,9 +1209,9 @@ test-bats-conformance-fibby-hotplug:
       zz-tests_bats/conformance/fibby_hotplug_fibby.bats
 
 # Fibby-backed end-to-end gate for `age-plugin-piggy`: derive the age
-# recipient/identity from fib's slot-9D key (`generate`), encrypt a secret with
-# `age`, then decrypt it back through piggy-agent's ecdh@joyent.com against fib
-# with on-demand PIN. Confirms on real card-side crypto the X-coordinate
+# recipient/identity from fibby's seeded slot-9D key (`generate`), encrypt a
+# secret with `age`, then decrypt it back through piggy-agent's ecdh@joyent.com
+# against fibby with on-demand PIN. Confirms on real card-side crypto the X-coordinate
 # assumption the Rust unit tests pin only in software. Serves the
 # age-plugin-piggy dev loop (Phase 2).
 #
@@ -1749,10 +1745,9 @@ debug-vm-loop check="vm-piggy-agent" runs="10" logdir="":
     done
     echo "$failures of {{ runs }} runs failed; logs in $logdir"
 
-# Rust card-integration tests against FIBBY — the consolidated fibby
-# companion to test-rust-agent-ecdh / -agent-unlock / -card-unlock, part of
-# the fib→fibby retirement (docs/plans/2026-06-15-retire-fib-for-fibby.md,
-# Phase 2). Boots ONE fibby (virtual backend, seeded slot 9D + CHUID/GUID)
+# Rust card-integration tests against FIBBY — the one lane for the agent
+# ECDH, agent unlock and card unlock integration tests since the fib card was
+# retired (piggy#365). Boots ONE fibby (virtual backend, seeded slot 9D + CHUID/GUID)
 # and runs all three card-agnostic integration tests against it: the agent
 # ECDH round-trip, the agent unlock round-trip, and the direct-PCSC
 # (CardEcdhOracle) unlock. The agent tests spawn `piggy agent` against the
@@ -2144,13 +2139,13 @@ debug-stats-me-roundtrip: build-rust
 #
 # Env overrides (all optional):
 #   FIBBY_BACKEND_PCSCD=<socket>  Tell fibby's HardwareProxy to talk to
-#                                 a non-default pcscd (e.g. fib's
-#                                 private pcscd at /tmp/piggy-fib-ipc/pcscd.comm).
+#                                 a non-default pcscd (e.g. a private
+#                                 pcscd started on its own socket).
 #                                 Default: system pcscd at /run/pcscd/pcscd.comm.
 #   FIBBY_READER=<substr>         Reader-name substring HardwareProxy
-#                                 selects on. Default: "Yubico". Set to
-#                                 e.g. "piggy fib" for the fib virtual
-#                                 reader.
+#                                 selects on. Default: "Yubico". Set it to
+#                                 pick another reader when several are
+#                                 attached.
 #   FIBBY_KEEP_LOGS=<dir>         Copy the FIBBY_LOG=wire trace to this
 #                                 directory before the cleanup trap erases
 #                                 the tmp dir. Output file is named
@@ -2469,8 +2464,8 @@ lint-rust:
     # Option<T> mismatches, missing pcsc::Error variants) are caught at
     # the merge gate — the same lane the host-devshell-unblock fixes at
     # c0c59f0 + 653ca77 fell through silently before they were in CI.
-    # Gated on Linux because flake.nix:166 only adds pcsclite to
-    # rustBuildInputs on isLinux (vsmartcard is broken on darwin; the
+    # Gated on Linux because flake.nix only adds pcsclite to
+    # rustBuildInputs on isLinux (pcsclite is a Linux-only build input; the
     # hardware-proxy build needs libpcsclite-dev via pcsc-sys).
     if [ "$(uname -s)" = Linux ]; then
       cargo clippy -p fibby --all-targets --features hardware-proxy -- -D warnings
@@ -2880,7 +2875,8 @@ explore-verify-auth-sock-cache piggy_auth_sock=env_var_or_default("PIGGY_AUTH_SO
 # this runs the in-process `unlock_ebox_card_integration`
 # test, which drives piggy's Rust `CardEcdhOracle` → `begin_pin_session` →
 # `PinSession::{verify_pin,ecdh_derive}` DIRECTLY against the card. First time
-# the Rust #56 PinSession code runs on real hardware (it has only seen fib).
+# the Rust #56 PinSession code runs on real hardware (the lanes only ever ran
+# it against virtual cards).
 # Pins to the throwaway via PIGGY_TEST_CARD_GUID so a co-resident prod card is
 # never selected; one fail-fast PIN check first. NEVER pass your prod PIN.
 #

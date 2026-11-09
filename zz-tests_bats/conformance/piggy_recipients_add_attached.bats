@@ -4,13 +4,12 @@
 # Conformance tier-2 tests for piggy pass recipients add --all-attached
 # against a real virtual PIV card. Multi-card permutations (mixed
 # supported+unsupported, dedup across N cards) live in the tier-1 mock
-# bats at zz-tests_bats/t0610-recipients-add-attached.bats because both
-# fib and fibby are single-card by construction; see amarbel-llc/piggy#83.
+# bats at zz-tests_bats/t0610-recipients-add-attached.bats because
+# fibby is single-card by construction; see amarbel-llc/piggy#83.
 #
 # Driven by `just test-bats-conformance-recipients-add-attached-fibby`
-# (fibby, virtual slot 9D) — or the legacy fib recipe — which exports
-# PCSCLITE_CSOCK_NAME and runs bats with --allow-local-binding plus the
-# askpass safety net.
+# (fibby, virtual slot 9D), which exports PCSCLITE_CSOCK_NAME and runs
+# bats with --allow-local-binding plus the askpass safety net.
 #
 # Tests skip gracefully when the card env vars are absent.
 
@@ -24,7 +23,7 @@ setup() {
 
   # Replace common.bash's mock-piggy-ids symlink with the real Rust
   # binary so detect-pubkey / detect-all-pubkeys actually talk to the
-  # fib card via piggy-piv. Scoped to BATS_TEST_TMPDIR.
+  # fibby card via piggy-piv. Scoped to BATS_TEST_TMPDIR.
   if [[ -x "$REPO_ROOT/target/debug/piggy-ids" ]]; then
     ln -sf "$REPO_ROOT/target/debug/piggy-ids" "$BATS_TEST_TMPDIR/piggy-ids"
   elif [[ -x "$REPO_ROOT/target/release/piggy-ids" ]]; then
@@ -49,7 +48,7 @@ setup() {
 # --all-attached adds the live card on top.
 FOREIGN_RECIPIENT="piggy-recipient-v1@pivy_ecdh_p256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqr9fwqu"
 
-function fib_attached_adds_the_card { # @test
+function fibby_attached_adds_the_card { # @test
   "$PIGGY" pass init -k "$FOREIGN_RECIPIENT"
 
   run "$PIGGY" pass recipients add --all-attached
@@ -60,7 +59,7 @@ function fib_attached_adds_the_card { # @test
   assert_output --partial "$FOREIGN_RECIPIENT"
 }
 
-function fib_attached_already_a_recipient_is_noop { # @test
+function fibby_attached_already_a_recipient_is_noop { # @test
   "$PIGGY" pass init -k "$CARD_ID"
   local before_sha
   before_sha="$(git -C "$PIGGY_STORE_DIR" rev-parse HEAD)"
@@ -83,4 +82,4 @@ function fib_attached_already_a_recipient_is_noop { # @test
 # detect-all-pubkeys emits the unsupported line (piggy-ids main.rs tests),
 # and `recipients add` reports "Cannot encrypt" (recipients.rs
 # parse_detect_supported_and_unsupported). So the hardware confirmation was
-# redundant. See the fib→fibby retirement plan + #176.
+# redundant. See docs/plans/2026-06-15-retire-fib-for-fibby.md + #176.
