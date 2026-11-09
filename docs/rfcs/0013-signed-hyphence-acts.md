@@ -20,8 +20,9 @@ date: 2026-11-09
 > and numbers (circus EPIC 0001 decision 3, adopted); `deny` is admitted in
 > a body with one spelling. The head consolidation (dropping the derivable
 > `issuer`, `issuer-key`, `namespace`, `hash`, `assurance`, `issued-at`)
-> awaits the operator's ruling on the two prompt renderings and is not in
-> this text. The mechanism's plain-words explanation is `piggy-acts(7)`.
+> was ruled the same day: keep the full head and judge the prompt live
+> first; the consolidation is the recorded fallback (Limitations, Tuning
+> Levers). The mechanism's plain-words explanation is `piggy-acts(7)`.
 
 ## Abstract
 
@@ -791,8 +792,12 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
   `issuer-key`, `namespace`, `hash`, `assurance`, `issued-at`) can be
   derived from `kind`, `key` and the signature's format or are
   informational. Dropping them takes a card root from fifteen fixed lines
-  to nine. Pending the operator's ruling on the two prompt renderings in
-  the review document.
+  to nine. Ruled 2026-11-09 (R): start with the full head as this table
+  stands and judge the prompt live, then improve from what is observed;
+  the consolidation (fold `hash` into the signature's markl format, derive
+  `namespace`, `issuer` and the piggy `assurance` values from `kind` and
+  `key`, drop `issuer-key` and `issued-at`) is the recorded fallback and a
+  Tuning Lever below.
 - **One prompt.** A card act's head must fit a prompt (4096 bytes hard,
   about fifteen lines comfortable). A large right set is the consumer's
   to compress (a profile right instead of a list).
@@ -816,6 +821,7 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 |---|---|---|---|
 | chain depth cap | 32 | a stack never needs more; bounds a verifier's work | a legitimate tree exceeds it |
 | card-act head size | 4096 bytes hard (RFC 0012); about 1200 characters recommended | one screen, no scrolling | operators report skimming, or producers hit the cap |
+| derivable head fields written out | all six present (`issuer`, `issuer-key`, `namespace`, `hash`, `assurance`, `issued-at`) | the operator sees the whole signed text and nothing is derived behind the prompt; judged live first (R 2026-11-09) | the operator reports skimming or crowding at the prompt; then drop them per Limitations |
 | time precision | seconds, UTC | enough for expiry; no sub-second clocks across hosts | a consumer needs finer |
 | memoization | until effective expiry or an annotating act on the chain is learned | verifiers are called often | a revocation is observed to be missed |
 | digest format emitted | `blake2b256` | matches the record purposes' existing use | a consumer needs sha256 only |
