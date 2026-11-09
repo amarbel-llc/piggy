@@ -145,6 +145,11 @@ let
         # output of `piggy health --format ndjson`.
         pkgs.jq
         pkgs.openssl
+        # openssh: ssh-keygen makes the throwaway keys and signatures the
+        # RFC 0013 act_seal/act_body conformance files check, both ways
+        # (`ssh-keygen -Y sign` into `piggy act attach`, `piggy act
+        # detach` into `ssh-keygen -Y verify`). No agent, no card.
+        pkgs.openssh
         # python3: needed by conformance/piggy_askpass.bats — the test
         # uses `python3 -c 'import os; os.setsid(); os.execvp(...)'` to
         # detach the controlling TTY before invoking the askpass
