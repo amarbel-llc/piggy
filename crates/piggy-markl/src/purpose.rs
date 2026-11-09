@@ -70,6 +70,11 @@ pub enum PurposeId {
     /// fixed-width form (piggy RFC 0012 §4), as `papi-doc-sig-v1` does.
     /// Accepts `ed25519_sig` and `ecdsa_p256_sig`.
     PiggyRecordSigV1,
+    /// `piggy-principal_pub-v1` — the public key of a principal
+    /// certified by a `piggy-act-v1` certifying act (piggy RFC 0013 §8):
+    /// an act's `subject-key`, and the `issuer-key`/`key` of a software
+    /// act. Accepts `ssh_ed25519_pub` and `ssh_ecdsa_nistp256_pub`.
+    PiggyPrincipalPubV1,
     /// `dodder-blob-digest-sha256-v1` — blob content hash. Piggy does
     /// not produce these, but accepts them for round-trip purposes.
     DodderBlobDigestSha256V1,
@@ -366,6 +371,7 @@ impl PurposeId {
             PurposeId::PigpenDocV1 => "pigpen-doc-v1",
             PurposeId::PiggyRecordDigestV1 => "piggy-record-digest-v1",
             PurposeId::PiggyRecordSigV1 => "piggy-record-sig-v1",
+            PurposeId::PiggyPrincipalPubV1 => "piggy-principal_pub-v1",
             PurposeId::DodderBlobDigestSha256V1 => "dodder-blob-digest-sha256-v1",
             PurposeId::DodderObjectDigestV2 => "dodder-object-digest-v2",
             PurposeId::DodderObjectSigV2 => "dodder-object-sig-v2",
@@ -386,6 +392,7 @@ impl PurposeId {
             "pigpen-doc-v1" => PurposeId::PigpenDocV1,
             "piggy-record-digest-v1" => PurposeId::PiggyRecordDigestV1,
             "piggy-record-sig-v1" => PurposeId::PiggyRecordSigV1,
+            "piggy-principal_pub-v1" => PurposeId::PiggyPrincipalPubV1,
             "dodder-blob-digest-sha256-v1" => PurposeId::DodderBlobDigestSha256V1,
             "dodder-object-digest-v2" => PurposeId::DodderObjectDigestV2,
             "dodder-object-sig-v2" => PurposeId::DodderObjectSigV2,
@@ -422,6 +429,12 @@ impl PurposeId {
                     FormatId::SshEcdsaNistp256Pub
                         | FormatId::SshEd25519Pub
                         | FormatId::SshEcdsaNistp384Pub
+                )
+            }
+            PurposeId::PiggyPrincipalPubV1 => {
+                matches!(
+                    format,
+                    FormatId::SshEd25519Pub | FormatId::SshEcdsaNistp256Pub
                 )
             }
             PurposeId::PapiDocSigV1 => matches!(format, FormatId::EcdsaP256Sig),
@@ -580,6 +593,32 @@ mod tests {
         assert!(
             sig.validate_format(FormatId::SshEcdsaNistp256Pub).is_err(),
             "the signing key is not the signature"
+        );
+    }
+
+    /// piggy RFC 0013 §8.
+    #[test]
+    fn piggy_principal_pub_v1_accepts_the_rfc_0013_key_formats() {
+        let p = PurposeId::PiggyPrincipalPubV1;
+        assert_eq!(p.as_str(), "piggy-principal_pub-v1");
+        assert_eq!(PurposeId::parse("piggy-principal_pub-v1"), p);
+        assert!(p.validate_format(FormatId::SshEd25519Pub).is_ok());
+        assert!(p.validate_format(FormatId::SshEcdsaNistp256Pub).is_ok());
+        assert!(
+            p.validate_format(FormatId::SshEcdsaNistp384Pub).is_err(),
+            "RFC 0013 certifies Ed25519 and P-256 principals only"
+        );
+        assert!(
+            p.validate_format(FormatId::Ed25519Pub).is_err(),
+            "the raw ed25519_pub is the dodder repo-key form"
+        );
+        assert!(
+            p.validate_format(FormatId::PivyEcdhP256Pub).is_err(),
+            "a recipient is not a principal"
+        );
+        assert!(
+            p.validate_format(FormatId::Ed25519Sig).is_err(),
+            "a signature is not a principal key"
         );
     }
 
@@ -802,6 +841,9 @@ mod tests {
             PurposeId::PiggyPivSigV1,
             PurposeId::PiggyPivCardAuthV1,
             PurposeId::PapiDocSigV1,
+            PurposeId::PiggyRecordDigestV1,
+            PurposeId::PiggyRecordSigV1,
+            PurposeId::PiggyPrincipalPubV1,
             PurposeId::DodderBlobDigestSha256V1,
             PurposeId::DodderObjectDigestV2,
             PurposeId::DodderObjectSigV2,

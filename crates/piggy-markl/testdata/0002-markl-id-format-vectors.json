@@ -260,6 +260,20 @@
       "encoded": "piggy-record-sig-v1@ed25519_sig-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgfzyvjz2f389q5j52ev95hz7vp3xgengdfkxuurjw3m8s7nu0cy4lu83"
     },
     {
+      "name": "purpose/piggy-principal_pub-v1/ssh_ecdsa_nistp256_pub",
+      "purpose": "piggy-principal_pub-v1",
+      "format": "ssh_ecdsa_nistp256_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "encoded": "piggy-principal_pub-v1@ssh_ecdsa_nistp256_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jq03gaxg"
+    },
+    {
+      "name": "purpose/piggy-principal_pub-v1/ssh_ed25519_pub",
+      "purpose": "piggy-principal_pub-v1",
+      "format": "ssh_ed25519_pub",
+      "payload_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "encoded": "piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx"
+    },
+    {
       "name": "purpose/example-unregistered-purpose-v1/sha256",
       "purpose": "example-unregistered-purpose-v1",
       "format": "sha256",

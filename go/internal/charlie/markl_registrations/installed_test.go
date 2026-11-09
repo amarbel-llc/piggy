@@ -40,6 +40,7 @@ func TestPiggyPurposesInstalled(t *testing.T) {
 		markl.PurposePiggyPivAuthV1,
 		markl.PurposePiggyPivSigV1,
 		markl.PurposePiggyPivCardAuthV1,
+		markl.PurposePiggyPrincipalPubV1,
 	} {
 		if got := markl.GetPurpose(pid).GetPurposeType(); got != markl.PurposeTypePubKey {
 			t.Errorf("purpose %q: type = %v, want PurposeTypePubKey", pid, got)

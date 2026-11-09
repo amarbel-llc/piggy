@@ -385,12 +385,15 @@ const (
 // and the piggy-markl crate). The piggy-piv_* purposes carry a PIV
 // slot's SSH-suitable public key; piggy-recipient-v1 carries an
 // encryption recipient pubkey (PIV slot 9D or an age recipient).
+// piggy-principal_pub-v1 carries the public key of a principal
+// certified by a piggy-act-v1 certifying act (piggy RFC 0013 §8).
 // keep sorted
 const (
-	PurposePiggyPivAuthV1     = internal.PurposePiggyPivAuthV1
-	PurposePiggyPivCardAuthV1 = internal.PurposePiggyPivCardAuthV1
-	PurposePiggyPivSigV1      = internal.PurposePiggyPivSigV1
-	PurposePiggyRecipientV1   = internal.PurposePiggyRecipientV1
+	PurposePiggyPivAuthV1      = internal.PurposePiggyPivAuthV1
+	PurposePiggyPivCardAuthV1  = internal.PurposePiggyPivCardAuthV1
+	PurposePiggyPivSigV1       = internal.PurposePiggyPivSigV1
+	PurposePiggyPrincipalPubV1 = internal.PurposePiggyPrincipalPubV1
+	PurposePiggyRecipientV1    = internal.PurposePiggyRecipientV1
 )
 
 // Piggy signed-record purposes (piggy RFC 0012 §4).

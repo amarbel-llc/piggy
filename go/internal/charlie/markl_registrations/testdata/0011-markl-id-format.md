@@ -9,6 +9,7 @@ revisions:
   - 2026-07-18: expand the purpose grammar from the `system-domain-role-version` registry convention to general identifiers (§2.1, §6); add the embedding-grammar quoting-split section (§2.2) (linenisgreat/madder#270)
   - 2026-07-20: move from madder RFC 0002 to piggy RFC 0011, completing the piggy#183 markl-ownership inversion; narrow the purpose charset from the 2026-07-18 open-Unicode form to a bare-ident-plus-quoted-String model, restrict blech32 to a single separator and lower-case only, define blech32 by reference to bech32, make checksum verification normative for decoders, mark the legacy combined-HRP form historical (§9.1), and add the identifier conformance-vector corpus and divergence register (§7.3, §7.4) (linenisgreat/madder#273)
   - 2026-10-12: add the piggy-record-digest-v1 and piggy-record-sig-v1 purposes (§6.1), registered by piggy RFC 0012 §4
+  - 2026-11-09: add the piggy-principal_pub-v1 purpose (§6.1), registered by piggy RFC 0013 §8
 ---
 
 # RFC 0011 — Markl ID Format
@@ -729,6 +730,7 @@ decode opaquely per §6.6.
 | `piggy-recipient-v1`             | piggy  | `pivy_ecdh_p256_pub`, `age_x25519_pub`          | Encryption recipient (PIV slot 9D ECDH key, or age recipient) |
 | `piggy-record-digest-v1`         | piggy  | `sha256`, `blake2b256`                          | Digest of a signed record's canonical bytes (piggy RFC 0012 §4) |
 | `piggy-record-sig-v1`            | piggy  | `ed25519_sig`, `ecdsa_p256_sig`                 | Raw signature over a signed record, SSH framing stripped to the §5 fixed-width form (piggy RFC 0012 §4) |
+| `piggy-principal_pub-v1`         | piggy  | `ssh_ed25519_pub`, `ssh_ecdsa_nistp256_pub`     | Public key of a principal certified by a `piggy-act-v1` certifying act (piggy RFC 0013 §8) |
 | `papi-doc-sig-v1`                | papi   | `ecdsa_p256_sig`                                | PAPI document signature (slot-9A SSH sig over JCS bytes) |
 
 The `piggy-*` purposes are owned by this repository and mirrored in its
@@ -738,7 +740,9 @@ The `piggy-*` purposes are owned by this repository and mirrored in its
 and consumed by madder wherever a piggy-issued key appears in a markl-id
 slot. The record purposes (`piggy-record-{digest,sig}-v1`) name a signed
 record's digest and raw signature; their semantics are authoritative in
-piggy RFC 0012 §4.
+piggy RFC 0012 §4. The principal purpose (`piggy-principal_pub-v1`)
+names a key certified by a signed act, not a card slot; its semantics
+are authoritative in piggy RFC 0013 §8.
 
 The `papi-doc-sig-v1` purpose is owned jointly with
 [`amarbel-llc/papi`](https://github.com/amarbel-llc/papi) and mirrored in

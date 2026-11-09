@@ -37,6 +37,11 @@ var (
 	PurposePiggyPivSigV1Opts      = internal.PurposePiggyPivSigV1Opts
 )
 
+// piggy-principal_pub-v1 — the public key of a principal certified by
+// a piggy-act-v1 certifying act: an act's subject-key, and the
+// issuer-key and key of a software act (piggy RFC 0013 §8).
+var PurposePiggyPrincipalPubV1Opts = internal.PurposePiggyPrincipalPubV1Opts
+
 // piggy-recipient-v1 — the encryption recipient pubkey (PIV slot 9D
 // ECDH key, or an age recipient) piggy encrypts blobs to.
 var PurposePiggyRecipientV1Opts = internal.PurposePiggyRecipientV1Opts

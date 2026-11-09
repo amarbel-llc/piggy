@@ -101,6 +101,18 @@ var (
 			markl.FormatIdEcdsaP256Sig,
 		},
 	}
+
+	// piggy-principal_pub-v1 — the public key of a principal certified by
+	// a piggy-act-v1 certifying act: an act's subject-key, and the
+	// issuer-key and key of a software act (piggy RFC 0013 §8).
+	PurposePiggyPrincipalPubV1Opts = markl.RegisterPurposeOpts{
+		Id:   markl.PurposePiggyPrincipalPubV1,
+		Type: markl.PurposeTypePubKey,
+		FormatIds: []string{
+			markl.FormatIdSshEd25519Pub,
+			markl.FormatIdSshEcdsaNistp256Pub,
+		},
+	}
 )
 
 // AllPurposes is the ordered list of piggy's own purpose registrations.
@@ -115,6 +127,7 @@ var AllPurposes = []markl.RegisterPurposeOpts{
 	PurposePigpenDocV1Opts,
 	PurposePiggyRecordDigestV1Opts,
 	PurposePiggyRecordSigV1Opts,
+	PurposePiggyPrincipalPubV1Opts,
 }
 
 func init() {
