@@ -1,4 +1,10 @@
 #! /usr/bin/env bats
+# bats file_tags=c-pivy
+#
+# Runs the C pivy-tool, so it is outside the merge gate (piggy#364): run it
+# with `just test-bats-conformance-pivy-tool-admin-key`, `just
+# test-optional`, or sandboxed as `nix build .#bats-c-pivy`. It leaves with
+# the C build at piggy#289 Phase 5.
 #
 # Regression test for pivy-tool -K default argument parsing.
 # See amarbel-llc/piggy#23: the "default" branch failed to set len,

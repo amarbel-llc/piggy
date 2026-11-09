@@ -345,8 +345,6 @@ _card_init_tty() {
 }
 
 function card_init_seal_flag_escrows_key_recoverable_by_backup_card { # @test
-  [[ -x ${PIVY_TOOL:-/nonexistent} ]] ||
-    skip "PIVY_TOOL unset; run via just test-bats-conformance-card-init-fibby"
   card_spawn_with_backup_recipient --auto-touch --model yk5
 
   _card_init_tty --reader "$CARD_READER_A" --seal-management-key <<<"y"
@@ -375,9 +373,10 @@ function card_init_seal_flag_escrows_key_recoverable_by_backup_card { # @test
   }
 
   # The recovered key admin-authenticates card A: set-admin rewrites it to
-  # itself (-R skips the PIN-gated printed-info write) ...
+  # itself. piggy's set-admin is 3DES-only and never writes printed info,
+  # so no PIN is involved (the C pivy-tool needed -A 3des -R for the same).
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
-    run "$PIVY_TOOL" -g "$guid" -A 3des -K "$key" -R set-admin "$key"
+    run "$PIGGY_BIN" tool -g "$guid" -K "$key" set-admin "$key"
   [[ $status -eq 0 ]] || {
     echo "the recovered key failed admin auth on card A: $output" >&2
     return 1
@@ -386,7 +385,7 @@ function card_init_seal_flag_escrows_key_recoverable_by_backup_card { # @test
   local wrong
   wrong=$(printf '11%.0s' {1..24})
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" \
-    run "$PIVY_TOOL" -g "$guid" -A 3des -K "$wrong" -R set-admin "$wrong"
+    run "$PIGGY_BIN" tool -g "$guid" -K "$wrong" set-admin "$wrong"
   [[ $status -ne 0 ]] || {
     echo "a wrong management key passed admin auth on card A" >&2
     return 1

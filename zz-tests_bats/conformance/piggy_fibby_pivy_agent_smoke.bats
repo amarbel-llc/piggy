@@ -1,4 +1,9 @@
 #! /usr/bin/env bats
+# bats file_tags=c-pivy
+#
+# Runs the C pivy-agent, so it is outside the merge gate (piggy#364): run it
+# with `just test-bats-conformance-fibby-pivy-agent-smoke` or `just
+# test-optional`. It leaves with the C build at piggy#289 Phase 5.
 #
 # piggy#135 Phase 0 smoke: pivy-agent over fibby's virtual PIV card,
 # no hardware. Asserts the pcsc-lite substrate is wired correctly:

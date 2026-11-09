@@ -347,10 +347,17 @@ run-nix *ARGS:
 test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-rust test-go test-pigpen test-nix-hm-module test-nix-hm-secrets-module _test-conformance-linux-only _test-vm-linux-only
 
 [group('post-build')]
-test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware
+test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-bats-conformance-pivy-tool-admin-key _test-optional-linux-only
+
+# The C pivy-agent smoke over fibby, out of the merge gate since piggy#364.
+[linux]
+_test-optional-linux-only: test-bats-conformance-fibby-pivy-agent-smoke
+
+[macos]
+_test-optional-linux-only:
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-fibby-pivy-agent-smoke test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
+_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -438,19 +445,20 @@ vm-check-system := arch() + "-linux"
 test-bats-conformance: build-rust
   #!/usr/bin/env bash
   set -euo pipefail
-  # On Linux, hand pivy_tool_admin_key.bats a real pivy-tool (PIVY_TOOL) and a
-  # fibby binary (FIBBY_BIN) so it routes its PC/SC context at a virtual card
-  # instead of the host's system pcscd, which denies SCardEstablishContext
+  # On Linux, hand the glob a fibby binary (FIBBY_BIN) so a test that stands
+  # up a virtual card routes its PC/SC context at it instead of the host's
+  # system pcscd, which denies SCardEstablishContext
   # (SCARD_W_SECURITY_VIOLATION) in headless/polkit sessions. macOS ignores
   # PCSCLITE_CSOCK_NAME, so there's nothing to redirect — run the glob
   # unchanged and skip the (pointless) fibby build. The agent-backed fibby
   # tests still skip here: they gate on PIVY_AGENT/PIGGY_BIN, left unset so
-  # they run only via their dedicated [linux] recipes.
+  # they run only via their dedicated [linux] recipes. The `c-pivy` files
+  # run the C binaries and are left to test-optional (piggy#364), so this
+  # recipe never builds C.
   fibby_env=()
   if [[ "$(uname -s)" == Linux ]]; then
-    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
-    fibby_env=(PIVY_TOOL="$pivy_out/bin/pivy-tool" FIBBY_BIN="$fibby_out/bin/fibby")
+    fibby_env=(FIBBY_BIN="$fibby_out/bin/fibby")
   fi
   # The fenced (batman) glob excludes `pty`-tagged tests: fence (the
   # third-party Use-Tusk/fence sandbox) denies PTY allocation
@@ -459,13 +467,32 @@ test-bats-conformance: build-rust
   # instead. Tracked at piggy#167 (fence-profile fix is upstream:
   # amarbel-llc/igloo + Use-Tusk/fence).
   env "${fibby_env[@]}" {{ fence-tmpdir-linux }} BATS_TEST_TIMEOUT=30 \
-    bats --jobs {{ num_cpus() }} --filter-tags '!pty' --tap zz-tests_bats/conformance/*.bats
+    bats --jobs {{ num_cpus() }} --filter-tags '!pty,!c-pivy' --tap zz-tests_bats/conformance/*.bats
   # The pty-tagged tests need a real /dev/ptmx, which fence blocks — run
   # them outside the sandbox (the same escape the pcscd/hardware lanes
   # use). pty-spawn.py surfaces the true errno if a future sandbox change
   # ever re-blocks them here.
   env "${fibby_env[@]}" BATS_TEST_TIMEOUT=30 \
-    bats --no-sandbox --filter-tags 'pty' --tap zz-tests_bats/conformance/*.bats
+    bats --no-sandbox --filter-tags 'pty,!c-pivy' --tap zz-tests_bats/conformance/*.bats
+
+# The C pivy-tool `-K default` parse regression (piggy#23) against a fresh
+# .#pivy, routed at a fibby virtual card on Linux (see the file's header).
+# Outside the merge gate since piggy#364: C pivy is test-only and the gate
+# no longer builds it. Leaves with the C build at piggy#289 Phase 5.
+#
+# run the C pivy-tool admin-key bats against a fresh .#pivy
+[group('post-build')]
+test-bats-conformance-pivy-tool-admin-key:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  pivy_out=$(nix build .#pivy --no-link --print-out-paths)
+  env_args=(PIVY_TOOL="$pivy_out/bin/pivy-tool")
+  if [[ "$(uname -s)" == Linux ]]; then
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    env_args+=(FIBBY_BIN="$fibby_out/bin/fibby")
+  fi
+  env "${env_args[@]}" {{ fence-tmpdir-linux }} BATS_TEST_TIMEOUT=30 \
+    bats --tap zz-tests_bats/conformance/pivy_tool_admin_key.bats
 
 # Run the SSH-agent wire-protocol conformance bats against a freshly built
 # piggy-agent-conformance binary (the .#piggy.tests.conformance package).
@@ -1001,10 +1028,9 @@ test-bats-conformance-secrets-reconcile-fibby: build-rust
 
 # Hardware-free Phase 0 smoke for piggy#135: stand up fibby (virtual
 # backend, empty slots) and pivy-agent against it, run ssh-add -L,
-# assert the substrate works. Lives in the default `just test` lane
-# (no hardware dependency); the bats file gracefully skips if PIVY_
-# AGENT / FIBBY_BIN aren't supplied (e.g. when invoked via the
-# conformance glob without this recipe's env setup).
+# assert the substrate works. Runs the C pivy-agent, so it is in
+# `test-optional`, not the merge gate (piggy#364); the bats file skips
+# if PIVY_AGENT / FIBBY_BIN aren't supplied.
 #
 # Both binaries come from nix derivations (.#pivy + .#fibby) rather
 # than the workspace's target/debug/. This is the same pattern as the
@@ -1312,16 +1338,15 @@ test-bats-conformance-card-init-fibby:
     set -euo pipefail
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
-    pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     cargo build -p card-frontend-server --quiet
     # PIGGY satisfies the parent common.bash loader without a cargo build.
-    # PIGGY_IDS_BIN reads the backup card's 9D recipient and PIVY_TOOL proves
-    # a recovered management key admin-authenticates (piggy#258 seal cases).
+    # PIGGY_IDS_BIN reads the backup card's 9D recipient; `piggy tool
+    # set-admin` proves a recovered management key admin-authenticates
+    # (piggy#258 seal cases), so the gate needs no C pivy (piggy#364).
     PIGGY="$piggy_out/bin/piggy" \
       FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
       PIGGY_IDS_BIN="$piggy_out/libexec/piggy/piggy-ids" \
-      PIVY_TOOL="$pivy_out/bin/pivy-tool" \
       CARD_FRONTEND_BIN="$PWD/target/debug/card-frontend-server" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_card_init_fibby.bats

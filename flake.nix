@@ -1000,10 +1000,14 @@
             lint-closure-no-pivy =
               let
                 ci = pkgs.closureInfo { rootPaths = [ piggy ]; };
+                # The path string only, without its build context: the check
+                # compares store paths and must not itself build C pivy
+                # (piggy#364, the merge gate builds no C).
+                pivyPath = builtins.unsafeDiscardStringContext "${pivyPkg}";
               in
               pkgs.runCommand "lint-closure-no-pivy" { } ''
-                if grep -qF '${pivyPkg}' ${ci}/store-paths; then
-                  echo "FAIL: C pivy (${pivyPkg}) is in the piggy runtime closure" >&2
+                if grep -qF '${pivyPath}' ${ci}/store-paths; then
+                  echo "FAIL: C pivy (${pivyPath}) is in the piggy runtime closure" >&2
                   echo "  piggy#289 Phase 4 demoted pivy to a test-only input; it must not ship." >&2
                   echo "  Something re-introduced a runtime reference to it." >&2
                   exit 1

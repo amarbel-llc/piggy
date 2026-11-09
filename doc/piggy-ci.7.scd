@@ -56,8 +56,15 @@ take two to three minutes each once the guest closure is cached; a
 *just test-optional*
 	Not run by the gate: *test-bats-file* and *test-bats-piggy-local* (the
 	fast, unsandboxed local-iteration paths), *test-bats-conformance-protocol*
-	(the SSH-agent wire-protocol bats), and
-	*test-bats-conformance-pivy-agent-hardware* (needs a plugged-in card).
+	(the SSH-agent wire-protocol bats),
+	*test-bats-conformance-pivy-agent-hardware* (needs a plugged-in card),
+	and the two bats files that still run the C pivy binaries:
+	*test-bats-conformance-pivy-tool-admin-key* and, on Linux,
+	*test-bats-conformance-fibby-pivy-agent-smoke*. Those two are tagged
+	_c-pivy_ and filtered out of every gate lane, so the gate never builds
+	*.#pivy* (piggy#364); each builds a fresh one when run, and *nix build
+	.#bats-c-pivy* runs the first sandboxed. They leave with the C build at
+	piggy#289 Phase 5.
 
 *just test-vm-coverage*
 	The three VM lanes re-run on an instrumented piggy, merged into an

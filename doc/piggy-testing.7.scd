@@ -56,12 +56,16 @@ _bats.nix_ wraps the *batsLane* builder from the bats flake. Two scan
 roots: _zz-tests_bats/t\*.bats_ and _zz-tests_bats/conformance/\*.bats_
 (_zz-tests_bats/explore/_ is deliberately not scanned). _# bats
 file_tags=_ directives are auto-discovered, producing one _bats-<tag>_
-derivation per tag plus _bats-default_, whose filter is _!hardware_: a
-test needing a real pcscd (fibby or hardware) cannot run in the nix
-sandbox and is invoked by a _just test-bats-conformance-\*-fibby_ recipe
-instead. *nix build .#bats-default* is the authoritative sandboxed gate;
-*just test-bats-conformance* is the ergonomic path for the non-hardware
-conformance files (dual coverage is intentional, piggy#117).
+derivation per tag plus _bats-default_, whose filter is
+_!hardware,!c-pivy_: a test needing a real pcscd (fibby or hardware)
+cannot run in the nix sandbox and is invoked by a _just
+test-bats-conformance-\*-fibby_ recipe instead, and a _c-pivy_ file runs
+the C pivy binaries, which the gate no longer builds (piggy#364; see
+*piggy-ci*(7) OUTSIDE THE GATE). Only the _bats-c-pivy_ lane is handed
+the C pivy-tool (_REAL\_PIVY\_TOOL_). *nix build .#bats-default* is the
+authoritative sandboxed gate; *just test-bats-conformance* is the
+ergonomic path for the non-hardware conformance files (dual coverage is
+intentional, piggy#117); it skips _c-pivy_ files too.
 
 Fast iteration on one file, outside the sandbox:
 

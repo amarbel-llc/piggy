@@ -12,8 +12,9 @@
 #
 # Auto-discovers `# bats file_tags=foo,bar` directives at flake-eval
 # time and produces one `bats-${tag}` derivation per unique tag plus
-# `bats-default` (which filters with `!hardware` to exclude tests
-# that need a real pcscd/PIV stack).
+# `bats-default` (which filters with `!hardware,!c-pivy` to exclude tests
+# that need a real pcscd/PIV stack and those that run the C pivy
+# binaries, piggy#364).
 #
 # Two scan roots: top-level `*.bats` plus `conformance/*.bats`. Both
 # are passed as `testFiles` globs to batsLane so the staged tests run
@@ -43,11 +44,11 @@
   # sandboxed lane instead of via `bats --no-sandbox` only.
   conformanceBin,
   # The C pivy package (pivyPkg in flake.nix). Threaded as
-  # `REAL_PIVY_TOOL` so `conformance/pivy_tool_admin_key.bats` can
-  # exercise its assertions against the lane-bundled pivy-tool rather
-  # than skipping when `./result/bin/piggy` is absent (the sandbox has
-  # no `result/` symlink). See piggy#116. Intentionally NOT on
-  # `nativeBuildInputs` — the mock `pivy-tool` installed by
+  # `REAL_PIVY_TOOL` into the `bats-c-pivy` lane ONLY, so
+  # `conformance/pivy_tool_admin_key.bats` runs against a real pivy-tool
+  # there (piggy#116) while `bats-default`, the merge gate, never builds C
+  # (piggy#364: the c-pivy files are filtered out of it). Intentionally
+  # NOT on `nativeBuildInputs` — the mock `pivy-tool` installed by
   # common.bash at the front of $PATH must still win for the other
   # tests; we hand the real binary in by absolute path instead.
   pivy,
@@ -70,8 +71,11 @@ let
 
   mkBatsLane =
     {
-      filter ? "!hardware",
+      # `c-pivy` files run the C pivy binaries; they are kept out of the
+      # default lane so the merge gate never builds C (piggy#364).
+      filter ? "!hardware,!c-pivy",
       base ? piggyRs,
+      laneEnv ? { },
     }:
     batsLane {
       inherit base filter batsSrc;
@@ -113,10 +117,6 @@ let
         # `flake.nix` installs the piggy-ids binary. PIGGY_IDS_REAL
         # is consumed by mock-piggy-ids.sh for delegation.
         PIGGY_IDS_REAL = "${piggyWrapped}/libexec/piggy/piggy-ids";
-        # The real C pivy-tool, used only by pivy_tool_admin_key.bats.
-        # Matches the REAL_PIVY_BOX convention used by the interop
-        # recipe (see justfile). See piggy#116.
-        REAL_PIVY_TOOL = "${pivy}/bin/pivy-tool";
         # piggy#305: zz-tests_bats/common.bash points PC/SC at a dead
         # socket for any test with no card of its own, so nothing in this
         # lane reaches the host's pcscd and a real card plugged into it.
@@ -125,7 +125,8 @@ let
         # rust dispatcher falls through to `command -v piggy-ids`,
         # which resolves to the mock symlink in $BATS_TEST_TMPDIR
         # (placed at the front of $PATH by common.bash).
-      };
+      }
+      // laneEnv;
       nativeBuildInputs = [
         # The bats helpers (mock-pivy-tool.sh / mock-piggy-ids.sh) and
         # the rust handlers' callouts shell out to these directly;
@@ -206,6 +207,12 @@ let
           tag:
           lib.nameValuePair "bats-${tag}" (mkBatsLane {
             filter = tag;
+            # The real C pivy-tool for pivy_tool_admin_key.bats (piggy#116),
+            # in its own lane only, so only `nix build .#bats-c-pivy` builds
+            # C. Matches the REAL_PIVY_BOX convention of the interop recipe.
+            laneEnv = lib.optionalAttrs (tag == "c-pivy") {
+              REAL_PIVY_TOOL = "${pivy}/bin/pivy-tool";
+            };
           })
         ) allFileTags
       )
