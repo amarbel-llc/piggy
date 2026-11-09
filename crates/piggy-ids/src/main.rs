@@ -212,10 +212,18 @@ fn cmd_validate(path: &Path) -> Result<ExitCode, DynErr> {
 fn cmd_canonicalize(path: &Path) -> Result<ExitCode, DynErr> {
     let file = read_recipient_file(path)?;
     let rendered = file.render();
-    let tmp = path.with_extension("tmp");
+    // A symlinked piggy-ids (kept under version control elsewhere) is
+    // rewritten at its target, so the link survives (piggy#113).
+    let is_link = fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    let target = if is_link {
+        fs::canonicalize(path).map_err(|e| format!("resolving {}: {e}", path.display()))?
+    } else {
+        path.to_path_buf()
+    };
+    let tmp = target.with_extension("tmp");
     fs::write(&tmp, rendered.as_bytes()).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, path)
-        .map_err(|e| format!("renaming {} → {}: {e}", tmp.display(), path.display()))?;
+    fs::rename(&tmp, &target)
+        .map_err(|e| format!("renaming {} → {}: {e}", tmp.display(), target.display()))?;
     Ok(ExitCode::SUCCESS)
 }
 

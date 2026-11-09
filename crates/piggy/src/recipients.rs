@@ -117,7 +117,7 @@ pub fn add(args: &[String]) -> i32 {
     // Build candidate in a tempfile, validate via canonicalize, then
     // atomically install — mirrors the bash append-before-validate
     // guard that keeps a malformed input from corrupting the live file.
-    let tmp = tmp_sibling(&piggy_ids);
+    let tmp = tmp_sibling(&write_target(&piggy_ids));
     if let Err(err) = std::fs::copy(&piggy_ids, &tmp) {
         let _ = std::fs::remove_file(&tmp);
         eprintln!("Error: failed to stage candidate piggy-ids: {err}");
@@ -133,7 +133,7 @@ pub fn add(args: &[String]) -> i32 {
         eprintln!("Error: invalid recipient(s); aborting.");
         return 1;
     }
-    if let Err(err) = std::fs::rename(&tmp, &piggy_ids) {
+    if let Err(err) = std::fs::rename(&tmp, write_target(&piggy_ids)) {
         let _ = std::fs::remove_file(&tmp);
         eprintln!("Error: failed to install candidate piggy-ids: {err}");
         return 1;
@@ -275,7 +275,7 @@ fn add_all_attached(
     }
 
     let count = to_add.len();
-    let tmp = tmp_sibling(&piggy_ids);
+    let tmp = tmp_sibling(&write_target(&piggy_ids));
     if let Err(err) = std::fs::copy(&piggy_ids, &tmp) {
         let _ = std::fs::remove_file(&tmp);
         eprintln!("Error: failed to stage candidate piggy-ids: {err}");
@@ -291,7 +291,7 @@ fn add_all_attached(
         eprintln!("Error: invalid recipient(s); aborting.");
         return 1;
     }
-    if let Err(err) = std::fs::rename(&tmp, &piggy_ids) {
+    if let Err(err) = std::fs::rename(&tmp, write_target(&piggy_ids)) {
         let _ = std::fs::remove_file(&tmp);
         eprintln!("Error: failed to install candidate piggy-ids: {err}");
         return 1;
@@ -352,13 +352,13 @@ pub fn remove(args: &[String]) -> i32 {
         return 0;
     }
 
-    let tmp = tmp_sibling(&piggy_ids);
+    let tmp = tmp_sibling(&write_target(&piggy_ids));
     if let Err(err) = std::fs::write(&tmp, filtered.as_bytes()) {
         let _ = std::fs::remove_file(&tmp);
         eprintln!("Error: failed to stage candidate piggy-ids: {err}");
         return 1;
     }
-    if let Err(err) = std::fs::rename(&tmp, &piggy_ids) {
+    if let Err(err) = std::fs::rename(&tmp, write_target(&piggy_ids)) {
         let _ = std::fs::remove_file(&tmp);
         eprintln!("Error: failed to install candidate piggy-ids: {err}");
         return 1;
@@ -774,6 +774,21 @@ fn current_markl_ids(contents: &str) -> std::collections::HashSet<String> {
         }
     }
     set
+}
+
+/// The file a rewrite of `piggy_ids` lands in: the link's target when
+/// `piggy_ids` is a symlink (a recipient set kept under version control
+/// elsewhere, piggy#113), so the temp-and-rename install writes through the
+/// link instead of replacing it with a regular file; the path itself
+/// otherwise.
+fn write_target(piggy_ids: &Path) -> PathBuf {
+    let is_link = std::fs::symlink_metadata(piggy_ids).is_ok_and(|m| m.file_type().is_symlink());
+    if is_link {
+        if let Ok(target) = std::fs::canonicalize(piggy_ids) {
+            return target;
+        }
+    }
+    piggy_ids.to_path_buf()
 }
 
 /// `${PIGGY_IDS}.tmp.$$` — a sibling temp path. The bash uses the PID;

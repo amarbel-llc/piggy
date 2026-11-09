@@ -15,6 +15,52 @@ setup() {
 RECIPIENT_SECONDARY="piggy-recipient-v1@pivy_ecdh_p256_pub-qd43050juykyy3lchnnw2caygre8wqmasyk7kvaq7jsnj3wcnrpfve2jwdn"
 WRONG_FORMAT="sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6"
 
+# piggy#113: a piggy-ids that is a symlink (to a version-controlled copy
+# elsewhere) is written through, never replaced by a regular file.
+_symlink_piggy_ids() {
+  TRACKED="$BATS_TEST_TMPDIR/tracked/piggy-ids"
+  mkdir -p "${TRACKED%/*}"
+  mv "$PIGGY_STORE_DIR/piggy-ids" "$TRACKED"
+  ln -s "$TRACKED" "$PIGGY_STORE_DIR/piggy-ids"
+}
+
+_assert_still_linked() {
+  [[ -L $PIGGY_STORE_DIR/piggy-ids ]] || fail "piggy-ids is no longer a symlink"
+  [[ $(readlink "$PIGGY_STORE_DIR/piggy-ids") == "$TRACKED" ]] ||
+    fail "piggy-ids points elsewhere: $(readlink "$PIGGY_STORE_DIR/piggy-ids")"
+}
+
+function recipients_add_writes_through_a_symlinked_piggy_ids { # @test
+  _symlink_piggy_ids
+  run "$PIGGY" pass recipients add "$RECIPIENT_SECONDARY"
+  assert_success
+  _assert_still_linked
+  run cat "$TRACKED"
+  assert_output --partial "$RECIPIENT_SECONDARY"
+}
+
+function recipients_remove_writes_through_a_symlinked_piggy_ids { # @test
+  "$PIGGY" pass recipients add "$RECIPIENT_SECONDARY"
+  _symlink_piggy_ids
+  run "$PIGGY" pass recipients remove "$RECIPIENT_SECONDARY"
+  assert_success
+  _assert_still_linked
+  run cat "$TRACKED"
+  refute_output --partial "$RECIPIENT_SECONDARY"
+  assert_output --partial "$RECIPIENT_PRIMARY"
+}
+
+function recipients_sync_writes_through_a_symlinked_piggy_ids { # @test
+  _symlink_piggy_ids
+  local desired="$BATS_TEST_TMPDIR/desired-piggy-ids"
+  printf '%s\n%s\n' "$RECIPIENT_PRIMARY" "$RECIPIENT_SECONDARY" >"$desired"
+  run "$PIGGY" pass recipients sync "$desired"
+  assert_success
+  _assert_still_linked
+  run cat "$TRACKED"
+  assert_output --partial "$RECIPIENT_SECONDARY"
+}
+
 function recipients_list_prints_recipients { # @test
   run "$PIGGY" pass recipients list
   assert_success
