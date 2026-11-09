@@ -84,6 +84,61 @@ function approval_prompt_shows_its_class_namespace_and_text_verbatim { # @test
   done <<<"$text"
 }
 
+# RFC 0013 §6: for a card act the canonical form IS the text. Sealed through
+# `piggy act seal`, every head line reaches the askpass verbatim, in
+# canonical order, none omitted, after the class, card, slot and namespace.
+function a_piggy_act_reaches_the_prompt_whole_and_in_canonical_order { # @test
+  operator_act_stack_up
+  operator_act_public_key 9C >"$WORKDIR/9c.pub"
+  ssh-keygen -q -t ed25519 -N '' -f "$WORKDIR/subject"
+  local card principal
+  card=$("$PIGGY_BIN" act key --card "$WORKDIR/9c.pub")
+  principal=$("$PIGGY_BIN" act key "$WORKDIR/subject.pub")
+  # Written out of order, with a comment: the prompt shows the canonical
+  # form, not the arrival bytes.
+  cat >"$WORKDIR/act" <<EOF
+---
+! piggy-act-v1
+- hash = sha256
+% not shown, not signed
+- right = spinclass:merge
+- right = spinclass:check
+- namespace = piggy-certificate-v1
+- key = $card
+- assurance = piggy:hardware
+- issued-at = 2026-11-08T23:00:00Z
+- not-after = 2026-11-09T23:00:00Z
+- issuer-key = $card
+- issuer = operator
+- subject-key = $principal
+- subject = clown:72dca00c
+- producer = troupe:root-v1
+- kind = root
+# piggy-test: root for session 72dca00c
+---
+EOF
+  "$PIGGY_BIN" act canon "$WORKDIR/act" >"$WORKDIR/canonical"
+
+  : >"$AGENT_LOG"
+  PIGGY_AUTH_SOCK="$AGENT_SOCK" run --separate-stderr "$PIGGY_BIN" act seal "$WORKDIR/act"
+  [[ $status -eq 0 ]] || operator_act_fail "act seal failed"
+
+  grep -qx '\[piggy-test-askpass\] operator act kind: certificate' "$AGENT_LOG" ||
+    operator_act_fail "the prompt did not carry kind certificate"
+  # The text is everything after the namespace line and its blank line, up
+  # to the banner's closing parenthesis.
+  awk '
+    shown && $0 == ")" { exit }
+    shown { print }
+    $0 == "namespace piggy-certificate-v1" { getline; shown = 1 }
+  ' "$AGENT_LOG" >"$WORKDIR/shown"
+  cmp "$WORKDIR/canonical" "$WORKDIR/shown" ||
+    operator_act_fail "the prompt text is not the canonical form, line for line: $(diff "$WORKDIR/canonical" "$WORKDIR/shown")"
+  if grep -q 'not shown, not signed' "$AGENT_LOG"; then
+    operator_act_fail "a comment reached the prompt"
+  fi
+}
+
 # Once the PIN is in, the card waits for a touch and the dialog is gone: the
 # agent must say so where the operator will see it, naming card and slot,
 # while the card is still waiting.

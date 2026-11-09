@@ -680,14 +680,61 @@ fn markl_id_lead_len(token: &str) -> Option<usize> {
     (format_ok && body_ok).then_some(purpose_len + format.len() + 1 + EMPHASIZED_BODY_CHARS)
 }
 
+/// The head fields of a `piggy-act-v1` whose values are emphasized: what the
+/// act does, to whom, with which rights, until when (piggy RFC 0013 §6).
+const EMPHASIZED_ACT_FIELDS: [&str; 4] = ["kind", "subject", "right", "not-after"];
+
+/// When `text` is a `piggy-act-v1` (its head, between the first two `---`
+/// boundaries, carries `! piggy-act-v1`), the byte ranges of the values of
+/// [`EMPHASIZED_ACT_FIELDS`]; otherwise none, and the text renders plain.
+/// Only attributes are added: no line is omitted, truncated or reordered
+/// (RFC 0012 §2.6).
+fn act_field_emphasis(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut is_act = false;
+    let mut in_head = false;
+    let mut offset = 0;
+
+    for line in text.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        if content == "---" {
+            if in_head {
+                break;
+            }
+            if offset == 0 {
+                in_head = true;
+            }
+        } else if in_head && content == "! piggy-act-v1" {
+            is_act = true;
+        } else if let Some(field) = content.strip_prefix("- ").filter(|_| in_head) {
+            for name in EMPHASIZED_ACT_FIELDS {
+                if let Some(value) = field
+                    .strip_prefix(name)
+                    .and_then(|rest| rest.strip_prefix(" = "))
+                {
+                    let end = offset + content.len();
+                    spans.push(end - value.len()..end);
+                }
+            }
+        }
+        offset += line.len();
+    }
+
+    if is_act { spans } else { Vec::new() }
+}
+
 /// The act's text, set as plain text so nothing in it is read as markup, in
 /// a monospace face so look-alike characters stay apart, and wrapped at the
-/// width the script's height limit assumes. Each markl-id's lead is bold.
+/// width the script's height limit assumes. Each markl-id's lead is bold,
+/// and so are a `piggy-act-v1`'s kind, subject, rights and expiry.
 fn text_label(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.set_use_markup(false);
     let attrs = pango::AttrList::new();
-    for span in markl_id_emphasis(text) {
+    for span in markl_id_emphasis(text)
+        .into_iter()
+        .chain(act_field_emphasis(text))
+    {
         let mut bold = pango::AttrInt::new_weight(pango::Weight::Bold);
         bold.set_start_index(span.start as u32);
         bold.set_end_index(span.end as u32);
@@ -815,6 +862,37 @@ mod tests {
         let lead = "piggy-record-digest-v1@blake2b256-qqqsyqcy";
         assert_eq!(spans[0], start..start + lead.len());
         assert_eq!(&text[spans[0].clone()], lead);
+    }
+
+    /// RFC 0013 §6: a piggy-act-v1 head shows kind, subject, each right and
+    /// not-after emphasized; nothing else in it, and nothing in the body.
+    #[test]
+    fn a_piggy_act_has_its_kind_subject_rights_and_expiry_emphasized() {
+        let text = "---\n# piggy-test: root\n- kind = root\n- producer = troupe:root-v1\n\
+                    - subject = clown:72dca00c\n- subject-key = x\n- right = spinclass:check\n\
+                    - right = spinclass:merge\n- not-after = 2026-11-09T23:00:00Z\n\
+                    - issued-at = 2026-11-08T23:00:00Z\n! piggy-act-v1\n---\n\n- kind = body\n";
+        let emphasized: Vec<&str> = act_field_emphasis(text)
+            .into_iter()
+            .map(|span| &text[span])
+            .collect();
+        assert_eq!(
+            emphasized,
+            [
+                "root",
+                "clown:72dca00c",
+                "spinclass:check",
+                "spinclass:merge",
+                "2026-11-09T23:00:00Z"
+            ]
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_a_piggy_act_is_left_plain() {
+        assert!(act_field_emphasis("grant: merge\n- kind = root\n").is_empty());
+        assert!(act_field_emphasis("---\n- kind = root\n! other-v1\n---\n").is_empty());
+        assert!(act_field_emphasis("").is_empty());
     }
 
     #[test]
