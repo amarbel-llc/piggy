@@ -393,6 +393,86 @@ document:
 | ! piggy-act-v1
 | ---
 
+name: refuse/right-on-an-approval
+outcome: refuse
+rule: forbidden-field
+document:
+| ---
+| - kind = approval
+| - right = spinclass:merge
+| ! piggy-act-v1
+| ---
+
+name: refuse/right-on-a-revocation
+outcome: refuse
+rule: forbidden-field
+document:
+| ---
+| - kind = revocation
+| - right = spinclass:merge
+| ! piggy-act-v1
+| ---
+
+name: refuse/subject-key-on-a-grant
+outcome: refuse
+rule: forbidden-field
+document:
+| ---
+| - kind = grant
+| - subject-key = piggy-principal_pub-v1@ssh_ed25519_pub-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0str2nnx
+| ! piggy-act-v1
+| ---
+
+name: refuse/names-on-a-link
+outcome: refuse
+rule: forbidden-field
+document:
+| ---
+| - kind = link
+| - names = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ! piggy-act-v1
+| ---
+
+name: refuse/profile-on-an-approval
+outcome: refuse
+rule: forbidden-field
+document:
+| ---
+| - kind = approval
+| - profile = engineer-reviewer@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ! piggy-act-v1
+| ---
+
+name: refuse/object-on-a-narrow
+outcome: refuse
+rule: forbidden-field
+document:
+| ---
+| - kind = narrow
+| - object = repo:piggy
+| ! piggy-act-v1
+| ---
+
+name: refuse/subject-on-an-approval
+outcome: refuse
+rule: forbidden-field
+document:
+| ---
+| - kind = approval
+| - subject = clown:72dca00c
+| ! piggy-act-v1
+| ---
+
+name: refuse/records-on-a-grant
+outcome: refuse
+rule: forbidden-field
+document:
+| ---
+| - kind = grant
+| - records = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ! piggy-act-v1
+| ---
+
 name: refuse/unclosed-metadata-section
 outcome: refuse
 rule: envelope

@@ -172,6 +172,7 @@ pub fn parse(input: &[u8]) -> Result<Act, Refusal> {
         fields: canonical_order(fields),
         body,
     };
+    act.check_admission()?;
     act.check_presence()?;
     act.check_key_purposes()?;
 
@@ -359,6 +360,28 @@ impl Act {
         // refuse.
         head.encode(self.body.as_deref())
             .expect("a parsed act always has a canonical spelling")
+    }
+
+    /// §2's Required column read as the admission list: a field whose cell
+    /// names kinds appears on those kinds only. An act with no `kind` is
+    /// left to [`Act::check_presence`].
+    fn check_admission(&self) -> Result<(), Refusal> {
+        let Some(kind) = self.text("kind") else {
+            return Ok(());
+        };
+
+        for (name, _) in &self.fields {
+            if let Some((_, spec)) = fields::lookup(name) {
+                if spec.kinds.is_some_and(|kinds| !kinds.contains(&kind)) {
+                    return refuse(
+                        Rule::ForbiddenField,
+                        format!("`{name}` is not admitted on a {kind}"),
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// §2's Required column, by `kind` and by whether the act is a card act.

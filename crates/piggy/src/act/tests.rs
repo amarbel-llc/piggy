@@ -170,27 +170,33 @@ fn namespace_pairing_is_section_4_8() {
         .unwrap();
     assert_eq!(narrow.check_namespace_pairing(), Ok(()));
 
-    for (from, to) in [
-        (
-            "- kind = approval",
-            "- kind = revocation\n- names = piggy-record-digest-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400",
-        ),
-        ("- issuer = operator", "- issuer = clown:x"),
-        (
+    // A revocation names acts rather than records (the admission list), so
+    // that case swaps the line too.
+    for edits in [
+        &[
+            ("- kind = approval", "- kind = revocation"),
+            ("- records = ", "- names = "),
+        ][..],
+        &[("- issuer = operator", "- issuer = clown:x")],
+        &[(
             "- assurance = piggy:hardware",
             "- assurance = piggy:software",
-        ),
-        (
+        )],
+        &[(
             "- namespace = piggy-approval-v1",
             "- namespace = piggy-quote-v1",
-        ),
+        )],
     ] {
-        let doc = text(&card.canonical()).replace(from, to);
-        let act = parse(doc.as_bytes()).unwrap_or_else(|r| panic!("{to}: {r}"));
+        let doc = edits
+            .iter()
+            .fold(text(&card.canonical()), |doc, (from, to)| {
+                doc.replace(from, to)
+            });
+        let act = parse(doc.as_bytes()).unwrap_or_else(|r| panic!("{edits:?}: {r}"));
         assert_eq!(
             act.check_namespace_pairing().map_err(|r| r.rule),
             Err(Rule::NamespacePairing),
-            "{to}"
+            "{edits:?}"
         );
     }
 }

@@ -13,6 +13,10 @@ pub struct FieldSpec {
     /// Repeatable, one line per value; the values form a set.
     pub set: bool,
     pub shape: Shape,
+    /// The kinds the field may appear on, when its Required cell names
+    /// kinds; `None` admits it on every kind. The Required column is also
+    /// the admission list (§2).
+    pub kinds: Option<&'static [&'static str]>,
 }
 
 /// The value a field admits. Each variant is one "Values" cell of §2.
@@ -73,16 +77,16 @@ const NAMESPACES: &[&str] = &[
 pub const TABLE: &[FieldSpec] = &[
     spec("kind", Shape::OneOf(KINDS)),
     spec("producer", Shape::Namespaced),
-    spec("subject", Shape::Bare),
-    spec("subject-key", Shape::Key(PRINCIPAL_KEY)),
-    spec("object", Shape::MarklOrBare),
-    spec("profile", Shape::LockedEdge),
+    spec("subject", Shape::Bare).on(&["root", "link", "grant", "narrow", "escalation"]),
+    spec("subject-key", Shape::Key(PRINCIPAL_KEY)).on(&["root", "link"]),
+    spec("object", Shape::MarklOrBare).on(&["grant", "escalation", "revocation"]),
+    spec("profile", Shape::LockedEdge).on(&["root", "link", "grant", "escalation", "narrow"]),
     spec("issuer", Shape::Issuer),
     spec("issuer-key", Shape::Key(SIGNING_KEY)),
     spec("issuer-record", Shape::RecordDigest),
-    set("right", Shape::Opaque),
-    set("names", Shape::RecordDigest),
-    set("records", Shape::AnyMarkl),
+    set("right", Shape::Opaque).on(&["root", "link", "grant", "narrow", "escalation"]),
+    set("names", Shape::RecordDigest).on(&["narrow", "escalation", "revocation", "approval"]),
+    set("records", Shape::AnyMarkl).on(&["approval", "escalation", "root", "link"]),
     set("prev", Shape::RecordDigest),
     spec("not-before", Shape::Timestamp),
     spec("not-after", Shape::Timestamp),
@@ -100,6 +104,7 @@ const fn spec(name: &'static str, shape: Shape) -> FieldSpec {
         name,
         set: false,
         shape,
+        kinds: None,
     }
 }
 
@@ -108,6 +113,16 @@ const fn set(name: &'static str, shape: Shape) -> FieldSpec {
         name,
         set: true,
         shape,
+        kinds: None,
+    }
+}
+
+impl FieldSpec {
+    const fn on(self, kinds: &'static [&'static str]) -> FieldSpec {
+        FieldSpec {
+            kinds: Some(kinds),
+            ..self
+        }
     }
 }
 
