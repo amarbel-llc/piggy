@@ -28,6 +28,8 @@ piggy - PIV smart-card backed password store and agent
 
 *piggy act key* [*--card*] [_PUBFILE_]
 
+*piggy act seal* [*--guid* _GUID_] [_FILE_]
+
 *piggy help*
 
 *piggy version*
@@ -637,6 +639,34 @@ commands:
 	Print the _key_ value for an OpenSSH Ed25519 or ECDSA P-256 public key:
 	a _piggy-principal_pub-v1_ markl id, or with *--card* a
 	_piggy-piv_sig-v1_ one (a card's slot-9C key).
+
+*act seal* [*--guid* _GUID_] [_FILE_]
+	Sign an unsealed act and write the sealed act to stdout (RFC 0013
+	§3.2, §3.3): the producer primitive programs call instead of writing
+	the canonical form themselves. The act's _namespace_, _kind_, _issuer_
+	and _assurance_ are checked against RFC 0013 §4.8 first, so an act its
+	namespace forbids is refused before any agent is asked.
+
+	A card act (_piggy-certificate-v1_, _piggy-escalation-v1_,
+	_piggy-approval-v1_) is signed through the agent's operator-act
+	extension, as *operator-sign* does, with slot 9C's key and the act's
+	canonical form as the text: the operator sees exactly the bytes that
+	are signed, and enters the PIN and touches the card. *--guid* picks the
+	card when the agent serves 9C for more than one. A software act
+	(_piggy-record-v1_) is signed by an ordinary agent sign request with the
+	key the act's _key_ names, which the agent must hold. Either way the
+	signature must be by the act's _key_, a P-256 signature is normalized
+	to low-S, and the sealed act is verified before it is written. The
+	agent is the one at *PIGGY_AUTH_SOCK*, else *SSH_AUTH_SOCK*.
+
+	Exit status follows *operator-sign*: *0* sealed; *1* refused (the act,
+	the pairing, the key, or the agent's refusal); *2* usage error; *3* no
+	agent here serves the signature, or the input could not be read; *4*
+	not signed this time (the operator cancelled, or the card was absent).
+
+	```
+	piggy act seal < root.act > root.sealed
+	```
 
 *card init* [*--serial* _N_|*--guid* _HEX_|*--reader* _NAME_] [*--allow-reprovision*] [*--pin-policy* _SLOT_=_POLICY_]... [*--touch-policy* _SLOT_=_POLICY_]... [*--seal-management-key*[=_PASS-NAME_]|*--no-seal-management-key*] [*--frontend* _tty_|_jsonrpc_] [*--socket* _PATH_]
 	Provision a factory-blank PIV card in one step: write the CHUID (a fresh

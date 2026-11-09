@@ -55,7 +55,7 @@ pub fn names_act(act: &Act, id: &str) -> bool {
 }
 
 /// The key of an act's `key` field, decoded.
-fn seal_key(act: &Act) -> Result<Id, Refusal> {
+pub fn seal_key(act: &Act) -> Result<Id, Refusal> {
     match act.field("key") {
         Some(Value::Markl(id)) => markl(id),
         _ => refuse(Rule::MissingField, "`key` is required to verify"),

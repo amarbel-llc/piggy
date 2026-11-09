@@ -9,6 +9,7 @@
 
 pub mod cli;
 mod fields;
+pub mod produce;
 pub mod seal;
 
 use std::fmt;

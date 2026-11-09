@@ -12,6 +12,11 @@
 //!   to its unsealed act after checking its namespace, key and hash against
 //!   the seal fields (§3.3); the sealed act on stdout.
 //! - `key [--card] [PUBFILE]`: the `key` value for an OpenSSH public key.
+//! - `seal [--guid GUID] [FILE]`: sign an unsealed act through the agent
+//!   (card namespaces through operator-act@piggy, piggy-record-v1 through an
+//!   ordinary sign request) and write the sealed act. Its exit codes are
+//!   `piggy operator-sign`'s: 1 refused, 3 no agent serves it, 4 not signed
+//!   this time.
 //!
 //! FILE is stdin when absent or `-`. A refusal is on stderr as
 //! `refused (<rule>): <detail>`, the rule the stable name of what was broken.
@@ -24,6 +29,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
+use super::produce::{SealError, seal_act};
 use super::seal::{self, DigestFormat};
 use super::{Act, Refusal, parse};
 use crate::operator_act::armor;
@@ -77,6 +83,18 @@ enum ActCommand {
     Attach {
         #[arg(long)]
         signature: PathBuf,
+        /// The act to read; stdin when absent or `-`.
+        file: Option<PathBuf>,
+    },
+    /// Sign an unsealed act through the agent and write the sealed act
+    /// (RFC 0013 §3.2, §3.3): a card namespace through operator-act@piggy
+    /// (the canonical form is the prompt), piggy-record-v1 through an
+    /// ordinary sign request with the act's `key`.
+    Seal {
+        /// GUID (hex, or a prefix) of the card, when the agent serves slot 9C
+        /// for more than one.
+        #[arg(long)]
+        guid: Option<String>,
         /// The act to read; stdin when absent or `-`.
         file: Option<PathBuf>,
     },
@@ -134,6 +152,7 @@ pub fn run(args: &[String]) -> i32 {
         ActCommand::Digest { sha256, file } => ("digest", digest(sha256, file.as_deref())),
         ActCommand::Detach { signature, file } => ("detach", detach(&signature, file.as_deref())),
         ActCommand::Attach { signature, file } => ("attach", attach(&signature, file.as_deref())),
+        ActCommand::Seal { guid, file } => ("seal", seal(guid.as_deref(), file.as_deref())),
         ActCommand::Key { card, file } => ("key", key(card, file.as_deref())),
     };
 
@@ -212,6 +231,30 @@ fn attach(signature: &Path, file: Option<&Path>) -> Result<Vec<u8>, Failure> {
     sealed
         .sealed_canonical()
         .ok_or_else(|| input_failure("attach produced no seal".into()))
+}
+
+fn seal(guid: Option<&str>, file: Option<&Path>) -> Result<Vec<u8>, Failure> {
+    let act = read_act(file)?;
+    let as_failure = |e: SealError| Failure {
+        exit: e.exit_code(),
+        message: e.message().to_owned(),
+    };
+
+    // The pairing is checked before the socket is looked for, so an act the
+    // namespace forbids is refused the same way with or without an agent.
+    act.check_namespace_pairing()?;
+    let socket = crate::agent_client::piggy_auth_sock_override()
+        .or_else(|| std::env::var_os("SSH_AUTH_SOCK").filter(|s| !s.is_empty()))
+        .ok_or_else(|| {
+            as_failure(SealError::NotServed(
+                "no agent socket: set PIGGY_AUTH_SOCK or SSH_AUTH_SOCK".into(),
+            ))
+        })?;
+
+    let sealed = seal_act(&act, Path::new(&socket), guid).map_err(as_failure)?;
+    sealed
+        .sealed_canonical()
+        .ok_or_else(|| input_failure("seal produced no signature".into()))
 }
 
 fn key(card: bool, file: Option<&Path>) -> Result<Vec<u8>, Failure> {

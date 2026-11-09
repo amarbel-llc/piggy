@@ -616,6 +616,84 @@ pub fn agent_sign_message(
     })
 }
 
+/// Why an ordinary sign request could not be answered with a signature.
+#[derive(Debug)]
+pub enum AgentSignError {
+    /// No agent, or one that would not list its keys.
+    Unreachable(String),
+    /// The agent serves no key equal to the one asked for.
+    NoKey(String),
+    /// The agent refused or failed the sign request.
+    Refused(String),
+}
+
+impl std::fmt::Display for AgentSignError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable(e) | Self::NoKey(e) | Self::Refused(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Sign `data` through an ordinary agent sign request with the identity
+/// whose public key blob (RFC 4253 §6.6) is `public_key`, and return the SSH
+/// signature encoding (`string algorithm || string signature`).
+///
+/// This is how a software act is sealed (RFC 0013 §3.2): `data` is the
+/// sshsig signed data, which the agent signs like any other message, the
+/// way `ssh-keygen -Y sign` asks it to. The key is chosen by equality, never
+/// by slot or comment, so a signature can only come from the key the act
+/// names.
+pub fn agent_sign_with_key(
+    socket: &Path,
+    public_key: &[u8],
+    data: &[u8],
+) -> Result<Vec<u8>, AgentSignError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| AgentSignError::Unreachable(format!("tokio runtime: {e}")))?;
+    let socket = socket.to_path_buf();
+    let public_key = public_key.to_vec();
+    let data = data.to_vec();
+
+    runtime.block_on(async move {
+        let stream = UnixStream::connect(&socket).await.map_err(|e| {
+            AgentSignError::Unreachable(format!("connect {}: {e}", socket.display()))
+        })?;
+        let mut client = Client::new(stream);
+        let identities = client
+            .request_identities()
+            .await
+            .map_err(|e| AgentSignError::Unreachable(format!("request_identities: {e}")))?;
+
+        let identity = identities
+            .into_iter()
+            .find(|identity| {
+                ssh_key::PublicKey::new(identity.pubkey.clone(), "")
+                    .to_bytes()
+                    .is_ok_and(|blob| blob == public_key)
+            })
+            .ok_or_else(|| {
+                AgentSignError::NoKey("the agent does not hold the act's `key`".into())
+            })?;
+
+        let signature = client
+            .sign(SignRequest {
+                pubkey: identity.pubkey,
+                data,
+                flags: 0,
+            })
+            .await
+            .map_err(|e| AgentSignError::Refused(format!("agent sign: {e}")))?;
+
+        Ok(crate::operator_act::ssh_signature(
+            signature.algorithm().as_str(),
+            signature.as_bytes(),
+        ))
+    })
+}
+
 /// Field width (bytes) for an agent-served ECDSA identity's curve: P-256 → 32,
 /// P-384 → 48. Errors for any non-ECDSA or unsupported-curve key.
 fn ecdsa_field_len(pubkey: &KeyData) -> Result<usize, String> {
