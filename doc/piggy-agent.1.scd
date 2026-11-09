@@ -263,6 +263,12 @@ served since it started, whose card has since been removed, is _card-absent_
 (worth asking again once the card is back); _no-such-key_ is kept for a key it
 never served and no upstream holds.
 
+Prompts are rate-limited per connection: once three operator acts on one
+connection have ended _cancelled_ within a minute, that connection's further
+acts are _refused-policy_ without a prompt until the oldest of those cancels is
+a minute old. A new connection starts afresh. This keeps a misbehaving client
+from flooding the operator with dialogs.
+
 So that the extension is the only way to such a signature, an ordinary sign
 request whose data is sshsig signed data under one of those three namespaces
 is refused, whether the key is on a card here or held by an upstream. Signing under *file*, *git* or any

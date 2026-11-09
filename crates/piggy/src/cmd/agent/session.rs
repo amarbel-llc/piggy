@@ -65,6 +65,11 @@ pub struct PiggyAgent {
     /// `card-absent`, which a caller retries; `no-such-key` is kept for a key
     /// this agent never served (RFC 0012 §2.3, piggy#308).
     once_served: Arc<Mutex<Vec<KeyData>>>,
+    /// When this connection's recent operator acts ended `cancelled`. Not
+    /// shared: each connection is its own clone of the agent, so the prompt
+    /// rate limit is per connection (RFC 0012 Security Considerations,
+    /// piggy#309).
+    act_cancels: std::collections::VecDeque<std::time::Instant>,
     /// Per-card PIN cache (piggy#177): verified PINs keyed by GUID plus the
     /// not-yet-verified `ssh-add -X` offer. Shared with the probe loop.
     pins: Arc<Mutex<PinCache>>,
@@ -124,6 +129,7 @@ impl PiggyAgent {
         Self {
             keys: Arc::new(Mutex::new(keys)),
             once_served: Arc::new(Mutex::new(once_served)),
+            act_cancels: std::collections::VecDeque::new(),
             pins: Arc::new(Mutex::new(PinCache::new())),
             prompt_lock: Arc::new(Mutex::new(())),
             card_lock: Arc::new(Mutex::new(())),
@@ -647,10 +653,15 @@ impl PiggyAgent {
             n if n == crate::operator_act::EXTENSION => {
                 let details = extension.details.clone().into_bytes();
                 match self.handle_operator_act(&details, extension).await {
-                    OperatorActAnswer::Local(response) => Ok(Some(Extension {
-                        name: crate::operator_act::EXTENSION.into(),
-                        details: response.encode().into(),
-                    })),
+                    OperatorActAnswer::Local(response) => {
+                        if response.status == crate::operator_act::Status::Cancelled {
+                            self.act_cancels.push_back(std::time::Instant::now());
+                        }
+                        Ok(Some(Extension {
+                            name: crate::operator_act::EXTENSION.into(),
+                            details: response.encode().into(),
+                        }))
+                    }
                     OperatorActAnswer::Relayed(answer) => answer,
                 }
             }
@@ -719,6 +730,29 @@ impl From<AgentError> for NativeExtError {
 /// card in that time, so the pool's probe-sized `--agent-timeout` does not
 /// apply.
 const OPERATOR_ACT_UPSTREAM_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How many operator acts one connection may have end `cancelled` within
+/// [`OPERATOR_ACT_CANCEL_WINDOW`] before its further acts are refused without
+/// a prompt (RFC 0012 Security Considerations, piggy#309). A person who
+/// dismisses a prompt by mistake and tries again is not stopped; a session
+/// that keeps raising prompts the operator keeps dismissing is.
+const OPERATOR_ACT_CANCEL_LIMIT: usize = 3;
+const OPERATOR_ACT_CANCEL_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a connection whose acts were cancelled at `cancels` may raise
+/// another prompt at `now`. Cancels older than the window are forgotten.
+fn operator_act_prompts_held(
+    cancels: &mut std::collections::VecDeque<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    while cancels
+        .front()
+        .is_some_and(|t| now.duration_since(*t) >= OPERATOR_ACT_CANCEL_WINDOW)
+    {
+        cancels.pop_front();
+    }
+    cancels.len() >= OPERATOR_ACT_CANCEL_LIMIT
+}
 
 /// The answer to an `operator-act@piggy` request: one this agent decided, or
 /// the upstream's own answer relayed unchanged (RFC 0012 §2.8).
@@ -877,6 +911,24 @@ impl PiggyAgent {
                 ),
             );
         };
+
+        // The last check before the card and the prompt: a connection whose
+        // recent acts the operator kept dismissing raises no more dialogs
+        // for a while (RFC 0012 Security Considerations, piggy#309).
+        if operator_act_prompts_held(&mut self.act_cancels, std::time::Instant::now()) {
+            tracing::warn!(
+                limit = OPERATOR_ACT_CANCEL_LIMIT,
+                window_secs = OPERATOR_ACT_CANCEL_WINDOW.as_secs(),
+                "refusing an operator act without a prompt: this connection's recent acts were cancelled"
+            );
+            return refuse(
+                Status::RefusedPolicy,
+                format!(
+                    "too many cancelled operator acts on this connection ({OPERATOR_ACT_CANCEL_LIMIT} within {}s); no prompt raised",
+                    OPERATOR_ACT_CANCEL_WINDOW.as_secs()
+                ),
+            );
+        }
 
         {
             let _card_guard = self.card_lock.lock().await;
@@ -3091,6 +3143,29 @@ mod tests {
         assert_eq!(
             operator_act_status(&mut agent, request).await,
             act::Status::NoSuchKey
+        );
+    }
+
+    /// piggy#309: three cancels within the window hold further prompts;
+    /// once the oldest falls out of the window, prompts are allowed again.
+    #[test]
+    fn operator_act_prompts_are_held_after_three_recent_cancels() {
+        let start = std::time::Instant::now();
+        let mut cancels = std::collections::VecDeque::new();
+        assert!(!operator_act_prompts_held(&mut cancels, start));
+
+        for i in 0..3 {
+            cancels.push_back(start + std::time::Duration::from_secs(i));
+        }
+        let soon = start + std::time::Duration::from_secs(10);
+        assert!(operator_act_prompts_held(&mut cancels, soon));
+
+        let later = start + OPERATOR_ACT_CANCEL_WINDOW + std::time::Duration::from_millis(1);
+        assert!(!operator_act_prompts_held(&mut cancels, later));
+        assert_eq!(
+            cancels.len(),
+            2,
+            "only the cancel outside the window is forgotten"
         );
     }
 

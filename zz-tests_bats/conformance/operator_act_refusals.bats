@@ -104,6 +104,28 @@ function declined_prompt_is_cancelled_and_nothing_is_signed { # @test
   fi
 }
 
+# piggy#309, RFC 0012 Security Considerations: the agent rate-limits prompts
+# per connection. After three cancelled acts on one connection within the
+# window, a fourth is refused-policy without a prompt; a new connection is
+# not held to the first one's record.
+function a_connection_that_keeps_cancelling_stops_raising_prompts { # @test
+  spawn_operator_card
+  OPERATOR_ACT_AGENT_REFUSES_PROMPTS=1 spawn_card_agent
+
+  operator_act_probe "$AGENT_SOCK" --slot 9C --repeat 4
+  [[ $(grep -c '^status ' <<<"$output") -eq 4 ]] || operator_act_fail "expected four answers"
+  [[ $(grep '^status ' <<<"$output" | tr '\n' ' ') == "status 5 status 5 status 5 status 2 " ]] ||
+    operator_act_fail "expected cancelled three times, then refused-policy"
+  grep -q '^detail .*too many cancelled operator acts' <<<"$output" ||
+    operator_act_fail "the refusal does not say why"
+  [[ $(operator_act_prompt_count "$AGENT_LOG") -eq 3 ]] ||
+    operator_act_fail "the fourth act raised a prompt"
+
+  # Another connection starts afresh: it is asked, and cancels.
+  operator_act_probe "$AGENT_SOCK" --slot 9C
+  assert_probe_status 5 "cancelled on a new connection"
+}
+
 # The CLI reports a refusal with the RFC's status name and exit 1, and keeps
 # stdout empty; it refuses what it can tell is wrong before asking the agent.
 function cli_reports_refusals_by_name { # @test

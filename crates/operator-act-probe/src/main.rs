@@ -37,7 +37,7 @@ const USAGE: &str =
     "usage: operator-act-probe --socket PATH (--slot XX [--guid PREFIX] | --key-hex HEX)
     [--version N] [--namespace NS] [--hash NAME] [--flags N]
     [--text STR | --text-hex HEX | --text-file PATH]
-    [--trailing-hex HEX] [--details-hex HEX]";
+    [--trailing-hex HEX] [--details-hex HEX] [--repeat N]";
 
 struct Args {
     socket: String,
@@ -51,6 +51,9 @@ struct Args {
     text: Vec<u8>,
     trailing: Vec<u8>,
     details: Option<Vec<u8>>,
+    /// Send the request this many times on ONE connection (the agent's
+    /// per-connection rules, piggy#309); each answer is printed in turn.
+    repeat: u32,
 }
 
 fn unhex(text: &str) -> Result<Vec<u8>, String> {
@@ -80,6 +83,7 @@ fn parse_args() -> Result<Args, String> {
         text: b"piggy-test: operator act probe".to_vec(),
         trailing: Vec::new(),
         details: None,
+        repeat: 1,
     };
     let mut argv = std::env::args().skip(1);
     while let Some(flag) = argv.next() {
@@ -102,6 +106,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--trailing-hex" => args.trailing = unhex(&value()?)?,
             "--details-hex" => args.details = Some(unhex(&value()?)?),
+            "--repeat" => args.repeat = number(value()?)?.max(1),
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
         }
     }
@@ -150,6 +155,11 @@ impl<'a> Reader<'a> {
 /// (type byte first). No read timeout: the agent may be waiting on a touch.
 fn exchange(socket: &str, body: &[u8]) -> Result<Vec<u8>, String> {
     let mut stream = UnixStream::connect(socket).map_err(|e| format!("connect {socket}: {e}"))?;
+    exchange_on(&mut stream, body)
+}
+
+/// One request/reply exchange on an open connection.
+fn exchange_on(stream: &mut UnixStream, body: &[u8]) -> Result<Vec<u8>, String> {
     let mut framed = Vec::new();
     put_string(&mut framed, body);
     stream
@@ -257,13 +267,17 @@ fn run() -> Result<(), String> {
     let mut body = vec![SSH_AGENTC_EXTENSION];
     put_string(&mut body, EXTENSION.as_bytes());
     body.extend_from_slice(&details);
-    let reply = exchange(&args.socket, &body)?;
 
-    let (&kind, rest) = reply.split_first().ok_or("empty reply")?;
-    println!("reply {kind} {}", reply_name(kind));
-    println!("raw {}", hex(&reply));
-    if kind == SSH_AGENT_EXTENSION_RESPONSE {
-        print_response(rest);
+    let mut stream =
+        UnixStream::connect(&args.socket).map_err(|e| format!("connect {}: {e}", args.socket))?;
+    for _ in 0..args.repeat {
+        let reply = exchange_on(&mut stream, &body)?;
+        let (&kind, rest) = reply.split_first().ok_or("empty reply")?;
+        println!("reply {kind} {}", reply_name(kind));
+        println!("raw {}", hex(&reply));
+        if kind == SSH_AGENT_EXTENSION_RESPONSE {
+            print_response(rest);
+        }
     }
     Ok(())
 }
