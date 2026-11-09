@@ -53,12 +53,15 @@ remove, edit, synchronize, generate, and manipulate passwords.
 
 Encryption uses PIV slot 9D (Key Management / ECDH key agreement) on a smart
 card such as a YubiKey. Encryption requires only the public key and does not
-need the card to be present. Decryption requires *pivy-agent* with the physical
-card inserted, or a forwarded SSH agent socket when working remotely.
+need the card to be present. Decryption requires the physical card, reached
+directly or through *piggy agent* (*piggy-agent*(1)), or a forwarded SSH agent
+socket when working remotely.
 
-Recipients are managed via _.pivy-id_ template files (analogous to _.gpg-id_ in
-*pass*(1)). Each _.pivy-id_ is a *pivy-box*(1) ebox template that lists the PIV
-public keys secrets are encrypted to.
+Recipients are declared in _piggy-ids_ files (analogous to _.gpg-id_ in
+*pass*(1)): a line-oriented text file of markl IDs naming the public keys
+secrets are encrypted to (*piggy-ids*(5)). A _piggy-ids_ in a sub-folder
+governs the entries in and below it. Manage it with *piggy pass init* and
+*piggy pass recipients*.
 
 Bare *piggy* (no subcommand) and bare *piggy pass* (no nested subcommand) both
 print top-level help instead of acting on the store.
@@ -70,7 +73,7 @@ will cause a corresponding git commit. See the _EXTENDED GIT EXAMPLE_ section
 for a detailed description using *piggy pass init* and *piggy pass git*.
 
 The *piggy pass init* command must be run before other *pass* subcommands in
-order to initialize the password store with a pivy-box template.
+order to initialize the password store with a _piggy-ids_ file.
 
 In addition to the *pass* family, *piggy* provides these top-level PIV
 commands:
@@ -113,16 +116,16 @@ commands:
 ## piggy pass
 
 *pass init* [*--path*=_sub-folder_, *-p* _sub-folder_] [*-k* _markl-id_ | *-g* _guid_]
-	Initialize new password storage with a piggy 2.x recipient template
-	written to _piggy-ids_ (RFC 0003). The recipient is identified by a
+	Initialize new password storage with a recipient written to
+	_piggy-ids_ (RFC 0003, *piggy-ids*(5)). The recipient is identified by a
 	markl ID of format *pivy_ecdh_p256_pub*. With *-k* the recipient is
 	provided declaratively (bare-format also accepted; canonicalized to
 	*piggy-recipient-v1@* on disk). Without *-k*, slot 9D of the attached
 	PIV card is auto-detected via *piggy-ids detect-pubkey*; pass *-g*
 	to disambiguate when more than one card is attached. If *--path* or
-	*-p* is specified, the template covers that sub-folder. If the
+	*-p* is specified, the _piggy-ids_ covers that sub-folder. If the
 	resulting recipient set differs from any existing files, those files
-	are re-encrypted to the new template.
+	are re-encrypted to the new recipients.
 
 *pass recipients list* [*--path*=_sub-folder_, *-p* _sub-folder_]
 	Print the recipients listed in the relevant _piggy-ids_, one per line.
@@ -294,8 +297,9 @@ commands:
 
 	The walk is sequential by design — PIV-card serialization makes
 	parallelism a non-win and the simple model is easier to reason
-	about. PIN entry happens once (the user-running *pivy-agent*
-	caches the verify state) and every subsequent decrypt reuses it.
+	about. PIN entry happens once (the agent, or the shared local
+	unlock, caches the verify state) and every subsequent decrypt reuses
+	it.
 
 	_subpath_ is canonicalised against the store root and rejected if
 	it contains parent-directory components (*..*), is absolute, or
@@ -357,15 +361,16 @@ commands:
 	command is alternatively named *rename*. If *--force* is specified,
 	silently overwrite _new-path_ if it exists. If _new-path_ ends in a
 	trailing _/_, it is always treated as a directory. Passwords are
-	selectively re-encrypted to the corresponding template of their new
-	destination.
+	selectively re-encrypted to the recipients of the _piggy-ids_ that
+	governs their new destination.
 
 *pass cp* [*--force*, *-f*] _old-path_ _new-path_
 	Copies the password or directory named _old-path_ to _new-path_. This
 	command is alternatively named *copy*. If *--force* is specified, silently
 	overwrite _new-path_ if it exists. If _new-path_ ends in a trailing _/_,
 	it is always treated as a directory. Passwords are selectively
-	re-encrypted to the corresponding template of their new destination.
+	re-encrypted to the recipients of the _piggy-ids_ that governs their new
+	destination.
 
 *pass git* _git-command-args_...
 	If the password store is a git repository, pass _git-command-args_ as
@@ -1100,12 +1105,12 @@ $ piggy pass git push
 *~/.local/share/piggy*
 	The default password storage directory.
 
-*~/.local/share/piggy/.pivy-id*
-	Contains the pivy-box ebox template used for encryption. This is a binary
-	template file created by *pivy-box*(1) that lists PIV public keys that
-	secrets are encrypted to. Sub-directories may contain their own _.pivy-id_
-	files; passwords inside those sub-directories are encrypted using those
-	templates. This should be set using the *piggy pass init* command.
+*~/.local/share/piggy/piggy-ids*
+	The recipients secrets are encrypted to: a text file of markl IDs, one
+	per line, described in *piggy-ids*(5). Sub-directories may contain their
+	own _piggy-ids_; passwords inside them are encrypted to the nearest one
+	above them. Create it with *piggy pass init* and change it with *piggy
+	pass recipients*.
 
 # ENVIRONMENT VARIABLES
 
