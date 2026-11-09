@@ -267,7 +267,9 @@ Prompts are rate-limited per connection: once three operator acts on one
 connection have ended _cancelled_ within a minute, that connection's further
 acts are _refused-policy_ without a prompt until the oldest of those cancels is
 a minute old. A new connection starts afresh. This keeps a misbehaving client
-from flooding the operator with dialogs.
+from flooding the operator with dialogs. The three cancels and the minute are
+tuning levers, not protocol: they are *OPERATOR_ACT_CANCEL_LIMIT* and
+*OPERATOR_ACT_CANCEL_WINDOW* in the agent's session code, and may move.
 
 So that the extension is the only way to such a signature, an ordinary sign
 request whose data is sshsig signed data under one of those three namespaces
