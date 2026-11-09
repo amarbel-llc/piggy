@@ -578,7 +578,14 @@ lines. A software act has no display.
 ### 7. Producers
 
 A producer is any program that builds a canonical act, obtains its
-signature and adds the seal. It names itself in `producer` with an
+signature and adds the seal. Before requesting a signature a producer
+MUST run §5.2 steps 1 and 3 on the unsealed act (the field rules, the
+namespace and kind table, `issuer-key = key`, a `narrow`'s
+`issuer = subject`) and, for a card act, MUST confirm the agent serves the
+key the act names before any PIN prompt, so an operator is never asked to
+sign an act every verifier would refuse; after signing it MUST normalize
+the signature (§3.3 Low-S) and verify the seal before writing it. The
+reference producer is `piggy act seal`. A producer names itself in `producer` with an
 identifier in its own domain (`barker:act-v1`, `piggy:operator-sign-v1`),
 which is inside the signed bytes. piggy keeps no registry of producers
 (R): a domain registers its own names for itself, and a producer's acts
