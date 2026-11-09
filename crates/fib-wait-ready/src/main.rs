@@ -14,12 +14,6 @@ struct Args {
 
     #[arg(long, default_value = "30")]
     timeout: u64,
-
-    #[arg(
-        long,
-        help = "Hex-encoded APDU to send before the readiness probe (whitespace stripped)"
-    )]
-    activate: Option<String>,
 }
 
 fn main() {
@@ -41,21 +35,6 @@ fn main() {
             std::process::exit(2);
         }
     };
-
-    if let Some(ref hex_apdu) = args.activate {
-        let stripped: String = hex_apdu.chars().filter(|c| !c.is_whitespace()).collect();
-        let apdu = match hex::decode(&stripped) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("fib-wait-ready: bad --activate hex: {e}");
-                std::process::exit(2);
-            }
-        };
-        if !activate_loop(&ctx, &reader_cstr, &apdu, deadline) {
-            eprintln!("fib-wait-ready: activation APDU never succeeded (timeout)");
-            std::process::exit(1);
-        }
-    }
 
     if !wait_card_present(&ctx, &reader_cstr, deadline) {
         eprintln!("fib-wait-ready: card never became present (timeout)");
@@ -79,34 +58,6 @@ fn is_retryable(e: pcsc::Error) -> bool {
             | pcsc::Error::ResetCard
             | pcsc::Error::UnpoweredCard
     )
-}
-
-fn activate_loop(ctx: &Context, reader: &CString, apdu: &[u8], deadline: Instant) -> bool {
-    loop {
-        if Instant::now() >= deadline {
-            return false;
-        }
-        match ctx.connect(reader, ShareMode::Shared, Protocols::ANY) {
-            Ok(card) => {
-                let mut resp = [0u8; 258];
-                match card.transmit(apdu, &mut resp) {
-                    Ok(r) if r.len() >= 2 => {
-                        let sw1 = r[r.len() - 2];
-                        if sw1 == 0x90 || sw1 == 0x9F {
-                            return true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Err(e) if is_retryable(e) => {}
-            Err(e) => {
-                eprintln!("fib-wait-ready: activate SCardConnect: {e}");
-                return false;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
 }
 
 fn wait_card_present(ctx: &Context, reader: &CString, deadline: Instant) -> bool {

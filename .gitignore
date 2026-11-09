@@ -3,9 +3,6 @@
 # rust
 /target/
 
-# fib (virtual PIV) runtime state
-/.fib/
-
 # locally rendered diagrams (`just codemod-diagrams`); the .puml is committed
 /docs/diagrams/*.svg
 

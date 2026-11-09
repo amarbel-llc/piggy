@@ -1890,35 +1890,6 @@ test-grammar-vectors:
 
 # --- debug ---
 
-# PIN-safe side-by-side of Rust-piggy and C-pivy stream encrypt byte layouts
-# against the same fib template. Used to diagnose #29 wire-format issues.
-# Only runs the encrypt paths — decrypt is intentionally omitted because it
-# would prompt for a PIN on /dev/tty and consume PIV retries on fib's slot.
-#
-# compare Rust-piggy and C-pivy stream encrypt byte layouts on one fib template
-[group('debug')]
-debug-interop-stream-bytes: build-rust
-  #!/usr/bin/env bash
-  set -euo pipefail
-  trap 'just clean-fib' EXIT
-  just load-fib
-  eval "$(cat .fib/env)"
-  pivy-tool -P 123456 -K default -a eccp256 generate 9d >/dev/null
-  guid=$(pivy-tool list 2>&1 | grep -oiE '[0-9a-f]{32}' | head -1)
-  export HOME="$PWD/.fib"
-  "$PWD/target/debug/piggy" box tpl create interop primary local-guid "$guid"
-  tpl_file="$HOME/.pivy/tpl/interop"
-
-  echo "--- rust encrypt first 80 bytes ---"
-  printf "hello from rust" | "$PWD/target/debug/piggy" box stream encrypt "$tpl_file" > /tmp/stream-rust.ebox
-  head -c 80 /tmp/stream-rust.ebox | xxd
-  echo "total: $(wc -c < /tmp/stream-rust.ebox) bytes"
-  echo
-  echo "--- C encrypt first 80 bytes ---"
-  printf "hello from c" | pivy-box stream encrypt "$tpl_file" > /tmp/stream-c.ebox
-  head -c 80 /tmp/stream-c.ebox | xxd
-  echo "total: $(wc -c < /tmp/stream-c.ebox) bytes"
-
 # Dump the recipient pubkey(s) baked into one or more .ebox files, rendered
 # as piggy-recipient-v1@pivy_ecdh_p256_pub-… markl IDs so they compare
 # byte-for-byte against piggy-ids and `piggy pass recipients list-available`.
@@ -1963,60 +1934,12 @@ explore-darwin-fibby-csock: build-rust
     echo "=== fibby wire log (did the framework client ever connect?) ==="
     cat "$log"
 
-# EXPLORE (#task darwin-fibby) — does nixpkgs vsmartcard-vpcd actually BUILD on
-# this darwin, or is its `broken = isDarwin` flag a stale blanket? The package
-# already scaffolds the darwin path (`--enable-infoplist` → ifd-vpcd.bundle).
-# If it builds, the bundle is one nix build away; if it fails, we learn the
-# real blocker cheaply. Uses NIXPKGS_ALLOW_BROKEN + --impure to bypass the
-# broken assertion.
-#
-# attempt a nixpkgs vsmartcard-vpcd build on darwin with the broken flag overridden
-[group('explore')]
-explore-darwin-vpcd-build:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    echo "=== attempting nixpkgs#vsmartcard-vpcd build on $(uname -sm) with broken override ==="
-    NIXPKGS_ALLOW_BROKEN=1 nix build --impure --no-link --print-out-paths \
-      'nixpkgs#vsmartcard-vpcd' 2>&1 | tail -40
-    echo "=== nix build exit=$? ==="
-
-# EXPLORE (#task darwin-fibby) — vpcd's darwin build fails at link: the IFD
-# handler (libifdvpcd) references `_log_msg`, which the loader daemon provides
-# at runtime, but darwin ld rejects the undefined symbol. Override the nixpkgs
-# derivation to add `-undefined dynamic_lookup` (the standard darwin
-# loadable-bundle flag) and drop the broken gate, then rebuild. If it links and
-# emits ifd-vpcd.bundle, this is both a buildable path AND a nixpkgs-unbreak PR.
-#
-# build vsmartcard-vpcd on darwin patched with -undefined dynamic_lookup
-[group('explore')]
-explore-darwin-vpcd-build-patched:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    echo "=== building patched vsmartcard-vpcd (darwin dynamic_lookup) ==="
-    NIXPKGS_ALLOW_BROKEN=1 nix build --impure --no-link --print-out-paths --expr '
-      let
-        flake = builtins.getFlake "nixpkgs";
-        pkgs = import flake.outPath { system = "aarch64-darwin"; config.allowBroken = true; };
-      in
-      pkgs.vsmartcard-vpcd.overrideAttrs (old: {
-        # The IFD handler is a loadable bundle; _log_msg is resolved at
-        # runtime by com.apple.ifdreader. Tell darwin ld to allow it.
-        env = (old.env or {}) // {
-          NIX_LDFLAGS = (old.env.NIX_LDFLAGS or "") + " -undefined dynamic_lookup";
-        };
-        meta = old.meta // { broken = false; };
-      })
-    ' 2>&1 | tail -45
-    echo "=== nix build exit=$? ==="
-
 # Generic driver for exploratory bats files. Each file brings up whatever
 # infrastructure it needs in setup_file() / teardown_file(). We pass
 # --no-sandbox because explore tests often need to talk to pcscd (Unix
-# sockets), bind local ports, shell out to `just` to bring up fib (which
-# writes .fib/ into CWD and /run/user/$UID), etc. The narrow-escape flag
-# (--allow-local-binding) covers local binding but leaves CWD read-only,
-# which breaks load-fib. Explores are not part of the CI gate so the
-# broader trust is fine.
+# sockets), bind local ports, or write into CWD, which the narrow-escape
+# flag (--allow-local-binding) leaves read-only. Explores are not part of
+# the CI gate so the broader trust is fine.
 #
 # run the given exploratory bats FILES outside the sandbox
 [group('explore')]
@@ -2372,42 +2295,6 @@ debug-fibby-roundtrip-capture-test-vector:
     FIBBY_KEEP_LOGS=crates/fibby/tests/fixtures/captures/yubikey/test-vector \
       just debug-fibby-roundtrip
 
-# Tier-4 round-trip routed through fib (the Java virtual PIV card)
-# instead of a real YubiKey. fib provides a second oracle — same APDU
-# script, second capture — so we have differential fixtures even when
-# no hardware is around. Brings fib up first (idempotent); does NOT
-# tear it down on exit (run `just clean-fib` when you're done).
-#
-# Prereq: fib's slot 9D must already have an ECDH key. Bootstrap once
-# per load-fib session:
-#   just debug-fibby-proxy-via-fib pivy-tool -K default init
-#   just debug-fibby-proxy-via-fib pivy-tool -P 123456 -K default -a eccp256 generate 9d
-#
-# The captured trace lands under crates/fibby/tests/fixtures/captures/fib/.
-#
-# run debug-fibby-roundtrip against fib instead of a real YubiKey
-[group('debug')]
-debug-fibby-roundtrip-via-fib: build-rust load-fib
-    FIBBY_BACKEND_PCSCD=/tmp/piggy-fib-ipc/pcscd.comm \
-    FIBBY_READER="piggy fib" \
-    FIBBY_KEEP_LOGS=crates/fibby/tests/fixtures/captures/fib \
-      just debug-fibby-roundtrip
-
-# Companion to debug-fibby-roundtrip-via-fib: run an arbitrary client
-# command via fibby-via-fib. Used to bootstrap fib's slot 9D (init +
-# generate) before the round-trip recipe is meaningful.
-#
-# Usage:
-#   just debug-fibby-proxy-via-fib pivy-tool list
-#   just debug-fibby-proxy-via-fib pivy-tool -K default init
-#
-# run CLIENT_CMD against fibby backed by fib
-[group('debug')]
-debug-fibby-proxy-via-fib *CLIENT_CMD: build-rust load-fib
-    FIBBY_BACKEND_PCSCD=/tmp/piggy-fib-ipc/pcscd.comm \
-    FIBBY_READER="piggy fib" \
-      just debug-fibby-proxy {{CLIENT_CMD}}
-
 # Reproduce the launchd environment that pivy-agent invokes piggy-askpass.sh
 # under: no controlling TTY, no DISPLAY, scrubbed env. `setsid` detaches the
 # controlling terminal so the script's `/dev/tty` open-test fails the same
@@ -2693,112 +2580,11 @@ lint-worktree:
 lint-justfile-profile:
     nix run --refresh 'git+https://code.linenisgreat.com/conformist.git' -- check --tree-root . --profile conformist.profile --profile-only
 
-# --- fib: virtual PIV smart card ---
-#
-# `fib` is a software PIV card built from PivApplet + jCardSim + vsmartcard-vpcd.
-# Packaged via nix/virtual-piv.nix; see docs/virtual-piv.md for architecture
-# and troubleshooting.
-#
-# `load-fib` starts a private pcscd and the applet; `clean-fib` tears them down.
-# Callers must `eval .fib/env` after `load-fib` to redirect PC/SC clients at
-# the private socket (via PCSCLITE_CSOCK_NAME). `run-fib-shell` is the
-# interactive convenience wrapper — opens a subshell with the env set and
-# cleans up on exit.
-
-# Start a private pcscd + PivApplet pair. After this returns, run
-# `eval $(cat .fib/env)` in your shell; then `pivy-tool list` etc. will
-# see "Virtual PCD piggy fib" as the reader.
-#
-# start a private pcscd + PivApplet pair (fib)
-[group('operational')]
-load-fib:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p .fib
-    # Short-circuit if already running.
-    if [[ -f .fib/pcscd.pid ]] && kill -0 "$(cat .fib/pcscd.pid)" 2>/dev/null; then
-      echo "load-fib: already running (pid $(cat .fib/pcscd.pid)). eval \$(cat .fib/env)" >&2
-      exit 0
-    fi
-    reader_conf=$(nix build --no-link --print-out-paths .#fib-reader-conf)
-    pcscd_bin=$(nix build --no-link --print-out-paths .#fib-pcscd^out)/bin/pcscd
-    # pcscd hardcodes its socket path at compile time via --enable-ipcdir.
-    # Our fib-pcscd was built with -Dipcdir=/tmp/piggy-fib-ipc, so that's
-    # where the socket lives. PCSCLITE_CSOCK_NAME only redirects CLIENTS,
-    # not the server. We export that env var below so clients point here.
-    sock="/tmp/piggy-fib-ipc/pcscd.comm"
-    mkdir -p /tmp/piggy-fib-ipc
-    # Clean stale state: the singleton check reads pcscd.pid and tries
-    # kill(pid, 0); a stale pid from a dead process yields a confusing
-    # error. Removing it (and the socket) bypasses that.
-    rm -f /tmp/piggy-fib-ipc/pcscd.pid "$sock"
-    # Private pcscd loading only vpcd.
-    "$pcscd_bin" \
-      --foreground \
-      --config "$reader_conf" \
-      --disable-polkit \
-      >.fib/pcscd.log 2>&1 &
-    pcscd_pid=$!
-    echo "$pcscd_pid" >.fib/pcscd.pid
-    # Wait for the socket.
-    for _ in $(seq 1 30); do [[ -S $sock ]] && break; sleep 0.1; done
-    if [[ ! -S $sock ]]; then
-      echo "load-fib: pcscd socket never appeared — see .fib/pcscd.log" >&2
-      kill "$pcscd_pid" 2>/dev/null || true
-      exit 1
-    fi
-    # Start the applet — it connects to vpcd on localhost:35963.
-    nix run .#fib >.fib/fib.log 2>&1 &
-    fib_pid=$!
-    echo "$fib_pid" >.fib/fib.pid
-    # Readiness probe: wait for jCardSim/vpcd to come up and the PIV
-    # applet to respond to SELECT. Uses SCardGetStatusChange (event-based,
-    # not polling) + SCardConnect + PIV AID SELECT. The --activate flag
-    # sends the jCardSim INSTALL APDU first. Replaces the former
-    # opensc-tool + pivy-tool polling loops (see #20, #22).
-    export PCSCLITE_CSOCK_NAME="$sock"
-    reader="Virtual PCD piggy fib 00 00"
-    fib_wait_bin="./target/debug/fib-wait-ready"
-    if [[ ! -x "$fib_wait_bin" ]]; then
-      cargo build -p fib-wait-ready --quiet
-    fi
-    activate_apdu='80b80000120ba000000308000010000100050000020F0F7f'
-    if ! "$fib_wait_bin" \
-        --reader "$reader" \
-        --timeout 30 \
-        --activate "$activate_apdu"; then
-      echo "load-fib: fib-wait-ready failed — card never became ready" >&2
-      kill "$fib_pid" "$pcscd_pid" 2>/dev/null || true
-      exit 1
-    fi
-    # Export env for the caller.
-    cat >.fib/env <<EOF
-    export PCSCLITE_CSOCK_NAME="$sock"
-    # fib pcscd pid: $pcscd_pid
-    # fib jcardsim pid: $fib_pid
-    EOF
-    echo "fib: up — eval \$(cat .fib/env) to connect"
-
-# tear down the private pcscd + fib pair
-[group('operational')]
-clean-fib:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    if [[ -f .fib/fib.pid ]]; then
-      kill "$(cat .fib/fib.pid)" 2>/dev/null || true
-    fi
-    if [[ -f .fib/pcscd.pid ]]; then
-      kill "$(cat .fib/pcscd.pid)" 2>/dev/null || true
-    fi
-    rm -rf .fib
-    echo "fib: down"
-
 # Bring up the standalone `fibby` server in hardware-proxy mode, fronted
-# by the system pcscd. Mirrors load-fib's UX: short-circuits if already
-# running, drops a PID file under .fibby/, and writes an env file
-# (.fibby/env) consumers `eval` to set PCSCLITE_CSOCK_NAME.
+# by the system pcscd: short-circuits if already running, drops a PID
+# file under .fibby/, and writes an env file (.fibby/env) consumers
+# `eval` to set PCSCLITE_CSOCK_NAME.
 #
-# Unlike fib (which brings up its own pcscd + jcardsim + applet),
 # load-fibby assumes a real PC/SC reader + card are already plugged in
 # and the system pcscd is up — its sole job is to translate pcsc-lite
 # daemon-protocol traffic into PC/SC client traffic against the system
@@ -2870,198 +2656,6 @@ clean-fibby:
     rm -f /tmp/piggy-fibby-ipc/pcscd.comm
     rmdir /tmp/piggy-fibby-ipc 2>/dev/null || true
     echo "fibby: down"
-
-# open a subshell with fib up and the env preloaded; tears down on exit
-[group('operational')]
-run-fib-shell:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just load-fib
-    trap 'just clean-fib' EXIT
-    export PCSCLITE_CSOCK_NAME="/tmp/piggy-fib-ipc/pcscd.comm"
-    PS1="(fib) $PS1" exec "$SHELL"
-
-[group('post-build')]
-verify: verify-fib
-
-# smoke test: bring up fib, verify pivy-tool sees the virtual card, tear down
-[group('post-build')]
-verify-fib:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    trap 'just clean-fib' EXIT
-    just load-fib
-    eval "$(cat .fib/env)"
-
-    # Minimal diagnostics — see #20 for full investigation history.
-    echo "--- fib diagnostics ---"
-    echo "PCSCLITE_CSOCK_NAME=${PCSCLITE_CSOCK_NAME:-<unset>}"
-    echo "socket exists: $(test -S "${PCSCLITE_CSOCK_NAME:-}" && echo yes || echo no)"
-    echo "pcscd alive: $(kill -0 "$(cat .fib/pcscd.pid 2>/dev/null)" 2>/dev/null && echo yes || echo no)"
-    echo "fib alive: $(kill -0 "$(cat .fib/fib.pid 2>/dev/null)" 2>/dev/null && echo yes || echo no)"
-    opensc-tool -l 2>&1 || echo "(opensc-tool -l failed)"
-
-    echo "--- pivy-tool list (with retries) ---"
-    found=false
-    for attempt in $(seq 1 10); do
-      # -d so piv_enumerate's BNY_DEBUG "eliminated reader" messages surface
-      # during any retry window (#27). Match the "device:" field emitted by
-      # pivy-tool's successful enumeration — this line only appears when the
-      # reader passes piv_enumerate's probes, so it won't false-positive on
-      # debug log fields that mention the reader name.
-      output=$(pivy-tool -d list 2>&1) || true
-      echo "attempt $attempt: $output"
-      if echo "$output" | grep -qE "^\s*device: Virtual PCD piggy fib"; then
-        found=true
-        break
-      fi
-      sleep 0.5
-    done
-    if [[ "$found" != true ]]; then
-      echo "verify-fib: FAIL — virtual card not visible after 10 attempts" >&2
-      echo
-      echo "--- dumping debug-fib-pivy-trace on failure (see #20) ---" >&2
-      just debug-fib-pivy-trace >&2 || true
-      exit 1
-    fi
-    echo "verify-fib: PASS"
-
-# Trace pivy-tool vs opensc-tool against a running fib stack.
-# Fib must already be up (just load-fib). Used to investigate #20
-# (pivy-tool list empty despite opensc-tool seeing the virtual card).
-#
-# trace pivy-tool vs opensc-tool against a running fib stack
-[group('debug')]
-debug-fib-pivy-trace:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    if [[ ! -f .fib/env ]]; then
-      echo "ERROR: .fib/env not found - run 'just load-fib' first" >&2
-      exit 1
-    fi
-    eval "$(cat .fib/env)"
-
-    echo "=== env ==="
-    echo "PCSCLITE_CSOCK_NAME=${PCSCLITE_CSOCK_NAME:-<unset>}"
-    echo "socket exists: $(test -S "${PCSCLITE_CSOCK_NAME:-}" && echo yes || echo no)"
-
-    echo
-    echo "=== opensc-tool -l (list only, no SCardConnect) ==="
-    opensc-tool -l 2>&1 || echo "(opensc-tool -l failed: exit $?)"
-
-    echo
-    echo "=== opensc-tool PIV AID SELECT (forces SCardConnect) ==="
-    opensc-tool --reader 0 --send-apdu 00A4040009A00000030800001000 2>&1 \
-      || echo "(opensc-tool send-apdu failed: exit $?)"
-
-    echo
-    echo "=== pivy-tool -d list (bunyan TRACE output) ==="
-    pivy-tool -d list 2>&1 || echo "(pivy-tool -d list failed: exit $?)"
-
-    echo
-    echo "=== pivy-tool -dd list (full APDU debug) ==="
-    pivy-tool -dd list 2>&1 || echo "(pivy-tool -dd list failed: exit $?)"
-
-# Capture the jcardsim Maven dependency closure into nix/jcardsim-m2/.
-# Run once whenever the jcardsim flake input is bumped. The vendored .m2
-# replaces buildMavenPackage's FOD so the nix build never fetches from
-# Maven Central (eliminates hash drift). Maven is pure Java — works on
-# any platform regardless of fib/vsmartcard Linux constraints.
-#
-# capture the jcardsim Maven dependency closure into nix/jcardsim-m2/
-[group('debug')]
-debug-capture-jcardsim-m2:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    project_root="$PWD"
-    tmpdir=$(mktemp -d /tmp/jcardsim-m2-capture.XXXXXX)
-    trap 'rm -rf "$tmpdir"' EXIT
-
-    echo "=== Resolving flake input store paths ==="
-    archive=$(nix flake archive --json .)
-    jcardsim_src=$(echo "$archive" | jq -r '.inputs.jcardsim.path // empty')
-    if [[ -z $jcardsim_src ]]; then
-      echo "ERROR: Could not resolve jcardsim source path from flake" >&2
-      exit 1
-    fi
-    echo "jcardsim source: $jcardsim_src"
-
-    oracle_sdks=$(echo "$archive" | jq -r '.inputs["oracle-javacard-sdks"].path // empty')
-    if [[ -z $oracle_sdks ]]; then
-      echo "ERROR: Could not resolve oracle-javacard-sdks source path from flake" >&2
-      exit 1
-    fi
-    echo "oracle-javacard-sdks: $oracle_sdks"
-
-    echo "=== Copying jcardsim source to writable tmpdir ==="
-    cp -r "$jcardsim_src"/. "$tmpdir/jcardsim"
-    chmod -R u+w "$tmpdir/jcardsim"
-
-    echo "=== Patching pom.xml (same as nix/virtual-piv.nix postPatch) ==="
-    sdk_jar="$oracle_sdks/jc305u3_kit/lib/api_classic.jar"
-    if [[ ! -f "$sdk_jar" ]]; then
-      echo "ERROR: Oracle SDK jar not found at $sdk_jar" >&2
-      exit 1
-    fi
-    cd "$tmpdir/jcardsim"
-    # Replace compile scope with system scope + absolute path to SDK jar.
-    # Replace ${env.JC_CLASSIC_HOME} with the actual path.
-    # Use temp file for BSD/GNU sed portability.
-    sed \
-      -e "s|<scope>compile</scope>|<scope>system</scope><systemPath>$sdk_jar</systemPath>|g" \
-      -e "s|\${env.JC_CLASSIC_HOME}|$oracle_sdks/jc305u3_kit|g" \
-      pom.xml > pom.xml.tmp
-    mv pom.xml.tmp pom.xml
-
-    echo "=== Resolving the jcardsim derivation's own Maven + JDK ==="
-    # Capture against EXACTLY the toolchain nix/virtual-piv.nix builds with,
-    # not `nixpkgs#maven` from the ambient flake registry. Those drift apart:
-    # the registry shipped maven 3.9.11 while the derivation (via igloo's
-    # pkgs) used 3.9.16, and each bundles a different default
-    # maven-resources-plugin. Capturing with the wrong Maven yields a closure
-    # that still fails the offline (-o -nsu) resolve with
-    # "Plugin org.apache.maven.plugins:maven-resources-plugin:<v> ... could
-    # not be resolved". Deriving the tools from the drv keeps the capture
-    # correct across any future nixpkgs/igloo bump.
-    # NB: we have already cd'd into $tmpdir/jcardsim, so the flake must be
-    # addressed via $project_root rather than a bare `.#`.
-    jcardsim_drv=$(nix path-info --derivation "$project_root#jcardsim")
-    tool_bins=()
-    while read -r tool_drv; do
-      [[ -z $tool_drv ]] && continue
-      tool_out=$(nix build --no-link --print-out-paths "${tool_drv}^out")
-      tool_bins+=("$tool_out/bin")
-    done < <(nix derivation show "$jcardsim_drv" \
-      | jq -r '.[].inputDrvs | keys[] | select(test("(-maven-|-openjdk-)"))')
-
-    if [[ ${#tool_bins[@]} -eq 0 ]]; then
-      echo "ERROR: Could not resolve Maven/JDK from $jcardsim_drv" >&2
-      exit 1
-    fi
-    export PATH="$(IFS=:; echo "${tool_bins[*]}"):$PATH"
-    echo "Using maven: $(command -v mvn) ($(mvn --version | head -n1))"
-
-    echo "=== Running Maven to download dependency closure ==="
-    m2repo="$tmpdir/m2-repo"
-    mkdir -p "$m2repo"
-    mvn package \
-      "-Dmaven.repo.local=$m2repo" \
-      -Dmaven.test.skip=true \
-      -Dgpg.skip=true \
-      -Djava.version=1.8
-
-    echo "=== Stripping ephemeral Maven metadata (matches buildMavenPackage) ==="
-    find "$m2repo" -name '*.lastUpdated' -delete
-    find "$m2repo" -name 'resolver-status.properties' -delete
-    find "$m2repo" -name '_remote.repositories' -delete
-
-    echo "=== Installing to nix/jcardsim-m2/ ==="
-    dest="$project_root/nix/jcardsim-m2"
-    rm -rf "$dest"
-    cp -r "$m2repo" "$dest"
-
-    echo "=== Done. Vendored Maven deps at nix/jcardsim-m2/ ==="
-    du -sh "$dest"
 
 # --- explore ---
 
@@ -3443,45 +3037,6 @@ debug-lock-contention-probe guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456"
     else
       echo "Inconclusive — see output above."
     fi
-
-# Probe PivApplet (running under fib) for X25519 / Ed25519 algorithm
-# support. Sends GENERATE ASYMMETRIC KEY PAIR for several alg bytes and
-# captures each SW. Hardware-free: only touches the virtual card behind
-# fib. Used to settle issue #11 (X25519 ECDH) — see findings on the
-# issue. Bring fib up with `just load-fib` first; this recipe fails fast
-# if it isn't running rather than managing the lifecycle.
-#
-# probe PivApplet under fib for X25519 / Ed25519 support
-[group('explore')]
-explore-x25519-pivapplet:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    if [[ ! -f .fib/env ]]; then
-      echo "ERROR: .fib/env not found - run 'just load-fib' first" >&2
-      exit 1
-    fi
-    eval "$(cat .fib/env)"
-    reader="Virtual PCD piggy fib 00 00"
-    aid="00:a4:04:00:0b:a0:00:00:03:08:00:00:10:00:01:00"
-
-    probe() {
-      local label="$1" alg="$2"
-      echo
-      echo "=== Probe $label (alg=0x$alg) ==="
-      echo "--- SELECT PIV AID ---"
-      opensc-tool -r "$reader" -s "$aid" 2>&1 || echo "(SELECT failed: $?)"
-      echo "--- GENERATE ASYMMETRIC KEY PAIR slot=9D ---"
-      opensc-tool -r "$reader" -s "$aid" \
-        -s "00:47:00:9d:05:ac:03:80:01:$alg" 2>&1 \
-        || echo "(GEN ASYM failed: $?)"
-    }
-
-    probe "Yubico/pivy X25519"             "e1"
-    probe "Yubico/pivy ED25519"            "e0"
-    probe "piggy-piv apdu.rs X25519"       "23"
-    probe "piggy-piv apdu.rs ED25519"      "22"
-    probe "ECCP256 (control, supported)"   "11"
-    probe "RSA2048 (control, supported)"   "07"
 
 # --- update / clean ---
 

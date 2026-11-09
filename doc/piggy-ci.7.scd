@@ -71,10 +71,6 @@ take two to three minutes each once the guest closure is cached; a
 	llvm-cov report. Roughly thirteen minutes serialized; kept out of the
 	gate until that cost is accepted.
 
-*just verify-fib*
-	Smoke-test of the legacy fib (jCardSim) virtual PIV card, retained as a
-	fibby differential oracle. Linux only.
-
 *just lint-justfile-profile*
 	conformist's profile-delivered justfile linters (recipe verbs, orphaned
 	doc summaries) over *conformist.profile* at the repo root, a verbatim

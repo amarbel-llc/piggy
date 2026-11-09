@@ -165,22 +165,6 @@
         "url": "https://code.linenisgreat.com/igloo/archive/master.tar.gz"
       }
     },
-    "jcardsim": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1589327878,
-        "narHash": "sha256-0akp8BAp6QxGuBrDFEg0ED/F98bCkO2WQSocYqWszyI=",
-        "owner": "arekinath",
-        "repo": "jcardsim",
-        "rev": "4c766cfb48c43507f9a30a1443e7214d2073a430",
-        "type": "github"
-      },
-      "original": {
-        "owner": "arekinath",
-        "repo": "jcardsim",
-        "type": "github"
-      }
-    },
     "langlang": {
       "inputs": {
         "bats": [
@@ -244,38 +228,6 @@
         "type": "github"
       }
     },
-    "oracle-javacard-sdks": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1790182564,
-        "narHash": "sha256-X60GF/jWGIPBgv5OYSH7Tkv7mT1Z+ojU5h4lx8H+fkQ=",
-        "owner": "martinpaljak",
-        "repo": "oracle_javacard_sdks",
-        "rev": "700ec80afdda210a0e62fb6a151a9cddc1acd244",
-        "type": "github"
-      },
-      "original": {
-        "owner": "martinpaljak",
-        "repo": "oracle_javacard_sdks",
-        "type": "github"
-      }
-    },
-    "pivapplet": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1661144882,
-        "narHash": "sha256-FuO9iocgB1ZjQCKW9EfPUuCIx066LIz0mhb73SmGMAw=",
-        "owner": "arekinath",
-        "repo": "PivApplet",
-        "rev": "5cb14a9e8d16e92fbad73dcad86a219a9210554f",
-        "type": "github"
-      },
-      "original": {
-        "owner": "arekinath",
-        "repo": "PivApplet",
-        "type": "github"
-      }
-    },
     "purse-first": {
       "inputs": {
         "conformist": [
@@ -309,12 +261,9 @@
         "bats": "bats",
         "conformist": "conformist",
         "igloo": "igloo",
-        "jcardsim": "jcardsim",
         "langlang": "langlang",
         "nixpkgs-master": "nixpkgs-master",
         "nixpkgs-x86_64-darwin": "nixpkgs-x86_64-darwin",
-        "oracle-javacard-sdks": "oracle-javacard-sdks",
-        "pivapplet": "pivapplet",
         "purse-first": "purse-first",
         "utils": "utils"
       }

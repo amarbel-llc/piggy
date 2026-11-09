@@ -74,31 +74,6 @@
       inputs.utils.follows = "utils";
     };
 
-    # Software PIV smart card for tests — see nix/virtual-piv.nix.
-    # Not flakes themselves; fetched as plain sources.
-    jcardsim = {
-      url = "github:arekinath/jcardsim";
-      flake = false;
-    };
-    pivapplet = {
-      url = "github:arekinath/PivApplet";
-      flake = false;
-    };
-    # Oracle JavaCard SDK binaries vendored by martinpaljak. The jc305u3
-    # kit provides api_classic.jar, which jcardsim's pom.xml requires at
-    # build time (its `initialize` phase runs install-file on
-    # $JC_CLASSIC_HOME/lib/api_classic.jar). The resulting jcardsim.jar
-    # bundles the javacard.* bytecode.
-    #
-    # License: Oracle Binary Code License — redistribution allowed
-    # "bundled as part of Your Programs" with the constraints listed in
-    # jc305u3_kit/legal/Distribution_ReadME.txt. See LICENSING in
-    # nix/virtual-piv.nix for how this posture affects piggy.
-    oracle-javacard-sdks = {
-      url = "github:martinpaljak/oracle_javacard_sdks";
-      flake = false;
-    };
-
     utils.inputs.systems.follows = "igloo/systems";
     bats.inputs.nixpkgs-master.follows = "nixpkgs-master";
     igloo.inputs.nixpkgs-master.follows = "nixpkgs-master";
@@ -130,9 +105,6 @@
       langlang,
       purse-first,
       conformist,
-      jcardsim,
-      pivapplet,
-      oracle-javacard-sdks,
     }:
     let
       # Intel Mac: packages only, from nixpkgs 26.05 (see the input). No
@@ -260,17 +232,6 @@
           };
           inherit (gomod) goFlakeInputs;
           inherit (gomod.goPkgs) go-pkgs go-pkgs-test;
-
-          # Software PIV smart card for tests. Only built on Linux — vsmartcard
-          # is marked broken on darwin upstream.
-          virtualPiv = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
-            import ./nix/virtual-piv.nix {
-              inherit pkgs pkgs-master;
-              jcardsim-src = jcardsim;
-              pivapplet-src = pivapplet;
-              oracle-javacard-sdks-src = oracle-javacard-sdks;
-            }
-          );
 
           # NixOS VM integration lane (nix/vm-tests/): fibby + the Rust
           # agent as guest systemd units, LUKS2 and ZFS unlocked from the
@@ -477,14 +438,12 @@
           # HardwareProxy backend (real-card passthrough used by the wet-env
           # validation recipes) is available. Darwin builds without the
           # feature because pcsc-sys's libpcsclite link isn't satisfied
-          # there — flake.nix:166 only adds pcsclite to rustBuildInputs on
-          # `stdenv.hostPlatform.isLinux`, matching the upstream vsmartcard-on-darwin
-          # status. The `VirtualCard` backend is always available on both
-          # platforms.
+          # there — rustBuildInputs adds pcsclite only on
+          # `stdenv.hostPlatform.isLinux`. The `VirtualCard` backend is always
+          # available on both platforms.
           #
           # Used by: `just load-fibby` (downstream of this output), the wet-env
-          # capture recipes (`debug-fibby-roundtrip-capture` /
-          # `debug-fibby-roundtrip-via-fib`), and any consumer of #129's
+          # capture recipe (`debug-fibby-roundtrip-capture`), and any consumer of #129's
           # planned packaging story (e.g. a future home-manager service).
           fibby = pkgs.rustPlatform.buildRustPackage {
             pname = "fibby";
@@ -654,9 +613,6 @@
               # Rust and Go toolchains into one derivation.
               passthru.tests = {
                 conformance = piggy-agent-conformance;
-              }
-              // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-                fib = virtualPiv.fibBundle;
               };
 
               meta = with pkgs.lib; {
@@ -922,7 +878,7 @@
             '';
             # Standalone fibby binary. On Linux this carries the
             # `hardware-proxy` feature; on darwin it's VirtualCard-only
-            # (vsmartcard upstream is broken on darwin). Consumed by
+            # (pcsclite is a Linux-only build input). Consumed by
             # `just load-fibby` and the wet-env capture recipes; future
             # consumer is the planned home-manager service (#129 stretch).
             fibby = fibby;
@@ -968,12 +924,6 @@
           // batsLib.batsLaneOutputs
           // vmCoverage
           // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-            fib = virtualPiv.fib;
-            fib-bundle = virtualPiv.fibBundle;
-            fib-reader-conf = virtualPiv.readerConf;
-            fib-pcscd = virtualPiv.pcscdForFib;
-            jcardsim = virtualPiv.jcardsim;
-            pivapplet = virtualPiv.pivapplet;
             # The GTK operator-act dialog piggy-askpass.sh prefers on Linux.
             piggy-askpass-gtk = piggy-askpass-gtk;
           };
@@ -1087,12 +1037,9 @@
                 pkgs.expect
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-                # `just load-fib` needs pcscd + opensc-tool on PATH; it runs
-                # fib itself via `nix run .#fib`, so fib is deliberately NOT
-                # a devShell package: a jcardsim build failure (its vendored
-                # Maven closure vs the toolchain, piggy#252) must not take
-                # every `just` recipe down with it, least of all
-                # `debug-capture-jcardsim-m2`, the recipe that repairs it.
+                # pcscd for `debug-pcsclite-linkage` and opensc-tool for
+                # `debug-pcsc-env`, the PC/SC survey recipes of the fibby
+                # hardware-proxy dev loop.
                 pkgs.pcsclite
                 pkgs.opensc
               ];

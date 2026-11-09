@@ -3,8 +3,8 @@
 fibby implements the **pcsc-lite daemon protocol** in Rust, so PC/SC
 clients (`pivy-tool`, `piggy`, `opensc-tool`) connect straight to it via
 `PCSCLITE_CSOCK_NAME` — **no `pcscd`, no `vsmartcard-vpcd`, no Java**.
-This is the self-contained replacement for the `fib` stack
-(`docs/virtual-piv.md`). Design + rationale:
+It replaced the retired jCardSim-based `fib` card (piggy#365). Design +
+rationale:
 [`docs/plans/2026-05-29-fibby-virtual-piv-rust-design.md`](../../docs/plans/2026-05-29-fibby-virtual-piv-rust-design.md).
 
 ## Module map
