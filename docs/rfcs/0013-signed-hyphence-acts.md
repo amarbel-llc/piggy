@@ -142,7 +142,7 @@ them); every other field MUST appear at most once.
 | `issuer` | a principal id, or `operator` | yes | who signs; `operator` iff `key` is a trust anchor (§5.1) |
 | `issuer-key` | markl-id of the signing public key: purpose `piggy-piv_sig-v1` for a card act, `piggy-principal_pub-v1` for a software act | yes | equals `key` |
 | `issuer-record` | act digest (§3.5) | every software act; MUST be absent on a card act | the certifying act that binds `issuer-key` to `issuer` |
-| `right` | a namespaced string, `<domain>:<name>`; **set** | `root`, `link`, `grant`, `narrow`, `escalation` | one right; the vocabulary is the consumer's; piggy checks set relations only |
+| `right` | a namespaced string, `<domain>:<name>`, which MAY be spelled as a markl-id when the consumer pins a digest (`"roustabout:grammar:x"@blake2b256-…`); **set** | `root`, `link`, `grant`, `narrow`, `escalation` | one right; the vocabulary is the consumer's; piggy checks set relations only, over the parsed value |
 | `names` | act digest (§3.5); **set** | `narrow`, `escalation`, `revocation`; optional on `approval` | the **acts** this act modifies, supersedes or revokes (§4) |
 | `records` | a markl-id digest of a record that is not an act; **set** | `approval`; `escalation` SHOULD; `root` and `link` SHOULD | the consumer's records this act answers or decides (a request, a decision); opaque to piggy, never resolved by §5 |
 | `prev` | record digest; **set** | optional | parents in the consumer's history (a DAG) |
@@ -183,13 +183,15 @@ encoder emits (hyphence RFC 0001 "Encoder Behavior", RFC 0002, RFC 0003)
 for the document after these normalizations, in order:
 
 1. every `%` comment and every trailing comment is removed;
-2. each `#` line is trimmed of leading and trailing whitespace, empty
-   ones are dropped, and the rest are joined with single spaces into one
-   `#` line, placed first; an act with no description has none;
+2. each `#` line is trimmed of leading and trailing ASCII space and TAB,
+   empty ones are dropped, and the rest are joined with single spaces into
+   one `#` line, placed first; an act with no description has none;
 3. the field lines are ordered: piggy's fields in the order of the §2
    table, then every prefixed field sorted by field name as bytes; within
    a **set** field the values are sorted as bytes over their parsed
-   (unquoted) values, and duplicates removed;
+   (unquoted) values (a text value's text; a markl-id's unquoted purpose,
+   `@`, format and data), never over their quoted spelling, and duplicates
+   removed;
 4. the `signature` line is removed;
 5. the type line `! piggy-act-v1`, with no lock, comes last;
 6. field lines are written in hyphence's spaced canonical spelling,
@@ -417,9 +419,11 @@ argument values) ride in two places, both inside the signed bytes:
   by cutting-garden FDR 0028, "ajour", and is theirs to change: espalier
   plus id-less typed nodes, locked ids, the field operators, value lists,
   `^` negation and the tags `deny` and `subtree`; no sigils, closures,
-  reverse edges, version subpaths or OR-groups). It is signed as its bytes
-  stand (§3.1 step 7); no canonical form is defined for it and none is
-  needed. piggy's reference verifier checks only that the body obeys RFC
+  reverse edges, version subpaths or OR-groups; the list is cutting-garden's
+  and may grow, a `+` creation-allowance node being under discussion). It
+  is signed as its bytes stand (§3.1 step 7); no canonical form is defined
+  for it and none is needed, so a producer MAY write it in any input
+  spelling FDR 0028 accepts, and the prompt shows those bytes. piggy's reference verifier checks only that the body obeys RFC
   0012 §2.5's character rules and otherwise treats it as opaque bytes.
 
 Every `profile` edge and every body on a chain is a **layer**, from the
