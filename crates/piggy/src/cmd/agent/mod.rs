@@ -163,7 +163,7 @@ pub fn run(full_argv: Vec<String>) -> i32 {
     };
 
     if cli.kill {
-        return match kill_agent() {
+        return match kill_agent(wants_csh_output(&cli)) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("piggy agent: {}", e);
@@ -424,6 +424,7 @@ async fn run_async(
     config: KeyLoadConfig,
     upstream_pool: Option<UpstreamPool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let use_csh = wants_csh_output(&cli);
     // Determine socket path
     let socket_path = match cli.socket {
         Some(s) => s,
@@ -456,10 +457,6 @@ async fn run_async(
         )
         .into());
     }
-
-    // Detect shell output format
-    let use_csh = cli.csh_format
-        || (!cli.sh_format && std::env::var("SHELL").is_ok_and(|s| s.ends_with("csh")));
 
     if use_csh {
         println!("setenv SSH_AUTH_SOCK {};", socket_path);
@@ -648,30 +645,61 @@ fn bind_reclaiming_stale(path: &str) -> std::io::Result<UnixListener> {
     }
 }
 
-fn kill_agent() -> Result<(), Box<dyn std::error::Error>> {
+/// `-c` forces csh output and `-s` Bourne output; with neither, a `SHELL`
+/// ending in `csh` picks csh. Shared by agent start and `-k`.
+fn wants_csh_output(cli: &AgentArgs) -> bool {
+    cli.csh_format || (!cli.sh_format && std::env::var("SHELL").is_ok_and(|s| s.ends_with("csh")))
+}
+
+/// What `-k` prints for the caller's shell to eval after the agent is gone.
+fn kill_agent_shell_lines(use_csh: bool, pid: i32) -> String {
+    if use_csh {
+        format!("unsetenv SSH_AUTH_SOCK;\nunsetenv SSH_AGENT_PID;\necho Agent pid {pid} killed;\n")
+    } else {
+        format!("unset SSH_AUTH_SOCK;\nunset SSH_AGENT_PID;\necho Agent pid {pid} killed;\n")
+    }
+}
+
+fn kill_agent(use_csh: bool) -> Result<(), Box<dyn std::error::Error>> {
     let pid_str = std::env::var("SSH_AGENT_PID").map_err(|_| "SSH_AGENT_PID not set")?;
     let pid: i32 = pid_str.parse().map_err(|_| "invalid SSH_AGENT_PID")?;
 
-    #[cfg(unix)]
-    {
-        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-        if rc != 0 {
-            return Err(
-                format!("kill({pid}, SIGTERM): {}", std::io::Error::last_os_error()).into(),
-            );
-        }
+    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if rc != 0 {
+        return Err(format!("kill({pid}, SIGTERM): {}", std::io::Error::last_os_error()).into());
     }
 
-    println!("unset SSH_AUTH_SOCK;");
-    println!("unset SSH_AGENT_PID;");
-    println!("echo Agent pid {} killed;", pid);
-
+    print!("{}", kill_agent_shell_lines(use_csh, pid));
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_agent_prints_bourne_lines() {
+        assert_eq!(
+            kill_agent_shell_lines(false, 42),
+            "unset SSH_AUTH_SOCK;\nunset SSH_AGENT_PID;\necho Agent pid 42 killed;\n"
+        );
+    }
+
+    #[test]
+    fn kill_agent_prints_csh_lines() {
+        assert_eq!(
+            kill_agent_shell_lines(true, 42),
+            "unsetenv SSH_AUTH_SOCK;\nunsetenv SSH_AGENT_PID;\necho Agent pid 42 killed;\n"
+        );
+    }
+
+    #[test]
+    fn csh_flag_picks_csh_output_for_kill_too() {
+        let cli = AgentArgs::try_parse_from(["piggy agent", "-c", "-k"]).unwrap();
+        assert!(wants_csh_output(&cli));
+        let cli = AgentArgs::try_parse_from(["piggy agent", "-s", "-k"]).unwrap();
+        assert!(!wants_csh_output(&cli));
+    }
 
     /// `command` is trailing_var_arg, so pin that the piggy#215 long
     /// flags parse as flags (not slurped into the command tail) and that
