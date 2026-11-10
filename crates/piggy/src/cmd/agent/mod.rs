@@ -143,12 +143,6 @@ pub struct AgentArgs {
     pub command: Vec<String>,
 }
 
-/// Entry point for `piggy agent ...`.
-///
-/// `full_argv` is the full argv as passed to `piggy`, including `args[0]`
-/// (program name) and `args[1]` (`"agent"`). We rebuild the clap-facing argv
-/// with a synthetic program name so errors and `--help` display as
-/// `piggy agent` instead of `piggy`.
 /// FDR 0006 phase (b): the process that caches PINs is not dumpable and
 /// writes no core file. A step that fails is a warning, and the agent
 /// serves anyway, as C pivy-agent did when `mlockall` failed.
@@ -168,6 +162,12 @@ fn harden_agent_process() {
     );
 }
 
+/// Entry point for `piggy agent ...`.
+///
+/// `full_argv` is the full argv as passed to `piggy`, including `args[0]`
+/// (program name) and `args[1]` (`"agent"`). We rebuild the clap-facing argv
+/// with a synthetic program name so errors and `--help` display as
+/// `piggy agent` instead of `piggy`.
 pub fn run(full_argv: Vec<String>) -> i32 {
     let agent_argv: Vec<String> = std::iter::once("piggy agent".to_string())
         .chain(full_argv.into_iter().skip(2))

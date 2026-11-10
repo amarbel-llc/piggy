@@ -4607,11 +4607,11 @@ explore-fdr0006-a-askpass-tty:
 # private blank fibby card, a PIN put in its cache with `ssh-add -X` (the
 # test askpass answers, piggy-testing(7) PIN PROMPT SAFETY NET; no card
 # VERIFY happens), then what the operator checks: VmLck grew by a page per
-# cached PIN, /proc/<pid> belongs to root (the agent is non-dumpable), the
+# cached PIN, /proc/<pid>'s files belong to root (the agent is non-dumpable), the
 # agent's core limit is 0 although it was started with a raised one, and a
-# SIGSEGV leaves no core file. core_pattern, suid_dumpable and what
+# SIGABRT leaves no core file. core_pattern, suid_dumpable and what
 # coredumpctl recorded are printed for the reader, not judged. VmRSS is the
-# figure behind the open mlockall question. BIN_DIR, when given, is a
+# figure behind the mlockall ruling (FDR 0006, Tuning Levers). BIN_DIR, when given, is a
 # directory holding the piggy and fibby to run (e.g. target/debug) in
 # place of the nix-built ones.
 #
