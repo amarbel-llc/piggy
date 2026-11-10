@@ -345,19 +345,23 @@ by its own rules.
 A right is an opaque namespaced string; piggy checks set relations only
 (byte equality of values). For a software `link`, the `right` set MUST be
 a subset of the issuer's **certified rights** at verification time: the
-effective rights of the issuer's certifying act computed through §4.3
-step 3 (the chain, with escalations applied) and before its narrows. A
-verifier MUST refuse a `link` whose set exceeds them. A narrow the issuer
-later places on itself does not invalidate a wider child; §4.3 step 2
-intersects the child's rights with the issuer's narrowed set instead
-(clarified 2026-11-10 with S6: a self-narrow is a promise that cuts
-downwards, never a fault in the children). For a software `grant`, the
-`right` set MUST be a subset of the issuer's effective rights **over that
-`object`**: its certified rights together with the effective rights of
-every valid `grant` it holds over the same `object` (§4.3). A grant is
-therefore handed down over its object, which is how a holder of a card
-grant narrows it for a child without the card (spinclass FDR 0034's
-software grants under a card grant). A `narrow` MUST be signed by its
+rights of the issuer's certifying act computed by §4.3 with step 4 (the
+narrows) omitted at every level of the chain, escalations applied. A
+verifier MUST refuse a `link` whose set exceeds them. A narrow that the
+issuer, or any ancestor, places on itself does not invalidate a wider
+child; §4.3 step 2 intersects the child's rights with the narrowed set
+instead (clarified 2026-11-10 with S6: a self-narrow is a promise that
+cuts downwards, never a fault in the children). For a software `grant`,
+the `right` set MUST be a subset of the issuer's effective rights **over
+that `object`**: its certified rights together with the effective rights
+of every valid `grant` it holds over the same `object` (§4.3), as a
+union. A grant is therefore handed down over its object, which is how a
+holder of a card grant narrows it for a child without the card
+(spinclass FDR 0034's software grants under a card grant). The rights of
+the held grants union for this bound; their conditions stack (§4.9), so
+the child is admitted only where every held grant's stencil admits it.
+The asymmetry is deliberate: a union of rights is a cheap set check, a
+union of conditions would need the comparison §4.9 refuses. A `narrow` MUST be signed by its
 subject's own key and can only remove. Only an `escalation`, a card act,
 may add. A card `link` or `grant` is bounded by nothing but the
 operator's judgement at the prompt.
@@ -509,7 +513,14 @@ argument values) ride in two places, both inside the signed bytes:
 
 Every `profile` edge and every body on a chain is a **layer**, from the
 chain start down, together with the layers of every valid `escalation`
-and `narrow` naming an act on that chain. An `escalation` replaces, for
+and `narrow` naming an act on that chain. For a software `grant` G the
+layers are, in this order: those of G's `issuer-record` chain; then, for
+every valid `grant` G's issuer holds over the same `object` (the grants
+that bound G, §4.2), that grant's own chain layers followed by its layers;
+then G's own; then those of G's applied `escalation` and narrows. The
+held grants' stencils ride down with the rights they bound, so a software
+grant can never escape the profile a card grant pinned (clarified
+2026-11-10 with S6). An `escalation` replaces, for
 the act it names, that act's own layers of the kinds it carries: its
 `profile` edge replaces the act's `profile` edge and its body replaces
 the act's body, while a kind the escalation does not carry stays as the
@@ -615,9 +626,10 @@ on its chain.
 The answer is one of: **valid**, with the effective expiry, the
 `assurance`, the chain start's `key`, and for a certifying act or `grant`
 its effective rights (for a `grant`, with its `object`) and its layers
-(§4.9: the `profile` edge and body of every act on the chain and of every
-applied `escalation` and `narrow`, as given, in chain order, each marked
-stencil or patch); **invalid**,
+(§4.9: the `profile` edge and body of every act on the chain, for a
+software `grant` also of the grants its issuer holds over the object, and
+of every applied `escalation` and `narrow`, as given, in the order §4.9
+states, each marked stencil or patch); **invalid**,
 with the step of §5.2 that failed and the act digest; **undetermined**,
 when an act in `names` or `issuer-record` could not be resolved or no
 revocation source was reachable. A consumer MUST NOT treat undetermined
