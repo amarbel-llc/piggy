@@ -1117,11 +1117,14 @@ test-bats-conformance-agent-concurrent-sign:
     set -euo pipefail
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
+    # socat captures the agent's statsd datagrams (piggy#144).
+    socat_out=$(nix build --inputs-from . nixpkgs#socat --no-link --print-out-paths)
     # PIGGY satisfies the parent common.bash loader without a cargo build;
     # the test itself drives PIGGY_BIN only.
     PIGGY="$piggy_out/bin/piggy" \
       FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
+      SOCAT_BIN="$socat_out/bin/socat" \
       BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_agent_concurrent_sign_fibby.bats
 

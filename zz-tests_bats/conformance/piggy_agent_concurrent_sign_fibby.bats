@@ -64,6 +64,7 @@ setup() {
 teardown() {
   [[ -n ${AGENT_PID:-} ]] && kill "$AGENT_PID" 2>/dev/null || true
   [[ -n ${FIBBY_PID:-} ]] && kill "$FIBBY_PID" 2>/dev/null || true
+  [[ -n ${STATSD_CAPTURE_PID:-} ]] && kill "$STATSD_CAPTURE_PID" 2>/dev/null || true
   if [[ -n ${AGENT_PID:-} ]]; then wait "$AGENT_PID" 2>/dev/null || true; fi
   if [[ -n ${FIBBY_PID:-} ]]; then wait "$FIBBY_PID" 2>/dev/null || true; fi
   [[ -n ${WORKDIR:-} ]] && rm -rf "$WORKDIR" 2>/dev/null || true
@@ -86,6 +87,53 @@ _spawn_rust_agent() {
   echo "--- fibby log ---" >&2
   cat "$FIBBY_LOG" >&2 || true
   return 1
+}
+
+# piggy#144: the C-era `sign` metric showed only failures. A sign the
+# Rust agent completes must be counted as `piggy.agent.sign.success`, and
+# must not also be counted as a failure. The agent's statsd datagrams are
+# captured on a throwaway UDP port.
+function rust_piggy_agent_counts_a_successful_sign_as_success { # @test
+  [[ -n ${SOCAT_BIN:-} && -x ${SOCAT_BIN:-/nonexistent} ]] ||
+    skip "SOCAT_BIN unset; run via just test-bats-conformance-agent-concurrent-sign"
+  local port=$((20000 + RANDOM % 20000))
+  local capture="$WORKDIR/statsd.capture"
+  "$SOCAT_BIN" -u UDP-RECV:"$port",bind=127.0.0.1 - >"$capture" 2>/dev/null &
+  STATSD_CAPTURE_PID=$!
+
+  spawn_fibby --seed-rfc6979-slot-9a-cert --seed-chuid
+  STATSD_HOST=127.0.0.1 STATSD_PORT="$port" _spawn_rust_agent
+  export SSH_AUTH_SOCK="$AGENT_SOCK"
+
+  ssh-add -L | grep '^ecdsa-sha2-nistp256 ' >"$WORKDIR/id.pub"
+  [[ -s $WORKDIR/id.pub ]] || {
+    echo "no ecdsa-sha2-nistp256 identity from the agent" >&2
+    return 1
+  }
+  echo "metric" >"$WORKDIR/metric"
+  run ssh-keygen -Y sign -f "$WORKDIR/id.pub" -U -n file "$WORKDIR/metric"
+  [[ $status -eq 0 && -f $WORKDIR/metric.sig ]] || {
+    echo "sign failed (status $status)" >&2
+    printf '%s\n' "$output" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+
+  local _
+  for _ in $(seq 1 20); do
+    grep -q 'piggy\.agent\.sign\.success:1|c' "$capture" && break
+    sleep 0.1
+  done
+  grep -q 'piggy\.agent\.sign\.success:1|c' "$capture" || {
+    echo "no piggy.agent.sign.success counter captured; datagrams:" >&2
+    cat "$capture" >&2
+    return 1
+  }
+  ! grep -q 'piggy\.agent\.sign\.failure' "$capture" || {
+    echo "a successful sign was also counted as a failure; datagrams:" >&2
+    cat "$capture" >&2
+    return 1
+  }
 }
 
 # All N members of a simultaneous SIGN burst must succeed. Before the
