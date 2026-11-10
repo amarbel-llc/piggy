@@ -372,6 +372,35 @@ a partial line included, is discarded before the PIN line appears. Any askpass m
 a one-line reason on standard output. Test harnesses must point *SSH_ASKPASS* at
 a non-interactive helper; see *piggy-testing*(7).
 
+# PIN MEMORY
+
+A PIN that verified on a card, or that *ssh-add -X* offered, stays cached
+for that card until the card leaves, *ssh-add -x* clears it, or the agent
+exits. Each cached PIN is held on pages of its own (FDR 0006 phase (b)):
+between two inaccessible guard pages, locked against swap, and unreadable
+except while one VERIFY copies it out; its pages are zeroed when it is
+forgotten. At start the agent makes itself non-dumpable and sets its core
+size limit to zero. It logs what it got at debug level (*-d*, the
+_process hardening_ line); a step that fails is a warning and the agent
+serves anyway.
+
+What each platform gets:
+
+- Linux: all of the above, and the cached PINs' pages are left out of
+  core dumps (*MADV_DONTDUMP*) and read as zeros in a forked child
+  (*MADV_WIPEONFORK*, Linux 4.14 and later). Non-dumpable is
+  *PR_SET_DUMPABLE* 0, which also refuses a same-user *ptrace*(2) attach
+  and makes the files under _/proc/<pid>_ root's.
+- macOS: the guard pages, the lock, the seal between uses, the zeroing and
+  the zero core limit; there is no non-dumpable flag and neither advice
+  flag.
+
+The lock is per PIN: unlike C pivy-agent, the agent does not lock its
+whole address space (*mlockall*). A lock the kernel refuses (past
+*RLIMIT_MEMLOCK*) leaves the PIN cached but swappable. A PIN that cannot
+be put on guarded pages at all is not cached, so the next operation
+prompts again.
+
 # SLOT SPECIFICATION
 
 The *-S* option accepts a comma-separated list of PIV slot IDs in hexadecimal.

@@ -4602,3 +4602,98 @@ explore-fdr0006-a-askpass-tty:
     check "wrong escalation word: exit 4"      rc_is wrongword 4
     echo "1..$n"
     ((fails == 0))
+
+# The piggy#378 hand pass, staged (FDR 0006 phase (b)): a piggy agent on a
+# private blank fibby card, a PIN put in its cache with `ssh-add -X` (the
+# test askpass answers, piggy-testing(7) PIN PROMPT SAFETY NET; no card
+# VERIFY happens), then what the operator checks: VmLck grew by a page per
+# cached PIN, /proc/<pid> belongs to root (the agent is non-dumpable), the
+# agent's core limit is 0 although it was started with a raised one, and a
+# SIGSEGV leaves no core file. core_pattern, suid_dumpable and what
+# coredumpctl recorded are printed for the reader, not judged. VmRSS is the
+# figure behind the open mlockall question. BIN_DIR, when given, is a
+# directory holding the piggy and fibby to run (e.g. target/debug) in
+# place of the nix-built ones.
+#
+# stage the piggy#378 hand pass: guarded PIN cache, non-dumpable agent, no core dump
+[group('explore')]
+[linux]
+explore-fdr0006-b BIN_DIR="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{ BIN_DIR }}" ]]; then
+      bin="$(realpath "{{ BIN_DIR }}")"
+      piggy="$bin/piggy" fibby="$bin/fibby"
+    else
+      piggy="$(nix build .#default --no-link --print-out-paths)/bin/piggy"
+      fibby="$(nix build .#fibby --no-link --print-out-paths)/bin/fibby"
+    fi
+    dir="$(mktemp -d -t fdr6b.XXXXXX)"
+    export PCSCLITE_CSOCK_NAME="$dir/pcscd.comm" PIGGY_STORE_DIR="$dir/store"
+    export SSH_AUTH_SOCK="$dir/agent.sock" PIGGY_AUTH_SOCK="$dir/agent.sock"
+    export SSH_ASKPASS="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    export SSH_ASKPASS_REQUIRE=force DISPLAY="" PIGGY_TEST_FIB_PIN=123456
+    unset WAYLAND_DISPLAY
+    pids=()
+    cleanup() { kill "${pids[@]}" 2>/dev/null || true; rm -rf "$dir"; }
+    trap cleanup EXIT
+
+    "$fibby" --socket "$PCSCLITE_CSOCK_NAME" --backend virtual --model yk5 >"$dir/fibby.log" 2>&1 &
+    pids+=($!)
+    for _ in $(seq 1 50); do [[ -S $PCSCLITE_CSOCK_NAME ]] && break; sleep 0.1; done
+    # Raised, so a zero limit in the agent is the agent's own doing.
+    ulimit -c "$(ulimit -H -c)"
+    (cd "$dir" && exec "$piggy" agent -d -a "$dir/agent.sock") >"$dir/agent.log" 2>&1 &
+    agent=$!
+    pids+=($agent)
+    for _ in $(seq 1 50); do [[ -S $dir/agent.sock ]] && break; sleep 0.1; done
+    [[ -S $dir/agent.sock ]] || { echo "the agent did not come up:" >&2; cat "$dir/agent.log" >&2; exit 1; }
+
+    status_kib() { awk -v f="$1:" '$1 == f {print $2}' "/proc/$agent/status"; }
+    page_kib=$(($(getconf PAGESIZE) / 1024))
+    lck_before=$(status_kib VmLck)
+    unlock_rc=0
+    setsid -w ssh-add -X </dev/null >"$dir/ssh-add.log" 2>&1 || unlock_rc=$?
+    lck_after=$(status_kib VmLck)
+    rss=$(status_kib VmRSS)
+    # proc(5): a non-dumpable process's /proc/<pid> FILES belong to root.
+    owner=$(stat -c %U "/proc/$agent/environ")
+    core_limit=$(awk '/^Max core file size/ {print $5}' "/proc/$agent/limits")
+    started=$(date +%s)
+    # SIGABRT, not SIGSEGV: Rust's std handles SIGSEGV (stack-overflow
+    # detection) and a kill(2)-sent one does not end the process. Both
+    # are core-dumping signals.
+    kill -ABRT "$agent"
+    for _ in $(seq 1 100); do kill -0 "$agent" 2>/dev/null || break; sleep 0.1; done
+    alive=0
+    kill -0 "$agent" 2>/dev/null && alive=1
+    sleep 1
+    cores=$(find "$dir" -maxdepth 1 -name 'core*' | wc -l)
+
+    echo "# agent pid $agent: VmLck $lck_before kB -> $lck_after kB after ssh-add -X (page $page_kib kB); VmRSS $rss kB"
+    echo "# /proc/$agent/environ owner: $owner; agent core limit: $core_limit; shell core limit: $(ulimit -c)"
+    echo "# core_pattern: $(cat /proc/sys/kernel/core_pattern); suid_dumpable: $(cat /proc/sys/fs/suid_dumpable)"
+    echo "# uid_map: $(tr -s ' ' <"/proc/$$/uid_map")"
+    if command -v coredumpctl >/dev/null; then
+      echo "# coredumpctl since the SIGABRT:"
+      coredumpctl list --no-pager --since "@$started" 2>&1 | sed 's/^/#   /' || true
+    fi
+    echo "# agent log:"
+    sed 's/^/#   /' "$dir/agent.log"
+
+    n=0 fails=0
+    check() { # check DESCRIPTION COMMAND...
+      n=$((n + 1))
+      if "${@:2}" >/dev/null 2>&1; then echo "ok $n - $1"; else echo "not ok $n - $1"; fails=$((fails + 1)); fi
+    }
+    echo "TAP version 14"
+    check "ssh-add -X was accepted"                 test "$unlock_rc" = 0
+    check "VmLck grew by at least a page"           test "$lck_after" -ge "$((lck_before + page_kib))"
+    sed 's/\x1b\[[0-9;]*m//g' "$dir/agent.log" >"$dir/agent.plain.log"
+    check "the agent reads itself non-dumpable"     grep -q 'process hardening.*dumpable=Some(false)' "$dir/agent.plain.log"
+    check "/proc/<agent>/environ belongs to root"   test "$owner" = root
+    check "the agent's core limit is 0"             test "$core_limit" = 0
+    check "SIGABRT ended the agent"                 test "$alive" = 0
+    check "no core file in the agent's directory"   test "$cores" = 0
+    echo "1..$n"
+    ((fails == 0))
