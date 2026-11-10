@@ -28,11 +28,16 @@ cargo test  -p piggy-pigpen
 
 # wasm (library)
 rustup target add wasm32-unknown-unknown
-cargo build -p piggy-pigpen --target wasm32-unknown-unknown --no-default-features --features wasm
+cargo build -p piggy-pigpen --target wasm32-unknown-unknown --no-default-features
 
-# wasm-bindgen JS bindings (when the wasm feature + wasm-bindgen are wired)
-wasm-pack build crates/piggy-pigpen --target web -- --no-default-features --features wasm
+# wasm-bindgen JS bindings (once the adapter and wasm-bindgen are wired)
+wasm-pack build crates/piggy-pigpen --target web -- --no-default-features
 ```
+
+No cargo feature is needed for the wasm32 build: the getrandom `js` backend
+comes from the crate's `cfg(target_arch = "wasm32")` dependency. A `wasm`
+feature was a placeholder that gated no code and was removed (piggy#211); it
+comes back with the adapter below.
 
 The crate is `exclude`d from the piggy workspace while it is a prototype
 (it carries its own `Cargo.lock` and RustCrypto deps that are not part of
@@ -49,7 +54,7 @@ pub trait EcdhOracle {
 }
 ```
 
-Under `--features wasm`, the crate exposes a `wasm-bindgen` adapter that
+Behind a future `wasm` feature, the crate would expose a `wasm-bindgen` adapter that
 turns a JS callback `(selfId: string, epk: Uint8Array) => Uint8Array`
 into an `EcdhOracle`. The page wires that callback to piggy-agent over a
 native-messaging host, a WebUSB/WebAuthn-PIV bridge, or a remote signer.
