@@ -188,6 +188,19 @@ user can use it, and restarting the *ssh-agent* unit forgets it. On macOS,
 name the launchd *ssh-agent* with *--upstream* and *--add-new-keys-to*
 instead.
 
+A host with its own card can also be reached from a workstation whose
+agent is forwarded to it. Don't forward that agent onto the path the
+host's own *piggy agent* listens on. With _StreamLocalBindUnlink yes_, sshd
+unlinks the agent's socket and binds the forward in its place. For as long
+as the session lasts, every client of that path (*piggy pass*, health
+probes, other sessions) talks to the workstation's card instead of the
+host's. When the session ends the path can be left pointing at a dead
+forward, and the host's agent is unreachable until it is restarted.
+Forward onto a path of its own and name it with *--upstream*. The host's
+socket then serves both cards: native keys first, the forwarded card's
+after. *pass show-batch* then sends a batch to the forwarded card when only
+that card holds a recipient key (piggy#351, *piggy*(1) _PIGGY_UNLOCK_).
+
 # CARD PRESENCE
 
 The card-backed agent re-enumerates PC/SC on a reconcile loop: each pass
