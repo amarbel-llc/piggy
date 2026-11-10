@@ -16,9 +16,8 @@ hand down less.
 This page explains how acts combine, without the formal language. The
 normative text is RFC 0013 (*docs/rfcs/0013-signed-hyphence-acts.md*).
 The wire protocol the card uses to sign one is RFC 0012. RFC 0013 was
-accepted on 2026-11-10. The document, its seal and the producer (*piggy
-act seal*, *piggy*(1)) are built; the chain walk (*piggy act verify*
-beyond *--seal-only*) is being built (piggy#361).
+accepted on 2026-11-10. The document, its seal, the producer (*piggy act
+seal*) and the chain walk (*piggy act verify*, *piggy*(1)) are built.
 
 # THE CHAIN
 
@@ -110,8 +109,13 @@ piggy owns the envelope and the chain. Its verifier checks that every act
 is well formed, that its signature verifies under its key, that the chain
 reaches a trusted card key, that rights only shrink along software links,
 that nothing has expired or been revoked, and that each escalation and
-narrowing names the act it changes. It returns the verdict together with
-the act's *profile* line and body, untouched, for the enforcer.
+narrowing names the act it changes. A narrow never makes a child invalid;
+it cuts the child's rights too. A session may also hand down a *grant*
+over a thing (an *object*) it holds a grant over. Its rights over that
+object add up across the grants it holds, while their stencils all stack
+over the grant it hands down. The verifier returns the verdict together
+with every *profile* line and body on the chain, untouched, in order, for
+the enforcer.
 
 piggy does not define the right names (the tools do), does not define the
 profile document or the espalier node types (clown and cutting-garden

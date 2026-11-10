@@ -20,6 +20,8 @@ piggy - PIV smart-card backed password store and agent
 
 *piggy act canon* [_FILE_]
 
+*piggy act verify* *--anchors* _FILE_ [*--store* _DIR_|*--store-stdin*] [*--store-is-revocation-source*] [*--at* _TIME_] [*--format* _text_|_json_] [*--act* _DIGEST_|_PATH_|_FILE_]
+
 *piggy act verify* *--seal-only* [_FILE_]
 
 *piggy act digest* [*--sha256*] [_FILE_]
@@ -610,26 +612,81 @@ commands:
 	_value_ or _body_. *canon* does not check the signature, the
 	namespace-and-kind pairing or the chain.
 
-	Exit status, for every *act* verb: *0* done; *1* refused (for
-	*verify*, the act is invalid); *2* usage error; *3* an input could not
-	be read or an output written.
+	Exit status, for every *act* verb but *verify* and *seal*: *0* done;
+	*1* refused; *2* usage error; *3* an input could not be read or an
+	output written.
 
 	```
 	piggy act canon < grant.act > grant.canonical
 	```
 
+*act verify* *--anchors* _FILE_ [*--store* _DIR_|*--store-stdin*] [*--store-is-revocation-source*] [*--at* _TIME_] [*--format* _text_|_json_] [*--act* _DIGEST_|_PATH_|_FILE_]
+	Verify an act against its chain at a time (RFC 0013 §4, §5.2) and print
+	the verdict (§5.3): *valid*, *invalid* with the step of §5.2 that
+	failed and the act that failed it, or *undetermined* with the digests
+	that could not be resolved. The walk checks the seal, the namespace
+	and kind table, the chain edge up to a trust anchor, that a software
+	link or grant hands down no right its issuer was not certified (a
+	grant also counts the issuer's grants over the same _object_), the
+	acts it _names_, _not-before_ and the effective expiry, and
+	revocations. It computes the effective rights from the escalations and
+	narrows naming each act on the chain. Every _profile_ edge (a
+	*stencil*) and body (a *patch*) on the chain and on the escalations and
+	narrows applied is returned as given, in chain order. piggy never
+	evaluates a condition (*piggy-acts*(7)).
+
+	The act is _FILE_ (stdin when absent or _-_), or *--act*: a path, or
+	an act digest found in the store. *--anchors* is an allowed-signers
+	file (*ssh-keygen*(1) ALLOWED SIGNERS). Every key on it is a trust
+	anchor, whatever its principals and options; a card's slot-9C key goes
+	there. *--store* is a directory of sealed acts, every regular file in
+	it, as *act seal* writes them; files that are not sealed acts are
+	skipped. *--store-stdin* reads the store from stdin instead, as a JSON
+	object whose _acts_ member is an array of sealed acts as strings. It is
+	a test adapter and its shape is provisional. *--at* is the time T, spelled
+	_YYYY-MM-DDThh:mm:ssZ_, now when absent.
+
+	A store holds what the caller gave it, so without
+	*--store-is-revocation-source*, by which the caller asserts the store
+	holds every revocation there is, a chain that is otherwise good is
+	*undetermined*, never *valid* (§4.6). The verdict records which
+	(_revocation_source_: _asserted_ or _none_).
+
+	*--format* _text_ prints *valid* _DIGEST_, *invalid* _DIGEST_*: step*
+	_5.2.N_ [(_FAILED-ACT_)]*:* _reason_, or *undetermined* _DIGEST_*:*
+	_reason_ followed by one *unresolved* _DIGEST_ line per digest.
+	*--format* _json_ prints one _piggy-act-verdict-v1_ object (spinclass
+	FDR 0034), fields in this order: _schema_, _verdict_, _act_, _at_,
+	_revocation_source_; for a valid act also _kind_, _subject_, _object_,
+	_effective_expiry_ (null for a card annotating act with no
+	_not-after_), _assurance_, _chain_start_key_, _chain_ (digests from the
+	chain start down), _rights_ and _layers_ (for a certifying act or a
+	grant; each layer is _act_, _kind_, _role_ _stencil_ or _patch_, and
+	_profile_ or _body_), and _prefixed_ (the act's consumer fields, each
+	as a set); for an invalid one _failed_step_ (_5.2.1_ to _5.2.6_),
+	_failed_act_ and _reason_; for an undetermined one _unresolved_ and
+	_reason_.
+
+	The exit status is the verdict: *0* valid; *1* invalid; *2*
+	undetermined; *3* a usage or input error, with no verdict. Unlike
+	piggy's other verbs, *verify* does not use 2 for a usage error.
+
+	```
+	piggy act verify --act "$digest" --anchors signers --store acts/ --store-is-revocation-source --format json
+	```
+
 *act verify* *--seal-only* [_FILE_]
 	Check a sealed act's _signature_ under its _key_ over the canonical
 	form, with the _namespace_ and _hash_ the seal names (RFC 0013 §5.2
-	steps 1 and 2), and print *valid* and the act digest. Ed25519 and ECDSA
-	P-256 keys are accepted; a P-256 _key_ that is not a point on the curve
-	is refused as _value_, a signature that does not verify as
-	_signature_. A P-256 signature must be in low-S form: its twin
-	(_r_, _n_ - _s_) verifies under plain ECDSA, and since the act digest
-	covers the signature, admitting both would make two acts of one.
+	steps 1 and 2), and print *valid* and the act digest, with no chain
+	walk. Ed25519 and ECDSA P-256 keys are accepted; a P-256 _key_ that is
+	not a point on the curve is refused as _value_, a signature that does
+	not verify as _signature_. A P-256 signature must be in low-S form: its
+	twin (_r_, _n_ - _s_) verifies under plain ECDSA, and since the act
+	digest covers the signature, admitting both would make two acts of one.
 	*attach* normalizes what it is given, so an *ssh-keygen* signature
-	always seals. *--seal-only* is required: the chain walk (trust anchors,
-	_issuer-record_, rights, expiry, revocation) is not built yet.
+	always seals. Exit status *0* valid, *1* refused, *3* a usage or input
+	error.
 
 *act digest* [*--sha256*] [_FILE_]
 	Print a sealed act's digest (RFC 0013 §3.5): a
@@ -673,7 +730,8 @@ commands:
 	The signing key is the one the act's _key_ names, found among the
 	agent's keys by equality; a key the agent does not serve is refused
 	before any request. A card act (_piggy-certificate-v1_,
-	_piggy-escalation-v1_, _piggy-approval-v1_) is signed through the
+	_piggy-escalation-v1_, _piggy-approval-v1_; a card revocation's
+	_piggy-revocation-v1_ is not served by the agent yet) is signed through the
 	agent's operator-act extension, as *operator-sign* does, with the act's
 	canonical form as the text: the operator sees exactly the bytes that are
 	signed, and enters the PIN and touches the card. A software act
