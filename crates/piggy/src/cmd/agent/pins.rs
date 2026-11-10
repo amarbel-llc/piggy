@@ -14,11 +14,36 @@
 //!
 //! Pure data structure, no IO: the session decides when to verify, and
 //! the probe loop decides when a card is gone.
+//!
+//! Each PIN is held in a [`GuardedBytes`] (FDR 0006 phase (b), piggy#378):
+//! its own locked pages, out of core dumps, inaccessible between lookups.
+//! A lookup hands out a short-lived `Zeroizing` copy for one VERIFY. If a
+//! PIN cannot be put on guarded pages it is not cached at all, and the next
+//! op prompts again; that is logged as a warning.
 
 use std::collections::{HashMap, HashSet};
 
+use piggy_guard::GuardedBytes;
 use piggy_piv::Guid;
 use zeroize::Zeroizing;
+
+fn guard(pin: &str) -> Option<GuardedBytes> {
+    GuardedBytes::from_slice(pin.as_bytes())
+        .inspect_err(
+            |e| tracing::warn!(error = %e, "could not hold a PIN on guarded pages; not caching it"),
+        )
+        .ok()
+}
+
+fn copy_out(pin: &GuardedBytes) -> Option<Zeroizing<String>> {
+    pin.with(|bytes| {
+        Zeroizing::new(String::from(
+            std::str::from_utf8(bytes).expect("a cached PIN is stored from a &str"),
+        ))
+    })
+    .inspect_err(|e| tracing::warn!(error = %e, "could not read a cached PIN"))
+    .ok()
+}
 
 /// Where an [`PinCache::lookup`] hit came from; the caller caches a PIN
 /// into the per-card map only after an on-card verify succeeds, so a
@@ -34,9 +59,9 @@ pub enum PinSource {
 #[derive(Default)]
 pub struct PinCache {
     /// PINs that verified on-card, keyed by the card they verified on.
-    verified: HashMap<Guid, Zeroizing<String>>,
+    verified: HashMap<Guid, GuardedBytes>,
     /// The `ssh-add -X` PIN, not tied to a card until it verifies on one.
-    offered: Option<Zeroizing<String>>,
+    offered: Option<GuardedBytes>,
     /// Cards that rejected the current `offered` PIN — don't burn another
     /// retry re-offering it there.
     offered_rejected_by: HashSet<Guid>,
@@ -51,11 +76,11 @@ impl PinCache {
     /// else the offered one (unless this card already rejected it).
     pub fn lookup(&self, guid: &Guid) -> Option<(Zeroizing<String>, PinSource)> {
         if let Some(p) = self.verified.get(guid) {
-            return Some((p.clone(), PinSource::Verified));
+            return copy_out(p).map(|pin| (pin, PinSource::Verified));
         }
         match &self.offered {
             Some(p) if !self.offered_rejected_by.contains(guid) => {
-                Some((p.clone(), PinSource::Offered))
+                copy_out(p).map(|pin| (pin, PinSource::Offered))
             }
             _ => None,
         }
@@ -64,8 +89,14 @@ impl PinCache {
     /// Record that `pin` verified on `guid` (a prompted PIN, or a
     /// promoted offer).
     pub fn cache_verified(&mut self, guid: &Guid, pin: &str) {
-        self.verified
-            .insert(guid.clone(), Zeroizing::new(pin.to_string()));
+        match guard(pin) {
+            Some(guarded) => {
+                self.verified.insert(guid.clone(), guarded);
+            }
+            None => {
+                self.verified.remove(guid);
+            }
+        }
     }
 
     /// `guid` rejected the PIN it was just given (piggy#142 re-prompt
@@ -91,7 +122,7 @@ impl PinCache {
     /// `ssh-add -X <pin>`: offer `pin` to every card that has no verified
     /// PIN. Replaces a previous offer and forgets who rejected that one.
     pub fn offer(&mut self, pin: &str) {
-        self.offered = Some(Zeroizing::new(pin.to_string()));
+        self.offered = guard(pin);
         self.offered_rejected_by.clear();
     }
 
@@ -110,13 +141,29 @@ impl PinCache {
     /// Test accessor: the verified PIN for `guid`.
     #[cfg(test)]
     pub fn verified_for(&self, guid: &Guid) -> Option<String> {
-        self.verified.get(guid).map(|p| p.as_str().to_string())
+        self.verified
+            .get(guid)
+            .and_then(copy_out)
+            .map(|p| p.to_string())
     }
 
     /// Test accessor: the current `ssh-add -X` offer.
     #[cfg(test)]
     pub fn offered(&self) -> Option<String> {
-        self.offered.as_ref().map(|p| p.as_str().to_string())
+        self.offered
+            .as_ref()
+            .and_then(copy_out)
+            .map(|p| p.to_string())
+    }
+
+    /// Test accessor: what the kernel granted each held PIN.
+    #[cfg(test)]
+    fn protections(&self) -> Vec<piggy_guard::Protections> {
+        self.verified
+            .values()
+            .chain(&self.offered)
+            .map(GuardedBytes::protections)
+            .collect()
     }
 }
 
@@ -220,6 +267,29 @@ mod tests {
         // Nothing left for g(1): reports false (no-op) — the probe loop
         // uses this to decide whether to log "forgetting PIN".
         assert!(!c.forget_card(&g(1)));
+    }
+
+    /// Each held PIN is on its own guarded allocation: locked (where
+    /// RLIMIT_MEMLOCK allows), and out of core dumps on Linux. That a lock
+    /// grows VmLck by a page is piggy-guard's tests/locked_memory.rs.
+    #[test]
+    fn each_cached_pin_is_held_on_guarded_pages() {
+        let mut c = PinCache::new();
+        c.cache_verified(&g(1), "1111");
+        c.cache_verified(&g(2), "2222");
+        c.offer("9999");
+        let held = c.protections();
+        assert_eq!(held.len(), 3);
+        for p in &held {
+            assert_eq!(
+                p.excluded_from_core_dumps,
+                cfg!(target_os = "linux"),
+                "{p:?}"
+            );
+        }
+        if !held.iter().all(|p| p.locked) {
+            eprintln!("skipped the lock check: mlock was refused here (RLIMIT_MEMLOCK): {held:?}");
+        }
     }
 
     #[test]

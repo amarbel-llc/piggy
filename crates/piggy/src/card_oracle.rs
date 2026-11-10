@@ -337,12 +337,23 @@ fn prompt_on_tty(
     unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &saved) };
     let _ = writeln!(tty);
 
-    let line = read_result?;
-    let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
-    if trimmed.is_empty() {
+    let mut line = read_result?;
+    trim_line_end_in_place(&mut line);
+    if line.is_empty() {
         return Err(OracleError::Other("tty returned empty PIN".into()));
     }
-    Ok(Zeroizing::new(trimmed))
+    Ok(line)
+}
+
+/// Room for any PIN (and any askpass refusal reason) without the buffer
+/// growing, so a read never leaves a reallocated, unwiped copy behind
+/// (piggy#378).
+const PIN_READ_CAPACITY: usize = 256;
+
+/// Drop a trailing CR/LF without copying the PIN out of its buffer.
+fn trim_line_end_in_place(line: &mut String) {
+    let len = line.trim_end_matches(['\r', '\n']).len();
+    line.truncate(len);
 }
 
 /// Show a countdown for `hold`, then discard every byte typed meanwhile
@@ -369,8 +380,8 @@ fn hold_tty_input(tty: &mut std::fs::File, hold: Duration) -> std::io::Result<()
 }
 
 /// Read one `\n`-terminated line from the (already echo-suppressed) tty.
-fn read_tty_line(tty: &mut std::fs::File) -> Result<String, OracleError> {
-    let mut buf = Vec::new();
+fn read_tty_line(tty: &mut std::fs::File) -> Result<Zeroizing<String>, OracleError> {
+    let mut buf = Zeroizing::new(Vec::with_capacity(PIN_READ_CAPACITY));
     let mut byte = [0u8; 1];
     loop {
         match tty.read(&mut byte) {
@@ -381,7 +392,13 @@ fn read_tty_line(tty: &mut std::fs::File) -> Result<String, OracleError> {
             Err(e) => return Err(OracleError::Other(format!("read /dev/tty: {e}"))),
         }
     }
-    String::from_utf8(buf).map_err(|_| OracleError::Other("tty PIN was not valid UTF-8".into()))
+    match String::from_utf8(std::mem::take(&mut *buf)) {
+        Ok(line) => Ok(Zeroizing::new(line)),
+        Err(e) => {
+            drop(Zeroizing::new(e.into_bytes()));
+            Err(OracleError::Other("tty PIN was not valid UTF-8".into()))
+        }
+    }
 }
 
 /// Prompt for a PIN, routed per `SSH_ASKPASS_REQUIRE` (#166, see
@@ -446,7 +463,7 @@ pub fn run_askpass_of_kind(
         OracleError::Other(format!("spawn askpass {}: {e}", askpass.to_string_lossy()))
     })?;
 
-    let mut buf = String::new();
+    let mut buf = Zeroizing::new(String::with_capacity(PIN_READ_CAPACITY));
     if let Some(mut out) = child.stdout.take() {
         out.read_to_string(&mut buf)
             .map_err(|e| OracleError::Other(format!("read askpass stdout: {e}")))?;
@@ -463,11 +480,11 @@ pub fn run_askpass_of_kind(
     if !status.success() {
         return Err(OracleError::Other(format!("askpass exited with {status}")));
     }
-    let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
-    if trimmed.is_empty() {
+    trim_line_end_in_place(&mut buf);
+    if buf.is_empty() {
         return Err(OracleError::Other("askpass returned empty PIN".into()));
     }
-    Ok(Zeroizing::new(trimmed))
+    Ok(buf)
 }
 
 /// The program that shows the operator a desktop notice, called as

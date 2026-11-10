@@ -33,6 +33,9 @@ use std::sync::Mutex;
 
 use zeroize::Zeroize;
 
+mod process;
+pub use process::{ProcessHardening, core_limit, harden_process, is_dumpable};
+
 /// What the kernel granted one allocation, beyond the guard pages and the
 /// seal at rest, which every allocation has.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

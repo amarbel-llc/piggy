@@ -221,6 +221,42 @@ fn off_linux_the_advice_flags_are_reported_absent() {
     assert!(!p.excluded_from_core_dumps && !p.wiped_on_fork, "{p:?}");
 }
 
+/// In a child, so the test process keeps its own flags.
+#[test]
+fn harden_process_turns_off_core_dumps() {
+    let end = in_child(|| {
+        // in_child already zeroed the limit; raise it so the call has
+        // something to do (the hard limit may refuse, which is fine: zero
+        // is all that is checked).
+        let some = libc::rlimit {
+            rlim_cur: 4096,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        // SAFETY: setrlimit reads one rlimit the call borrows.
+        unsafe { libc::setrlimit(libc::RLIMIT_CORE, &some) };
+        // Likewise the flag in_child cleared. Nothing in this child faults.
+        #[cfg(target_os = "linux")]
+        // SAFETY: PR_SET_DUMPABLE takes one integer argument.
+        unsafe {
+            libc::prctl(libc::PR_SET_DUMPABLE, 1 as libc::c_ulong)
+        };
+        let hardening = harden_process();
+        let mut problems = 0;
+        if hardening.core_limit_zero.is_err() || core_limit() != Some(0) {
+            problems |= 1;
+        }
+        if cfg!(target_os = "linux") {
+            if !matches!(hardening.non_dumpable, Some(Ok(()))) || is_dumpable() != Some(false) {
+                problems |= 2;
+            }
+        } else if hardening.non_dumpable.is_some() || is_dumpable().is_some() {
+            problems |= 4;
+        }
+        problems
+    });
+    assert_eq!(end, ChildEnd::Exited(0));
+}
+
 #[test]
 fn debug_does_not_print_the_secret() {
     let g = GuardedBytes::from_slice(b"hunter2").unwrap();

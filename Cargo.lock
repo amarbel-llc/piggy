@@ -1363,6 +1363,7 @@ dependencies = [
  "p256",
  "pcsc",
  "piggy-box",
+ "piggy-guard",
  "piggy-ids",
  "piggy-markl",
  "piggy-pigpen",

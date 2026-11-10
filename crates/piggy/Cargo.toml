@@ -27,6 +27,9 @@ piggy-markl = { path = "../piggy-markl" }
 # parts for the TAP `# SKIP` decision. Transitive via piggy-box already;
 # the explicit entry makes the `piggy_ids::RecipientFile` use-site legal.
 piggy-ids = { path = "../piggy-ids" }
+# The agent's PIN cache keeps each PIN on guarded pages, and the agent
+# marks itself non-dumpable at start (FDR 0006 phase (b), piggy#378).
+piggy-guard = { path = "../piggy-guard" }
 # Direct dep so `pigpen_pointer::resolve_piggy_ids_path` can sniff a
 # `piggy-ids` path for a pigpen recipient-set/pointer face (RFC 0009 §3.2)
 # and convert a recipient-set document to RFC 0003 text. See piggy#216.

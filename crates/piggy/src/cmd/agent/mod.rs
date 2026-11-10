@@ -149,6 +149,25 @@ pub struct AgentArgs {
 /// (program name) and `args[1]` (`"agent"`). We rebuild the clap-facing argv
 /// with a synthetic program name so errors and `--help` display as
 /// `piggy agent` instead of `piggy`.
+/// FDR 0006 phase (b): the process that caches PINs is not dumpable and
+/// writes no core file. A step that fails is a warning, and the agent
+/// serves anyway, as C pivy-agent did when `mlockall` failed.
+fn harden_agent_process() {
+    let hardening = piggy_guard::harden_process();
+    if let Some(Err(e)) = &hardening.non_dumpable {
+        tracing::warn!(error = %e, "could not mark the agent non-dumpable");
+    }
+    if let Err(e) = &hardening.core_limit_zero {
+        tracing::warn!(error = %e, "could not set the agent's core size limit to zero");
+    }
+    tracing::debug!(
+        non_dumpable = ?hardening.non_dumpable.as_ref().map(Result::is_ok),
+        core_limit_zero = hardening.core_limit_zero.is_ok(),
+        dumpable = ?piggy_guard::is_dumpable(),
+        "process hardening"
+    );
+}
+
 pub fn run(full_argv: Vec<String>) -> i32 {
     let agent_argv: Vec<String> = std::iter::once("piggy agent".to_string())
         .chain(full_argv.into_iter().skip(2))
@@ -179,6 +198,7 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         _ => "piggy=trace",
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
+    harden_agent_process();
 
     let allowed_slots: Option<Vec<u8>> = match cli
         .slot_spec
