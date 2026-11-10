@@ -11,6 +11,8 @@ pub mod cli;
 mod fields;
 pub mod produce;
 pub mod seal;
+pub mod store;
+pub mod verify;
 
 use std::fmt;
 
@@ -349,6 +351,20 @@ impl Act {
             .filter_map(move |(n, v)| (n == name).then_some(v))
     }
 
+    /// The consumer's fields (§2, prefixed names), each with its values in
+    /// canonical order (parsed form).
+    pub fn prefixed_fields(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut out = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for (name, value) in &self.fields {
+            if fields::lookup(name).is_none() {
+                out.entry(name.clone())
+                    .or_default()
+                    .push(parsed_bytes(value));
+            }
+        }
+        out
+    }
+
     pub fn description(&self) -> Option<&str> {
         self.description.as_deref()
     }
@@ -579,5 +595,7 @@ impl Act {
     }
 }
 
+#[cfg(test)]
+mod chain_tests;
 #[cfg(test)]
 mod tests;
