@@ -32,7 +32,9 @@ use clap::{Parser, Subcommand};
 
 use super::produce::{SealError, check_before_signing, seal_act};
 use super::seal::{self, DigestFormat};
-use super::{Act, Refusal, parse};
+use super::store::{ActStore, MemoryStore};
+use super::verify::{self, Failure as VerifyFailure, Options, Outcome, Step, Unresolved, Verifier};
+use super::{Act, Refusal, fields, parse, verdict};
 use crate::operator_act::armor;
 
 #[derive(Parser, Debug)]
@@ -53,13 +55,37 @@ enum ActCommand {
         /// The act to read; stdin when absent or `-`.
         file: Option<PathBuf>,
     },
-    /// Check a sealed act's signature under its `key` (RFC 0013 §5.2 steps
-    /// 1 and 2); prints `valid <act digest>`.
+    /// Verify an act against its chain (RFC 0013 §5.2) and print the
+    /// verdict; with --seal-only, its signature alone (§5.2 steps 1 and 2).
+    /// The exit code is the verdict: 0 valid, 1 invalid, 2 undetermined, 3
+    /// a usage or input error with no verdict.
     Verify {
-        /// Check the seal only, with no chain walk. Required: the chain walk
-        /// is not built yet.
+        /// Check the seal only, with no chain walk; prints `valid <act
+        /// digest>`.
         #[arg(long)]
         seal_only: bool,
+        /// The act to verify, as a path or as an act digest found in the
+        /// store; instead of FILE.
+        #[arg(long, conflicts_with = "file")]
+        act: Option<String>,
+        /// The time T, YYYY-MM-DDThh:mm:ssZ; now when absent.
+        #[arg(long)]
+        at: Option<String>,
+        /// The trust anchors: an allowed-signers file naming the card keys.
+        #[arg(long, required_unless_present = "seal_only")]
+        anchors: Option<PathBuf>,
+        /// A directory of sealed acts.
+        #[arg(long, conflicts_with = "store_stdin")]
+        store: Option<PathBuf>,
+        /// A test adapter: the store as {"acts": ["<sealed act>", ...]} on
+        /// stdin (provisional).
+        #[arg(long)]
+        store_stdin: bool,
+        /// Assert that the store holds every revocation there is.
+        #[arg(long)]
+        store_is_revocation_source: bool,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
         /// The act to read; stdin when absent or `-`.
         file: Option<PathBuf>,
     },
@@ -105,9 +131,21 @@ enum ActCommand {
     },
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum Format {
+    Text,
+    /// One `piggy-act-verdict-v1` JSON object.
+    Json,
+}
+
 const EXIT_REFUSED: i32 = 1;
 const EXIT_USAGE: i32 = 2;
 const EXIT_INPUT: i32 = 3;
+
+/// `piggy act verify`'s exit code is the verdict, so its usage and input
+/// errors are 3, not piggy's usual 2.
+const EXIT_UNDETERMINED: i32 = 2;
+const EXIT_VERIFY_USAGE: i32 = 3;
 
 struct Failure {
     exit: i32,
@@ -137,7 +175,12 @@ pub fn run(args: &[String]) -> i32 {
     ) {
         Ok(cli) => cli,
         Err(e) => {
-            let code = if e.use_stderr() { EXIT_USAGE } else { 0 };
+            let usage = if args.first().map(String::as_str) == Some("verify") {
+                EXIT_VERIFY_USAGE
+            } else {
+                EXIT_USAGE
+            };
+            let code = if e.use_stderr() { usage } else { 0 };
             let _ = e.print();
             return code;
         }
@@ -145,7 +188,47 @@ pub fn run(args: &[String]) -> i32 {
 
     let (verb, result) = match cli.cmd {
         ActCommand::Canon { file } => ("canon", read_act(file.as_deref()).map(|a| a.canonical())),
-        ActCommand::Verify { seal_only, file } => ("verify", verify(seal_only, file.as_deref())),
+        ActCommand::Verify {
+            seal_only: true,
+            file,
+            act,
+            ..
+        } => {
+            let file = act.map(PathBuf::from).or(file);
+            (
+                "verify",
+                verify_seal_only(file.as_deref()).map_err(|f| Failure {
+                    exit: if f.exit == EXIT_REFUSED {
+                        EXIT_REFUSED
+                    } else {
+                        EXIT_VERIFY_USAGE
+                    },
+                    ..f
+                }),
+            )
+        }
+        ActCommand::Verify {
+            seal_only: false,
+            act,
+            at,
+            anchors,
+            store,
+            store_stdin,
+            store_is_revocation_source,
+            format,
+            file,
+        } => {
+            return verify_chain(VerifyArgs {
+                act,
+                file,
+                at,
+                anchors: anchors.expect("clap requires --anchors"),
+                store,
+                store_stdin,
+                revocation_source: store_is_revocation_source,
+                format,
+            });
+        }
         ActCommand::Digest { sha256, file } => ("digest", digest(sha256, file.as_deref())),
         ActCommand::Detach { signature, file } => ("detach", detach(&signature, file.as_deref())),
         ActCommand::Attach { signature, file } => ("attach", attach(&signature, file.as_deref())),
@@ -176,19 +259,206 @@ fn read_act(file: Option<&Path>) -> Result<Act, Failure> {
     Ok(parse(&input)?)
 }
 
-fn verify(seal_only: bool, file: Option<&Path>) -> Result<Vec<u8>, Failure> {
-    if !seal_only {
-        return Err(Failure {
-            exit: EXIT_USAGE,
-            message: "only --seal-only is built: the chain walk (RFC 0013 §5.2 steps 3 to 6) \
-                      comes later"
-                .into(),
-        });
-    }
+fn verify_seal_only(file: Option<&Path>) -> Result<Vec<u8>, Failure> {
     let act = read_act(file)?;
     seal::verify_seal(&act)?;
     let digest = sealed_digest(&act, DigestFormat::Blake2b256)?;
     Ok(format!("valid {digest}\n").into_bytes())
+}
+
+struct VerifyArgs {
+    act: Option<String>,
+    file: Option<PathBuf>,
+    at: Option<String>,
+    anchors: PathBuf,
+    store: Option<PathBuf>,
+    store_stdin: bool,
+    revocation_source: bool,
+    format: Format,
+}
+
+/// The full `piggy act verify` (RFC 0013 §5.2, §5.3); returns the exit code.
+fn verify_chain(args: VerifyArgs) -> i32 {
+    let usage = |message: String| {
+        eprintln!("piggy act verify: {message}");
+        EXIT_VERIFY_USAGE
+    };
+
+    let at = match args.at {
+        Some(at) if fields::is_timestamp(&at) => at,
+        Some(at) => return usage(format!("--at {at:?} is not spelled YYYY-MM-DDThh:mm:ssZ")),
+        None => verify::now(),
+    };
+    let anchors = match load_anchors(&args.anchors) {
+        Ok(anchors) => anchors,
+        Err(message) => return usage(message),
+    };
+
+    let store = if args.store_stdin {
+        let reads_stdin = match (&args.act, &args.file) {
+            (Some(_), _) => false,
+            (None, Some(f)) => f.as_os_str() == "-",
+            (None, None) => true,
+        };
+        if reads_stdin {
+            return usage("--store-stdin needs the act from --act or FILE, not stdin".into());
+        }
+        match read_input(None).and_then(|bytes| MemoryStore::from_json(&bytes)) {
+            Ok(store) => store,
+            Err(message) => return usage(message),
+        }
+    } else if let Some(dir) = &args.store {
+        match MemoryStore::from_dir(dir) {
+            Ok(store) => store,
+            Err(e) => return usage(format!("reading the store {}: {e}", dir.display())),
+        }
+    } else {
+        MemoryStore::new()
+    };
+
+    // The act: a digest in the store, or a document.
+    let (digest, outcome) = match &args.act {
+        Some(digest) if digest.starts_with("piggy-record-digest-v1@") => match store.get(digest) {
+            Some(stored) => {
+                let outcome = Verifier::new(
+                    store,
+                    Options {
+                        at: at.clone(),
+                        anchors,
+                        revocation_source: args.revocation_source,
+                    },
+                )
+                .verify(&stored.act);
+                (Some(stored.digest), outcome)
+            }
+            None => (
+                Some(digest.clone()),
+                Outcome::Undetermined(Unresolved {
+                    digests: vec![digest.clone()],
+                    reason: "the act is not in the store".into(),
+                }),
+            ),
+        },
+        _ => {
+            let path = args.act.as_ref().map(PathBuf::from).or(args.file);
+            let input = match read_input(path.as_deref()) {
+                Ok(input) => input,
+                Err(message) => return usage(message),
+            };
+            match parse(&input) {
+                Err(refusal) => (
+                    None,
+                    Outcome::Invalid(VerifyFailure {
+                        step: Step::Parse,
+                        act: String::new(),
+                        reason: refusal.to_string(),
+                    }),
+                ),
+                Ok(act) => {
+                    let digest = seal::act_digest(&act, DigestFormat::Blake2b256);
+                    let outcome = Verifier::new(
+                        store,
+                        Options {
+                            at: at.clone(),
+                            anchors,
+                            revocation_source: args.revocation_source,
+                        },
+                    )
+                    .verify(&act);
+                    (digest, outcome)
+                }
+            }
+        }
+    };
+
+    let output = match args.format {
+        Format::Json => verdict::to_json(&outcome, digest.as_deref(), &at, args.revocation_source),
+        Format::Text => verdict_text(&outcome, digest.as_deref()),
+    };
+    let mut stdout = std::io::stdout().lock();
+    if stdout
+        .write_all(output.as_bytes())
+        .and_then(|()| stdout.flush())
+        .is_err()
+    {
+        return EXIT_VERIFY_USAGE;
+    }
+
+    match outcome {
+        Outcome::Valid(_) => 0,
+        Outcome::Invalid(_) => EXIT_REFUSED,
+        Outcome::Undetermined(_) => EXIT_UNDETERMINED,
+    }
+}
+
+fn verdict_text(outcome: &Outcome, digest: Option<&str>) -> String {
+    let act = digest.unwrap_or("-");
+    match outcome {
+        Outcome::Valid(_) => format!("valid {act}\n"),
+        Outcome::Invalid(f) => {
+            let failed = if f.act.is_empty() || f.act == act {
+                String::new()
+            } else {
+                format!(" ({})", f.act)
+            };
+            format!(
+                "invalid {act}: step {}{failed}: {}\n",
+                f.step.as_str(),
+                f.reason
+            )
+        }
+        Outcome::Undetermined(u) => {
+            let mut out = format!("undetermined {act}: {}\n", u.reason);
+            for d in &u.digests {
+                out.push_str(&format!("unresolved {d}\n"));
+            }
+            out
+        }
+    }
+}
+
+/// The trust anchors (§5.1) from an allowed-signers file (ssh-keygen(1)
+/// ALLOWED SIGNERS): every key on a line, whatever its principals and
+/// options, spelled as a card act's `key`. A bare OpenSSH public key line or
+/// a `piggy-piv_sig-v1@…` line counts too.
+fn load_anchors(path: &Path) -> Result<std::collections::BTreeSet<String>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("reading the anchors {}: {e}", path.display()))?;
+    let mut anchors = std::collections::BTreeSet::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("piggy-piv_sig-v1@") {
+            anchors.insert(line.to_owned());
+            continue;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let Some(at) = tokens
+            .iter()
+            .position(|t| matches!(*t, "ssh-ed25519" | "ecdsa-sha2-nistp256"))
+        else {
+            return Err(format!(
+                "{}:{}: no ssh-ed25519 or ecdsa-sha2-nistp256 key",
+                path.display(),
+                n + 1
+            ));
+        };
+        let key = tokens[at..]
+            .iter()
+            .take(2)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        anchors.insert(
+            seal::key_id(&key, true).map_err(|e| format!("{}:{}: {e}", path.display(), n + 1))?,
+        );
+    }
+    if anchors.is_empty() {
+        return Err(format!("{} names no trust anchor", path.display()));
+    }
+    Ok(anchors)
 }
 
 fn digest(sha256: bool, file: Option<&Path>) -> Result<Vec<u8>, Failure> {

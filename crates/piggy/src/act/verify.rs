@@ -134,7 +134,7 @@ pub struct Unresolved {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    Valid(Valid),
+    Valid(Box<Valid>),
     Invalid(Failure),
     Undetermined(Unresolved),
 }
@@ -280,13 +280,13 @@ impl<S: ActStore> Verifier<S> {
         };
 
         let outcome = match self.memoized(&stored.digest) {
-            Some(valid) => Outcome::Valid(valid),
+            Some(valid) => Outcome::Valid(Box::new(valid)),
             None => {
                 let outcome = self.eval(&stored, &mut Vec::new());
                 if let Outcome::Valid(valid) = &outcome {
                     self.memo.borrow_mut().insert(
                         stored.digest.clone(),
-                        (self.options.at.clone(), valid.clone()),
+                        (self.options.at.clone(), (**valid).clone()),
                     );
                 }
                 outcome
@@ -401,7 +401,7 @@ impl<S: ActStore> Verifier<S> {
                 }
             }
         };
-        let parent: Option<&Valid> = parent.as_ref().and_then(Option::as_ref);
+        let parent: Option<&Valid> = parent.as_ref().and_then(Option::as_deref);
 
         let mut pending: Vec<String> = Vec::new();
         let mut layers: Vec<Layer> = parent.map(|p| p.layers.clone()).unwrap_or_default();
@@ -538,7 +538,7 @@ impl<S: ActStore> Verifier<S> {
         }
 
         // Step 7.
-        Outcome::Valid(Valid {
+        Outcome::Valid(Box::new(Valid {
             act: x.digest.clone(),
             kind: kind.to_owned(),
             subject: a.text("subject").map(str::to_owned),
@@ -551,7 +551,7 @@ impl<S: ActStore> Verifier<S> {
             certified,
             layers,
             prefixed: a.prefixed_fields(),
-        })
+        }))
     }
 
     /// §5.1: the act's `key` is one the verifier trusts as a root signer.
@@ -805,7 +805,7 @@ impl<S: ActStore> Verifier<S> {
             && a.text("not-before").is_none_or(|nb| nb <= at)
             && lineage.expiry.as_deref().is_none_or(|e| e > at);
         if holds {
-            Outcome::Valid(Valid {
+            Outcome::Valid(Box::new(Valid {
                 act: n.digest.clone(),
                 kind: a.kind().to_owned(),
                 subject: None,
@@ -818,7 +818,7 @@ impl<S: ActStore> Verifier<S> {
                 certified: None,
                 layers: Vec::new(),
                 prefixed: BTreeMap::new(),
-            })
+            }))
         } else {
             invalid(Step::Annotations, n, "fails steps 2, 3 or §4.5")
         }

@@ -195,6 +195,8 @@ function the_digest_covers_the_signature { # @test
   assert_output --regexp '^piggy-record-digest-v1@sha256-'
 }
 
-function verify_without_seal_only_is_a_usage_error { # @test
-  run -2 "$PIGGY" act verify /dev/null
+function verify_without_anchors_is_a_usage_error { # @test
+  # The chain walk needs trust anchors. `piggy act verify`'s exit code is
+  # the verdict (2 is undetermined), so its usage errors are 3.
+  run -3 "$PIGGY" act verify /dev/null
 }

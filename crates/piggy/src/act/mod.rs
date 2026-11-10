@@ -12,6 +12,7 @@ mod fields;
 pub mod produce;
 pub mod seal;
 pub mod store;
+pub mod verdict;
 pub mod verify;
 
 use std::fmt;

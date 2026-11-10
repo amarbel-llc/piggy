@@ -330,7 +330,7 @@ pub fn spells_bare(text: &str) -> bool {
 
 /// RFC 0013 §2's one RFC 3339 spelling: `YYYY-MM-DDThh:mm:ssZ`, with every
 /// field in range.
-fn is_timestamp(t: &str) -> bool {
+pub(super) fn is_timestamp(t: &str) -> bool {
     let b = t.as_bytes();
     if b.len() != 20 {
         return false;
