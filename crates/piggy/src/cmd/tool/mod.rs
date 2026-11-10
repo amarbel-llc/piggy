@@ -1705,7 +1705,10 @@ fn list_json_for_token(token: &PivToken) -> Result<String, piggy_piv::PivError> 
         s.push_str(&format!(",\"subject\":\"{}\"", escape_qstr(&subject)));
         s.push_str(&format!(",\"issuer\":\"{}\"", escape_qstr(&issuer)));
         s.push_str(&format!(",\"cert_serial\":\"{serial}\""));
-        s.push_str(&format!(",\"pubkey\":\"{}\"", slot.ssh_public_key_string()));
+        s.push_str(&format!(
+            ",\"pubkey\":\"{}\"",
+            slot.ssh_public_key_string()?
+        ));
         s.push('}');
     }
     s.push('}');

@@ -46,6 +46,7 @@ fn read_slots_from_token() {
                 slot.id(),
                 slot.algorithm(),
                 slot.ssh_public_key_string()
+                    .expect("encode slot public key")
             );
         }
     }

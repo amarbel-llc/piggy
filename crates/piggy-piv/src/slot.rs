@@ -52,8 +52,12 @@ impl PivSlot {
         &self.public_key
     }
 
-    pub fn ssh_public_key_string(&self) -> String {
-        self.public_key.to_openssh().unwrap_or_default()
+    /// The slot's public key as an OpenSSH `authorized_keys` line. A
+    /// serialization failure is an error, never a blank key.
+    pub fn ssh_public_key_string(&self) -> Result<String, crate::error::PivError> {
+        self.public_key
+            .to_openssh()
+            .map_err(|e| crate::error::PivError::Crypto(format!("encode slot public key: {e}")))
     }
 
     pub fn cert_der(&self) -> &[u8] {
