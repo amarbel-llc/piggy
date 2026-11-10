@@ -328,30 +328,7 @@ impl PivToken {
         if !sw.is_success() {
             return Err(PivError::SlotEmpty(slot_id));
         }
-
-        // Response wrapped in tag 0x53
-        let mut reader = TlvReader::new(&data);
-        let outer_tag = reader.read_tag()?;
-        if outer_tag != 0x53 {
-            return Err(PivError::Tlv {
-                message: format!("expected cert outer tag 0x53, got {:#X}", outer_tag),
-            });
-        }
-        let inner = reader.read_value()?;
-
-        // Parse inner TLV: tag 0x70 = certificate, tag 0x71 = cert info
-        let mut inner_reader = TlvReader::new(inner);
-        let mut cert_der: Option<Vec<u8>> = None;
-        while inner_reader.has_remaining() {
-            let tag = inner_reader.read_tag()?;
-            let value = inner_reader.read_value()?;
-            if tag == 0x70 {
-                cert_der = Some(value.to_vec());
-            }
-            // tag 0x71 = certinfo, tag 0xFE = error detection code -- skip
-        }
-
-        let cert_der = cert_der.ok_or(PivError::SlotEmpty(slot_id))?;
+        let cert_der = piv_cert_object_der(&data)?.ok_or(PivError::SlotEmpty(slot_id))?;
         let (algorithm, public_key) = cert::extract_public_key(&cert_der)?;
         Ok(PivSlot::new(slot_id, algorithm, cert_der, public_key))
     }
@@ -683,24 +660,7 @@ impl<'tok> PinSession<'tok> {
         if !sw.is_success() {
             return Err(PivError::SlotEmpty(slot_id));
         }
-        let mut reader = TlvReader::new(&data);
-        let outer_tag = reader.read_tag()?;
-        if outer_tag != 0x53 {
-            return Err(PivError::Tlv {
-                message: format!("expected cert outer tag 0x53, got {:#X}", outer_tag),
-            });
-        }
-        let inner = reader.read_value()?;
-        let mut inner_reader = TlvReader::new(inner);
-        let mut cert_der: Option<Vec<u8>> = None;
-        while inner_reader.has_remaining() {
-            let tag = inner_reader.read_tag()?;
-            let value = inner_reader.read_value()?;
-            if tag == 0x70 {
-                cert_der = Some(value.to_vec());
-            }
-        }
-        let cert_der = cert_der.ok_or(PivError::SlotEmpty(slot_id))?;
+        let cert_der = piv_cert_object_der(&data)?.ok_or(PivError::SlotEmpty(slot_id))?;
         let (algorithm, public_key) = cert::extract_public_key(&cert_der)?;
         Ok(PivSlot::new(slot_id, algorithm, cert_der, public_key))
     }
@@ -803,7 +763,7 @@ fn transmit_on(link: &dyn RawApdu, apdu: &Apdu) -> Result<(Vec<u8>, StatusWord),
 /// in a PIV data object (0x53 { 0x70 = cert }). Both are handled.
 fn attestation_cert_der(data: Vec<u8>) -> Vec<u8> {
     if data.first().copied() == Some(0x53) {
-        if let Ok(cert_der) = unwrap_piv_cert_object(&data) {
+        if let Ok(Some(cert_der)) = piv_cert_object_der(&data) {
             return cert_der;
         }
     }
@@ -825,27 +785,28 @@ impl PinSession<'_> {
     }
 }
 
-/// Try to unwrap a PIV data object (0x53 { 0x70 = cert_der }).
-fn unwrap_piv_cert_object(data: &[u8]) -> Result<Vec<u8>, PivError> {
+/// The cert DER inside a PIV cert data object `0x53 { 0x70 cert, 0x71
+/// certinfo, 0xFE error-detection }`. Every inner TLV is parsed; the last
+/// `0x70` wins. `Ok(None)` when the object holds no `0x70`; an outer tag
+/// other than `0x53` or a malformed TLV is an error.
+fn piv_cert_object_der(data: &[u8]) -> Result<Option<Vec<u8>>, PivError> {
     let mut reader = TlvReader::new(data);
-    let tag = reader.read_tag()?;
-    if tag != 0x53 {
+    let outer_tag = reader.read_tag()?;
+    if outer_tag != 0x53 {
         return Err(PivError::Tlv {
-            message: "not a PIV data object".into(),
+            message: format!("expected cert outer tag 0x53, got {:#X}", outer_tag),
         });
     }
-    let inner = reader.read_value()?;
-    let mut inner_reader = TlvReader::new(inner);
+    let mut inner_reader = TlvReader::new(reader.read_value()?);
+    let mut cert_der = None;
     while inner_reader.has_remaining() {
         let tag = inner_reader.read_tag()?;
         let value = inner_reader.read_value()?;
         if tag == 0x70 {
-            return Ok(value.to_vec());
+            cert_der = Some(value.to_vec());
         }
     }
-    Err(PivError::Tlv {
-        message: "cert tag (0x70) not found in data object".into(),
-    })
+    Ok(cert_der)
 }
 
 /// Validate that `peer_ec_point` is an uncompressed SEC1 point whose size
@@ -936,6 +897,25 @@ impl PivContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn piv_cert_object_der_takes_the_70_and_skips_71_and_fe() {
+        let obj = [
+            0x53, 0x09, 0x70, 0x02, 0x30, 0x00, 0x71, 0x01, 0x00, 0xFE, 0x00,
+        ];
+        assert_eq!(piv_cert_object_der(&obj).unwrap(), Some(vec![0x30, 0x00]));
+    }
+
+    #[test]
+    fn piv_cert_object_der_without_a_70_is_none() {
+        let obj = [0x53, 0x03, 0x71, 0x01, 0x00];
+        assert_eq!(piv_cert_object_der(&obj).unwrap(), None);
+    }
+
+    #[test]
+    fn piv_cert_object_der_refuses_another_outer_tag() {
+        assert!(piv_cert_object_der(&[0x30, 0x00]).is_err());
+    }
 
     fn sw(sw1: u8, sw2: u8) -> StatusWord {
         StatusWord::from_bytes(sw1, sw2)
