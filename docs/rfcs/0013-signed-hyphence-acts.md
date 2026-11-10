@@ -1,6 +1,6 @@
 ---
 status: proposed
-date: 2026-11-09
+date: 2026-11-10
 ---
 
 # Signed Hyphence Acts: the `piggy-act-v1` document and its certificate chain (piggy normative)
@@ -23,6 +23,16 @@ date: 2026-11-09
 > was ruled the same day: keep the full head and judge the prompt live
 > first; the consolidation is the recorded fallback (Limitations, Tuning
 > Levers). The mechanism's plain-words explanation is `piggy-acts(7)`.
+>
+> **Amended 2026-11-10** on the operator's rulings on the three Limitations
+> the acceptance pass left open: a software `revocation` may be signed by
+> the key that signed the revoked act or by any ancestor key on that act's
+> chain (§4.6); a card `revocation` has its own namespace and display
+> class, `piggy-revocation-v1` (§4.8; RFC 0012's fourth amendment, code as
+> piggy#377); a self-narrow is lifted only by an escalation that names it,
+> kept as written and watched as a Tuning Lever. The status stays
+> `proposed` until the body grammar (cutting-garden FDR 0028) settles; the
+> acceptance pass is otherwise complete.
 
 ## Abstract
 
@@ -302,7 +312,7 @@ valid encoding and so one name.
 | `narrow` | annotating | the subject's own key only (`issuer = subject`) | shrinks the effective rights of each act in `names` (all of which MUST have this `subject`) to their intersection with this `right` set |
 | `escalation` | annotating | the card | sets the effective rights of the one certifying act or `grant` in `names` whose `subject` is this act's `subject` to this `right` set, which MAY exceed anything in the chain; `names` MAY also hold earlier `escalation` and `narrow` acts on that act, which it supersedes; SHOULD list the request in `records` |
 | `approval` | annotating | the card | records a decision that confers no right; MUST list the decision in `records` |
-| `revocation` | annotating | the card, or the key that signed the revoked act | ends the validity of every act in `names` and of every certifying act below a revoked certifying act |
+| `revocation` | annotating | the card; or, for a software act, the key that signed the revoked act or any ancestor key on that act's chain (§4.6) | ends the validity of every act in `names` and of every certifying act below a revoked certifying act |
 
 **Card acts have no `issuer-record`.** The card's key is the trust anchor
 (§5.1), not a certified key, so a card act's chain edge is the anchor
@@ -389,9 +399,18 @@ needs re-signing unless its own `not-after` has passed.
 #### 4.6. Revocation
 
 A `revocation` is an act and is valid under §4.5. It revokes each act in
-`names` from the moment a verifier learns of it. A software `revocation`
-MUST be signed by the same `key` that signed each act it names; a card
-`revocation` MAY name any act. A revoked certifying act invalidates every
+`names` from the moment a verifier learns of it. A card `revocation` MAY
+name any act. A software `revocation` MUST be signed, for each act it
+names, by the `key` that signed that act or by an **ancestor key** of it:
+the `subject-key` of any certifying act on the path the named act's
+`issuer-record` starts (that act, its issuer's certifying act, and so on
+to the chain start). A verifier MUST refuse a software revocation whose
+`key` is neither, for any act it names. A card act has no ancestor key but
+the card. (R 2026-11-10: the signer, any ancestor, or the card; the
+operator chose reach over ceremony, since a revocation only removes.)
+Revoking is not parentage: an act keeps its one `issuer-record` edge, and
+a revocation, like an escalation, hangs off the act it names. A revoked
+certifying act invalidates every
 certifying act whose chain passes through it and every annotating act
 whose `issuer-record` resolves through it. A `revocation` MUST NOT be
 named by another `revocation`: revocations are final. Where verifiers
@@ -417,12 +436,17 @@ MUST be allowed for it:
 
 | `namespace` | Signer | `issuer` | Allowed `kind` |
 |---|---|---|---|
-| `piggy-certificate-v1` | card | `operator` | `root`, `link`, `revocation` |
+| `piggy-certificate-v1` | card | `operator` | `root`, `link` |
 | `piggy-escalation-v1` | card | `operator` | `escalation`, `grant` |
 | `piggy-approval-v1` | card | `operator` | `approval` |
+| `piggy-revocation-v1` | card | `operator` | `revocation` |
 | `piggy-record-v1` | a principal's own key, ordinary sign request | a principal | `link`, `grant`, `narrow`, `revocation` |
 
-`piggy-quote-v1` carries no act (a quote is a retrieval, RFC 0012 §3). A
+A card `revocation` has its own namespace and display class so the prompt
+says that something is being cancelled, also when it cancels an
+`escalation` or an `approval` (R 2026-11-10; RFC 0012's fourth amendment
+registers `piggy-revocation-v1`). `piggy-quote-v1` carries no act (a quote
+is a retrieval, RFC 0012 §3). A
 verifier MUST refuse any pairing this table does not list, an `issuer` the
 row does not allow, and an `assurance` inconsistent with the row (§4.7).
 This table replaces the per-namespace text shapes of RFC 0012 §3 for every
@@ -808,8 +832,8 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 | §4.3, effective rights | `act_chain.bats` | an `escalation` naming a `link` replaces its set; a `narrow` intersects it whatever the issue order; two unsuperseded escalations on one act make it invalid; an escalation naming the narrow lifts it |
 | §4.1, §5.2 step 6, `names` and `records` | `act_chain.bats` | an escalation whose `names` entry is not an act, or has another subject, is refused; an unresolvable `names` entry answers undetermined; a `records` entry is never resolved |
 | §4.5, effective expiry | `act_chain.bats` | a child whose root has expired is invalid; a child with no `not-after` inherits the root's |
-| §4.6, revocation | `act_chain.bats` | an act below a revoked `link` is invalid; a software revocation by a different key is refused; a revocation naming a revocation is refused |
-| §4.7, §4.8, namespace, kind, issuer, assurance | `act_refusals.bats` | an `escalation` under `piggy-record-v1`, a `narrow` under a card namespace, `piggy:hardware` on a software act, are refused |
+| §4.6, revocation | `act_chain.bats` | an act below a revoked `link` is invalid; a software revocation by a key that is neither the signer nor an ancestor on the named act's chain is refused, and one by the parent's key is accepted; a revocation naming a revocation is refused |
+| §4.7, §4.8, namespace, kind, issuer, assurance | `act_refusals.bats` | an `escalation` under `piggy-record-v1`, a `narrow` under a card namespace, a `revocation` under `piggy-certificate-v1`, `piggy:hardware` on a software act, are refused |
 | §5.3, undetermined | `act_chain.bats` | an unresolvable `issuer-record` and an unreachable revocation source answer undetermined, never valid |
 | §6, the prompt shows the whole head | `operator_act_prompt.bats` | the test askpass receives every head line verbatim in canonical order |
 | §4.9, the body is signed verbatim and returned opaque | `act_body.bats` | an act with a body verifies; one byte changed in the body fails; the verdict returns the `profile` edge and body bytes unchanged; a body with a C0 control character is refused |
@@ -834,6 +858,11 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
     of RFC 0012's scope; this RFC defines the grammar for acts only.
   - §4's note that the carrier of a record's signature is the consumer's
     decision stands for records that are not acts.
+  - Already made, 2026-11-10 (the fourth amendment): §2.6 and §3 gain a
+    fifth display class, `revocation`, with the namespace
+    `piggy-revocation-v1`, which §4.8 here requires of a card `revocation`;
+    the agent, the askpass dialogs and the conformance rows follow as
+    piggy#377.
 - **RFC 0011** gains the purpose of §8 by amendment to its §6.1.
 - **RFC 0008 (pigpen)** carries its header MAC in the type-line lock, which
   the operator's ruling disallows for signatures. A MAC is not a
@@ -884,17 +913,21 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
   to compress (a profile right instead of a list).
 - **piggy does not distribute.** Where acts, revocations and trust
   anchors are stored and found is the consumers'.
-- **Who may revoke.** This draft lets the signing key revoke what it
-  signed without the card. The operator may want revocation to be the
-  card's alone.
-- **Banner for card revocations.** A card `revocation` is signed under
-  `piggy-certificate-v1` and so appears under the `certificate` banner,
-  also when it revokes an `escalation` or `approval`. A distinct class
-  would need an RFC 0012 amendment; flagged for the operator.
-- **A narrow outlives a later escalation unless named.** By §4.3 step 4,
-  a self-narrow keeps cutting until the card names it in an escalation.
-  Deliberate (the card always wins, but has to say so); flagged for the
-  operator.
+- **Who may revoke** (R 2026-11-10): the card, the key that signed the
+  act, or any ancestor key on the act's chain (§4.6). The two software
+  cases need no touch; the operator chose reach over ceremony because a
+  revocation only removes. The draft had allowed the signer alone.
+- **Banner for card revocations** (R 2026-11-10): a card `revocation` has
+  its own class and namespace, `piggy-revocation-v1` (§4.8), so the prompt
+  says that something is being cancelled; RFC 0012's fourth amendment
+  registers it and the agent, the askpass dialogs and the conformance rows
+  follow as piggy#377. The draft had signed it under
+  `piggy-certificate-v1`.
+- **A narrow outlives a later escalation unless named** (R 2026-11-10):
+  kept as §4.3 step 4 states it; the card always wins but has to say
+  which promise it lifts. The operator expects toil at escalation
+  boundaries (naming narrows at every escalation, or children re-narrowing
+  after each one) and asked that it be watched: a Tuning Lever below.
 
 ## Tuning Levers
 
@@ -905,6 +938,7 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 | derivable head fields written out | all six present (`issuer`, `issuer-key`, `namespace`, `hash`, `assurance`, `issued-at`) | the operator sees the whole signed text and nothing is derived behind the prompt; judged live first (R 2026-11-09) | the operator reports skimming or crowding at the prompt; then drop them per Limitations |
 | time precision | seconds, UTC | enough for expiry; no sub-second clocks across hosts | a consumer needs finer |
 | memoization | until effective expiry or an annotating act on the chain is learned | verifiers are called often | a revocation is observed to be missed |
+| a narrow is lifted only by an escalation that names it | §4.3 step 4 as written (R 2026-11-10) | the card always wins, but says at the prompt which promise it lifts | toil at escalation boundaries: the operator naming narrows at every escalation, or children re-narrowing after each one; the operator expects this and asked that it be watched |
 | digest format emitted | `blake2b256` | matches the record purposes' existing use | a consumer needs sha256 only |
 
 ## References

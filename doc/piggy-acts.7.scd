@@ -15,10 +15,10 @@ hand down less.
 
 This page explains how acts combine, without the formal language. The
 normative text is RFC 0013 (*docs/rfcs/0013-signed-hyphence-acts.md*).
-The wire protocol the card uses to sign one is RFC 0012. As of this
-page's writing (2026-11-09) RFC 0013 is *proposed* and nothing described
-here is built; the reference verifier (*piggy act verify*) does not exist
-yet.
+The wire protocol the card uses to sign one is RFC 0012. As of 2026-11-10
+RFC 0013 is *proposed*: the document, its seal and the producer (*piggy
+act seal*, *piggy*(1)) are built; the chain walk (*piggy act verify*
+beyond *--seal-only*) is not yet (piggy#361).
 
 # THE CHAIN
 
@@ -35,7 +35,9 @@ needs the card for any of this, because none of it adds anything.
 Adding is the card's alone. An *escalation* gives one session more than
 its chain allows, for a bounded time. An *approval* records that the
 operator saw a decision and said yes; it confers no right. A *revocation*
-cancels an act and everything under it.
+cancels an act and everything under it. The card may revoke anything, at
+its own prompt; a session may revoke, without the card, an act it signed
+or any act below it on its chain, because cancelling only takes away.
 
 The rule under all of it: *rights move down, never up, without the card.*
 

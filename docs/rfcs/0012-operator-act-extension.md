@@ -11,8 +11,17 @@ approval-note: >
   the operator's tty, including a local posh attach, is a privileged
   channel. Implementations conform to this text; the conformance suite
   lands with FDR 0006 phase (a) (piggy#303).
-amended: 2026-11-08
+amended: 2026-11-10
 amendment-note: >
+  Fourth amendment, 2026-11-10 (operator ruling in the RFC 0013
+  acceptance pass, item 2): §2.6 and §3 gain a fifth display class,
+  `revocation`, with the namespace `piggy-revocation-v1`, for a card act
+  that cancels earlier acts (RFC 0013 §4.6, §4.8); previously a card
+  revocation was signed under `piggy-certificate-v1` and shown under the
+  certificate banner. Docs first: the agent, the askpass dialogs and the
+  conformance rows follow as piggy#377. An agent built before it answers
+  `refused-namespace`, which is what an older agent does, not conformance
+  to this text.
   2026-10-23 (piggy#332, circus EPIC 0001 D1/D4): the `piggy-escalation-v1`
   text shape names the record the act signs, which is a grant, a profile
   transition or an escalation request record, per the new §3.1 table;
@@ -226,12 +235,14 @@ grant, "a record by the card over the request's digest", is the model.
 
 The card agent MUST present, on the same prompt that collects the PIN:
 
-- the act's **display class** (§3: `quote`, `escalation`, `certificate`
-  or `approval`), rendered so that the prompt is visibly different from
-  a routine PIN prompt, an `escalation` is visibly different from a
-  `quote`, and an `approval` is visibly different from an `escalation`
-  (it grants nothing, and its prompt MUST NOT use the escalation
-  banner's words);
+- the act's **display class** (§3: `quote`, `escalation`, `certificate`,
+  `approval` or `revocation`), rendered so that the prompt is visibly
+  different from a routine PIN prompt, an `escalation` is visibly
+  different from a `quote`, an `approval` is visibly different from an
+  `escalation` (it grants nothing, and its prompt MUST NOT use the
+  escalation banner's words), and a `revocation` is visibly different
+  from a `certificate` (it cancels, and its prompt MUST say so in its
+  banner);
 - the card identity and slot (as `piggy health` names them);
 - the `namespace`;
 - the `text`, verbatim.
@@ -354,6 +365,7 @@ the agent does not check but a verifier of that act kind MUST.
 | `piggy-escalation-v1`     | `operator-act@piggy`  | `escalation`  | An escalation grant (FDR 0032 D11). The text MUST name the record the act signs by markl-id (`piggy-record-digest-v1@…`), which is one of the kinds in §3.1, and state in words what that kind's row says. A first grant to a grantee that holds no rights yet is an escalation too, as is a widening of an existing grant; the namespace does not tell the two apart, so a verifier that needs to know reads it from the named record, or from the text when the requesting system has the text say so. |
 | `piggy-certificate-v1`    | `operator-act@piggy`  | `certificate` | A card-signed certificate or enrollment (FDR 0032 D2 root certificate, D15 enrollment blessing). The text MUST name the certified public key and the certificate request record by markl-id. |
 | `piggy-approval-v1`       | `operator-act@piggy`  | `approval`    | A decision that grants no right (registered 2026-11-08 on the operator's ruling; asked by barker FDR 0001 P2): an acknowledgement such as a deadman ack, a deploy or release approval, a go or no-go. The text MUST name the decision record by markl-id (`piggy-record-digest-v1@…`) and state in words what is decided, what it applies to (the deploy, the host, the run) and its bound (a time, or one run). The decision record's grammar and canonical bytes are the requesting system's (circus for deploys and acks, barker for acts sent from the phone), as §3.1's kinds are their owners'. A verifier MUST NOT accept an approval where a grant, a profile transition or an escalation request is expected (§3.1). Served by agents from piggy#355 on (piggy FDR 0007 item I2); an older agent answers `refused-namespace`. |
+| `piggy-revocation-v1`     | `operator-act@piggy`  | `revocation`  | A card act that cancels earlier acts (registered 2026-11-10 on the operator's ruling in the RFC 0013 acceptance pass). The text is a `piggy-act-v1` document of kind `revocation` (RFC 0013 §4.6, §4.8): its `names` set is what is cancelled, each by act digest, and the prompt shows the whole head. A verifier MUST NOT accept a revocation where a certificate, an escalation or an approval is expected, and MUST NOT accept a card `revocation` under any other namespace. Served by agents from piggy#377 on; an older agent answers `refused-namespace`. |
 | `piggy-record-v1`         | ordinary sign request | none          | A signed record (FDR 0032 D8) signed by a principal's own key through `ssh-keygen -Y sign -n piggy-record-v1` or an equivalent agent sign request; the message is the record's canonical bytes as troupe's RFC defines them. Not an operator act. |
 
 `operator-act@piggy` MUST refuse (`refused-namespace`) any namespace not
@@ -526,7 +538,7 @@ Code's own JSONL under a harness-generated uuid, and that the
 merkle-stable transcript identity belongs to FDR 0032 D8 / slice 2 in
 troupe's transcript seam. Until a resolvable stanza id exists, a
 `piggy-quote-v1` text cannot be formed, and operator acts use the
-`escalation`, `certificate` and `approval` classes only.
+`escalation`, `certificate`, `approval` and `revocation` classes only.
 
 **The display surface is privileged.** §2.6 states the requirement:
 nothing in an agent scope may write to what the operator reads the
@@ -615,6 +627,7 @@ Tests use binary injection via `bats-emo`:
 | §2.8, proxy forwards unchanged, never prompts | `operator_act_proxy.bats` | a `--proxy-only` front relays request and response byte-for-byte; the prompt fires in the card agent only |
 | §3, namespace registry | `operator_act_refusals.bats` | `git`, `file`, `piggy-record-v1` and an unregistered name yield `refused-namespace` |
 | §2.6 and §3, the `approval` class | `operator_act_prompt.bats`, `piggy_askpass.bats` | the prompt carries `PIGGY_ASKPASS_KIND=approval` and a banner distinct from the escalation banner |
+| §2.6 and §3, the `revocation` class | `operator_act_prompt.bats`, `piggy_askpass.bats` | the prompt carries `PIGGY_ASKPASS_KIND=revocation` and a banner distinct from the certificate banner (rows land with piggy#377) |
 | §5, attestation bundle shape | `attestation_bundle.bats` | the export has exactly the five parts in order and the three key spellings agree |
 
 ## Compatibility
