@@ -1117,7 +1117,9 @@ $ piggy pass git push
 	per line, described in *piggy-ids*(5). Sub-directories may contain their
 	own _piggy-ids_; passwords inside them are encrypted to the nearest one
 	above them. Create it with *piggy pass init* and change it with *piggy
-	pass recipients*.
+	pass recipients*. A directory holding only a piggy 1.x _.pivy-id_
+	template is refused with an error naming it; a _piggy-ids_ beside it
+	takes precedence.
 
 # ENVIRONMENT VARIABLES
 

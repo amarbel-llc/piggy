@@ -224,8 +224,8 @@ pub(crate) fn sneaky_path_reason(path: &str) -> Option<&'static str> {
 }
 
 /// Walk up from `root/subfolder` toward `root`, returning the first
-/// directory that contains a `piggy-ids` file. Mirrors
-/// `find_piggy_ids` in piggy.sh.
+/// directory that contains a `piggy-ids` file. A directory on the way
+/// that holds only a piggy 1.x `.pivy-id` template is refused (piggy#76).
 ///
 /// `subfolder` is empty for top-level recipients commands. The walk
 /// short-circuits at `root` regardless of whether `root/piggy-ids`
@@ -242,6 +242,15 @@ pub(crate) fn find_piggy_ids(root: &Path, subfolder: &str) -> Result<PathBuf, St
         let candidate = current.join("piggy-ids");
         if candidate.is_file() {
             return Ok(candidate);
+        }
+        let legacy = current.join(".pivy-id");
+        if legacy.is_file() {
+            return Err(format!(
+                "{} is a piggy 1.x .pivy-id template, which is no longer read; \
+                 write a piggy-ids beside it with `piggy pass init -k <markl-id>` \
+                 (piggy-ids(5))",
+                legacy.display()
+            ));
         }
         if current == root {
             break;
@@ -555,6 +564,26 @@ mod tests {
         std::fs::write(tmp.join("a/piggy-ids"), b"inner").unwrap();
         let got = find_piggy_ids(&tmp, "a/b").unwrap();
         assert_eq!(got, tmp.join("a/piggy-ids"));
+    }
+
+    #[test]
+    fn find_piggy_ids_refuses_a_legacy_pivy_id() {
+        let tmp = tempdir();
+        std::fs::create_dir_all(tmp.join("a")).unwrap();
+        std::fs::write(tmp.join("piggy-ids"), b"outer").unwrap();
+        std::fs::write(tmp.join("a/.pivy-id"), b"legacy").unwrap();
+        let err = find_piggy_ids(&tmp, "a").unwrap_err();
+        assert!(err.contains("a/.pivy-id"), "got: {err}");
+        assert!(err.contains("piggy-ids"), "got: {err}");
+        assert!(!err.contains('\n'), "got: {err}");
+    }
+
+    #[test]
+    fn find_piggy_ids_prefers_piggy_ids_over_a_leftover_pivy_id() {
+        let tmp = tempdir();
+        std::fs::write(tmp.join("piggy-ids"), b"x").unwrap();
+        std::fs::write(tmp.join(".pivy-id"), b"legacy").unwrap();
+        assert_eq!(find_piggy_ids(&tmp, "").unwrap(), tmp.join("piggy-ids"));
     }
 
     #[test]
