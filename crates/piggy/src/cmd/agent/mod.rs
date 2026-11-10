@@ -305,11 +305,36 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         }
     };
 
-    match rt.block_on(run_async(cli, cached_keys, config, upstream_pool)) {
-        Ok(()) => 0,
+    let code = match rt.block_on(run_async(cli, cached_keys, config, upstream_pool)) {
+        Ok(code) => code,
         Err(e) => {
             eprintln!("piggy agent: {}", e);
             1
+        }
+    };
+    // Exiting through here, not std::process::exit inside the runtime, lets the
+    // dropped tasks run their destructors. Card work already in a blocking
+    // thread (a PinSession's reset on drop) gets a short grace to finish.
+    rt.shutdown_timeout(RUNTIME_SHUTDOWN_GRACE);
+    code
+}
+
+/// How long a stopping agent waits for card work in blocking threads.
+const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Resolves on SIGINT or SIGTERM (`systemctl stop`, launchd). Falls back
+/// to SIGINT alone when the SIGTERM handler cannot be installed.
+async fn shutdown_signal() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut sigterm) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        Err(e) => {
+            tracing::warn!("cannot install SIGTERM handler: {e}");
+            tokio::signal::ctrl_c().await.ok();
         }
     }
 }
@@ -423,7 +448,7 @@ async fn run_async(
     cached_keys: Vec<CachedKey>,
     config: KeyLoadConfig,
     upstream_pool: Option<UpstreamPool>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<i32, Box<dyn std::error::Error>> {
     let use_csh = wants_csh_output(&cli);
     // Determine socket path
     let socket_path = match cli.socket {
@@ -585,7 +610,7 @@ async fn run_async(
         agent_handle.abort();
         let _ = std::fs::remove_file(&socket_path);
 
-        std::process::exit(status.code().unwrap_or(1));
+        return Ok(status.code().unwrap_or(1));
     }
 
     // Clean up the socket on exit — on SIGINT (interactive ^C) AND on
@@ -594,29 +619,12 @@ async fn run_async(
     // EADDRINUSEd unless a launcher unlinked it first; the agent now owns
     // its own stale-socket cleanup (the ssh-agent-mux#8 parity piggy#215
     // asked for).
-    let socket_path_clone = socket_path.clone();
-    tokio::spawn(async move {
-        let mut sigterm =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("cannot install SIGTERM handler: {e}");
-                    tokio::signal::ctrl_c().await.ok();
-                    let _ = std::fs::remove_file(&socket_path_clone);
-                    std::process::exit(0);
-                }
-            };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
-        }
-        let _ = std::fs::remove_file(&socket_path_clone);
-        std::process::exit(0);
-    });
-
-    listen(listener, agent).await?;
-
-    Ok(())
+    tokio::select! {
+        res = listen(listener, agent) => res?,
+        () = shutdown_signal() => {}
+    }
+    let _ = std::fs::remove_file(&socket_path);
+    Ok(0)
 }
 
 /// Bind the agent socket, reclaiming a *stale* socket file first: a
