@@ -26,7 +26,7 @@ teardown() {
 function prompt_kind_is_the_namespaces_display_class { # @test
   operator_act_stack_up
   local pair namespace class
-  for pair in piggy-quote-v1=quote piggy-escalation-v1=escalation piggy-certificate-v1=certificate piggy-approval-v1=approval; do
+  for pair in piggy-quote-v1=quote piggy-escalation-v1=escalation piggy-certificate-v1=certificate piggy-approval-v1=approval piggy-revocation-v1=revocation; do
     namespace=${pair%%=*}
     class=${pair##*=}
     : >"$AGENT_LOG"

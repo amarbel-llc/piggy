@@ -80,7 +80,7 @@
 #
 # Operator acts (RFC 0012 §2.6): when the agent is about to sign an
 # operator act it sets PIGGY_ASKPASS_KIND to the act's display class
-# (quote, escalation, certificate or approval) and puts the namespace and the exact
+# (quote, escalation, certificate, approval or revocation) and puts the namespace and the exact
 # text being signed in PIGGY_ASKPASS_CONTEXT. Each class then gets its own
 # banner, window title, confirm button and dialog, so the prompt cannot be
 # mistaken for a routine PIN prompt, nor an escalation for a quote. Every
@@ -94,6 +94,8 @@
 #                On a tty the word is asked for on a line of its own.
 #   approval     green band, ✔; one PIN field; button "Approve". It grants
 #                no right, and its words never echo the escalation's.
+#   revocation   purple band, ✖; one PIN field; button "Revoke". It cancels
+#                earlier acts, and its words never echo the certificate's.
 #
 # The dialogs are piggy-askpass-gtk's (on Linux the nix wrapper puts it on
 # PATH), which also shows the routine PIN prompt; see gtk_operator_act
@@ -191,6 +193,17 @@ class_approval() {
   class_band_foreground="#ffffff"
 }
 
+# A card act that cancels earlier acts (RFC 0012 §2.6). Deliberately worded
+# unlike the certificate it may be cancelling.
+class_revocation() {
+  class_banner="=== OPERATOR ACT: REVOCATION — you are cancelling earlier acts ==="
+  class_title="piggy operator act: REVOCATION (cancels earlier acts)"
+  class_ok_label="Revoke"
+  class_band="✖  REVOCATION — cancelling earlier acts"
+  class_band_background="#613583"
+  class_band_foreground="#ffffff"
+}
+
 class_banner=""
 class_title="piggy PIV PIN"
 class_ok_label=""
@@ -200,7 +213,7 @@ class_band_foreground=""
 default_timeout=30
 case "$kind" in
   "") ;;
-  quote | escalation | certificate | approval)
+  quote | escalation | certificate | approval | revocation)
     "class_$kind"
     default_timeout=120
     ;;

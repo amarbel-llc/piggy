@@ -65,7 +65,8 @@ fn failure(exit: Exit) -> impl Fn(String) -> Failure {
 )]
 struct OperatorSignCli {
     /// The sshsig namespace: piggy-quote-v1, piggy-escalation-v1,
-    /// piggy-certificate-v1 or piggy-approval-v1. It selects how the agent
+    /// piggy-certificate-v1, piggy-approval-v1 or piggy-revocation-v1. It
+    /// selects how the agent
     /// presents the prompt.
     #[arg(long)]
     namespace: String,

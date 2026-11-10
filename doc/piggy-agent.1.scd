@@ -240,7 +240,8 @@ namespace; the agent, and only the agent, makes the signature:
 
 . It refuses, before any prompt, a request that is malformed, a namespace
   other than *piggy-quote-v1*, *piggy-escalation-v1*,
-  *piggy-certificate-v1* or *piggy-approval-v1*, and a text that cannot be shown whole (not UTF-8,
+  *piggy-certificate-v1*, *piggy-approval-v1* or *piggy-revocation-v1*, and
+  a text that cannot be shown whole (not UTF-8,
   empty, over 4096 bytes, or holding a control character other than newline
   and tab).
 . It asks the card to attest the slot's key, and refuses unless the
@@ -249,8 +250,9 @@ namespace; the agent, and only the agent, makes the signature:
   every request; nothing configured stands in for it. A key that was
   imported, or that a card cannot attest, is refused.
 . It asks for the PIN on a prompt that shows the act: its class (quote,
-  escalation, certificate or approval, the last for a decision that grants
-  no right), the card and slot, the namespace, and the
+  escalation, certificate, approval for a decision that grants no right, or
+  revocation for an act that cancels earlier acts), the card and slot, the
+  namespace, and the
   text, verbatim. The PIN is asked for every act and is never taken from,
   or put in, the agent's PIN cache. *PIGGY_ASKPASS_KIND* carries the class
   to the askpass program so each class gets its own dialog.
@@ -330,8 +332,9 @@ when the agent inherited a frozen *systemd --user* environment, and
 refuses rather than guessing. For an operator act it reads the class from
 *PIGGY_ASKPASS_KIND* and gives each its own banner, window title, button and
 dialog, which opens with a band in the class's colour carrying its symbol
-(escalation red, certificate amber, quote blue, approval green); an
-approval's banner says it grants no right; an escalation also
+(escalation red, certificate amber, quote blue, approval green, revocation
+purple); an approval's banner says it grants no right, a revocation's that
+it cancels earlier acts; an escalation also
 requires the word ESCALATE to be typed, and then a click on its button.
 On Linux every dialog, the routine PIN prompt included, is
 *piggy-askpass-gtk*, which the packaged helper finds on its *PATH*; with

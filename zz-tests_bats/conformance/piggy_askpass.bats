@@ -836,7 +836,7 @@ refute_zenity_argv_has() {
 
 @test "kind_banners_differ_per_class_and_a_routine_prompt_has_none" {
   local class
-  for class in quote escalation certificate approval; do
+  for class in quote escalation certificate approval revocation; do
     PIGGY_ASKPASS_KIND="$class" run "$ASKPASS" "Enter PIV PIN"
     assert_success
     assert_output --partial "OPERATOR ACT: ${class^^}"
@@ -893,7 +893,7 @@ TRICKY_TEXT='grant <b>bold</b> & more; id ecdsa_p256_sig; path a\nb'
 # reason on stdout for the agent to report.
 @test "operator_acts_are_refused_on_zenity_before_any_dialog" {
   local class
-  for class in quote certificate escalation approval; do
+  for class in quote certificate escalation approval revocation; do
     run_askpass_against_logging_zenity_stub PIGGY_ASKPASS_KIND="$class"
 
     assert_failure 3
@@ -956,7 +956,7 @@ tall_act_text() {
 
 @test "tall_operator_act_text_is_refused_before_any_dialog_with_the_limit_named" {
   local class
-  for class in quote certificate escalation approval; do
+  for class in quote certificate escalation approval revocation; do
     run_askpass_against_logging_zenity_stub \
       PIGGY_ASKPASS_KIND="$class" PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
 
@@ -1038,7 +1038,7 @@ helper_option() {
 
 @test "operator_acts_use_the_gtk_helper_with_their_class_and_never_zenity" {
   local class title
-  for class in quote certificate escalation approval; do
+  for class in quote certificate escalation approval revocation; do
     run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND="$class"
 
     assert_success
@@ -1047,6 +1047,7 @@ helper_option() {
     title="piggy operator act: ${class^^}"
     [[ $class == escalation ]] && title+=" (grants authority)"
     [[ $class == approval ]] && title+=" (grants no right)"
+    [[ $class == revocation ]] && title+=" (cancels earlier acts)"
     assert_equal "$(helper_option --title)" "$title"
     assert_equal "$(helper_option --timeout)" 120
     [[ $(helper_option --band-background) == '#'?????? ]]
@@ -1086,6 +1087,32 @@ helper_option() {
     cat "$HELPER_ARGV"
     return 1
   fi
+}
+
+# piggy#377 (RFC 0012 §2.6): a revocation cancels, and its dialog must say
+# so and never read as the certificate it may be cancelling.
+@test "a_revocation_dialog_says_it_cancels_and_never_reads_as_a_certificate" {
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=revocation
+  assert_success
+  assert_equal "$(helper_option --ok-label)" "Revoke"
+  assert_equal "$(helper_option --band)" "✖  REVOCATION — cancelling earlier acts"
+  [[ $(helper_option --band-background) != "#e5a50a" ]]
+  if grep -qxF -- --confirm-word "$HELPER_ARGV"; then
+    echo "a revocation asked for the escalation's typed word"
+    return 1
+  fi
+  if grep -qiE -- 'CERTIF' "$HELPER_ARGV"; then
+    echo "a revocation's dialog reused the certificate's words; got:"
+    cat "$HELPER_ARGV"
+    return 1
+  fi
+}
+
+@test "a_revocation_banner_says_it_cancels" {
+  PIGGY_ASKPASS_KIND=revocation run "$ASKPASS" "Enter PIV PIN"
+  assert_success
+  assert_output --partial "OPERATOR ACT: REVOCATION — you are cancelling earlier acts"
+  refute_output --partial "CERTIFICATE"
 }
 
 @test "an_approval_banner_says_it_grants_no_right" {

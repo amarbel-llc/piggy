@@ -5,10 +5,9 @@
 # built from throwaway ssh-keygen keys: an ECDSA P-256 key stands in for the
 # card (its slot-9C key is a P-256 key, and the walk trusts it only because
 # the anchors file names it), Ed25519 keys are the principals. Card acts are
-# signed by `ssh-keygen -Y sign` under the card namespace, which is how a
-# card `revocation` under piggy-revocation-v1 is built before the agent
-# serves that namespace (#377). No card, no agent, no PIN, so no askpass
-# safety net is needed.
+# signed by `ssh-keygen -Y sign` under the card namespace: the walk checks
+# the seal, not which agent made it. No card, no agent, no PIN, so no
+# askpass safety net is needed.
 
 bats_require_minimum_version 1.5.0
 

@@ -30,6 +30,9 @@ pub enum DisplayClass {
     /// A decision that grants no right (an acknowledgement, a deploy
     /// approval); deliberately not an escalation.
     Approval,
+    /// A card act that cancels earlier acts; shown so it cannot read as the
+    /// certificate it may be cancelling.
+    Revocation,
 }
 
 impl DisplayClass {
@@ -40,6 +43,7 @@ impl DisplayClass {
             Self::Escalation => "escalation",
             Self::Certificate => "certificate",
             Self::Approval => "approval",
+            Self::Revocation => "revocation",
         }
     }
 }
@@ -54,16 +58,18 @@ pub fn display_class(namespace: &str) -> Option<DisplayClass> {
         "piggy-escalation-v1" => Some(DisplayClass::Escalation),
         "piggy-certificate-v1" => Some(DisplayClass::Certificate),
         "piggy-approval-v1" => Some(DisplayClass::Approval),
+        "piggy-revocation-v1" => Some(DisplayClass::Revocation),
         _ => None,
     }
 }
 
 /// The namespaces [`display_class`] accepts, for help text.
-pub const NAMESPACES: [&str; 4] = [
+pub const NAMESPACES: [&str; 5] = [
     "piggy-quote-v1",
     "piggy-escalation-v1",
     "piggy-certificate-v1",
     "piggy-approval-v1",
+    "piggy-revocation-v1",
 ];
 
 /// The digest an sshsig is made over (RFC 0012 §2.1).
@@ -550,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_four_act_namespaces_have_a_display_class() {
+    fn only_the_five_act_namespaces_have_a_display_class() {
         assert_eq!(display_class("piggy-quote-v1"), Some(DisplayClass::Quote));
         assert_eq!(
             display_class("piggy-escalation-v1"),
@@ -565,6 +571,12 @@ mod tests {
             Some(DisplayClass::Approval)
         );
         assert_eq!(DisplayClass::Approval.as_str(), "approval");
+        assert_eq!(
+            display_class("piggy-revocation-v1"),
+            Some(DisplayClass::Revocation)
+        );
+        assert_eq!(DisplayClass::Revocation.as_str(), "revocation");
+        assert_eq!(NAMESPACES.len(), 5);
         for refused in [
             "git",
             "file",
@@ -734,6 +746,17 @@ mod tests {
         assert_eq!(
             context,
             "operator act: approval\ncard 5da19c98, slot 9C\nnamespace piggy-approval-v1\n\napprove deploy of piggy 0.1.24"
+        );
+        let context = prompt_context(
+            DisplayClass::Revocation,
+            "5da19c98",
+            0x9C,
+            "piggy-revocation-v1",
+            "cancel act X",
+        );
+        assert_eq!(
+            context,
+            "operator act: revocation\ncard 5da19c98, slot 9C\nnamespace piggy-revocation-v1\n\ncancel act X"
         );
     }
 }

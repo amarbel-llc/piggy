@@ -552,8 +552,9 @@ commands:
 	command works unchanged over a forwarded agent socket or through a
 	*piggy agent --proxy-only* front: the prompt appears where the card is.
 
-	*--namespace* is one of *piggy-quote-v1*, *piggy-escalation-v1* or
-	*piggy-certificate-v1*. It is part of what is signed, and it selects
+	*--namespace* is one of *piggy-quote-v1*, *piggy-escalation-v1*,
+	*piggy-certificate-v1*, *piggy-approval-v1* or *piggy-revocation-v1*.
+	It is part of what is signed, and it selects
 	how the prompt presents the act, so an escalation cannot be obtained
 	behind a prompt that looked like a quote. Any other namespace is
 	refused.
@@ -730,8 +731,8 @@ commands:
 	The signing key is the one the act's _key_ names, found among the
 	agent's keys by equality; a key the agent does not serve is refused
 	before any request. A card act (_piggy-certificate-v1_,
-	_piggy-escalation-v1_, _piggy-approval-v1_; a card revocation's
-	_piggy-revocation-v1_ is not served by the agent yet) is signed through the
+	_piggy-escalation-v1_, _piggy-approval-v1_, _piggy-revocation-v1_) is
+	signed through the
 	agent's operator-act extension, as *operator-sign* does, with the act's
 	canonical form as the text: the operator sees exactly the bytes that are
 	signed, and enters the PIN and touches the card. A software act

@@ -35,8 +35,9 @@ _assert_no_prompt() {
 function unregistered_namespaces_are_refused_before_any_prompt { # @test
   operator_act_stack_up
   local namespace
-  # piggy-approval-v1 is registered (piggy#355); its near misses are not.
-  for namespace in git file email piggy-record-v1 piggy-escalation-v2 escalation piggy-approval-v2 approval ""; do
+  # piggy-approval-v1 (piggy#355) and piggy-revocation-v1 (piggy#377) are
+  # registered; their near misses are not.
+  for namespace in git file email piggy-record-v1 piggy-escalation-v2 escalation piggy-approval-v2 approval piggy-revocation-v2 revocation ""; do
     operator_act_probe "$AGENT_SOCK" --slot 9C --namespace "$namespace"
     assert_probe_status 3 "refused-namespace for '$namespace'"
   done
