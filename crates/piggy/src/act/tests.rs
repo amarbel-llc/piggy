@@ -238,6 +238,29 @@ fn issuer_binding_needs_issuer_key_to_be_key_and_a_narrow_signed_by_its_subject(
     }
 }
 
+/// §4.8 as amended 2026-11-10: a card revocation has its own namespace, and
+/// `piggy-certificate-v1` no longer carries one.
+#[test]
+fn a_card_revocation_is_under_piggy_revocation_v1_only() {
+    let revocation = text(&approval().canonical())
+        .replace("- kind = approval", "- kind = revocation")
+        .replace("- records = ", "- names = ");
+    let under = |namespace: &str| {
+        let doc = revocation.replace(
+            "- namespace = piggy-approval-v1",
+            &format!("- namespace = {namespace}"),
+        );
+        parse(doc.as_bytes())
+            .unwrap()
+            .check_namespace_pairing()
+            .map_err(|r| r.rule)
+    };
+
+    assert_eq!(under("piggy-revocation-v1"), Ok(()));
+    assert_eq!(under("piggy-certificate-v1"), Err(Rule::NamespacePairing));
+    assert!(is_card_namespace("piggy-revocation-v1"));
+}
+
 #[test]
 fn canon_does_not_apply_the_pairing() {
     let doc = text(&approval().canonical()).replace("- kind = approval", "- kind = escalation");

@@ -70,6 +70,7 @@ const NAMESPACES: &[&str] = &[
     "piggy-escalation-v1",
     "piggy-certificate-v1",
     "piggy-approval-v1",
+    "piggy-revocation-v1",
     "piggy-record-v1",
 ];
 
@@ -139,7 +140,10 @@ pub fn is_prefixed(name: &str) -> bool {
 /// Whether the seal's namespace is one signed through `operator-act@piggy`
 /// (a card act) rather than an ordinary sign request.
 pub fn is_card_namespace(namespace: &str) -> bool {
-    display_class(namespace).is_some()
+    // TODO(#377): piggy-revocation-v1 joins operator_act::display_class when
+    // the agent serves it; until then only the act layer knows it is a card
+    // namespace, so a card revocation verifies but cannot yet be signed.
+    display_class(namespace).is_some() || namespace == "piggy-revocation-v1"
 }
 
 /// A value's parsed (unquoted) form, the bytes a set sorts and dedups on

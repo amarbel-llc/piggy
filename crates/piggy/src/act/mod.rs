@@ -539,9 +539,10 @@ impl Act {
         let kind = self.kind();
 
         let (card, kinds): (bool, &[&str]) = match namespace {
-            "piggy-certificate-v1" => (true, &["root", "link", "revocation"]),
+            "piggy-certificate-v1" => (true, &["root", "link"]),
             "piggy-escalation-v1" => (true, &["escalation", "grant"]),
             "piggy-approval-v1" => (true, &["approval"]),
+            "piggy-revocation-v1" => (true, &["revocation"]),
             "piggy-record-v1" => (false, &["link", "grant", "narrow", "revocation"]),
             other => {
                 return refuse(
