@@ -131,7 +131,24 @@ impl TlvWriter {
         Self { buf: Vec::new() }
     }
 
+    /// Longest value BER-TLV's 3-byte long-form length (`83 LL LL LL`) can
+    /// carry. PIV values are bounded far below it: an extended APDU carries
+    /// at most 64 KiB.
+    pub const MAX_VALUE_LEN: usize = 0xFF_FFFF;
+
+    /// Append `tag`, the BER length of `value`, and `value`.
+    ///
+    /// # Panics
+    ///
+    /// If `value` is longer than [`Self::MAX_VALUE_LEN`]. That is a caller
+    /// bug, not card input: every caller builds the value itself.
     pub fn write_tag_value(&mut self, tag: u32, value: &[u8]) {
+        assert!(
+            value.len() <= Self::MAX_VALUE_LEN,
+            "TLV value of {} bytes exceeds the {}-byte BER length limit",
+            value.len(),
+            Self::MAX_VALUE_LEN
+        );
         self.write_tag(tag);
         self.write_length(value.len());
         self.buf.extend_from_slice(value);
@@ -159,13 +176,12 @@ impl TlvWriter {
             self.buf.push(0x82);
             self.buf.push((len >> 8) as u8);
             self.buf.push((len & 0xFF) as u8);
-        } else if len < 0x1000000 {
+        } else {
+            // write_tag_value asserted len <= MAX_VALUE_LEN.
             self.buf.push(0x83);
             self.buf.push((len >> 16) as u8);
             self.buf.push(((len >> 8) & 0xFF) as u8);
             self.buf.push((len & 0xFF) as u8);
-        } else {
-            panic!("TLV length too large: {}", len);
         }
     }
 

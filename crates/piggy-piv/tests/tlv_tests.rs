@@ -143,6 +143,21 @@ fn encode_three_byte_length() {
 }
 
 #[test]
+fn encode_four_byte_length_at_the_limit() {
+    let value = vec![0x00; TlvWriter::MAX_VALUE_LEN];
+    let mut writer = TlvWriter::new();
+    writer.write_tag_value(0x53, &value);
+    assert_eq!(&writer.as_bytes()[..5], &[0x53, 0x83, 0xFF, 0xFF, 0xFF]);
+}
+
+#[test]
+#[should_panic(expected = "exceeds")]
+fn encode_past_the_limit_panics_at_the_entry_point() {
+    let value = vec![0x00; TlvWriter::MAX_VALUE_LEN + 1];
+    TlvWriter::new().write_tag_value(0x53, &value);
+}
+
+#[test]
 fn encode_multi_byte_tag() {
     let mut writer = TlvWriter::new();
     writer.write_tag_value(0x5F2F, &[0xAB, 0xCD]);
