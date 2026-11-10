@@ -1680,15 +1680,18 @@ fn ec_public_key_from_point(
     EcKey::from_public_key(&group, &ec_point).map_err(|e| format!("ec key: {e}"))
 }
 
-/// Encode (r, s) as SSH mpint-pair for ECDSA signature blob.
-/// SSH ECDSA signature blob = string(r as mpint) || string(s as mpint)
+/// Frame (r, s) as the SSH ECDSA signature blob `string(r) || string(s)`:
+/// each a u32 big-endian length then the bytes as given, with no mpint
+/// normalization. The callers pass the INTEGER bodies
+/// `ecdsa_sig::decode_der_ecdsa_signature` read from the card's DER. A
+/// minimal DER INTEGER body for a positive value is byte-identical to an SSH
+/// mpint body (RFC 4251 §5), so the blob is well-formed when the card's DER
+/// is minimal. The decoder does not check minimality.
 fn encode_ecdsa_ssh_signature(r: &[u8], s: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    // r as SSH mpint
     let r_len = r.len() as u32;
     buf.extend_from_slice(&r_len.to_be_bytes());
     buf.extend_from_slice(r);
-    // s as SSH mpint
     let s_len = s.len() as u32;
     buf.extend_from_slice(&s_len.to_be_bytes());
     buf.extend_from_slice(s);
