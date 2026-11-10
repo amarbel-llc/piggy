@@ -637,7 +637,7 @@ Tests use binary injection via `bats-emo`:
 | §2.8, proxy forwards unchanged, never prompts | `operator_act_proxy.bats` | a `--proxy-only` front relays request and response byte-for-byte; the prompt fires in the card agent only |
 | §3, namespace registry | `operator_act_refusals.bats` | `git`, `file`, `piggy-record-v1` and an unregistered name yield `refused-namespace` |
 | §2.6 and §3, the `approval` class | `operator_act_prompt.bats`, `piggy_askpass.bats` | the prompt carries `PIGGY_ASKPASS_KIND=approval` and a banner distinct from the escalation banner |
-| §2.6 and §3, the `revocation` class | `operator_act_prompt.bats`, `piggy_askpass.bats` | the prompt carries `PIGGY_ASKPASS_KIND=revocation` and a banner distinct from the certificate banner (rows land with piggy#377) |
+| §2.6 and §3, the `revocation` class | `operator_act_prompt.bats`, `piggy_askpass.bats` | the prompt carries `PIGGY_ASKPASS_KIND=revocation` and a banner distinct from the certificate banner |
 | §5, attestation bundle shape | `attestation_bundle.bats` | the export has exactly the five parts in order and the three key spellings agree |
 
 ## Compatibility

@@ -2874,8 +2874,8 @@ explore-verify-auth-sock-cache piggy_auth_sock=env_var_or_default("PIGGY_AUTH_SO
     fi
 
 # HARDWARE + out-of-band — piggy#56: exercise the REAL Rust PinSession on a
-# real card. Unlike a `piggy agent` invocation (which execs the C pivy-agent),
-# this runs the in-process `unlock_ebox_card_integration`
+# real card. Unlike a `piggy agent` invocation (a separate agent process in
+# front of the card), this runs the in-process `unlock_ebox_card_integration`
 # test, which drives piggy's Rust `CardEcdhOracle` → `begin_pin_session` →
 # `PinSession::{verify_pin,ecdh_derive}` DIRECTLY against the card. First time
 # the Rust #56 PinSession code runs on real hardware (the lanes only ever ran
