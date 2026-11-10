@@ -71,13 +71,14 @@ owning session.
 | S3 | The seal: rebuild the sshsig from the four seal fields, verify under `key` for Ed25519 and P-256, the act digest (§3.5), `piggy act verify --seal-only` (working name) answering valid or invalid for the signature alone, `ssh-keygen -Y verify` interop both ways; `act_seal.bats`, `act_body.bats` (body signed verbatim, one byte changed fails) | S2 | now | medium |
 | S4 | Producing acts: `piggy act seal` takes an unsealed head (and optional body), canonicalizes, checks the §4.8 namespace and kind table statically, obtains the signature (card via the existing `operator-sign` path for card namespaces; the agent's ordinary sign path for `piggy-record-v1`), and emits the sealed act. This is the primitive the Go consumers call instead of writing a canonicalizer | S3 | now | medium |
 | S5 | Display: the agent shows a `piggy-act-v1` text as RFC 0013 §6 requires (every head line, canonical order), the askpass emphasis of `kind`, `subject`, `right`, `not-after` in `piggy-askpass-gtk` as a MAY; `operator_act_prompt.bats`; answers piggy#332 and #329 from RFC 0013 | S2 | now | medium |
-| S6 | The chain walk: store interface (a directory of sealed acts first; a JSON-over-stdin adapter for Go consumers second), §4.1 to §4.8 (kinds, rights never widen, effective rights, keys, validity and expiry, revocation, assurance, namespace table), §5.2 steps 3 to 7, §5.3 verdict with layers marked stencil or patch, undetermined; full `piggy act verify`; `act_chain.bats` | S3, acceptance | held | large |
-| S7 | On acceptance: RFC 0013 status to `accepted`; the RFC 0012 §3 amendments listed under Compatibility; FDR 0007 decision 5 updated to Shape E; `piggy-acts(7)` pointer to cutting-garden's `ajour(7)` once it exists | S6 | held | small |
-| S8 | Consumer onboarding, in the ruled order: (a) spinclass FDR 0034 slice 1 over `piggy act seal` and `piggy act verify`, the JSON verdict shape agreed with spinclass; (b) barker device blessing as a card `link` with `profile` and a short `not-after`, answering barker P1; (c) circus approval acts naming the merge decision record, answering circus D4 and piggy#329 Q1 | S4, S6 | held, asks now | asks |
+| S6 | The chain walk: store interface (a directory of sealed acts first; a JSON-over-stdin adapter for Go consumers second), §4.1 to §4.8 (kinds, rights never widen, effective rights, keys, validity and expiry, revocation, assurance, namespace table), §5.2 steps 3 to 7, §5.3 verdict with layers marked stencil or patch, undetermined; full `piggy act verify`; `act_chain.bats` | S3, acceptance | started 2026-11-10 (piggy/eager-poplar) | large |
+| S7 | On acceptance: RFC 0013 status to `accepted`; the RFC 0012 §3 amendments listed under Compatibility; FDR 0007 decision 5 updated to Shape E; `piggy-acts(7)` pointer to cutting-garden's `ajour(7)` once it exists | S6 | done 2026-11-10 (paperwork landed with the acceptance; S6 runs beside it) | small |
+| S8 | Consumer onboarding, in the ruled order: (a) spinclass FDR 0034 slice 1 over `piggy act seal` and `piggy act verify`, the JSON verdict shape agreed with spinclass; (b) barker device blessing as a card `link` with `profile` and a short `not-after`, answering barker P1; (c) circus approval acts naming the merge decision record, answering circus D4 and piggy#329 Q1 | S4, S6 | held until S6 lands; asks now | asks |
 
-S1 to S5 are the "stable parts now" of the ruling. S6 to S8 are held
-until the operator accepts RFC 0013; their issues are filed now so the
-order is visible, labelled as held.
+S1 to S5 are the "stable parts now" of the ruling. S6 to S8 were held
+until the operator accepts RFC 0013; their issues were filed so the order
+was visible. The operator accepted RFC 0013 on 2026-11-10: S7's paperwork
+landed that day, S6 started in piggy/eager-poplar, S8 waits on S6.
 
 ## 4. Order and parallelism
 
@@ -156,9 +157,9 @@ order is visible, labelled as held.
 | S3 | piggy#358 |
 | S4 | piggy#359 |
 | S5 | piggy#360 |
-| S6 | piggy#361 (held) |
-| S7 | piggy#362 (held) |
-| S8 | piggy#363 (held) |
+| S6 | piggy#361 (started 2026-11-10) |
+| S7 | piggy#362 (done 2026-11-10) |
+| S8 | piggy#363 (held until S6) |
 
 - piggy#26: a comment pointing here, with S1 and S2b as "Recommended next"
   for a worker and the acceptance pass as the operator's item.

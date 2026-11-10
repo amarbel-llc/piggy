@@ -9,7 +9,7 @@ revisions:
   - 2026-07-18: expand the purpose grammar from the `system-domain-role-version` registry convention to general identifiers (§2.1, §6); add the embedding-grammar quoting-split section (§2.2) (linenisgreat/madder#270)
   - 2026-07-20: move from madder RFC 0002 to piggy RFC 0011, completing the piggy#183 markl-ownership inversion; narrow the purpose charset from the 2026-07-18 open-Unicode form to a bare-ident-plus-quoted-String model, restrict blech32 to a single separator and lower-case only, define blech32 by reference to bech32, make checksum verification normative for decoders, mark the legacy combined-HRP form historical (§9.1), and add the identifier conformance-vector corpus and divergence register (§7.3, §7.4) (linenisgreat/madder#273)
   - 2026-10-12: add the piggy-record-digest-v1 and piggy-record-sig-v1 purposes (§6.1), registered by piggy RFC 0012 §4
-  - 2026-11-09: add the piggy-principal_pub-v1 purpose (§6.1), registered by piggy RFC 0013 §8
+  - 2026-11-09: add the piggy-principal_pub-v1 purpose (§6.1), registered by piggy RFC 0013 §8 (provisional on RFC 0013's acceptance, which came 2026-11-10; RFC 0013 is the purpose's owner)
 ---
 
 # RFC 0011 — Markl ID Format

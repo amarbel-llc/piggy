@@ -13,6 +13,12 @@ approval-note: >
   lands with FDR 0006 phase (a) (piggy#303).
 amended: 2026-11-10
 amendment-note: >
+  Fifth amendment, 2026-11-10 (RFC 0013 accepted): §3's text shapes for
+  `piggy-certificate-v1`, `piggy-escalation-v1`, `piggy-approval-v1` and
+  `piggy-revocation-v1` become "the text is a `piggy-act-v1` document
+  (RFC 0013) whose `kind` RFC 0013 §4.8 allows"; the `piggy-record-v1`
+  row admits a `piggy-act-v1` software act; §3.1 is read through RFC 0013
+  §4.1. Docs only: the agent never checked text shapes.
   Fourth amendment, 2026-11-10 (operator ruling in the RFC 0013
   acceptance pass, item 2): §2.6 and §3 gain a fifth display class,
   `revocation`, with the namespace `piggy-revocation-v1`, for a card act
@@ -362,11 +368,11 @@ the agent does not check but a verifier of that act kind MUST.
 | Namespace                 | Path                  | Display class | Text shape and meaning |
 |---------------------------|-----------------------|---------------|------------------------|
 | `piggy-quote-v1`          | `operator-act@piggy`  | `quote`       | A quote of operator input already in the ledger (FDR 0032 D10). The text MUST be the recorded input verbatim, followed by one line `ledger <markl-id>` naming the transcript stanza it was taken from (`piggy-record-digest-v1@…`). A verifier MUST resolve that stanza and MUST fail if its recorded input differs from the quoted text. The quote adds the operator's touch to words the ledger already holds; it never introduces words. |
-| `piggy-escalation-v1`     | `operator-act@piggy`  | `escalation`  | An escalation grant (FDR 0032 D11). The text MUST name the record the act signs by markl-id (`piggy-record-digest-v1@…`), which is one of the kinds in §3.1, and state in words what that kind's row says. A first grant to a grantee that holds no rights yet is an escalation too, as is a widening of an existing grant; the namespace does not tell the two apart, so a verifier that needs to know reads it from the named record, or from the text when the requesting system has the text say so. |
-| `piggy-certificate-v1`    | `operator-act@piggy`  | `certificate` | A card-signed certificate or enrollment (FDR 0032 D2 root certificate, D15 enrollment blessing). The text MUST name the certified public key and the certificate request record by markl-id. |
-| `piggy-approval-v1`       | `operator-act@piggy`  | `approval`    | A decision that grants no right (registered 2026-11-08 on the operator's ruling; asked by barker FDR 0001 P2): an acknowledgement such as a deadman ack, a deploy or release approval, a go or no-go. The text MUST name the decision record by markl-id (`piggy-record-digest-v1@…`) and state in words what is decided, what it applies to (the deploy, the host, the run) and its bound (a time, or one run). The decision record's grammar and canonical bytes are the requesting system's (circus for deploys and acks, barker for acts sent from the phone), as §3.1's kinds are their owners'. A verifier MUST NOT accept an approval where a grant, a profile transition or an escalation request is expected (§3.1). Served by agents from piggy#355 on (piggy FDR 0007 item I2); an older agent answers `refused-namespace`. |
+| `piggy-escalation-v1`     | `operator-act@piggy`  | `escalation`  | An escalation or a card grant (FDR 0032 D11). The text is a `piggy-act-v1` document (RFC 0013) whose `kind` RFC 0013 §4.8 allows here: `escalation` or `grant`. Its `right` set is what is added; the record that asked for it (one of the kinds in §3.1) is named in `records`, and §3.1 is read through RFC 0013 §4.1: a grant or widening is an `escalation` naming the act it replaces, a profile transition is an `approval`. A first grant to a grantee that holds no rights yet is an escalation too, as is a widening of an existing grant; the namespace does not tell the two apart, so a verifier that needs to know reads the named record. (Before RFC 0013's acceptance the text was free prose that named the record by markl-id and stated the row's words.) |
+| `piggy-certificate-v1`    | `operator-act@piggy`  | `certificate` | A card-signed certificate (FDR 0032 D2 root certificate, D15 enrollment blessing). The text is a `piggy-act-v1` document (RFC 0013) whose `kind` RFC 0013 §4.8 allows here: `root` or a card `link`. Its `subject-key` is the certified public key, its `subject` the principal, and the certificate request record, when there is one, is named in `records`. (Before RFC 0013's acceptance the text was free prose naming the key and the request record by markl-id.) |
+| `piggy-approval-v1`       | `operator-act@piggy`  | `approval`    | A decision that grants no right (registered 2026-11-08 on the operator's ruling; asked by barker FDR 0001 P2): an acknowledgement such as a deadman ack, a deploy or release approval, a go or no-go, a profile transition. The text is a `piggy-act-v1` document (RFC 0013) of kind `approval`; the decision record is named in `records` (`piggy-record-digest-v1@…`) and the `description` line says in words what is decided, what it applies to (the deploy, the host, the run) and its bound (a time, or one run); `not-after` bounds it. The decision record's grammar and canonical bytes are the requesting system's (circus for deploys and acks, barker for acts sent from the phone), as §3.1's kinds are their owners'. A verifier MUST NOT accept an approval where a grant, a profile transition or an escalation request is expected (§3.1). Served by agents from piggy#355 on (piggy FDR 0007 item I2); an older agent answers `refused-namespace`. |
 | `piggy-revocation-v1`     | `operator-act@piggy`  | `revocation`  | A card act that cancels earlier acts (registered 2026-11-10 on the operator's ruling in the RFC 0013 acceptance pass). The text is a `piggy-act-v1` document of kind `revocation` (RFC 0013 §4.6, §4.8): its `names` set is what is cancelled, each by act digest, and the prompt shows the whole head. A verifier MUST NOT accept a revocation where a certificate, an escalation or an approval is expected, and MUST NOT accept a card `revocation` under any other namespace. Served by agents from piggy#377 on; an older agent answers `refused-namespace`. |
-| `piggy-record-v1`         | ordinary sign request | none          | A signed record (FDR 0032 D8) signed by a principal's own key through `ssh-keygen -Y sign -n piggy-record-v1` or an equivalent agent sign request; the message is the record's canonical bytes as troupe's RFC defines them. Not an operator act. |
+| `piggy-record-v1`         | ordinary sign request | none          | A signed record (FDR 0032 D8) signed by a principal's own key through `ssh-keygen -Y sign -n piggy-record-v1` or an equivalent agent sign request; the message is the record's canonical bytes as troupe's RFC defines them, or a `piggy-act-v1` software act (RFC 0013: `link`, `grant`, `narrow` or `revocation`, §4.8). Not an operator act. |
 
 `operator-act@piggy` MUST refuse (`refused-namespace`) any namespace not
 registered in this table for the `operator-act@piggy` path. In
@@ -386,11 +392,15 @@ MUST accept only namespaces its policy names.
 
 #### 3.1. Records an escalation names
 
-The record a `piggy-escalation-v1` text names is the one the act signs.
-The kinds below are those FDR 0032 and spinclass FDR 0034 define; their
-grammar and canonical bytes are the owning system's, and a verifier of a
-kind MUST resolve the named record and MUST fail if the text's words do
-not match it.
+The record a `piggy-escalation-v1` act names in `records` is the one it
+answers. The kinds below are those FDR 0032 and spinclass FDR 0034
+define; their grammar and canonical bytes are the owning system's, and a
+verifier of a kind MUST resolve the named record and MUST fail if the
+act's `right` set and `subject` do not match it. Since RFC 0013's
+acceptance this table is read through RFC 0013 §4.1: a grant or a
+widening is an `escalation` act naming the act it replaces; a profile
+transition confers no right and is an `approval` act naming the
+transition record; an escalation request is answered by an `escalation`.
 
 | Kind | The text names | The text states in words |
 |------|----------------|--------------------------|

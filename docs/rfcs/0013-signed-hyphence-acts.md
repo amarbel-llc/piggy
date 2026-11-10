@@ -1,15 +1,29 @@
 ---
-status: proposed
+status: accepted
 date: 2026-11-10
+approved: 2026-11-10
+approval-note: >
+  Accepted by the operator on 2026-11-10 after review through the
+  user-stories-and-end-UX tab beside the record (seven questions answered
+  2026-11-08 and 2026-11-09, the three remaining Limitations ruled
+  2026-11-10: signer, any ancestor or the card may revoke; card revocations
+  have their own display class; a narrow is lifted only by an escalation
+  naming it). The acceptance had been deferred until the body grammar
+  settled; cutting-garden FDR 0028 (ajour) and the RFC 0014 stencil
+  fragment landed on cutting-garden master on 2026-11-09 (bed87cc,
+  553815c). Built as of acceptance: the document and canonical form
+  (piggy#357), the seal (#358), the producer `piggy act seal` (#359), the
+  display rules (#360); the chain walk is #361 and the revocation display
+  class #377.
 ---
 
 # Signed Hyphence Acts: the `piggy-act-v1` document and its certificate chain (piggy normative)
 
-> **Status of this draft.** Written on the operator's rulings of 2026-11-08
-> (Shape C and the comments on "Operator acts: Shape C versus Shape A"),
-> for the operator's review through a user-stories tab beside this text.
-> Not yet approved; nothing is built. The hyphence RFCs this text builds
-> on are themselves `proposed`. Evidence labels in the notes: **V** read in
+> **Status.** Written on the operator's rulings of 2026-11-08 (Shape C and
+> the comments on "Operator acts: Shape C versus Shape A"), reviewed
+> through a user-stories tab beside this text, and **accepted 2026-11-10**
+> (front matter). The hyphence RFCs this text builds on are themselves
+> `proposed`. Evidence labels in the notes: **V** read in
 > a named file at piggy master `f7f0db9` or in the sibling repositories
 > named; **I** inference; **U** unknown; **R** an operator ruling, dated.
 >
@@ -30,9 +44,9 @@ date: 2026-11-10
 > chain (§4.6); a card `revocation` has its own namespace and display
 > class, `piggy-revocation-v1` (§4.8; RFC 0012's fourth amendment, code as
 > piggy#377); a self-narrow is lifted only by an escalation that names it,
-> kept as written and watched as a Tuning Lever. The status stays
-> `proposed` until the body grammar (cutting-garden FDR 0028) settles; the
-> acceptance pass is otherwise complete.
+> kept as written and watched as a Tuning Lever. The body grammar
+> (cutting-garden FDR 0028) having settled the day before, the operator
+> accepted this RFC the same morning.
 
 ## Abstract
 
@@ -329,11 +343,23 @@ by its own rules.
 #### 4.2. Rights move down, never up, without the card
 
 A right is an opaque namespaced string; piggy checks set relations only
-(byte equality of values). For a software `link` or `grant`, the `right`
-set MUST be a subset of the issuer's effective rights at verification
-time; a verifier MUST refuse one that is not. A `narrow` MUST be signed by
-its subject's own key and can only remove. Only an `escalation`, a card
-act, may add. A card `link` or `grant` is bounded by nothing but the
+(byte equality of values). For a software `link`, the `right` set MUST be
+a subset of the issuer's **certified rights** at verification time: the
+effective rights of the issuer's certifying act computed through §4.3
+step 3 (the chain, with escalations applied) and before its narrows. A
+verifier MUST refuse a `link` whose set exceeds them. A narrow the issuer
+later places on itself does not invalidate a wider child; §4.3 step 2
+intersects the child's rights with the issuer's narrowed set instead
+(clarified 2026-11-10 with S6: a self-narrow is a promise that cuts
+downwards, never a fault in the children). For a software `grant`, the
+`right` set MUST be a subset of the issuer's effective rights **over that
+`object`**: its certified rights together with the effective rights of
+every valid `grant` it holds over the same `object` (§4.3). A grant is
+therefore handed down over its object, which is how a holder of a card
+grant narrows it for a child without the card (spinclass FDR 0034's
+software grants under a card grant). A `narrow` MUST be signed by its
+subject's own key and can only remove. Only an `escalation`, a card act,
+may add. A card `link` or `grant` is bounded by nothing but the
 operator's judgement at the prompt.
 
 **Conditions are stacked, never compared** (R 2026-11-09). piggy compares
@@ -365,7 +391,8 @@ chain start down:
 The effective rights of a `grant` G over its `object` are G's `right` set,
 then steps 3 and 4 applied with escalations and narrows naming G. A
 `grant`'s rights belong to its `subject` over its `object` only; they
-never flow into the subject's certifying chain. An `escalation` or
+never flow into the subject's certifying chain, and they are handed down
+only by a software `grant` over the same `object` (§4.2). An `escalation` or
 `narrow` has no effective rights of its own; `approval` and `revocation`
 confer none.
 
@@ -482,9 +509,16 @@ argument values) ride in two places, both inside the signed bytes:
 
 Every `profile` edge and every body on a chain is a **layer**, from the
 chain start down, together with the layers of every valid `escalation`
-and `narrow` naming an act on that chain. An `escalation` that carries a
-`profile` or a body replaces, for the act it names, that act's own layer
-only; the layers above remain. A `narrow`'s layer is added.
+and `narrow` naming an act on that chain. An `escalation` replaces, for
+the act it names, that act's own layers of the kinds it carries: its
+`profile` edge replaces the act's `profile` edge and its body replaces
+the act's body, while a kind the escalation does not carry stays as the
+act had it (an escalation with no body leaves the act's patch of denies
+in place; to clear one, the escalation carries a body with no leaves).
+The layers above remain. A `narrow`'s layer is added. (Clarified
+2026-11-10 with S6: the operator reads the escalation's text, not the
+act's old body, so a deny the session placed on itself is not lifted
+unseen.)
 
 **A `profile` layer is a stencil; a body is a patch.** A stencil admits
 only what it names. A patch is transparent where it says nothing, and
@@ -553,8 +587,11 @@ Given an act A, a time T and a store S of acts:
    resolve `issuer-record` in S to a certifying act P; refuse if missing,
    if P's `subject-key` is not `key` or P's `subject` is not `issuer`, or
    if P is not valid at T (this algorithm, recursively, depth capped).
-5. For a software act, apply the kind's rule (§4.1, §4.2) against the
-   effective rights of P. A card act is bounded by no P (§4.2).
+5. For a software act, apply the kind's rule (§4.1, §4.2): a `link`
+   against P's certified rights; a `grant` against P's certified rights
+   together with the effective rights of the issuer's valid grants over
+   the same `object`, found in S by `subject` and `object`. A card act is
+   bounded by no P (§4.2).
 6. Resolve every act in `names`; answer undetermined if one cannot be
    resolved; refuse if an entry is not of a kind the §4.1 row allows, or
    has a `subject` the row requires to match and it does not. Collect
@@ -562,6 +599,11 @@ Given an act A, a time T and a store S of acts:
    (and, for a certifying A, naming any act on its chain); compute
    effective rights (§4.3) and effective expiry (§4.5); refuse if
    expired, not yet valid, revoked (§4.6), or invalid under §4.3 step 3.
+   A `narrow` or `revocation` whose own `issuer-record` chain passes
+   through A, or through an act whose evaluation is in progress, is taken
+   as valid for that inner check once its own steps 1 to 3 and §4.5 hold:
+   both kinds only remove, so this over-applies and never widens
+   (clarified 2026-11-10 with S6).
 7. Return the verdict.
 
 A verifier MAY memoize a valid act until its effective expiry or until it
@@ -828,7 +870,7 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 | §3.4, size | `act_refusals.bats` | a canonical form over 4096 bytes is refused by the agent as `refused-text` |
 | §3.5, act digest | `act_canonical.bats` | the digest covers the signature; re-signing yields a new digest |
 | §4.1, §5.2 step 4, chain edge | `act_chain.bats` | a software act whose `issuer-record` names an act with another `subject-key` or `subject` is refused; a card act with a non-anchor key is refused |
-| §4.2, rights never widen without the card | `act_chain.bats` | a software `link` or `grant` with a right its issuer lacks is refused; a `narrow` signed by another key is refused |
+| §4.2, rights never widen without the card | `act_chain.bats` | a software `link` with a right outside its issuer's certified rights is refused; a `link` wider only than its issuer's later self-narrow is valid with the intersection; a software `grant` is bounded by the issuer's certified rights plus its valid grants over the same `object`, and one that exceeds them is refused; a `narrow` signed by another key is refused |
 | §4.3, effective rights | `act_chain.bats` | an `escalation` naming a `link` replaces its set; a `narrow` intersects it whatever the issue order; two unsuperseded escalations on one act make it invalid; an escalation naming the narrow lifts it |
 | §4.1, §5.2 step 6, `names` and `records` | `act_chain.bats` | an escalation whose `names` entry is not an act, or has another subject, is refused; an unresolvable `names` entry answers undetermined; a `records` entry is never resolved |
 | §4.5, effective expiry | `act_chain.bats` | a child whose root has expired is invalid; a child with no `not-after` inherits the root's |
@@ -837,6 +879,7 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 | §5.3, undetermined | `act_chain.bats` | an unresolvable `issuer-record` and an unreachable revocation source answer undetermined, never valid |
 | §6, the prompt shows the whole head | `operator_act_prompt.bats` | the test askpass receives every head line verbatim in canonical order |
 | §4.9, the body is signed verbatim and returned opaque | `act_body.bats` | an act with a body verifies; one byte changed in the body fails; the verdict returns the `profile` edge and body bytes unchanged; a body with a C0 control character is refused |
+| §4.9, an escalation replaces only the layer kinds it carries | `act_chain.bats` | an escalation with a `profile` and no body leaves the named act's body in the layers; one with a body replaces it; one with a body of no leaves clears it |
 
 ## Compatibility
 

@@ -15,10 +15,10 @@ hand down less.
 
 This page explains how acts combine, without the formal language. The
 normative text is RFC 0013 (*docs/rfcs/0013-signed-hyphence-acts.md*).
-The wire protocol the card uses to sign one is RFC 0012. As of 2026-11-10
-RFC 0013 is *proposed*: the document, its seal and the producer (*piggy
+The wire protocol the card uses to sign one is RFC 0012. RFC 0013 was
+accepted on 2026-11-10. The document, its seal and the producer (*piggy
 act seal*, *piggy*(1)) are built; the chain walk (*piggy act verify*
-beyond *--seal-only*) is not yet (piggy#361).
+beyond *--seal-only*) is being built (piggy#361).
 
 # THE CHAIN
 
@@ -65,39 +65,21 @@ An act carries two kinds of permission, and they are checked differently.
 
 Think of each document on a chain as a stencil: a sheet with holes cut
 in it. A hole is an allowance ("folio may read under this worktree").
-Where there is no hole, nothing passes.
+A call is a beam of light aimed at the stack; it passes only where
+*every* stencil has a hole. Every hand-down adds a stencil, nobody cuts a
+hole in someone else's stencil (a child may only add a sheet with fewer
+holes, or a solid *patch* over a hole, which is a *deny*), and only the
+card hands out a stencil with more holes (an escalation, which replaces
+the one it names while the sheets above still apply). Conditions are
+therefore never compared, only stacked, and a deny can never let more
+light through.
 
-A call is a beam of light aimed at the stack. It passes only where
-*every* stencil has a hole. If any one stencil is solid at that spot, the
-call is refused.
-
-Three rules, and nothing else:
-
-- *Every hand-down adds one stencil to the stack.* The root is the first
-  stencil. A link adds a second. A self-narrow adds a third. None is
-  removed while the chain stands.
-- *Nobody cuts a hole in someone else's stencil.* A child may add a
-  stencil with fewer holes (a new profile), or a *patch*: a solid piece
-  laid over a hole the parent left open (a *deny* in the act's body). A
-  patch is transparent where it says nothing; it can only cover. The
-  child cannot widen a hole above it, because the light still has to
-  pass the parent's sheet.
-- *Only the card hands out a stencil with more holes.* That is an
-  escalation. It sits in the stack in place of the stencil it names, so
-  the stencils above it still apply.
-
-This is why conditions need no comparison. Asking "does the child's
-stencil fit inside the parent's" would mean comparing two regular
-expressions, or two path rules, for containment, which is hard and
-sometimes impossible. Stacking never asks. It only shines the light.
-
-It is also why a *deny* is safe. A solid patch can only stop light. It
-can never let more through.
-
-The name: the arrangement is the *stencil stack*; the invariant is the
-*stencil rule* (nobody cuts a hole in someone else's stencil); each
-document is a *stencil*, each hole an *allowance*, and a call that passes
-is *admitted*.
+The stencil, its grammar (the stencil fragment, with *_*, *+*, *deny* and
+*subtree*), the patch rules and the evaluator belong to cutting-garden and
+are explained in full, with the pictures, in *ajour*(7) and
+cutting-garden FDR 0028. The names are shared: the arrangement is the
+*stencil stack*, the invariant the *stencil rule*, each document a
+*stencil*, each hole an *allowance*, and a call that passes *admitted*.
 
 # HOW ONE CALL IS CHECKED
 
@@ -150,5 +132,6 @@ needs more names a profile by digest instead of listing everything.
 *piggy*(1) (*operator-sign*), *piggy-agent*(1) (the *operator-act@piggy*
 extension), RFC 0013 (the act document and chain rules), RFC 0012 (the
 signing extension and the prompt), RFC 0011 (markl ids), hyphence RFC
-0001 to 0003 (the carrier), cutting-garden RFC 0014 (espalier),
+0001 to 0003 (the carrier), *ajour*(7) and cutting-garden FDR 0028 (the
+stencil fragment and the evaluator), cutting-garden RFC 0014 (espalier),
 *piggy-piv-slots*(7) (slot 9C).
