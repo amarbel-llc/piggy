@@ -383,6 +383,76 @@ function layers_come_back_in_chain_order_marked_stencil_or_patch { # @test
   cmp <(jq -j '.layers[1].body' <<<"$output") <(printf '%s' "$BODY")
 }
 
+# RFC 0013 §9's consumer examples (piggy#363).
+
+PROFILE_MANAGER=manager-builder@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+PROFILE_REVIEWER=engineer-reviewer@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+
+# §9 (a), spinclass: a session certified by a card root holds a card grant
+# over spinclass:profiles; the grant it hands its child over the same object
+# pins a narrower profile.
+_spinclass_session() {
+  ROOT=$(_act root card "subject = clown:72dca00c" "subject-key = $(_key a)" \
+    "not-after = $LATER" "right = spinclass:grant")
+  CARD_GRANT=$(_act grant card "subject = clown:72dca00c" "object = spinclass:profiles" \
+    "profile = $PROFILE_MANAGER" "right = spinclass:profile:builder" \
+    "right = spinclass:profile:reviewer" "not-after = $LATER")
+}
+
+_spinclass_child_grant() { # _spinclass_child_grant RIGHT...
+  local rights=() r
+  for r in "$@"; do rights+=("right = $r"); done
+  _act grant a "subject = clown:a1b2c3d4" "object = spinclass:profiles" \
+    "issuer = clown:72dca00c" "issuer-record = $ROOT" "profile = $PROFILE_REVIEWER" \
+    "${rights[@]}"
+}
+
+function spinclass_a_child_grant_carries_the_card_grants_stencil_before_its_own { # @test
+  _spinclass_session
+  local child
+  child=$(_spinclass_child_grant spinclass:profile:reviewer)
+
+  run -0 _verify "$child"
+  [[ $(_jq .kind) == grant ]] || fail "$output"
+  [[ $(_jq .object) == spinclass:profiles ]]
+  [[ $(_jq '.rights | join(" ")') == spinclass:profile:reviewer ]]
+  [[ $(_jq '.chain | join(" ")') == "$ROOT $child" ]]
+  [[ $(_jq '.layers | length') == 2 ]] || fail "$output"
+  [[ $(_jq '.layers[0].act') == "$CARD_GRANT" ]]
+  [[ $(_jq '.layers[0].role') == stencil ]]
+  [[ $(_jq '.layers[0].profile') == "$PROFILE_MANAGER" ]]
+  [[ $(_jq '.layers[1].act') == "$child" ]]
+  [[ $(_jq '.layers[1].role') == stencil ]]
+  [[ $(_jq '.layers[1].profile') == "$PROFILE_REVIEWER" ]]
+}
+
+function spinclass_a_child_grant_with_a_right_the_card_grant_lacks_is_refused { # @test
+  _spinclass_session
+  local child
+  child=$(_spinclass_child_grant spinclass:profile:reviewer spinclass:profile:root)
+  run -1 _verify "$child"
+  [[ $(_jq .failed_step) == 5.2.5 ]] || fail "$output"
+  [[ $(_jq .failed_act) == "$child" ]]
+}
+
+# §9 (c), circus: an approval names its merge decision record and confers
+# nothing.
+function circus_an_approval_names_its_merge_decision_and_confers_nothing { # @test
+  local approval
+  approval=$(_act approval card "records = $UNKNOWN" "not-after = 2026-11-10T13:00:00Z")
+  run -0 _verify "$approval"
+  [[ $(_jq .kind) == approval ]] || fail "$output"
+  [[ $(_jq 'has("rights") or has("layers")') == false ]] || fail "$output"
+  [[ $(_jq .effective_expiry) == 2026-11-10T13:00:00Z ]]
+
+  # The same head with a `right` line: the admission list refuses it at
+  # §5.2 step 1, before any signature is looked at.
+  sed '/^- kind = approval$/a - right = spinclass:merge' "$STORE/${approval##*-}.act" >"$DIR/with-right"
+  run -1 _verify "$DIR/with-right"
+  [[ $(_jq .failed_step) == 5.2.1 ]] || fail "$output"
+  [[ $(_jq .reason) == *forbidden-field* ]]
+}
+
 # The adapters and the CLI contract.
 
 function the_json_store_adapter_answers_as_the_directory_does { # @test

@@ -702,10 +702,10 @@ signature (§3.3).
 
 ### 9. Examples
 
-Spelling note: the two card examples are the canonical form (§3.1), which
-is what the operator saw; their producers add the `signature` line after
-`hash` afterwards. The software example is shown sealed (§3.5), with its
-`signature` line.
+Spelling note: the card examples are the canonical form (§3.1), which is
+what the operator saw; their producers add the `signature` line after
+`hash` afterwards. The software examples are shown sealed (§3.5), with
+their `signature` line. A `…` stands for a key, digest or signature.
 
 A card root for a human-started session, blessed at session start; its
 `records` line is the enrollment request it answers. The operator saw
@@ -821,6 +821,92 @@ node types are the consumer's; shown sealed):
 node without `subtree` matches only its exact id, so a bare `deny` on the
 folder would leave every file under it admitted by the parent's
 allowance. Caught by cutting-garden's writing probe, 2026-11-09.)
+
+**A grant handed down over its object** (spinclass's profile grants,
+spinclass FDR 0034). The session `clown:72dca00c…`, certified by a card
+`root` like the first example, holds a card `grant` over the object
+`spinclass:profiles`. Its `profile` edge is the stencil every grant handed
+down from it stacks under:
+
+    ---
+    # grant: session 72dca00c may grant the builder and reviewer profiles
+    - kind = grant
+    - producer = spinclass:profile-grant-v1
+    - subject = clown:72dca00c-1c93-41d1-a2ad-9e530b9e30ee
+    - object = spinclass:profiles
+    - profile = manager-builder@blake2b256-…
+    - issuer = operator
+    - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-…
+    - right = spinclass:profile:builder
+    - right = spinclass:profile:reviewer
+    - not-after = 2026-11-10T23:00:00Z
+    - issued-at = 2026-11-10T09:00:00Z
+    - assurance = piggy:hardware
+    - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-…
+    - namespace = piggy-escalation-v1
+    - hash = sha256
+    ! piggy-act-v1
+    ---
+
+The session hands its child a narrower grant over the same object, no
+prompt. `issuer-record` is the session's certifying `root`, not the card
+grant. The `right` set is within the session's certified rights plus the
+card grant's (§5.2 step 5), and the `profile` edge is the child's
+narrower stencil:
+
+    ---
+    # grant: the reviewer profile for worker a1b2c3d4
+    - kind = grant
+    - producer = spinclass:profile-grant-v1
+    - subject = clown:a1b2c3d4-…
+    - object = spinclass:profiles
+    - profile = engineer-reviewer@blake2b256-…
+    - issuer = clown:72dca00c-1c93-41d1-a2ad-9e530b9e30ee
+    - issuer-key = piggy-principal_pub-v1@ssh_ed25519_pub-…
+    - issuer-record = piggy-record-digest-v1@blake2b256-…
+    - right = spinclass:profile:reviewer
+    - issued-at = 2026-11-10T09:30:00Z
+    - assurance = piggy:software
+    - key = piggy-principal_pub-v1@ssh_ed25519_pub-…
+    - namespace = piggy-record-v1
+    - hash = sha256
+    - signature = piggy-record-sig-v1@ed25519_sig-…
+    ! piggy-act-v1
+    ---
+
+Its verdict's `rights` is `spinclass:profile:reviewer`. Its `layers` are
+the card grant's `manager-builder` stencil, then its own
+`engineer-reviewer` stencil (§4.9), so the child is held to both. A child
+grant naming `spinclass:profile:root`, which neither the session's root
+nor the card grant holds, is refused at §5.2 step 5. Replayed by
+`act_chain.bats`, `spinclass_a_child_grant_carries_the_card_grants_stencil_before_its_own`
+and `spinclass_a_child_grant_with_a_right_the_card_grant_lacks_is_refused`.
+
+**An approval naming a merge decision** (circus merge attestation). The
+operator approves the merge a decision record describes, for one hour.
+The approval confers no right and carries no `right` or `profile` line:
+
+    ---
+    # approval: merge piggy eager-poplar into master
+    - kind = approval
+    - producer = circus:merge-approval-v1
+    - issuer = operator
+    - issuer-key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-…
+    - records = piggy-record-digest-v1@blake2b256-…
+    - not-after = 2026-11-10T13:00:00Z
+    - issued-at = 2026-11-10T12:00:00Z
+    - assurance = piggy:hardware
+    - key = piggy-piv_sig-v1@ssh_ecdsa_nistp256_pub-…
+    - namespace = piggy-approval-v1
+    - hash = sha256
+    ! piggy-act-v1
+    ---
+
+It verifies with no `rights` and no `layers` in its verdict. piggy never
+resolves its `records` entry; circus checks that the decision record it
+names is the merge being attempted. The same head with a `right` line is
+refused at §5.2 step 1 (the admission list, §2). Replayed by
+`act_chain.bats`, `circus_an_approval_names_its_merge_decision_and_confers_nothing`.
 
 Verifying a signature by hand on any host: rebuild the sshsig from the
 seal, write the canonical form (the sealed act minus its `signature`
