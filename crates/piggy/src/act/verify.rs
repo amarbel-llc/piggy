@@ -29,6 +29,10 @@ use super::{Act, Refusal, parsed_bytes};
 /// The chain depth cap (RFC 0013 Tuning Levers).
 pub const DEPTH_CAP: usize = 32;
 
+/// How deep the walk may nest (chains, annotations and grants handed down
+/// from, together) before it answers undetermined.
+const WALK_CAP: usize = 4 * DEPTH_CAP;
+
 /// The step of RFC 0013 §5.2 that refused an act.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -245,27 +249,14 @@ impl<S: ActStore> Verifier<S> {
     }
 
     /// Forget the memoized answers an act just added to the store can
-    /// change: an escalation, narrow or revocation naming an act on their
-    /// chain, or any grant (it may add a layer to a grant handed down over
-    /// its object, §5.2 step 5).
+    /// change. An escalation, narrow or revocation reaches further than the
+    /// chain it names (revoking an applied escalation, or a grant another
+    /// grant was handed down from), and a grant may add a layer to a grant
+    /// handed down over its object (§5.2 step 5), so any of them clears the
+    /// memo. Certifying acts and approvals change nothing already answered.
     pub fn learned(&mut self, act: &Act) {
-        let kind = act.kind();
-        let names: Vec<String> = act.values("names").map(parsed_bytes).collect();
-        let memo = self.memo.get_mut();
-        match kind {
-            "grant" => memo.clear(),
-            "escalation" | "narrow" | "revocation" => memo.retain(|_, (_, valid)| {
-                !valid.chain.iter().any(|on_chain| {
-                    names.iter().any(|name| {
-                        name == on_chain
-                            || self
-                                .store
-                                .get(on_chain)
-                                .is_some_and(|stored| stored.is_named_by(name))
-                    })
-                })
-            }),
-            _ => {}
+        if matches!(act.kind(), "grant" | "escalation" | "narrow" | "revocation") {
+            self.memo.get_mut().clear();
         }
     }
 
@@ -302,20 +293,25 @@ impl<S: ActStore> Verifier<S> {
         }
     }
 
+    /// A memoized answer, reused at the time it was given only: a later time
+    /// can bring another act into force (a revocation's `not-before`) or end
+    /// one (an applied escalation's `not-after`), not only expire this one.
     fn memoized(&self, digest: &str) -> Option<Valid> {
         let memo = self.memo.borrow();
         let (since, valid) = memo.get(digest)?;
-        let at = &self.options.at;
-        let unexpired = valid.effective_expiry.as_ref().is_none_or(|e| at < e);
-        (since <= at && unexpired).then(|| valid.clone())
+        (*since == self.options.at).then(|| valid.clone())
     }
 
     fn eval(&self, x: &StoredAct, stack: &mut Vec<String>) -> Outcome {
-        if stack.len() >= DEPTH_CAP {
-            return invalid(
-                Step::ChainEdge,
-                x,
-                format!("the chain is deeper than {DEPTH_CAP}"),
+        // The chain's own length is capped in `lineage` (an invalid act).
+        // This bounds the walk's work: recursion also passes through
+        // annotations and grants handed down from, so running out here says
+        // nothing about the act and must not be taken as an answer either
+        // way (a revocation dropped as invalid would fail open).
+        if stack.len() >= WALK_CAP {
+            return undetermined(
+                vec![x.digest.clone()],
+                format!("the walk is nested deeper than {WALK_CAP}"),
             );
         }
         stack.push(x.digest.clone());
@@ -405,6 +401,11 @@ impl<S: ActStore> Verifier<S> {
 
         let mut pending: Vec<String> = Vec::new();
         let mut layers: Vec<Layer> = parent.map(|p| p.layers.clone()).unwrap_or_default();
+        // What a software link or grant may use: the issuer's effective
+        // rights (over the grant's object: plus its held grants' effective
+        // rights), against which a narrow-induced excess intersects (§4.3
+        // step 2).
+        let mut usable: Option<BTreeSet<String>> = None;
 
         // Step 5: the kind's rule against P (§4.1, §4.2). A card act is
         // bounded by no P.
@@ -419,9 +420,13 @@ impl<S: ActStore> Verifier<S> {
                             format!("right {excess} exceeds the issuer's certified rights"),
                         );
                     }
+                    usable = p.rights.clone();
                 }
-                "grant" => match self.grant_bound(x, certified, stack) {
-                    Ok(held) => layers.extend(held),
+                "grant" => match self.grant_bound(x, p, stack) {
+                    Ok((held_layers, held_usable)) => {
+                        layers.extend(held_layers);
+                        usable = Some(held_usable);
+                    }
                     Err(outcome) => return outcome,
                 },
                 _ => {}
@@ -476,14 +481,9 @@ impl<S: ActStore> Verifier<S> {
         // Step 6: effective rights (§4.3) and layers (§4.9).
         let (certified, effective) = if carries_rights(a) {
             let own = rights(a);
-            let (mut certified, mut effective) = match parent {
-                Some(p) if kind == "link" => (
-                    own.clone(),
-                    own.intersection(p.rights.as_ref().expect("a certifying parent"))
-                        .cloned()
-                        .collect(),
-                ),
-                _ => (own.clone(), own),
+            let (mut certified, mut effective) = match &usable {
+                Some(usable) => (own.clone(), own.intersection(usable).cloned().collect()),
+                None => (own.clone(), own),
             };
 
             let escalations = self.valid_annotations(&naming, "escalation", stack, &mut pending);
@@ -694,18 +694,21 @@ impl<S: ActStore> Verifier<S> {
     /// §5.2 step 5 for a software grant: its rights within the issuer's
     /// certified rights plus the effective rights of every valid grant the
     /// issuer holds over the same `object`. Returns those grants' layers,
-    /// which stack over the grant handed down from them.
+    /// which stack over the grant handed down from them, and what the grant
+    /// may use: the issuer's effective rights plus those grants' effective
+    /// rights.
     fn grant_bound(
         &self,
         x: &StoredAct,
-        certified: &BTreeSet<String>,
+        issuer_act: &Valid,
         stack: &mut Vec<String>,
-    ) -> Result<Vec<Layer>, Outcome> {
+    ) -> Result<(Vec<Layer>, BTreeSet<String>), Outcome> {
         let a = &x.act;
         let issuer = a.text("issuer").unwrap_or_default();
         let object = spelled(a, "object").unwrap_or_default();
 
-        let mut bound = certified.clone();
+        let mut bound = issuer_act.certified.clone().unwrap_or_default();
+        let mut usable = issuer_act.rights.clone().unwrap_or_default();
         let mut layers = Vec::new();
         let mut pending = Vec::new();
         for g in self.store.grants(issuer, &object) {
@@ -716,7 +719,9 @@ impl<S: ActStore> Verifier<S> {
             }
             match self.eval(&g, stack) {
                 Outcome::Valid(v) => {
-                    bound.extend(v.rights.clone().unwrap_or_default());
+                    let held = v.rights.clone().unwrap_or_default();
+                    bound.extend(held.iter().cloned());
+                    usable.extend(held);
                     layers.extend(v.layers);
                 }
                 Outcome::Undetermined(u) => pending.extend(u.digests),
@@ -725,7 +730,7 @@ impl<S: ActStore> Verifier<S> {
         }
 
         match rights(a).difference(&bound).next() {
-            None => Ok(layers),
+            None => Ok((layers, usable)),
             Some(_) if !pending.is_empty() => Err(undetermined(
                 pending,
                 "a grant the issuer holds over this object could not be evaluated",

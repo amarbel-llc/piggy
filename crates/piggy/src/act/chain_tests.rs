@@ -759,6 +759,78 @@ fn the_depth_cap_bounds_the_walk() {
     assert_eq!(failed(&w.verify(&record)).0, Step::ChainEdge);
 }
 
+/// A narrow on the issuer cuts what a grant it hands down may use, as it
+/// cuts a link (§4.3 step 2), without refusing the grant.
+#[test]
+fn a_narrow_on_the_issuer_cuts_its_software_grant() {
+    let (mut w, ka, _kb, root, _link) = two_link_world();
+    let mut lines = vec![
+        "subject = s:b".to_owned(),
+        "object = x:repo".to_owned(),
+        "issuer = s:a".to_owned(),
+        format!("issuer-record = {root}"),
+    ];
+    lines.extend(rights(&["x:check", "x:merge"]));
+    let grant = seal(&ka, false, "grant", &lines, None);
+    let grant = w.add(grant);
+    assert_eq!(
+        valid(&w.verify(&grant)).rights,
+        set(&["x:check", "x:merge"])
+    );
+
+    w.narrow("s:a", &ka, &root, &[&root], &["x:check"]);
+    assert_eq!(valid(&w.verify(&grant)).rights, set(&["x:check"]));
+}
+
+/// A memoized answer is not reused at a later time: a revocation whose
+/// `not-before` falls between the two comes into force.
+#[test]
+fn a_memoized_answer_is_not_reused_at_another_time() {
+    let (mut w, _ka, _kb, _root, link) = two_link_world();
+    let act = w.get(&link);
+    let revocation = seal(
+        &w.card,
+        true,
+        "revocation",
+        &[
+            format!("names = {link}"),
+            "not-before = 2026-11-10T18:00:00Z".to_owned(),
+        ],
+        None,
+    );
+    w.add(revocation);
+
+    let mut verifier = w.verifier();
+    assert!(verifier.verify(&act).is_valid());
+    verifier.set_at("2026-11-10T19:00:00Z".into());
+    assert!(!verifier.verify(&act).is_valid());
+}
+
+/// A revocation of an applied escalation, which is not on the act's
+/// chain, still drops the memoized answer when learned.
+#[test]
+fn learning_a_revocation_of_an_applied_escalation_drops_the_memo() {
+    let (mut w, _ka, _kb, _root, link) = two_link_world();
+    let esc = w.escalation("s:b", &[&link], &["x:deploy"], &[], None);
+    let act = w.get(&link);
+    let mut verifier = w.verifier();
+    assert_eq!(valid(&verifier.verify(&act)).rights, set(&["x:deploy"]));
+
+    let revocation = seal(
+        &w.card,
+        true,
+        "revocation",
+        &[format!("names = {esc}")],
+        None,
+    );
+    verifier.store_mut().insert(revocation.clone());
+    verifier.learned(&revocation);
+    assert_eq!(
+        valid(&verifier.verify(&act)).rights,
+        set(&["x:check", "x:merge"])
+    );
+}
+
 /// §3.5: verifiers accept a `names` or `issuer-record` entry under sha256.
 #[test]
 fn a_sha256_act_digest_resolves_like_a_blake2b256_one() {

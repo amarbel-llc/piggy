@@ -103,8 +103,10 @@ impl MemoryStore {
             .filter(|path| path.is_file())
             .collect();
         paths.sort();
-        for path in paths {
-            store.insert_bytes(&std::fs::read(&path)?);
+        // A file that cannot be read is skipped like one that is not a
+        // sealed act: the walk answers undetermined if it needed it.
+        for bytes in paths.iter().filter_map(|path| std::fs::read(path).ok()) {
+            store.insert_bytes(&bytes);
         }
         Ok(store)
     }

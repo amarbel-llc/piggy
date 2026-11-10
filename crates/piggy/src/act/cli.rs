@@ -296,7 +296,7 @@ fn verify_chain(args: VerifyArgs) -> i32 {
 
     let store = if args.store_stdin {
         let reads_stdin = match (&args.act, &args.file) {
-            (Some(_), _) => false,
+            (Some(a), _) => a == "-",
             (None, Some(f)) => f.as_os_str() == "-",
             (None, None) => true,
         };
