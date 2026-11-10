@@ -1401,6 +1401,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "piggy-guard"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "zeroize",
+]
+
+[[package]]
 name = "piggy-ids"
 version = "0.1.0"
 dependencies = [

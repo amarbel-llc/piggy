@@ -9,6 +9,7 @@ members = [
     "crates/operator-act-probe",
     "crates/piggy",
     "crates/piggy-box",
+    "crates/piggy-guard",
     "crates/piggy-ids",
     "crates/piggy-markl",
     "crates/piggy-piv",

@@ -1,0 +1,13 @@
+[package]
+name = "piggy-guard"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "Guarded allocations for secrets: guard pages, locked, out of core dumps, sealed at rest (FDR 0006)"
+# Every `unsafe` the guarded-memory work needs lives in this crate, so its
+# consumers (the `piggy agent` PIN cache now, fibby in FDR 0006 phase (c))
+# stay free of it. Both dependencies are already in the workspace lock.
+
+[dependencies]
+libc = "0.2"
+zeroize = "1"
