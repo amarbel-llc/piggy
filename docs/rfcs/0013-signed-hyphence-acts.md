@@ -498,7 +498,17 @@ argument values) ride in two places, both inside the signed bytes:
   define that document, resolve it or parse it; the digest pins it and the
   signature covers the pin. The document's shape is the consumer's (the
   first consumers write it as a hyphence document whose body is an
-  espalier stream).
+  espalier stream). The first consumers' convention (agreed 2026-11-10
+  with cutting-garden, whose RFC registers the purpose, piggy RFC 0011
+  §6.1; cutting-garden#414): the edge is a markl id, purpose
+  `cutting_garden-stencil-digest-v1`, format `blake2b256`, over the
+  canonical nested-espalier bytes of the stencil tree alone (no hyphence
+  head, no surrounding document), so any spelling of the profile file
+  canonicalizes to one value; an enforcer verifies a layer file against
+  the verdict's `profile` edge by recomputing that digest, needing
+  neither the act nor piggy. This binds producers and enforcers of
+  cutting-garden stencils, not piggy, which still treats the edge as an
+  opaque pin.
 - **The body.** When present it MUST be a document in the **stencil
   fragment** of trellis (cutting-garden RFC 0014; the fragment is defined
   by cutting-garden FDR 0028, "ajour", and is theirs to change; as ruled
