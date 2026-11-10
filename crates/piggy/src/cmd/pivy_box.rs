@@ -395,13 +395,7 @@ fn cmd_tpl_create(args: &[&str]) -> i32 {
         }
     };
 
-    let slots = match token.read_all_slots() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("piggy box tpl create: read slots: {e}");
-            return 1;
-        }
-    };
+    let slots = token.read_all_slots();
 
     // Slot 0x9D = Key Management (ECDH)
     let slot = match slots.iter().find(|s| s.id() == 0x9D) {

@@ -333,28 +333,17 @@ impl PivToken {
         Ok(PivSlot::new(slot_id, algorithm, cert_der, public_key))
     }
 
-    /// Read certificates from all standard PIV slots plus retired slots.
-    /// Silently skips empty slots.
-    pub fn read_all_slots(&self) -> Result<Vec<PivSlot>, PivError> {
-        let mut slots = Vec::new();
-
-        // Standard slots
-        for &slot_id in slot::STANDARD_SLOTS {
-            match self.read_slot(slot_id) {
-                Ok(s) => slots.push(s),
-                Err(_) => continue,
-            }
-        }
-
-        // Retired key management slots 82-95
-        for slot_id in 0x82..=0x95_u8 {
-            match self.read_slot(slot_id) {
-                Ok(s) => slots.push(s),
-                Err(_) => continue,
-            }
-        }
-
-        Ok(slots)
+    /// Read certificates from all standard PIV slots plus the retired slots
+    /// 82..95. A slot whose read fails for any reason (empty, a transport
+    /// error, a malformed cert) is left out, so one bad slot never hides the
+    /// others; call [`Self::read_slot`] to see why a slot is missing.
+    pub fn read_all_slots(&self) -> Vec<PivSlot> {
+        slot::STANDARD_SLOTS
+            .iter()
+            .copied()
+            .chain(0x82..=0x95_u8)
+            .filter_map(|slot_id| self.read_slot(slot_id).ok())
+            .collect()
     }
 
     /// Read the existing PIV Key History object (`5FC10C`). An absent object

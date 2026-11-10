@@ -39,7 +39,7 @@ fn read_slots_from_token() {
     };
     let tokens = ctx.enumerate_tokens().unwrap_or_default();
     for token in &tokens {
-        let slots = token.read_all_slots().unwrap_or_default();
+        let slots = token.read_all_slots();
         for slot in &slots {
             println!(
                 "Slot {:#04x}: algo={:?}, pubkey={}",

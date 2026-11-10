@@ -390,7 +390,7 @@ fn build_cached_keys(
         // card connection and signs; a co-resident reset on disconnect can
         // disturb the live enumerated connection this read uses (observed on
         // fibby). Read first, then discard the keys if the card fails CAK.
-        let slots = token.read_all_slots().unwrap_or_default();
+        let slots = token.read_all_slots();
         let mut token_keys = Vec::new();
         for slot in &slots {
             if let Some(ref allowed) = config.allowed_slots {
