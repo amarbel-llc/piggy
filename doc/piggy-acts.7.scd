@@ -74,8 +74,9 @@ the one it names while the sheets above still apply). Conditions are
 therefore never compared, only stacked, and a deny can never let more
 light through.
 
-The stencil, its grammar (the stencil fragment, with *_*, *+*, *deny* and
-*subtree*), the patch rules and the evaluator belong to cutting-garden and
+The stencil, its grammar (the stencil fragment: the null id \_, the temp id
++, and the tags *deny* and *subtree*), the patch rules and the evaluator
+belong to cutting-garden and
 are explained in full, with the pictures, in *ajour*(7) and
 cutting-garden FDR 0028. The names are shared: the arrangement is the
 *stencil stack*, the invariant the *stencil rule*, each document a
