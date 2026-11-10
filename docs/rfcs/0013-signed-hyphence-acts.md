@@ -386,6 +386,10 @@ chain start down:
    named by another valid escalation): if there is exactly one, replace
    the set with its `right` set; if there are several, C is
    **invalid** (conflicting escalations) until one supersedes the others.
+   The replacement is absolute: an ancestor's narrow, which reached C only
+   through step 2, no longer cuts C once the card has set C's rights
+   (clarified 2026-11-10 with S6). Only a narrow naming C (step 4) and the
+   stacked conditions (§4.9), which an escalation never thins, still cut.
 4. Then every valid `narrow` naming C that is not superseded by the
    applied escalation: intersect with its `right` set. Issue order is
    irrelevant: a narrow cuts an escalation that does not name it, so the
@@ -887,7 +891,7 @@ with the reference verifier). Tests use binary injection via `bats-emo`:
 | §4.1, §5.2 step 6, `names` and `records` | `act_chain.bats` | an escalation whose `names` entry is not an act, or has another subject, is refused; an unresolvable `names` entry answers undetermined; a `records` entry is never resolved |
 | §4.5, effective expiry | `act_chain.bats` | a child whose root has expired is invalid; a child with no `not-after` inherits the root's |
 | §4.6, revocation | `act_chain.bats` | an act below a revoked `link` is invalid; a software revocation by a key that is neither the signer nor an ancestor on the named act's chain is refused, and one by the parent's key is accepted; a revocation naming a revocation is refused |
-| §4.7, §4.8, namespace, kind, issuer, assurance | `act_refusals.bats` | an `escalation` under `piggy-record-v1`, a `narrow` under a card namespace, a `revocation` under `piggy-certificate-v1`, `piggy:hardware` on a software act, are refused |
+| §4.7, §4.8, namespace, kind, issuer, assurance | `act_chain.bats` | an `escalation` under `piggy-record-v1`, a `narrow` under a card namespace, a `revocation` under `piggy-certificate-v1`, `piggy:hardware` on a software act, are refused (by `verify`, which applies the pairing; `canon` does not) |
 | §5.3, undetermined | `act_chain.bats` | an unresolvable `issuer-record` and an unreachable revocation source answer undetermined, never valid |
 | §6, the prompt shows the whole head | `operator_act_prompt.bats` | the test askpass receives every head line verbatim in canonical order |
 | §4.9, the body is signed verbatim and returned opaque | `act_body.bats` | an act with a body verifies; one byte changed in the body fails; the verdict returns the `profile` edge and body bytes unchanged; a body with a C0 control character is refused |
