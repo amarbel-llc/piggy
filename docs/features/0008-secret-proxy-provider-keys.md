@@ -102,34 +102,115 @@ scope-binding ruling in FDR 0006.
 ### Loading a key after a restart
 
 A proxy restart wipes every key, as in FDR 0006. Provider keys cannot be
-regenerated, so a loading path exists. Candidates, in the order this
-record leans (issue #385 owns the decision):
+regenerated, so a loading path exists. The design for issue #385 follows. It is a recommendation for the
+operator, not a ruling.
+
+**Candidates.**
 
 1. **Operator input.** After each proxy start the operator supplies the
-   key at a prompt in a frontend scope (the same surface FDR 0006's
-   approver uses). Nothing durable. Simple, and a restart needs a human.
+   key at a prompt in a frontend scope. Nothing durable; a restart needs
+   a human.
 2. **Card-unsealed pigpen blob.** The key lives as a pigpen document (RFC
-   0008) sealed to the operator's card; the proxy asks the card agent to
-   unseal it at start, which needs the card and a PIN or touch. The blob
-   is safe at rest; this ties to FDR 0006's phase (g) durable sealed
-   keys.
-3. **Both.** Operator input for the first load, a sealed blob for later
-   restarts.
+   0008) sealed to the operator's card; the proxy asks a card agent to
+   unseal it, which needs the card and a PIN or touch. The blob is safe
+   at rest and ties to FDR 0006 phase (g) durable sealed keys. It needs a
+   new sealed-secret format and an unseal verb that does not exist yet.
+3. **Load from the operator's piggy password store.** The provider key
+   already can live as an ordinary `.ebox` in the operator's store
+   (`piggy pass`), encrypted to the card's slot 9D. A small `load` verb
+   of the proxy reads the secret from stdin and the operator runs, for
+   example, `piggy pass show providers/openrouter | <proxy> load
+   openrouter`. Decryption happens through the operator's card agent,
+   including over a forwarded agent (FDR 0001), so the proxy host needs
+   no card. This is candidate 1 with the prompt replaced by tooling
+   piggy already has; no new format.
 
-Whether a start without the card fails or runs with no keys is part of
-that decision. Either way an unloaded handle answers "unavailable", not an
-empty or default key.
+**Recommendation.** Candidate 3 for the first slice, because it needs no
+new cryptographic format, keeps the key encrypted at rest in a store the
+operator already backs up, and works when the proxy runs on a host with no
+card. Candidate 2 later, only if restarts without the operator present
+become a requirement; it is the only candidate that allows an unattended
+restart, and it should be designed with phase (g) so there is one sealed
+durable key format, not two.
+
+**Behaviour rules, whichever candidate.**
+
+- An unloaded handle answers "unavailable", never an empty or default key.
+- The `load` verb is reachable only from a frontend scope (FDR 0006 scope
+  rules), never from a bound caller, so a graph run cannot replace a key
+  or load one of its own choosing.
+- The key crosses a pipe once, into guarded memory; the loader zeroizes
+  its own buffer. The operator sees the handle name and provider host at
+  load time, not the key.
+- Rotation is a repeat `load` of the same handle, replacing the held key
+  atomically; in-flight calls finish on the old key.
+- A proxy start with nothing loaded is valid (it serves "unavailable");
+  it does not fail, so the unit can start before the operator is present.
+
+**Open for the operator.** Whether unattended restarts are a requirement
+(decides when candidate 2 is needed); which host runs the proxy and
+whether the operator reaches it with a forwarded agent; whether the
+provisioning/admin key for option B (below) is loaded the same way.
 
 ### Fallback: provider-minted scoped keys (option B)
 
-If a provider offers programmatic, scoped, expiring, revocable keys
-(research: #384), the proxy can instead hold a long-lived provisioning key
-and hand each run a short-lived key. This weakens the guarantee: the run
-holds a bearer string and can copy it. The bound is the key's scope and
-lifetime, and revocation is the provider's. It is a fallback only, used
-for a provider or case where proxying is impractical (for example a
-client that must speak to the provider directly). It needs its own
-decision per provider and is not built unless A cannot serve.
+The proxy can instead hold a long-lived provisioning key and hand each
+run a short-lived key. This weakens the guarantee: the run holds a bearer
+string and can copy it. The bound is the key's caps and lifetime, and
+revocation is the provider's. It is a fallback only, used for a case where
+proxying is impractical (for example a client that must speak to the
+provider directly) and is not built unless A cannot serve.
+
+**Research result (#384), read from the providers' documentation on
+2026-11-12. Both providers support the mechanism; neither was tried
+against a live account, so every statement is "documented", not
+"verified".**
+
+| | OpenRouter | Tinfoil |
+|---|---|---|
+| Create a key by API | yes: `POST /api/v1/keys` with a management key | yes: `POST /api/keys` with an admin key |
+| Expiry per key | yes: `expires_at` (ISO 8601 UTC, seconds required) | yes: `expires_at`; omitted means non-expiring |
+| Spend cap | yes: `limit` in USD, optional `limit_reset` daily/weekly/monthly | yes: `max_cost` in dollars, a lifetime total |
+| Token caps | not seen in the create call | yes: `max_input_tokens`, `max_output_tokens` (lifetime) |
+| Revoke | yes: delete or `disabled: true` by key hash | yes: delete by full key value |
+| Scope by model or endpoint | not seen in the key-create call; the docs list Guardrails and Workspaces as separate management routes, not read | not seen |
+| Plaintext returned | once, in the create response only | in the create response; the key value is also what update and delete take |
+| Provisioning key power | management key is unscoped across the account's workspaces and cannot call completions; the docs recommend an expiry and warn a leak can create, edit and delete other keys | admin key; personal or organization; a scoped-admin-keys section exists for container routes (not read in detail) |
+| Caps are exact | not stated | no: usage records arrive after completion, so limits are soft and in-flight requests overshoot (documented) |
+
+Sources: OpenRouter, "Management API Keys"
+(`openrouter.ai/docs/guides/overview/auth/provisioning-api-keys`) and the
+API reference page "Create a new API key"; Tinfoil, "Admin API
+documentation" (`docs.tinfoil.sh/admin/admin-api`), section API Key
+Management. Not read or not verified: OpenRouter Guardrails and
+Workspaces as a way to restrict a minted key to models; Tinfoil's
+scoped-admin-keys section; rate limits on the create calls; whether
+either provider can be reached from krone.
+
+Consequences for the design:
+
+- **B is real for both**, bounded by expiry and a spend cap rather than by
+  endpoint scope. A run holding a minted key can spend up to the cap
+  against any model the provider allows until expiry or deletion.
+- **B moves the high-value secret, it does not remove it.** The proxy (or
+  a sibling) would hold a management or admin key, which can create and
+  delete every key on the account. That key is more dangerous than a
+  single inference key and must live under the same guarded-memory rules,
+  loaded as above. A leak of the inference key under A costs spend; a leak
+  of the management key under B costs the account's key set.
+- **Soft Tinfoil caps** mean a per-run cap is a bound with overshoot, not
+  a hard ceiling.
+- **Tinfoil changes A's plaintext limitation.** Tinfoil bodies can be
+  encrypted end to end to an attested enclave (EHBP, using HPKE) by its
+  SDKs, and its documentation describes a backend proxy that adds the
+  API key header without being able to read the bodies
+  (`docs.tinfoil.sh/guides/proxy-server`). A proxy of ours in that role
+  would never see Tinfoil plaintext, but the caller must then use a
+  Tinfoil SDK pointed at the proxy with attestation verified in the
+  client, the proxy must preserve the EHBP headers, and it must allowlist
+  the `X-Tinfoil-Enclave-Url` header's host (the documentation says to
+  treat it as untrusted input). OpenRouter has no such mode, so its
+  traffic is plaintext to the proxy.
 
 ## Examples
 
@@ -159,8 +240,10 @@ header is ignored. A bound caller sends its own `Authorization`: dropped.
 ## Limitations
 
 - **The proxy sees plaintext.** It terminates TLS to the provider and sees
-  every request and response body. It is a trusted component; the
-  prompts and completions pass through it. It must not log bodies.
+  every request and response body (for OpenRouter; Tinfoil's end-to-end
+  body encryption can avoid this, see option B). It is a trusted
+  component; the prompts and completions pass through it. It must not log
+  bodies.
 - **It guards the key, not what the key can do.** A bound caller can spend
   the provider account's money and read model output through the proxy for
   as long as it is bound. Per-handle caps are a lever, not a guarantee.
@@ -213,14 +296,19 @@ slice.
    - **Allowlist knowledge.** The provider-specific allowlist is circus's
      knowledge, held in piggy's configuration: operator-edited, never
      supplied by a caller.
-2. **How is a key loaded after a restart? (blocks; #385)** Operator input,
-   a card-unsealed blob, or both, and what a start without the card does.
+2. **How is a key loaded after a restart? (blocks; #385)** Recommended:
+   load from the operator's piggy password store through a frontend-only
+   `load` verb for the first slice; a card-sealed blob later only if
+   unattended restarts are required. Needs the operator's ruling on
+   unattended restarts.
 3. **What does a handle bind to? (blocks; per-run binding issue)** A
    graph, a run, or both; who may bind; gated on clown#244 and FDR 0006's
    open scope-binding ruling.
-4. **Is option B real for either provider? (#384)** Not yet researched.
-   If neither provider offers scoped, expiring keys the fallback does not
-   exist and unproxyable clients have no answer.
+4. **Is option B real for either provider? (#384)** Researched
+   2026-11-12 from documentation only: yes for both, bounded by expiry and
+   spend caps, not by model or endpoint scope (see the table under option
+   B). Open: whether OpenRouter Guardrails can restrict a minted key to
+   models, and whether to accept holding an account-wide management key.
 5. **Does krone run the proxy, or flic, or both?** Where the graphs run
    decides which host's units and which account layout apply. Not checked
    here; FDR 0006's holder is Linux-only and says nothing about krone.
