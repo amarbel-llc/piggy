@@ -47,9 +47,8 @@ allocations and exposes one unix socket. A caller asks for a call; the
 proxy attaches the key, sends the call, and returns the response. The key
 is never in any response, error message or log line.
 
-Whether this is a mode of `piggy agent`, a sibling binary, or a separate
-repo's service is open (see "Open questions"); the interface below is
-independent of that.
+It is a sibling binary in the piggy repo (ruled by the operator,
+2026-11-12; see "Open questions", item 1, for the dependency cost).
 
 ### The request
 
@@ -190,14 +189,30 @@ header is ignored. A bound caller sends its own `Authorization`: dropped.
 For the operator unless noted. Each marked "blocks" blocks the first
 slice.
 
-1. **Where does the proxy live? (blocks)** A mode of `piggy agent`, a
-   sibling binary in the piggy repo, or a service owned by circus that
-   uses `piggy-guard`. The case for piggy: guarded memory, caller binding
-   and the units are here. The case against: an HTTP/TLS client is a large
-   dependency surface in a repo that so far links none, and the
-   provider-specific allowlist is circus's knowledge. This record leans to
-   a sibling binary in piggy sharing `piggy-guard` and the binding code,
-   but has not weighed the dependency cost.
+1. **Where does the proxy live? Ruled (operator, 2026-11-12): a sibling
+   binary in the piggy repo.** Not a mode of `piggy agent`, not a circus
+   service. It shares `piggy-guard` and the caller-binding code with the
+   holder agent. Consequences, stated so they are not rediscovered:
+   - **Dependency cost.** The workspace `Cargo.lock` links `tokio` and
+     `openssl` today but no HTTP client, no TLS library other than
+     openssl, and no `rustls`, `hyper`, `reqwest` or `ureq` (checked by
+     searching the lockfile, 2026-11-12). The proxy needs an HTTP/1.1
+     client with streaming and a TLS client with certificate
+     verification against the provider's name. That is a new, large
+     dependency surface in code that holds provider keys, and it is the
+     part of the build most exposed to the network. Choosing between
+     openssl (already linked, but piggy is moving off C: see the
+     LibreSSL and vendored-pivy retirement issues) and a pure-Rust TLS
+     stack is part of the first slice's design and is not decided here.
+   - **Isolation.** The binary is its own process and unit, so the HTTP
+     and TLS code never shares an address space with the PIV keys, the
+     card agent or fibby. The dependencies are gated to that crate only
+     (a new workspace member), not the `piggy` binary, and a lint in the
+     merge gate, modelled on `checks.lint-closure-no-pivy`, should fail if
+     the `piggy` or holder binaries link the HTTP/TLS stack.
+   - **Allowlist knowledge.** The provider-specific allowlist is circus's
+     knowledge, held in piggy's configuration: operator-edited, never
+     supplied by a caller.
 2. **How is a key loaded after a restart? (blocks; #385)** Operator input,
    a card-unsealed blob, or both, and what a start without the card does.
 3. **What does a handle bind to? (blocks; per-run binding issue)** A
