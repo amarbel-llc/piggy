@@ -603,14 +603,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
-name = "fib-wait-ready"
-version = "0.1.0"
-dependencies = [
- "clap",
- "pcsc",
-]
-
-[[package]]
 name = "fibby"
 version = "0.1.0"
 dependencies = [
@@ -625,6 +617,14 @@ dependencies = [
  "rand_core 0.6.4",
  "spki",
  "x509-cert",
+]
+
+[[package]]
+name = "fibby-wait-ready"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "pcsc",
 ]
 
 [[package]]

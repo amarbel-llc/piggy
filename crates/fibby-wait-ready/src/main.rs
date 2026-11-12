@@ -23,7 +23,7 @@ fn main() {
     let ctx = match Context::establish(Scope::System) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fib-wait-ready: SCardEstablishContext failed: {e}");
+            eprintln!("fibby-wait-ready:SCardEstablishContext failed: {e}");
             std::process::exit(1);
         }
     };
@@ -31,18 +31,18 @@ fn main() {
     let reader_cstr = match CString::new(args.reader.as_str()) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fib-wait-ready: invalid reader name: {e}");
+            eprintln!("fibby-wait-ready:invalid reader name: {e}");
             std::process::exit(2);
         }
     };
 
     if !wait_card_present(&ctx, &reader_cstr, deadline) {
-        eprintln!("fib-wait-ready: card never became present (timeout)");
+        eprintln!("fibby-wait-ready:card never became present (timeout)");
         std::process::exit(1);
     }
 
     if !piv_select(&ctx, &reader_cstr) {
-        eprintln!("fib-wait-ready: PIV AID SELECT failed after card present");
+        eprintln!("fibby-wait-ready:PIV AID SELECT failed after card present");
         std::process::exit(1);
     }
 }
@@ -76,7 +76,7 @@ fn wait_card_present(ctx: &Context, reader: &CString, deadline: Instant) -> bool
                 continue;
             }
             Err(e) => {
-                eprintln!("fib-wait-ready: SCardGetStatusChange: {e}");
+                eprintln!("fibby-wait-ready:SCardGetStatusChange: {e}");
                 return false;
             }
         }
@@ -92,7 +92,7 @@ fn piv_select(ctx: &Context, reader: &CString) -> bool {
     let card = match ctx.connect(reader, ShareMode::Shared, Protocols::ANY) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fib-wait-ready: SCardConnect for PIV SELECT: {e}");
+            eprintln!("fibby-wait-ready:SCardConnect for PIV SELECT: {e}");
             return false;
         }
     };
@@ -106,15 +106,15 @@ fn piv_select(ctx: &Context, reader: &CString) -> bool {
             if sw == 0x9000 {
                 return true;
             }
-            eprintln!("fib-wait-ready: PIV SELECT returned SW={sw:#06X}");
+            eprintln!("fibby-wait-ready:PIV SELECT returned SW={sw:#06X}");
             false
         }
         Ok(_) => {
-            eprintln!("fib-wait-ready: PIV SELECT response too short");
+            eprintln!("fibby-wait-ready:PIV SELECT response too short");
             false
         }
         Err(e) => {
-            eprintln!("fib-wait-ready: PIV SELECT transmit: {e}");
+            eprintln!("fibby-wait-ready:PIV SELECT transmit: {e}");
             false
         }
     }

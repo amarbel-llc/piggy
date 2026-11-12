@@ -6,7 +6,7 @@ license = "MPL-2.0"
 
 # Test-only helper: a scripted JSON-RPC frontend server for the `piggy card
 # init` JSON-RPC conformance lane (piggy#194, RFC 0006 §4). Mirrors the
-# fib-wait-ready precedent — a small Rust test binary built via
+# fibby-wait-ready precedent — a small Rust test binary built via
 # `cargo build -p card-frontend-server` by the conformance recipe, not shipped.
 
 [[bin]]

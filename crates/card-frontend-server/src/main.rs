@@ -16,7 +16,7 @@
 //! generic JSON rather than reusing piggy's serde types), so a green lane is a
 //! real cross-process conformance check of the wire contract, not a tautology.
 //! It is deliberately a separate workspace crate built on demand by the
-//! conformance recipe (mirroring `fib-wait-ready`), never shipped.
+//! conformance recipe (mirroring `fibby-wait-ready`), never shipped.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;

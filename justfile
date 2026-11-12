@@ -1249,7 +1249,7 @@ test-bats-conformance-sign-bytes-fibby:
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
     # The jsonrpc-frontend lane supplies the PIN via the scripted
-    # card-frontend-server test helper (cargo-built, mirroring fib-wait-ready).
+    # card-frontend-server test helper (cargo-built, mirroring fibby-wait-ready).
     cargo build -p card-frontend-server --quiet
     # PIGGY satisfies the parent common.bash loader without a cargo build.
     PIGGY="$piggy_out/bin/piggy" \
@@ -1325,7 +1325,7 @@ test-bats-conformance-health-fibby:
 # Fibby-backed gate for `piggy card init` (piggy#194): provision a blank yk5
 # fibby end to end through BOTH interaction frontends — the tty/askpass default
 # and the JSON-RPC binding driven by the scripted `card-frontend-server` test
-# helper (cargo-built on demand, mirroring `fib-wait-ready`). Asserts `piggy
+# helper (cargo-built on demand, mirroring `fibby-wait-ready`). Asserts `piggy
 # list` then shows the card provisioned (CHUID GUID + 9D recipient). [linux]-
 # only like the other fibby lanes (PCSCLITE_CSOCK_NAME redirect is a no-op on
 # macOS's PCSC.framework).
@@ -4174,10 +4174,10 @@ debug-tool-list-capture:
 
 # piggy#248 event-driven wake dev-loop: prove fibby's new WAIT_READER_STATE_CHANGE
 # (register + reader-state array + async 8-byte notify on `fibby ctl`) actually
-# unblocks a REAL SCardGetStatusChange client. fib-wait-ready is the oracle (a
+# unblocks a REAL SCardGetStatusChange client. fibby-wait-ready is the oracle (a
 # get_status_change loop): start fibby with a card + control socket, remove the
-# card so fib-wait-ready blocks waiting for PRESENT, then `fibby ctl insert` and
-# confirm fib-wait-ready returns within its timeout. Exits 0 iff the wake works.
+# card so fibby-wait-ready blocks waiting for PRESENT, then `fibby ctl insert` and
+# confirm fibby-wait-ready returns within its timeout. Exits 0 iff the wake works.
 # This is the authoritative empirical check on the old-mode (proto<=4005) wire
 # assumption before the agent event source (piggy#248) is built on top. Uses
 # cargo debug binaries for fast iteration. No hardware.
@@ -4187,10 +4187,10 @@ debug-tool-list-capture:
 debug-fibby-get-status-change:
     #!/usr/bin/env bash
     set -uo pipefail
-    cargo build -p fibby -p fib-wait-ready >/dev/null 2>&1 || {
-      echo "build failed; rerun to see why:"; cargo build -p fibby -p fib-wait-ready; exit 1; }
+    cargo build -p fibby -p fibby-wait-ready >/dev/null 2>&1 || {
+      echo "build failed; rerun to see why:"; cargo build -p fibby -p fibby-wait-ready; exit 1; }
     fibby_bin="$PWD/target/debug/fibby"
-    wait_bin="$PWD/target/debug/fib-wait-ready"
+    wait_bin="$PWD/target/debug/fibby-wait-ready"
     [[ -x $fibby_bin && -x $wait_bin ]] || { echo "missing debug binaries"; exit 1; }
 
     workdir=$(mktemp -d /tmp/pgsc-XXXXXX)
@@ -4209,19 +4209,19 @@ debug-fibby-get-status-change:
     for _ in $(seq 1 50); do [[ -S $sock && -S $ctl ]] && break; sleep 0.1; done
     [[ -S $sock && -S $ctl ]] || { echo "sockets never appeared:"; cat "$log"; exit 1; }
 
-    echo "=== remove the card so fib-wait-ready blocks on PRESENT ==="
+    echo "=== remove the card so fibby-wait-ready blocks on PRESENT ==="
     "$fibby_bin" ctl --socket "$ctl" remove "$reader"
 
-    echo "=== launch fib-wait-ready (blocks in SCardGetStatusChange, 8s timeout) ==="
+    echo "=== launch fibby-wait-ready (blocks in SCardGetStatusChange, 8s timeout) ==="
     PCSCLITE_CSOCK_NAME="$sock" timeout 12 "$wait_bin" --reader "$reader" --timeout 8 &
     wait_pid=$!
     sleep 1.5
 
-    echo "=== insert the card -> should wake fib-wait-ready promptly ==="
+    echo "=== insert the card -> should wake fibby-wait-ready promptly ==="
     "$fibby_bin" ctl --socket "$ctl" insert "$reader"
 
     wait "$wait_pid"; rc=$?
-    echo "=== fib-wait-ready exit code: $rc (0 = woke on insert) ==="
+    echo "=== fibby-wait-ready exit code: $rc (0 = woke on insert) ==="
     echo "=== fibby wire trace (tail 80) ==="
     tail -80 "$log"
     if [[ $rc -eq 0 ]]; then echo "=== WAKE OK (piggy#248 wire confirmed) ==="; else echo "=== WAKE FAILED ==="; fi

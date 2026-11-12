@@ -3,8 +3,8 @@ resolver = "2"
 members = [
     "crates/age-plugin-piggy",
     "crates/card-frontend-server",
-    "crates/fib-wait-ready",
     "crates/fibby",
+    "crates/fibby-wait-ready",
     "crates/manage-client",
     "crates/operator-act-probe",
     "crates/piggy",

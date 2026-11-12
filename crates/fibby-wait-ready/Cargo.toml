@@ -1,11 +1,11 @@
 [package]
-name = "fib-wait-ready"
+name = "fibby-wait-ready"
 version = "0.1.0"
 edition = "2021"
 license = "MPL-2.0"
 
 [[bin]]
-name = "fib-wait-ready"
+name = "fibby-wait-ready"
 path = "src/main.rs"
 
 [dependencies]
