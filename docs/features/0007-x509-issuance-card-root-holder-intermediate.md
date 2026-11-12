@@ -22,6 +22,16 @@ promotion-criteria: >
 > built. The pilot on the cascade host (a card-held CA signing one leaf
 > by hand) proceeds without this record and without fibby on its
 > critical path.
+>
+> **Update, 2026-11-12.** Implementation items I1 (piggy#354, retired
+> slots in `piggy tool`), I2 (piggy#355, the `approval` display class)
+> and I3 (piggy#327, licence) are Closed on the tracker; this session did
+> not re-read their commits, so "landed" is inferred from the Closed
+> state. Decision 5 is answered by RFC 0013 (accepted 2026-11-10). What
+> remains for the operator is approval of this record, after which phases
+> (i) to (iv) each want a tracking issue (none exists; filing waits for
+> approval). FDR 0008 (secret proxy) is a sibling consumer of the same
+> holder and `piggy-guard`, not a dependency of this record.
 
 > **Parent records.** FDR 0006 (fibby as guarded key holder; the holder,
 > the frontend and agent scopes, the unit bindings) and RFC 0012 (operator
