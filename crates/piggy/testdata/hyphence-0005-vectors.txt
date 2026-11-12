@@ -1,0 +1,303 @@
+# Copied verbatim from hyphence docs/rfcs/0005-vectors.txt at commit 1c63a98bc70a (below this line).
+# hyphence canonical-emission conformance vectors (RFC 0005, "Test Vectors").
+#
+# The shape is piggy docs/rfcs/0013-vectors.txt's, so piggy can replay these
+# beside its own act vectors. Replayed by rust/hyphence/src/conformance.rs
+# (emission_vectors) and go/hyphence/emission_vectors_test.go
+# (TestEmissionVectors) from their byte-identical copies at
+# rust/hyphence/testdata/0005-vectors.txt and
+# go/hyphence/testdata/0005-vectors.txt; the flake's vectors-equality check
+# fails when any of the three drifts.
+#
+# Records are separated by blank lines. Each line is "key: value", except
+# that a document is written one line per "| " line (the text after "| " is
+# the line, and a lone "|" is an empty line); every document line ends in
+# LF. Keys:
+#
+#   name          record name
+#   outcome       canonical | refuse
+#   document      the input (as "| " lines)
+#   body-hex      lowercase hex appended to "document" and, for a canonical
+#                 record, to "canonical": body bytes a "| " line cannot
+#                 carry. RFC 0005 never changes a body.
+#   canonical     (canonical) the canonical form: the document decoded into
+#                 a typed head and encoded under RFC 0005. Encoding the
+#                 canonical form again MUST reproduce it.
+#   rule          (refuse) why decoding refuses it: envelope (RFC 0001) |
+#                 content (RFC 0002/0003 content grammar)
+#
+# These are hyphence's rules only. A consumer applies its own normalizations
+# first (piggy RFC 0013 §3.1 drops comments, orders fields and treats an
+# empty body as no body); hyphence keeps comments, keeps the caller's order
+# within a rank, and keeps an empty body. The digests are markl test values
+# (a 0x00, 0x01, ... payload), lexeme-valid and never decoded by hyphence.
+
+name: canonical/already-canonical-is-a-fixed-point
+outcome: canonical
+document:
+| ---
+| # a description
+| - kind = approval
+| - key = piggy-piv_sig-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - prev = @sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6
+| - urgent
+| - one/uno@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ! piggy-act-v1
+| ---
+canonical:
+| ---
+| # a description
+| - kind = approval
+| - key = piggy-piv_sig-v1@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - prev = @sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6
+| - urgent
+| - one/uno@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ! piggy-act-v1
+| ---
+
+name: canonical/rank-order-is-stable
+outcome: canonical
+document:
+| ---
+| ! md
+| - b = 2
+| @ blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - a = 1
+| # a description
+| ---
+canonical:
+| ---
+| # a description
+| - b = 2
+| - a = 1
+| @ blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ! md
+| ---
+
+name: canonical/spacing-and-angle-prefix
+outcome: canonical
+document:
+| ---
+| - kind=approval
+| < blocks=one/uno@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| < urgent
+| ! md
+| ---
+canonical:
+| ---
+| - kind = approval
+| - blocks = one/uno@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - urgent
+| ! md
+| ---
+
+name: canonical/text-bare-only-when-ident
+outcome: canonical
+document:
+| ---
+| - a = "open"
+| - b = 'open'
+| - c = "spinclass:merge"
+| - d = "2026-11-08T23:00:00Z"
+| - e = "-"
+| - f = "two words"
+| - g = "ends-in-colon:"
+| - h = ""
+| - i = 'say "hi"'
+| ! md
+| ---
+canonical:
+| ---
+| - a = open
+| - b = open
+| - c = spinclass:merge
+| - d = 2026-11-08T23:00:00Z
+| - e = -
+| - f = "two words"
+| - g = "ends-in-colon:"
+| - h = ""
+| - i = "say \"hi\""
+| ! md
+| ---
+
+name: canonical/field-name-bare-only-when-ident
+outcome: canonical
+document:
+| ---
+| - "plain" = v
+| - "odd name" = v
+| - "ends-in-colon:" = v
+| ! md
+| ---
+canonical:
+| ---
+| - plain = v
+| - "odd name" = v
+| - "ends-in-colon:" = v
+| ! md
+| ---
+
+name: canonical/quote-purpose-escape-set
+outcome: canonical
+document:
+| ---
+| - all = "\a\b\f\v\r\t\n\\\""
+| - unknown = "x\qy"
+| - single = 'tab\there'
+| ! md
+| ---
+canonical:
+| ---
+| - all = "\a\b\f\v\r\t\n\\\""
+| - unknown = xqy
+| - single = "tab\there"
+| ! md
+| ---
+
+name: canonical/purpose-bare-only-when-purpose-bare
+outcome: canonical
+document:
+| ---
+| - a = "md"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - b = one/uno_2-x@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - c = caldav:x@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - d = "a.b"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - e = "a@b"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - f = "q\"t"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - prev=@sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6
+| ! "md"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ---
+canonical:
+| ---
+| - a = md@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - b = one/uno_2-x@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - c = "caldav:x"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - d = "a.b"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - e = "a@b"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - f = "q\"t"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| - prev = @sha256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s7lcgm6
+| ! md@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ---
+
+name: canonical/locked-type-purpose-quoted
+outcome: canonical
+document:
+| ---
+| ! piggy:act@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ---
+canonical:
+| ---
+| ! "piggy:act"@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+| ---
+
+name: canonical/comments-kept
+outcome: canonical
+document:
+| ---
+| ! md%type note
+| % lead
+| - k=v%glued
+| # d
+| % tail
+| ---
+canonical:
+| ---
+| # d
+| % lead
+| - k = v %glued
+| ! md %type note
+| % tail
+| ---
+
+name: canonical/description-verbatim
+outcome: canonical
+document:
+| ---
+| #  two  spaces, kept
+| ! md
+| ---
+canonical:
+| ---
+| #  two  spaces, kept
+| ! md
+| ---
+
+name: canonical/no-body
+outcome: canonical
+document:
+| ---
+| ! md
+| ---
+canonical:
+| ---
+| ! md
+| ---
+
+name: canonical/empty-body-is-a-body
+outcome: canonical
+document:
+| ---
+| ! md
+| ---
+|
+canonical:
+| ---
+| ! md
+| ---
+|
+
+name: canonical/body-bytes-unchanged
+outcome: canonical
+document:
+| ---
+| ! md
+| ---
+|
+body-hex: 00ff1b5b6d0d0a2d2d2d0a
+canonical:
+| ---
+| ! md
+| ---
+|
+
+name: refuse/digest-outside-blech32
+outcome: refuse
+rule: content
+document:
+| ---
+| - k = md@blake2b256-9bt3
+| ! md
+| ---
+
+name: refuse/unquoted-two-words
+outcome: refuse
+rule: content
+document:
+| ---
+| - k = two words
+| ! md
+| ---
+
+name: refuse/quoted-unlocked-type
+outcome: refuse
+rule: content
+document:
+| ---
+| ! "md"
+| ---
+
+name: refuse/unterminated-metadata
+outcome: refuse
+rule: envelope
+document:
+| ---
+| ! md
+
+name: refuse/unknown-prefix
+outcome: refuse
+rule: envelope
+document:
+| ---
+| x foo
+| ! md
+| ---

@@ -599,4 +599,6 @@ impl Act {
 #[cfg(test)]
 mod chain_tests;
 #[cfg(test)]
+mod hyphence_vectors_tests;
+#[cfg(test)]
 mod tests;

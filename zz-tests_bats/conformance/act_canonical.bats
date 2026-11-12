@@ -125,3 +125,47 @@ function a_file_argument_and_stdin_agree { # @test
   run -0 "$PIGGY" act canon - <"$BATS_TEST_TMPDIR/act"
   assert_output "$from_file"
 }
+
+# hyphence RFC 0005's refuse vectors (crates/piggy/testdata/
+# hyphence-0005-vectors.txt, copied from hyphence 1c63a98), one row per
+# record, documents copied byte for byte. piggy reports a hyphence decode
+# error (RFC 0001, `rule: envelope`) and a typed-head error (RFC 0002/0003,
+# `rule: content`) alike as `envelope`, both before any act rule runs, so
+# every row expects `refused (envelope)`: a pinned hyphence that let one of
+# these through would answer with an act rule (`type`, `value`) instead.
+
+function hyphence_0005_refuse_digest_outside_blech32 { # @test
+  run -1 "$PIGGY" act canon <<<$'---\n- k = md@blake2b256-9bt3\n! md\n---'
+  assert_output --partial 'refused (envelope)'
+}
+
+function hyphence_0005_refuse_unquoted_two_words { # @test
+  run -1 "$PIGGY" act canon <<<$'---\n- k = two words\n! md\n---'
+  assert_output --partial 'refused (envelope)'
+}
+
+function hyphence_0005_refuse_quoted_unlocked_type { # @test
+  run -1 "$PIGGY" act canon <<<$'---\n! "md"\n---'
+  assert_output --partial 'refused (envelope)'
+}
+
+function hyphence_0005_refuse_unterminated_metadata { # @test
+  run -1 "$PIGGY" act canon <<<$'---\n! md'
+  assert_output --partial 'refused (envelope)'
+}
+
+function hyphence_0005_refuse_unknown_prefix { # @test
+  run -1 "$PIGGY" act canon <<<$'---\nx foo\n! md\n---'
+  assert_output --partial 'refused (envelope)'
+}
+
+# The 13 canonical records are hyphence documents, not acts (`! md`, a
+# locked type, a bare `-` term), so `piggy act canon` refuses each with an
+# act rule before RFC 0005 emission is reached, and piggy has no plain
+# hyphence emission verb. They are replayed against the linked hyphence in
+# crates/piggy/src/act/hyphence_vectors_tests.rs instead; this row only
+# pins that the first of them is refused as an act, not as hyphence.
+function hyphence_0005_canonical_records_are_not_acts { # @test
+  run -1 "$PIGGY" act canon <<<$'---\n- kind = approval\n- urgent\n! piggy-act-v1\n---'
+  assert_output --partial 'refused (line-kind)'
+}

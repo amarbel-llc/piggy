@@ -5,21 +5,27 @@ use super::*;
 
 const VECTORS: &str = include_str!("../../testdata/0013-vectors.txt");
 
-struct Vector {
-    name: String,
-    outcome: String,
-    rule: Option<String>,
-    document: Vec<u8>,
-    canonical: Option<Vec<u8>>,
+pub(super) struct Vector {
+    pub(super) name: String,
+    pub(super) outcome: String,
+    pub(super) rule: Option<String>,
+    pub(super) document: Vec<u8>,
+    pub(super) canonical: Option<Vec<u8>>,
     sealed: Option<Vec<u8>>,
+}
+
+fn vectors() -> Vec<Vector> {
+    read_vectors(VECTORS)
 }
 
 /// The vector file's record format: `key: value` lines, and documents as
 /// runs of `| ` lines under a `key:` line with nothing after the colon.
-fn vectors() -> Vec<Vector> {
+/// `body-hex` is appended to the document and, when present, the canonical
+/// form (neither RFC 0013 §3.1 nor hyphence RFC 0005 changes a body).
+pub(super) fn read_vectors(source: &str) -> Vec<Vector> {
     let mut out = Vec::new();
 
-    for record in VECTORS.split("\n\n") {
+    for record in source.split("\n\n") {
         let lines: Vec<&str> = record
             .lines()
             .filter(|l| !l.starts_with('#') || l.starts_with("| "))
@@ -56,8 +62,13 @@ fn vectors() -> Vec<Vector> {
             continue;
         };
         let mut document = blocks.remove("document").expect("a document");
+        let mut canonical = blocks.remove("canonical");
         if let Some(hex) = scalars.get("body-hex") {
-            document.extend(hex::decode(hex).expect("body-hex"));
+            let body = hex::decode(hex).expect("body-hex");
+            document.extend(&body);
+            if let Some(canonical) = canonical.as_mut() {
+                canonical.extend(&body);
+            }
         }
 
         out.push(Vector {
@@ -65,7 +76,7 @@ fn vectors() -> Vec<Vector> {
             outcome: scalars["outcome"].clone(),
             rule: scalars.get("rule").cloned(),
             document,
-            canonical: blocks.remove("canonical"),
+            canonical,
             sealed: blocks.remove("sealed"),
         });
     }
