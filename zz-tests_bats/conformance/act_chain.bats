@@ -383,6 +383,69 @@ function layers_come_back_in_chain_order_marked_stencil_or_patch { # @test
   cmp <(jq -j '.layers[1].body' <<<"$output") <(printf '%s' "$BODY")
 }
 
+# §4.9: an escalation replaces, for the act it names, only the layer kinds
+# it carries.
+
+PROFILE_OLD=reviewer@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+PROFILE_NEW=builder@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
+PATCH_OLD=$'[x !y-v1\n  [-> z !w-v1 deny]]\n'
+PATCH_NEW=$'[x !y-v1\n  [-> q !w-v1 deny]]\n'
+
+# A link from a root carrying both a profile edge and a patch.
+_layered_link() {
+  ROOT=$(_root)
+  BODY=$PATCH_OLD
+  LINK=$(_act link a "subject = s:b" "subject-key = $(_key b)" "issuer = s:a" \
+    "issuer-record = $ROOT" "profile = $PROFILE_OLD" "right = x:check")
+  BODY=
+}
+
+function an_escalation_with_a_profile_and_no_body_keeps_the_acts_body { # @test
+  local escalation
+  _layered_link
+  escalation=$(_act escalation card "subject = s:b" "right = x:check" \
+    "profile = $PROFILE_NEW" "names = $LINK")
+  run -0 _verify "$LINK"
+  [[ $(_jq '.layers | length') == 2 ]] || fail "$output"
+  [[ $(_jq '.layers[0].act') == "$escalation" ]]
+  [[ $(_jq '.layers[0].role') == stencil ]]
+  [[ $(_jq '.layers[0].profile') == "$PROFILE_NEW" ]]
+  [[ $(_jq '.layers[1].act') == "$LINK" ]]
+  [[ $(_jq '.layers[1].role') == patch ]]
+  cmp <(jq -j '.layers[1].body' <<<"$output") <(printf '%s' "$PATCH_OLD")
+}
+
+function an_escalation_with_a_body_and_no_profile_replaces_only_the_body { # @test
+  local escalation
+  _layered_link
+  BODY=$PATCH_NEW
+  escalation=$(_act escalation card "subject = s:b" "right = x:check" "names = $LINK")
+  BODY=
+  run -0 _verify "$LINK"
+  [[ $(_jq '.layers | length') == 2 ]] || fail "$output"
+  [[ $(_jq '.layers[0].act') == "$LINK" ]]
+  [[ $(_jq '.layers[0].profile') == "$PROFILE_OLD" ]]
+  [[ $(_jq '.layers[1].act') == "$escalation" ]]
+  [[ $(_jq '.layers[1].role') == patch ]]
+  cmp <(jq -j '.layers[1].body' <<<"$output") <(printf '%s' "$PATCH_NEW")
+}
+
+function an_escalation_with_a_leafless_body_clears_the_acts_patch { # @test
+  local escalation
+  _layered_link
+  # Whitespace only: non-empty, so a body to piggy (§3.1 step 7), and zero
+  # leaves to the stencil fragment's patch reader.
+  BODY=$'\n'
+  escalation=$(_act escalation card "subject = s:b" "right = x:check" "names = $LINK")
+  BODY=
+  run -0 _verify "$LINK"
+  [[ $(_jq '.layers | length') == 2 ]] || fail "$output"
+  [[ $(_jq '.layers[0].profile') == "$PROFILE_OLD" ]]
+  [[ $(_jq '.layers[1].act') == "$escalation" ]]
+  [[ $(_jq '.layers[1].role') == patch ]]
+  cmp <(jq -j '.layers[1].body' <<<"$output") <(printf '\n') || fail "$output"
+}
+
 # RFC 0013 §9's consumer examples (piggy#363).
 
 PROFILE_MANAGER=manager-builder@blake2b256-qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s6vk400
