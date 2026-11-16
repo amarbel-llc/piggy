@@ -1,0 +1,16 @@
+[package]
+name = "pigtrough"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "The auth decoration proxy pilot (FDR 0009): clients send plain HTTP over a unix socket, piggy attaches the credential"
+# This first slice is the request path without a wire: route, allowlist,
+# filters, secret holder, audit line, listener admission, and the
+# `upstream::UpstreamClient` seam. The ruled stack (FDR 0009 t1: rustls
+# with ring, hyper on tokio) lands behind that seam in the next slice, and
+# only in this crate; `piggy`, the agent and fibby must not link it.
+
+[dependencies]
+libc = "0.2"
+piggy-guard = { path = "../piggy-guard" }
+zeroize = "1"

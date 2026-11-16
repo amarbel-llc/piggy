@@ -1,0 +1,168 @@
+//! The request path: admit, decorate, forward, check, return.
+//!
+//! [`Proxy::handle`] takes a request already read off the wire and returns
+//! what to write back, so it does not depend on the HTTP library (FDR 0009
+//! question 7). Its order fixes the fail-closed properties: the allowlist
+//! and the secret are both checked before the upstream is called, so a
+//! refused or undecoratable request makes no upstream connection
+//! (behaviours 3 and 4).
+
+use std::io::{self, Read};
+use std::sync::Arc;
+
+use crate::Headers;
+use crate::audit::{AuditRecord, AuditSink, Decision};
+use crate::filter::{ScannedBody, inbound_headers, outbound_headers};
+use crate::holder::SecretHolder;
+use crate::refusal::Cause;
+use crate::route::{Route, admit};
+use crate::upstream::{Credential, OutboundRequest, UpstreamClient};
+
+/// A client request, as the wire adapter read it. A body with a transfer
+/// coding has already been decoded or refused by the adapter.
+#[derive(Debug)]
+pub struct ClientRequest {
+    pub method: String,
+    pub target: String,
+    pub headers: Headers,
+    pub body: Vec<u8>,
+}
+
+/// What to send back to the client.
+pub enum Reply {
+    /// A fixed refusal: the status and body come from the cause alone.
+    Refusal(Cause),
+    Upstream {
+        status: u16,
+        headers: Headers,
+        body: ReplyBody,
+    },
+}
+
+impl Reply {
+    pub fn status(&self) -> u16 {
+        match self {
+            Reply::Refusal(cause) => cause.status(),
+            Reply::Upstream { status, .. } => *status,
+        }
+    }
+}
+
+/// The scope one proxy serves. In the pilot it is fixed (FDR 0009, ruling
+/// p2): one socket, one bound UID.
+pub struct Scope {
+    pub name: String,
+}
+
+pub struct Proxy<C> {
+    routes: Vec<&'static Route>,
+    holder: Arc<SecretHolder>,
+    client: C,
+    audit: Arc<dyn AuditSink>,
+    scope: Scope,
+}
+
+impl<C: UpstreamClient> Proxy<C> {
+    /// A proxy serving `route` for `scope`, its secret in `holder`.
+    pub fn new(
+        route: &'static Route,
+        holder: Arc<SecretHolder>,
+        client: C,
+        audit: Arc<dyn AuditSink>,
+        scope: Scope,
+    ) -> Self {
+        Self {
+            routes: vec![route],
+            holder,
+            client,
+            audit,
+            scope,
+        }
+    }
+
+    /// Record a connection refused before any request was read.
+    pub fn refuse_binding(&self) {
+        self.audit
+            .record(&AuditRecord::new(&self.scope.name, Decision::RefuseBinding));
+    }
+
+    pub fn handle(&self, request: ClientRequest) -> Reply {
+        let mut record = AuditRecord::new(&self.scope.name, Decision::Allow)
+            .request(&request.method, &request.target);
+        record.bytes_in = request.body.len() as u64;
+
+        let Some(admitted) = admit(&self.routes, &request.method, &request.target) else {
+            return self.refuse(record, Cause::Refused);
+        };
+        record.route = Some(admitted.route.name);
+
+        let Some(secret) = self.holder.current() else {
+            return self.refuse(record, Cause::SecretUnavailable);
+        };
+        let credential = Credential::new(admitted.route.scheme, secret.clone());
+        let outbound = OutboundRequest {
+            method: &request.method,
+            path_and_query: admitted.path_and_query(),
+            headers: outbound_headers(admitted.route, &request.headers),
+            credential,
+            body: &request.body,
+        };
+        let upstream = &admitted.route.upstream;
+        let response = match self.client.send(upstream, outbound) {
+            Ok(response) => response,
+            Err(_) => return self.refuse(record, Cause::UpstreamUnavailable),
+        };
+        let headers = match inbound_headers(upstream, response.status, response.headers, &secret) {
+            Ok(headers) => headers,
+            Err(cause) => return self.refuse(record, cause),
+        };
+        record.status = Some(response.status);
+        Reply::Upstream {
+            status: response.status,
+            headers,
+            body: ReplyBody {
+                inner: ScannedBody::new(response.body, secret),
+                record: Some(record),
+                audit: self.audit.clone(),
+            },
+        }
+    }
+
+    fn refuse(&self, mut record: AuditRecord, cause: Cause) -> Reply {
+        record.decision = cause.decision();
+        record.status = Some(cause.status());
+        self.audit.record(&record);
+        Reply::Refusal(cause)
+    }
+}
+
+/// An upstream response body on its way to the client. It writes the
+/// request's audit line when it is dropped, with the bytes actually
+/// returned, so a line is written whether the body was read to the end, cut
+/// off by an echoed credential, or abandoned by the client.
+pub struct ReplyBody {
+    inner: ScannedBody<Box<dyn Read + Send>>,
+    record: Option<AuditRecord>,
+    audit: Arc<dyn AuditSink>,
+}
+
+impl Read for ReplyBody {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let result = self.inner.read(buf);
+        if result.is_err() {
+            if let Some(record) = self.record.as_mut() {
+                record.decision = Decision::RefuseUpstream;
+            }
+        }
+        result
+    }
+}
+
+impl Drop for ReplyBody {
+    fn drop(&mut self) {
+        if let Some(mut record) = self.record.take() {
+            record.bytes_out = self.inner.count;
+            self.audit.record(&record);
+        }
+    }
+}
