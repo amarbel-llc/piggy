@@ -213,9 +213,11 @@ fn exchange(running: &Running, raw: &[u8], close_write: bool) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
-    stream.write_all(raw).unwrap();
+    // A refused connection may be closed before the request is written, so a
+    // write error here is an outcome to observe, not a test failure.
+    let _ = stream.write_all(raw);
     if close_write {
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let _ = stream.shutdown(std::net::Shutdown::Write);
     }
     let mut out = Vec::new();
     let _ = stream.read_to_end(&mut out);
