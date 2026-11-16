@@ -315,6 +315,41 @@ here:
   by a per-pod fibby instead of the host proxy, so the route table's
   `secret` field names a secret, not a store location.
 
+## Certificate prior art (circus shithub proxy design)
+
+Source: circus `docs/plans/2026-11-08-shithub-proxy-design.md`, read
+2026-11-16. That design is an *intercepting* proxy: a shim terminates TLS
+for three GitHub names with a leaf that clients are made to trust, so it
+presents a certificate to its clients. This proxy, as ruled, does not:
+clients speak plain HTTP over a unix socket (path-prefix routes), so **the
+pilot presents no leaf and needs no CA**. What it needs from TLS is the
+other direction, verifying `api.github.com` upstream, which uses ordinary
+roots and nothing from the shithub design.
+
+What is reusable, by case:
+
+- **Pilot (upstream verification only).** The shithub design's per-process
+  trust pattern: a bundle of the system roots plus one extra file, passed
+  to one process and never installed system-wide. For the proxy's tests
+  that is the fake upstream's self-signed certificate added as the only
+  trusted root for the test route, which matches the plan's fake-upstream
+  behaviour.
+- **If the proxy later terminates for clients** (the SOCKS5 or CONNECT
+  variants of question 9, or a guest that insists on `https://`). The
+  design is already written and piggy-side: a card-held root with
+  `nameConstraints` (permitted names plus the IPv4 and IPv6 exclusions,
+  `pathlen:1`), a holder-held intermediate, short-lived leaves with the
+  key generated on the consuming side and only a CSR sent (FDR 0007 is
+  the piggy side). Facts from its spike that bind any such work: nix's
+  curl accepted a P-256 CA and enforced the name constraints; Ed25519 is
+  rejected on the certificate path; a proxy variable sends *all* of a
+  client's HTTPS through the proxy, so names outside the constrained set
+  must be tunnelled, not terminated; a holder restart wipes the
+  intermediate, so a durable arrangement or a card re-signing is needed.
+- **Not reusable as is.** The shim's mirror-serving, its anonymous
+  pass-through to GitHub, and its flic cascade wiring are specific to
+  shithub.
+
 ## Operator rulings (2026-11-16)
 
 Relayed by the coordinator (circus/eager-holly/clarabell). The operator
@@ -347,9 +382,9 @@ proxy to see the request, so the client side is plain HTTP on the unix
 socket and the proxy originates TLS to the upstream. A pure tunnel cannot
 add headers, so "no TLS termination" is not available to a route that
 attaches a header. What the pilot omits is TLS *to the client*, not TLS
-to GitHub. The library choice is the open FDR 0008 question 1; the pilot
-needs only a TLS client and an HTTP/1.1 client with certificate
-verification against the fixed name.
+to GitHub. The stack is ruled (question 7): rustls with ring, hyper on
+tokio, the dialer behind one small trait. The pilot needs only the
+upstream side: certificate verification against the fixed name.
 
 **Process and files (proposed).**
 
@@ -421,10 +456,11 @@ constraint requires.
 **Dependencies on operator answers.** Question 1 (one unit or two) fixes
 the crate's name and whether the FDR 0008 request shape ships in the same
 binary; the pilot needs neither the handle model nor graph runs. Question
-7 (TLS library) must be answered before the build; the recommendation is
-to choose the library the build can compile and audit most easily, and to
-record the choice in this record. Everything else in the plan above holds
-whatever the answers to questions 2, 3 and 4.
+7 (TLS library) is ruled (rustls, ring, hyper, tokio, swappable dialer).
+The implementer's first checks are how the nix build vendors the new
+dependencies and that the `piggy` and agent closures do not link them.
+Everything else in the plan above holds whatever the answers to
+questions 2, 3 and 4.
 
 ## Open questions
 
@@ -445,8 +481,14 @@ For the operator unless noted. "Blocks" blocks the first slice.
 6. **Where does the proxy run?** On the host of its clients (flic for the
    reconciler; krone for graph runs); who loads secrets on each. FDR 0008
    questions 5 and 7.
-7. **TLS library.** openssl versus a pure-Rust stack, as FDR 0008
-   question 1 left it.
+7. **TLS library and HTTP stack.** Ruled (operator, 2026-11-16, ruling
+   t1): rustls with the ring provider, hyper on tokio, and the TLS
+   dialer behind one small trait so the provider can change. Answers
+   FDR 0008 question 1 for the proxy. Rejected: the `openssl` crate
+   (already in the lock) and a hand-rolled HTTP/1.1 client. The operator
+   added that the prior art for certificates from the shithub proxy
+   design is to be reused; what that covers for this proxy is under
+   "Certificate prior art" below.
 8. **Audit log destination** (FDR 0008 question 9).
 9. **Should the front end be a SOCKS5 proxy?** Floated by the operator
    ("maybe this should be a SOCKS5 proxy? not sure yet"); not decided and
