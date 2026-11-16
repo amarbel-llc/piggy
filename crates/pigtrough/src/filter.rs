@@ -7,6 +7,12 @@
 //! any header whose value contains the secret is dropped, a redirect off
 //! the upstream host is refused (behaviour 5), and the body is scanned for
 //! the secret as it streams (behaviour 2).
+//!
+//! The scan sees bytes, so the proxy asks for an unencoded body
+//! (`Accept-Encoding: identity`) and refuses any response with a content
+//! coding: a gzipped echo would pass the scan. It does not catch an echo
+//! the upstream itself encodes (base64, a JSON-escaped string); GitHub
+//! echoes neither, and catching them would mean understanding the body.
 
 use std::io::{self, Read};
 use std::sync::Arc;
@@ -17,7 +23,10 @@ use crate::Headers;
 use crate::refusal::Cause;
 use crate::route::{Route, Upstream};
 
-/// The client headers the route forwards, plus the upstream's `Host`.
+/// The client headers the route forwards, plus the upstream's `Host` and
+/// `Accept-Encoding: identity`. Framing headers (`Content-Length`,
+/// `Transfer-Encoding`) are never forwarded: the upstream client frames the
+/// body it actually sends.
 pub fn outbound_headers(route: &Route, client: &Headers) -> Headers {
     let mut out: Headers = client
         .iter()
@@ -30,6 +39,7 @@ pub fn outbound_headers(route: &Route, client: &Headers) -> Headers {
         .cloned()
         .collect();
     out.push(("Host".to_owned(), route.upstream.host.as_bytes().to_vec()));
+    out.push(("Accept-Encoding".to_owned(), b"identity".to_vec()));
     out
 }
 
@@ -63,6 +73,13 @@ pub fn inbound_headers(
                 return Err(Cause::UpstreamRedirectRefused);
             }
         }
+    }
+    let encoded = headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-encoding")
+            && !value.trim_ascii().eq_ignore_ascii_case(b"identity")
+    });
+    if encoded {
+        return Err(Cause::UpstreamEncodedResponse);
     }
     let mut kept = Headers::with_capacity(headers.len());
     for (name, value) in headers {
@@ -204,6 +221,8 @@ mod tests {
             ("Accept", "application/vnd.github+json"),
             ("content-type", "application/json"),
             ("User-Agent", "reconciler"),
+            ("Content-Length", "999"),
+            ("Transfer-Encoding", "chunked"),
         ]);
         let out = outbound_headers(&GITHUB_API, &client);
         assert_eq!(
@@ -213,8 +232,23 @@ mod tests {
                 ("content-type", "application/json"),
                 ("User-Agent", "reconciler"),
                 ("Host", "api.github.com"),
+                ("Accept-Encoding", "identity"),
             ])
         );
+    }
+
+    #[test]
+    fn inbound_refuses_a_content_coding() {
+        let s = secret(b"piggy-test-tok");
+        let up = &GITHUB_API.upstream;
+        for coding in ["gzip", "br", "identity, gzip"] {
+            assert_eq!(
+                inbound_headers(up, 200, h(&[("Content-Encoding", coding)]), &s),
+                Err(Cause::UpstreamEncodedResponse),
+                "{coding}"
+            );
+        }
+        assert!(inbound_headers(up, 200, h(&[("Content-Encoding", "Identity ")]), &s).is_ok());
     }
 
     #[test]

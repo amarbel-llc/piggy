@@ -103,7 +103,6 @@ pub static GITHUB_API: Route = Route {
     forward_headers: &[
         "accept",
         "content-type",
-        "content-length",
         "user-agent",
         "x-github-api-version",
         "if-none-match",

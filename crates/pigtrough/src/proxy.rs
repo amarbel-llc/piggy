@@ -128,6 +128,13 @@ impl<C: UpstreamClient> Proxy<C> {
         }
     }
 
+    /// Refuse a request the wire adapter could not read whole, with its
+    /// audit line.
+    pub fn reject(&self, method: &str, target: &str, cause: Cause) -> Reply {
+        let record = AuditRecord::new(&self.scope.name, Decision::Allow).request(method, target);
+        self.refuse(record, cause)
+    }
+
     fn refuse(&self, mut record: AuditRecord, cause: Cause) -> Reply {
         record.decision = cause.decision();
         record.status = Some(cause.status());

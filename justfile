@@ -2,7 +2,7 @@
 default: lint build test
 
 [group('pre-build')]
-lint: lint-fmt lint-rust lint-piggy-piv-portable lint-worktree lint-closure-no-pivy
+lint: lint-fmt lint-rust lint-piggy-piv-portable lint-worktree lint-closure-no-pivy lint-pigtrough-stack-isolated
 
 # --- build ---
 
@@ -208,6 +208,37 @@ codemod-rfc0002-fixture:
 codemod-pigpen-vectors:
     cd go && go test -count=1 -tags 'test pigpen_vectors_generate' -run TestGeneratePigpenVectors ./internal/delta/pigpen/...
     cp go/internal/delta/pigpen/testdata/0008-pigpen-vectors.txt docs/rfcs/0008-pigpen-vectors.txt
+
+# Regenerate pigtrough's fake-upstream TLS fixtures (FDR 0009 pilot):
+# a P-256 test CA and an api.github.com leaf it signs, valid for a century.
+# tests/wire.rs trusts only the CA, so the real roots never apply in a test.
+# These are public test material, not secrets: the CA key is discarded and
+# the leaf key verifies nothing outside the test.
+#
+# regenerate pigtrough's fake-upstream test CA and leaf certificate
+[group('codemod')]
+codemod-pigtrough-test-cert:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=crates/pigtrough/testdata
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    mkdir -p "$out"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout "$work/ca.key" -out "$out/fake-upstream-ca.pem" -days 36500 \
+      -subj "/CN=pigtrough test CA" \
+      -addext "basicConstraints=critical,CA:TRUE" \
+      -addext "keyUsage=critical,keyCertSign"
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout "$out/fake-upstream-leaf.key.pem" -out "$work/leaf.csr" \
+      -subj "/CN=api.github.com"
+    printf '%s\n' "subjectAltName=DNS:api.github.com" \
+      "basicConstraints=critical,CA:FALSE" \
+      "keyUsage=critical,digitalSignature" \
+      "extendedKeyUsage=serverAuth" > "$work/leaf.ext"
+    openssl x509 -req -in "$work/leaf.csr" -CA "$out/fake-upstream-ca.pem" \
+      -CAkey "$work/ca.key" -set_serial 2 -days 36500 \
+      -extfile "$work/leaf.ext" -out "$out/fake-upstream-leaf.pem"
 
 # Capture the pivy-oracle differential corpus (piggy#164 Phase 1 item 2).
 # Encrypt a matrix of plaintexts to fibby's RFC 5903 slot-9D key with the
@@ -2525,6 +2556,27 @@ lint-closure-no-pivy:
     set -euo pipefail
     system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
     nix build ".#checks.${system}.lint-closure-no-pivy" --no-link --print-build-logs
+
+# FDR 0009: pigtrough's HTTP/TLS stack (hyper, rustls with ring, tokio-rustls,
+# webpki-roots) stays in pigtrough. Every other workspace member's normal and
+# build dependency tree must be free of it, so `piggy`, the agent and fibby
+# never link it. A dependency-tree check, not a store-closure one: Rust links
+# statically, so the stack would leave no store path to find.
+#
+# assert no workspace crate but pigtrough pulls in the HTTP/TLS stack
+[group('pre-build')]
+lint-pigtrough-stack-isolated:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    found=$(cargo tree --locked --workspace --exclude pigtrough --edges normal,build \
+      --prefix none --format '{p}' |
+      grep -E '^(hyper|hyper-util|http-body-util|rustls|tokio-rustls|webpki-roots|ring) ' |
+      sort -u || true)
+    if [[ -n "$found" ]]; then
+      echo "a workspace crate other than pigtrough pulls in its HTTP/TLS stack:" >&2
+      echo "$found" >&2
+      exit 1
+    fi
 
 # Impure lane: the eng-convention checks that need the live worktree (git
 # remotes / default branch / sweatfile / agents-md) PLUS the go/ facade

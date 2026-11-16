@@ -8,8 +8,9 @@
 
 use std::fs;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 
 /// The effective UID of this process.
@@ -76,8 +77,7 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 
 /// The UID of the process at the other end of `stream`, from the kernel.
 #[cfg(target_os = "linux")]
-pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
-    use std::os::fd::AsRawFd;
+pub fn peer_uid(stream: &impl AsRawFd) -> io::Result<u32> {
     let mut cred = libc::ucred {
         pid: 0,
         uid: 0,
@@ -103,8 +103,7 @@ pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 
 /// The UID of the process at the other end of `stream`, from the kernel.
 #[cfg(target_os = "macos")]
-pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
-    use std::os::fd::AsRawFd;
+pub fn peer_uid(stream: &impl AsRawFd) -> io::Result<u32> {
     let (mut uid, mut gid) = (0, 0);
     // SAFETY: the fd is a live socket owned by `stream`; both out-pointers
     // are valid.
@@ -116,14 +115,17 @@ pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 }
 
 /// Whether a connection is admitted: its peer must be `bound_uid`. A peer
-/// whose credentials cannot be read is refused.
-pub fn admit_peer(stream: &UnixStream, bound_uid: u32) -> bool {
+/// whose credentials cannot be read is refused. The one admission decision:
+/// `server::serve` calls it (through its admission closure) for every
+/// accepted connection, std or tokio.
+pub fn admit_peer(stream: &impl AsRawFd, bound_uid: u32) -> bool {
     peer_uid(stream).is_ok_and(|uid| uid == bound_uid)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixStream;
 
     /// A fresh directory with a short name: a socket path must fit in
     /// `sun_path` (108 bytes on Linux) under a worktree's long `TMPDIR`.

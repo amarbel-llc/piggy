@@ -14,12 +14,14 @@
 //!   route, replaced whole on `load`.
 //! - [`filter`]: what the proxy forwards from the client and returns from
 //!   the upstream.
-//! - [`upstream`]: the seam to the HTTP/TLS client (FDR 0009 ruling t1:
-//!   rustls with ring, hyper on tokio), the only module that will depend on
-//!   that stack.
+//! - [`upstream`]: the seam to the upstream client.
 //! - [`audit`]: the one audit line per request.
 //! - [`proxy`]: the request path that ties them together, independent of how
 //!   the client's request arrived on the wire.
+//! - [`server`] and [`tls`]: the only modules that use the HTTP/TLS stack
+//!   (FDR 0009 ruling t1: rustls with ring, hyper on tokio): the
+//!   client-facing HTTP/1.1 server on the unix socket, and the upstream
+//!   client behind the seam.
 //!
 //! The crate and its binary are `pigtrough` (operator ruling, 2026-11-16).
 
@@ -30,8 +32,12 @@ pub mod listener;
 pub mod proxy;
 pub mod refusal;
 pub mod route;
+pub mod server;
+pub mod tls;
 pub mod upstream;
+mod wire;
 
 /// HTTP header fields in arrival order, names as received. The proxy's own
-/// type, so nothing outside [`upstream`] depends on an HTTP library.
+/// type, so nothing outside [`server`] and [`tls`] depends on an HTTP
+/// library.
 pub type Headers = Vec<(String, Vec<u8>)>;
