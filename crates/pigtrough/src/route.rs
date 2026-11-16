@@ -151,10 +151,8 @@ pub fn admit<'r, 't>(
         return None;
     }
     let rest = path.strip_prefix('/')?;
-    let (name, upstream_path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => return None,
-    };
+    let split = rest.find('/')?;
+    let (name, upstream_path) = rest.split_at(split);
     let route = routes.iter().copied().find(|r| r.name == name)?;
     route
         .allow

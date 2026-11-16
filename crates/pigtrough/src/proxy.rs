@@ -35,7 +35,7 @@ pub enum Reply {
     Upstream {
         status: u16,
         headers: Headers,
-        body: ReplyBody,
+        body: Box<ReplyBody>,
     },
 }
 
@@ -120,11 +120,11 @@ impl<C: UpstreamClient> Proxy<C> {
         Reply::Upstream {
             status: response.status,
             headers,
-            body: ReplyBody {
+            body: Box::new(ReplyBody {
                 inner: ScannedBody::new(response.body, secret),
                 record: Some(record),
                 audit: self.audit.clone(),
-            },
+            }),
         }
     }
 
