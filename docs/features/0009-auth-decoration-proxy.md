@@ -142,8 +142,11 @@ Refusals are logged at the same level as successes. Where the log goes
 
 **6. Card lock state.** Fail closed and say so. A route whose secret is
 unloaded or whose unsealing needs a locked or absent card answers HTTP
-`503` with a fixed body naming the cause (`secret-unavailable`,
-`card-locked`, `card-absent`); it never forwards without auth, never
+`503` with a fixed body naming the cause (`secret-unavailable`; and
+`card-locked` or `card-absent` once a route's secret is unsealed by the
+proxy itself, which the pilot does not do: it never touches the card, so
+the pilot answers `secret-unavailable` only, and a client should treat
+any `503` from the proxy as "stop, not retry"); it never forwards without auth, never
 substitutes an empty credential, and never queues indefinitely. This
 matches the stance cutting-garden asked to keep (a missing binary or a
 non-zero exit is a hard error). Prompting is the exception, allowed only
