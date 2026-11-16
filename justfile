@@ -4314,6 +4314,139 @@ explore-launchd-piggy-agent label="piggy-agent":
 explore-piggy-health *ARGS:
     cargo run -q -p piggy -- health -v --format tap {{ARGS}}
 
+# Run the pigtrough pilot pass (docs/plans/2026-11-16-pigtrough-pilot-runbook.md)
+# start to finish with no terminal, in a throwaway runtime dir: start
+# `serve`, print each check's command and result, stop `serve`, remove the
+# dir. BIN is a built pigtrough (the `nix build .#pigtrough` output); the
+# recipe builds nothing.
+#   PHASE=pre-load touches no secret and no network: the fail-closed 503 and
+#     the fixed 403 refusals.
+#   PHASE=loaded also loads github/forgejo-mirror from the operator's own
+#     store (PIGGY_STORE_DIR unset; a card decrypt) and makes three read-only
+#     GETs to api.github.com: the direct unauthenticated baseline, the
+#     proxied call, and the proxied call with a bogus client Authorization.
+#     The token goes from `piggy pass show` straight into `pigtrough load`;
+#     only status lines and x-ratelimit-limit are printed.
+#   PHASE=proc loads the same way, makes no GitHub call, and runs runbook
+#     step 6: the loaded serve's /proc cmdline, and whether its environ is
+#     readable (it must not be: serve is non-dumpable).
+#
+# run the pigtrough pilot pass against a throwaway runtime dir (PHASE=pre-load, loaded or proc)
+[group('explore')]
+[linux]
+explore-pigtrough-pilot-pass BIN PHASE="pre-load":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ PHASE }}" in
+      pre-load | loaded | proc) ;;
+      *)
+        echo "PHASE is pre-load, loaded or proc" >&2
+        exit 2
+        ;;
+    esac
+    bin="{{ BIN }}"
+    [[ -x $bin ]] || {
+      echo "not executable: $bin" >&2
+      exit 2
+    }
+    # Not $TMPDIR: a worktree's .tmp is too deep for a unix socket path.
+    base=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/pigtrough-pilot.XXXXXX")
+    run=$base/run
+    log=$base/serve.log
+    serve_pid=""
+    cleanup() {
+      if [[ -n $serve_pid ]]; then
+        # TERM, not INT: bash starts background jobs with SIGINT ignored.
+        kill -TERM "$serve_pid" 2>/dev/null || true
+        wait "$serve_pid" 2>/dev/null || true
+      fi
+      echo
+      echo "--- serve output"
+      cat "$log" 2>/dev/null || true
+      rm -rf "$base"
+      if [[ -e $base ]]; then echo "--- $base NOT removed"; else echo "--- removed $base"; fi
+    }
+    trap cleanup EXIT
+    "$bin" serve --dir "$run" >"$log" 2>&1 &
+    serve_pid=$!
+    for _ in $(seq 50); do
+      [[ -S $run/proxy.sock && -S $run/control.sock ]] && break
+      sleep 0.1
+    done
+    [[ -S $run/proxy.sock ]] || {
+      echo "serve did not come up" >&2
+      exit 1
+    }
+    echo "--- runtime dir and sockets (uid $(id -u))"
+    stat -c '%a %u %F %n' "$run" "$run/proxy.sock" "$run/control.sock"
+    sock=$run/proxy.sock
+    api=http://pigtrough/github-api
+    repo=repos/amarbel-llc/piggy
+    full() {
+      echo
+      echo "\$ curl -i --unix-socket proxy.sock $*"
+      curl -sS -i --max-time 10 --path-as-is --unix-socket "$sock" "$@"
+      echo
+    }
+    short() {
+      echo
+      echo "\$ curl -i --unix-socket proxy.sock $* | grep status, x-ratelimit-limit"
+      curl -sS -i --max-time 30 --unix-socket "$sock" "$@" |
+        grep -i -e '^HTTP/' -e '^x-ratelimit-limit' || true
+    }
+    full "$api/$repo"
+    if [[ "{{ PHASE }}" == pre-load ]]; then
+      full -H 'Authorization: Bearer not-a-token' "$api/$repo"
+      full "$api/user"
+      full "$api/repos/someone-else/repo"
+      full -X DELETE "$api/$repo"
+      full "http://pigtrough/elsewhere/x"
+      full "$api/repos/amarbel-llc/%2e%2e"
+      exit 0
+    fi
+    echo
+    echo "\$ piggy pass show github/forgejo-mirror | pigtrough load github-api --dir run"
+    (
+      unset PIGGY_STORE_DIR
+      piggy pass show github/forgejo-mirror
+    ) | "$bin" load github-api --dir "$run"
+    if [[ "{{ PHASE }}" == proc ]]; then
+      echo
+      echo "\$ tr '\\0' ' ' < /proc/\$serve_pid/cmdline   (runbook step 6)"
+      tr '\0' ' ' <"/proc/$serve_pid/cmdline" | sed "s|$run|run|"
+      echo
+      echo "\$ cat /proc/\$serve_pid/environ"
+      cat "/proc/$serve_pid/environ" >/dev/null 2>"$base/environ.err" &&
+        echo "READABLE (serve is dumpable)" ||
+        sed "s|/proc/$serve_pid|/proc/\$serve_pid|" "$base/environ.err"
+      stat -c 'owner of /proc/$serve_pid/environ: %u' "/proc/$serve_pid/environ"
+      exit 0
+    fi
+    echo
+    echo "\$ curl -i https://api.github.com/$repo | grep status, x-ratelimit-limit   (direct, no token)"
+    curl -sS -i --max-time 30 "https://api.github.com/$repo" |
+      grep -i -e '^HTTP/' -e '^x-ratelimit-limit' || true
+    short "$api/$repo"
+    short -H 'Authorization: Bearer not-a-token' "$api/$repo"
+
+# Stop any `pigtrough serve` a killed explore-pigtrough-pilot-pass left
+# running, and remove its throwaway runtime dirs.
+#
+# clean up after an interrupted explore-pigtrough-pilot-pass
+[group('explore')]
+[linux]
+explore-pigtrough-pilot-pass-clean:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    pattern="pigtrough serve --dir ${XDG_RUNTIME_DIR:-/tmp}/pigtrough-pilot\."
+    pgrep -af "$pattern" || echo "no leftover serve"
+    pkill -TERM -f "$pattern" && sleep 1
+    pgrep -af "$pattern" && echo "still running" || echo "no serve running"
+    for d in "${XDG_RUNTIME_DIR:-/tmp}"/pigtrough-pilot.*; do
+      [[ -e $d ]] || continue
+      rm -rf "$d" && echo "removed $d"
+    done
+
 # Stage the hand pass that closes piggy#303 (FDR 0006 phase (a), "Phase
 # acceptance"): open a shell with everything the operator needs to read the
 # prompts, drive the new verbs and misuse them, and print the checklist.
