@@ -72,7 +72,7 @@ pub static GITHUB_API: Route = Route {
         port: 443,
     },
     scheme: Scheme::Bearer,
-    secret: "github/mirror-create",
+    secret: "github/forgejo-mirror",
     owners: &["amarbel-llc"],
     allow: &[
         Allow {

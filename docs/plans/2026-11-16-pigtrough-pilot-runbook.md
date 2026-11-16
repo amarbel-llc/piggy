@@ -4,10 +4,14 @@ FDR 0009's pilot closes with a human pass (FDR 0006, "Phase acceptance"):
 the operator runs `pigtrough` with the real create token against the real
 `api.github.com`, which no automated test does. Every step below is read-only
 on GitHub; the write calls (create, edit, topics) are left to the mirror
-reconciler's first dry-run-off run.
+reconciler's first dry-run-off run. See pigtrough(1) for the commands.
 
-Needs: the operator's card, the piggy store entry `github/mirror-create`,
-`curl` with `--unix-socket`, and flic's network.
+Needs: the operator's card, `curl` with `--unix-socket`, flic's network, and
+the create-capable token in the operator's **own** piggy store (the default
+`PIGGY_STORE_DIR`, not a session store) at the entry `github/forgejo-mirror`.
+Its create capability is not yet verified; this pass does not verify it
+either (it only reads). The push-only entry `github/forgejo-mirror-push`
+stays outside the proxy by ruling and must **not** be loaded.
 
 ## 1. Build and start
 
@@ -23,45 +27,60 @@ In a second terminal:
 
     sock=$XDG_RUNTIME_DIR/pigtrough/proxy.sock
     api=http://pigtrough/github-api
+    repo=repos/amarbel-llc/piggy    # any amarbel-llc repository on GitHub
 
 ## 2. Fail closed before the load
 
-    curl -si --unix-socket "$sock" "$api/repos/amarbel-llc/piggy"
+    curl -si --unix-socket "$sock" "$api/$repo"
 
 Expect `HTTP/1.1 503` and the body `secret-unavailable`; the audit line says
 `decision=refuse-unavailable`. Nothing went to GitHub.
 
 ## 3. Load the token
 
-    piggy pass show github/mirror-create | target/debug/pigtrough load github-api
+    piggy pass show github/forgejo-mirror | target/debug/pigtrough load github-api
 
 The PIN prompt, if any, is piggy's (the decrypt), not pigtrough's. Expect
 `pigtrough: loaded github-api`; the serve terminal says
 `pigtrough control: load github-api: ok`.
 
-## 4. An allowed call
+## 4. The token is attached
 
-    curl -si --unix-socket "$sock" "$api/repos/amarbel-llc/piggy"
-    curl -si --unix-socket "$sock" "$api/repos/amarbel-llc/piggy/commits/master"
+A `200` alone proves nothing: GitHub answers an unauthenticated request
+for a public repository with the same `200`. The proof is the rate limit
+GitHub reports, which differs for authenticated calls. Per GitHub's REST
+documentation (verify against the current docs), an unauthenticated
+request reports `x-ratelimit-limit: 60` and a request with a personal or
+fine-grained token reports a higher limit (5000 for a standard token).
 
-Use any `amarbel-llc` repository that exists on GitHub and its default
-branch; `piggy` and `master` are examples, and a repository that does not
-exist answers GitHub's own `404`, which still proves the token was sent.
-Expect `HTTP/1.1 200` with GitHub's JSON. The audit lines say
-`decision=allow`, `status=200`, the path without any query string.
+The baseline, direct and without any token (this does not go through the
+proxy):
+
+    curl -si "https://api.github.com/$repo" | grep -i '^x-ratelimit-limit'
+
+Then the same call through the proxy:
+
+    curl -si --unix-socket "$sock" "$api/$repo" | grep -i -e '^HTTP/' -e '^x-ratelimit-limit'
+
+Pass: `HTTP/1.1 200` and a limit above the baseline. The audit line says
+`decision=allow`, `status=200`, the path without any query string. A
+`200` with the baseline limit means the token was not attached: stop and
+report it.
 
 A client credential is dropped, not forwarded:
 
     curl -si --unix-socket "$sock" -H 'Authorization: Bearer not-a-token' \
-      "$api/repos/amarbel-llc/piggy"
+      "$api/$repo" | grep -i -e '^HTTP/' -e '^x-ratelimit-limit'
 
-Still `200`: GitHub saw the loaded token, not the client's.
+Pass: the same `200` and the same higher limit as above. Had the client's
+header been forwarded, the bogus token would have replaced the real one;
+per GitHub's docs (verify) an invalid token is answered with `401`.
 
 ## 5. Refusals
 
     curl -si --unix-socket "$sock" "$api/user"
     curl -si --unix-socket "$sock" "$api/repos/someone-else/repo"
-    curl -si --unix-socket "$sock" -X DELETE "$api/repos/amarbel-llc/piggy"
+    curl -si --unix-socket "$sock" -X DELETE "$api/$repo"
     curl -si --unix-socket "$sock" "http://pigtrough/elsewhere/x"
 
 Each is `HTTP/1.1 403` with the body `refused`, all four identical, and
@@ -88,3 +107,11 @@ Send the outcome of each step (pass, or what differed) to piggy/green-larch
 and the coordinator. A difference in steps 2, 4 or 5 is a pilot defect; a
 `502 upstream-unavailable` in step 4 means the TLS dial or verification
 failed, and is worth the exact audit line.
+
+## Known gaps of the pilot (not tested by this pass)
+
+- No operator-supplied extra trusted roots: upstreams are verified against
+  the `webpki-roots` bundle of the build only.
+- A client that disconnects does not cancel its in-flight upstream call;
+  the call runs to completion or to the 30 s head timeout.
+- The binary is not yet in a nix package (step 1 builds it with cargo).
