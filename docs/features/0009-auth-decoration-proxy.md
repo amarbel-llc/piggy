@@ -388,7 +388,7 @@ upstream side: certificate verification against the fixed name.
 
 **Process and files (proposed).**
 
-- A new workspace crate, a sibling binary (working name `piggy-decorate`),
+- A new workspace crate, a sibling binary (`pigtrough`, ruled by the operator 2026-11-16: "pigpen is already used"),
   holding all HTTP and TLS dependencies; `piggy`, the agent and fibby do
   not link them, enforced by a lint in the style of
   `checks.lint-closure-no-pivy`.
@@ -398,7 +398,7 @@ upstream side: certificate verification against the fixed name.
   `piggy-guard`), the request path (parse, strip `Host`, `Authorization`
   and credential-echoing headers, check the allowlist, forward), the audit
   line, and a control verb `load`.
-- Loading: `piggy pass show <entry> | piggy-decorate load github-api`
+- Loading: `piggy pass show <entry> | pigtrough load github-api`
   over a control socket reachable only by the operator's own account
   (FDR 0008 candidate 3). The pilot's single-operator, single-host
   binding is the socket's file mode plus a peer-UID check; cgroup binding
