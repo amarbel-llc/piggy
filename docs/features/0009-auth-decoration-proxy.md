@@ -10,7 +10,11 @@ promotion-criteria: >
   Every phase closes with a human pass (FDR 0006, "Phase acceptance").
 ---
 
-# Auth decoration proxy: clients point at piggy, piggy attaches the credential
+# pigtrough, the auth decoration proxy: clients point at piggy, piggy attaches the credential
+
+> **Name.** `pigtrough` is the operator's name (2026-11-16) for the proxy,
+> its crate and its binary; "auth decoration proxy" describes what it
+> does and stays in the text. The file name keeps the descriptive form.
 
 > **Status of this draft.** Written on the coordinator's request of
 > 2026-11-16 (operator priority 3) for piggy#388, an open-ended design
