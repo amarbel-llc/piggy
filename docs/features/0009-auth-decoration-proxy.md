@@ -564,6 +564,41 @@ For the operator unless noted. "Blocks" blocks the first slice.
    (the "Tuning Levers" change signal for route naming), and then prefer
    the virtual-hostname variant over a minted CA.
 
+10. **Known gaps after the pilot build** (all unbuilt, none blocks the
+    pilot): nix packaging of `pigtrough`; a `pigtrough(1)` manpage (it
+    should say `serve` stops on SIGTERM or SIGINT and installs no handler
+    of its own, per the implementer's report); extra upstream roots
+    (upstream roots are the bundled webpki-roots set, which ages with the
+    crate, not the system store); cancel-on-disconnect (a client that
+    disconnects does not cancel the upstream request). The request path is
+    synchronous under an async adapter (`spawn_blocking`, blocking pool
+    bounded at 16 in `main.rs`); confirmed for the pilot only.
+
+## Pilot acceptance (reported 2026-11-16)
+
+The implementer (piggy/solid-dogwood/sparkles) reports the real-token pass
+passed, operator-authorized, against the real `api.github.com` with the
+mirror token loaded from the operator's own store. As reported (not
+re-run by the design session):
+
+- before `load`: 503 `secret-unavailable`;
+- off-allowlist requests (`/user`, another owner, DELETE, `/elsewhere`,
+  a `%2e%2e` path): five identical 403 `refused`, `bytes_out=0`;
+- direct unauthenticated baseline `x-ratelimit-limit: 60`; proxied 200 with
+  `x-ratelimit-limit: 5000`, so a token was attached; the same with a bogus
+  client `Authorization` header gave 200 and 5000, so the client header is
+  dropped;
+- runtime directory `0700`, sockets `0600`, own uid; teardown clean.
+
+Not run against the real token: runbook step 6 (token absent from
+`/proc/<pid>/cmdline` and `environ`); `tests/binary.rs` covers it with a
+fake token. Harness notes: a worktree `$TMPDIR` is too deep for `SUN_LEN`
+(`serve` refuses it cleanly); a backgrounded `serve` ignored SIGINT under
+non-interactive bash, which the implementer theorises is an inherited
+`SIG_IGN` (unverified), while SIGTERM works. Per the standing rule, the
+phase tracking issue is closed by the operator after their acceptance
+pass, not by this record.
+
 ## More Information
 
 - piggy#388 (this design discussion), piggy#387 (the approval dialog
