@@ -4327,9 +4327,14 @@ explore-piggy-health *ARGS:
 #     proxied call, and the proxied call with a bogus client Authorization.
 #     The token goes from `piggy pass show` straight into `pigtrough load`;
 #     only status lines and x-ratelimit-limit are printed.
-#   PHASE=proc loads the same way, makes no GitHub call, and runs runbook
-#     step 6: the loaded serve's /proc cmdline, and whether its environ is
-#     readable (it must not be: serve is non-dumpable).
+#   PHASE=proc loads the same secret (read once into the check's memory),
+#     makes no GitHub call, and runs runbook step 6 on the loaded serve:
+#     cmdline, environ, open fds, the serve log, the dumpable state and
+#     ptrace access; each artifact is searched for the exact token and for
+#     the ghp_/github_pat_ prefixes, printing only counts and PASS/FAIL.
+#   PHASE=proc-fake is PHASE=proc with a fixed fake token and no card: it
+#     checks the step-6 plumbing itself. The fake token has the ghp_ prefix
+#     on purpose, so a leak of it would show in both counts.
 #
 # run the pigtrough pilot pass against a throwaway runtime dir (PHASE=pre-load, loaded or proc)
 [group('explore')]
@@ -4338,9 +4343,9 @@ explore-pigtrough-pilot-pass BIN PHASE="pre-load":
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{ PHASE }}" in
-      pre-load | loaded | proc) ;;
+      pre-load | loaded | proc | proc-fake) ;;
       *)
-        echo "PHASE is pre-load, loaded or proc" >&2
+        echo "PHASE is pre-load, loaded, proc or proc-fake" >&2
         exit 2
         ;;
     esac
@@ -4359,6 +4364,11 @@ explore-pigtrough-pilot-pass BIN PHASE="pre-load":
         # TERM, not INT: bash starts background jobs with SIGINT ignored.
         kill -TERM "$serve_pid" 2>/dev/null || true
         wait "$serve_pid" 2>/dev/null || true
+        if pgrep -f "serve --dir $run" >/dev/null; then
+          echo "--- serve STILL RUNNING after TERM"
+        else
+          echo "--- no serve process left"
+        fi
       fi
       echo
       echo "--- serve output"
@@ -4394,6 +4404,79 @@ explore-pigtrough-pilot-pass BIN PHASE="pre-load":
       curl -sS -i --max-time 30 --unix-socket "$sock" "$@" |
         grep -i -e '^HTTP/' -e '^x-ratelimit-limit' || true
     }
+    # Runbook step 6. The token is read once, kept in this shell's memory
+    # only (never exported, never an argument: printf is a builtin and grep
+    # reads it as a pattern file through a pipe), and never printed, nor its
+    # length or a hash. Each artifact is searched for the exact token and
+    # for GitHub's token prefixes; only counts and PASS/FAIL are printed.
+    run_step_6() {
+      local token pid=$serve_pid fails=0 artifact
+      if [[ "{{ PHASE }}" == proc-fake ]]; then
+        echo "\$ (a fixed fake token, no card)   (into this check's memory, then into pigtrough load)"
+        token=ghp_pigtroughPilotFakeTokenNotASecret0000
+      else
+        echo "\$ piggy pass show github/forgejo-mirror   (into this check's memory, then into pigtrough load)"
+        token=$(
+          unset PIGGY_STORE_DIR
+          piggy pass show github/forgejo-mirror
+        )
+      fi
+      [[ -n $token ]] || {
+        echo "FAIL: empty secret"
+        return 1
+      }
+      printf '%s\n' "$token" | "$bin" load github-api --dir "$run"
+      mkdir "$base/step6"
+      tr '\0' '\n' <"/proc/$pid/cmdline" >"$base/step6/cmdline"
+      cp "$log" "$base/step6/serve.log"
+      if cat "/proc/$pid/environ" >"$base/step6/environ" 2>/dev/null; then
+        echo "environ: READABLE"
+      else
+        echo "environ: not readable ($(cat "/proc/$pid/environ" 2>&1 >/dev/null | sed 's/.*: //'))"
+        rm -f "$base/step6/environ"
+      fi
+      if ls -l "/proc/$pid/fd" >"$base/step6/fds" 2>/dev/null; then
+        echo "open fds: listed, $(($(wc -l <"$base/step6/fds") - 1)) entries:"
+        sed 's/.* \([0-9]* -> .*\)/  \1/' "$base/step6/fds" | tail -n +2 | sed "s|$run|run|"
+      else
+        echo "open fds: not listable ($(ls "/proc/$pid/fd" 2>&1 >/dev/null | sed 's/.*: //'))"
+        rm -f "$base/step6/fds"
+      fi
+      echo "cmdline: $(tr '\n' ' ' <"$base/step6/cmdline" | sed "s|$run|run|")"
+      echo "dumpable: $(grep -i '^dumpable' "/proc/$pid/status" || echo "no Dumpable field in /proc/<pid>/status on this kernel")"
+      stat -c 'owner of /proc/<pid>/environ: uid %u' "/proc/$pid/environ"
+      stat -c 'owner of /proc/<pid>/fd: uid %u (serve runs as uid '"$(id -u)"')' "/proc/$pid/fd"
+      if (exec 3<"/proc/$pid/mem") 2>/dev/null; then
+        echo "ptrace access (open /proc/<pid>/mem): ALLOWED"
+      else
+        echo "ptrace access (open /proc/<pid>/mem): refused"
+      fi
+      # Positive control, through a pipe (the token is never written to a
+      # file): the same searches must find it, else a 0 below proves nothing.
+      local control_exact control_prefix
+      control_exact=$(printf '%s\n' "$token" | grep -c -F -f <(printf '%s\n' "$token") || true)
+      control_prefix=$(printf '%s\n' "$token" | grep -c -E 'ghp_|github_pat_' || true)
+      echo "control (the token itself, via a pipe): token matches $control_exact (must be 1), ghp_/github_pat_ matches $control_prefix (1 if the token has one of these prefixes)"
+      [[ $control_exact == 1 ]] || {
+        echo "FAIL: the search cannot find the token; step 6 is void"
+        unset token
+        return 1
+      }
+      for artifact in "$base"/step6/*; do
+        local exact prefix
+        exact=$(grep -a -c -F -f <(printf '%s\n' "$token") "$artifact" || true)
+        prefix=$(grep -a -c -E 'ghp_|github_pat_' "$artifact" || true)
+        if [[ $exact == 0 && $prefix == 0 ]]; then
+          echo "PASS ${artifact##*/}: token matches 0, ghp_/github_pat_ matches 0"
+        else
+          echo "FAIL ${artifact##*/}: token matches $exact, ghp_/github_pat_ matches $prefix"
+          fails=$((fails + 1))
+        fi
+      done
+      unset token
+      echo "step 6: $fails artifact(s) failed"
+      [[ $fails == 0 ]]
+    }
     full "$api/$repo"
     if [[ "{{ PHASE }}" == pre-load ]]; then
       full -H 'Authorization: Bearer not-a-token' "$api/$repo"
@@ -4405,21 +4488,14 @@ explore-pigtrough-pilot-pass BIN PHASE="pre-load":
       exit 0
     fi
     echo
-    echo "\$ piggy pass show github/forgejo-mirror | pigtrough load github-api --dir run"
-    (
-      unset PIGGY_STORE_DIR
-      piggy pass show github/forgejo-mirror
-    ) | "$bin" load github-api --dir "$run"
-    if [[ "{{ PHASE }}" == proc ]]; then
-      echo
-      echo "\$ tr '\\0' ' ' < /proc/\$serve_pid/cmdline   (runbook step 6)"
-      tr '\0' ' ' <"/proc/$serve_pid/cmdline" | sed "s|$run|run|"
-      echo
-      echo "\$ cat /proc/\$serve_pid/environ"
-      cat "/proc/$serve_pid/environ" >/dev/null 2>"$base/environ.err" &&
-        echo "READABLE (serve is dumpable)" ||
-        sed "s|/proc/$serve_pid|/proc/\$serve_pid|" "$base/environ.err"
-      stat -c 'owner of /proc/$serve_pid/environ: %u' "/proc/$serve_pid/environ"
+    if [[ "{{ PHASE }}" == loaded ]]; then
+      echo "\$ piggy pass show github/forgejo-mirror | pigtrough load github-api --dir run"
+      (
+        unset PIGGY_STORE_DIR
+        piggy pass show github/forgejo-mirror
+      ) | "$bin" load github-api --dir "$run"
+    else
+      run_step_6
       exit 0
     fi
     echo
