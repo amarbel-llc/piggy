@@ -315,6 +315,20 @@ here:
   by a per-pod fibby instead of the host proxy, so the route table's
   `secret` field names a secret, not a store location.
 
+## Operator rulings (2026-11-16)
+
+Relayed by the coordinator (circus/eager-holly/clarabell). The operator
+said of the first: "we can explore this a bit and not commit to any one
+posture just yet", so every ruling below is provisional where marked and
+the pilot's structure must keep it reversible.
+
+| # | Question | Ruling | Standing |
+|---|---|---|---|
+| p1 | one unit or two with FDR 0008 | one unit with FDR 0008's secret proxy | **provisional**: no irreversible coupling; the pilot keeps the transport, the route record and the secret holder as separate modules so a split stays cheap |
+| p2 | socket per scope or shared | per scope | the pilot starts with one socket and one fixed scope until #386 / clown#244 settle scope binding |
+| p3 | how a client names the route | path-prefix routes for now | "for now"; SOCKS5 is an open question below |
+| p4 | the pilot consumer, and the order after it | the circus mirror reconciler; then smith; then cutting-garden; then tent | some of the later steps can run in parallel once the proxy has matured |
+
 ## Pilot implementation plan
 
 For the coordinator's timeline (design 2026-11-17, operator decisions
@@ -416,21 +430,16 @@ whatever the answers to questions 2, 3 and 4.
 
 For the operator unless noted. "Blocks" blocks the first slice.
 
-1. **One unit or two? (blocks)** Recommended: one proxy binary and one
-   route table serving both this record and FDR 0008, FDR 0008's request
-   shape becoming a client of the unix-socket transport. Alternative: two
-   units. Needs the operator's ruling because FDR 0008's wire form is
-   itself still open (its question 6).
-2. **Socket per scope or shared socket with route checks? (blocks)**
-   Recommended per scope; depends on the scope-binding ruling (#386,
-   clown#244).
-3. **Route naming in the URL path prefix? (blocks)** Recommended; the
-   alternatives are rejected above. Needs cutting-garden's and the
-   reconciler's agreement because it is their client contract.
-4. **First pilot: the mirror reconciler's `github-api` route?** Recommended
-   as above. Needs the reconciler's maintainer (circus, quiet-maple's
-   line) to confirm the allowlist it needs and its client's unix-socket
-   support.
+1. **One unit or two?** Ruled, provisionally: one unit with FDR 0008
+   (see "Operator rulings"). Revisit when the pilot has run.
+2. **Socket per scope or shared?** Ruled: per scope; the pilot uses one
+   fixed scope until #386 / clown#244.
+3. **Route naming.** Ruled for now: URL path prefix. Whether the front end
+   should instead (or also) be SOCKS5 is open: see question 9.
+4. **First pilot.** Ruled: the mirror reconciler's `github-api` route,
+   then smith, cutting-garden, tent. Still needed from the reconciler's
+   maintainer (circus, quiet-maple's line): the allowlist it needs and
+   whether its HTTP client can talk over a unix socket.
 5. **Which acts and which stencil vocabulary for requests?** For the
    second slice; cutting-garden owns the fragment.
 6. **Where does the proxy run?** On the host of its clients (flic for the
@@ -439,6 +448,72 @@ For the operator unless noted. "Blocks" blocks the first slice.
 7. **TLS library.** openssl versus a pure-Rust stack, as FDR 0008
    question 1 left it.
 8. **Audit log destination** (FDR 0008 question 9).
+9. **Should the front end be a SOCKS5 proxy?** Floated by the operator
+   ("maybe this should be a SOCKS5 proxy? not sure yet"); not decided and
+   not built. What follows is analysis from protocol knowledge, not
+   verified against any client; the client-support rows are marked
+   unchecked.
+
+   *What SOCKS5 is.* A TCP-level proxy: the client names a destination
+   host and port, the proxy connects, and the client then speaks whatever
+   protocol it likes across the connection. The proxy does not see an HTTP
+   request unless it chooses to parse the stream.
+
+   *What it could decorate.*
+   - **Plain HTTP** to a destination: the proxy can parse the request and
+     add a header, exactly as with path-prefix routes.
+   - **HTTPS to a real host** (`api.github.com`): the client runs TLS end
+     to end with the destination, so the proxy sees only ciphertext and
+     **cannot add a header**. Decorating it needs a man-in-the-middle:
+     the proxy terminates TLS with a certificate for the destination
+     name, which every client must trust (a CA the proxy mints and
+     distributes to each client's trust store). That is a heavy trust and
+     provisioning cost, and a CA that can impersonate any host is itself
+     a high-value secret; it is the cost question 8 of "Answers" avoided
+     by choosing path-prefix routes.
+   - **Other TCP protocols** (IMAP, SMTP, a database): possible only if
+     the proxy understands the protocol's login, which is a separate
+     per-protocol feature; SOCKS5 alone adds nothing. This is the one
+     place it widens scope 10, and only in principle.
+
+   *A variant that avoids the CA (a theory, not checked).* The proxy
+   accepts a SOCKS5 CONNECT to a *virtual* hostname it owns (for example
+   `github-api.piggy`), the client speaks plain HTTP inside that
+   connection, and the proxy decorates and originates real TLS upstream.
+   No CA is needed, since the client never expected TLS to that name. It
+   reduces to route naming by hostname instead of path prefix, and needs
+   the client to send `http://` URLs through a SOCKS5 proxy, which some
+   clients upgrade or refuse.
+
+   *Authentication and the route name.* SOCKS5 has its own
+   username/password step, which could carry the route name or scope,
+   but it is cleartext and does not replace the peer-credential check on
+   a unix socket.
+
+   *Client support (all unchecked).*
+
+   | Client | Question |
+   |---|---|
+   | circus mirror reconciler | does its HTTP client take a SOCKS5 proxy, and over a unix socket? The planned `--github-api` base URL already works with path-prefix routes |
+   | smith (`serve-cutting_garden`, fj-cg) | Rust HTTP client features for SOCKS5 and for unix-socket proxies |
+   | cutting-garden Go plugins | `golang.org/x/net/proxy` supports SOCKS5 over a net.Conn dialer; a unix-socket dial needs a custom dialer |
+   | tent guests and VMM | `AF_UNIX` only, so a SOCKS5 front end would have to listen on a unix socket, which many SOCKS clients do not support (the common case is `host:port`) |
+
+   *What it would change in this record.* Question 2 of "Answers" (naming
+   the route) would move from the URL path to the destination name or the
+   SOCKS5 username; question 8 (TLS) gains the CA decision above or the
+   virtual-hostname variant; the pilot's listener module would speak
+   SOCKS5 instead of (or beside) plain HTTP. The route table, the secret
+   holder, the allowlist, the audit line and the fail-closed behaviour
+   are unchanged. So the pilot's separation of transport from route and
+   secret (see the p1 ruling) keeps SOCKS5 a front-end swap, not a
+   redesign.
+
+   *Recommendation.* Keep path-prefix routes for the pilot, as ruled;
+   check the four client rows above before deciding; adopt SOCKS5 only
+   if a client is found that cannot set a base URL but can set a proxy
+   (the "Tuning Levers" change signal for route naming), and then prefer
+   the virtual-hostname variant over a minted CA.
 
 ## More Information
 
