@@ -16,12 +16,12 @@ promotion-criteria: >
 > 2026-11-16 (operator priority 3) for piggy#388, an open-ended design
 > issue. Docs only; nothing is built; nothing here is approved. Where it
 > says "recommend", it is a recommendation for the operator, not a ruling.
-> Sources: piggy#388 and its one comment, cutting-garden#285 (read through
-> the issue tracker 2026-11-16; its options note
-> `docs/plans/2026-11-15-wire-plugin-piggy-secrets-options.md` lives in the
-> cutting-garden repo and was not read here), FDR 0008, FDR 0006, RFC 0013,
-> piggy-acts(7). Tent FDR 0002 was not read; tent's requirements are taken
-> from the text of #388.
+> Sources: piggy#388 and its one comment, cutting-garden#285 and its
+> options note (`docs/plans/2026-11-15-wire-plugin-piggy-secrets-options.md`
+> in the cutting-garden repo, section Ruling, read 2026-11-16), tent FDR
+> 0002 (`docs/features/0002-restricted-kvm-on-nikulin.md`, decisions 3 and
+> 4 and the threat table, read 2026-11-16), FDR 0008, FDR 0006, RFC 0013,
+> piggy-acts(7).
 
 > **Relation to FDR 0008.** FDR 0008 (the secret proxy) is the same idea
 > aimed at one client class: graph runs on krone that call OpenRouter and
@@ -270,6 +270,147 @@ unavailable: `503` with the cause, no request sent upstream. A client
 | route naming | URL path prefix | works for every HTTP client | a client that cannot set a base URL |
 | act checks | off for pilot routes | binding is enough for one operator-run client | a second route needs per-request conditions |
 | prompting | off | fail closed is the stance cutting-garden wants | a plugin set that cannot work without a prompt |
+
+## What the neighbouring records change
+
+Read after the first draft; none of it contradicts the answers above.
+
+**cutting-garden#285, Ruling (2026-11-16).** Option (d): plugins hold no
+credential and resolve no indirection, so not even a key name reaches a
+plugin; its config names the proxy. The ruling states what it leaves to
+piggy: how the proxy is addressed, how routes map to entries, TLS. It
+adds three requirements:
+
+- *One batched PIN session.* The ruling counts "one batched PIN session"
+  among the reasons for (d). The design meets it: the proxy holds each
+  secret after one load, so any number of plugins share one unlock.
+- *Cross-reference, not restatement.* cutting-garden will point RFC 0013's
+  Security Considerations and cutting-garden-config(5) at piggy's own
+  docs once they exist. This record is therefore the document they cite,
+  and should stay stable in its route-naming and addressing sections; a
+  change there is a contract change for them.
+- *`password_source = "piggy"` stays.* The in-process path remains until
+  the proxy supersedes it, so the proxy does not need to be reachable from
+  in-tree plugins on day one. Smith's `serve-cutting_garden` is blocked
+  on this feature; it is the first out-of-tree client after the pilot.
+
+**Tent FDR 0002.** Decision 4 (ruled) gives the VMM and every guest no
+network: `PrivateNetwork`, `RestrictAddressFamilies=AF_UNIX`, no tap, no
+bridge, no user-mode networking. Decision 3's long-range shape (not a
+design) is a pod-like unit of microvms, each with a fibby card attached
+virtually that also authenticates its network access. What it changes
+here:
+
+- The unix socket is the *only* transport tent's units can use; a
+  loopback or inet listener is unusable to them, which confirms question
+  1. A unit that may speak to the proxy needs the socket's path made
+  reachable inside its namespace (a bind mount of that one socket), which
+  is a tent decision, not a proxy feature.
+- tent's outbound-transfer decision (journal only in v1; a results
+  directory or a unix socket later) is a separate channel from the
+  decoration proxy; they should not be merged into one socket.
+- The virtual card's attachment (a VMM device, a socket into the pod's
+  fibby unit, or other) stays undesigned and is outside this record.
+  What this record keeps open for it: a route's secret may later be held
+  by a per-pod fibby instead of the host proxy, so the route table's
+  `secret` field names a secret, not a store location.
+
+## Pilot implementation plan
+
+For the coordinator's timeline (design 2026-11-17, operator decisions
+2026-11-17/18, build 2026-11-19 to 21, reconciler pointed at it
+2026-11-22). Everything here is a proposal pending the operator's answers
+to the "blocks" questions; file and module names are suggestions, not
+facts about code that does not exist yet.
+
+**Scope: the minimal pilot.** One listener (a unix stream socket), one
+route (`github-api`, a bearer credential for `api.github.com`), fail
+closed when the secret is unloaded, no per-caller acts, no route table
+beyond the single entry.
+
+**TLS in the pilot (correction to a framing).** Decoration needs the
+proxy to see the request, so the client side is plain HTTP on the unix
+socket and the proxy originates TLS to the upstream. A pure tunnel cannot
+add headers, so "no TLS termination" is not available to a route that
+attaches a header. What the pilot omits is TLS *to the client*, not TLS
+to GitHub. The library choice is the open FDR 0008 question 1; the pilot
+needs only a TLS client and an HTTP/1.1 client with certificate
+verification against the fixed name.
+
+**Process and files (proposed).**
+
+- A new workspace crate, a sibling binary (working name `piggy-decorate`),
+  holding all HTTP and TLS dependencies; `piggy`, the agent and fibby do
+  not link them, enforced by a lint in the style of
+  `checks.lint-closure-no-pivy`.
+- Modules: listener (socket creation, mode `0600`, peer credentials), a
+  route record (name, upstream, allowed methods and path prefixes, scheme
+  `bearer`, secret name), the secret holder (one `GuardedBytes` from
+  `piggy-guard`), the request path (parse, strip `Host`, `Authorization`
+  and credential-echoing headers, check the allowlist, forward), the audit
+  line, and a control verb `load`.
+- Loading: `piggy pass show <entry> | piggy-decorate load github-api`
+  over a control socket reachable only by the operator's own account
+  (FDR 0008 candidate 3). The pilot's single-operator, single-host
+  binding is the socket's file mode plus a peer-UID check; cgroup binding
+  and per-scope sockets wait for the scope-binding ruling (#386).
+
+**Behaviour the tests pin.**
+
+1. A request to `/github-api/<path>` reaches the fake upstream with
+   `Authorization: Bearer <token>` and without the client's own
+   `Authorization`, `Host` or `Cookie`.
+2. The token is absent from every byte the client receives (response
+   headers, body, error bodies), from the audit line, and from the proxy's
+   own argv and environment; a test greps for it.
+3. An unloaded secret answers `503` with the fixed cause `secret-unavailable`
+   and the fake upstream sees no connection.
+4. A path or method outside the allowlist, or an unknown route, is refused
+   before any upstream connection; the two refusal bodies are identical.
+5. A redirect from the upstream to another host is not followed and is
+   returned as an error, never with the token attached to the second host.
+6. A connection from another UID is refused.
+7. The audit line has route, method, path without query, status, decision
+   and no header values.
+8. Reload: a second `load` replaces the held secret; an in-flight request
+   finishes on the old one.
+
+**Fake upstream.** A test-only local server with a self-signed
+certificate, and the proxy configured to trust only that certificate for
+the test's route; no test reaches the real `api.github.com` or a real
+card. A real-network check is a human pass, run by the operator with the
+real token, which is also the phase-acceptance step FDR 0006 requires.
+Tests that could reach a PIN prompt follow the askpass safety net in
+piggy-testing(7).
+
+**Unprivileged operation.** The proxy runs as the operator's own account
+in the pilot, with no capabilities; the socket directory is `0700`. The
+service-account split of FDR 0006 (a dedicated unit) is a later phase and
+needs the same ruling as the holder.
+
+**What the pilot deliberately omits.** RFC 0013 act checks and any
+stencil evaluation; more than one route and any route table file (the
+single route is compiled in or read from a minimal config); per-scope
+sockets and cgroup binding; prompting (always fail closed); `basic` and
+signed-request schemes; the approval dialog (#387); tent's microvm
+attachment and the virtual card; non-HTTP protocols; the second client
+(smith).
+
+**Who implements.** Recommend a fresh piggy session spawned for the
+build, with this record as its brief, working on the sibling crate only;
+this session keeps the design and reviews the result against the
+behaviours above. The two RFC 0013 sessions (bright-hemlock,
+eager-poplar) are not involved. Mechanical parts (HTTP plumbing, the
+fake upstream) go to subagents at opus or lower, as the standing
+constraint requires.
+
+**Dependencies on operator answers.** Question 1 (one unit or two) fixes
+the crate's name and whether the FDR 0008 request shape ships in the same
+binary; the pilot needs neither the handle model nor graph runs. Question
+7 (TLS library) must be answered before the build; the recommendation is
+to choose the library the build can compile and audit most easily, and to
+record the choice in this record. Everything else in the plan above holds
+whatever the answers to questions 2, 3 and 4.
 
 ## Open questions
 
