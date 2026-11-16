@@ -142,7 +142,7 @@ pub fn split_target(target: &str) -> (&str, Option<&str>) {
 /// Look `target` up among `routes` and check it against the route's
 /// allowlist. `None` for every refusal, whatever the reason (behaviour 4).
 pub fn admit<'r, 't>(
-    routes: &'r [&'r Route],
+    routes: &[&'r Route],
     method: &str,
     target: &'t str,
 ) -> Option<Admitted<'r, 't>> {
