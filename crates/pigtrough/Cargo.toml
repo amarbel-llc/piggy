@@ -19,7 +19,7 @@ hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 libc = "0.2"
 piggy-guard = { path = "../piggy-guard" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "1"
 zeroize = "1"

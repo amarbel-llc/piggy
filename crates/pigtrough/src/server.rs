@@ -9,6 +9,12 @@
 //! credential, an upstream that broke off), the failure is passed to hyper as
 //! a body error, which aborts the connection instead of ending the response
 //! cleanly, so a cut response cannot look complete.
+//!
+//! Two known limits of running the synchronous path on the blocking pool,
+//! for a later slice: the pool's size bounds concurrent requests (the binary
+//! sets it explicitly, `MAX_IN_FLIGHT`), and a client that disconnects does
+//! not cancel its in-flight upstream call, which runs to completion or to the
+//! head timeout.
 
 use std::convert::Infallible;
 use std::io::{self, Read};

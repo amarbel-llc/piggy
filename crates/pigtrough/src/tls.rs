@@ -8,6 +8,10 @@
 //! CA as the only root, and with [`TlsUpstream::connect_to`] pointing the dial
 //! at a local address while the name verified stays the route's host.
 //!
+//! The bundled roots age with the `webpki-roots` version this crate locks;
+//! a later slice may add an operator-supplied extra-roots file (the shithub
+//! per-process trust bundle idea).
+//!
 //! The request path is synchronous, so [`UpstreamClient::send`] runs the
 //! async client on the given runtime with `Handle::block_on`, which the
 //! server calls from a blocking thread, never from a runtime worker.

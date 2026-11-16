@@ -12,6 +12,7 @@
 //! - [`route`]: the route record and its allowlist (one compiled-in route).
 //! - [`holder`]: the secret holder, one [`piggy_guard::GuardedBytes`] per
 //!   route, replaced whole on `load`.
+//! - [`control`]: the control socket the `load` verb speaks to.
 //! - [`filter`]: what the proxy forwards from the client and returns from
 //!   the upstream.
 //! - [`upstream`]: the seam to the upstream client.
@@ -26,6 +27,7 @@
 //! The crate and its binary are `pigtrough` (operator ruling, 2026-11-16).
 
 pub mod audit;
+pub mod control;
 pub mod filter;
 pub mod holder;
 pub mod listener;
