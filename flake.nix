@@ -508,6 +508,55 @@
             };
           };
 
+          # The auth decoration proxy pilot (FDR 0009), its own package so the
+          # hyper/rustls stack it links stays out of `piggy` (the wrapped piggy
+          # copies only its own binaries out of piggy-rs; the dependency side is
+          # `just lint-pigtrough-stack-isolated`). Built narrow, like fibby.
+          # Its manpage, pigtrough(1), ships with the piggy package's doc/*.scd
+          # loop, so it is not installed here a second time.
+          pigtrough = pkgs.rustPlatform.buildRustPackage {
+            pname = "pigtrough";
+            version = "0.1.0";
+
+            src = pkgs.lib.cleanSourceWith {
+              src = ./.;
+              filter =
+                name: type:
+                let
+                  rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
+                  base = baseNameOf rel;
+                in
+                base == "Cargo.toml"
+                || base == "Cargo.lock"
+                || base == "version.env"
+                || pkgs.lib.hasPrefix "crates" rel;
+            };
+
+            cargoLock = sharedCargoLock;
+            cargoBuildFlags = [
+              "-p"
+              "pigtrough"
+            ];
+            cargoTestFlags = [
+              "-p"
+              "pigtrough"
+            ];
+
+            # No openssl or pcsclite: rustls with ring needs only a C compiler.
+
+            # The tests use loopback TCP, short unix sockets under TMPDIR and
+            # /proc (tests/binary.rs, Linux only); no card, no outside network.
+            doCheck = pkgs.stdenv.hostPlatform.isLinux;
+
+            meta = with pkgs.lib; {
+              description = "Auth decoration proxy pilot: clients send plain HTTP over a unix socket, piggy attaches the credential";
+              homepage = "https://code.linenisgreat.com/piggy";
+              license = licenses.mpl20;
+              mainProgram = "pigtrough";
+              platforms = platforms.linux ++ platforms.darwin;
+            };
+          };
+
           # Wrapped `piggy` binary: rust dispatch + bash passwordstore + pivy
           # fallback, bundled as a single symlink-joined package. A function
           # of the Rust workspace derivation so the coverage variant
@@ -882,6 +931,9 @@
             # `just load-fibby` and the wet-env capture recipes; future
             # consumer is the planned home-manager service (#129 stretch).
             fibby = fibby;
+            # The auth decoration proxy pilot (FDR 0009); the operator's
+            # acceptance pass is docs/plans/2026-11-16-pigtrough-pilot-runbook.md.
+            inherit pigtrough;
             # Instrumented-coverage variant of the wrapped piggy, consumed by
             # the vm-piggy-*-cov lanes and `.#coverage-report`.
             piggy-cov = piggy-cov;

@@ -15,8 +15,9 @@ stays outside the proxy by ruling and must **not** be loaded.
 
 ## 1. Build and start
 
-    just build-rust -p pigtrough
-    target/debug/pigtrough serve
+    nix build .#pigtrough --out-link "$XDG_RUNTIME_DIR/pigtrough-pkg"
+    pigtrough=$XDG_RUNTIME_DIR/pigtrough-pkg/bin/pigtrough
+    "$pigtrough" serve
 
 `serve` creates `$XDG_RUNTIME_DIR/pigtrough/` (mode `0700`) with
 `proxy.sock` and `control.sock` (mode `0600`), says
@@ -38,7 +39,8 @@ Expect `HTTP/1.1 503` and the body `secret-unavailable`; the audit line says
 
 ## 3. Load the token
 
-    piggy pass show github/forgejo-mirror | target/debug/pigtrough load github-api
+    pigtrough=$XDG_RUNTIME_DIR/pigtrough-pkg/bin/pigtrough
+    piggy pass show github/forgejo-mirror | "$pigtrough" load github-api
 
 The PIN prompt, if any, is piggy's (the decrypt), not pigtrough's. Expect
 `pigtrough: loaded github-api`; the serve terminal says
@@ -114,4 +116,3 @@ failed, and is worth the exact audit line.
   the `webpki-roots` bundle of the build only.
 - A client that disconnects does not cancel its in-flight upstream call;
   the call runs to completion or to the 30 s head timeout.
-- The binary is not yet in a nix package (step 1 builds it with cargo).

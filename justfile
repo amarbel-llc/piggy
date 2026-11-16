@@ -13,7 +13,7 @@ build: build-nix build-rust build-go build-pigpen
 # packages that aren't transitive deps of .#default, so flake.nix regressions
 # in those surface at the merge gate.
 #
-# build the default piggy nix package plus .#fibby, .#piggy-test-sshd, and .#piggy-agent-conformance
+# build the default piggy nix package plus .#fibby, .#piggy-test-sshd, .#piggy-agent-conformance and .#pigtrough
 [group('build')]
 build-nix:
     nix build --show-trace
@@ -34,6 +34,9 @@ build-nix:
     # go/gomod2nix.toml fails the merge gate here (piggy#183). The whole-module
     # vet + tests are `just test-go` (checks.go-vet / go-tests, piggy#340).
     nix build .#piggy-agent-conformance --no-link --show-trace
+    # And pigtrough (FDR 0009): its own narrow package, not a dep of
+    # `.#default`; building it also runs its tests in the sandbox.
+    nix build .#pigtrough --no-link --show-trace
 
 # Cargo-build the workspace; on Linux with no ARGS, also build fibby with
 # --features hardware-proxy so pcsc-sys's link-time pkg-config runs at the gate.
