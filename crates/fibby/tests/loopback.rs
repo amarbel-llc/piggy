@@ -4,6 +4,10 @@
 //! cross-check of the protocol layer and the template the wet-env
 //! agents extend (swap in the hardware-proxy backend, replay the same
 //! script, diff the bytes).
+//!
+//! Drives the `test-double` build: it seeds cards and starts the binary
+//! with test flags.
+#![cfg(feature = "test-double")]
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;

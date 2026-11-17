@@ -353,6 +353,7 @@ pub struct VirtualCard {
     /// [`Self::set_generate_override`] (or the CLI `--generate-slot-*-priv`
     /// flags); empty by default (real random keygen). Config, not session
     /// state: persists across `disconnect()`.
+    #[cfg(feature = "test-double")]
     generate_overrides: HashMap<u8, [u8; 32]>,
     /// Injected faults (piggy#284), consumed in order by `transmit`: the
     /// next matching command APDUs answer the fault's status word instead
@@ -360,6 +361,7 @@ pub struct VirtualCard {
     /// 6983, or one GENERAL AUTHENTICATE return 6982, without seeding a
     /// whole different card. Set through the control socket (`fibby ctl
     /// fault`). Config, not session state: survives `disconnect()`.
+    #[cfg(feature = "test-double")]
     faults: Vec<Fault>,
     /// Per-slot YubicoPIV `[pin_policy, touch_policy]` exactly as GENERATE
     /// or IMPORT configured it (their `AA`/`AB` tags; an absent tag is
@@ -383,6 +385,7 @@ pub struct VirtualCard {
     /// (`--touch-timeout-ms`).
     touch_timeout: Duration,
     /// `--auto-touch`: every touch-requiring operation is granted at once.
+    #[cfg(feature = "test-double")]
     auto_touch: bool,
     /// Added to the wall clock when judging the touch-`cached` window, so
     /// a test can step past the 15 seconds without sleeping
@@ -400,7 +403,8 @@ pub struct VirtualCard {
 pub enum KeyOrigin {
     /// GENERATE ASYMMETRIC on this card.
     Generated = 0x01,
-    /// IMPORT ASYMMETRIC.
+    /// IMPORT ASYMMETRIC (test-double build only).
+    #[cfg_attr(not(feature = "test-double"), allow(dead_code))]
     Imported = 0x02,
 }
 
@@ -435,6 +439,7 @@ const TAG_ATTESTATION_CERT: &[u8] = &[0x5F, 0xFF, 0x01];
 
 /// One injected fault (piggy#284): `remaining` command APDUs whose INS
 /// matches `ins` (`None` = any INS) answer `sw` verbatim.
+#[cfg(feature = "test-double")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fault {
     pub ins: Option<u8>,
@@ -472,6 +477,10 @@ const DEFAULT_MGMT_KEY: [u8; 24] = [
 /// wet-env ECDH captures. [`VirtualCard::seed_rfc6979_slot_9a_cert`]
 /// installs both the cert and this scalar so the seeded SSH identity can
 /// actually sign. The unit tests reference it as `RFC6979_SCALAR`.
+///
+/// Every fixed test vector, test certificate and canonical CHUID below is
+/// `test-double` only (FDR 0006, piggy#382): the holder build carries none.
+#[cfg(feature = "test-double")]
 const RFC6979_A2_5_PRIV: [u8; 32] = [
     0xC9, 0xAF, 0xA9, 0xD8, 0x45, 0xBA, 0x75, 0x16, 0x6B, 0x5C, 0x21, 0x57, 0x67, 0xB1, 0xD6, 0x93,
     0x4E, 0x50, 0xC3, 0xDB, 0x36, 0xE8, 0x9B, 0x12, 0x7B, 0x8A, 0x62, 0x2B, 0x12, 0x0F, 0x67, 0x21,
@@ -486,6 +495,7 @@ const RFC6979_A2_5_PRIV: [u8; 32] = [
 /// (ECDH) could let pivy-agent route a decrypt's ECDH to the sign-only
 /// 9A slot. Its public point is `04 ‖ DA D0 B6 53 … ‖ 52 71 A0 46 …`
 /// (see tests/fixtures/test-vectors/rfc5903-8-1-priv.pem).
+#[cfg(feature = "test-double")]
 const RFC5903_SLOT_9D_PRIV: [u8; 32] = [
     0xC8, 0x8F, 0x01, 0xF5, 0x10, 0xD9, 0xAC, 0x3F, 0x70, 0xA2, 0x92, 0xDA, 0xA2, 0x31, 0x6D, 0xE5,
     0x44, 0xE9, 0xAA, 0xB8, 0xAF, 0xE8, 0x40, 0x49, 0xC6, 0x2A, 0x9C, 0x57, 0x86, 0x2D, 0x14, 0x33,
@@ -501,6 +511,7 @@ const RFC5903_SLOT_9D_PRIV: [u8; 32] = [
 /// cert over this exact key); the anchor PEM is
 /// tests/fixtures/test-vectors/fibby-slot-9c-test-priv.pem. Its public
 /// point is `04 ‖ BA 37 10 C3 … ‖ … 67 20 E6 2E 89`.
+#[cfg(feature = "test-double")]
 const FIBBY_SLOT_9C_TEST_PRIV: [u8; 32] = [
     0x7A, 0x02, 0x52, 0x57, 0xFB, 0xC7, 0x8C, 0x36, 0x9C, 0x6C, 0xFA, 0x4B, 0xEE, 0x3B, 0x1C, 0x04,
     0x49, 0xD1, 0x93, 0xA5, 0xD4, 0x46, 0x11, 0x88, 0x85, 0x14, 0x1F, 0x0F, 0xBE, 0xBB, 0x47, 0xFC,
@@ -515,12 +526,14 @@ const FIBBY_SLOT_9C_TEST_PRIV: [u8; 32] = [
 /// via GA `P2=0x9E` (which fibby's sign handler, keyed on slot 9A,
 /// rejects with `6D00`). The fibby↔pivy-agent Phase 0 smoke caught
 /// exactly this. See `pivy-piv/src/slot.rs` for the full slot→tag map.
+#[cfg(feature = "test-double")]
 const TAG_SLOT_9A_CERT: &[u8] = &[0x5F, 0xC1, 0x05];
 
 /// PIV tag for the slot 9E (Card Authentication) X.509 cert object, per
 /// SP 800-73-4 §3.3 Table 6 / pivy `PIV_TAG_CERT_9E`: `5F C1 01`. Seeding
 /// a cert here makes pivy-agent expose the identity as slot 9E and route
 /// GA `P2=0x9E` signing to it — the CAK challenge path (piggy#143).
+#[cfg(feature = "test-double")]
 const TAG_SLOT_9E_CERT: &[u8] = &[0x5F, 0xC1, 0x01];
 
 /// Canonical fibby test-vector slot 9A certificate, wrapped in the PIV
@@ -546,6 +559,7 @@ const TAG_SLOT_9E_CERT: &[u8] = &[0x5F, 0xC1, 0x01];
 ///
 /// 399 bytes total (1-byte `53` tag + 3-byte BER `82 01 8B` long-form
 /// length + 395-byte inner: `70 82 01 82 <386 B DER> 71 01 00 FE 00`).
+#[cfg(feature = "test-double")]
 const RFC6979_SLOT_9A_CERT_OBJECT: &[u8] = &[
     0x53, 0x82, 0x01, 0x8B, 0x70, 0x82, 0x01, 0x82, 0x30, 0x82, 0x01, 0x7E, 0x30, 0x82, 0x01, 0x24,
     0xA0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01, 0x30, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE,
@@ -578,6 +592,7 @@ const RFC6979_SLOT_9A_CERT_OBJECT: &[u8] = &[
 /// SP 800-73-4 §3.3 Table 6 / pivy `PIV_TAG_CERT_9D`: `5F C1 0B`.
 /// This is the cert pivy-agent enumerates to expose fibby's ECDH /
 /// decrypt identity.
+#[cfg(feature = "test-double")]
 const TAG_SLOT_9D_CERT: &[u8] = &[0x5F, 0xC1, 0x0B];
 
 /// Canonical fibby slot-9D certificate, wrapped in the PIV cert-object
@@ -597,6 +612,7 @@ const TAG_SLOT_9D_CERT: &[u8] = &[0x5F, 0xC1, 0x0B];
 ///
 /// Activated by [`VirtualCard::seed_rfc5903_slot_9d_cert`] — typically
 /// via the fibby CLI's `--seed-rfc5903-slot-9d-cert` flag.
+#[cfg(feature = "test-double")]
 const RFC5903_SLOT_9D_CERT_OBJECT: &[u8] = &[
     0x53, 0x82, 0x01, 0x69, 0x70, 0x82, 0x01, 0x60, 0x30, 0x82, 0x01, 0x5C, 0x30, 0x82, 0x01, 0x03,
     0xA0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01, 0x30, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE,
@@ -626,6 +642,7 @@ const RFC5903_SLOT_9D_CERT_OBJECT: &[u8] = &[
 /// PIV tag for the slot 9C (Digital Signature) X.509 cert object, per
 /// SP 800-73-4 §3.3 Table 6 / pivy `PIV_TAG_CERT_9C`: `5F C1 0A`. (The
 /// fibby↔pivy-agent smoke documents the same slot↔tag map.)
+#[cfg(feature = "test-double")]
 const TAG_SLOT_9C_CERT: &[u8] = &[0x5F, 0xC1, 0x0A];
 
 /// Canonical fibby slot-9C certificate, wrapped in the PIV cert-object
@@ -639,6 +656,7 @@ const TAG_SLOT_9C_CERT: &[u8] = &[0x5F, 0xC1, 0x0A];
 /// slot-9C signature identity distinct from the 9A/9D ones. The ECDSA
 /// signature uses a random `k`, so the bytes aren't reproducible from the
 /// PEM by external tools — once pinned they're canonical. 398 bytes.
+#[cfg(feature = "test-double")]
 const FIBBY_SLOT_9C_CERT_OBJECT: &[u8] = &[
     0x53, 0x82, 0x01, 0x8A, 0x70, 0x82, 0x01, 0x81, 0x30, 0x82, 0x01, 0x7D, 0x30, 0x82, 0x01, 0x24,
     0xA0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01, 0x30, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE,
@@ -669,10 +687,12 @@ const FIBBY_SLOT_9C_CERT_OBJECT: &[u8] = &[
 
 /// PIV tag for the Card Holder Unique Identifier (CHUID) data object,
 /// per SP 800-73-4 §3.1.2: `5F C1 02`.
+#[cfg(feature = "test-double")]
 const TAG_CHUID: &[u8] = &[0x5F, 0xC1, 0x02];
 
 /// PIV tag for the Printed Information data object, per SP 800-73-4 §3.1.6:
 /// `5F C1 09`. Read by `pivy-tool pinfo` / piggy's `read_pinfo`.
+#[cfg(feature = "test-double")]
 const TAG_PINFO: &[u8] = &[0x5F, 0xC1, 0x09];
 
 /// Canonical CHUID object, captured from the YubiKey 4 throwaway during
@@ -693,10 +713,12 @@ const TAG_PINFO: &[u8] = &[0x5F, 0xC1, 0x09];
 /// TLV. Public so the multi-card CLI (piggy#242) can derive per-card
 /// default GUIDs from it (vary the last byte) without re-parsing the
 /// CHUID; pinned against the CHUID bytes by a test.
+#[cfg(feature = "test-double")]
 pub const CANONICAL_GUID: [u8; 16] = [
     0x19, 0x17, 0x55, 0xCF, 0xF3, 0x9E, 0xFE, 0x52, 0x2C, 0x07, 0xA3, 0x83, 0x27, 0x5B, 0xBE, 0xB1,
 ];
 
+#[cfg(feature = "test-double")]
 const CANONICAL_REAL_CARD_CHUID: &[u8] = &[
     0x53, 0x39, 0x30, 0x19, 0xD0, 0x42, 0x10, 0xD8, 0x21, 0x08, 0x6C, 0x10, 0x84, 0x21, 0x0D, 0x83,
     0x68, 0x58, 0x21, 0x08, 0x42, 0x10, 0x84, 0x21, 0xC8, 0x42, 0x10, 0xC3, 0xEB, 0x34, 0x10, 0x19,
@@ -707,6 +729,7 @@ const CANONICAL_REAL_CARD_CHUID: &[u8] = &[
 /// Locate the 16-byte GUID payload inside a `53 <len> …` CHUID object by
 /// walking its one-byte-tag/one-byte-len TLVs to tag `0x34` (SP 800-73-4
 /// CHUID GUID). Returns the offset of the GUID's first byte.
+#[cfg(feature = "test-double")]
 fn chuid_guid_offset(chuid: &[u8]) -> Option<usize> {
     if chuid.len() < 2 || chuid[0] != 0x53 {
         return None;
@@ -752,6 +775,7 @@ impl VirtualCard {
     /// In production, callers should use PUT DATA. This method
     /// bypasses the auth check that PUT DATA would eventually
     /// enforce, so reserve it for test scaffolding.
+    #[cfg(feature = "test-double")]
     pub fn seed_data_object(&mut self, tag: Vec<u8>, payload: Vec<u8>) {
         self.data_objects.insert(tag, payload);
     }
@@ -784,13 +808,16 @@ impl VirtualCard {
             mgmt_key: DEFAULT_MGMT_KEY,
             pending_mgmt_witness: None,
             mgmt_authenticated: false,
+            #[cfg(feature = "test-double")]
             generate_overrides: HashMap::new(),
+            #[cfg(feature = "test-double")]
             faults: Vec::new(),
             slot_policies: HashMap::new(),
             slot_origins: HashMap::new(),
             attestation: AttestationAuthority::generate(),
             touch: Arc::new(TouchPad::default()),
             touch_timeout: touch::DEFAULT_TOUCH_TIMEOUT,
+            #[cfg(feature = "test-double")]
             auto_touch: false,
             touch_clock_skew: Duration::ZERO,
             touch_blocked: None,
@@ -842,6 +869,7 @@ impl VirtualCard {
 
     /// A seeded key replaces whatever the slot held: it carries no
     /// configured policy and no on-card origin.
+    #[cfg(feature = "test-double")]
     fn forget_slot_provenance(&mut self, slot: u8) {
         self.slot_policies.remove(&slot);
         self.slot_origins.remove(&slot);
@@ -893,6 +921,7 @@ impl VirtualCard {
             touch_policy::CACHED => true,
             _ => return true,
         };
+        #[cfg(feature = "test-double")]
         if self.auto_touch {
             trace::emit(
                 trace::INFO,
@@ -924,6 +953,7 @@ impl VirtualCard {
 
     /// `--auto-touch`: grant every touch-requiring operation immediately
     /// (and log that it was auto-granted). Test convenience.
+    #[cfg(feature = "test-double")]
     pub fn set_auto_touch(&mut self, auto_touch: bool) {
         self.auto_touch = auto_touch;
     }
@@ -946,7 +976,7 @@ impl VirtualCard {
 
     /// Mark the PIN verified as a successful VERIFY does, for tests that
     /// set up card state without sending one.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "test-double"))]
     fn mark_pin_verified(&mut self) {
         self.pin_verified = true;
         self.command_since_verify = false;
@@ -974,6 +1004,46 @@ impl VirtualCard {
                 .as_bytes()
                 .to_vec(),
         )
+    }
+
+    /// Override the reader name this card's backend advertises. Needed by
+    /// the multi-card server (piggy#242): every reader in the
+    /// `CMD_GET_READERS_STATE` table must carry a distinct name, since
+    /// `SCardConnect` routes by it.
+    pub fn set_reader_name(&mut self, name: &str) {
+        self.reader_name = name.to_string();
+    }
+
+    /// The scalar a GENERATE for `slot` must install instead of a random
+    /// one. The holder build has no overrides: GENERATE is always random.
+    #[cfg(not(feature = "test-double"))]
+    fn generate_override(&self, _slot: u8) -> Option<[u8; 32]> {
+        None
+    }
+
+    /// The witness the management-key challenge sends when no seeded one
+    /// is pending. The holder build draws 8 fresh random bytes per
+    /// challenge, as silicon does; the test double keeps the zero witness
+    /// its captured replays expect.
+    #[cfg(not(feature = "test-double"))]
+    fn fresh_mgmt_witness() -> [u8; 8] {
+        let mut witness = [0u8; 8];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut witness);
+        witness
+    }
+}
+
+/// The test-double surface (FDR 0006, piggy#382): seeding, fixed vectors,
+/// deterministic GENERATE and management-key witnesses, and fault
+/// injection. Absent from the holder build.
+#[cfg(feature = "test-double")]
+impl VirtualCard {
+    fn generate_override(&self, slot: u8) -> Option<[u8; 32]> {
+        self.generate_overrides.get(&slot).copied()
+    }
+
+    fn fresh_mgmt_witness() -> [u8; 8] {
+        [0u8; 8]
     }
 
     /// Consume the first queued fault matching `ins`, if any, returning
@@ -1132,14 +1202,6 @@ impl VirtualCard {
         self.seed_data_object(TAG_PINFO.to_vec(), obj);
     }
 
-    /// Override the reader name this card's backend advertises. Needed by
-    /// the multi-card server (piggy#242): every reader in the
-    /// `CMD_GET_READERS_STATE` table must carry a distinct name, since
-    /// `SCardConnect` routes by it.
-    pub fn set_reader_name(&mut self, name: &str) {
-        self.reader_name = name.to_string();
-    }
-
     /// Seed a non-default application PIN (1–8 ASCII chars, 0xFF-padded
     /// per SP 800-73-4). The multi-card lanes (piggy#242/#177) use this
     /// to give each card a DIFFERENT PIN, so per-card PIN-cache behavior
@@ -1289,6 +1351,7 @@ impl Backend for VirtualCard {
         self.event_counter
     }
 
+    #[cfg(feature = "test-double")]
     fn inject_fault(&mut self, fault: Fault) -> Result<(), String> {
         if fault.remaining == 0 {
             return Err("fault count must be at least 1".into());
@@ -1297,6 +1360,7 @@ impl Backend for VirtualCard {
         Ok(())
     }
 
+    #[cfg(feature = "test-double")]
     fn clear_faults(&mut self) {
         self.faults.clear();
     }
@@ -1420,6 +1484,7 @@ impl VirtualCard {
         // piggy#284: an injected fault answers before any processing, so
         // the card's own state (PIN retries, verified flag) is untouched —
         // the test is about the CLIENT's handling of the status word.
+        #[cfg(feature = "test-double")]
         if let Some(fault_sw) = self.take_fault(ins) {
             trace::emit(
                 trace::INFO,
@@ -1672,7 +1737,10 @@ impl VirtualCard {
         // IMPORT ASYMMETRIC (00 FE <alg> <slot> <Lc> 06 <len> <scalar>).
         // YubicoPIV vendor instruction; installs caller-supplied key material
         // into the slot (the imported-key counterpart of GENERATE). Gated on
-        // a prior mgmt-key GENERAL AUTHENTICATE this session.
+        // a prior mgmt-key GENERAL AUTHENTICATE this session. Test-double
+        // only: a holder's keys are generated inside it (FDR 0006), so the
+        // holder build answers 6D00 like any unsupported instruction.
+        #[cfg(feature = "test-double")]
         if cla == 0x00 && ins == apdu::ins::IMPORT_ASYM {
             return Ok(self.handle_import_asymmetric(p1, p2, apdu_body(command_apdu)));
         }
@@ -1847,7 +1915,9 @@ impl VirtualCard {
         };
         // Phase 1: request witness. Body `7C 02 81 00`.
         if body == [0x7C, 0x02, 0x81, 0x00] {
-            let witness = self.pending_mgmt_witness.unwrap_or([0u8; 8]);
+            let witness = self
+                .pending_mgmt_witness
+                .unwrap_or_else(Self::fresh_mgmt_witness);
             self.pending_mgmt_witness = Some(witness);
             trace::emit(
                 trace::DEBUG,
@@ -2509,8 +2579,8 @@ impl VirtualCard {
 
         // Pick the scalar: a pinned override for reproducibility, else a
         // fresh random P-256 key.
-        let scalar: [u8; 32] = match self.generate_overrides.get(&slot) {
-            Some(s) => *s,
+        let scalar: [u8; 32] = match self.generate_override(slot) {
+            Some(s) => s,
             None => {
                 let sk = SigningKey::random(&mut rand_core::OsRng);
                 sk.to_bytes()
@@ -2570,6 +2640,7 @@ impl VirtualCard {
     ///   scalar.
     /// - `6A 86` if `slot` isn't one VirtualCard models (9A/9C/9D/9E).
     /// - `90 00` on success (the slot can then sign / do ECDH with the key).
+    #[cfg(feature = "test-double")]
     fn handle_import_asymmetric(&mut self, alg: u8, slot: u8, body: Option<&[u8]>) -> Vec<u8> {
         use p256::ecdsa::SigningKey;
 
@@ -2736,6 +2807,7 @@ impl VirtualCard {
 
 /// The key material and optional policy tags of an IMPORT ASYMMETRIC data
 /// field.
+#[cfg(feature = "test-double")]
 struct ImportRequest {
     scalar: [u8; 32],
     pin_policy: Option<u8>,
@@ -2753,6 +2825,7 @@ struct ImportRequest {
 /// stripped leading zeros — so trim leading zeros and left-pad to 32 bytes.
 /// Bytes after the scalar that are not well-formed TLVs are ignored, as
 /// they were before policies were read.
+#[cfg(feature = "test-double")]
 fn parse_import_request(body: &[u8]) -> Option<ImportRequest> {
     if body.len() < 2 || body[0] != 0x06 {
         return None;
@@ -3085,7 +3158,46 @@ fn sw(sw1: u8, sw2: u8) -> Vec<u8> {
     vec![sw1, sw2]
 }
 
-#[cfg(test)]
+/// The holder build's own behaviour (FDR 0006, piggy#382), run by the
+/// `.#fibby-holder` derivation's check phase.
+#[cfg(all(test, not(feature = "test-double")))]
+mod holder_tests {
+    use super::*;
+
+    #[test]
+    fn import_asymmetric_is_an_unsupported_instruction() {
+        let mut c = VirtualCard::new();
+        let mut apdu = vec![0x00, apdu::ins::IMPORT_ASYM, 0x11, 0x9A, 34, 0x06, 32];
+        apdu.extend_from_slice(&[0x11; 32]);
+        assert_eq!(c.transmit(&apdu).unwrap(), vec![0x6D, 0x00]);
+        assert_eq!(c.slot_9a_priv, None, "nothing was installed");
+    }
+
+    /// Phase 1 of the management-key challenge: `00 87 03 9B 04 7C 02 81 00`.
+    fn mgmt_witness(c: &mut VirtualCard) -> Vec<u8> {
+        let resp = c
+            .transmit(&[0x00, 0x87, 0x03, 0x9B, 0x04, 0x7C, 0x02, 0x81, 0x00])
+            .unwrap();
+        assert_eq!(&resp[..4], &[0x7C, 0x0A, 0x81, 0x08], "got {resp:02X?}");
+        assert_eq!(&resp[resp.len() - 2..], &[0x90, 0x00]);
+        resp[4..12].to_vec()
+    }
+
+    #[test]
+    fn the_management_key_witness_is_random() {
+        let first = mgmt_witness(&mut VirtualCard::new());
+        let second = mgmt_witness(&mut VirtualCard::new());
+        assert_ne!(first, second, "two cards drew the same witness");
+        assert_ne!(first, vec![0u8; 8], "the test double's zero witness");
+    }
+
+    #[test]
+    fn the_build_profile_is_holder() {
+        assert_eq!(crate::BUILD_PROFILE, "holder");
+    }
+}
+
+#[cfg(all(test, feature = "test-double"))]
 mod tests {
     use super::*;
 

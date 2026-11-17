@@ -23,15 +23,27 @@ pub const WIRE: u8 = 3;
 static LEVEL: AtomicU8 = AtomicU8::new(OFF);
 
 /// Read `FIBBY_LOG` once at startup. Unknown values default to `info`.
-pub fn init_from_env() {
+/// The holder build (no `test-double` feature) has no wire level: asking
+/// for it is an error, so a holder never silently runs with less logging
+/// than its operator asked for, nor ever dumps APDUs (they carry PINs and
+/// management-key responses).
+pub fn init_from_env() -> Result<(), String> {
     let lvl = match std::env::var("FIBBY_LOG").ok().as_deref() {
         Some("off") | None => OFF,
         Some("info") => INFO,
         Some("debug") => DEBUG,
+        #[cfg(feature = "test-double")]
         Some("wire") | Some("trace") => WIRE,
+        #[cfg(not(feature = "test-double"))]
+        Some(v @ ("wire" | "trace")) => {
+            return Err(format!(
+                "FIBBY_LOG={v}: this fibby is the holder build, which has no wire logging"
+            ));
+        }
         Some(_) => INFO,
     };
     LEVEL.store(lvl, Ordering::Relaxed);
+    Ok(())
 }
 
 #[inline]
@@ -54,7 +66,13 @@ pub fn emit(lvl: u8, tag: &str, msg: &str) {
 
 /// Hex dump in the canonical `offset  hex…  |ascii|` form, only built
 /// when the WIRE level is active (so the formatting cost is skipped
-/// otherwise).
+/// otherwise). A no-op in the holder build.
+#[cfg(not(feature = "test-double"))]
+#[inline]
+pub fn hexdump(_tag: &str, _bytes: &[u8]) {}
+
+/// See the holder-build variant above.
+#[cfg(feature = "test-double")]
 pub fn hexdump(tag: &str, bytes: &[u8]) {
     if !enabled(WIRE) {
         return;

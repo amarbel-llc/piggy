@@ -9,14 +9,31 @@ description = "Pure-Rust virtual PIV smart card that speaks the pcsc-lite client
 name = "fibby"
 path = "src/main.rs"
 
+[[bin]]
+name = "wire-to-apdu-fixtures"
+path = "src/bin/wire-to-apdu-fixtures.rs"
+required-features = ["test-double"]
+
 [features]
+# FDR 0006 phase (c), piggy#382: everything that makes fibby a good test
+# double and a dangerous key holder lives behind `test-double`: the
+# command-line key and state seeding, the fixed RFC test vectors and their
+# certificates, IMPORT ASYMMETRIC, deterministic GENERATE and management-key
+# witnesses, auto-touch, fault injection, the hardware proxy and wire
+# logging. On by default so cargo builds, piggy-piv's dev-dependency and the
+# test lanes (`.#fibby`) keep it; the holder (`.#fibby-holder`) is built
+# with --no-default-features, so the code is absent from that binary, and
+# `checks.lint-fibby-holder` proves it. `fibby --build-profile` reports
+# which build is running (`test-double` or `holder`).
+default = ["test-double"]
+test-double = []
 # The hardware-proxy backend forwards client calls to a real pcscd via
 # libpcsclite (the `pcsc` crate). Gated so the protocol core + virtual
 # backend build and unit-test on hosts without PCSC headers (e.g. CI
 # containers, darwin). Enable on a machine with a real reader to capture
 # /validate against hardware: `cargo run -p fibby --features hardware-proxy`.
-default = []
-hardware-proxy = ["dep:pcsc"]
+# A test tool, so it implies `test-double`.
+hardware-proxy = ["test-double", "dep:pcsc"]
 
 [dependencies]
 pcsc = { version = "2.9", optional = true }

@@ -254,17 +254,20 @@ fn handle_control(
 /// `fault <INS|*> <SW>[x<count>] <reader-name>` queues an injected fault
 /// (piggy#284: the next `count` APDUs with that INS — `*` for any — answer
 /// `SW`, e.g. `fault 20 63C2 …` makes one VERIFY report a wrong PIN with 2
-/// retries left) and `fault clear <reader-name>` drops them;
+/// retries left) and `fault clear <reader-name>` drops them (test-double
+/// build only);
 /// `touch <reader-name>` grants that card one simulated touch, consumed by
-/// its next touch-requiring operation (replies `ok pending=<n>`). Replies
-/// `ok[ ...]` or `err <reason>`.
+/// its next touch-requiring operation (replies `ok pending=<n>`); `profile`
+/// replies `ok <build-profile>`. Replies `ok[ ...]` or `err <reason>`.
 fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> String {
     let (verb, name) = match line.split_once(' ') {
         Some((v, n)) => (v, n.trim()),
         None => (line, ""),
     };
     match verb {
+        #[cfg(feature = "test-double")]
         "fault" => control_fault(backends, name),
+        "profile" => format!("ok {}", crate::BUILD_PROFILE),
         "touch" => match find_backend(backends, name) {
             // Locking the card here cannot deadlock against a client
             // waiting for this very touch: that client parks on the
@@ -322,6 +325,7 @@ fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> 
 
 /// `fault <INS|*> <SW>[x<count>] <reader-name>` / `fault clear <reader-name>`
 /// (piggy#284). The reader name is last because it may contain spaces.
+#[cfg(feature = "test-double")]
 fn control_fault(backends: &SharedBackends, args: &str) -> String {
     let Some((first, rest)) = args.split_once(' ') else {
         return "err usage: fault <INS|*> <SW>[x<count>] <reader-name> | fault clear <reader-name>"

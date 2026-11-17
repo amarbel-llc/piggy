@@ -34,3 +34,14 @@ pub mod virtual_card;
 
 #[cfg(feature = "hardware-proxy")]
 pub mod hardware_proxy;
+
+/// Which build this is (FDR 0006, piggy#382): `test-double` when the
+/// `test-double` feature carries the seeding, fixed vectors, key import,
+/// fault injection, hardware proxy and wire logging; `holder` when it was
+/// built without them. `fibby --build-profile` prints it and the control
+/// socket's `profile` verb answers it, so a holder unit can refuse the
+/// wrong binary.
+#[cfg(feature = "test-double")]
+pub const BUILD_PROFILE: &str = "test-double";
+#[cfg(not(feature = "test-double"))]
+pub const BUILD_PROFILE: &str = "holder";

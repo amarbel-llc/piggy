@@ -2,7 +2,7 @@
 default: lint build test
 
 [group('pre-build')]
-lint: lint-fmt lint-rust lint-piggy-piv-portable lint-worktree lint-closure-no-pivy lint-pigtrough-stack-isolated
+lint: lint-fmt lint-rust lint-piggy-piv-portable lint-worktree lint-closure-no-pivy lint-fibby-holder lint-pigtrough-stack-isolated
 
 # --- build ---
 
@@ -2507,6 +2507,26 @@ lint-rust:
     if [ "$(uname -s)" = Linux ]; then
       cargo clippy -p fibby --all-targets --features hardware-proxy -- -D warnings
     fi
+    # FDR 0006 (piggy#382): the fibby holder build, without the default
+    # `test-double` feature, must stay clippy-clean too (dead code left
+    # behind by a gate shows up only here).
+    cargo clippy -p fibby --all-targets --no-default-features -- -D warnings
+
+# FDR 0006 phase (c), piggy#382: the fibby holder build (`.#fibby-holder`)
+# must carry none of the test double's conveniences. Builds the
+# `checks.lint-fibby-holder` derivation, which greps the holder binary for
+# every flag the test build lists (`fibby --test-flags`) and the fixed test
+# certificates' subjects, runs the holder with each of those flags and with
+# FIBBY_LOG=wire and wants exit 2, checks both builds' `--build-profile`, and
+# checks the holder closure for pcsclite. Modelled on lint-closure-no-pivy.
+#
+# assert the fibby holder build carries no test flags, vectors or wire logging
+[group('pre-build')]
+lint-fibby-holder:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
+    nix build ".#checks.${system}.lint-fibby-holder" --no-link --print-build-logs
 
 # piggy#337: `piggy-piv --no-default-features` is the portable core pigsty
 # links on Android and wasm. It must compile (clippy-clean), and its
@@ -4960,4 +4980,88 @@ explore-fdr0006-b BIN_DIR="":
     check "SIGABRT ended the agent"                 test "$alive" = 0
     check "no core file in the agent's directory"   test "$cores" = 0
     echo "1..$n"
+    ((fails == 0))
+
+# The piggy#382 hand pass, staged (FDR 0006 phase (c), the fibby holder
+# build): builds `.#fibby-holder` and `.#fibby`, checks that each reports
+# its build profile, that the holder refuses every test flag the test build
+# lists and FIBBY_LOG=wire while the test build accepts them, then starts a
+# holder on a private socket with a control socket and leaves a shell there
+# (`exit` tears it down) so the operator can read `fibby --help` for both
+# builds and drive `fibby ctl` by hand. Virtual cards only: no real card, no
+# PIN prompt (the askpass safety net is set anyway, piggy-testing(7)).
+# BIN_DIR, when given, holds a holder build named fibby-holder and a
+# test-double build named fibby (e.g. built by hand) to run instead.
+#
+# stage the piggy#382 hand pass: fibby holder build, profiles, test-flag refusal
+[group('explore')]
+[linux]
+explore-fdr0006-c BIN_DIR="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{ BIN_DIR }}" ]]; then
+      bin="$(realpath "{{ BIN_DIR }}")"
+      holder="$bin/fibby-holder" testdouble="$bin/fibby"
+    else
+      holder="$(nix build .#fibby-holder --no-link --print-out-paths)/bin/fibby"
+      testdouble="$(nix build .#fibby --no-link --print-out-paths)/bin/fibby"
+    fi
+    dir="$(mktemp -d -t fdr6c.XXXXXX)"
+    export SSH_ASKPASS="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    export SSH_ASKPASS_REQUIRE=force DISPLAY="" PIGGY_TEST_FIB_PIN=123456
+    unset WAYLAND_DISPLAY
+    pids=()
+    cleanup() { kill "${pids[@]}" 2>/dev/null || true; rm -rf "$dir"; }
+    trap cleanup EXIT
+
+    n=0 fails=0
+    check() { # check DESCRIPTION COMMAND...
+      n=$((n + 1))
+      if "${@:2}" >/dev/null 2>&1; then echo "ok $n - $1"; else echo "not ok $n - $1"; fails=$((fails + 1)); fi
+    }
+    exits() { # exits WANT COMMAND...
+      local rc=0
+      timeout 10 "${@:2}" </dev/null >"$dir/last.out" 2>&1 || rc=$?
+      [[ $rc == "$1" ]]
+    }
+    serves() { # serves COMMAND...: fibby comes up on $FIBBY_SOCK, then is stopped
+      local sock="$dir/probe.sock" pid
+      rm -f "$sock"
+      FIBBY_SOCK="$sock" "$@" >"$dir/probe.log" 2>&1 &
+      pid=$!
+      for _ in $(seq 1 50); do [[ -S $sock ]] && break; sleep 0.1; done
+      local up=0
+      [[ -S $sock ]] && up=1
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      ((up == 1))
+    }
+    "$testdouble" --test-flags >"$dir/flags"
+    echo "# holder:      $holder"
+    echo "# test double: $testdouble"
+    echo "# test-only flags: $(wc -l <"$dir/flags")"
+    echo "TAP version 14"
+    check "holder reports profile holder"            test "$("$holder" --build-profile)" = holder
+    check "test double reports profile test-double"  test "$("$testdouble" --build-profile)" = test-double
+    while IFS= read -r flag; do
+      check "holder refuses $flag (exit 2)"          exits 2 "$holder" --socket "$dir/refuse.sock" "$flag"
+    done <"$dir/flags"
+    check "holder refuses FIBBY_LOG=wire (exit 2)"   exits 2 env FIBBY_LOG=wire "$holder" --socket "$dir/wire.sock"
+    check "holder refuses --backend hardware"        exits 1 "$holder" --socket "$dir/hw.sock" --backend hardware
+    check "test double serves with seed flags"       serves "$testdouble" --seed-rfc6979-slot-9a-cert --auto-touch
+    check "test double serves with FIBBY_LOG=wire"   serves env FIBBY_LOG=wire "$testdouble"
+    check "holder serves a blank --card"             serves "$holder" --card "piggy-test holder"
+    echo "1..$n"
+
+    ctl="$dir/ctl.sock"
+    "$holder" --socket "$dir/pcscd.comm" --control-socket "$ctl" --card "piggy-test holder" \
+      >"$dir/holder.log" 2>&1 &
+    pids+=($!)
+    for _ in $(seq 1 50); do [[ -S $ctl ]] && break; sleep 0.1; done
+    echo "# A holder is serving $dir/pcscd.comm (control socket $ctl)."
+    echo "# Try: \"\$FIBBY\" ctl --socket \"\$FIBBY_CTL\" profile | list | fault * 6982 'piggy-test holder'"
+    echo "#      \"\$FIBBY\" --help; \"\$FIBBY_TEST_DOUBLE\" --help; cat \"$dir/holder.log\""
+    echo "# exit the shell to stop it."
+    FIBBY="$holder" FIBBY_TEST_DOUBLE="$testdouble" FIBBY_CTL="$ctl" \
+      PCSCLITE_CSOCK_NAME="$dir/pcscd.comm" "${SHELL:-bash}" -i || true
     ((fails == 0))

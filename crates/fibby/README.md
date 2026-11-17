@@ -25,23 +25,37 @@ holding the rest in your head.
 | `hardware_proxy.rs` | forwards to a real pcscd/YubiKey via the `pcsc` crate. Feature `hardware-proxy`. The validation oracle. |
 | `server.rs` | listen loop + per-command dispatch + handle table. |
 
+## Two builds: test double and holder
+
+The default `test-double` feature carries everything that makes fibby a
+good test double and a dangerous key holder (FDR 0006 phase (c),
+piggy#382): the seed flags, the fixed RFC vectors and their certificates,
+IMPORT ASYMMETRIC, deterministic GENERATE and management-key witnesses,
+`--auto-touch`, `fibby ctl fault`, the hardware proxy and `FIBBY_LOG=wire`.
+Built without it (`--no-default-features`, nix `.#fibby-holder`) fibby is
+the holder: those flags are unknown arguments, `FIBBY_LOG=wire` is refused,
+IMPORT answers 6D00. `fibby --build-profile` prints `test-double` or
+`holder`; `just lint-fibby-holder` checks the holder binary.
+
 ## Build & test (no hardware, any platform)
 
 ```sh
-cargo test -p fibby --no-default-features
+just test-rust -p fibby                        # the test double
+just test-rust -p fibby --no-default-features  # the holder
 ```
 
-This covers the codec unit tests **and** `tests/loopback.rs` — a full
-PC/SC session (handshake → establish → readers-state → connect →
+The first covers the codec unit tests **and** `tests/loopback.rs` — a
+full PC/SC session (handshake → establish → readers-state → connect →
 transmit SELECT → disconnect) driven over a real Unix socket against the
-`VirtualCard`. No pcscd, no card.
+`VirtualCard`. No pcscd, no card. The second runs the tests that need no
+test-double surface plus the holder's own.
 
 ## Debugging
 
 ```sh
 FIBBY_LOG=info    # connection lifecycle, one line per command
 FIBBY_LOG=debug   # + decoded struct fields
-FIBBY_LOG=wire    # + full hex dump of every rx/tx body + APDU
+FIBBY_LOG=wire    # + full hex dump of every rx/tx body + APDU (test double only)
 ```
 
 ## Hardware validation runbook (wet-env)

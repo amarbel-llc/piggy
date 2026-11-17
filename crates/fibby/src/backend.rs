@@ -63,11 +63,13 @@ pub trait Backend: Send {
     /// being processed. Driven by the control socket (`fibby ctl fault`).
     /// Default: refused — a backend fronting real silicon cannot fake a
     /// status word.
+    #[cfg(feature = "test-double")]
     fn inject_fault(&mut self, _fault: crate::virtual_card::Fault) -> Result<(), String> {
         Err("this backend does not support fault injection".into())
     }
 
     /// Drop every queued fault (piggy#284). Default no-op.
+    #[cfg(feature = "test-double")]
     fn clear_faults(&mut self) {}
 
     /// ATR of the present card (empty if absent).

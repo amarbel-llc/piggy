@@ -15,6 +15,9 @@
 //! `full_byte_replay_*` tests are `#[ignore]`'d on purpose — that's
 //! how the implementation milestone is captured (un-ignore the test
 //! when the relevant code path lands).
+//!
+//! Needs the `test-double` build: it seeds cards with fixed vectors.
+#![cfg(feature = "test-double")]
 
 use std::fs;
 use std::path::{Path, PathBuf};

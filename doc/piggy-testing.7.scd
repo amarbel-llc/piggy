@@ -100,6 +100,21 @@ satisfied) or 6A82 (no such object) is asserted deterministically;
 reader-state wait so the agent's event-driven presence path runs
 against it.
 
+fibby comes in two builds (FDR 0006 phase (c), piggy#382). The test
+double, *nix build .#fibby* and every plain cargo build, has the crate's
+default _test-double_ feature: the seed flags, the fixed test vectors,
+IMPORT ASYMMETRIC, a deterministic GENERATE and management-key witness,
+*--auto-touch*, *fault*, the hardware proxy and _FIBBY_LOG=wire_. Every
+lane uses it. The key holder, *nix build .#fibby-holder* (built with
+*--no-default-features*), has none of them: it answers any of those flags
+or _FIBBY_LOG=wire_ with exit 2 and IMPORT with 6D00, and draws a random
+witness. *fibby --build-profile* and *fibby ctl* *profile* print
+_test-double_ or _holder_; *fibby --test-flags* (test double only) lists
+the test-only flags. *just lint-fibby-holder*, part of *just lint*,
+proves the holder binary holds none of those flag names nor the test
+certificates and refuses each flag. *just explore-fdr0006-c* stages the
+phase's hand pass.
+
 fibby stores the PIN and touch policy a key is generated or imported
 with and enforces it (piggy#303). A slot whose touch policy is _always_
 or _cached_ does not sign or do ECDH until the card is touched:

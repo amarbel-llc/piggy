@@ -443,70 +443,92 @@
           # available on both platforms.
           #
           # Used by: `just load-fibby` (downstream of this output), the wet-env
-          # capture recipe (`debug-fibby-roundtrip-capture`), and any consumer of #129's
-          # planned packaging story (e.g. a future home-manager service).
-          fibby = pkgs.rustPlatform.buildRustPackage {
-            pname = "fibby";
-            version = "0.1.0";
+          # capture recipe (`debug-fibby-roundtrip-capture`), and every fibby
+          # test lane.
+          #
+          # FDR 0006 phase (c), piggy#382: this is the TEST-DOUBLE build (the
+          # crate's default `test-double` feature: seeding, fixed vectors, key
+          # import, fault injection, the hardware proxy, wire logging).
+          # `holder = true` builds `.#fibby-holder` instead, with
+          # --no-default-features, so none of that is in the binary;
+          # `checks.lint-fibby-holder` proves it.
+          mkFibby =
+            {
+              holder ? false,
+            }:
+            pkgs.rustPlatform.buildRustPackage {
+              pname = if holder then "fibby-holder" else "fibby";
+              version = "0.1.0";
 
-            src = pkgs.lib.cleanSourceWith {
-              src = ./.;
-              filter =
-                name: type:
-                let
-                  rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
-                  base = baseNameOf rel;
-                in
-                base == "Cargo.toml"
-                || base == "Cargo.lock"
-                || base == "version.env"
-                || pkgs.lib.hasPrefix "crates" rel;
+              src = pkgs.lib.cleanSourceWith {
+                src = ./.;
+                filter =
+                  name: type:
+                  let
+                    rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
+                    base = baseNameOf rel;
+                  in
+                  base == "Cargo.toml"
+                  || base == "Cargo.lock"
+                  || base == "version.env"
+                  || pkgs.lib.hasPrefix "crates" rel;
+              };
+
+              cargoLock = sharedCargoLock;
+
+              # Build only the fibby crate (the workspace builds piggy etc. as
+              # a side effect via piggy-rs; this keeps the artifact narrow).
+              # The holder carries no feature at all (not even the default
+              # `test-double`), so no hardware proxy and no pcsclite link.
+              buildNoDefaultFeatures = holder;
+              cargoBuildFlags = [
+                "-p"
+                "fibby"
+              ]
+              ++ pkgs.lib.optionals (!holder && pkgs.stdenv.hostPlatform.isLinux) [
+                "--features"
+                "hardware-proxy"
+              ];
+
+              # Match the build feature gate on tests so `cargo test` exercises
+              # the hardware-proxy code path on Linux. The fibby tests are
+              # pure-data / VirtualCard-driven, so they pass with or without the
+              # feature; the feature gate just ensures the hardware-proxy code
+              # TYPE-CHECKS in the sandbox. The holder runs the tests that need
+              # no test-double surface.
+              cargoTestFlags = [
+                "-p"
+                "fibby"
+              ]
+              ++ pkgs.lib.optionals (!holder && pkgs.stdenv.hostPlatform.isLinux) [
+                "--features"
+                "hardware-proxy"
+              ];
+
+              buildInputs = if holder then [ ] else rustBuildInputs;
+              nativeBuildInputs = rustNativeBuildInputs;
+
+              # Run the 18 fibby tests inside the sandbox. Loopback uses /tmp
+              # for its AF_UNIX socket (sun_path-short), so it survives the
+              # short nix-sandbox TMPDIR fine. Hardware-proxy unit tests stay
+              # hermetic — they don't try to reach a real pcscd.
+              doCheck = true;
+
+              meta = with pkgs.lib; {
+                description =
+                  if holder then
+                    "fibby holder build: the virtual PIV card without its test conveniences (FDR 0006)"
+                  else
+                    "Pure-Rust virtual PIV card speaking the pcsc-lite client protocol directly";
+                homepage = "https://code.linenisgreat.com/piggy";
+                license = licenses.mpl20;
+                mainProgram = "fibby";
+                platforms = platforms.linux ++ platforms.darwin;
+              };
             };
 
-            cargoLock = sharedCargoLock;
-
-            # Build only the fibby crate (the workspace builds piggy etc. as
-            # a side effect via piggy-rs; this keeps the artifact narrow).
-            cargoBuildFlags = [
-              "-p"
-              "fibby"
-            ]
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-              "--features"
-              "hardware-proxy"
-            ];
-
-            # Match the build feature gate on tests so `cargo test` exercises
-            # the hardware-proxy code path on Linux. The 18 fibby tests
-            # (17 unit + 1 loopback) are pure-data / VirtualCard-driven, so
-            # they pass with or without the feature; the feature gate just
-            # ensures the hardware-proxy code TYPE-CHECKS in the sandbox.
-            cargoTestFlags = [
-              "-p"
-              "fibby"
-            ]
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-              "--features"
-              "hardware-proxy"
-            ];
-
-            buildInputs = rustBuildInputs;
-            nativeBuildInputs = rustNativeBuildInputs;
-
-            # Run the 18 fibby tests inside the sandbox. Loopback uses /tmp
-            # for its AF_UNIX socket (sun_path-short), so it survives the
-            # short nix-sandbox TMPDIR fine. Hardware-proxy unit tests stay
-            # hermetic — they don't try to reach a real pcscd.
-            doCheck = true;
-
-            meta = with pkgs.lib; {
-              description = "Pure-Rust virtual PIV card speaking the pcsc-lite client protocol directly";
-              homepage = "https://code.linenisgreat.com/piggy";
-              license = licenses.mpl20;
-              mainProgram = "fibby";
-              platforms = platforms.linux ++ platforms.darwin;
-            };
-          };
+          fibby = mkFibby { };
+          fibby-holder = mkFibby { holder = true; };
 
           # The auth decoration proxy pilot (FDR 0009), its own package so the
           # hyper/rustls stack it links stays out of `piggy` (the wrapped piggy
@@ -930,7 +952,12 @@
             # (pcsclite is a Linux-only build input). Consumed by
             # `just load-fibby` and the wet-env capture recipes; future
             # consumer is the planned home-manager service (#129 stretch).
+            # The test-double build; every test lane uses it.
             fibby = fibby;
+            # FDR 0006's key holder: fibby without the `test-double` feature
+            # (no seeding, fixed vectors, import, faults, hardware proxy or
+            # wire logging). `fibby --build-profile` prints `holder`.
+            inherit fibby-holder;
             # The auth decoration proxy pilot (FDR 0009); the operator's
             # acceptance pass is docs/plans/2026-11-16-pigtrough-pilot-runbook.md.
             inherit pigtrough;
@@ -1015,6 +1042,59 @@
                   exit 1
                 fi
                 echo "ok: no C pivy in the piggy runtime closure"
+                touch "$out"
+              '';
+            # FDR 0006 phase (c), piggy#382: the holder build carries none of
+            # the test double's conveniences. Fails if the holder binary
+            # contains any test-only flag name the test build lists
+            # (`fibby --test-flags`) or a fixed test-vector certificate's
+            # subject, if it accepts any of those flags or FIBBY_LOG=wire, if
+            # either build misreports its profile, or if pcsclite (the
+            # hardware proxy's link) is in the holder closure. Driven from
+            # `just lint-fibby-holder`.
+            lint-fibby-holder =
+              let
+                ci = pkgs.closureInfo { rootPaths = [ fibby-holder ]; };
+              in
+              pkgs.runCommand "lint-fibby-holder" { nativeBuildInputs = [ pkgs.coreutils ]; } ''
+                set -euo pipefail
+                holder=${fibby-holder}/bin/fibby
+                testdouble=${fibby}/bin/fibby
+                fail=0
+                bad() { echo "FAIL: $*" >&2; fail=1; }
+
+                [[ "$($holder --build-profile)" == holder ]] ||
+                  bad "the holder build does not report profile 'holder'"
+                [[ "$($testdouble --build-profile)" == test-double ]] ||
+                  bad "the test-double build does not report profile 'test-double'"
+
+                $testdouble --test-flags > flags
+                [[ -s flags ]] || bad "the test-double build lists no test flags"
+                # The fixed vectors' certificates carry these subjects.
+                printf '%s\n' fibby-test-slot-9a fibby-test-slot-9c fibby-test-slot-9d > markers
+                cat flags markers > needles
+                while IFS= read -r needle; do
+                  if grep -aqF -- "$needle" "$holder"; then
+                    bad "the holder binary contains '$needle'"
+                  fi
+                done < needles
+
+                while IFS= read -r flag; do
+                  rc=0
+                  timeout 10 "$holder" --socket "$PWD/refuse.sock" "$flag" </dev/null >/dev/null 2>&1 || rc=$?
+                  [[ $rc == 2 ]] || bad "the holder did not refuse $flag (exit $rc, want 2)"
+                done < flags
+
+                rc=0
+                FIBBY_LOG=wire timeout 10 "$holder" --socket "$PWD/wire.sock" </dev/null >/dev/null 2>&1 || rc=$?
+                [[ $rc == 2 ]] || bad "the holder did not refuse FIBBY_LOG=wire (exit $rc, want 2)"
+
+                if grep -q -- "-pcsclite-" ${ci}/store-paths; then
+                  bad "pcsclite is in the holder's runtime closure"
+                fi
+
+                [[ $fail == 0 ]] || exit 1
+                echo "ok: the fibby holder build carries no test-double surface"
                 touch "$out"
               '';
           }
