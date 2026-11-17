@@ -6,7 +6,7 @@ pigtrough - auth decoration proxy that attaches piggy credentials
 
 # SYNOPSIS
 
-*pigtrough serve* [*--dir* _DIR_]++
+*pigtrough serve* [*--dir* _DIR_] [*--routes* _FILE_]++
 *pigtrough load* _ROUTE_ [*--dir* _DIR_]
 
 # DESCRIPTION
@@ -18,7 +18,7 @@ the route's allowlist, attaches the route's credential, sends the request
 over TLS to the route's fixed upstream, and returns the response. The
 client never holds, resolves or sees the credential.
 
-The pilot has one route, compiled in:
+Without *--routes* the pilot has one route, compiled in:
 
 *github-api*
 	Upstream *https://api.github.com*, a bearer token. It serves exactly
@@ -44,6 +44,15 @@ the socket below reaches these as */github-api/repos/...*, and so on.
 	process makes itself non-dumpable. It starts with no credential
 	loaded. Audit lines and control events go to standard error.
 
+	With *--routes* _FILE_, the routes come from the TOML file instead
+	(see ROUTE TABLE). Each route has its own credential, empty until
+	its own *load*. A route that names a *loopback_port* is also served on
+	*127.0.0.1*:_port_, where a client can name only that route. A
+	connection there is admitted only if the kernel's table of TCP
+	sockets (*/proc/net/tcp*) lists the client's end as owned by the
+	invoking user; a connection it cannot attribute is refused. This
+	checks who created the client socket, not a peer credential.
+
 *load* _ROUTE_
 	Read the credential for _ROUTE_ from standard input and hand it to
 	the running *serve* over its control socket. One trailing newline is
@@ -57,6 +66,46 @@ the socket below reaches these as */github-api/repos/...*, and so on.
 *--dir* _DIR_
 	The directory holding both sockets. Default:
 	*$XDG_RUNTIME_DIR/pigtrough*.
+
+# ROUTE TABLE
+
+*--routes* _FILE_ is TOML, read once at start; there is no reload. Any
+error refuses to start, with no partial table. Each *[[route]]* has:
+
+*name*
+	The first path segment clients use. 1 to 32 of a-z, 0-9 and -; unique.
+
+*upstream*
+	_host_ or _host_:_port_ (port defaults to 443); a DNS name or IPv4
+	address, nothing else.
+
+*auth*
+	*token* (_Authorization: token <secret>_) or *bearer*. There is no
+	default.
+
+*secret*
+	The name of the piggy entry, never a value.
+
+*owners*
+	The owners a *{owner}* segment may be.
+
+*loopback_port*
+	Optional, 1024 or higher, unique across routes.
+
+*forward_headers*
+	Optional lower-case names; default *accept* and *user-agent*. A
+	credential or framing header (_authorization_, _cookie_, _host_, ...)
+	is refused.
+
+*[[route.allow]]*
+	At least one: a *method* (GET, POST, PUT, PATCH, DELETE) and a *path*
+	array of plain literals and the kinds *{owner}*, *{name}*, *{ref}*,
+	*{ref-range}*, *{number}*, *{number-diff}* (digits and _.diff_ or
+	_.patch_) and *{rest}* (one or more pieces, last only). A path needs
+	a literal, and no piece may be empty, _._ or _.._.
+
+*extra_roots* is parsed but not supported yet: a table that sets it is
+refused. Unknown keys are refused.
 
 # BEHAVIOUR
 
@@ -122,9 +171,11 @@ curl --unix-socket "$XDG_RUNTIME_DIR/pigtrough/proxy.sock" \
 
 # LIMITATIONS
 
-The pilot has one compiled-in route, one scope (the invoking user) and no
-route table file. Prompting is never done: a missing credential fails
-closed. The trusted roots are the *webpki-roots* bundle of the build, with
+One scope: the invoking user. Prompting is never done: a missing
+credential fails closed. A loopback port is reachable by every local
+user, and its admission rests on the kernel's TCP socket table (a theory
+still being tested for races and other users); the unix socket's peer
+credential is the stronger check. The trusted roots are the *webpki-roots* bundle of the build, with
 no way yet to add one. A client that disconnects does not cancel its
 in-flight upstream call. Linux only.
 
