@@ -110,6 +110,17 @@ pub trait UpstreamClient: Send + Sync {
     ) -> Result<UpstreamResponse, UpstreamError>;
 }
 
+/// One client shared by several proxies (one per listener).
+impl<T: UpstreamClient + ?Sized> UpstreamClient for Arc<T> {
+    fn send(
+        &self,
+        upstream: &Upstream,
+        request: OutboundRequest<'_>,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        (**self).send(upstream, request)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

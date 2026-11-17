@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::Headers;
 use crate::audit::{AuditRecord, AuditSink, Decision};
 use crate::filter::{ScannedBody, inbound_headers, outbound_headers};
-use crate::holder::SecretHolder;
+use crate::holder::{Mount, SecretHolder};
 use crate::refusal::Cause;
 use crate::route::{Route, admit};
 use crate::upstream::{Credential, OutboundRequest, UpstreamClient};
@@ -56,7 +56,8 @@ pub struct Scope {
 
 pub struct Proxy<C> {
     routes: Vec<&'static Route>,
-    holder: Arc<SecretHolder>,
+    /// Parallel to `routes`: each route's own secret.
+    holders: Vec<Arc<SecretHolder>>,
     client: C,
     audit: Arc<dyn AuditSink>,
     scope: Scope,
@@ -71,9 +72,20 @@ impl<C: UpstreamClient> Proxy<C> {
         audit: Arc<dyn AuditSink>,
         scope: Scope,
     ) -> Self {
+        Self::with_mounts(vec![Mount { route, holder }], client, audit, scope)
+    }
+
+    /// A proxy serving every mounted route for `scope`, each decorated with
+    /// its own holder's secret. A request can only reach a route in `mounts`.
+    pub fn with_mounts(
+        mounts: Vec<Mount>,
+        client: C,
+        audit: Arc<dyn AuditSink>,
+        scope: Scope,
+    ) -> Self {
         Self {
-            routes: vec![route],
-            holder,
+            routes: mounts.iter().map(|m| m.route).collect(),
+            holders: mounts.into_iter().map(|m| m.holder).collect(),
             client,
             audit,
             scope,
@@ -96,7 +108,13 @@ impl<C: UpstreamClient> Proxy<C> {
         };
         record.route = Some(admitted.route.name);
 
-        let Some(secret) = self.holder.current() else {
+        // `admit` returns one of `self.routes`, so the name finds its holder.
+        let holder = self
+            .routes
+            .iter()
+            .position(|r| r.name == admitted.route.name)
+            .map(|i| &self.holders[i]);
+        let Some(secret) = holder.and_then(|h| h.current()) else {
             return self.refuse(record, Cause::SecretUnavailable);
         };
         let credential = Credential::new(admitted.route.scheme, secret.clone());

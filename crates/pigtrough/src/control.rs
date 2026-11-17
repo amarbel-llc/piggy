@@ -15,36 +15,35 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use zeroize::Zeroizing;
 
-use crate::holder::SecretHolder;
-use crate::route::Route;
+use crate::holder::Mount;
 
 /// The most a load request may hold: a route name and a token.
 pub const MAX_LOAD: usize = 64 * 1024;
 
-/// Serve load requests on `listener` for `route`, whose secret is `holder`,
-/// until the listener fails.
+/// Serve load requests on `listener` for the mounted routes, each filling
+/// its own holder, until the listener fails.
 pub async fn serve_control<A>(
     listener: UnixListener,
-    route: &'static Route,
-    holder: Arc<SecretHolder>,
+    mounts: Vec<Mount>,
     admit: A,
 ) -> io::Result<()>
 where
     A: Fn(&UnixStream) -> bool,
 {
+    let mounts = Arc::new(mounts);
     loop {
         let (mut stream, _) = listener.accept().await?;
         if !admit(&stream) {
             eprintln!("pigtrough control: refused a connection from another user");
             continue;
         }
-        let holder = holder.clone();
+        let mounts = mounts.clone();
         tokio::spawn(async move {
-            let answer = match read_request(&mut stream).await {
-                Ok(request) => load(route, &holder, &request),
-                Err(_) => "error: the request could not be read".to_owned(),
+            let (route, answer) = match read_request(&mut stream).await {
+                Ok(request) => load(&mounts, &request),
+                Err(_) => (None, "error: the request could not be read".to_owned()),
             };
-            eprintln!("pigtrough control: load {}: {answer}", route.name);
+            eprintln!("pigtrough control: load {}: {answer}", route.unwrap_or("?"));
             let _ = stream.write_all(format!("{answer}\n").as_bytes()).await;
         });
     }
@@ -62,19 +61,23 @@ async fn read_request(stream: &mut UnixStream) -> io::Result<Zeroizing<Vec<u8>>>
     Ok(request)
 }
 
-/// Apply one load request; the answer names no part of the secret.
-fn load(route: &Route, holder: &SecretHolder, request: &[u8]) -> String {
+/// Apply one load request to the mount it names; the answer names no part
+/// of the secret. The first part is the route's name when the request named
+/// a mounted one (for the control log), else `None`: a client-supplied name
+/// is never echoed.
+fn load(mounts: &[Mount], request: &[u8]) -> (Option<&'static str>, String) {
     let Some(newline) = request.iter().position(|b| *b == b'\n') else {
-        return "error: no route name".to_owned();
+        return (None, "error: no route name".to_owned());
     };
     let (name, secret) = (&request[..newline], &request[newline + 1..]);
-    if name != route.name.as_bytes() {
-        return "error: unknown route".to_owned();
-    }
-    match holder.load(secret) {
+    let Some(mount) = mounts.iter().find(|m| m.route.name.as_bytes() == name) else {
+        return (None, "error: unknown route".to_owned());
+    };
+    let answer = match mount.holder.load(secret) {
         Ok(()) => "ok".to_owned(),
         Err(e) => format!("error: {e}"),
-    }
+    };
+    (Some(mount.route.name), answer)
 }
 
 /// The client half: send `secret` for `route_name` to the control socket at
@@ -96,27 +99,54 @@ pub fn send_load(path: &std::path::Path, route_name: &str, secret: &[u8]) -> io:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::route::GITHUB_API;
+    use crate::route::{GITHUB_API, Route};
 
     #[test]
     fn load_requests_name_their_route_and_never_echo() {
-        let holder = SecretHolder::empty();
+        let mount = Mount::empty(&GITHUB_API);
+        let mounts = [mount.clone()];
         assert_eq!(
-            load(&GITHUB_API, &holder, b"github-api\npiggy-test-tok\n"),
-            "ok"
+            load(&mounts, b"github-api\npiggy-test-tok\n"),
+            (Some("github-api"), "ok".to_owned())
         );
-        assert!(holder.current().is_some());
+        assert!(mount.holder.current().is_some());
         for (request, answer) in [
             (&b"piggy-test-tok"[..], "error: no route name"),
             (b"other-route\npiggy-test-tok", "error: unknown route"),
-            (b"github-api\n", "error: the secret is empty"),
         ] {
-            assert_eq!(load(&GITHUB_API, &holder, request), answer);
+            assert_eq!(load(&mounts, request), (None, answer.to_owned()));
         }
-        let answer = load(&GITHUB_API, &holder, b"github-api\npiggy test tok");
+        assert_eq!(
+            load(&mounts, b"github-api\n"),
+            (Some("github-api"), "error: the secret is empty".to_owned())
+        );
+        let (_, answer) = load(&mounts, b"github-api\npiggy test tok");
         assert!(
             answer.starts_with("error:") && !answer.contains("piggy"),
             "{answer}"
         );
+    }
+
+    #[test]
+    fn each_route_fills_only_its_own_holder() {
+        static OTHER: Route = Route {
+            name: "other",
+            upstream: crate::route::Upstream {
+                host: "other.invalid",
+                port: 443,
+            },
+            scheme: crate::route::Scheme::Token,
+            secret: "piggy-test/none",
+            owners: &[],
+            allow: &[],
+            forward_headers: &[],
+        };
+        let (a, b) = (Mount::empty(&GITHUB_API), Mount::empty(&OTHER));
+        let mounts = [a.clone(), b.clone()];
+        assert_eq!(load(&mounts, b"other\ntok-b").1, "ok");
+        assert!(a.holder.current().is_none());
+        assert!(b.holder.current().is_some());
+        assert_eq!(load(&mounts, b"github-api\ntok-a").1, "ok");
+        assert!(a.holder.current().is_some());
     }
 }

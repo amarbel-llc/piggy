@@ -15,6 +15,24 @@ pub struct SecretHolder {
     current: RwLock<Option<Arc<GuardedBytes>>>,
 }
 
+/// A route with its own secret holder: the unit `serve` mounts, the proxy
+/// decorates with and `load` fills.
+#[derive(Clone)]
+pub struct Mount {
+    pub route: &'static crate::route::Route,
+    pub holder: Arc<SecretHolder>,
+}
+
+impl Mount {
+    /// A mount whose holder starts empty.
+    pub fn empty(route: &'static crate::route::Route) -> Self {
+        Self {
+            route,
+            holder: Arc::new(SecretHolder::empty()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum LoadError {
     /// Nothing to load.

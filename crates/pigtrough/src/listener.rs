@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::io;
+use std::net::{SocketAddr, SocketAddrV4};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
@@ -122,10 +123,95 @@ pub fn admit_peer(stream: &impl AsRawFd, bound_uid: u32) -> bool {
     peer_uid(stream).is_ok_and(|uid| uid == bound_uid)
 }
 
+/// Bind `127.0.0.1:port`, loopback only.
+pub fn bind_loopback(port: u16) -> io::Result<std::net::TcpListener> {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+}
+
+/// The `/proc/net/tcp` spelling of an IPv4 socket address: the address as
+/// the kernel prints it (its bytes read in host order), `:`, the port in hex.
+fn proc_net_addr(addr: &SocketAddrV4) -> String {
+    format!(
+        "{:08X}:{:04X}",
+        u32::from_ne_bytes(addr.ip().octets()),
+        addr.port()
+    )
+}
+
+/// The owner uid the kernel lists for the *client's* end of a loopback
+/// connection: the socket whose local address is `peer` and whose remote
+/// address is `local` (the listener's end). `None` when `table` (the text of
+/// `/proc/net/tcp`) has no such line, or the addresses are not IPv4.
+fn client_uid_in(table: &str, peer: SocketAddr, local: SocketAddr) -> Option<u32> {
+    let (SocketAddr::V4(peer), SocketAddr::V4(local)) = (peer, local) else {
+        return None;
+    };
+    let (want_local, want_remote) = (proc_net_addr(&peer), proc_net_addr(&local));
+    table.lines().skip(1).find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let _slot = fields.next()?;
+        if fields.next()? != want_local || fields.next()? != want_remote {
+            return None;
+        }
+        // After the addresses: st, tx_queue:rx_queue, tr:tm->when,
+        // retrnsmt, then uid.
+        fields.nth(4)?.parse().ok()
+    })
+}
+
+/// Whether a loopback TCP connection is admitted: the kernel must list its
+/// client end as owned by `bound_uid`. A connection the table does not show
+/// (a lookup that races the connection, a non-IPv4 peer, an unreadable
+/// table) is refused. The owner is the uid of the process that created the
+/// client socket, not a peer credential: a descriptor handed on to another
+/// user keeps its creator's uid (FDR 0009 listener options, path 2).
+#[cfg(target_os = "linux")]
+pub fn admit_loopback_peer(peer: SocketAddr, local: SocketAddr, bound_uid: u32) -> bool {
+    fs::read_to_string("/proc/net/tcp")
+        .ok()
+        .and_then(|table| client_uid_in(&table, peer, local))
+        .is_some_and(|uid| uid == bound_uid)
+}
+
+/// Loopback attribution reads Linux's `/proc/net/tcp`; elsewhere every
+/// loopback connection is refused.
+#[cfg(not(target_os = "linux"))]
+pub fn admit_loopback_peer(_peer: SocketAddr, _local: SocketAddr, _bound_uid: u32) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+
+    const TABLE: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+   0: 0100007F:1F4B 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 11111 1 0 100\n\
+   1: 0100007F:A5E4 0100007F:1F4B 01 00000000:00000000 00:00000000 00000000  1001        0 22222 1 0 20\n\
+   2: 0100007F:A5E5 0100007F:1F4B 01 00000000:00000000 00:00000000 00000000  1002        0 33333 1 0 20\n";
+
+    fn v4(port: u16) -> SocketAddr {
+        SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
+    }
+
+    #[test]
+    fn the_clients_uid_is_read_from_its_own_line_of_the_table() {
+        // The listener's own line (state 0A) must not be taken for a client.
+        assert_eq!(client_uid_in(TABLE, v4(0xA5E4), v4(0x1F4B)), Some(1001));
+        assert_eq!(client_uid_in(TABLE, v4(0xA5E5), v4(0x1F4B)), Some(1002));
+        assert_eq!(client_uid_in(TABLE, v4(0xA5E6), v4(0x1F4B)), None);
+        assert_eq!(client_uid_in(TABLE, v4(0xA5E4), v4(0x1F4C)), None);
+        let v6 = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 0xA5E4));
+        assert_eq!(client_uid_in(TABLE, v6, v4(0x1F4B)), None);
+        assert_eq!(client_uid_in("", v4(1), v4(2)), None);
+        assert_eq!(client_uid_in("header only\n", v4(1), v4(2)), None);
+    }
+
+    #[test]
+    fn bind_loopback_listens_on_loopback_only() {
+        let listener = bind_loopback(0).unwrap();
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+    }
 
     /// A fresh directory with a short name: a socket path must fit in
     /// `sun_path` (108 bytes on Linux) under a worktree's long `TMPDIR`.

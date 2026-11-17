@@ -58,14 +58,48 @@ where
             proxy.refuse_binding();
             continue;
         }
-        let proxy = proxy.clone();
-        tokio::spawn(async move {
-            let service = service_fn(move |request| respond(proxy.clone(), request));
-            let _ = hyper::server::conn::http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), service)
-                .await;
-        });
+        spawn_connection(stream, proxy.clone());
     }
+}
+
+/// Like [`serve`], for a loopback TCP listener (FDR 0009 listener options,
+/// path 2). `admit` gets the connection's peer and local address; the unix
+/// peer-credential check does not exist for TCP, so the caller supplies the
+/// decision ([`crate::listener::admit_loopback_peer`]).
+pub async fn serve_tcp<C, A>(
+    listener: tokio::net::TcpListener,
+    proxy: Arc<Proxy<C>>,
+    admit: A,
+) -> io::Result<()>
+where
+    C: UpstreamClient + 'static,
+    A: Fn(std::net::SocketAddr, std::net::SocketAddr) -> bool,
+{
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let admitted = match stream.local_addr() {
+            Ok(local) => admit(peer, local),
+            Err(_) => false,
+        };
+        if !admitted {
+            proxy.refuse_binding();
+            continue;
+        }
+        spawn_connection(stream, proxy.clone());
+    }
+}
+
+fn spawn_connection<C, S>(stream: S, proxy: Arc<Proxy<C>>)
+where
+    C: UpstreamClient + 'static,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let service = service_fn(move |request| respond(proxy.clone(), request));
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
 }
 
 async fn respond<C: UpstreamClient + 'static>(
