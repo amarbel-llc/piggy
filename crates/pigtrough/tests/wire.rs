@@ -106,11 +106,15 @@ fn tls_acceptor() -> TlsAcceptor {
 }
 
 /// A fake upstream that accepts TLS, reads the request, says `request`, then
-/// never answers and says `closed` when the proxy closes the connection.
+/// never finishes answering and says `closed` when the proxy closes the
+/// connection. With `partial` it first sends a response head promising 1000
+/// bytes and the first hundred of them (`x`), so the proxy is streaming a
+/// body when the client goes.
 fn start_hanging_upstream(
     runtime: &Runtime,
+    partial: bool,
 ) -> (SocketAddr, std::sync::mpsc::Receiver<&'static str>) {
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let acceptor = tls_acceptor();
     let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -127,6 +131,14 @@ fn start_hanging_upstream(
                     return;
                 }
                 let _ = tx.send("request");
+                if partial {
+                    let mut head = b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n".to_vec();
+                    // More than the credential scan holds back at the tail.
+                    head.extend_from_slice(&[b'x'; 100]);
+                    if tls.write_all(&head).await.is_err() || tls.flush().await.is_err() {
+                        return;
+                    }
+                }
                 loop {
                     match tls.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
@@ -218,10 +230,19 @@ fn start_proxy(
     roots: RootCertStore,
     admit: impl Fn(&tokio::net::UnixStream) -> bool + Send + 'static,
 ) -> Running {
+    let client = TlsUpstream::with_roots(runtime.handle().clone(), roots).connect_to(addr);
+    start_with_client(runtime, client, seen, admit)
+}
+
+fn start_with_client<C: pigtrough::upstream::UpstreamClient + 'static>(
+    runtime: Runtime,
+    client: C,
+    seen: Arc<Mutex<Vec<Seen>>>,
+    admit: impl Fn(&tokio::net::UnixStream) -> bool + Send + 'static,
+) -> Running {
     let holder = Arc::new(SecretHolder::empty());
     holder.load(format!("{TOKEN}\n").as_bytes()).unwrap();
     let audit = Arc::new(CaptureSink::default());
-    let client = TlsUpstream::with_roots(runtime.handle().clone(), roots).connect_to(addr);
     let proxy = Arc::new(Proxy::new(
         &GITHUB_API,
         holder,
@@ -480,6 +501,136 @@ fn roots_with_refuses_a_bad_bundle() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A proxy over `HostClients`: the public-roots client by default, and the
+/// private-CA client for `private_for` only. The fake upstream is reached
+/// through either; only the one trusting its CA completes the handshake.
+fn dispatch_rig(private_for: pigtrough::route::Upstream) -> Running {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (addr, seen) = start_fake_upstream(&runtime, ok("{\"id\":3}"));
+    let handle = runtime.handle().clone();
+    let public = TlsUpstream::with_public_roots(handle.clone()).connect_to(addr);
+    let private = TlsUpstream::with_roots(
+        handle,
+        pigtrough::tls::roots_with(&[PathBuf::from(CA_PATH)]).unwrap(),
+    )
+    .connect_to(addr);
+    let clients = pigtrough::tls::HostClients::new(public).with_host(&private_for, private);
+    start_with_client(runtime, clients, seen, admit_self)
+}
+
+#[test]
+fn host_clients_use_the_private_roots_for_their_own_upstream_only() {
+    // Registered for the route's own upstream: the private CA is used.
+    let own = dispatch_rig(GITHUB_API.upstream);
+    let reply = get(&own, "/github-api/repos/amarbel-llc/piggy");
+    let (head, _) = split_response(&reply);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert_eq!(own.seen.lock().unwrap().len(), 1);
+
+    // Registered for another host, or for the same host on another port:
+    // the route falls to the public roots, which do not vouch for the fake.
+    for other in [
+        pigtrough::route::Upstream {
+            host: "other.invalid",
+            port: GITHUB_API.upstream.port,
+        },
+        pigtrough::route::Upstream {
+            host: GITHUB_API.upstream.host,
+            port: GITHUB_API.upstream.port + 1,
+        },
+    ] {
+        let rig = dispatch_rig(other);
+        let reply = get(&rig, "/github-api/repos/amarbel-llc/piggy");
+        let (head, body) = split_response(&reply);
+        assert!(head.starts_with("HTTP/1.1 502"), "{other:?}: {head}");
+        assert_eq!(body, b"upstream-unavailable\n");
+        assert!(rig.seen.lock().unwrap().is_empty());
+    }
+}
+
+/// A client that hangs up while the response body is streaming: the
+/// upstream sees its connection close, and the audit line is written once.
+#[test]
+fn a_client_that_hangs_up_while_the_body_streams_cancels_the_upstream_read() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (addr, events) = start_hanging_upstream(&runtime, true);
+    let running = start_proxy(
+        runtime,
+        addr,
+        Arc::new(Mutex::new(Vec::new())),
+        test_roots(),
+        admit_self,
+    );
+    let mut stream = StdUnixStream::connect(&running.socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .write_all(b"GET /github-api/repos/amarbel-llc/piggy HTTP/1.1\r\nHost: proxy\r\n\r\n")
+        .unwrap();
+    let wait = Duration::from_secs(10);
+    assert_eq!(events.recv_timeout(wait), Ok("request"));
+
+    // Read until some of the streamed body has reached the client.
+    let mut got = Vec::new();
+    let mut buf = [0u8; 512];
+    loop {
+        let n = stream
+            .read(&mut buf)
+            .expect("body bytes before the timeout");
+        assert!(n > 0, "the proxy closed before any body arrived");
+        got.extend_from_slice(&buf[..n]);
+        if let Some(at) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+            if got.len() - (at + 4) >= 16 {
+                break;
+            }
+        }
+    }
+    drop(stream);
+    assert_eq!(
+        events.recv_timeout(wait),
+        Ok("closed"),
+        "the upstream connection was not closed after the client hung up mid-body"
+    );
+
+    // One audit line, written once the body was dropped.
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let lines: Vec<_> = running
+            .audit
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| (r.decision, r.status))
+            .collect();
+        if lines.len() == 1 {
+            assert_eq!(
+                lines[0],
+                (pigtrough::audit::Decision::RefuseUpstream, Some(200)),
+                "audit: {lines:?}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "audit lines: {lines:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // And no second line shows up late.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(running.audit.0.lock().unwrap().len(), 1);
+}
+
 /// A client that hangs up while the upstream is still thinking: the
 /// upstream sees its connection closed within moments, long before the 30 s
 /// head timeout, and the audit line says the client went.
@@ -490,7 +641,7 @@ fn a_client_that_hangs_up_cancels_its_upstream_call() {
         .enable_all()
         .build()
         .unwrap();
-    let (addr, events) = start_hanging_upstream(&runtime);
+    let (addr, events) = start_hanging_upstream(&runtime, false);
     let running = start_proxy(
         runtime,
         addr,
