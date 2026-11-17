@@ -1693,6 +1693,33 @@ test-nix-hm-secrets-module:
     exit 1
   fi
 
+# Smoke-test for the `services.pigtrough` home-manager module (FDR 0009, R3):
+# evaluates it against synthetic configs and checks the exec line, the
+# restart and fail-closed unit shape, the routes/routesFile mutex and the
+# argument escaping. Nothing is deployed or realised.
+#
+# smoke-test the services.pigtrough home-manager module
+[group('post-build')]
+test-nix-hm-pigtrough-module:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  # git+file, not a bare path: a path flake copies the whole directory,
+  # and a worktree's .tmp can hold sockets ("unsupported type").
+  expr='let
+    flake = builtins.getFlake ("git+file://" + toString ./.);
+    pkgs = flake.inputs.igloo.legacyPackages.${builtins.currentSystem};
+    test = import ./nix/hm/pigtrough-eval-test.nix {
+      inherit pkgs;
+      module = flake.homeManagerModules.pigtrough;
+    };
+  in test'
+  json="$(nix eval --impure --json --show-trace --expr "$expr")"
+  printf '%s\n' "$json" | jq -r '"\(.summary)"'
+  if [[ "$(printf '%s\n' "$json" | jq -r '.pass')" != "true" ]]; then
+    printf '%s\n' "$json" | jq -r '.failures[] | "FAIL: \(.name)\n  got: \(.result.got)"'
+    exit 1
+  fi
+
 # NixOS VM lane (nix/vm-tests/luks.nix): a guest running the shipped piggy
 # package with fibby + the Rust `piggy agent` as systemd units; a store
 # secret sealed to the virtual card formats, opens and re-opens a LUKS2

@@ -123,6 +123,15 @@ refused. Unknown keys are refused.
   without query string, status, byte counts and decision. Never a header
   value, body, query string or credential.
 
+# SUPERVISION
+
+The flake exports the home-manager module *services.pigtrough*
+(*homeManagerModules.pigtrough*): a systemd user unit that runs *serve*
+(with *--routes* and *--dir* from its options) and restarts it when it
+exits. A restart comes back with every route unloaded, so each route
+answers *503 secret-unavailable* until the operator runs *load* again by
+hand; the unit never reads the card and never loads a credential.
+
 # SIGNALS
 
 *serve* installs no signal handler of its own, so *SIGINT* and *SIGTERM*

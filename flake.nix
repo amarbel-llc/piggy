@@ -1197,6 +1197,11 @@
         # `piggy secrets reconcile` (FDR 0003). Same thin NixOS re-export shape.
         homeManagerModules.piggy-secrets = import ./nix/hm/piggy-secrets.nix;
         nixosModules.piggy-secrets = import ./nix/nixos/piggy-secrets.nix;
+
+        # `services.pigtrough` — the systemd user unit that keeps
+        # `pigtrough serve` running (FDR 0009, R3): restarts come back with
+        # every route unloaded, never touching the card.
+        homeManagerModules.pigtrough = import ./nix/hm/pigtrough.nix;
       }
     );
 }
