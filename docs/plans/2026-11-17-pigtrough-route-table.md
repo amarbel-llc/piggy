@@ -93,12 +93,32 @@ contents beyond the field path.
 - `{n}` (an issue or pull number) is not an existing `Segment` kind;
   smith's calls need a `{number}` segment (digits only, at most 10) added to
   `Segment`. This is a small change to `route.rs`, in slice 1.
-- Smith's call list came from a smith worker reading smith's source (file
-  and line cited), relayed by the coordinator, not read by this session.
-  Three items are NOT confirmed there: the issue-comment paths, the
-  `pulls/{n}/files` and `/commits` path strings, and `contents/{filepath}`
-  (a path with slashes, which no current `Segment` kind matches either: it
-  needs its own kind, or those calls stay off the allowlist). A smith worker
-  can trace them read-only; the allowlist is written only from confirmed
-  paths.
+- Smith's call list came from smith workers reading smith's source at
+  smith master 12444e1 (file and line cited there), relayed by the
+  coordinator, not read by this session. All calls are `GET` under `/api/v1`
+  with no body; headers are `Authorization` and `User-Agent` only. The
+  native CLI's allowlist (paths below `/repos/{owner}/{name}`):
+  `issues`, `issues/{number}`, `issues/{number}/comments`, `pulls`,
+  `pulls/{number}`, `pulls/{number}/files`, `pulls/{number}/commits`,
+  `pulls/{number}.diff` and `.patch` (if wanted), `commits/{ref}/status`,
+  `tags`, `releases`, `contents` (the list, no file path) and
+  `raw/{filepath}`; plus `repos/{owner}/{name}` itself. `pulls/{n}/files`
+  is also called by plain `pr view`, so it is allowed for every PR view.
+  `contents/{filepath}` stays OFF the allowlist: smith's Rust code never
+  calls it (the moxin content tool might, via `smith api`: a theory, not
+  traced), so it is added only if the operator wants that path proxied.
+- **Segment kinds to add**: `{number}` (digits only, at most 10), a
+  `{number}.diff` / `{number}.patch` form (digits plus one of those two
+  suffixes), and a rest-of-path kind for `raw/{filepath}`. The
+  rest-of-path kind must keep the traversal rules: it takes one or more
+  `/`-separated pieces, each non-empty, none `.` or `..`, no percent
+  encoding, only the characters `is_name` allows, and it is the last
+  segment of its shape. Smith's template paths (`.github/ISSUE_TEMPLATE/..`)
+  start with a dot and pass; `..` does not.
+- Paging: calls that page send `page=N` and read `x-total-count` (a
+  response header, forwarded to the client as a plain response header).
+  Query strings are admitted by the existing plain-character check; the
+  allowed query keys per shape are not restricted in the pilot. The
+  response-header filter passes `x-total-count`: `RESPONSE_DROPPED` in
+  `filter.rs` lists only hop-by-hop headers and cookies (read, not run).
 - The `/proc/net/tcp` admission check (slice 4) is still a theory.
