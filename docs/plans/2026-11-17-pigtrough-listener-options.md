@@ -109,6 +109,37 @@ socket and ask smith's worker to keep the unix connector as a follow-up
 build path 3. If the check cannot be made reliable, fall back to path 1 for
 anything beyond a single-user host.
 
+## Throwaway test for the `/proc/net/tcp` uid check (design, not run)
+
+Goal: find out whether, for an accepted loopback connection, the peer's uid
+can be attributed reliably. Nothing here is a claim until it runs.
+
+Setup, as a `explore-` justfile recipe (never an ad hoc script), on flic, no
+credential, no network beyond loopback:
+
+1. A listener binds `127.0.0.1:0`, prints its port, and for each accepted
+   connection records the peer address (ip:port) and looks that 4-tuple up
+   in `/proc/net/tcp` (the line whose local address is the peer's and whose
+   remote address is the listener's); the `uid` column is the answer.
+2. Cases, each compared with the known uid of the connecting process:
+   - same uid connects: expect equal.
+   - another uid connects (needs a second account or a `systemd-run
+     --user`-style different-uid helper; if flic has none, mark the case
+     NOT TESTED rather than faking it).
+   - a burst of N hundred short connections: count lookups that find no
+     line (the race), which decides whether "refuse if unattributable" is
+     usable or too lossy.
+   - a connection from inside a separate network namespace: expect it cannot
+     reach the host's loopback at all.
+   - IPv4-mapped and `::1`: the listener binds `127.0.0.1` only, so `::1`
+     must be refused by connect; check `/proc/net/tcp6` is not needed.
+3. Output: counts per case (match, mismatch, no line), nothing else.
+
+Pass criteria: zero mismatches; the no-line rate low enough that refusing
+those connections costs nothing visible (to be set after seeing the number,
+not before). Fail or flaky: fall back to path 1 (unix connector) for anything
+beyond a single-user host, as the recommendation says.
+
 ## Open questions
 
 - What clowncar needs from a host-wide proxy, if it is more than the

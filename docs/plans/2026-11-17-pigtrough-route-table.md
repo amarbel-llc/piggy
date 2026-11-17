@@ -93,8 +93,12 @@ contents beyond the field path.
 - `{n}` (an issue or pull number) is not an existing `Segment` kind;
   smith's calls need a `{number}` segment (digits only, at most 10) added to
   `Segment`. This is a small change to `route.rs`, in slice 1.
-- Smith's call list is the relayed one (issues, pulls, files, commits,
-  repos, commit status, tags, releases, contents); the exact paths come from
-  smith's source, not from this session. Take them from the smith worker
-  before writing the allowlist.
+- Smith's call list came from a smith worker reading smith's source (file
+  and line cited), relayed by the coordinator, not read by this session.
+  Three items are NOT confirmed there: the issue-comment paths, the
+  `pulls/{n}/files` and `/commits` path strings, and `contents/{filepath}`
+  (a path with slashes, which no current `Segment` kind matches either: it
+  needs its own kind, or those calls stay off the allowlist). A smith worker
+  can trace them read-only; the allowlist is written only from confirmed
+  paths.
 - The `/proc/net/tcp` admission check (slice 4) is still a theory.
