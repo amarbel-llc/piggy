@@ -5106,6 +5106,9 @@ explore-fdr0006-c BIN_DIR="":
     check "holder: destroying it again is refused"   exits 1 "$holder" ctl --socket "$ctl" destroy "$minted"
     echo "1..$n"
 
+    echo "# NOTE: a created card's key goes in slot 9A with the factory PIN (123456). That is"
+    echo "#       phase (c)'s placeholder, not the design: slot and PIN policy are phase (d)'s"
+    echo "#       to settle with mint@piggy (FDR 0006)."
     echo "# A holder is serving $PCSCLITE_CSOCK_NAME (control socket $ctl)."
     echo "# Try: \"\$FIBBY\" ctl --socket \"\$FIBBY_CTL\" profile | list | create [alg=…] NAME | destroy NAME"
     echo "#      \"\$PIGGY\" card export-attestation 9a --reader NAME"
