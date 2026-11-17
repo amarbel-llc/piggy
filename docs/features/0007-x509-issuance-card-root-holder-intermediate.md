@@ -1,6 +1,6 @@
 ---
 status: proposed
-date: 2026-11-08
+date: 2026-11-17
 promotion-criteria: >
   proposed -> experimental when the operator has approved this record and
   phase (i) has landed: `piggy-piv` builds the root, intermediate and leaf
@@ -324,12 +324,23 @@ tailnet HTTP endpoint (a new service, not piggy's); PAPI.
 
 | Phase | Content | Serves |
 |---|---|---|
-| (i) | `piggy-piv` profile builders (root, intermediate, leaf) over the existing signer-closure shape; the bats lane with openssl, including the negative name and IP cases and the unconstrained-intermediate case; item I1 (retired slots in `piggy tool`) if it has not landed ahead of the phase | the pilot's slot; the certificate shapes |
-| (ii) | `piggy ca root-cert`, `sign`, `issue` for a **card-held** issuer, with profiles; replaces openssl in the pilot's renewal | the pilot's renewal |
-| (iii) | the holder intermediate: a unit-bound mint (FDR 0006 (d)), `sign` of the intermediate by the card, `issue` with the holder key; health reports the intermediate | unattended renewal |
-| (iv) | the issuance service unit in the NixOS module; whatever part of the transport the operator rules is piggy's, if any | the proxy host's renewal |
+| (i) #393 | `piggy-piv` profile builders (root, intermediate, leaf) over the existing signer-closure shape; the bats lane with openssl, including the negative name and IP cases and the unconstrained-intermediate case; item I1 (retired slots in `piggy tool`) if it has not landed ahead of the phase | the pilot's slot; the certificate shapes |
+| (ii) #391 | `piggy ca root-cert`, `sign`, `issue` for a **card-held** issuer, with profiles; replaces openssl in the pilot's renewal | the pilot's renewal |
+| (iii) #392 | the holder intermediate: a unit-bound mint (FDR 0006 (d)), `sign` of the intermediate by the card, `issue` with the holder key; health reports the intermediate | unattended renewal |
+| (iv) #394 | the issuance service unit in the NixOS module; whatever part of the transport the operator rules is piggy's, if any | the proxy host's renewal |
 
 Every phase closes with the human pass FDR 0006 requires.
+
+**Operator approval, 2026-11-17.** The operator approved this record as
+proposed and had the four phase issues filed (the numbers above). The
+status stays `proposed` until phase (i) lands (see the promotion
+criteria). Rulings made with the approval, folded into the open
+questions below: the agent refuses operator acts for keys outside the
+slot `card init` provisions (9C); each root signature also produces a
+`piggy-certificate-v1` act, deferred to phase (ii); the intermediate key
+is minted per unit and is unit-bound by default. Still open: the
+transport and placement question and the TBS sign guard (decided with
+phase (ii)).
 
 ## Examples
 
@@ -630,16 +641,20 @@ that exists on every host without piggy.
   card agent lists it (V). Either the agent refuses operator acts for
   keys outside the slot `card init` provisions for them, or the overlap
   is accepted and the certificate subject keeps the two keys apart in
-  listings. Operator's call.
+  listings. Operator's call. **Ruled 2026-11-17: refuse.** The agent
+  refuses operator acts for keys outside the slot `card init`
+  provisions for them (9C).
 - **Ledger linkage.** Should each root signature also produce a
   `piggy-certificate-v1` operator act whose text names the issued
   certificate's markl-id, so the ledger records that the operator
   touched for it? RFC 0012 §3 says that text names the certified key and
   the request record (V); an X.509 certificate is neither, so this would
-  be an amendment.
+  be an amendment. **Ruled 2026-11-17: yes**, deferred to phase (ii)
+  (#391), with the RFC 0012 §3 amendment.
 - **Durable intermediate.** Whether the operator prefers FDR 0006's
   sealed durable-key class for the intermediate, trading a card tap per
-  restart for a key that survives one.
+  restart for a key that survives one. **Ruled 2026-11-17:** the
+  intermediate key is minted per unit and is unit-bound by default.
 - **A sign guard for TBS data.** The holder agent treats ordinary sign
   data as opaque (V, FDR 0006 "What the signed subject is"), and the
   card agent signs ordinary requests for every slot it lists after a
