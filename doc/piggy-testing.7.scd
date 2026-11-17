@@ -129,9 +129,9 @@ canonical CHUID; the fibby lines to count are _GA ED25519 9A -> 9000_.
 *just test-bats-conformance-agent-ed25519* drives the agent over it.
 
 Both builds' control socket also creates and destroys cards at runtime
-(piggy#382 item 6): *fibby ctl --socket* _PATH_ *create*
-[*alg=p256*|*alg=ed25519*] [*pin=*_default_|_never_|_once_|_always_]
-[*touch=*_default_|_never_|_always_|_cached_] _READER_ adds a card whose
+(piggy#382 item 6): *fibby ctl --socket* _PATH_ *create* [*alg=p256*|*alg=ed25519*]
+options *pin=*_default_|_never_|_once_|_always_ and
+*touch=*_default_|_never_|_always_|_cached_, then _READER_, adds a card whose
 9A key, self-signed certificate and CHUID (a random GUID) are generated
 inside fibby, the key recorded as generated so it attests; *destroy*
 _READER_ wipes the card's secrets and objects and removes its reader, after
