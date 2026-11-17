@@ -4582,7 +4582,7 @@ explore-pigtrough-admission:
     #!/usr/bin/env bash
     set -uo pipefail
     cargo test -p pigtrough --test admission_probe -- --ignored --test-threads=1 --nocapture 2>&1 \
-      | grep -E '^COUNTS |^test result|panicked|error(\[|:)' || true
+      | grep -E 'COUNTS |^test result|panicked|error(\[|:)' || true
 
 # Stage the hand pass that closes piggy#303 (FDR 0006 phase (a), "Phase
 # acceptance"): open a shell with everything the operator needs to read the

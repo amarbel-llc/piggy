@@ -94,14 +94,18 @@ fn client_gone_before_the_lookup() {
     let me = effective_uid();
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
-    let total = 300;
-    for _ in 0..total {
-        drop(TcpStream::connect(("127.0.0.1", port)).unwrap());
-    }
+    // Rounds smaller than the listen backlog (128), so every connect
+    // completes before anything is accepted.
+    let (rounds, per_round) = (3, 100);
     let mut counts = Counts::default();
-    for _ in 0..total {
-        let (stream, peer) = listener.accept().unwrap();
-        classify(&mut counts, peer, stream.local_addr().unwrap(), me);
+    for _ in 0..rounds {
+        for _ in 0..per_round {
+            drop(TcpStream::connect(("127.0.0.1", port)).unwrap());
+        }
+        for _ in 0..per_round {
+            let (stream, peer) = listener.accept().unwrap();
+            classify(&mut counts, peer, stream.local_addr().unwrap(), me);
+        }
     }
     println!("COUNTS client-gone: {counts:?}");
 }
