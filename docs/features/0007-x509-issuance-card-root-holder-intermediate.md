@@ -338,9 +338,10 @@ criteria). Rulings made with the approval, folded into the open
 questions below: the agent refuses operator acts for keys outside the
 slot `card init` provisions (9C); each root signature also produces a
 `piggy-certificate-v1` act, deferred to phase (ii); the intermediate key
-is minted per unit and is unit-bound by default. Still open: the
-transport and placement question and the TBS sign guard (decided with
-phase (ii)).
+is minted per unit and is unit-bound by default; operator-act
+verification requires the attested slot 9C; the card agent and
+`piggy tool sign` refuse TBSCertificate DER on CA slots. Still open: the
+transport and placement question.
 
 ## Examples
 
@@ -643,7 +644,11 @@ that exists on every host without piggy.
   is accepted and the certificate subject keeps the two keys apart in
   listings. Operator's call. **Ruled 2026-11-17: refuse.** The agent
   refuses operator acts for keys outside the slot `card init`
-  provisions for them (9C).
+  provisions for them (9C). RFC 0012 verification of an operator act
+  REQUIRES the attested slot 9C, not only the policy: the attestation
+  certificate names the slot, so a key in slot 82 presents a slot-82
+  attestation and is rejected as an operator act. Stated in RFC 0012
+  when phase (ii) opens (#391).
 - **Ledger linkage.** Should each root signature also produce a
   `piggy-certificate-v1` operator act whose text names the issued
   certificate's markl-id, so the ledger records that the operator
@@ -664,7 +669,11 @@ that exists on every host without piggy.
   is exactly the unseen signature this record wants to avoid. Whether
   every piggy signing surface should refuse DER that parses as a
   TBSCertificate, the way it refuses operator-act sshsig data (RFC 0012
-  §2.7), is decided with phase (ii).
+  §2.7), is decided with phase (ii). **Ruled 2026-11-17:** both the
+  card agent and `piggy tool sign` refuse DER that parses as a
+  TBSCertificate on CA slots (82 today). Not every surface: 9A signs
+  SSH challenges and is not a CA, and 9D does not sign. Built in phase
+  (ii) (#391).
 - **Retired-slot policy.** Whether a YubiKey honours PIN always and
   touch always on slot 82 exactly as on 9C (the hand pass reads the
   attestation).
