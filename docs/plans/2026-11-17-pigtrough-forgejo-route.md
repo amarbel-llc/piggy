@@ -17,10 +17,16 @@ Status: plan. Rulings of 2026-11-17 (operator, relayed by the coordinator):
    start on any parse or validation error; no partial table. The compiled-in
    `github-api` becomes the same record, read from the same parser's output
    or kept as the default when no file is given.
-2. **Per-route sockets** (ON HOLD until the operator rules on how smith
-   reaches the proxy, see below): `proxy-<route>.sock` (mode `0600`) in the
-   runtime directory; a request on a socket can only name that socket's
-   route, so reachability is the scope binding. `load` still names a route.
+2. **Loopback TCP listener per route** (operator ruling 2026-11-17, option
+   A of the blocker below: smith skips vanity discovery for http/localhost,
+   and is changed by a smith worker, not by this session): the route table
+   gives each route an optional loopback `port`; `serve` binds
+   `127.0.0.1:<port>` for it, and a connection there can only name that
+   route. No socket-per-route for smith. The existing unix `proxy.sock`
+   stays for other clients. The accepted caveat: a loopback port is reachable
+   by every local user, so the same-user admission of the unix socket does
+   not carry over by itself; how a TCP connection is admitted is evaluated
+   in `2026-11-17-pigtrough-listener-options.md`.
 3. **Scheme field** (default `token`, which is what smith sends): `token` sends `Authorization: token <secret>`, `bearer`
    sends `Authorization: Bearer <secret>`.
 4. **Extra roots** per route (see `2026-11-17-pigtrough-extra-roots.md`).
@@ -76,10 +82,10 @@ Two options, for the operator to rule (the coordinator is asking):
   which has only the client side today, and the same loopback admission
   question as A.
 
-Recommendation (a theory, not tested): A with a unix connector keeps R4 and
-the same-user admission as ruled and adds no TLS server; B adds the most to
-pigtrough. Nothing is built until the operator rules. The per-route socket
-code (step 2) is on hold.
+**Ruled 2026-11-17:** option A, without the unix connector: smith skips
+discovery for http/localhost and pigtrough serves a loopback TCP listener for
+smith; the caveat above is accepted. The smith change is filed separately
+and owned by a smith worker.
 
 ## Test plan for "works for smith"
 
