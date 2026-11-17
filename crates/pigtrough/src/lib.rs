@@ -35,6 +35,7 @@ pub mod proxy;
 pub mod refusal;
 pub mod route;
 pub mod server;
+pub mod table;
 pub mod tls;
 pub mod upstream;
 mod wire;

@@ -19,6 +19,9 @@ pub struct Upstream {
 pub enum Scheme {
     /// `Authorization: Bearer <secret>`.
     Bearer,
+    /// `Authorization: token <secret>`, the scheme Forgejo's clients (smith)
+    /// send.
+    Token,
 }
 
 /// One segment of an allowed path shape.
@@ -34,6 +37,15 @@ pub enum Segment {
     Ref,
     /// `<ref>...<ref>`, as GitHub's compare endpoint takes it.
     RefRange,
+    /// An issue or pull request number: ASCII digits only, at most 10.
+    Number,
+    /// A number with a `.diff` or `.patch` suffix, as Forgejo's pull
+    /// request diff endpoints take it.
+    NumberDiff,
+    /// One or more `/`-separated path pieces (a file path inside a
+    /// repository). Only valid as the last segment of a shape: it takes the
+    /// whole remainder of the path.
+    Rest,
 }
 
 /// One allowed request shape: a method and a whole path, segment by segment.
@@ -60,7 +72,7 @@ pub struct Route {
     pub forward_headers: &'static [&'static str],
 }
 
-use Segment::{Literal, Name, Owner, Ref, RefRange};
+use Segment::{Literal, Name, Number, NumberDiff, Owner, Ref, RefRange, Rest};
 
 /// The pilot route, for the circus mirror reconciler (FDR 0009, "What the
 /// first pilot route needs"); the allowlist is the one its maintainer
@@ -169,12 +181,27 @@ fn path_matches(route: &Route, shape: &[Segment], path: &str) -> bool {
         return false;
     };
     let segments: Vec<&str> = segments.split('/').collect();
+    if let Some((Rest, head)) = shape.split_last() {
+        // The rest-of-path segment takes one or more pieces: the head must
+        // match piece for piece and every remaining piece must be plain.
+        let tail = &segments[head.len().min(segments.len())..];
+        return segments.len() > head.len()
+            && tail.len() <= MAX_REST_PIECES
+            && head
+                .iter()
+                .zip(&segments)
+                .all(|(shape, seg)| segment_matches(route, *shape, seg))
+            && tail.iter().all(|seg| is_piece(seg));
+    }
     segments.len() == shape.len()
         && shape
             .iter()
             .zip(&segments)
             .all(|(shape, seg)| segment_matches(route, *shape, seg))
 }
+
+/// The most pieces a [`Segment::Rest`] takes.
+const MAX_REST_PIECES: usize = 16;
 
 fn segment_matches(route: &Route, shape: Segment, seg: &str) -> bool {
     match shape {
@@ -185,20 +212,37 @@ fn segment_matches(route: &Route, shape: Segment, seg: &str) -> bool {
         RefRange => seg
             .split_once("...")
             .is_some_and(|(a, b)| is_ref(a) && is_ref(b)),
+        Number => is_number(seg),
+        NumberDiff => seg
+            .rsplit_once('.')
+            .is_some_and(|(n, ext)| is_number(n) && matches!(ext, "diff" | "patch")),
+        // A Rest segment is handled whole in `path_matches`; a shape that
+        // puts it anywhere but last matches nothing.
+        Rest => false,
     }
 }
 
-/// A repository name: GitHub's characters, at most 100 of them, and not a
-/// dot segment. Percent-encoding is refused outright, so a path cannot
+/// ASCII digits only, one to ten of them.
+fn is_number(seg: &str) -> bool {
+    !seg.is_empty() && seg.len() <= 10 && seg.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// One plain path piece: GitHub's name characters, at most 255 of them, and
+/// not a dot segment. Percent-encoding is refused outright, so a path cannot
 /// smuggle a `/` or `..` past the segment check.
-fn is_name(seg: &str) -> bool {
+fn is_piece(seg: &str) -> bool {
     !seg.is_empty()
-        && seg.len() <= 100
+        && seg.len() <= 255
         && seg != "."
         && seg != ".."
         && seg
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+}
+
+/// A repository name: a plain piece of at most 100 characters.
+fn is_name(seg: &str) -> bool {
+    seg.len() <= 100 && is_piece(seg)
 }
 
 /// A branch name or commit id, limited to one path segment.
@@ -245,6 +289,139 @@ mod tests {
         ] {
             assert!(admitted(method, target), "{method} {target}");
         }
+    }
+
+    /// A route using the Forgejo-style segment kinds, built in the test.
+    static FORGEJO_SHAPES: Route = Route {
+        name: "forgejo-api",
+        upstream: Upstream {
+            host: "forgejo.invalid",
+            port: 443,
+        },
+        scheme: Scheme::Bearer,
+        secret: "piggy-test/none",
+        owners: &["some-org"],
+        allow: &[
+            Allow {
+                method: "GET",
+                path: &[
+                    Literal("api"),
+                    Literal("v1"),
+                    Literal("repos"),
+                    Owner,
+                    Name,
+                    Literal("pulls"),
+                    Number,
+                ],
+            },
+            Allow {
+                method: "GET",
+                path: &[
+                    Literal("api"),
+                    Literal("v1"),
+                    Literal("repos"),
+                    Owner,
+                    Name,
+                    Literal("pulls"),
+                    NumberDiff,
+                ],
+            },
+            Allow {
+                method: "GET",
+                path: &[
+                    Literal("api"),
+                    Literal("v1"),
+                    Literal("repos"),
+                    Owner,
+                    Name,
+                    Literal("raw"),
+                    Rest,
+                ],
+            },
+        ],
+        forward_headers: &["user-agent"],
+    };
+
+    fn forgejo(method: &str, target: &str) -> bool {
+        admit(&[&FORGEJO_SHAPES], method, target).is_some()
+    }
+
+    #[test]
+    fn number_kinds_take_digits_and_the_diff_suffixes_only() {
+        for target in [
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/7",
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/1234567890",
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/7.diff",
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/7.patch",
+        ] {
+            assert!(forgejo("GET", target), "{target}");
+        }
+        for target in [
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/",
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/x",
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/-1",
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/12345678901",
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/7.txt",
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/7.diff.patch",
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/.diff",
+            "/forgejo-api/api/v1/repos/some-org/r/pulls/7%2Ediff",
+        ] {
+            assert!(!forgejo("GET", target), "{target}");
+        }
+    }
+
+    #[test]
+    fn rest_of_path_takes_plain_pieces_and_refuses_traversal() {
+        for target in [
+            "/forgejo-api/api/v1/repos/some-org/r/raw/README.md",
+            "/forgejo-api/api/v1/repos/some-org/r/raw/.github/ISSUE_TEMPLATE/bug.yml",
+            "/forgejo-api/api/v1/repos/some-org/r/raw/a/b/c/d.txt?ref=main",
+        ] {
+            assert!(forgejo("GET", target), "{target}");
+        }
+        for target in [
+            "/forgejo-api/api/v1/repos/some-org/r/raw",
+            "/forgejo-api/api/v1/repos/some-org/r/raw/",
+            "/forgejo-api/api/v1/repos/some-org/r/raw/a//b",
+            "/forgejo-api/api/v1/repos/some-org/r/raw/a/../b",
+            "/forgejo-api/api/v1/repos/some-org/r/raw/./a",
+            "/forgejo-api/api/v1/repos/some-org/r/raw/a/",
+            "/forgejo-api/api/v1/repos/some-org/r/raw/a%2Fb",
+            "/forgejo-api/api/v1/repos/some-org/r/raw/%2e%2e/x",
+            "/forgejo-api/api/v1/repos/other-org/r/raw/README.md",
+        ] {
+            assert!(!forgejo("GET", target), "{target}");
+        }
+        let deep = format!(
+            "/forgejo-api/api/v1/repos/some-org/r/raw/{}",
+            ["d"; MAX_REST_PIECES + 1].join("/")
+        );
+        assert!(!forgejo("GET", &deep));
+        let at_limit = format!(
+            "/forgejo-api/api/v1/repos/some-org/r/raw/{}",
+            ["d"; MAX_REST_PIECES].join("/")
+        );
+        assert!(forgejo("GET", &at_limit));
+    }
+
+    #[test]
+    fn rest_anywhere_but_last_matches_nothing() {
+        static MISPLACED: Route = Route {
+            name: "x",
+            upstream: Upstream {
+                host: "x.invalid",
+                port: 443,
+            },
+            scheme: Scheme::Bearer,
+            secret: "piggy-test/none",
+            owners: &[],
+            allow: &[Allow {
+                method: "GET",
+                path: &[Rest, Literal("tail")],
+            }],
+            forward_headers: &[],
+        };
+        assert!(admit(&[&MISPLACED], "GET", "/x/a/tail").is_none());
     }
 
     #[test]

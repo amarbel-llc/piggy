@@ -31,9 +31,17 @@ forward_headers = ["accept", "user-agent"]   # optional; default below
 ```
 
 Path segments are literals or one of `{owner}`, `{name}`, `{ref}`,
-`{ref-range}`: exactly the existing `Segment` kinds, so the matcher in
-`route.rs` is reused unchanged. Anything else in braces is a validation
-error. `auth` has no default in the file (the plan's "default token" is the
+`{ref-range}`, `{number}`, `{number-diff}` (digits plus `.diff` or
+`.patch`) and `{rest}` (one or more pieces, last segment only): the
+`Segment` kinds, so the matcher in `route.rs` is shared. Anything else in
+braces is a validation error.
+
+Implementation note (slice 1 as built): instead of turning every `&'static`
+type in `route.rs` into an owned one, the parser (`table.rs`) leaks the
+validated strings once to produce the same `&'static Route` the rest of the
+crate already takes. The table is read once for the life of the process, so
+nothing is lost, and `proxy`, `control` and `filter` need no change in this
+slice. `auth` has no default in the file (the plan's "default token" is the
 documented recommendation for smith, written by whoever authors the file);
 an absent `auth` is a validation error, so a mis-typed route never silently
 picks a scheme.

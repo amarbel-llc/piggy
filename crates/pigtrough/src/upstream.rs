@@ -36,7 +36,7 @@ impl Credential {
     /// The header the credential goes in.
     pub fn header_name(&self) -> &'static str {
         match self.scheme {
-            Scheme::Bearer => "Authorization",
+            Scheme::Bearer | Scheme::Token => "Authorization",
         }
     }
 
@@ -49,6 +49,7 @@ impl Credential {
             let mut value = Zeroizing::new(Vec::with_capacity(7 + secret.len()));
             match self.scheme {
                 Scheme::Bearer => value.extend_from_slice(b"Bearer "),
+                Scheme::Token => value.extend_from_slice(b"token "),
             }
             value.extend_from_slice(secret);
             value
@@ -123,5 +124,16 @@ mod tests {
             b"Bearer piggy-test-tok"
         );
         assert_eq!(format!("{c:?}"), "Credential(<redacted>)");
+    }
+
+    #[test]
+    fn credential_renders_the_token_scheme() {
+        let secret = Arc::new(GuardedBytes::from_slice(b"piggy-test-tok").unwrap());
+        let c = Credential::new(Scheme::Token, secret);
+        assert_eq!(c.header_name(), "Authorization");
+        assert_eq!(
+            c.with_header_value(|v| v.to_vec()).unwrap(),
+            b"token piggy-test-tok"
+        );
     }
 }
