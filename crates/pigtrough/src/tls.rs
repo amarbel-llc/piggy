@@ -8,9 +8,10 @@
 //! CA as the only root, and with [`TlsUpstream::connect_to`] pointing the dial
 //! at a local address while the name verified stays the route's host.
 //!
-//! The bundled roots age with the `webpki-roots` version this crate locks;
-//! a later slice may add an operator-supplied extra-roots file (the shithub
-//! per-process trust bundle idea).
+//! The bundled roots age with the `webpki-roots` version this crate locks. A
+//! route's table entry may add PEM files of extra trusted roots
+//! ([`roots_with`]); [`HostClients`] gives each upstream that names some its
+//! own client, so a private CA vouches for that upstream only.
 //!
 //! The request path is synchronous, so [`UpstreamClient::send`] runs the
 //! async client on the given runtime with `Handle::block_on`, which the
@@ -18,6 +19,7 @@
 
 use std::io::{self, Read};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,7 +29,8 @@ use hyper::Request;
 use hyper::body::Incoming;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper_util::rt::TokioIo;
-use rustls::pki_types::ServerName;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
@@ -41,6 +44,69 @@ use crate::wire::{extend_header_map, from_header_map};
 /// How long the dial, the TLS handshake and the response head may take
 /// together.
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The Mozilla roots plus every certificate in each PEM file of `files`. A
+/// file that cannot be read, is not PEM, or holds no certificate is an
+/// error: a bad bundle never silently falls back to the public roots alone.
+pub fn roots_with(files: &[PathBuf]) -> Result<RootCertStore, String> {
+    let mut roots = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    for file in files {
+        let pem = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let mut found = 0;
+        for cert in CertificateDer::pem_slice_iter(&pem) {
+            let cert =
+                cert.map_err(|e| format!("{}: not a PEM certificate: {e}", file.display()))?;
+            roots
+                .add(cert)
+                .map_err(|e| format!("{}: not a usable CA certificate: {e}", file.display()))?;
+            found += 1;
+        }
+        if found == 0 {
+            return Err(format!("{}: no certificate in the file", file.display()));
+        }
+    }
+    Ok(roots)
+}
+
+/// One client per upstream that has extra roots, and the public-roots client
+/// for every other. An upstream is its host and port; the route table
+/// refuses two routes that share one but trust different extra roots.
+pub struct HostClients {
+    default: TlsUpstream,
+    by_host: Vec<(&'static str, u16, TlsUpstream)>,
+}
+
+impl HostClients {
+    pub fn new(default: TlsUpstream) -> Self {
+        Self {
+            default,
+            by_host: Vec::new(),
+        }
+    }
+
+    /// Verify `upstream` against `client`'s roots instead of the default's.
+    pub fn with_host(mut self, upstream: &Upstream, client: TlsUpstream) -> Self {
+        self.by_host.push((upstream.host, upstream.port, client));
+        self
+    }
+}
+
+impl UpstreamClient for HostClients {
+    fn send(
+        &self,
+        upstream: &Upstream,
+        request: OutboundRequest<'_>,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        let client = self
+            .by_host
+            .iter()
+            .find(|(host, port, _)| *host == upstream.host && *port == upstream.port)
+            .map_or(&self.default, |(_, _, client)| client);
+        client.send(upstream, request)
+    }
+}
 
 pub struct TlsUpstream {
     config: Arc<ClientConfig>,

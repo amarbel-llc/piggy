@@ -104,8 +104,15 @@ error refuses to start, with no partial table. Each *[[route]]* has:
 	_.patch_) and *{rest}* (one or more pieces, last only). A path needs
 	a literal, and no piece may be empty, _._ or _.._.
 
-*extra_roots* is parsed but not supported yet: a table that sets it is
-refused. Unknown keys are refused.
+*extra_roots*
+	Optional array of PEM file paths. Their certificates are trusted in
+	addition to the bundled Mozilla roots, for that route's upstream
+	only (an upstream is its host and port, and routes sharing one must
+	list the same files). A file that cannot be read, is not PEM or holds
+	no certificate refuses to start. Trust is by the CA alone: there is
+	no pinning and no switch that accepts an invalid certificate.
+
+Unknown keys are refused.
 
 # BEHAVIOUR
 
@@ -185,7 +192,7 @@ credential fails closed. A loopback port is reachable by every local
 user, and its admission rests on the kernel's TCP socket table (a theory
 still being tested for races and other users); the unix socket's peer
 credential is the stronger check. The trusted roots are the
-*webpki-roots* bundle of the build, with no way yet to add one. Linux
+*webpki-roots* bundle of the build plus a route's *extra_roots*. Linux
 only.
 
 A client that hangs up cancels its request: the upstream dial, handshake,

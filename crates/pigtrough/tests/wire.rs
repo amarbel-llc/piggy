@@ -433,6 +433,53 @@ fn a_connection_that_fails_admission_is_closed_unread() {
     assert_eq!(audit[0].decision, pigtrough::audit::Decision::RefuseBinding);
 }
 
+const CA_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/fake-upstream-ca.pem");
+
+/// A private CA named in a route's `extra_roots` vouches for that
+/// upstream: the same fake upstream that the public roots refuse is reached
+/// once `roots_with` adds its CA (built here as a client of its own, as
+/// `HostClients` does per upstream).
+#[test]
+fn an_extra_root_vouches_for_a_private_upstream() {
+    let roots = pigtrough::tls::roots_with(&[PathBuf::from(CA_PATH)]).unwrap();
+    let running = start(ok("{\"id\":2}"), roots, admit_self);
+    let reply = get(&running, "/github-api/repos/amarbel-llc/piggy");
+    let (head, body) = split_response(&reply);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert_eq!(body, b"{\"id\":2}");
+    assert_eq!(running.seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn roots_with_refuses_a_bad_bundle() {
+    use pigtrough::tls::roots_with;
+    let dir = short_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let missing = dir.join("missing.pem");
+    let empty = dir.join("empty.pem");
+    let garbage = dir.join("garbage.pem");
+    std::fs::write(&empty, b"").unwrap();
+    std::fs::write(
+        &garbage,
+        b"-----BEGIN CERTIFICATE-----\nnot base64 !!\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    for (file, needle) in [
+        (&missing, "missing.pem"),
+        (&empty, "no certificate"),
+        (&garbage, "garbage.pem"),
+    ] {
+        match roots_with(std::slice::from_ref(file)) {
+            Ok(_) => panic!("{} was accepted", file.display()),
+            Err(e) => assert!(e.contains(needle), "{e}"),
+        }
+    }
+    // The public roots stay in alongside the extra ones.
+    let with = roots_with(&[PathBuf::from(CA_PATH)]).unwrap();
+    assert!(with.roots.len() > 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A client that hangs up while the upstream is still thinking: the
 /// upstream sees its connection closed within moments, long before the 30 s
 /// head timeout, and the audit line says the client went.

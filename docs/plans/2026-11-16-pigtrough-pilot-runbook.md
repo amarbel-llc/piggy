@@ -191,8 +191,9 @@ with the real token is still to do, and needs the operator and the card.
 
 ## Known gaps of the pilot (not tested by this pass)
 
-- No operator-supplied extra trusted roots: upstreams are verified against
-  the `webpki-roots` bundle of the build only.
+- (Closed 2026-11-17: a route's `extra_roots` adds PEM CA files for its
+  upstream; see pigtrough(1). Tested against the local test CA only; the
+  real Forgejo's CA has not been tried.)
 - (Closed 2026-11-17: a client that hangs up now cancels its in-flight
   upstream call; see pigtrough(1) LIMITATIONS. Tested against a fake
   upstream only, not against the real api.github.com.)

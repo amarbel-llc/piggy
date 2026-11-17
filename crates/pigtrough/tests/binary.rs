@@ -294,9 +294,9 @@ fn serve_refuses_a_bad_route_table_before_binding_anything() {
         (
             "bad3",
             "[[route]]\nname = \"r\"\nupstream = \"x.invalid\"\nauth = \"token\"\n\
-             secret = \"piggy-test/x\"\nextra_roots = [\"/etc/ca.pem\"]\n\
+             secret = \"piggy-test/x\"\nextra_roots = [\"/etc/pigtrough-test-no-such-ca.pem\"]\n\
              [[route.allow]]\nmethod = \"GET\"\npath = [\"a\"]\n",
-            "extra_roots is not supported yet",
+            "/etc/pigtrough-test-no-such-ca.pem",
         ),
     ] {
         let file = routes_file(tag, text);

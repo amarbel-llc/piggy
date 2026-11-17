@@ -120,6 +120,20 @@ pub fn parse(text: &str) -> Result<Vec<RouteEntry>, TableError> {
         }
         entries.push(build(spec)?);
     }
+    // Extra roots belong to an upstream (host and port), not to a route, so
+    // routes sharing an upstream must trust the same ones: otherwise one
+    // route's private CA would vouch for another's calls.
+    for (i, a) in entries.iter().enumerate() {
+        for b in &entries[..i] {
+            if a.route.upstream == b.route.upstream && a.extra_roots != b.extra_roots {
+                return refuse(
+                    a.route.name,
+                    "extra_roots",
+                    "a route sharing this upstream trusts different extra roots",
+                );
+            }
+        }
+    }
     Ok(entries)
 }
 
@@ -607,6 +621,32 @@ path = ["api", "v1", "repos", "{owner}", "{name}", "raw", "{rest}"]
         ))
         .unwrap();
         assert_eq!(ok.len(), 2);
+    }
+
+    #[test]
+    fn routes_sharing_an_upstream_must_trust_the_same_extra_roots() {
+        let other = |roots: &str| {
+            format!(
+                "{}\n{}",
+                one("extra_roots = [\"/a.pem\"]"),
+                one(roots).replace("name = \"r\"", "name = \"s\"")
+            )
+        };
+        refused(
+            &other("extra_roots = [\"/b.pem\"]"),
+            "different extra roots",
+        );
+        refused(&other(""), "different extra roots");
+        assert!(parse(&other("extra_roots = [\"/a.pem\"]")).is_ok());
+        // A different upstream may trust different roots.
+        let apart = format!(
+            "{}\n{}",
+            one("extra_roots = [\"/a.pem\"]"),
+            one("")
+                .replace("name = \"r\"", "name = \"s\"")
+                .replace("forgejo.invalid", "other.invalid")
+        );
+        assert!(parse(&apart).is_ok());
     }
 
     #[test]

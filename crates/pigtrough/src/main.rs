@@ -28,7 +28,7 @@ use pigtrough::proxy::{Proxy, Scope};
 use pigtrough::route::GITHUB_API;
 use pigtrough::server::{serve, serve_tcp};
 use pigtrough::table::{self, RouteEntry};
-use pigtrough::tls::TlsUpstream;
+use pigtrough::tls::{HostClients, TlsUpstream, roots_with};
 
 /// The blocking threads that run requests (each holds one for the length of
 /// its upstream call), so the cap is the number of concurrent requests. A
@@ -109,17 +109,33 @@ fn read_routes(file: Option<PathBuf>) -> Result<Vec<RouteEntry>, String> {
         }]);
     };
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-    let entries = table::parse(&text).map_err(|e| format!("{}: {e}", file.display()))?;
-    // Extra trusted roots are designed but not built; refuse rather than
-    // serve a route without the roots its operator asked for.
-    if let Some(entry) = entries.iter().find(|e| !e.extra_roots.is_empty()) {
-        return Err(format!(
-            "{}: route {}: extra_roots is not supported yet",
-            file.display(),
-            entry.route.name
-        ));
+    table::parse(&text).map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// The upstream client: public roots for every upstream, and a client of
+/// its own, with the route's extra roots added, for each upstream that has
+/// some. A bad roots file refuses to start.
+fn build_client(
+    runtime: &tokio::runtime::Runtime,
+    entries: &[RouteEntry],
+) -> Result<HostClients, String> {
+    let mut clients = HostClients::new(TlsUpstream::with_public_roots(runtime.handle().clone()));
+    let mut done: Vec<&pigtrough::route::Upstream> = Vec::new();
+    for entry in entries.iter().filter(|e| !e.extra_roots.is_empty()) {
+        let upstream = &entry.route.upstream;
+        // The table guarantees routes sharing an upstream share their roots.
+        if done.contains(&upstream) {
+            continue;
+        }
+        let roots = roots_with(&entry.extra_roots)
+            .map_err(|e| format!("route {}: extra_roots: {e}", entry.route.name))?;
+        clients = clients.with_host(
+            upstream,
+            TlsUpstream::with_roots(runtime.handle().clone(), roots),
+        );
+        done.push(upstream);
     }
-    Ok(entries)
+    Ok(clients)
 }
 
 fn run_serve(dir: PathBuf, routes_file: Option<PathBuf>) -> Result<(), String> {
@@ -134,6 +150,9 @@ fn run_serve(dir: PathBuf, routes_file: Option<PathBuf>) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
+    // Built before any socket is bound: a bad roots file refuses to start
+    // without leaving a listener behind.
+    let client = Arc::new(build_client(&runtime, &entries)?);
     let uid = effective_uid();
     let listen = |name: &str| -> Result<tokio::net::UnixListener, String> {
         let path = dir.join(name);
@@ -148,7 +167,6 @@ fn run_serve(dir: PathBuf, routes_file: Option<PathBuf>) -> Result<(), String> {
     let control_listener = listen("control.sock")?;
 
     let mounts: Vec<Mount> = entries.iter().map(|e| Mount::empty(e.route)).collect();
-    let client = Arc::new(TlsUpstream::with_public_roots(runtime.handle().clone()));
     let audit = Arc::new(StderrSink);
 
     // A loopback listener per route that asks for one. Each gets its own
