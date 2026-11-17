@@ -27,6 +27,7 @@
 //! The crate and its binary are `pigtrough` (operator ruling, 2026-11-16).
 
 pub mod audit;
+pub mod cancel;
 pub mod control;
 pub mod filter;
 pub mod holder;

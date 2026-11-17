@@ -12,11 +12,12 @@ use std::sync::Arc;
 
 use crate::Headers;
 use crate::audit::{AuditRecord, AuditSink, Decision};
+use crate::cancel::Cancel;
 use crate::filter::{ScannedBody, inbound_headers, outbound_headers};
 use crate::holder::{Mount, SecretHolder};
 use crate::refusal::Cause;
 use crate::route::{Route, admit};
-use crate::upstream::{Credential, OutboundRequest, UpstreamClient};
+use crate::upstream::{Credential, OutboundRequest, UpstreamClient, UpstreamError};
 
 /// A client request, as the wire adapter read it. A body with a transfer
 /// coding has already been decoded or refused by the adapter.
@@ -98,7 +99,14 @@ impl<C: UpstreamClient> Proxy<C> {
             .record(&AuditRecord::new(&self.scope.name, Decision::RefuseBinding));
     }
 
+    /// Handle `request` with nothing able to cancel it.
     pub fn handle(&self, request: ClientRequest) -> Reply {
+        self.handle_with(request, Cancel::default())
+    }
+
+    /// Handle `request`; when `cancel` fires (the client hung up) the
+    /// upstream call stops and the reply is [`Cause::ClientGone`].
+    pub fn handle_with(&self, request: ClientRequest, cancel: Cancel) -> Reply {
         let mut record = AuditRecord::new(&self.scope.name, Decision::Allow)
             .request(&request.method, &request.target);
         record.bytes_in = request.body.len() as u64;
@@ -117,6 +125,9 @@ impl<C: UpstreamClient> Proxy<C> {
         let Some(secret) = holder.and_then(|h| h.current()) else {
             return self.refuse(record, Cause::SecretUnavailable);
         };
+        if cancel.is_cancelled() {
+            return self.refuse(record, Cause::ClientGone);
+        }
         let credential = Credential::new(admitted.route.scheme, secret.clone());
         let outbound = OutboundRequest {
             method: &request.method,
@@ -124,10 +135,12 @@ impl<C: UpstreamClient> Proxy<C> {
             headers: outbound_headers(admitted.route, &request.headers),
             credential,
             body: &request.body,
+            cancel,
         };
         let upstream = &admitted.route.upstream;
         let response = match self.client.send(upstream, outbound) {
             Ok(response) => response,
+            Err(UpstreamError::Cancelled) => return self.refuse(record, Cause::ClientGone),
             Err(_) => return self.refuse(record, Cause::UpstreamUnavailable),
         };
         let headers = match inbound_headers(upstream, response.status, response.headers, &secret) {

@@ -89,7 +89,7 @@ fn test_roots() -> RootCertStore {
     roots
 }
 
-fn start_fake_upstream(runtime: &Runtime, respond: Respond) -> (SocketAddr, Arc<Mutex<Vec<Seen>>>) {
+fn tls_acceptor() -> TlsAcceptor {
     let config = ServerConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
         .unwrap()
@@ -102,7 +102,46 @@ fn start_fake_upstream(runtime: &Runtime, respond: Respond) -> (SocketAddr, Arc<
             PrivateKeyDer::from_pem_slice(LEAF_KEY).unwrap(),
         )
         .unwrap();
-    let acceptor = TlsAcceptor::from(Arc::new(config));
+    TlsAcceptor::from(Arc::new(config))
+}
+
+/// A fake upstream that accepts TLS, reads the request, says `request`, then
+/// never answers and says `closed` when the proxy closes the connection.
+fn start_hanging_upstream(
+    runtime: &Runtime,
+) -> (SocketAddr, std::sync::mpsc::Receiver<&'static str>) {
+    use tokio::io::AsyncReadExt;
+    let acceptor = tls_acceptor();
+    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    runtime.spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let (acceptor, tx) = (acceptor.clone(), tx.clone());
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                if !matches!(tls.read(&mut buf).await, Ok(n) if n > 0) {
+                    return;
+                }
+                let _ = tx.send("request");
+                loop {
+                    match tls.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                let _ = tx.send("closed");
+            });
+        }
+    });
+    (addr, rx)
+}
+
+fn start_fake_upstream(runtime: &Runtime, respond: Respond) -> (SocketAddr, Arc<Mutex<Vec<Seen>>>) {
+    let acceptor = tls_acceptor();
     let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
     let addr = listener.local_addr().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -169,6 +208,16 @@ fn start(
         .build()
         .unwrap();
     let (addr, seen) = start_fake_upstream(&runtime, respond);
+    start_proxy(runtime, addr, seen, roots, admit)
+}
+
+fn start_proxy(
+    runtime: Runtime,
+    addr: SocketAddr,
+    seen: Arc<Mutex<Vec<Seen>>>,
+    roots: RootCertStore,
+    admit: impl Fn(&tokio::net::UnixStream) -> bool + Send + 'static,
+) -> Running {
     let holder = Arc::new(SecretHolder::empty());
     holder.load(format!("{TOKEN}\n").as_bytes()).unwrap();
     let audit = Arc::new(CaptureSink::default());
@@ -382,4 +431,63 @@ fn a_connection_that_fails_admission_is_closed_unread() {
     let audit = running.audit.0.lock().unwrap();
     assert_eq!(audit.len(), 1);
     assert_eq!(audit[0].decision, pigtrough::audit::Decision::RefuseBinding);
+}
+
+/// A client that hangs up while the upstream is still thinking: the
+/// upstream sees its connection closed within moments, long before the 30 s
+/// head timeout, and the audit line says the client went.
+#[test]
+fn a_client_that_hangs_up_cancels_its_upstream_call() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (addr, events) = start_hanging_upstream(&runtime);
+    let running = start_proxy(
+        runtime,
+        addr,
+        Arc::new(Mutex::new(Vec::new())),
+        test_roots(),
+        admit_self,
+    );
+
+    let mut stream = StdUnixStream::connect(&running.socket).unwrap();
+    stream
+        .write_all(b"GET /github-api/repos/amarbel-llc/piggy HTTP/1.1\r\nHost: proxy\r\n\r\n")
+        .unwrap();
+    let wait = Duration::from_secs(10);
+    assert_eq!(
+        events.recv_timeout(wait),
+        Ok("request"),
+        "the upstream saw the call"
+    );
+    // The client goes away with the upstream call in flight.
+    drop(stream);
+    assert_eq!(
+        events.recv_timeout(wait),
+        Ok("closed"),
+        "the upstream connection was not closed after the client hung up"
+    );
+
+    // The audit line names the cause, once the proxy has written it.
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let decisions: Vec<_> = running
+            .audit
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.decision)
+            .collect();
+        if decisions == [pigtrough::audit::Decision::ClientGone] {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "audit decisions: {decisions:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

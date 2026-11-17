@@ -26,11 +26,16 @@ pub enum Cause {
     /// The upstream echoed the credential in its response body; the
     /// response is cut off.
     UpstreamEchoedCredential,
+    /// The client hung up while its request was in flight; the upstream
+    /// call was cancelled. Nothing is sent (there is no one to send to), so
+    /// the status is only for the audit line.
+    ClientGone,
 }
 
 impl Cause {
     pub fn status(self) -> u16 {
         match self {
+            Cause::ClientGone => 499,
             Cause::Refused => 403,
             Cause::RequestRejected => 400,
             Cause::SecretUnavailable => 503,
@@ -52,6 +57,7 @@ impl Cause {
             Cause::UpstreamRedirectRefused => "upstream-redirect-refused",
             Cause::UpstreamEncodedResponse => "upstream-encoded-response",
             Cause::UpstreamEchoedCredential => "upstream-echoed-credential",
+            Cause::ClientGone => "client-gone",
         }
     }
 
@@ -61,6 +67,7 @@ impl Cause {
 
     pub fn decision(self) -> Decision {
         match self {
+            Cause::ClientGone => Decision::ClientGone,
             Cause::Refused => Decision::RefuseAllowlist,
             Cause::RequestRejected => Decision::RefuseMalformed,
             Cause::SecretUnavailable => Decision::RefuseUnavailable,

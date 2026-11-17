@@ -33,6 +33,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::Handle;
 use tokio_rustls::TlsConnector;
 
+use crate::cancel::Cancel;
 use crate::route::Upstream;
 use crate::upstream::{OutboundRequest, UpstreamClient, UpstreamError, UpstreamResponse};
 use crate::wire::{extend_header_map, from_header_map};
@@ -133,6 +134,7 @@ impl TlsUpstream {
                 runtime: self.runtime.clone(),
                 pending: Bytes::new(),
                 done: false,
+                cancel: request.cancel.clone(),
             }),
         })
     }
@@ -144,10 +146,16 @@ impl UpstreamClient for TlsUpstream {
         upstream: &Upstream,
         request: OutboundRequest<'_>,
     ) -> Result<UpstreamResponse, UpstreamError> {
+        let cancel = request.cancel.clone();
         self.runtime.block_on(async {
-            tokio::time::timeout(HEAD_TIMEOUT, self.send_async(upstream, request))
-                .await
-                .unwrap_or(Err(UpstreamError::Connect))
+            // Dropping the call when the client has gone closes its
+            // upstream connection.
+            tokio::select! {
+                result = tokio::time::timeout(HEAD_TIMEOUT, self.send_async(upstream, request)) => {
+                    result.unwrap_or(Err(UpstreamError::Connect))
+                }
+                () = cancel.cancelled() => Err(UpstreamError::Cancelled),
+            }
         })
     }
 }
@@ -158,6 +166,7 @@ struct BlockingBody {
     runtime: Handle,
     pending: Bytes,
     done: bool,
+    cancel: Cancel,
 }
 
 impl Read for BlockingBody {
@@ -172,14 +181,21 @@ impl Read for BlockingBody {
             if self.done || buf.is_empty() {
                 return Ok(0);
             }
-            match self.runtime.block_on(self.body.frame()) {
-                None => self.done = true,
-                Some(Ok(frame)) => {
+            let next = self.runtime.block_on(async {
+                tokio::select! {
+                    frame = self.body.frame() => Some(frame),
+                    () = self.cancel.cancelled() => None,
+                }
+            });
+            match next {
+                None => return Err(io::Error::other("the client went away")),
+                Some(None) => self.done = true,
+                Some(Some(Ok(frame))) => {
                     if let Ok(data) = frame.into_data() {
                         self.pending = data;
                     }
                 }
-                Some(Err(_)) => return Err(io::Error::other("upstream body broke off")),
+                Some(Some(Err(_))) => return Err(io::Error::other("upstream body broke off")),
             }
         }
     }

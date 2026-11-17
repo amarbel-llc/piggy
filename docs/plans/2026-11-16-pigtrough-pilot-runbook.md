@@ -193,5 +193,6 @@ with the real token is still to do, and needs the operator and the card.
 
 - No operator-supplied extra trusted roots: upstreams are verified against
   the `webpki-roots` bundle of the build only.
-- A client that disconnects does not cancel its in-flight upstream call;
-  the call runs to completion or to the 30 s head timeout.
+- (Closed 2026-11-17: a client that hangs up now cancels its in-flight
+  upstream call; see pigtrough(1) LIMITATIONS. Tested against a fake
+  upstream only, not against the real api.github.com.)

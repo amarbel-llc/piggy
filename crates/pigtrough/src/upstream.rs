@@ -17,6 +17,7 @@ use piggy_guard::{GuardError, GuardedBytes};
 use zeroize::Zeroizing;
 
 use crate::Headers;
+use crate::cancel::Cancel;
 use crate::route::{Scheme, Upstream};
 
 /// The credential for one outbound request. It renders the header value only
@@ -75,6 +76,9 @@ pub struct OutboundRequest<'a> {
     pub headers: Headers,
     pub credential: Credential,
     pub body: &'a [u8],
+    /// Fired when the client has gone; the call stops and its upstream
+    /// connection closes.
+    pub cancel: Cancel,
 }
 
 pub struct UpstreamResponse {
@@ -100,6 +104,8 @@ pub enum UpstreamError {
     Connect,
     Tls,
     Protocol,
+    /// The request's [`Cancel`] fired before the response head arrived.
+    Cancelled,
 }
 
 pub trait UpstreamClient: Send + Sync {

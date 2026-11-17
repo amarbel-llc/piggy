@@ -157,6 +157,56 @@ fn a_proxy_over_one_mount_cannot_name_the_other_route() {
     );
 }
 
+/// A client whose call is always cancelled, as the TLS client reports it.
+struct CancelledClient;
+
+impl UpstreamClient for CancelledClient {
+    fn send(
+        &self,
+        _upstream: &pigtrough::route::Upstream,
+        _request: OutboundRequest<'_>,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        Err(UpstreamError::Cancelled)
+    }
+}
+
+fn request(target: &str) -> ClientRequest {
+    ClientRequest {
+        method: "GET".to_owned(),
+        target: target.to_owned(),
+        headers: Headers::new(),
+        body: Vec::new(),
+    }
+}
+
+#[test]
+fn a_cancel_that_fired_before_the_call_makes_no_upstream_call() {
+    let rig = rig();
+    rig.mounts[0].holder.load(b"alpha-secret").unwrap();
+    let proxy = proxy(&rig, rig.mounts.clone());
+    let cancel = pigtrough::cancel::Cancel::default();
+    cancel.cancel();
+    let reply = proxy.handle_with(request("/alpha/repos/some-org/x"), cancel);
+    assert_eq!(reply.status(), 499);
+    assert!(rig.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_upstream_that_reports_cancelled_is_client_gone_not_unavailable() {
+    let rig = rig();
+    rig.mounts[0].holder.load(b"alpha-secret").unwrap();
+    let proxy = Proxy::with_mounts(
+        rig.mounts.clone(),
+        CancelledClient,
+        Arc::new(NullSink),
+        Scope {
+            name: "operator".to_owned(),
+        },
+    );
+    let reply = proxy.handle(request("/alpha/repos/some-org/x"));
+    assert_eq!(reply.status(), 499);
+}
+
 #[test]
 fn a_route_cannot_use_another_routes_shapes() {
     let rig = rig();

@@ -184,9 +184,14 @@ One scope: the invoking user. Prompting is never done: a missing
 credential fails closed. A loopback port is reachable by every local
 user, and its admission rests on the kernel's TCP socket table (a theory
 still being tested for races and other users); the unix socket's peer
-credential is the stronger check. The trusted roots are the *webpki-roots* bundle of the build, with
-no way yet to add one. A client that disconnects does not cancel its
-in-flight upstream call. Linux only.
+credential is the stronger check. The trusted roots are the
+*webpki-roots* bundle of the build, with no way yet to add one. Linux
+only.
+
+A client that hangs up cancels its request: the upstream dial, handshake,
+head wait or body read stops and its connection closes. The audit line
+says *client-gone* (status 499) when the call was cut before a response,
+and *refuse-upstream* when the client went away while the body streamed.
 
 # SEE ALSO
 
