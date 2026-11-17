@@ -1651,7 +1651,7 @@ test-nix-hm-module:
   #!/usr/bin/env bash
   set -euo pipefail
   expr='let
-    flake = builtins.getFlake (toString ./.);
+    flake = builtins.getFlake ("git+file://" + toString ./.);
     pkgs = flake.inputs.igloo.legacyPackages.${builtins.currentSystem};
     test = import ./nix/hm/eval-test.nix {
       inherit pkgs;
@@ -1675,7 +1675,7 @@ debug-hm-eval-warning-trace:
   #!/usr/bin/env bash
   set -euo pipefail
   expr='let
-    flake = builtins.getFlake (toString ./.);
+    flake = builtins.getFlake ("git+file://" + toString ./.);
     pkgs = flake.inputs.igloo.legacyPackages.${builtins.currentSystem};
     test = import ./nix/hm/eval-test.nix {
       inherit pkgs;
@@ -1695,7 +1695,7 @@ test-nix-hm-secrets-module:
   #!/usr/bin/env bash
   set -euo pipefail
   expr='let
-    flake = builtins.getFlake (toString ./.);
+    flake = builtins.getFlake ("git+file://" + toString ./.);
     pkgs = flake.inputs.igloo.legacyPackages.${builtins.currentSystem};
     test = import ./nix/hm/secrets-eval-test.nix {
       inherit pkgs;
