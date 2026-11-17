@@ -2989,7 +2989,7 @@ impl VirtualCard {
         push_ber_len(&mut out, 2 + point.len());
         out.push(0x86);
         push_ber_len(&mut out, point.len());
-        out.extend_from_slice(&point);
+        out.extend_from_slice(point);
         out.extend_from_slice(&sw(0x90, 0x00));
         trace::emit(
             trace::DEBUG,

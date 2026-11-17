@@ -44,7 +44,7 @@ use test_double::SeedSpec;
 /// The holder build seeds nothing: a `--card` is a blank card.
 #[cfg(not(feature = "test-double"))]
 #[derive(Default, Clone)]
-struct SeedSpec;
+struct SeedSpec {}
 
 struct Args {
     socket: String,
@@ -80,7 +80,7 @@ struct Args {
 
 /// What the command line asked for: serve, or answer a question and exit.
 enum Invocation {
-    Serve(Args),
+    Serve(Box<Args>),
     PrintAndExit(String),
 }
 
@@ -174,7 +174,7 @@ fn parse_args() -> Result<Invocation, String> {
     if !args.cards.is_empty() && args.backend != "virtual" {
         return Err("--card requires --backend virtual".into());
     }
-    Ok(Invocation::Serve(args))
+    Ok(Invocation::Serve(Box::new(args)))
 }
 
 #[cfg(feature = "test-double")]
@@ -258,7 +258,7 @@ fn main() {
     }
 
     let args = match parse_args() {
-        Ok(Invocation::Serve(a)) => a,
+        Ok(Invocation::Serve(a)) => *a,
         Ok(Invocation::PrintAndExit(text)) => {
             println!("{text}");
             std::process::exit(0);
