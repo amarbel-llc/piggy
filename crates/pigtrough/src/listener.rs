@@ -167,10 +167,17 @@ fn client_uid_in(table: &str, peer: SocketAddr, local: SocketAddr) -> Option<u32
 /// user keeps its creator's uid (FDR 0009 listener options, path 2).
 #[cfg(target_os = "linux")]
 pub fn admit_loopback_peer(peer: SocketAddr, local: SocketAddr, bound_uid: u32) -> bool {
-    fs::read_to_string("/proc/net/tcp")
-        .ok()
-        .and_then(|table| client_uid_in(&table, peer, local))
-        .is_some_and(|uid| uid == bound_uid)
+    loopback_client_uid(peer, local) == Some(bound_uid)
+}
+
+/// The owner uid `/proc/net/tcp` lists for the client end of the loopback
+/// connection `peer` -> `local`; `None` when it cannot be attributed. The
+/// decision [`admit_loopback_peer`] makes, with its answer kept apart from
+/// "unattributed" (the `explore-pigtrough-admission` recipe counts both).
+#[cfg(target_os = "linux")]
+pub fn loopback_client_uid(peer: SocketAddr, local: SocketAddr) -> Option<u32> {
+    let table = fs::read_to_string("/proc/net/tcp").ok()?;
+    client_uid_in(&table, peer, local)
 }
 
 /// Loopback attribution reads Linux's `/proc/net/tcp`; elsewhere every

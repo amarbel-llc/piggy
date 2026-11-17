@@ -4566,6 +4566,24 @@ explore-pigtrough-pilot-pass-clean:
       rm -rf "$d" && echo "removed $d"
     done
 
+# Slice 4 of the pigtrough loopback listener (docs/plans/2026-11-17-
+# pigtrough-listener-options.md): how reliably /proc/net/tcp attributes the
+# owner of a loopback client. Runs the ignored tests of
+# crates/pigtrough/tests/admission_probe.rs: 800 concurrent same-user
+# connections, 300 clients gone before the lookup, ::1 refused, and the
+# other-uid and network-namespace cases, which print NOT TESTED with the
+# reason where they cannot run here. No credential, loopback only, no
+# pigtrough binary; prints only the COUNTS lines. One cargo run.
+#
+# count the loopback peer-uid attribution cases (pigtrough listener, slice 4)
+[group('explore')]
+[linux]
+explore-pigtrough-admission:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    cargo test -p pigtrough --test admission_probe -- --ignored --test-threads=1 --nocapture 2>&1 \
+      | grep -E '^COUNTS |^test result|panicked|error(\[|:)' || true
+
 # Stage the hand pass that closes piggy#303 (FDR 0006 phase (a), "Phase
 # acceptance"): open a shell with everything the operator needs to read the
 # prompts, drive the new verbs and misuse them, and print the checklist.
