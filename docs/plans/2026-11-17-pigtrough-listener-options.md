@@ -140,6 +140,28 @@ those connections costs nothing visible (to be set after seeing the number,
 not before). Fail or flaky: fall back to path 1 (unix connector) for anything
 beyond a single-user host, as the recommendation says.
 
+## Result of the probe run (2026-11-17, flic, uid 1001, not root)
+
+Run through `just explore-pigtrough-admission` (second run; the first run
+printed no counts because of a grep bug in the recipe and a probe case that
+exceeded the listen backlog, both fixed). Tests ran in 7.4 s. Loopback only,
+no credential. What each case shows:
+
+| Case | Counts | What it shows |
+|---|---|---|
+| same-uid burst: 8 threads x 100 connections open at once, each client having sent a request, server looks each one up | 800 connections: own uid 800, other uid 0, unattributed 0 | For connections that are live when looked up, `/proc/net/tcp` attributed the owner correctly every time, with no missing line (the lookup race did not show). |
+| client gone before the lookup: 3 rounds of 100 clients that connect and close, then the server accepts and looks up | 300 connections: own uid 0, **other uid 300**, unattributed 0 | A connection whose client has already closed is not unattributed: the table still has a line for it, owned by a uid other than ours. Likely (a theory, not checked in the table text) the closed socket's line carries uid 0. The listener refuses such a connection, correctly, since nothing is left to serve. If `serve` ever runs as uid 0 the check would admit it; harmless (there is no client) but the decision should not treat "uid 0" as proof of a live root client. |
+| `::1` | connected=0, `ConnectionRefused` | The IPv4-only listener cannot be reached over IPv6 loopback. |
+| other uid | **NOT TESTED** | Running as uid 1001, not root; no second account is usable from a session. The admission against a foreign uid is therefore still **unverified** against the kernel; only a synthetic table in a unit test covers the foreign-uid parse. |
+| separate network namespace | **NOT TESTED** | Not part of this probe. |
+
+Conclusion, no stronger than the evidence: the same-uid path is attributed
+reliably under a burst of 800 on flic. Attribution of a *different* user, the
+one case that decides whether loopback admission means anything on a shared
+host, has not been exercised, so the `/proc/net/tcp` admission stays marked
+**THEORY** until the other-uid case is run (it needs root or a second
+account, so it is the operator's or a second session's to run).
+
 ## Open questions
 
 - What clowncar needs from a host-wide proxy, if it is more than the
