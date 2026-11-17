@@ -139,6 +139,13 @@ exits. A restart comes back with every route unloaded, so each route
 answers *503 secret-unavailable* until the operator runs *load* again by
 hand; the unit never reads the card and never loads a credential.
 
+With routes defined in the module's *routes* option, it also generates the
+oneshot unit *pigtrough-load*, which the operator starts by hand
+(*systemctl --user start pigtrough-load*). For each route in order it runs
+_piggy pass show_ the route's *secret* piped into *load*, and stops at the
+first failure; it prints route names and a verdict, never a value. Nothing
+else starts it.
+
 # SIGNALS
 
 *serve* installs no signal handler of its own, so *SIGINT* and *SIGTERM*

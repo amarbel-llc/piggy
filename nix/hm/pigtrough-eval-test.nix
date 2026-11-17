@@ -21,7 +21,35 @@ let
         pname = "pigtrough";
       })
     );
+    services.pigtrough.piggyPackage = lib.mkDefault (
+      pkgs.hello.overrideAttrs (_: {
+        pname = "piggy";
+      })
+    );
   };
+
+  route = name: secret: {
+    inherit name secret;
+    upstream = "${name}.invalid";
+    auth = "token";
+    owners = [ "some-org" ];
+    allow = [
+      {
+        method = "GET";
+        path = [
+          "repos"
+          "{owner}"
+          "{name}"
+        ];
+      }
+    ];
+  };
+
+  # Two routes, as the load unit sees them.
+  twoRoutes = [
+    (route "forgejo-api" "piggy-test/forgejo")
+    (route "github-api" "piggy-test/github")
+  ];
 
   runEval =
     cfg:
@@ -127,30 +155,146 @@ let
         };
     }
     {
-      name = "routes-file-is-passed-as-routes";
+      # The load helper steps through the routes in order, each as the
+      # pipeline the operator would run by hand, and stops at the first
+      # failure.
+      name = "load-all-runs-each-route-in-order-and-stops-at-the-first-failure";
       cfg.services.pigtrough = {
         enable = true;
-        # A string, not a path literal: a literal would be copied into the
-        # store, and the worktree's `.tmp` may hold sockets.
-        routesFile = "/var/lib/pigtrough/my-routes.toml";
+        routes = twoRoutes;
       };
       check =
         result:
         let
           tripped = trippedMessages result;
-          text = launcherOf result;
+          text = result.config.services.pigtrough._loadAllText;
+          first = lib.hasInfix "piggy pass show piggy-test/forgejo" text;
+          second = lib.hasInfix "piggy pass show piggy-test/github" text;
+          piped = lib.hasInfix "| /nix/store" text && lib.hasInfix "/bin/pigtrough load forgejo-api" text;
+          order =
+            let
+              parts = lib.splitString "piggy pass show piggy-test/github" text;
+            in
+            lib.hasInfix "piggy pass show piggy-test/forgejo" (lib.head parts);
         in
         {
-          ok = tripped == [ ] && lib.hasInfix "--routes /var/lib/pigtrough/my-routes.toml" text;
+          ok =
+            tripped == [ ]
+            && first
+            && second
+            && piped
+            && order
+            && lib.hasInfix "set -eu -o pipefail" text
+            && lib.hasInfix "if ! " text
+            && lib.hasInfix "exit 1" text
+            && !(lib.hasInfix "|| true" text)
+            && lib.hasInfix "all 2 routes loaded" text;
           got = { inherit tripped text; };
         };
     }
     {
-      name = "routes-and-routes-file-trip-the-mutex";
+      # The helper prints route names, never a secret value: no command
+      # prints or captures the decrypted text.
+      name = "load-all-never-captures-or-echoes-a-secret";
       cfg.services.pigtrough = {
         enable = true;
-        routesFile = "/var/lib/pigtrough/my-routes.toml";
-        routes = [ { name = "x"; } ];
+        routes = twoRoutes;
+      };
+      check =
+        result:
+        let
+          text = result.config.services.pigtrough._loadAllText;
+        in
+        {
+          ok =
+            !(lib.hasInfix "$(" text)
+            && !(lib.hasInfix "`" text)
+            && !(lib.hasInfix "read " text)
+            && !(lib.hasInfix "echo $" text)
+            && !(lib.hasInfix "tee " text)
+            && !(lib.hasInfix "> /" text);
+          got = text;
+        };
+    }
+    {
+      # The oneshot unit: started by hand only (no [Install], wanted by
+      # nothing), ordered after the serve unit, running the helper.
+      name = "load-unit-is-a-manual-oneshot-after-serve";
+      cfg.services.pigtrough = {
+        enable = true;
+        routes = twoRoutes;
+        loadEnvironment = {
+          SSH_AUTH_SOCK = "/run/user/1000/piggy-agent.sock";
+        };
+      };
+      check =
+        result:
+        let
+          unit = result.config.systemd.user.services.pigtrough-load or null;
+          serve = unitOf result;
+        in
+        {
+          ok =
+            unit != null
+            && unit.Service.Type == "oneshot"
+            && !(unit ? Install)
+            && unit.Unit.Requires == [ "pigtrough.service" ]
+            && unit.Unit.After == [ "pigtrough.service" ]
+            && unit.Service.Environment == [ "SSH_AUTH_SOCK=/run/user/1000/piggy-agent.sock" ]
+            && lib.hasInfix "pigtrough-load-all" unit.Service.ExecStart
+            # Nothing wants it: the serve unit is the only unit with an
+            # Install section.
+            && serve.Install.WantedBy == [ "default.target" ];
+          got = { inherit unit; };
+        };
+    }
+    {
+      # Without routes in nix the module cannot know the secrets, so it
+      # generates no load unit.
+      name = "no-routes-no-load-unit";
+      cfg.services.pigtrough.enable = true;
+      check =
+        result:
+        let
+          units = lib.attrNames result.config.systemd.user.services;
+        in
+        {
+          ok = units == [ "pigtrough" ] && result.config.services.pigtrough._loadAllText == "";
+          got = units;
+        };
+    }
+    {
+      # `dir` reaches the load helper too, so it talks to the same server.
+      name = "load-all-passes-dir-and-escapes-names";
+      cfg.services.pigtrough = {
+        enable = true;
+        dir = "/tmp/a b";
+        routes = [ (route "odd name" "piggy test/odd secret") ];
+      };
+      check =
+        result:
+        let
+          text = result.config.services.pigtrough._loadAllText;
+        in
+        {
+          ok =
+            lib.hasInfix "load 'odd name' --dir '/tmp/a b'" text
+            && lib.hasInfix "show 'piggy test/odd secret'" text;
+          got = text;
+        };
+    }
+    {
+      # A route without a secret or name cannot be loaded: refused at eval
+      # time, not discovered when the unit fails.
+      name = "a-route-without-a-secret-trips-an-assertion";
+      cfg.services.pigtrough = {
+        enable = true;
+        routes = [
+          {
+            name = "x";
+            upstream = "x.invalid";
+          }
+        ];
       };
       check =
         result:
@@ -158,7 +302,7 @@ let
           tripped = trippedMessages result;
         in
         {
-          ok = lib.any (m: lib.hasInfix "mutually exclusive" m) tripped;
+          ok = lib.any (m: lib.hasInfix "needs a `name` and a `secret`" m) tripped;
           got = tripped;
         };
     }
