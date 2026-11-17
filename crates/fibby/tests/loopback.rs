@@ -493,6 +493,156 @@ fn start_server_with_control(
     wait_until_listening(control);
 }
 
+/// `start_server_with_control`, with the card factory `fibby ctl create`
+/// uses (piggy#382 item 6): `VirtualCard::mint` on the given model.
+fn start_server_with_factory(
+    path: &std::path::Path,
+    control: &std::path::Path,
+    cards: Vec<VirtualCard>,
+    model: fibby::virtual_card::Model,
+) {
+    let backends = cards
+        .into_iter()
+        .map(|c| Arc::new(Mutex::new(c)) as server::SharedBackend)
+        .collect();
+    let factory: server::CardFactory = Arc::new(move |spec: &server::CreateSpec| {
+        let card = VirtualCard::mint(model, &spec.reader, spec.alg, spec.policy)?;
+        Ok(Arc::new(Mutex::new(card)) as server::SharedBackend)
+    });
+    let serve_path = path.to_path_buf();
+    let control_path = control.to_path_buf();
+    thread::spawn(move || {
+        let _ = server::serve_with_factory(
+            serve_path.to_str().unwrap(),
+            backends,
+            Some(control_path.to_str().unwrap()),
+            Some(factory),
+        );
+    });
+    wait_until_listening(path);
+    wait_until_listening(control);
+}
+
+/// Every reader name GET_READERS_STATE reports, in slot order.
+fn reader_names(c: &mut Client) -> Vec<String> {
+    c.send(Command::GetReadersState, &[]);
+    let arr = c.recv(MAX_READERS_CONTEXTS * ReaderState::WIRE_LEN);
+    arr.chunks(ReaderState::WIRE_LEN)
+        .map(|s| ReaderState::from_bytes(s).unwrap().reader_name)
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
+/// piggy#382 item 6 end to end over real sockets: `create` adds a card
+/// whose 9A certificate and CHUID were made inside fibby, it can be
+/// connected to and read; `destroy` removes it, after which neither its
+/// name nor a handle on it reaches any card, and the other card stays.
+#[test]
+fn control_socket_creates_and_destroys_cards_at_runtime() {
+    let path = unique_socket_path();
+    let control = unique_socket_path();
+    start_server_with_factory(
+        &path,
+        &control,
+        vec![VirtualCard::new()],
+        fibby::virtual_card::Model::Yk4,
+    );
+    let mut c = Client {
+        stream: UnixStream::connect(&path).unwrap(),
+    };
+    c.send(
+        Command::Version,
+        &VersionStruct {
+            major: PROTOCOL_VERSION_MAJOR,
+            minor: PROTOCOL_VERSION_MINOR,
+            rv: 0,
+        }
+        .to_bytes(),
+    );
+    let _ = c.recv(VersionStruct::WIRE_LEN);
+    c.send(
+        Command::EstablishContext,
+        &EstablishStruct {
+            dw_scope: scope::SYSTEM,
+            h_context: 0,
+            rv: 0,
+        }
+        .to_bytes(),
+    );
+    let est = EstablishStruct::from_bytes(&c.recv(EstablishStruct::WIRE_LEN)).unwrap();
+    let first = reader_names(&mut c).remove(0);
+
+    let minted = "piggy-test minted 00";
+    assert_eq!(
+        ctl_command(&control, &format!("create pin=once {minted}")).trim(),
+        format!("ok {minted}")
+    );
+    assert_eq!(
+        reader_names(&mut c),
+        vec![first.clone(), minted.to_string()]
+    );
+    let dup = ctl_command(&control, &format!("create {minted}"));
+    assert!(
+        dup.starts_with("err") && dup.contains("already exists"),
+        "{dup}"
+    );
+    let ed = ctl_command(&control, "create alg=ed25519 piggy-test no ed25519");
+    assert!(ed.starts_with("err") && ed.contains("yk5.7"), "{ed}");
+    let bad = ctl_command(&control, "create pin=sometimes piggy-test bad");
+    assert!(bad.starts_with("err bad pin policy"), "{bad}");
+
+    let con = c.connect_reader(est.h_context, minted);
+    assert_eq!(con.rv, 0, "the minted card is connectable");
+    c.transmit(con.h_card, &select_piv_apdu());
+    let chuid = c.transmit(con.h_card, &get_chuid_apdu());
+    assert_eq!(&chuid[chuid.len() - 2..], &[0x90, 0x00], "it has a CHUID");
+    // GET DATA 5F C1 05, the 9A certificate made inside fibby.
+    let cert = c.transmit(
+        con.h_card,
+        &[0x00, 0xCB, 0x3F, 0xFF, 0x05, 0x5C, 0x03, 0x5F, 0xC1, 0x05],
+    );
+    assert_eq!(&cert[cert.len() - 2..], &[0x90, 0x00], "it has a 9A cert");
+    // ATTEST 9A: the generated key is attestable.
+    let attest = c.transmit(con.h_card, &[0x00, 0xF9, 0x9A, 0x00]);
+    assert_eq!(&attest[attest.len() - 2..], &[0x90, 0x00], "9A attests");
+
+    assert_eq!(
+        ctl_command(&control, &format!("destroy {minted}")).trim(),
+        "ok"
+    );
+    assert_eq!(reader_names(&mut c), vec![first.clone()]);
+    let gone = c.connect_reader(est.h_context, minted);
+    assert_eq!(
+        gone.rv,
+        fibby::error::SCARD_E_UNKNOWN_READER,
+        "a destroyed name reaches no card, not the one left"
+    );
+    // The old handle finds no card.
+    c.send(
+        Command::Transmit,
+        &TransmitStruct {
+            h_card: con.h_card,
+            io_send_pci_protocol: protocol::T1,
+            io_send_pci_length: 8,
+            cb_send_length: select_piv_apdu().len() as u32,
+            io_recv_pci_protocol: 0,
+            io_recv_pci_length: 0,
+            pcb_recv_length: 0,
+            rv: 0,
+        }
+        .to_bytes(),
+    );
+    c.stream.write_all(&select_piv_apdu()).unwrap();
+    let reply = TransmitStruct::from_bytes(&c.recv(TransmitStruct::WIRE_LEN)).unwrap();
+    assert_eq!(reply.rv, fibby::error::SCARD_E_NO_SMARTCARD);
+    assert!(ctl_command(&control, &format!("destroy {minted}")).starts_with("err no such reader"));
+    // The card that was there at start is untouched.
+    assert_eq!(c.connect_reader(est.h_context, &first).rv, 0);
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&control);
+}
+
 /// Send one control command to fibby's control socket and return its reply.
 fn ctl_command(control: &std::path::Path, command: &str) -> String {
     let mut s = UnixStream::connect(control).unwrap();

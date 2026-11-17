@@ -1166,7 +1166,10 @@ test-bats-conformance-agent-concurrent-sign:
 # an Ed25519 PIV key (alg E0) seeded into fibby's yk5.7 model, and the
 # sshsig verifies; on the yk5 model the same key is refused, as pre-5.7
 # silicon refuses E0. Answers FDR 0006's "does the agent's Ed25519 PIV path
-# work end to end". [linux]-only like the other fibby lanes.
+# work end to end". Also mints an Ed25519 card at runtime over fibby's
+# control socket (`fibby ctl create`, item 6) and has the agent find it,
+# sign with it, and piggy export its attestation. [linux]-only like the
+# other fibby lanes.
 #
 # run the fibby-backed agent Ed25519 PIV sign bats gate
 [group('post-build')]
@@ -5006,12 +5009,14 @@ explore-fdr0006-b BIN_DIR="":
 # build): builds `.#fibby-holder` and `.#fibby`, checks that each reports
 # its build profile, that the holder refuses every test flag the test build
 # lists and FIBBY_LOG=wire while the test build accepts them, then starts a
-# holder on a private socket with a control socket and leaves a shell there
-# (`exit` tears it down) so the operator can read `fibby --help` for both
-# builds and drive `fibby ctl` by hand. Virtual cards only: no real card, no
-# PIN prompt (the askpass safety net is set anyway, piggy-testing(7)).
-# BIN_DIR, when given, holds a holder build named fibby-holder and a
-# test-double build named fibby (e.g. built by hand) to run instead.
+# holder on a private socket with a control socket, checks it is
+# non-dumpable with a zero core limit, creates an Ed25519 card at runtime,
+# reads its attestation with `piggy card export-attestation`, destroys it,
+# and leaves a shell there (`exit` tears it down) so the operator can read
+# `fibby --help` for both builds and drive `fibby ctl` by hand. Virtual
+# cards only: no real card, no PIN prompt (the askpass safety net is set
+# anyway, piggy-testing(7)). BIN_DIR, when given, holds a holder build named
+# fibby-holder, a test-double build named fibby and a piggy to run instead.
 #
 # stage the piggy#382 hand pass: fibby holder build, profiles, test-flag refusal
 [group('explore')]
@@ -5021,10 +5026,11 @@ explore-fdr0006-c BIN_DIR="":
     set -euo pipefail
     if [[ -n "{{ BIN_DIR }}" ]]; then
       bin="$(realpath "{{ BIN_DIR }}")"
-      holder="$bin/fibby-holder" testdouble="$bin/fibby"
+      holder="$bin/fibby-holder" testdouble="$bin/fibby" piggy="$bin/piggy"
     else
       holder="$(nix build .#fibby-holder --no-link --print-out-paths)/bin/fibby"
       testdouble="$(nix build .#fibby --no-link --print-out-paths)/bin/fibby"
+      piggy="$(nix build .#default --no-link --print-out-paths)/bin/piggy"
     fi
     dir="$(mktemp -d -t fdr6c.XXXXXX)"
     export SSH_ASKPASS="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
@@ -5074,21 +5080,37 @@ explore-fdr0006-c BIN_DIR="":
       --seed-slot-9a-ed25519 4242424242424242424242424242424242424242424242424242424242424242
     check "holder serves a yk5.7 card"               serves "$holder" --model yk5.7 --card "piggy-test yk5.7"
     check "holder serves a blank --card"             serves "$holder" --card "piggy-test holder"
-    echo "1..$n"
 
+    # A running holder (yk5.7, so Ed25519 can be minted), driven over its
+    # control socket: create a card, read its attestation with piggy, list,
+    # destroy (piggy#382 item 6).
     ctl="$dir/ctl.sock"
-    "$holder" --socket "$dir/pcscd.comm" --control-socket "$ctl" --card "piggy-test holder" \
-      >"$dir/holder.log" 2>&1 &
+    export PCSCLITE_CSOCK_NAME="$dir/pcscd.comm"
+    "$holder" --socket "$PCSCLITE_CSOCK_NAME" --control-socket "$ctl" --model yk5.7 \
+      --card "piggy-test holder" >"$dir/holder.log" 2>&1 &
     holder_pid=$!
     pids+=($holder_pid)
     for _ in $(seq 1 50); do [[ -S $ctl ]] && break; sleep 0.1; done
-    # proc(5): a non-dumpable process's /proc/<pid> files belong to root.
-    echo "# holder /proc/$holder_pid/environ owner: $(stat -c %U "/proc/$holder_pid/environ") (root = non-dumpable)"
-    echo "# holder core limit: $(awk '/^Max core file size/ {print $5}' "/proc/$holder_pid/limits")"
-    echo "# A holder is serving $dir/pcscd.comm (control socket $ctl)."
-    echo "# Try: \"\$FIBBY\" ctl --socket \"\$FIBBY_CTL\" profile | list | fault * 6982 'piggy-test holder'"
+    hctl() { "$holder" ctl --socket "$ctl" "$@"; }
+    minted="piggy-test minted"
+    check "holder: /proc/<pid>/environ belongs to root" test "$(stat -c %U "/proc/$holder_pid/environ")" = root
+    check "holder: core limit 0"                     test "$(awk '/^Max core file size/ {print $5}' "/proc/$holder_pid/limits")" = 0
+    check "holder: ctl profile is holder"            test "$(hctl profile)" = "ok holder"
+    check "holder: ctl fault is unknown"             exits 1 "$holder" ctl --socket "$ctl" fault 20 63C2 "piggy-test holder"
+    check "holder: create an Ed25519 card"           hctl create alg=ed25519 pin=once touch=never "$minted"
+    check "holder: the card is listed"               grep -qF "$minted" <(hctl list)
+    check "holder: piggy reads its 9A attestation"   "$piggy" card export-attestation 9a --reader "$minted"
+    check "holder: a second card of that name is refused" exits 1 "$holder" ctl --socket "$ctl" create "$minted"
+    check "holder: destroy it"                       hctl destroy "$minted"
+    check "holder: it is no longer listed"           bash -c "! \"$holder\" ctl --socket \"$ctl\" list | grep -qF \"$minted\""
+    check "holder: destroying it again is refused"   exits 1 "$holder" ctl --socket "$ctl" destroy "$minted"
+    echo "1..$n"
+
+    echo "# A holder is serving $PCSCLITE_CSOCK_NAME (control socket $ctl)."
+    echo "# Try: \"\$FIBBY\" ctl --socket \"\$FIBBY_CTL\" profile | list | create [alg=…] NAME | destroy NAME"
+    echo "#      \"\$PIGGY\" card export-attestation 9a --reader NAME"
     echo "#      \"\$FIBBY\" --help; \"\$FIBBY_TEST_DOUBLE\" --help; cat \"$dir/holder.log\""
     echo "# exit the shell to stop it."
-    FIBBY="$holder" FIBBY_TEST_DOUBLE="$testdouble" FIBBY_CTL="$ctl" \
-      PCSCLITE_CSOCK_NAME="$dir/pcscd.comm" "${SHELL:-bash}" -i || true
+    FIBBY="$holder" FIBBY_TEST_DOUBLE="$testdouble" FIBBY_CTL="$ctl" PIGGY="$piggy" \
+      "${SHELL:-bash}" -i || true
     ((fails == 0))

@@ -72,6 +72,13 @@ pub trait Backend: Send {
     #[cfg(feature = "test-double")]
     fn clear_faults(&mut self) {}
 
+    /// Wipe this card before its reader is removed (`fibby ctl destroy`,
+    /// piggy#382 item 6): its secrets and objects are dropped now, not when
+    /// the last reference to it goes. Default: the card is pulled out.
+    fn destroy(&mut self) {
+        self.set_present(false);
+    }
+
     /// ATR of the present card (empty if absent).
     fn atr(&self) -> Vec<u8>;
 

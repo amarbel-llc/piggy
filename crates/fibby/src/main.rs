@@ -28,7 +28,7 @@
 use std::sync::{Arc, Mutex};
 
 use fibby::backend::Backend;
-use fibby::server::{self, SharedBackend};
+use fibby::server::{self, CardFactory, CreateSpec, SharedBackend};
 use fibby::{
     trace,
     virtual_card::{Model, VirtualCard},
@@ -292,7 +292,7 @@ fn main() {
             .collect(),
     );
 
-    let backends = match make_backends(&args) {
+    let (backends, factory) = match make_backends(&args) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("fibby: backend init failed: {e}");
@@ -311,7 +311,12 @@ fn main() {
             args.socket
         ),
     );
-    if let Err(e) = server::serve(&args.socket, backends, args.control_socket.as_deref()) {
+    if let Err(e) = server::serve_with_factory(
+        &args.socket,
+        backends,
+        args.control_socket.as_deref(),
+        factory,
+    ) {
         eprintln!("fibby: serve failed: {e}");
         std::process::exit(1);
     }
@@ -380,10 +385,9 @@ fn exit_cleanly_on_sigterm_and_sigint(sockets: Vec<String>) {
 }
 
 #[cfg(feature = "test-double")]
-const CTL_USAGE: &str = "fibby ctl: want <insert|remove|list> [<reader-name>] | touch <reader-name> | profile | fault <INS|*> <SW>[x<count>] <reader-name> | fault clear <reader-name>";
+const CTL_USAGE: &str = "fibby ctl: want <insert|remove|list> [<reader-name>] | touch <reader-name> | profile | create [alg=p256|ed25519] [pin=…] [touch=…] <reader-name> | destroy <reader-name> | fault <INS|*> <SW>[x<count>] <reader-name> | fault clear <reader-name>";
 #[cfg(not(feature = "test-double"))]
-const CTL_USAGE: &str =
-    "fibby ctl: want <insert|remove|list> [<reader-name>] | touch <reader-name> | profile";
+const CTL_USAGE: &str = "fibby ctl: want <insert|remove|list> [<reader-name>] | touch <reader-name> | profile | create [alg=p256|ed25519] [pin=…] [touch=…] <reader-name> | destroy <reader-name>";
 
 /// piggy#130 control client: connect to a running fibby's `--control-socket`,
 /// send one command, print the reply. Returns a process exit code (0 on an
@@ -441,53 +445,72 @@ fn run_ctl_client() -> i32 {
     if reply.starts_with("ok") { 0 } else { 1 }
 }
 
+/// The settings every virtual card this fibby serves shares, whether it
+/// was made at start or by `fibby ctl create`.
+#[derive(Clone)]
+struct CardSettings {
+    model: Model,
+    /// FDR 0006 "Attestation" (piggy#382 item 5): one attestation key per
+    /// fibby start, in guarded memory, issuing for every card.
+    authority: Arc<fibby::attest::AttestationAuthority>,
+    #[cfg(feature = "test-double")]
+    auto_touch: bool,
+    require_select: bool,
+    serial: Option<u32>,
+    touch_timeout: Option<std::time::Duration>,
+}
+
+impl CardSettings {
+    fn finish(&self, mut card: VirtualCard) -> SharedBackend {
+        card.set_attestation_authority(self.authority.clone());
+        #[cfg(feature = "test-double")]
+        card.set_auto_touch(self.auto_touch);
+        card.set_require_select(self.require_select);
+        if let Some(serial) = self.serial {
+            card.set_serial(serial);
+        }
+        if let Some(timeout) = self.touch_timeout {
+            card.set_touch_timeout(timeout);
+        }
+        into_shared(card)
+    }
+}
+
 /// Build the reader table (piggy#242): one backend per `--card` group,
 /// or the single implicit card / hardware proxy of every pre-#242
-/// invocation.
-fn make_backends(args: &Args) -> Result<Vec<SharedBackend>, String> {
+/// invocation; and, for the virtual backend, the factory that makes the
+/// cards `fibby ctl create` asks for (piggy#382 item 6).
+fn make_backends(args: &Args) -> Result<(Vec<SharedBackend>, Option<CardFactory>), String> {
     match args.backend.as_str() {
         "virtual" => {
-            let model = Model::parse_arg(&args.model)?;
-            // FDR 0006 "Attestation" (piggy#382 item 5): one attestation key
-            // per fibby start, in guarded memory, issuing for every card.
-            let authority = Arc::new(fibby::attest::AttestationAuthority::generate());
-            // The touch flags are global: they configure every virtual
-            // card this fibby serves.
-            let with_touch_flags = |mut card: VirtualCard| {
-                card.set_attestation_authority(authority.clone());
+            let settings = CardSettings {
+                model: Model::parse_arg(&args.model)?,
+                authority: Arc::new(fibby::attest::AttestationAuthority::generate()),
                 #[cfg(feature = "test-double")]
-                card.set_auto_touch(args.auto_touch);
-                card.set_require_select(args.require_select);
-                if let Some(serial) = args.serial {
-                    card.set_serial(serial);
-                }
-                if let Some(timeout) = args.touch_timeout {
-                    card.set_touch_timeout(timeout);
-                }
-                into_shared(card)
+                auto_touch: args.auto_touch,
+                require_select: args.require_select,
+                serial: args.serial,
+                touch_timeout: args.touch_timeout,
             };
-            if args.cards.is_empty() {
-                return Ok(vec![with_touch_flags(build_virtual_card(
-                    model,
-                    &args.seeds,
-                    None,
-                    0,
-                ))]);
-            }
-            args.cards
-                .iter()
-                .enumerate()
-                .map(|(idx, (name, seeds))| {
-                    Ok(with_touch_flags(build_virtual_card(
-                        model,
-                        seeds,
-                        Some(name),
-                        idx,
-                    )))
-                })
-                .collect()
+            let model = settings.model;
+            let backends = if args.cards.is_empty() {
+                vec![settings.finish(build_virtual_card(model, &args.seeds, None, 0))]
+            } else {
+                args.cards
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (name, seeds))| {
+                        settings.finish(build_virtual_card(model, seeds, Some(name), idx))
+                    })
+                    .collect()
+            };
+            let factory: CardFactory = Arc::new(move |spec: &CreateSpec| {
+                let card = VirtualCard::mint(settings.model, &spec.reader, spec.alg, spec.policy)?;
+                Ok(settings.finish(card))
+            });
+            Ok((backends, Some(factory)))
         }
-        "hardware" => make_hardware_backend(args),
+        "hardware" => Ok((make_hardware_backend(args)?, None)),
         other => Err(format!(
             "unknown backend {other:?} (want 'virtual' or 'hardware')"
         )),

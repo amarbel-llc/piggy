@@ -155,24 +155,26 @@ impl AttestationAuthority {
     }
 }
 
-/// A self-signed X.509 certificate over the Ed25519 key with `seed`,
-/// subject `CN=<common_name>`: what a client reads from a slot's
-/// certificate object to learn its algorithm and public key. Test-double
-/// only (the seed flags); a holder's certificates come with item 6 of
-/// piggy#382.
-#[cfg(feature = "test-double")]
-pub fn self_signed_ed25519_certificate(seed: &[u8; 32], common_name: &str) -> Vec<u8> {
-    let key = ed25519_dalek::SigningKey::from_bytes(seed);
+/// A self-signed X.509 certificate over a slot key, subject
+/// `CN=<common_name>`: what a client reads from a slot's certificate object
+/// to learn its algorithm and public key. `private` is the slot's P-256
+/// scalar or, for `alg` Ed25519, its seed. Used by the test double's seed
+/// flags and by a runtime-created card (`fibby ctl create`, piggy#382 item
+/// 6), whose certificate is made inside fibby with the key it generated.
+/// `common_name` must be a valid DN value (the callers pass fixed text).
+pub fn self_signed_certificate(alg: u8, private: &[u8; 32], common_name: &str) -> Vec<u8> {
     let name = Name::from_str(&format!("CN={common_name}"))
-        .expect("a seeded certificate's subject is a valid DN");
-    issue_certificate(
-        &Issuer::Ed25519(&key),
-        &name,
-        &name,
-        1,
-        &SlotPublicKey::Ed25519(key.verifying_key().to_bytes()),
-        None,
-    )
+        .expect("a slot certificate's subject is a valid DN");
+    if alg == crate::virtual_card::algorithm::ED25519 {
+        let key = ed25519_dalek::SigningKey::from_bytes(private);
+        let public = SlotPublicKey::Ed25519(key.verifying_key().to_bytes());
+        issue_certificate(&Issuer::Ed25519(&key), &name, &name, 1, &public, None)
+    } else {
+        let key = SigningKey::from_slice(private).expect("a slot key is a valid P-256 scalar");
+        let point = VerifyingKey::from(&key).to_encoded_point(false);
+        let public = SlotPublicKey::P256(point.as_bytes().to_vec());
+        issue_certificate(&Issuer::P256(&key), &name, &name, 1, &public, None)
+    }
 }
 
 /// The key a certificate is signed with, and so its signature algorithm.
@@ -180,7 +182,6 @@ enum Issuer<'a> {
     /// ECDSA-SHA256.
     P256(&'a SigningKey),
     /// Ed25519 (RFC 8410: the whole TBS is signed, no prehash).
-    #[cfg_attr(not(feature = "test-double"), allow(dead_code))]
     Ed25519(&'a ed25519_dalek::SigningKey),
 }
 
@@ -411,11 +412,27 @@ mod tests {
         assert_eq!(spki.subject_public_key.raw_bytes(), raw.as_slice());
     }
 
-    #[cfg(feature = "test-double")]
+    #[test]
+    fn a_self_signed_p256_certificate_verifies_under_its_own_key() {
+        let key = SigningKey::random(&mut rand_core::OsRng);
+        let scalar: [u8; 32] = key.to_bytes().into();
+        let der = self_signed_certificate(
+            crate::virtual_card::algorithm::ECCP256,
+            &scalar,
+            "piggy-test p256",
+        );
+        let cert = Certificate::from_der(&der).unwrap();
+        assert!(verifies_under(&cert, &cert), "self-signature verifies");
+    }
+
     #[test]
     fn a_self_signed_ed25519_certificate_verifies_under_its_own_key() {
         let seed = [9u8; 32];
-        let der = self_signed_ed25519_certificate(&seed, "piggy-test ed25519");
+        let der = self_signed_certificate(
+            crate::virtual_card::algorithm::ED25519,
+            &seed,
+            "piggy-test ed25519",
+        );
         let cert = Certificate::from_der(&der).unwrap();
         assert_eq!(cert.signature_algorithm.oid, OID_ED25519);
         let key = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();

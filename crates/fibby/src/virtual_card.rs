@@ -585,7 +585,6 @@ const FIBBY_SLOT_9C_TEST_PRIV: [u8; 32] = [
 /// via GA `P2=0x9E` (which fibby's sign handler, keyed on slot 9A,
 /// rejects with `6D00`). The fibby↔pivy-agent Phase 0 smoke caught
 /// exactly this. See `pivy-piv/src/slot.rs` for the full slot→tag map.
-#[cfg(feature = "test-double")]
 const TAG_SLOT_9A_CERT: &[u8] = &[0x5F, 0xC1, 0x05];
 
 /// PIV tag for the slot 9E (Card Authentication) X.509 cert object, per
@@ -746,7 +745,6 @@ const FIBBY_SLOT_9C_CERT_OBJECT: &[u8] = &[
 
 /// PIV tag for the Card Holder Unique Identifier (CHUID) data object,
 /// per SP 800-73-4 §3.1.2: `5F C1 02`.
-#[cfg(feature = "test-double")]
 const TAG_CHUID: &[u8] = &[0x5F, 0xC1, 0x02];
 
 /// PIV tag for the Printed Information data object, per SP 800-73-4 §3.1.6:
@@ -1129,6 +1127,51 @@ impl VirtualCard {
         )
     }
 
+    /// A card made at runtime (`fibby ctl create`, FDR 0006 phase (c),
+    /// piggy#382 item 6), served as reader `reader_name`: its slot 9A key of
+    /// PIV algorithm `alg` (P-256, or Ed25519 on a model that does it) is
+    /// generated here from the OS RNG with `[pin, touch]` policy `policy`,
+    /// recorded as generated on the card (so it is attestable), with a
+    /// self-signed certificate over it at the 9A certificate tag, which the
+    /// agent's certificate-based slot discovery reads, and a CHUID carrying
+    /// a fresh random GUID. The key never leaves the card.
+    pub fn mint(model: Model, reader_name: &str, alg: u8, policy: [u8; 2]) -> Result<Self, String> {
+        let ed25519 = alg == algorithm::ED25519;
+        if !ed25519 && alg != algorithm::ECCP256 {
+            return Err(format!("unsupported algorithm {alg:#04x}"));
+        }
+        if ed25519 && !model.supports_ed25519() {
+            return Err(format!(
+                "the {} model has no Ed25519 (it needs firmware 5.7; use --model yk5.7)",
+                model_name(model)
+            ));
+        }
+        let policy = validated_policy(Some(policy[0]), Some(policy[1]))
+            .ok_or_else(|| format!("policy {policy:02X?} out of range"))?;
+        let mut card = Self::with_model(model);
+        card.set_reader_name(reader_name);
+
+        let mut private = Zeroizing::new([0u8; 32]);
+        if ed25519 {
+            rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, private.as_mut_slice());
+        } else {
+            let key = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+            private.copy_from_slice(&key.to_bytes());
+        }
+        card.install_slot_key(0x9A, alg, &private, policy, KeyOrigin::Generated);
+        let cert = crate::attest::self_signed_certificate(alg, &private, "fibby holder card");
+        card.data_objects.insert(
+            TAG_SLOT_9A_CERT.to_vec(),
+            crate::attest::piv_cert_object(&cert),
+        );
+
+        let mut guid = [0u8; 16];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut guid);
+        card.data_objects
+            .insert(TAG_CHUID.to_vec(), runtime_chuid(&guid));
+        Ok(card)
+    }
+
     /// Attest with `authority` instead of the key this card generated: the
     /// fibby binary hands every card the one attestation key it generated
     /// at start, so a verifier sees one holder, and phase (f) blesses one
@@ -1454,7 +1497,8 @@ impl VirtualCard {
         self.set_slot_private(slot, &seed);
         self.forget_slot_provenance(slot);
         self.slot_algorithms.insert(slot, algorithm::ED25519);
-        let cert = crate::attest::self_signed_ed25519_certificate(
+        let cert = crate::attest::self_signed_certificate(
+            algorithm::ED25519,
             &seed,
             &format!("fibby-test-slot-{slot:02x}-ed25519"),
         );
@@ -1508,6 +1552,29 @@ impl Backend for VirtualCard {
 
     fn event_counter(&self) -> u32 {
         self.event_counter
+    }
+
+    /// Pull the card out, then drop every secret (piggy-guard zeroizes the
+    /// pages as it unmaps them) and every object. The attestation key is
+    /// shared with the other cards, so it stays.
+    fn destroy(&mut self) {
+        self.set_present(false);
+        for slot in [0x9A, 0x9C, 0x9D, 0x9E] {
+            *self.slot_field(slot) = None;
+        }
+        self.pin = Secret::new(DEFAULT_PIN);
+        self.puk = Secret::new(DEFAULT_PUK);
+        self.mgmt_key = Secret::new(&DEFAULT_MGMT_KEY);
+        self.slot_policies.clear();
+        self.slot_origins.clear();
+        self.slot_algorithms.clear();
+        self.data_objects.clear();
+        self.touch.clear_cache();
+        trace::emit(
+            trace::INFO,
+            "vcard",
+            &format!("'{}' wiped", self.reader_name),
+        );
     }
 
     #[cfg(feature = "test-double")]
@@ -3381,6 +3448,20 @@ fn hex_tag(tag: &[u8]) -> String {
         let _ = write!(&mut s, "{byte:02X}");
     }
     s
+}
+
+/// The CHUID of a runtime-created card: `53 1E { 34 10 <guid> 35 08
+/// "20991231" 3E 00 }` — GUID, an expiry, and an empty error-detection
+/// code, without the FASC-N, which piggy-piv's parser treats as optional.
+fn runtime_chuid(guid: &[u8; 16]) -> Vec<u8> {
+    let mut inner = vec![0x34, 0x10];
+    inner.extend_from_slice(guid);
+    inner.extend_from_slice(&[0x35, 0x08]);
+    inner.extend_from_slice(b"20991231");
+    inner.extend_from_slice(&[0x3E, 0x00]);
+    let mut chuid = vec![0x53, inner.len() as u8];
+    chuid.extend_from_slice(&inner);
+    chuid
 }
 
 /// Short label for trace messages. Display impl would be neater but
@@ -6570,6 +6651,53 @@ mod tests {
                 "{what} is not in guarded memory"
             );
         }
+    }
+
+    /// piggy#382 item 6: a minted card's 9A key was generated on it (so it
+    /// attests, with the policy asked for), its certificate is over that
+    /// key, and its CHUID carries a GUID of its own.
+    #[test]
+    fn a_minted_ed25519_card_has_its_key_certificate_and_guid() {
+        let mut a = VirtualCard::mint(Model::Yk57, "piggy-test a", 0xE0, [0x02, 0x01]).unwrap();
+        let b = VirtualCard::mint(Model::Yk57, "piggy-test b", 0xE0, [0x02, 0x01]).unwrap();
+        assert_eq!(a.reader_name(), "piggy-test a");
+        let raw = match a.slot_public_key(0x9A) {
+            Some(SlotPublicKey::Ed25519(raw)) => raw,
+            other => panic!("want an Ed25519 9A key, got {other:?}"),
+        };
+        let cert = a.transmit(&get_data_apdu(TAG_SLOT_9A_CERT)).unwrap();
+        assert!(
+            cert.windows(32).any(|w| w == raw),
+            "the cert is over the key"
+        );
+        let metadata = a.transmit(&metadata_apdu(0x9A)).unwrap();
+        assert_eq!(
+            &metadata[..10],
+            &[0x01, 0x01, 0xE0, 0x02, 0x02, 0x02, 0x01, 0x03, 0x01, 0x01],
+            "Ed25519, pin once, touch never, generated"
+        );
+        assert!(is_success(&a.transmit(&attest_apdu(0x9A)).unwrap()));
+        assert_ne!(
+            a.data_objects.get(TAG_CHUID),
+            b.data_objects.get(TAG_CHUID),
+            "each minted card has its own GUID"
+        );
+    }
+
+    #[test]
+    fn minting_refuses_ed25519_before_5_7_and_bad_policies() {
+        assert!(VirtualCard::mint(Model::Yk4, "x", 0xE0, [0, 0]).is_err());
+        assert!(VirtualCard::mint(Model::Yk57, "x", 0x07, [0, 0]).is_err());
+        assert!(VirtualCard::mint(Model::Yk4, "x", 0x11, [0x09, 0]).is_err());
+    }
+
+    #[test]
+    fn destroying_a_card_drops_its_keys_and_objects() {
+        let mut c = VirtualCard::mint(Model::Yk4, "piggy-test d", 0x11, [0, 0]).unwrap();
+        c.destroy();
+        assert!(!c.card_present());
+        assert!(c.slot_9a_priv.is_none(), "the key is gone");
+        assert!(c.data_objects.is_empty(), "the objects are gone");
     }
 
     #[test]

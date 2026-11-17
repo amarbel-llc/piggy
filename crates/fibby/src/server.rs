@@ -38,9 +38,8 @@ use crate::trace;
 /// Shared, lockable backend handed to every connection thread.
 pub type SharedBackend = Arc<Mutex<dyn Backend>>;
 
-/// The reader table: one backend per reader, in `CMD_GET_READERS_STATE`
-/// slot order.
-pub type SharedBackends = Arc<Vec<SharedBackend>>;
+/// The reader table, shared by every connection and the control socket.
+pub type SharedBackends = Arc<ReaderTable>;
 
 /// What pcscd itself tracks for each card, across every client (piggy#320):
 /// how many handles are open on it, and which handle holds its transaction.
@@ -51,8 +50,118 @@ struct CardShare {
     transaction_holder: Option<i32>,
 }
 
-/// One [`CardShare`] per backend, same indexing as [`SharedBackends`].
-type CardShares = Arc<Vec<Mutex<CardShare>>>;
+/// One reader: its card and pcscd's sharing state for it.
+#[derive(Clone)]
+pub struct Reader {
+    pub backend: SharedBackend,
+    share: Arc<Mutex<CardShare>>,
+}
+
+impl Reader {
+    fn new(backend: SharedBackend) -> Self {
+        Reader {
+            backend,
+            share: Arc::default(),
+        }
+    }
+}
+
+/// The readers this fibby serves, in `CMD_GET_READERS_STATE` order. A
+/// reader keeps its index for life: card handles record it. Readers can be
+/// added and removed at runtime (FDR 0006 phase (c), piggy#382 item 6:
+/// `fibby ctl create` / `destroy`); a removed reader's index stays empty, so
+/// a handle still naming it finds no card rather than another one. At most
+/// [`MAX_READERS_CONTEXTS`] readers are live at once, pcsc-lite's cap.
+pub struct ReaderTable {
+    slots: std::sync::RwLock<Vec<Option<Reader>>>,
+}
+
+impl ReaderTable {
+    pub fn new(backends: Vec<SharedBackend>) -> Self {
+        ReaderTable {
+            slots: std::sync::RwLock::new(
+                backends.into_iter().map(|b| Some(Reader::new(b))).collect(),
+            ),
+        }
+    }
+
+    /// How many readers the table has ever held, removed ones included.
+    pub fn ever_held(&self) -> usize {
+        self.slots.read().unwrap().len()
+    }
+
+    /// The reader at `idx`, unless it was removed.
+    pub fn get(&self, idx: usize) -> Option<Reader> {
+        self.slots.read().unwrap().get(idx).cloned().flatten()
+    }
+
+    /// Every live reader with its index, in table order.
+    pub fn live(&self) -> Vec<(usize, Reader)> {
+        self.slots
+            .read()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, slot)| slot.clone().map(|reader| (idx, reader)))
+            .collect()
+    }
+
+    /// The live reader named `name`.
+    pub fn find(&self, name: &str) -> Option<(usize, Reader)> {
+        self.live()
+            .into_iter()
+            .find(|(_, reader)| reader.backend.lock().unwrap().reader_name() == name)
+    }
+
+    /// Add a reader. Refused when its name is taken or the table already
+    /// serves [`MAX_READERS_CONTEXTS`] readers.
+    pub fn insert(&self, backend: SharedBackend) -> Result<usize, String> {
+        let name = backend.lock().unwrap().reader_name();
+        let mut slots = self.slots.write().unwrap();
+        let live = slots.iter().flatten().count();
+        if live >= MAX_READERS_CONTEXTS {
+            return Err(format!(
+                "this fibby already serves {MAX_READERS_CONTEXTS} readers, pcsc-lite's limit"
+            ));
+        }
+        if slots
+            .iter()
+            .flatten()
+            .any(|r| r.backend.lock().unwrap().reader_name() == name)
+        {
+            return Err(format!("a reader named {name:?} already exists"));
+        }
+        slots.push(Some(Reader::new(backend)));
+        Ok(slots.len() - 1)
+    }
+
+    /// Remove the live reader named `name`, returning it.
+    pub fn remove(&self, name: &str) -> Result<Reader, String> {
+        let mut slots = self.slots.write().unwrap();
+        let slot = slots
+            .iter_mut()
+            .find(|slot| {
+                slot.as_ref()
+                    .is_some_and(|r| r.backend.lock().unwrap().reader_name() == name)
+            })
+            .ok_or_else(|| format!("no such reader: {name}"))?;
+        Ok(slot.take().expect("matched a live slot"))
+    }
+}
+
+/// What `fibby ctl create` asks for: a card served as reader `reader`, its
+/// slot 9A key of PIV algorithm `alg` with YubicoPIV `[pin, touch]` policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSpec {
+    pub reader: String,
+    pub alg: u8,
+    pub policy: [u8; 2],
+}
+
+/// Makes the card a `create` asks for. The fibby binary supplies one that
+/// mints a [`crate::virtual_card::VirtualCard`] with its model, its touch
+/// settings and its attestation key; without one, `create` is refused.
+pub type CardFactory = Arc<dyn Fn(&CreateSpec) -> Result<SharedBackend, String> + Send + Sync>;
 
 impl CardShare {
     /// Whether `h_card` may use the card now: no transaction is held, or
@@ -134,15 +243,24 @@ fn notify_waiters(waiters: &Waiters) {
 /// Bind `socket_path` and serve forever. Removes a stale socket file
 /// first and chmods the new one so unprivileged clients can connect
 /// (mirrors pcscd's 0777 on `pcscd.comm`). `backends` is one entry per
-/// reader; it must be non-empty.
+/// reader.
 pub fn serve(
     socket_path: &str,
     backends: Vec<SharedBackend>,
     control_socket: Option<&str>,
 ) -> std::io::Result<()> {
-    assert!(!backends.is_empty(), "serve needs at least one backend");
-    let shares: CardShares = Arc::new(backends.iter().map(|_| Mutex::default()).collect());
-    let backends: SharedBackends = Arc::new(backends);
+    serve_with_factory(socket_path, backends, control_socket, None)
+}
+
+/// [`serve`], with `factory` making the cards the control socket's
+/// `create` verb asks for (piggy#382 item 6).
+pub fn serve_with_factory(
+    socket_path: &str,
+    backends: Vec<SharedBackend>,
+    control_socket: Option<&str>,
+    factory: Option<CardFactory>,
+) -> std::io::Result<()> {
+    let backends: SharedBackends = Arc::new(ReaderTable::new(backends));
     // piggy#248: registry of live client connections so the control thread
     // can wake any blocked in SCardGetStatusChange when presence toggles.
     let waiters: Waiters = Arc::new(Mutex::new(Vec::new()));
@@ -155,7 +273,8 @@ pub fn serve(
         let control_backends = Arc::clone(&backends);
         let control_waiters = Arc::clone(&waiters);
         thread::spawn(move || {
-            if let Err(e) = serve_control(&control_path, control_backends, control_waiters) {
+            if let Err(e) = serve_control(&control_path, control_backends, control_waiters, factory)
+            {
                 trace::emit(trace::INFO, "ctl", &format!("control socket ended: {e}"));
             }
         });
@@ -171,7 +290,7 @@ pub fn serve(
         "listen",
         &format!(
             "fibby listening on {socket_path} with {} reader(s) (point PCSCLITE_CSOCK_NAME here)",
-            backends.len()
+            backends.live().len()
         ),
     );
 
@@ -179,10 +298,9 @@ pub fn serve(
         match stream {
             Ok(stream) => {
                 let backends = Arc::clone(&backends);
-                let shares = Arc::clone(&shares);
                 let waiters = Arc::clone(&waiters);
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, backends, shares, waiters) {
+                    if let Err(e) = handle_client(stream, backends, waiters) {
                         trace::emit(trace::INFO, "conn", &format!("connection ended: {e}"));
                     }
                 });
@@ -200,6 +318,7 @@ fn serve_control(
     control_path: &str,
     backends: SharedBackends,
     waiters: Waiters,
+    factory: Option<CardFactory>,
 ) -> std::io::Result<()> {
     let path = Path::new(control_path);
     if path.exists() {
@@ -217,8 +336,9 @@ fn serve_control(
             Ok(stream) => {
                 let backends = Arc::clone(&backends);
                 let waiters = Arc::clone(&waiters);
+                let factory = factory.clone();
                 thread::spawn(move || {
-                    if let Err(e) = handle_control(stream, backends, waiters) {
+                    if let Err(e) = handle_control(stream, backends, waiters, factory) {
                         trace::emit(trace::INFO, "ctl", &format!("control conn ended: {e}"));
                     }
                 });
@@ -235,6 +355,7 @@ fn handle_control(
     mut stream: UnixStream,
     backends: SharedBackends,
     waiters: Waiters,
+    factory: Option<CardFactory>,
 ) -> std::io::Result<()> {
     use std::io::{BufRead, BufReader, Write};
     let mut line = String::new();
@@ -242,7 +363,7 @@ fn handle_control(
     if reader.read_line(&mut line)? == 0 {
         return Ok(());
     }
-    let reply = control_command(&backends, &waiters, line.trim_end());
+    let reply = control_command(&backends, &waiters, factory.as_ref(), line.trim_end());
     stream.write_all(reply.as_bytes())?;
     stream.write_all(b"\n")?;
     Ok(())
@@ -258,8 +379,16 @@ fn handle_control(
 /// build only);
 /// `touch <reader-name>` grants that card one simulated touch, consumed by
 /// its next touch-requiring operation (replies `ok pending=<n>`); `profile`
-/// replies `ok <build-profile>`. Replies `ok[ ...]` or `err <reason>`.
-fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> String {
+/// replies `ok <build-profile>`; `create [alg=…] [pin=…] [touch=…]
+/// <reader-name>` and `destroy <reader-name>` add and remove a card at
+/// runtime (piggy#382 item 6, see [`control_create`]). Replies `ok[ ...]`
+/// or `err <reason>`.
+fn control_command(
+    backends: &SharedBackends,
+    waiters: &Waiters,
+    factory: Option<&CardFactory>,
+    line: &str,
+) -> String {
     let (verb, name) = match line.split_once(' ') {
         Some((v, n)) => (v, n.trim()),
         None => (line, ""),
@@ -268,6 +397,8 @@ fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> 
         #[cfg(feature = "test-double")]
         "fault" => control_fault(backends, name),
         "profile" => format!("ok {}", crate::BUILD_PROFILE),
+        "create" => control_create(backends, waiters, factory, name),
+        "destroy" => control_destroy(backends, waiters, name),
         "touch" => match find_backend(backends, name) {
             // Locking the card here cannot deadlock against a client
             // waiting for this very touch: that client parks on the
@@ -288,8 +419,8 @@ fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> 
         },
         "insert" | "remove" => {
             let present = verb == "insert";
-            for b in backends.iter() {
-                let mut card = b.lock().unwrap();
+            for (_, reader) in backends.live() {
+                let mut card = reader.backend.lock().unwrap();
                 if card.reader_name() == name {
                     card.set_present(present); // bumps event_counter on a real toggle
                     // Release the backend lock BEFORE waking waiters so the
@@ -305,8 +436,8 @@ fn control_command(backends: &SharedBackends, waiters: &Waiters, line: &str) -> 
         }
         "list" => {
             let mut out = String::from("ok");
-            for b in backends.iter() {
-                let card = b.lock().unwrap();
+            for (_, reader) in backends.live() {
+                let card = reader.backend.lock().unwrap();
                 out.push_str(&format!(
                     "\n{}\t{}",
                     card.reader_name(),
@@ -376,10 +507,99 @@ fn control_fault(backends: &SharedBackends, args: &str) -> String {
     }
 }
 
-fn find_backend<'a>(backends: &'a SharedBackends, name: &str) -> Option<&'a SharedBackend> {
-    backends
-        .iter()
-        .find(|b| b.lock().unwrap().reader_name() == name)
+fn find_backend(backends: &SharedBackends, name: &str) -> Option<SharedBackend> {
+    backends.find(name).map(|(_, reader)| reader.backend)
+}
+
+/// `create [alg=p256|ed25519] [pin=default|never|once|always]
+/// [touch=default|never|always|cached] <reader-name>` (piggy#382 item 6):
+/// a new card, served as reader `<reader-name>`, whose slot 9A key and
+/// self-signed certificate are generated inside fibby (P-256 and both
+/// policies `default` unless given). Options come first because the reader
+/// name, last, may contain spaces. Replies `ok <reader-name>`, and wakes
+/// event-driven clients as an insert does.
+fn control_create(
+    backends: &SharedBackends,
+    waiters: &Waiters,
+    factory: Option<&CardFactory>,
+    args: &str,
+) -> String {
+    const USAGE: &str = "err usage: create [alg=p256|ed25519] [pin=default|never|once|always] [touch=default|never|always|cached] <reader-name>";
+    let Some(factory) = factory else {
+        return "err this fibby cannot create cards".to_string();
+    };
+    let mut spec = CreateSpec {
+        reader: String::new(),
+        alg: crate::virtual_card::algorithm::ECCP256,
+        policy: [0, 0],
+    };
+    let mut rest = args;
+    loop {
+        let (word, tail) = rest.split_once(' ').unwrap_or((rest, ""));
+        let Some((key, value)) = word.split_once('=') else {
+            break;
+        };
+        match (key, value) {
+            ("alg", "p256") => spec.alg = crate::virtual_card::algorithm::ECCP256,
+            ("alg", "ed25519") => spec.alg = crate::virtual_card::algorithm::ED25519,
+            ("pin", v) => match ["default", "never", "once", "always"]
+                .iter()
+                .position(|w| *w == v)
+            {
+                Some(p) => spec.policy[0] = p as u8,
+                None => return format!("err bad pin policy {v:?}\n{USAGE}"),
+            },
+            ("touch", v) => {
+                match ["default", "never", "always", "cached"]
+                    .iter()
+                    .position(|w| *w == v)
+                {
+                    Some(t) => spec.policy[1] = t as u8,
+                    None => return format!("err bad touch policy {v:?}\n{USAGE}"),
+                }
+            }
+            _ => return format!("err bad option {word:?}\n{USAGE}"),
+        }
+        rest = tail.trim_start();
+    }
+    spec.reader = rest.trim().to_string();
+    if spec.reader.is_empty() {
+        return USAGE.to_string();
+    }
+    let backend = match factory(&spec) {
+        Ok(b) => b,
+        Err(e) => return format!("err {e}"),
+    };
+    match backends.insert(backend) {
+        Ok(idx) => {
+            trace::emit(
+                trace::INFO,
+                "ctl",
+                &format!("created card '{}' (reader #{idx}, {spec:?})", spec.reader),
+            );
+            notify_waiters(waiters);
+            format!("ok {}", spec.reader)
+        }
+        Err(e) => format!("err {e}"),
+    }
+}
+
+/// `destroy <reader-name>` (piggy#382 item 6): wipe the card's secrets and
+/// objects, then remove its reader. A client still holding a handle on it
+/// finds no card. Wakes event-driven clients as a remove does.
+fn control_destroy(backends: &SharedBackends, waiters: &Waiters, name: &str) -> String {
+    if name.is_empty() {
+        return "err usage: destroy <reader-name>".to_string();
+    }
+    match backends.remove(name) {
+        Ok(reader) => {
+            reader.backend.lock().unwrap().destroy();
+            trace::emit(trace::INFO, "ctl", &format!("destroyed card '{name}'"));
+            notify_waiters(waiters);
+            "ok".to_string()
+        }
+        Err(e) => format!("err {e}"),
+    }
 }
 
 /// Context and card handle values, minted monotonically for the whole
@@ -442,7 +662,6 @@ impl ConnState {
 fn handle_client(
     stream: UnixStream,
     backends: SharedBackends,
-    shares: CardShares,
     waiters: Waiters,
 ) -> std::io::Result<()> {
     // piggy#248: register this connection in the waiters registry so a
@@ -457,12 +676,12 @@ fn handle_client(
     }));
     waiters.lock().unwrap().push(Arc::clone(&sink));
     let mut state = ConnState::new();
-    let result = serve_connection(stream, &backends, &shares, &sink, &mut state);
+    let result = serve_connection(stream, &backends, &sink, &mut state);
     waiters.lock().unwrap().retain(|w| !Arc::ptr_eq(w, &sink));
     // A client that exits without SCardDisconnect still closes its handles,
     // as pcscd does when a client's socket goes away.
     for h_card in state.open_cards() {
-        let _ = close_handle(&backends, &shares, &mut state, h_card, disposition::LEAVE);
+        let _ = close_handle(&backends, &mut state, h_card, disposition::LEAVE);
     }
     result
 }
@@ -473,7 +692,6 @@ fn handle_client(
 /// while other handles stay open.
 fn close_handle(
     backends: &SharedBackends,
-    shares: &CardShares,
     state: &mut ConnState,
     h_card: i32,
     disp: u32,
@@ -481,15 +699,19 @@ fn close_handle(
     let Some(idx) = state.forget_card(h_card) else {
         return Err(crate::error::SCARD_E_INVALID_HANDLE);
     };
+    // A destroyed card has nothing left to close.
+    let Some(reader) = backends.get(idx) else {
+        return Ok(());
+    };
     let last = {
-        let mut share = shares[idx].lock().unwrap();
+        let mut share = reader.share.lock().unwrap();
         if share.transaction_holder == Some(h_card) {
             share.transaction_holder = None;
         }
         share.open_handles = share.open_handles.saturating_sub(1);
         share.open_handles == 0
     };
-    let mut backend = backends[idx].lock().unwrap();
+    let mut backend = reader.backend.lock().unwrap();
     if last {
         backend.disconnect(disp)
     } else {
@@ -507,7 +729,6 @@ fn close_handle(
 fn serve_connection(
     mut stream: UnixStream,
     backends: &SharedBackends,
-    shares: &CardShares,
     sink: &Arc<Mutex<ConnSink>>,
     state: &mut ConnState,
 ) -> std::io::Result<()> {
@@ -580,16 +801,14 @@ fn serve_connection(
             Some(Command::EstablishContext) => establish(&mut stream, &body, state)?,
             Some(Command::ReleaseContext) => simple_ok(&mut stream, &body)?,
             Some(Command::GetReadersState) => readers_state(&mut stream, backends)?,
-            Some(Command::Connect) => connect(&mut stream, &body, state, backends, shares)?,
-            Some(Command::Reconnect) => reconnect(&mut stream, &body, state, backends, shares)?,
-            Some(Command::Disconnect) => disconnect(&mut stream, &body, state, backends, shares)?,
+            Some(Command::Connect) => connect(&mut stream, &body, state, backends)?,
+            Some(Command::Reconnect) => reconnect(&mut stream, &body, state, backends)?,
+            Some(Command::Disconnect) => disconnect(&mut stream, &body, state, backends)?,
             Some(Command::BeginTransaction) => {
-                begin_transaction(&mut stream, &body, state, shares)?
+                begin_transaction(&mut stream, &body, state, backends)?
             }
-            Some(Command::EndTransaction) => {
-                end_transaction(&mut stream, &body, state, backends, shares)?
-            }
-            Some(Command::Transmit) => transmit(&mut stream, &body, state, backends, shares)?,
+            Some(Command::EndTransaction) => end_transaction(&mut stream, &body, state, backends)?,
+            Some(Command::Transmit) => transmit(&mut stream, &body, state, backends)?,
             Some(Command::Status) => status(&mut stream, &body)?,
             Some(Command::Cancel) => cancel(&mut stream, &body)?,
             Some(Command::WaitReaderStateChange) => wait_reader_state(sink, backends)?,
@@ -652,9 +871,10 @@ fn establish(stream: &mut UnixStream, body: &[u8], state: &mut ConnState) -> std
 /// for event-driven clients — the same monotonic `event_counter`.
 fn build_reader_states(backends: &SharedBackends) -> Vec<ReaderState> {
     backends
-        .iter()
-        .map(|backend| {
-            let b = backend.lock().unwrap();
+        .live()
+        .into_iter()
+        .map(|(_, reader)| {
+            let b = reader.backend.lock().unwrap();
             let present = b.card_present();
             ReaderState {
                 reader_name: b.reader_name(),
@@ -691,14 +911,19 @@ fn readers_state(stream: &mut UnixStream, backends: &SharedBackends) -> std::io:
 /// falls back to it (the historical behavior — the one-card server never
 /// looked at the name); with several backends an unmatched name is a
 /// routing error surfaced as `SCARD_E_UNKNOWN_READER`.
-fn backend_for_reader(backends: &SharedBackends, sz_reader: &str) -> Option<usize> {
-    if let Some(idx) = backends
-        .iter()
-        .position(|b| b.lock().unwrap().reader_name() == sz_reader)
-    {
-        return Some(idx);
+fn backend_for_reader(backends: &SharedBackends, sz_reader: &str) -> Option<(usize, Reader)> {
+    if let Some(found) = backends.find(sz_reader) {
+        return Some(found);
     }
-    if backends.len() == 1 { Some(0) } else { None }
+    // The fallback is for the one-card server of old only: once readers
+    // come and go at runtime, a name that matches none (one just destroyed)
+    // must not reach whichever card is left.
+    if backends.ever_held() == 1 {
+        backends.get(0)
+    } else {
+        None
+    }
+    .map(|reader| (0, reader))
 }
 
 fn connect(
@@ -706,14 +931,13 @@ fn connect(
     body: &[u8],
     state: &mut ConnState,
     backends: &SharedBackends,
-    shares: &CardShares,
 ) -> std::io::Result<()> {
     let req = match ConnectStruct::from_bytes(body) {
         Some(r) => r,
         None => return reply_handle_rv(stream, -1, SCARD_E_INVALID_VALUE),
     };
     let mut resp = req.clone();
-    let Some(idx) = backend_for_reader(backends, &req.sz_reader) else {
+    let Some((idx, reader)) = backend_for_reader(backends, &req.sz_reader) else {
         trace::emit(
             trace::DEBUG,
             "tx",
@@ -726,7 +950,7 @@ fn connect(
     };
     // piggy#130: a removed card is a known reader with no card — refuse the
     // connect so the client's enumerate omits it (as pcscd would).
-    if !backends[idx].lock().unwrap().card_present() {
+    if !reader.backend.lock().unwrap().card_present() {
         trace::emit(
             trace::DEBUG,
             "tx",
@@ -740,9 +964,10 @@ fn connect(
     // pcscd powers a card up for its first handle only; a second client's
     // connect finds it powered, with its applet selection and PIN state as
     // the other client left them (piggy#320).
-    let mut share = shares[idx].lock().unwrap();
+    let mut share = reader.share.lock().unwrap();
     let powered = if share.open_handles == 0 {
-        backends[idx]
+        reader
+            .backend
             .lock()
             .unwrap()
             .connect(req.dw_share_mode, req.dw_preferred_protocols)
@@ -785,7 +1010,6 @@ fn reconnect(
     body: &[u8],
     state: &ConnState,
     backends: &SharedBackends,
-    shares: &CardShares,
 ) -> std::io::Result<()> {
     // reconnect_struct { i32 hCard; u32 dwShareMode; u32 dwPreferredProtocols;
     //                    u32 dwInitialization; u32 dwActiveProtocol; u32 rv }
@@ -796,12 +1020,15 @@ fn reconnect(
     let h_card = i32::from_le_bytes(body[0..4].try_into().unwrap());
     let (share_mode, preferred, initialization) = (r(4), r(8), r(12));
     let mut out = body.to_vec();
-    let idx = state.backend_of(h_card);
-    let backend = &backends[idx];
+    let Some(reader) = backends.get(state.backend_of(h_card)) else {
+        out[20..24].copy_from_slice(&SCARD_E_NO_SMARTCARD.to_le_bytes());
+        return reply(stream, &out);
+    };
+    let backend = &reader.backend;
     // The handle stays open across a reconnect, so the open-handle count
     // does not move. A sole handle re-powers the card as before; with other
     // handles open only a reset or unpower initialization touches it.
-    let sole = shares[idx].lock().unwrap().open_handles <= 1;
+    let sole = reader.share.lock().unwrap().open_handles <= 1;
     let result = if sole {
         backend.lock().unwrap().connect(share_mode, preferred)
     } else {
@@ -834,14 +1061,13 @@ fn disconnect(
     body: &[u8],
     state: &mut ConnState,
     backends: &SharedBackends,
-    shares: &CardShares,
 ) -> std::io::Result<()> {
     let req = HandleArgRv::from_bytes(body).unwrap_or(HandleArgRv {
         handle: -1,
         arg: disposition::LEAVE,
         rv: 0,
     });
-    let rv = match close_handle(backends, shares, state, req.handle, req.arg) {
+    let rv = match close_handle(backends, state, req.handle, req.arg) {
         Ok(()) => SCARD_S_SUCCESS,
         Err(code) => code,
     };
@@ -869,7 +1095,6 @@ fn transmit(
     body: &[u8],
     state: &ConnState,
     backends: &SharedBackends,
-    shares: &CardShares,
 ) -> std::io::Result<()> {
     let req = match TransmitStruct::from_bytes(body) {
         Some(r) => r,
@@ -885,21 +1110,31 @@ fn transmit(
     );
     trace::hexdump("apdu>", &apdu);
 
-    let idx = state.backend_of(req.h_card);
+    let reader = backends.get(state.backend_of(req.h_card));
     // While another handle holds the card's transaction, pcscd refuses
-    // this one's APDUs instead of interleaving them (piggy#320).
-    let result = if shares[idx].lock().unwrap().admits(req.h_card) {
-        transmit_waiting_for_touch(&backends[idx], &apdu, || peer_hung_up(stream))
-    } else {
-        trace::emit(
-            trace::DEBUG,
-            "tx",
-            &format!(
-                "TRANSMIT hCard={} -> sharing violation (another handle holds the transaction)",
-                req.h_card
-            ),
-        );
-        Err(crate::error::SCARD_E_SHARING_VIOLATION)
+    // this one's APDUs instead of interleaving them (piggy#320). A
+    // destroyed card is gone (piggy#382 item 6).
+    let result = match reader {
+        None => {
+            trace::emit(
+                trace::DEBUG,
+                "tx",
+                &format!("TRANSMIT hCard={} -> no card (destroyed)", req.h_card),
+            );
+            Err(SCARD_E_NO_SMARTCARD)
+        }
+        Some(reader) if !reader.share.lock().unwrap().admits(req.h_card) => {
+            trace::emit(
+                trace::DEBUG,
+                "tx",
+                &format!(
+                    "TRANSMIT hCard={} -> sharing violation (another handle holds the transaction)",
+                    req.h_card
+                ),
+            );
+            Err(crate::error::SCARD_E_SHARING_VIOLATION)
+        }
+        Some(reader) => transmit_waiting_for_touch(&reader.backend, &apdu, || peer_hung_up(stream)),
     };
     let active = state
         .card_protocols
@@ -1051,10 +1286,13 @@ fn begin_transaction(
     stream: &mut UnixStream,
     body: &[u8],
     state: &ConnState,
-    shares: &CardShares,
+    backends: &SharedBackends,
 ) -> std::io::Result<()> {
     let req = HandleRv::from_bytes(body).unwrap_or(HandleRv { handle: -1, rv: 0 });
-    let mut share = shares[state.backend_of(req.handle)].lock().unwrap();
+    let Some(reader) = backends.get(state.backend_of(req.handle)) else {
+        return reply_handle_rv(stream, req.handle, SCARD_E_NO_SMARTCARD);
+    };
+    let mut share = reader.share.lock().unwrap();
     let rv = if share.admits(req.handle) {
         share.transaction_holder = Some(req.handle);
         SCARD_S_SUCCESS
@@ -1070,18 +1308,24 @@ fn end_transaction(
     body: &[u8],
     state: &ConnState,
     backends: &SharedBackends,
-    shares: &CardShares,
 ) -> std::io::Result<()> {
     let req = HandleArgRv::from_bytes(body).unwrap_or(HandleArgRv {
         handle: -1,
         arg: disposition::LEAVE,
         rv: 0,
     });
-    let idx = state.backend_of(req.handle);
+    let Some(reader) = backends.get(state.backend_of(req.handle)) else {
+        let gone = HandleArgRv {
+            handle: req.handle,
+            arg: req.arg,
+            rv: SCARD_E_NO_SMARTCARD,
+        };
+        return reply(stream, &gone.to_bytes());
+    };
     // Only the holder's disposition reaches the card: a handle that holds no
     // transaction has none to end.
     let held = {
-        let mut share = shares[idx].lock().unwrap();
+        let mut share = reader.share.lock().unwrap();
         let held = share.transaction_holder == Some(req.handle);
         if held {
             share.transaction_holder = None;
@@ -1089,7 +1333,7 @@ fn end_transaction(
         held
     };
     if held {
-        backends[idx].lock().unwrap().end_transaction(req.arg);
+        reader.backend.lock().unwrap().end_transaction(req.arg);
     }
     reply(
         stream,

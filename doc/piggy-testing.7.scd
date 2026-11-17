@@ -128,6 +128,19 @@ key from a 32-byte seed, a self-signed certificate over it and the
 canonical CHUID; the fibby lines to count are _GA ED25519 9A -> 9000_.
 *just test-bats-conformance-agent-ed25519* drives the agent over it.
 
+Both builds' control socket also creates and destroys cards at runtime
+(piggy#382 item 6): *fibby ctl --socket* _PATH_ *create*
+[*alg=p256*|*alg=ed25519*] [*pin=*_default_|_never_|_once_|_always_]
+[*touch=*_default_|_never_|_always_|_cached_] _READER_ adds a card whose
+9A key, self-signed certificate and CHUID (a random GUID) are generated
+inside fibby, the key recorded as generated so it attests; *destroy*
+_READER_ wipes the card's secrets and objects and removes its reader, after
+which neither its name nor an open handle reaches any card. At most 16
+readers are live, pcsc-lite's cap; a name may not be reused while live.
+Every card fibby serves attests under the one attestation key fibby
+generated at start (*fibby ctl* *profile* reports the build). The agent
+lane above mints an Ed25519 card this way and signs with it.
+
 fibby stores the PIN and touch policy a key is generated or imported
 with and enforces it (piggy#303). A slot whose touch policy is _always_
 or _cached_ does not sign or do ECDH until the card is touched:

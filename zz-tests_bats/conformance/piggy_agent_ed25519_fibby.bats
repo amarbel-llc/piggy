@@ -133,6 +133,53 @@ function rust_piggy_agent_signs_with_an_ed25519_piv_key_on_yk5_7 { # @test
   }
 }
 
+# piggy#382 item 6: a card created at runtime over fibby's control socket,
+# its Ed25519 key and certificate generated inside fibby, is found by the
+# agent through its certificate, signs, and exports an attestation bundle.
+function a_runtime_created_ed25519_card_is_found_signs_and_attests { # @test
+  local ctl="$WORKDIR/ctl.sock" minted="piggy-test minted"
+  spawn_fibby --model yk5.7 --control-socket "$ctl"
+  # The blank card fibby starts with goes, so the minted one is the only card.
+  "$FIBBY_BIN" ctl --socket "$ctl" destroy "Virtual PCD piggy fibby 00 00" >/dev/null
+  run "$FIBBY_BIN" ctl --socket "$ctl" create alg=ed25519 "$minted"
+  [[ $status -eq 0 && $output == "ok $minted" ]] || {
+    echo "create failed (status $status): $output" >&2
+    return 1
+  }
+  _spawn_rust_agent
+  export SSH_AUTH_SOCK="$AGENT_SOCK"
+  _ed25519_identity
+
+  local ktype kdata _rest
+  read -r ktype kdata _rest <"$WORKDIR/id.pub"
+  printf 'piggy-test@fibby %s %s\n' "$ktype" "$kdata" >"$WORKDIR/allowed_signers"
+  echo "piggy-test: minted card" >"$WORKDIR/data"
+  run ssh-keygen -Y sign -f "$WORKDIR/id.pub" -U -n file "$WORKDIR/data"
+  [[ $status -eq 0 ]] || {
+    echo "sign with the minted key failed: $output" >&2
+    cat "$AGENT_LOG" >&2 || true
+    return 1
+  }
+  ssh-keygen -Y verify -f "$WORKDIR/allowed_signers" -I piggy-test@fibby \
+    -n file -s "$WORKDIR/data.sig" <"$WORKDIR/data" >/dev/null
+
+  run env PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" card export-attestation 9a --reader "$minted"
+  [[ $status -eq 0 ]] || {
+    echo "export-attestation of the minted key failed: $output" >&2
+    return 1
+  }
+  [[ $output == *"BEGIN CERTIFICATE"* ]] || {
+    echo "no certificate in the bundle: $output" >&2
+    return 1
+  }
+
+  run "$FIBBY_BIN" ctl --socket "$ctl" destroy "$minted"
+  [[ $status -eq 0 ]] || {
+    echo "destroy failed: $output" >&2
+    return 1
+  }
+}
+
 function an_ed25519_piv_key_does_not_sign_on_firmware_before_5_7 { # @test
   spawn_fibby --model yk5 --seed-slot-9a-ed25519 "$ED25519_SEED"
   _spawn_rust_agent

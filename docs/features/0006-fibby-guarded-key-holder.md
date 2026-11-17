@@ -385,6 +385,17 @@ as only firmware 5.7+ does on silicon. Its ATR and serials are
 uncaptured, borrowed from `yk5` until #133 records a real 5.7 card; a
 later phase may make `yk5.7` the holder's default once they are.
 
+The rest of phase (c) as built (piggy#382 items 3 to 6): every card
+secret (slot keys, PIN, PUK, management key, attestation scalar) is a
+`piggy-guard` allocation in both builds, and the holder starts
+non-dumpable with a zero core limit; the fibby binary generates one
+attestation key at start and every card it serves attests under it; and
+the control socket's `create [alg=…] [pin=…] [touch=…] <reader>` mints a
+card whose slot **9A** key, self-signed certificate and CHUID (random
+GUID) are generated inside fibby, while `destroy <reader>` wipes the
+card and removes its reader. Which slot a minted key goes in, and its PIN
+(the factory default today), are phase (d)'s to settle with `mint@piggy`.
+
 ### Phases
 
 | Phase | Content | Serves |
