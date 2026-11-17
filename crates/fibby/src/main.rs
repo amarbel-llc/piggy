@@ -448,9 +448,13 @@ fn make_backends(args: &Args) -> Result<Vec<SharedBackend>, String> {
     match args.backend.as_str() {
         "virtual" => {
             let model = Model::parse_arg(&args.model)?;
+            // FDR 0006 "Attestation" (piggy#382 item 5): one attestation key
+            // per fibby start, in guarded memory, issuing for every card.
+            let authority = Arc::new(fibby::attest::AttestationAuthority::generate());
             // The touch flags are global: they configure every virtual
             // card this fibby serves.
             let with_touch_flags = |mut card: VirtualCard| {
+                card.set_attestation_authority(authority.clone());
                 #[cfg(feature = "test-double")]
                 card.set_auto_touch(args.auto_touch);
                 card.set_require_select(args.require_select);

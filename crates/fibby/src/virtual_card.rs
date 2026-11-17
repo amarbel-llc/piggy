@@ -17,7 +17,8 @@
 //!   (a touch-`always`/`cached` slot waits for `fibby ctl touch`; see
 //!   `touch.rs`).
 //! - YubiKey GET METADATA (INS 0xF7) and ATTEST (INS 0xF9 — a certificate
-//!   signed by the card's own attestation key for keys generated on this
+//!   signed by the attestation key (the card's own, or the one the fibby
+//!   binary generated at start for all its cards) for keys generated on this
 //!   card, `6A80` for imported, seeded and empty slots; see `attest.rs`).
 //!
 //! The policy, metadata and attestation surface is the minimal cut of
@@ -402,10 +403,13 @@ pub struct VirtualCard {
     /// a key slot field then holds a P-256 scalar, and for `E0` an Ed25519
     /// seed (both 32 bytes).
     slot_algorithms: HashMap<u8, u8>,
-    /// This card's attestation key and its self-signed F9 certificate,
-    /// generated once at construction. Survives a factory reset, as the
-    /// factory key does on hardware.
-    attestation: AttestationAuthority,
+    /// The attestation key and its self-signed F9 certificate. A card made
+    /// on its own generates one at construction; the fibby binary gives
+    /// every card it serves the one key it generated at start
+    /// ([`Self::set_attestation_authority`], FDR 0006 "Attestation",
+    /// piggy#382 item 5). Survives a factory reset, as the factory key
+    /// does on hardware.
+    attestation: Arc<AttestationAuthority>,
     /// Simulated touch for touch-policy slots. Shared with the connection
     /// threads waiting on it; see `touch.rs` for the locking.
     touch: Arc<TouchPad>,
@@ -870,7 +874,7 @@ impl VirtualCard {
             slot_policies: HashMap::new(),
             slot_origins: HashMap::new(),
             slot_algorithms: HashMap::new(),
-            attestation: AttestationAuthority::generate(),
+            attestation: Arc::new(AttestationAuthority::generate()),
             touch: Arc::new(TouchPad::default()),
             touch_timeout: touch::DEFAULT_TOUCH_TIMEOUT,
             #[cfg(feature = "test-double")]
@@ -1123,6 +1127,14 @@ impl VirtualCard {
                 .as_bytes()
                 .to_vec(),
         )
+    }
+
+    /// Attest with `authority` instead of the key this card generated: the
+    /// fibby binary hands every card the one attestation key it generated
+    /// at start, so a verifier sees one holder, and phase (f) blesses one
+    /// key per start.
+    pub fn set_attestation_authority(&mut self, authority: Arc<AttestationAuthority>) {
+        self.attestation = authority;
     }
 
     /// Override the reader name this card's backend advertises. Needed by
@@ -6210,6 +6222,40 @@ mod tests {
             policy_bytes_as_piggy_piv_reads_them(&resp[..resp.len() - 2]),
             [0x00, 0x00]
         );
+    }
+
+    /// piggy#382 item 5: cards given one authority attest under it, so a
+    /// holder's cards chain to the one key it generated at start.
+    #[test]
+    fn cards_given_one_attestation_authority_share_its_f9_and_sign_under_it() {
+        let authority = Arc::new(AttestationAuthority::generate());
+        let mut a = card_with_generated_key(0x9A, None, None);
+        let mut b = card_with_generated_key(0x9C, None, None);
+        a.set_attestation_authority(authority.clone());
+        b.set_attestation_authority(authority.clone());
+        let f9 = read_attestation_cert(&mut a);
+        assert_eq!(f9, authority.cert_der(), "a serves the process key's F9");
+        assert_eq!(f9, read_attestation_cert(&mut b), "b serves the same F9");
+        use der::{Decode, Encode};
+        use p256::ecdsa::signature::Verifier;
+        let issuer = x509_cert::Certificate::from_der(&f9).unwrap();
+        let issuer_key = p256::ecdsa::VerifyingKey::from_sec1_bytes(
+            issuer
+                .tbs_certificate
+                .subject_public_key_info
+                .subject_public_key
+                .raw_bytes(),
+        )
+        .unwrap();
+        for (card, slot) in [(&mut a, 0x9A), (&mut b, 0x9C)] {
+            let resp = card.transmit(&attest_apdu(slot)).unwrap();
+            assert!(is_success(&resp), "slot {slot:02X} attests");
+            let cert = x509_cert::Certificate::from_der(&resp[..resp.len() - 2]).unwrap();
+            let signature = p256::ecdsa::Signature::from_der(cert.signature.raw_bytes()).unwrap();
+            issuer_key
+                .verify(&cert.tbs_certificate.to_der().unwrap(), &signature)
+                .unwrap_or_else(|e| panic!("slot {slot:02X} not signed by the shared key: {e}"));
+        }
     }
 
     #[test]
