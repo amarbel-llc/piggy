@@ -22,6 +22,7 @@ holding the rest in your head.
 | `virtual_card.rs` | in-Rust PIV card. **Stub today**: SELECT→9000, else 6D00. Real applet is phase-5. |
 | `touch.rs` | simulated touch for touch-policy slots: `fibby ctl touch <reader>` grants one, `--touch-timeout-ms` bounds the wait, `--auto-touch` skips it. |
 | `attest.rs` | the per-card attestation key, its F9 certificate, and the slot attestations INS 0xF9 returns. |
+| `secret.rs` | a card secret (slot key, PIN, PUK, management key, attestation key) in a `piggy-guard` allocation, readable for one operation at a time. |
 | `hardware_proxy.rs` | forwards to a real pcscd/YubiKey via the `pcsc` crate. Feature `hardware-proxy`. The validation oracle. |
 | `server.rs` | listen loop + per-command dispatch + handle table. |
 

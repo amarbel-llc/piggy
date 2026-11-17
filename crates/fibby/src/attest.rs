@@ -9,9 +9,9 @@
 //!
 //! fibby generates one P-256 attestation key per card at construction and
 //! a self-signed certificate for it, served as the F9 certificate object.
-//! Phase (c) moves the key into guarded memory and phase (f) has the
-//! operator's 9C key bless it; the shape (one key per start, policy in
-//! the per-slot certificate) is the one those phases keep.
+//! The key lives in guarded memory (phase (c), piggy#382 item 3); phase (f)
+//! has the operator's 9C key bless it; the shape (one key per start,
+//! policy in the per-slot certificate) is the one those phases keep.
 
 use std::str::FromStr;
 
@@ -27,6 +27,9 @@ use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::time::{Time, Validity};
 
+use zeroize::Zeroizing;
+
+use crate::secret::Secret;
 use crate::virtual_card::{SlotPublicKey, push_ber_len};
 
 const OID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
@@ -56,9 +59,12 @@ pub const OID_YK_POLICY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.
 /// every slot attestation.
 const ATTESTATION_SUBJECT: &str = "CN=fibby attestation";
 
-/// One card's attestation key and its self-signed F9 certificate.
+/// One card's attestation key and its self-signed F9 certificate. The key's
+/// scalar is held in guarded memory (`secret.rs`, piggy#382 item 3); a
+/// `SigningKey`, which zeroizes itself on drop, exists only while one
+/// certificate is signed.
 pub struct AttestationAuthority {
-    signing_key: SigningKey,
+    scalar: Secret,
     name: Name,
     cert_der: Vec<u8>,
 }
@@ -91,11 +97,18 @@ impl AttestationAuthority {
             &SlotPublicKey::P256(point.as_bytes().to_vec()),
             Some(vec![ca]),
         );
+        let scalar = Secret::new(&Zeroizing::new(signing_key.to_bytes()));
         AttestationAuthority {
-            signing_key,
+            scalar,
             name,
             cert_der,
         }
+    }
+
+    /// The attestation key, rebuilt from its guarded scalar for one use.
+    fn signing_key(&self) -> SigningKey {
+        SigningKey::from_slice(self.scalar.array::<32>().as_slice())
+            .expect("the guarded attestation scalar is a valid P-256 key")
     }
 
     /// The attestation key's self-signed certificate, DER.
@@ -129,7 +142,7 @@ impl AttestationAuthority {
             octet_string_extension(OID_YK_POLICY, &policy),
         ];
         issue_certificate(
-            &Issuer::P256(&self.signing_key),
+            &Issuer::P256(&self.signing_key()),
             &self.name,
             &subject,
             // Any positive serial will do; the slot id keeps the four slot

@@ -5079,8 +5079,12 @@ explore-fdr0006-c BIN_DIR="":
     ctl="$dir/ctl.sock"
     "$holder" --socket "$dir/pcscd.comm" --control-socket "$ctl" --card "piggy-test holder" \
       >"$dir/holder.log" 2>&1 &
-    pids+=($!)
+    holder_pid=$!
+    pids+=($holder_pid)
     for _ in $(seq 1 50); do [[ -S $ctl ]] && break; sleep 0.1; done
+    # proc(5): a non-dumpable process's /proc/<pid> files belong to root.
+    echo "# holder /proc/$holder_pid/environ owner: $(stat -c %U "/proc/$holder_pid/environ") (root = non-dumpable)"
+    echo "# holder core limit: $(awk '/^Max core file size/ {print $5}' "/proc/$holder_pid/limits")"
     echo "# A holder is serving $dir/pcscd.comm (control socket $ctl)."
     echo "# Try: \"\$FIBBY\" ctl --socket \"\$FIBBY_CTL\" profile | list | fault * 6982 'piggy-test holder'"
     echo "#      \"\$FIBBY\" --help; \"\$FIBBY_TEST_DOUBLE\" --help; cat \"$dir/holder.log\""

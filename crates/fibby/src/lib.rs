@@ -27,6 +27,7 @@ pub mod backend;
 pub mod error;
 pub mod frame;
 pub mod proto;
+pub mod secret;
 pub mod server;
 pub mod touch;
 pub mod trace;

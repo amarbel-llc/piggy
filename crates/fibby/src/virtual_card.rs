@@ -34,8 +34,10 @@ use crate::apdu;
 use crate::attest::AttestationAuthority;
 use crate::backend::{Backend, ScardResult, TransmitOutcome};
 use crate::proto::protocol;
+use crate::secret::Secret;
 use crate::touch::{self, TouchPad, TouchPass, TouchWait};
 use crate::trace;
+use zeroize::Zeroizing;
 
 /// YubiKey 4 firmware 4.3.5 ATR, captured against real silicon on
 /// 2026-05-31 (the wet-env validation pass — see
@@ -265,8 +267,9 @@ pub struct VirtualCard {
     /// stored as 8 bytes; YubiKey factory default is `"123456"` padded
     /// with 0xFF to the full 8-byte length (`31 32 33 34 35 36 FF FF`).
     /// pivy-tool's captures use this default, so VirtualCard byte-
-    /// matches successful VERIFYs out of the box.
-    pin: Vec<u8>,
+    /// matches successful VERIFYs out of the box. Guarded, as every card
+    /// secret is (`secret.rs`).
+    pin: Secret,
     /// Number of remaining VERIFY attempts. Reset to 3 on a successful
     /// verification; decremented on a wrong-PIN attempt; PIN becomes
     /// permanently blocked at 0 (real silicon needs PUK to unblock,
@@ -301,7 +304,7 @@ pub struct VirtualCard {
     /// PUK rotation. fibby does not yet model RESET RETRY (PUK-driven PIN
     /// unblock); the PUK exists so a full-setup provision (piggy#194) can
     /// rotate it off the factory default.
-    puk: Vec<u8>,
+    puk: Secret,
     /// Number of remaining PUK CHANGE attempts. Reset to 3 on a
     /// successful PUK change; decremented on a wrong-PUK attempt; blocks
     /// at 0. Mirrors `pin_retries`.
@@ -314,7 +317,8 @@ pub struct VirtualCard {
     /// implicitly by [`Self::seed_rfc6979_slot_9a_cert`] which seeds the
     /// scalar matching the canonical slot-9A cert. Empty (`6A 88` to GA)
     /// until a future generate-asymmetric branch lands for production runs.
-    slot_9a_priv: Option<[u8; 32]>,
+    /// This and the three slot fields below are guarded (`secret.rs`).
+    slot_9a_priv: Option<Secret>,
     /// Raw P-256 scalar (big-endian) installed in slot 9D, or `None`
     /// if no key is present. Mirrors real silicon's PIV state: a slot
     /// can be either populated (key + optional cert) or empty
@@ -323,7 +327,7 @@ pub struct VirtualCard {
     /// GA ECDH responses are byte-deterministic across captures.
     /// Production VirtualCard runs always have this `None` until a
     /// future generate-asymmetric branch lands.
-    slot_9d_priv: Option<[u8; 32]>,
+    slot_9d_priv: Option<Secret>,
     /// Raw P-256 scalar (big-endian) installed in slot 9C (Digital
     /// Signature), or `None` if no key is present. The signature slot
     /// with PIV PIN policy **"always"**: GA ECDSA requests (INS 0x87,
@@ -333,7 +337,7 @@ pub struct VirtualCard {
     /// [`Self::sign_slot`]. Set via [`Self::seed_slot_9c_priv`], or
     /// implicitly by [`Self::seed_fibby_slot_9c_cert`]. Empty (`6A 88` to
     /// GA) until seeded.
-    slot_9c_priv: Option<[u8; 32]>,
+    slot_9c_priv: Option<Secret>,
     /// Raw P-256 scalar (big-endian) installed in slot 9E (Card
     /// Authentication), or `None` if no key is present. This is the
     /// **PIN-never** slot: GA ECDSA requests (INS 0x87, P1=0x11, P2=0x9E)
@@ -342,15 +346,15 @@ pub struct VirtualCard {
     /// agent -K` authenticates the card with (piggy#143). Set via
     /// [`Self::seed_slot_9e_priv`], or implicitly by
     /// [`Self::seed_rfc6979_slot_9e_cert`]. Empty (`6A 88` to GA) until seeded.
-    slot_9e_priv: Option<[u8; 32]>,
+    slot_9e_priv: Option<Secret>,
     /// 24-byte TripleDES management key. Defaults to YubiKey's factory
     /// constant `01 02 03 04 05 06 07 08 01 02 03 04 05 06 07 08 01
     /// 02 03 04 05 06 07 08` — the same value our throwaway captures
     /// pin against. Gated by INS 0x87 P1=0x03 P2=0x9B challenge-
     /// response (SP 800-73-4 §3.2.4). Override via
     /// [`Self::seed_mgmt_key`] for tests that capture against a
-    /// rotated mgmt-key.
-    mgmt_key: [u8; 24],
+    /// rotated mgmt-key. Guarded (`secret.rs`).
+    mgmt_key: Secret,
     /// Witness bytes the mgmt-key auth's phase-1 (`7C 02 81 00`)
     /// returns to the client. Real silicon picks 8 random bytes per
     /// session; for byte-deterministic replay (piggy#134's pattern)
@@ -845,18 +849,18 @@ impl VirtualCard {
             selected_otp: false,
             serial_override: None,
             data_objects: HashMap::new(),
-            pin: DEFAULT_PIN.to_vec(),
+            pin: Secret::new(DEFAULT_PIN),
             pin_retries: DEFAULT_PIN_RETRIES,
             pin_verified: false,
             command_since_verify: false,
             require_select: false,
-            puk: DEFAULT_PUK.to_vec(),
+            puk: Secret::new(DEFAULT_PUK),
             puk_retries: DEFAULT_PUK_RETRIES,
             slot_9a_priv: None,
             slot_9d_priv: None,
             slot_9c_priv: None,
             slot_9e_priv: None,
-            mgmt_key: DEFAULT_MGMT_KEY,
+            mgmt_key: Secret::new(&DEFAULT_MGMT_KEY),
             pending_mgmt_witness: None,
             mgmt_authenticated: false,
             #[cfg(feature = "test-double")]
@@ -893,15 +897,46 @@ impl VirtualCard {
             .unwrap_or_else(|| self.model.otp_serial())
     }
 
-    /// The key in `slot`, if it is a slot VirtualCard models and holds one.
-    fn slot_priv(&self, slot: u8) -> Option<[u8; 32]> {
+    /// A zeroizing copy of the key in `slot`, for one operation, if it is a
+    /// slot VirtualCard models and holds one.
+    fn slot_priv(&self, slot: u8) -> Option<Zeroizing<[u8; 32]>> {
+        let guarded = match slot {
+            0x9A => &self.slot_9a_priv,
+            0x9C => &self.slot_9c_priv,
+            0x9D => &self.slot_9d_priv,
+            0x9E => &self.slot_9e_priv,
+            _ => return None,
+        };
+        guarded.as_ref().map(Secret::array)
+    }
+
+    /// The key slot field for `slot`. Panics on any other slot.
+    fn slot_field(&mut self, slot: u8) -> &mut Option<Secret> {
         match slot {
-            0x9A => self.slot_9a_priv,
-            0x9C => self.slot_9c_priv,
-            0x9D => self.slot_9d_priv,
-            0x9E => self.slot_9e_priv,
-            _ => None,
+            0x9A => &mut self.slot_9a_priv,
+            0x9C => &mut self.slot_9c_priv,
+            0x9D => &mut self.slot_9d_priv,
+            0x9E => &mut self.slot_9e_priv,
+            _ => unreachable!("slot {slot:#04x} is not a key slot"),
         }
+    }
+
+    /// Test access to the guarded secrets, as copies.
+    #[cfg(all(test, feature = "test-double"))]
+    fn slot_private_copy(&self, slot: u8) -> Option<[u8; 32]> {
+        self.slot_priv(slot).map(|k| *k)
+    }
+    #[cfg(all(test, feature = "test-double"))]
+    fn pin_bytes(&self) -> Vec<u8> {
+        self.pin.with(<[u8]>::to_vec)
+    }
+    #[cfg(all(test, feature = "test-double"))]
+    fn puk_bytes(&self) -> Vec<u8> {
+        self.puk.with(<[u8]>::to_vec)
+    }
+    #[cfg(all(test, feature = "test-double"))]
+    fn mgmt_key_bytes(&self) -> [u8; 24] {
+        *self.mgmt_key.array()
     }
 
     /// The PIV algorithm of `slot`'s key ([`algorithm`]); P-256 unless the
@@ -935,7 +970,7 @@ impl VirtualCard {
         &mut self,
         slot: u8,
         alg: u8,
-        private: [u8; 32],
+        private: &[u8; 32],
         policy: [u8; 2],
         origin: KeyOrigin,
     ) {
@@ -945,14 +980,8 @@ impl VirtualCard {
         self.slot_origins.insert(slot, origin);
     }
 
-    fn set_slot_private(&mut self, slot: u8, private: [u8; 32]) {
-        match slot {
-            0x9A => self.slot_9a_priv = Some(private),
-            0x9C => self.slot_9c_priv = Some(private),
-            0x9D => self.slot_9d_priv = Some(private),
-            0x9E => self.slot_9e_priv = Some(private),
-            _ => unreachable!("set_slot_private: slot {slot:#04x} is not a key slot"),
-        }
+    fn set_slot_private(&mut self, slot: u8, private: &[u8; 32]) {
+        *self.slot_field(slot) = Some(Secret::new(private));
     }
 
     /// A seeded key replaces whatever the slot held: it carries no
@@ -1166,7 +1195,7 @@ impl VirtualCard {
     /// tests that capture against a rotated mgmt-key; the default is
     /// the YubiKey factory constant.
     pub fn seed_mgmt_key(&mut self, key: [u8; 24]) {
-        self.mgmt_key = key;
+        self.mgmt_key = Secret::new(&key);
     }
 
     /// Install the canonical fibby slot 9A test cert under PIV tag
@@ -1302,9 +1331,9 @@ impl VirtualCard {
             !pin.is_empty() && pin.len() <= 8 && pin.is_ascii(),
             "seed_pin: want 1..=8 ASCII chars"
         );
-        let mut padded = pin.as_bytes().to_vec();
+        let mut padded = Zeroizing::new(pin.as_bytes().to_vec());
         padded.resize(8, 0xFF);
-        self.pin = padded;
+        self.pin = Secret::new(&padded);
     }
 
     /// Start the PIN retry counter below the factory default of 3
@@ -1353,7 +1382,7 @@ impl VirtualCard {
     /// real GENERATE / import flow would require, so reserve it for test
     /// scaffolding (or the CLI seed flag, piggy#135).
     pub fn seed_slot_9a_priv(&mut self, scalar: [u8; 32]) {
-        self.slot_9a_priv = Some(scalar);
+        self.set_slot_private(0x9A, &scalar);
         self.forget_slot_provenance(0x9A);
     }
 
@@ -1369,7 +1398,7 @@ impl VirtualCard {
     /// into a throwaway YubiKey and into VirtualCard, so the wire
     /// capture matches VirtualCard's response byte-for-byte.
     pub fn seed_slot_9d_priv(&mut self, scalar: [u8; 32]) {
-        self.slot_9d_priv = Some(scalar);
+        self.set_slot_private(0x9D, &scalar);
         self.forget_slot_provenance(0x9D);
     }
 
@@ -1379,7 +1408,7 @@ impl VirtualCard {
     /// RFC 6979 deterministic ECDSA, consuming the PIN verification each
     /// time (PIN-always policy). Mirrors [`Self::seed_slot_9a_priv`].
     pub fn seed_slot_9c_priv(&mut self, scalar: [u8; 32]) {
-        self.slot_9c_priv = Some(scalar);
+        self.set_slot_private(0x9C, &scalar);
         self.forget_slot_provenance(0x9C);
     }
 
@@ -1390,7 +1419,7 @@ impl VirtualCard {
     /// since 9E is the PIN-never Card Authentication slot (piggy#143).
     /// Mirrors [`Self::seed_slot_9a_priv`].
     pub fn seed_slot_9e_priv(&mut self, scalar: [u8; 32]) {
-        self.slot_9e_priv = Some(scalar);
+        self.set_slot_private(0x9E, &scalar);
         self.forget_slot_provenance(0x9E);
     }
 
@@ -1410,7 +1439,7 @@ impl VirtualCard {
             0x9E => TAG_SLOT_9E_CERT,
             _ => panic!("seed_slot_ed25519: slot {slot:#04x} is not a key slot"),
         };
-        self.set_slot_private(slot, seed);
+        self.set_slot_private(slot, &seed);
         self.forget_slot_provenance(slot);
         self.slot_algorithms.insert(slot, algorithm::ED25519);
         let cert = crate::attest::self_signed_ed25519_certificate(
@@ -1967,7 +1996,7 @@ impl VirtualCard {
                     trace::emit(trace::DEBUG, "vcard", "VERIFY -> 6983 (blocked)");
                     return sw(0x69, 0x83);
                 }
-                if pin == self.pin.as_slice() {
+                if self.pin.equals(pin) {
                     self.pin_retries = DEFAULT_PIN_RETRIES;
                     self.pin_verified = true;
                     self.command_since_verify = false;
@@ -2096,7 +2125,8 @@ impl VirtualCard {
             };
             // Real PIV mgmt-key auth: client encrypts the card-supplied
             // witness with the mgmt-key; card decrypts and compares.
-            let cipher = des::TdesEde3::new(&self.mgmt_key.into());
+            let key = self.mgmt_key.array::<24>();
+            let cipher = des::TdesEde3::new(&(*key).into());
             let mut block = enc;
             cipher.decrypt_block((&mut block).into());
             if block == witness {
@@ -2162,7 +2192,7 @@ impl VirtualCard {
             );
             return sw(0x69, 0x83);
         }
-        if old != current.as_slice() {
+        if !current.equals(old) {
             *retries -= 1;
             let left = *retries;
             trace::emit(
@@ -2172,7 +2202,7 @@ impl VirtualCard {
             );
             return sw(0x63, 0xC0 | left);
         }
-        let new_value = new.to_vec();
+        let new_value = Secret::new(new);
         if p2 == 0x80 {
             self.pin = new_value;
             self.pin_retries = DEFAULT_PIN_RETRIES;
@@ -2220,7 +2250,7 @@ impl VirtualCard {
             );
             return sw(0x69, 0x83);
         }
-        if puk != self.puk.as_slice() {
+        if !self.puk.equals(puk) {
             self.puk_retries -= 1;
             let left = self.puk_retries;
             trace::emit(
@@ -2230,7 +2260,7 @@ impl VirtualCard {
             );
             return sw(0x63, 0xC0 | left);
         }
-        self.pin = new_pin.to_vec();
+        self.pin = Secret::new(new_pin);
         self.pin_retries = DEFAULT_PIN_RETRIES;
         self.puk_retries = DEFAULT_PUK_RETRIES;
         // A power-cycle's worth of PIN-verified state is not granted by a
@@ -2278,11 +2308,11 @@ impl VirtualCard {
         self.slot_algorithms.clear();
         self.touch.clear_cache();
         self.data_objects.clear();
-        self.pin = DEFAULT_PIN.to_vec();
+        self.pin = Secret::new(DEFAULT_PIN);
         self.pin_retries = DEFAULT_PIN_RETRIES;
-        self.puk = DEFAULT_PUK.to_vec();
+        self.puk = Secret::new(DEFAULT_PUK);
         self.puk_retries = DEFAULT_PUK_RETRIES;
-        self.mgmt_key = DEFAULT_MGMT_KEY;
+        self.mgmt_key = Secret::new(&DEFAULT_MGMT_KEY);
         self.pin_verified = false;
         trace::emit(
             trace::DEBUG,
@@ -2323,8 +2353,7 @@ impl VirtualCard {
             );
             return sw(0x6A, 0x80);
         }
-        let key: [u8; 24] = body[3..].try_into().expect("checked len == 27");
-        self.mgmt_key = key;
+        self.mgmt_key = Secret::new(&body[3..]);
         trace::emit(trace::DEBUG, "vcard", "SET MGMT KEY -> 9000 (rotated)");
         sw(0x90, 0x00)
     }
@@ -2381,7 +2410,7 @@ impl VirtualCard {
             );
             return sw(0x69, 0x82);
         }
-        let scalar_bytes = match self.slot_9d_priv {
+        let scalar_bytes = match self.slot_priv(0x9D) {
             Some(s) => s,
             None => {
                 trace::emit(trace::DEBUG, "vcard", "GA ECDH 9D -> 6A88 (slot empty)");
@@ -2586,7 +2615,7 @@ impl VirtualCard {
                 .to_bytes()
                 .to_vec()
         } else {
-            let signing_key = match SigningKey::from_slice(&private) {
+            let signing_key = match SigningKey::from_slice(private.as_slice()) {
                 Ok(k) => k,
                 Err(_) => {
                     trace::emit(
@@ -2767,7 +2796,7 @@ impl VirtualCard {
         // Pick the key: a pinned override for reproducibility, else a fresh
         // random one. An Ed25519 key is any 32-byte seed; a P-256 scalar
         // must be a valid key, which deriving its point checks.
-        let private: [u8; 32] = match self.generate_override(slot) {
+        let private: Zeroizing<[u8; 32]> = Zeroizing::new(match self.generate_override(slot) {
             Some(s) => s,
             None if ed25519 => {
                 let mut seed = [0u8; 32];
@@ -2781,8 +2810,8 @@ impl VirtualCard {
                     .try_into()
                     .expect("P-256 scalar is 32 bytes")
             }
-        };
-        if !ed25519 && SigningKey::from_slice(&private).is_err() {
+        });
+        if !ed25519 && SigningKey::from_slice(private.as_slice()).is_err() {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
@@ -2791,7 +2820,7 @@ impl VirtualCard {
             return sw(0x6A, 0x80);
         }
 
-        self.install_slot_key(slot, alg, private, policy, KeyOrigin::Generated);
+        self.install_slot_key(slot, alg, &private, policy, KeyOrigin::Generated);
         let public = self
             .slot_public_key(slot)
             .expect("the key just installed has a public half");
@@ -2895,7 +2924,7 @@ impl VirtualCard {
         self.install_slot_key(
             slot,
             algorithm::ECCP256,
-            scalar,
+            &scalar,
             policy,
             KeyOrigin::Imported,
         );
@@ -3369,7 +3398,7 @@ mod holder_tests {
         let mut apdu = vec![0x00, apdu::ins::IMPORT_ASYM, 0x11, 0x9A, 34, 0x06, 32];
         apdu.extend_from_slice(&[0x11; 32]);
         assert_eq!(c.transmit(&apdu).unwrap(), vec![0x6D, 0x00]);
-        assert_eq!(c.slot_9a_priv, None, "nothing was installed");
+        assert!(c.slot_9a_priv.is_none(), "nothing was installed");
     }
 
     /// Phase 1 of the management-key challenge: `00 87 03 9B 04 7C 02 81 00`.
@@ -4908,7 +4937,11 @@ mod tests {
             c.transmit(&import_apdu(0x9A, &RFC6979_SCALAR)).unwrap(),
             vec![0x90, 0x00]
         );
-        assert_eq!(c.slot_9a_priv, Some(RFC6979_SCALAR), "scalar installed");
+        assert_eq!(
+            c.slot_private_copy(0x9A),
+            Some(RFC6979_SCALAR),
+            "scalar installed"
+        );
         // The imported slot now signs (9A "once" — PIN-verify then sign).
         c.mark_pin_verified();
         let sig = c.transmit(&ga_sign_apdu(&[0x5A; 32])).unwrap();
@@ -4931,7 +4964,7 @@ mod tests {
             vec![0x90, 0x00]
         );
         assert_eq!(
-            c.slot_9a_priv,
+            c.slot_private_copy(0x9A),
             Some(RFC6979_SCALAR),
             "leading sign byte normalized away"
         );
@@ -4970,7 +5003,11 @@ mod tests {
         let point = extract_generate_point(&c.transmit(&generate_apdu(0x9D)).unwrap());
         let vk = VerifyingKey::from(&SigningKey::from_slice(&RFC6979_SCALAR).unwrap());
         assert_eq!(point, vk.to_encoded_point(false).as_bytes());
-        assert_eq!(c.slot_9d_priv, Some(RFC6979_SCALAR), "9D key installed");
+        assert_eq!(
+            c.slot_private_copy(0x9D),
+            Some(RFC6979_SCALAR),
+            "9D key installed"
+        );
     }
 
     /// The slot-9D EC key can ECDSA-sign (not just ECDH), so it can self-sign
@@ -5020,7 +5057,9 @@ mod tests {
         c.mgmt_authenticated = true;
 
         let p1 = extract_generate_point(&c.transmit(&generate_apdu(0x9A)).unwrap());
-        let stored = c.slot_9a_priv.expect("slot 9A populated by GENERATE");
+        let stored = c
+            .slot_private_copy(0x9A)
+            .expect("slot 9A populated by GENERATE");
         let vk = VerifyingKey::from(&SigningKey::from_slice(&stored).unwrap());
         assert_eq!(
             p1,
@@ -5102,7 +5141,7 @@ mod tests {
         assert_eq!(resp, vec![0x63, 0xC2], "wrong old PIN -> 63 C2 (2 left)");
         assert_eq!(c.pin_retries, 2);
         // The real PIN is untouched.
-        assert_eq!(c.pin, DEFAULT_PIN);
+        assert_eq!(c.pin_bytes(), DEFAULT_PIN);
     }
 
     #[test]
@@ -5115,7 +5154,7 @@ mod tests {
             vec![0x90, 0x00],
             "correct old PUK -> 9000"
         );
-        assert_eq!(c.puk, new.to_vec(), "PUK rotated");
+        assert_eq!(c.puk_bytes(), new.to_vec(), "PUK rotated");
     }
 
     /// The YubicoPIV RESET APDU: `00 FB 00 00` (no body).
@@ -5128,7 +5167,7 @@ mod tests {
         let mut c = VirtualCard::new();
         c.seed_rfc6979_slot_9a_cert(); // 9A key + cert + canonical CHUID
         c.seed_pin("999999"); // rotate PIN off the factory default
-        c.mgmt_key = [0xAB; 24]; // rotate mgmt-key off the factory default
+        c.seed_mgmt_key([0xAB; 24]); // rotate mgmt-key off the factory default
         c.seed_pin_puk_blocked();
         assert!(c.slot_9a_priv.is_some(), "precondition: 9A key present");
         assert!(!c.data_objects.is_empty(), "precondition: objects present");
@@ -5139,17 +5178,26 @@ mod tests {
             "RESET succeeds once both PIN and PUK are blocked"
         );
 
-        assert_eq!(c.slot_9a_priv, None, "9A key wiped");
-        assert_eq!(c.slot_9c_priv, None, "9C key wiped");
-        assert_eq!(c.slot_9d_priv, None, "9D key wiped");
-        assert_eq!(c.slot_9e_priv, None, "9E key wiped");
+        assert!(c.slot_9a_priv.is_none(), "9A key wiped");
+        assert!(c.slot_9c_priv.is_none(), "9C key wiped");
+        assert!(c.slot_9d_priv.is_none(), "9D key wiped");
+        assert!(c.slot_9e_priv.is_none(), "9E key wiped");
         assert!(c.data_objects.is_empty(), "all data objects wiped");
-        assert_eq!(c.pin, DEFAULT_PIN.to_vec(), "PIN back to factory default");
+        assert_eq!(
+            c.pin_bytes(),
+            DEFAULT_PIN.to_vec(),
+            "PIN back to factory default"
+        );
         assert_eq!(c.pin_retries, DEFAULT_PIN_RETRIES, "PIN counter restored");
-        assert_eq!(c.puk, DEFAULT_PUK.to_vec(), "PUK back to factory default");
+        assert_eq!(
+            c.puk_bytes(),
+            DEFAULT_PUK.to_vec(),
+            "PUK back to factory default"
+        );
         assert_eq!(c.puk_retries, DEFAULT_PUK_RETRIES, "PUK counter restored");
         assert_eq!(
-            c.mgmt_key, DEFAULT_MGMT_KEY,
+            c.mgmt_key_bytes(),
+            DEFAULT_MGMT_KEY,
             "mgmt-key back to factory default"
         );
     }
@@ -5215,7 +5263,7 @@ mod tests {
             vec![0x90, 0x00],
             "correct PUK resets the PIN -> 9000"
         );
-        assert_eq!(c.pin, new_pin.to_vec(), "PIN is the new value");
+        assert_eq!(c.pin_bytes(), new_pin.to_vec(), "PIN is the new value");
         assert_eq!(c.pin_retries, DEFAULT_PIN_RETRIES, "PIN counter unblocked");
         // The new PIN verifies.
         let mut v = vec![0x00, 0x20, 0x00, 0x80, 0x08];
@@ -5235,7 +5283,11 @@ mod tests {
         let resp = c.transmit(&reset_retry_apdu(&wrong_puk, &new_pin)).unwrap();
         assert_eq!(resp, vec![0x63, 0xC2], "wrong PUK -> 63 C2 (2 left)");
         assert_eq!(c.puk_retries, 2, "PUK counter decremented");
-        assert_eq!(c.pin, DEFAULT_PIN, "PIN untouched by a failed reset");
+        assert_eq!(
+            c.pin_bytes(),
+            DEFAULT_PIN,
+            "PIN untouched by a failed reset"
+        );
     }
 
     #[test]
@@ -5298,7 +5350,7 @@ mod tests {
             vec![0x90, 0x00],
             "SET MGMT KEY after mgmt-auth -> 9000"
         );
-        assert_eq!(c.mgmt_key, key, "mgmt key rotated to the new value");
+        assert_eq!(c.mgmt_key_bytes(), key, "mgmt key rotated to the new value");
     }
 
     #[test]
@@ -5419,7 +5471,7 @@ mod tests {
                 vec![0x6A, 0x80],
                 "pin={pin:?} touch={touch:?}"
             );
-            assert_eq!(c.slot_9a_priv, None, "no key was generated");
+            assert!(c.slot_9a_priv.is_none(), "no key was generated");
             assert!(c.slot_policies.is_empty() && c.slot_origins.is_empty());
         }
     }
@@ -5469,7 +5521,7 @@ mod tests {
             vec![0x6A, 0x80],
             "out-of-range PIN policy"
         );
-        assert_eq!(c.slot_9d_priv, None);
+        assert!(c.slot_9d_priv.is_none());
     }
 
     #[test]
@@ -6446,6 +6498,32 @@ mod tests {
         c.seed_pin_puk_blocked();
         assert!(is_success(&c.transmit(&factory_reset_apdu()).unwrap()));
         assert_eq!(c.slot_algorithm(0x9A), algorithm::ECCP256);
+    }
+
+    /// piggy#382 item 3: every card secret is a guarded allocation, left
+    /// out of core dumps (the advice this host's kernel honours; locking
+    /// depends on RLIMIT_MEMLOCK, so it is not asserted).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_card_secrets_are_held_in_guarded_memory() {
+        let mut c = VirtualCard::with_model(Model::Yk57);
+        authenticate_mgmt(&mut c);
+        assert!(is_success(&c.transmit(&generate_apdu(0x9A)).unwrap()));
+        assert!(is_success(
+            &c.transmit(&generate_ed25519_apdu(0x9C)).unwrap()
+        ));
+        for (what, secret) in [
+            ("9A key", c.slot_9a_priv.as_ref().unwrap()),
+            ("9C key", c.slot_9c_priv.as_ref().unwrap()),
+            ("PIN", &c.pin),
+            ("PUK", &c.puk),
+            ("management key", &c.mgmt_key),
+        ] {
+            assert!(
+                secret.protections().excluded_from_core_dumps,
+                "{what} is not in guarded memory"
+            );
+        }
     }
 
     #[test]

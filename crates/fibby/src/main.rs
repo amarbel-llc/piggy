@@ -275,6 +275,12 @@ fn main() {
         std::process::exit(2);
     }
 
+    // The holder keeps its secrets out of core files and ptrace as the
+    // agent does (piggy#382 item 3, FDR 0006 "Guarded memory"). The test
+    // double stays debuggable.
+    #[cfg(not(feature = "test-double"))]
+    harden_holder_process();
+
     if let Some(dir) = std::path::Path::new(&args.socket).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -309,6 +315,32 @@ fn main() {
         eprintln!("fibby: serve failed: {e}");
         std::process::exit(1);
     }
+}
+
+/// Non-dumpable and a zero core limit, each step reported; a step that
+/// fails is a warning, and the holder keeps running, as the agent does.
+#[cfg(not(feature = "test-double"))]
+fn harden_holder_process() {
+    let hardening = piggy_guard::harden_process();
+    let dumpable = match &hardening.non_dumpable {
+        Some(Ok(())) => "non-dumpable".to_string(),
+        Some(Err(e)) => format!("still dumpable ({e})"),
+        None => "dumpable flag unavailable on this platform".to_string(),
+    };
+    let core = match &hardening.core_limit_zero {
+        Ok(()) => "core limit 0".to_string(),
+        Err(e) => format!("core limit unchanged ({e})"),
+    };
+    let failed =
+        matches!(hardening.non_dumpable, Some(Err(_))) || hardening.core_limit_zero.is_err();
+    if failed {
+        eprintln!("fibby: warning: process hardening incomplete: {dumpable}, {core}");
+    }
+    trace::emit(
+        trace::INFO,
+        "main",
+        &format!("process hardening: {dumpable}, {core}"),
+    );
 }
 
 /// piggy#270: block SIGTERM and SIGINT in every thread and take them on a

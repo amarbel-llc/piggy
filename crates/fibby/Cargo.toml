@@ -97,3 +97,8 @@ const-oid = "0.9"
 # touch can tell its client hung up (piggy#314); `UnixStream::peek` is not
 # stable. Already in the lockfile (the piggy crate depends on it).
 libc = "0.2"
+# FDR 0006 phase (c) item 3 (piggy#382): slot keys, PIN, PUK, management key
+# and attestation key live in piggy-guard allocations (secret.rs); copies
+# made for one operation are `zeroize::Zeroizing`. Both already in the lock.
+piggy-guard = { path = "../piggy-guard" }
+zeroize = "1"

@@ -621,9 +621,11 @@ dependencies = [
  "libc",
  "p256",
  "pcsc",
+ "piggy-guard",
  "rand_core 0.6.4",
  "spki",
  "x509-cert",
+ "zeroize",
 ]
 
 [[package]]
