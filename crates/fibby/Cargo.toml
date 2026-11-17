@@ -84,6 +84,11 @@ rand_core = { version = "0.6", default-features = false, features = [
 # majors piggy-piv's cert_builder uses, so all four are already in the
 # lockfile; the ECDSA-SHA256 signature itself comes from `p256` above (its
 # `ecdsa` feature carries SHA-256), so no hash crate is added.
+# PIV Ed25519 (YubicoPIV algorithm E0, the yk5.7 model; FDR 0006 phase (c)
+# item 2, piggy#382): GENERATE, GENERAL AUTHENTICATE sign, and the Ed25519
+# SubjectPublicKeyInfo of an attestation. Already in the lockfile (ssh-key
+# pulls it); default features add no crate the lock does not hold.
+ed25519-dalek = "2.2"
 x509-cert = "0.2"
 der = "0.7"
 spki = "0.7"

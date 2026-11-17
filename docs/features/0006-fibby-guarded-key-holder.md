@@ -370,6 +370,21 @@ output built with it. A lint in the merge gate, modelled on
 test flag, and fibby reports its build profile so the holder unit can
 refuse the wrong binary.
 
+As built (piggy#382 item 1): the feature is `test-double`, and it is the
+cargo default, so every plain cargo build and the test lanes keep it.
+**The holder is the build without it**: nix `.#fibby-holder`, built with
+`--no-default-features`, which `fibby --build-profile` reports as
+`holder`. Nix `.#fibby` is the test double (`test-double`). The lint is
+`checks.lint-fibby-holder` (`just lint-fibby-holder`, part of `just
+lint`); piggy-testing(7) FIBBY describes both builds.
+
+The holder's default card model is `yk4`, the cargo default for every
+fibby (`--model` picks another). A holder that is to mint Ed25519 keys
+runs `--model yk5.7`, the only model that does algorithm `E0` (item 2),
+as only firmware 5.7+ does on silicon. Its ATR and serials are
+uncaptured, borrowed from `yk5` until #133 records a real 5.7 card; a
+later phase may make `yk5.7` the holder's default once they are.
+
 ### Phases
 
 | Phase | Content | Serves |
@@ -699,8 +714,12 @@ is scheduled, not before.
   needs a per-connection hook. Believed available, not read.
 - **How is the peer's cgroup read without a pid-reuse race?** A pidfd
   from the socket is the likely answer on recent kernels. Not verified.
-- **Does the agent's Ed25519 PIV path work end to end?** Phase (c) is
-  its first test.
+- **Does the agent's Ed25519 PIV path work end to end?** Yes, against
+  fibby (2026-11-17, piggy#382 item 2): `just
+  test-bats-conformance-agent-ed25519` lists an Ed25519 key seeded into
+  fibby's yk5.7 model as `ssh-ed25519`, signs through GENERAL
+  AUTHENTICATE algorithm `E0` and verifies the sshsig. Not yet run
+  against a real 5.7 card; fibby's yk5.7 bytes are uncaptured (#133).
 - **Per-operation latency through agent and fibby.** Unmeasured. Today
   the agent takes one global card lock, reconnects and re-verifies per
   operation (`session.rs:415-440`); fibby runs one thread per connection

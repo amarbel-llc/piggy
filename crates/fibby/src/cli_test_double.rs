@@ -30,6 +30,10 @@ pub const TEST_ONLY_FLAGS: &[&str] = &[
     "--seed-slot-9c-priv",
     "--seed-slot-9d-priv",
     "--seed-slot-9e-priv",
+    "--seed-slot-9a-ed25519",
+    "--seed-slot-9c-ed25519",
+    "--seed-slot-9d-ed25519",
+    "--seed-slot-9e-ed25519",
     "--generate-slot-9a-priv",
     "--generate-slot-9c-priv",
     "--generate-slot-9d-priv",
@@ -49,6 +53,8 @@ USAGE: fibby [--backend hardware --reader SUBSTR] [--auto-touch]\n\
              [--seed-pin ASCII] [--seed-pin-retries N] [--seed-pin-puk-blocked]\n\
              [--seed-slot-9a-priv HEX] [--seed-slot-9d-priv HEX]\n\
              [--seed-slot-9c-priv HEX] [--seed-slot-9e-priv HEX]\n\
+             [--seed-slot-9a-ed25519 HEX] [--seed-slot-9c-ed25519 HEX]\n\
+             [--seed-slot-9d-ed25519 HEX] [--seed-slot-9e-ed25519 HEX]\n\
              [--generate-slot-9a-priv HEX] [--generate-slot-9c-priv HEX]\n\
              [--generate-slot-9d-priv HEX]\n\
              [--seed-mgmt-key HEX] [--seed-mgmt-key-witness HEX]\n\
@@ -89,6 +95,13 @@ scalar; --seed-mgmt-key takes a 24-byte 3DES key;\n\
 --seed-mgmt-key-witness takes the 8-byte challenge witness. All accept\n\
 an optional 0x prefix and the `--flag=HEX` form. A slot flag applied\n\
 after a cert flag wins.\n\
+\n\
+--seed-slot-9a-ed25519 / -9c- / -9d- / -9e-ed25519 HEX install an\n\
+Ed25519 key (the 32-byte RFC 8032 seed, 64 hex chars) into that slot, with\n\
+a self-signed certificate over it (CN fibby-test-slot-<slot>-ed25519) and\n\
+the canonical CHUID. Signing with it (GENERAL AUTHENTICATE alg E0) needs\n\
+--model yk5.7, as Ed25519 needs firmware 5.7 on silicon. Applied after\n\
+the P-256 slot flags.\n\
 \n\
 --seed-chuid installs only the canonical CHUID (no key or cert), so\n\
 the card presents as initialized with empty slots — the starting\n\
@@ -155,6 +168,8 @@ pub struct SeedSpec {
     seed_slot_9d_priv: Option<[u8; 32]>,
     seed_slot_9c_priv: Option<[u8; 32]>,
     seed_slot_9e_priv: Option<[u8; 32]>,
+    /// `--seed-slot-<s>-ed25519`: Ed25519 seeds by slot, in flag order.
+    seed_slot_ed25519: Vec<(u8, [u8; 32])>,
     seed_mgmt_key: Option<[u8; 24]>,
     seed_mgmt_key_witness: Option<[u8; 8]>,
     /// Deterministic key material for on-card GENERATE ASYMMETRIC (INS 0x47),
@@ -243,6 +258,9 @@ impl SeedSpec {
         if let Some(s) = self.seed_slot_9e_priv {
             card.seed_slot_9e_priv(s);
         }
+        for &(slot, seed) in &self.seed_slot_ed25519 {
+            card.seed_slot_ed25519(slot, seed);
+        }
         // GENERATE overrides: make a subsequent on-card GENERATE for the
         // slot install this exact scalar instead of a random key.
         if let Some(s) = self.generate_slot_9a_priv {
@@ -323,6 +341,10 @@ impl FlagState {
             "--seed-slot-9c-priv" => seeds.seed_slot_9c_priv = Some(hex_flag(value, key)?),
             "--seed-slot-9d-priv" => seeds.seed_slot_9d_priv = Some(hex_flag(value, key)?),
             "--seed-slot-9e-priv" => seeds.seed_slot_9e_priv = Some(hex_flag(value, key)?),
+            "--seed-slot-9a-ed25519" => seeds.seed_slot_ed25519.push((0x9A, hex_flag(value, key)?)),
+            "--seed-slot-9c-ed25519" => seeds.seed_slot_ed25519.push((0x9C, hex_flag(value, key)?)),
+            "--seed-slot-9d-ed25519" => seeds.seed_slot_ed25519.push((0x9D, hex_flag(value, key)?)),
+            "--seed-slot-9e-ed25519" => seeds.seed_slot_ed25519.push((0x9E, hex_flag(value, key)?)),
             "--generate-slot-9a-priv" => seeds.generate_slot_9a_priv = Some(hex_flag(value, key)?),
             "--generate-slot-9c-priv" => seeds.generate_slot_9c_priv = Some(hex_flag(value, key)?),
             "--generate-slot-9d-priv" => seeds.generate_slot_9d_priv = Some(hex_flag(value, key)?),

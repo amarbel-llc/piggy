@@ -237,7 +237,7 @@ function pivy_agent_signs_and_verifies_via_seeded_fibby_slot_9a { # @test
 
   # Belt-and-suspenders: the signature must have come from fibby's slot-9A
   # GA ECDSA handler. The wire trace records the handler firing and
-  # returning 9000 (see virtual_card.rs::sign_ecdsa_slot).
+  # returning 9000 (see virtual_card.rs::sign_slot).
   grep -q "GA ECDSA 9A -> 9000" "$FIBBY_LOG" || {
     echo "no successful slot-9A GA ECDSA sign in fibby trace" >&2
     tail -80 "$FIBBY_LOG" >&2 || true
@@ -306,7 +306,7 @@ function pivy_agent_signs_and_verifies_via_seeded_fibby_slot_9c { # @test
   }
 
   # The signature must have come from fibby's slot-9C GA ECDSA handler
-  # (see virtual_card.rs::sign_ecdsa_slot, consume_pin = true).
+  # (see virtual_card.rs::sign_slot, consume_pin = true).
   grep -q "GA ECDSA 9C -> 9000" "$FIBBY_LOG" || {
     echo "no successful slot-9C GA ECDSA sign in fibby trace" >&2
     tail -80 "$FIBBY_LOG" >&2 || true

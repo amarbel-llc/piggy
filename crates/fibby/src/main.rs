@@ -194,7 +194,7 @@ fn print_help() {
         "fibby — pure-Rust virtual PIV card over the pcsc-lite protocol\n\
          build profile: {profile}\n\
          \n\
-         USAGE: fibby [--socket PATH] [--backend virtual] [--model yk4|yk5]\n\
+         USAGE: fibby [--socket PATH] [--backend virtual] [--model yk4|yk5|yk5.7]\n\
                       [--serial N] [--control-socket PATH]\n\
                       [--touch-timeout-ms MILLIS] [--require-select]\n\
                       [--card NAME]…\n\
@@ -208,6 +208,8 @@ fn print_help() {
          \n\
          --model selects the virtual-card hardware profile (ATR + advertised\n\
          firmware version). Default: yk4 (the wet-env-verified profile).\n\
+         yk5.7 is UNCAPTURED (yk5's placeholder ATR, firmware 5.7.1; #133)\n\
+         and the only model that does Ed25519 (algorithm E0).\n\
          \n\
          --serial N replaces the serial every virtual card reports (a whole\n\
          number); without it yk5 reports the serial captured from a physical\n\

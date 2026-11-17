@@ -10,7 +10,8 @@
 //! - VERIFY PIN (with retry counter + blocked state).
 //! - GENERAL AUTHENTICATE: ECDH on slot 9D (alg 0x11; the piggy decrypt
 //!   path), ECDSA sign on slot 9A (alg 0x11; the SSH-auth path, RFC 6979
-//!   deterministic), and the 3DES mgmt-key challenge-response (alg 0x03).
+//!   deterministic), Ed25519 sign on 9A/9C/9D/9E (alg 0xE0, the yk5.7
+//!   model only), and the 3DES mgmt-key challenge-response (alg 0x03).
 //! - GENERATE / IMPORT ASYMMETRIC with the YubicoPIV `AA`/`AB` PIN and
 //!   touch policy tags, stored per slot and enforced on sign and ECDH
 //!   (a touch-`always`/`cached` slot waits for `fibby ctl touch`; see
@@ -91,10 +92,11 @@ const CANONICAL_REAL_CARD_PIV_FCI: &[u8] = &[
 ///   Fixtures at `crates/fibby/tests/fixtures/captures/yubikey/`.
 /// - `Yk5` — placeholder ATR ported from VirtualCard's original
 ///   constant. Real-card capture pending; see #128.
-///
-/// `Yk57` (YubiKey 5.7+) is intentionally **not** an enum variant
-/// yet — we'd have nothing real to back it with. Add the variant
-/// once a 5.7 ATR has been captured.
+/// - `Yk57` — **UNCAPTURED**: YubiKey 5.7+ firmware, the first that does
+///   PIV Ed25519 (algorithm `E0`). Nothing real backs it yet: it reuses
+///   `Yk5`'s placeholder ATR, FCI and serials and advertises firmware
+///   5.7.1. Added for FDR 0006 phase (c) (piggy#382) on the operator's
+///   ruling; replace its bytes when #133 captures a real 5.7 card (#128).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Model {
     /// YubiKey 4 / NEO firmware family. Default — the only wet-env-
@@ -106,6 +108,11 @@ pub enum Model {
     /// not a captured one; behavior bytes diverge from real silicon
     /// until a capture lands.
     Yk5,
+    /// YubiKey 5.7+ family, uncaptured (see above): the only model that
+    /// accepts algorithm `E0` (Ed25519) in GENERATE and GENERAL
+    /// AUTHENTICATE. `Yk4` and `Yk5` answer `6A80` to it, as silicon
+    /// before 5.7 does.
+    Yk57,
 }
 
 impl Model {
@@ -113,8 +120,15 @@ impl Model {
     pub fn atr(self) -> &'static [u8] {
         match self {
             Model::Yk4 => YK4_ATR,
-            Model::Yk5 => YK5_ATR,
+            // UNCAPTURED for Yk57: Yk5's placeholder (#133, #128).
+            Model::Yk5 | Model::Yk57 => YK5_ATR,
         }
+    }
+
+    /// Whether this firmware does PIV Ed25519 (YubicoPIV algorithm `E0`,
+    /// firmware 5.7+).
+    pub fn supports_ed25519(self) -> bool {
+        matches!(self, Model::Yk57)
     }
 
     /// Bytes returned in the PIV SELECT response (inside the 0x61
@@ -133,7 +147,8 @@ impl Model {
         match self {
             // Both YubiKey models emit the canonical 19-byte real-card
             // PIV FCI; verified wet-env on YK4 4.3.5 + YK5 5.2.7.
-            Model::Yk4 | Model::Yk5 => CANONICAL_REAL_CARD_PIV_FCI,
+            // Yk57 is uncaptured and assumed to match (#133).
+            Model::Yk4 | Model::Yk5 | Model::Yk57 => CANONICAL_REAL_CARD_PIV_FCI,
         }
     }
 
@@ -154,7 +169,8 @@ impl Model {
     pub fn serial(self) -> Option<[u8; 4]> {
         match self {
             Model::Yk4 => None,
-            Model::Yk5 => Some([0x00, 0xF2, 0xC2, 0xE6]),
+            // Yk57 borrows Yk5's capture until #133 records a 5.7 card.
+            Model::Yk5 | Model::Yk57 => Some([0x00, 0xF2, 0xC2, 0xE6]),
         }
     }
 
@@ -166,7 +182,7 @@ impl Model {
     pub fn otp_serial(self) -> [u8; 4] {
         match self {
             Model::Yk4 => [0x00, 0xBC, 0x61, 0x4E], // 12345678, synthetic
-            Model::Yk5 => [0x00, 0xF2, 0xC2, 0xE6], // matches its PIV serial
+            Model::Yk5 | Model::Yk57 => [0x00, 0xF2, 0xC2, 0xE6], // matches its PIV serial
         }
     }
 
@@ -187,6 +203,8 @@ impl Model {
         match self {
             Model::Yk4 => [0x04, 0x03, 0x05],
             Model::Yk5 => [0x05, 0x02, 0x07],
+            // UNCAPTURED: a 5.7 version chosen, not observed (#133).
+            Model::Yk57 => [0x05, 0x07, 0x01],
         }
     }
 
@@ -197,8 +215,9 @@ impl Model {
         match s {
             "yk4" => Ok(Model::Yk4),
             "yk5" => Ok(Model::Yk5),
+            "yk5.7" | "yk57" => Ok(Model::Yk57),
             other => Err(format!(
-                "unknown model {other:?} (want 'yk4' or 'yk5'; #128 tracks adding 'yk5.7')"
+                "unknown model {other:?} (want 'yk4', 'yk5' or 'yk5.7')"
             )),
         }
     }
@@ -311,7 +330,7 @@ pub struct VirtualCard {
     /// P1=0x11, P2=0x9C) sign the client-supplied prehash under RFC 6979
     /// deterministic ECDSA, but unlike slot 9A ("once") the PIN
     /// verification is *consumed* by each sign — see
-    /// [`Self::sign_ecdsa_slot`]. Set via [`Self::seed_slot_9c_priv`], or
+    /// [`Self::sign_slot`]. Set via [`Self::seed_slot_9c_priv`], or
     /// implicitly by [`Self::seed_fibby_slot_9c_cert`]. Empty (`6A 88` to
     /// GA) until seeded.
     slot_9c_priv: Option<[u8; 32]>,
@@ -374,6 +393,11 @@ pub struct VirtualCard {
     /// wire. A slot with no entry is empty or was seeded from the command
     /// line. Only [`KeyOrigin::Generated`] slots are attestable.
     slot_origins: HashMap<u8, KeyOrigin>,
+    /// The PIV algorithm of each slot's key ([`algorithm`]). A slot with no
+    /// entry holds a P-256 key (`11`), as every slot did before Ed25519;
+    /// a key slot field then holds a P-256 scalar, and for `E0` an Ed25519
+    /// seed (both 32 bytes).
+    slot_algorithms: HashMap<u8, u8>,
     /// This card's attestation key and its self-signed F9 certificate,
     /// generated once at construction. Survives a factory reset, as the
     /// factory key does on hardware.
@@ -406,6 +430,33 @@ pub enum KeyOrigin {
     /// IMPORT ASYMMETRIC (test-double build only).
     #[cfg_attr(not(feature = "test-double"), allow(dead_code))]
     Imported = 0x02,
+}
+
+/// PIV algorithm bytes for the slot keys VirtualCard models (SP 800-78
+/// `11`; YubicoPIV's `E0` for Ed25519, firmware 5.7+).
+pub mod algorithm {
+    pub const ECCP256: u8 = 0x11;
+    pub const ED25519: u8 = 0xE0;
+}
+
+/// A slot key's public half, in the form each consumer encodes:
+/// GENERATE's and GET METADATA's `86` tag and the attestation SPKI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotPublicKey {
+    /// SEC1 uncompressed `04 ‖ X ‖ Y`.
+    P256(Vec<u8>),
+    /// The raw 32-byte RFC 8032 public key.
+    Ed25519([u8; 32]),
+}
+
+impl SlotPublicKey {
+    /// The bytes GENERATE and GET METADATA carry in their `86` tag.
+    pub fn tag_86_bytes(&self) -> &[u8] {
+        match self {
+            SlotPublicKey::P256(point) => point,
+            SlotPublicKey::Ed25519(key) => key,
+        }
+    }
 }
 
 /// YubicoPIV PIN policy bytes (`AA` tag; vendor/pivy/src/piv.h
@@ -814,6 +865,7 @@ impl VirtualCard {
             faults: Vec::new(),
             slot_policies: HashMap::new(),
             slot_origins: HashMap::new(),
+            slot_algorithms: HashMap::new(),
             attestation: AttestationAuthority::generate(),
             touch: Arc::new(TouchPad::default()),
             touch_timeout: touch::DEFAULT_TOUCH_TIMEOUT,
@@ -852,27 +904,65 @@ impl VirtualCard {
         }
     }
 
-    /// Put a key that arrived over the wire into `slot` with the policy
-    /// and origin it came with. `slot` must be one of the four key slots
-    /// (9A, 9C, 9D, 9E); the handlers validate it first.
-    fn install_slot_key(&mut self, slot: u8, scalar: [u8; 32], policy: [u8; 2], origin: KeyOrigin) {
-        match slot {
-            0x9A => self.slot_9a_priv = Some(scalar),
-            0x9C => self.slot_9c_priv = Some(scalar),
-            0x9D => self.slot_9d_priv = Some(scalar),
-            0x9E => self.slot_9e_priv = Some(scalar),
-            _ => unreachable!("install_slot_key: slot {slot:#04x} is not a key slot"),
+    /// The PIV algorithm of `slot`'s key ([`algorithm`]); P-256 unless the
+    /// slot was given an Ed25519 key.
+    fn slot_algorithm(&self, slot: u8) -> u8 {
+        self.slot_algorithms
+            .get(&slot)
+            .copied()
+            .unwrap_or(algorithm::ECCP256)
+    }
+
+    /// The public half of `slot`'s key, or `None` for an empty slot (or a
+    /// P-256 slot whose scalar is not a valid key).
+    fn slot_public_key(&self, slot: u8) -> Option<SlotPublicKey> {
+        let private = self.slot_priv(slot)?;
+        match self.slot_algorithm(slot) {
+            algorithm::ED25519 => Some(SlotPublicKey::Ed25519(
+                ed25519_dalek::SigningKey::from_bytes(&private)
+                    .verifying_key()
+                    .to_bytes(),
+            )),
+            _ => Self::public_point(&private).map(SlotPublicKey::P256),
         }
+    }
+
+    /// Put a key that arrived over the wire into `slot` with the algorithm,
+    /// policy and origin it came with. `slot` must be one of the four key
+    /// slots (9A, 9C, 9D, 9E); the handlers validate it first. `private` is
+    /// a P-256 scalar or, for [`algorithm::ED25519`], an Ed25519 seed.
+    fn install_slot_key(
+        &mut self,
+        slot: u8,
+        alg: u8,
+        private: [u8; 32],
+        policy: [u8; 2],
+        origin: KeyOrigin,
+    ) {
+        self.set_slot_private(slot, private);
+        self.slot_algorithms.insert(slot, alg);
         self.slot_policies.insert(slot, policy);
         self.slot_origins.insert(slot, origin);
     }
 
+    fn set_slot_private(&mut self, slot: u8, private: [u8; 32]) {
+        match slot {
+            0x9A => self.slot_9a_priv = Some(private),
+            0x9C => self.slot_9c_priv = Some(private),
+            0x9D => self.slot_9d_priv = Some(private),
+            0x9E => self.slot_9e_priv = Some(private),
+            _ => unreachable!("set_slot_private: slot {slot:#04x} is not a key slot"),
+        }
+    }
+
     /// A seeded key replaces whatever the slot held: it carries no
-    /// configured policy and no on-card origin.
+    /// configured policy and no on-card origin, and is P-256 unless the
+    /// seeding says otherwise.
     #[cfg(feature = "test-double")]
     fn forget_slot_provenance(&mut self, slot: u8) {
         self.slot_policies.remove(&slot);
         self.slot_origins.remove(&slot);
+        self.slot_algorithms.remove(&slot);
     }
 
     /// `[pin, touch]` as configured for `slot` (`default` when never set).
@@ -1304,9 +1394,37 @@ impl VirtualCard {
         self.forget_slot_provenance(0x9E);
     }
 
-    /// Pin the P-256 scalar that GENERATE ASYMMETRIC (INS 0x47) will
-    /// install into `slot`, making on-card keygen deterministic for that
-    /// slot. Without an override, GENERATE picks a fresh random key.
+    /// Install an Ed25519 key (`seed`, the 32-byte RFC 8032 private key)
+    /// into key slot `slot` (9A, 9C, 9D or 9E) with a self-signed
+    /// certificate over it at the slot's certificate tag and the canonical
+    /// CHUID, so clients that read the certificate to learn a slot's
+    /// algorithm (piggy-piv's `read_slot`, the agent) see an Ed25519
+    /// identity. The certificate's subject is `CN=fibby-test-slot-<slot>-ed25519`.
+    /// Signing with it needs the yk5.7 model, as on silicon; seeding works
+    /// on any model. Panics on any other slot — a test-fixture error.
+    pub fn seed_slot_ed25519(&mut self, slot: u8, seed: [u8; 32]) {
+        let tag = match slot {
+            0x9A => TAG_SLOT_9A_CERT,
+            0x9C => TAG_SLOT_9C_CERT,
+            0x9D => TAG_SLOT_9D_CERT,
+            0x9E => TAG_SLOT_9E_CERT,
+            _ => panic!("seed_slot_ed25519: slot {slot:#04x} is not a key slot"),
+        };
+        self.set_slot_private(slot, seed);
+        self.forget_slot_provenance(slot);
+        self.slot_algorithms.insert(slot, algorithm::ED25519);
+        let cert = crate::attest::self_signed_ed25519_certificate(
+            &seed,
+            &format!("fibby-test-slot-{slot:02x}-ed25519"),
+        );
+        self.seed_data_object(tag.to_vec(), crate::attest::piv_cert_object(&cert));
+        self.seed_chuid();
+    }
+
+    /// Pin the P-256 scalar (or, for an Ed25519 GENERATE, the seed) that
+    /// GENERATE ASYMMETRIC (INS 0x47) will install into `slot`, making
+    /// on-card keygen deterministic for that slot. Without an override,
+    /// GENERATE picks a fresh random key.
     /// `slot` is the PIV slot id (e.g. `0x9A` / `0x9C` / `0x9D`). Set via
     /// the CLI `--generate-slot-*-priv` flags or directly by tests.
     pub fn set_generate_override(&mut self, slot: u8, scalar: [u8; 32]) {
@@ -1693,9 +1811,41 @@ impl VirtualCard {
             // carries. Either way the slot's PIN and touch policy apply
             // (default for 9D: PIN "once", no touch).
             if body.is_some_and(|b| parse_ga_sign_request(b).is_some()) {
-                return Ok(self.sign_ecdsa_slot(body, 0x9D));
+                return Ok(self.sign_slot(body, 0x9D, algorithm::ECCP256));
+            }
+            if self.slot_algorithm(0x9D) != algorithm::ECCP256 {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    "GA ECDH 9D -> 6A80 (the slot holds an Ed25519 key)",
+                );
+                return Ok(sw(0x6A, 0x80));
             }
             return Ok(self.handle_general_authenticate_ecdh_slot_9d(body));
+        }
+
+        // GENERAL AUTHENTICATE Ed25519 sign (alg=0xE0, YubicoPIV 5.7+): the
+        // request's 81 (CHALLENGE) tag carries the whole message, the 82
+        // (RESPONSE) tag returns the 64-byte signature. Only the yk5.7
+        // model knows the algorithm; yk4 and yk5 answer 6A80 as silicon
+        // before 5.7 does. PIN and touch policy as for ECDSA.
+        if cla == 0x00
+            && ins == apdu::ins::GENERAL_AUTHENTICATE
+            && p1 == algorithm::ED25519
+            && matches!(p2, 0x9A | 0x9C | 0x9D | 0x9E)
+        {
+            if !self.model.supports_ed25519() {
+                trace::emit(
+                    trace::DEBUG,
+                    "vcard",
+                    &format!(
+                        "GA ED25519 {p2:02X} -> 6A80 (alg 0xE0 unsupported on {})",
+                        model_name(self.model)
+                    ),
+                );
+                return Ok(sw(0x6A, 0x80));
+            }
+            return Ok(self.sign_slot(apdu_body(command_apdu), p2, algorithm::ED25519));
         }
 
         // GENERAL AUTHENTICATE ECDSA sign (alg=0x11 P-256). The request
@@ -1713,7 +1863,7 @@ impl VirtualCard {
             && p1 == 0x11
             && matches!(p2, 0x9A | 0x9C | 0x9E)
         {
-            return Ok(self.sign_ecdsa_slot(apdu_body(command_apdu), p2));
+            return Ok(self.sign_slot(apdu_body(command_apdu), p2, algorithm::ECCP256));
         }
 
         // GENERAL AUTHENTICATE mgmt-key challenge-response (00 87 03
@@ -2125,6 +2275,7 @@ impl VirtualCard {
         // stays, as the factory attestation key does on hardware.
         self.slot_policies.clear();
         self.slot_origins.clear();
+        self.slot_algorithms.clear();
         self.touch.clear_cache();
         self.data_objects.clear();
         self.pin = DEFAULT_PIN.to_vec();
@@ -2342,18 +2493,31 @@ impl VirtualCard {
     /// VirtualCard's output is reproducible. Real silicon randomizes `k`,
     /// so a sign capture is *not* byte-replayable — tests verify the
     /// signature against the public key instead (piggy#135).
-    fn sign_ecdsa_slot(&mut self, body: Option<&[u8]>, slot: u8) -> Vec<u8> {
+    ///
+    /// `alg` is the request's P1: `11` signs a prehash with the slot's
+    /// P-256 key (DER `ECDSA-Sig-Value` in the `82` tag); `E0` (yk5.7
+    /// only, the caller checks) signs the `81` bytes as the whole message
+    /// with the slot's Ed25519 key (the 64-byte RFC 8032 signature in the
+    /// `82` tag). An `alg` that is not the slot key's algorithm is `6A 80`,
+    /// checked once the slot is known to hold a key. Ed25519 signing is
+    /// deterministic by construction.
+    fn sign_slot(&mut self, body: Option<&[u8]>, slot: u8, alg: u8) -> Vec<u8> {
         use p256::ecdsa::signature::hazmat::PrehashSigner;
         use p256::ecdsa::{Signature, SigningKey};
 
         let slot_label = &format!("{slot:02X}");
-        let scalar = self.slot_priv(slot);
+        let op = if alg == algorithm::ED25519 {
+            "GA ED25519"
+        } else {
+            "GA ECDSA"
+        };
+        let private = self.slot_priv(slot);
         let pin = self.effective_pin_policy(slot);
         if pin != pin_policy::NEVER && !self.pin_verified {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
-                &format!("GA ECDSA {slot_label} -> 6982 (PIN not verified)"),
+                &format!("{op} {slot_label} -> 6982 (PIN not verified)"),
             );
             return sw(0x69, 0x82);
         }
@@ -2362,29 +2526,40 @@ impl VirtualCard {
                 trace::DEBUG,
                 "vcard",
                 &format!(
-                    "GA ECDSA {slot_label} -> 6982 (PIN-always: a command came between VERIFY and the sign)"
+                    "{op} {slot_label} -> 6982 (PIN-always: a command came between VERIFY and the sign)"
                 ),
             );
             return sw(0x69, 0x82);
         }
-        let scalar_bytes = match scalar {
+        let private = match private {
             Some(s) => s,
             None => {
                 trace::emit(
                     trace::DEBUG,
                     "vcard",
-                    &format!("GA ECDSA {slot_label} -> 6A88 (slot empty)"),
+                    &format!("{op} {slot_label} -> 6A88 (slot empty)"),
                 );
                 return sw(0x6A, 0x88);
             }
         };
+        if self.slot_algorithm(slot) != alg {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!(
+                    "{op} {slot_label} -> 6A80 (the slot holds an alg {:#04x} key)",
+                    self.slot_algorithm(slot)
+                ),
+            );
+            return sw(0x6A, 0x80);
+        }
         let body = match body {
             Some(b) => b,
             None => {
                 trace::emit(
                     trace::DEBUG,
                     "vcard",
-                    &format!("GA ECDSA {slot_label} -> 6A80 (no body)"),
+                    &format!("{op} {slot_label} -> 6A80 (no body)"),
                 );
                 return sw(0x6A, 0x80);
             }
@@ -2395,20 +2570,9 @@ impl VirtualCard {
                 trace::emit(
                     trace::DEBUG,
                     "vcard",
-                    &format!("GA ECDSA {slot_label} -> 6A80 (malformed 7C/81 TLV)"),
+                    &format!("{op} {slot_label} -> 6A80 (malformed 7C/81 TLV)"),
                 );
                 return sw(0x6A, 0x80);
-            }
-        };
-        let signing_key = match SigningKey::from_slice(&scalar_bytes) {
-            Ok(k) => k,
-            Err(_) => {
-                trace::emit(
-                    trace::DEBUG,
-                    "vcard",
-                    &format!("GA ECDSA {slot_label} -> 6A88 (slot scalar invalid)"),
-                );
-                return sw(0x6A, 0x88);
             }
         };
         // Sign before the touch gate, and release the signature only once
@@ -2416,25 +2580,42 @@ impl VirtualCard {
         // rejected without waiting for, or spending, a touch, as a real
         // card validates the input first (piggy#314). The computation is
         // pure, so a blocked attempt still changes nothing.
-        let sig: Signature = match signing_key.sign_prehash(challenge) {
-            Ok(s) => s,
-            Err(_) => {
-                trace::emit(
-                    trace::DEBUG,
-                    "vcard",
-                    &format!("GA ECDSA {slot_label} -> 6A80 (sign failed)"),
-                );
-                return sw(0x6A, 0x80);
-            }
+        let signature: Vec<u8> = if alg == algorithm::ED25519 {
+            let key = ed25519_dalek::SigningKey::from_bytes(&private);
+            ed25519_dalek::Signer::sign(&key, challenge)
+                .to_bytes()
+                .to_vec()
+        } else {
+            let signing_key = match SigningKey::from_slice(&private) {
+                Ok(k) => k,
+                Err(_) => {
+                    trace::emit(
+                        trace::DEBUG,
+                        "vcard",
+                        &format!("{op} {slot_label} -> 6A88 (slot scalar invalid)"),
+                    );
+                    return sw(0x6A, 0x88);
+                }
+            };
+            let sig: Signature = match signing_key.sign_prehash(challenge) {
+                Ok(s) => s,
+                Err(_) => {
+                    trace::emit(
+                        trace::DEBUG,
+                        "vcard",
+                        &format!("{op} {slot_label} -> 6A80 (sign failed)"),
+                    );
+                    return sw(0x6A, 0x80);
+                }
+            };
+            // The ASN.1 `ECDSA-Sig-Value` (SEQUENCE { r, s }) — the same
+            // DER pivy parses out in piv_sign_prehash.
+            sig.to_der().as_bytes().to_vec()
         };
         if !self.pass_touch_gate(slot, slot_label) {
             return SW_TOUCH_TIMEOUT.to_vec();
         }
-        // The card returns the ASN.1 `ECDSA-Sig-Value` (SEQUENCE { r, s })
-        // under the GA `82` (RESPONSE) tag — the same DER pivy parses out
-        // in piv_sign_prehash.
-        let der = sig.to_der();
-        let der = der.as_bytes();
+        let der = signature.as_slice();
 
         let mut inner = Vec::with_capacity(2 + der.len());
         inner.push(0x82); // GA RESPONSE tag (SP 800-73-4 dynamic auth)
@@ -2456,7 +2637,7 @@ impl VirtualCard {
         trace::emit(
             trace::DEBUG,
             "vcard",
-            &format!("GA ECDSA {slot_label} -> 9000 ({}-byte DER sig)", der.len()),
+            &format!("{op} {slot_label} -> 9000 ({}-byte sig)", der.len()),
         );
         out
     }
@@ -2507,9 +2688,11 @@ impl VirtualCard {
     ///
     /// Returns:
     /// - `69 82` if the mgmt-key auth hasn't succeeded this session.
-    /// - `6A 80` on a missing/malformed request or a non-ECCP256 algorithm.
+    /// - `6A 80` on a missing/malformed request, or an algorithm other than
+    ///   ECCP256 (`11`) and, on the yk5.7 model only, Ed25519 (`E0`).
     /// - `6A 86` if `slot` isn't one VirtualCard models (9A/9C/9D).
-    /// - `7F 49 43 86 41 04 ‖ X ‖ Y` + `90 00` on success.
+    /// - `7F 49 43 86 41 04 ‖ X ‖ Y` (P-256) or `7F 49 22 86 20 <key>`
+    ///   (Ed25519) + `90 00` on success.
     ///
     /// Keygen is random (`rand_core::OsRng`) unless
     /// [`Self::set_generate_override`] pinned a scalar for `slot`. The
@@ -2549,11 +2732,15 @@ impl VirtualCard {
             }
         };
         let alg = request.alg;
-        if alg != 0x11 {
+        let ed25519 = alg == algorithm::ED25519 && self.model.supports_ed25519();
+        if alg != algorithm::ECCP256 && !ed25519 {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
-                &format!("GENERATE -> 6A80 (alg {alg:#04x} unsupported; only ECCP256 0x11)"),
+                &format!(
+                    "GENERATE -> 6A80 (alg {alg:#04x} unsupported on {}; ECCP256 0x11, and Ed25519 0xE0 on yk5.7)",
+                    model_name(self.model)
+                ),
             );
             return sw(0x6A, 0x80);
         }
@@ -2577,10 +2764,16 @@ impl VirtualCard {
             return sw(0x6A, 0x80);
         };
 
-        // Pick the scalar: a pinned override for reproducibility, else a
-        // fresh random P-256 key.
-        let scalar: [u8; 32] = match self.generate_override(slot) {
+        // Pick the key: a pinned override for reproducibility, else a fresh
+        // random one. An Ed25519 key is any 32-byte seed; a P-256 scalar
+        // must be a valid key, which deriving its point checks.
+        let private: [u8; 32] = match self.generate_override(slot) {
             Some(s) => s,
+            None if ed25519 => {
+                let mut seed = [0u8; 32];
+                rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut seed);
+                seed
+            }
             None => {
                 let sk = SigningKey::random(&mut rand_core::OsRng);
                 sk.to_bytes()
@@ -2589,22 +2782,21 @@ impl VirtualCard {
                     .expect("P-256 scalar is 32 bytes")
             }
         };
-        // Derive the public point (also validates a pinned override scalar).
-        let signing_key = match SigningKey::from_slice(&scalar) {
-            Ok(k) => k,
-            Err(_) => {
-                trace::emit(
-                    trace::DEBUG,
-                    "vcard",
-                    &format!("GENERATE slot={slot:#04x} -> 6A80 (override scalar invalid)"),
-                );
-                return sw(0x6A, 0x80);
-            }
-        };
-        let point = signing_key.verifying_key().to_encoded_point(false);
-        let pt = point.as_bytes(); // 04 ‖ X ‖ Y (65 bytes)
+        if !ed25519 && SigningKey::from_slice(&private).is_err() {
+            trace::emit(
+                trace::DEBUG,
+                "vcard",
+                &format!("GENERATE slot={slot:#04x} -> 6A80 (override scalar invalid)"),
+            );
+            return sw(0x6A, 0x80);
+        }
 
-        self.install_slot_key(slot, scalar, policy, KeyOrigin::Generated);
+        self.install_slot_key(slot, alg, private, policy, KeyOrigin::Generated);
+        let public = self
+            .slot_public_key(slot)
+            .expect("the key just installed has a public half");
+        // 04 ‖ X ‖ Y (65 bytes) for P-256; the raw 32 bytes for Ed25519.
+        let pt = public.tag_86_bytes();
 
         // Response template: 7F49 <len> [ 86 <ptlen> <point> ].
         let mut inner = Vec::with_capacity(2 + pt.len());
@@ -2621,7 +2813,8 @@ impl VirtualCard {
             trace::DEBUG,
             "vcard",
             &format!(
-                "GENERATE slot={slot:#04x} ECCP256 -> 9000 ({}-byte pubkey, policy pin={:02X} touch={:02X})",
+                "GENERATE slot={slot:#04x} {} -> 9000 ({}-byte pubkey, policy pin={:02X} touch={:02X})",
+                if ed25519 { "ED25519" } else { "ECCP256" },
                 pt.len(),
                 policy[0],
                 policy[1]
@@ -2699,7 +2892,13 @@ impl VirtualCard {
             );
             return sw(0x6A, 0x80);
         };
-        self.install_slot_key(slot, scalar, policy, KeyOrigin::Imported);
+        self.install_slot_key(
+            slot,
+            algorithm::ECCP256,
+            scalar,
+            policy,
+            KeyOrigin::Imported,
+        );
         trace::emit(
             trace::DEBUG,
             "vcard",
@@ -2717,11 +2916,10 @@ impl VirtualCard {
     /// answers for a key it did not generate (the wet-env F9 pair in both
     /// test-vector fixtures).
     fn handle_attest(&mut self, slot: u8) -> Vec<u8> {
-        let generated_point = (self.slot_origins.get(&slot) == Some(&KeyOrigin::Generated))
-            .then(|| self.slot_priv(slot))
-            .flatten()
-            .and_then(|scalar| Self::public_point(&scalar));
-        let Some(point) = generated_point else {
+        let generated_key = (self.slot_origins.get(&slot) == Some(&KeyOrigin::Generated))
+            .then(|| self.slot_public_key(slot))
+            .flatten();
+        let Some(public) = generated_key else {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
@@ -2731,7 +2929,7 @@ impl VirtualCard {
         };
         let mut out = self.attestation.attest_slot(
             slot,
-            &point,
+            &public,
             self.stored_policy(slot),
             self.model.firmware_version(),
         );
@@ -2750,13 +2948,14 @@ impl VirtualCard {
     /// Handle YK GET METADATA (INS 0xF7, P1=0x00, P2=`slot`). For a
     /// populated key slot returns the TLV list
     ///
-    /// - `01 01 <alg>` — algorithm (`11`, ECCP256);
+    /// - `01 01 <alg>` — algorithm (`11` ECCP256, `E0` Ed25519);
     /// - `02 02 <pin> <touch>` — the policy as STORED (configured), not
     ///   the effective one;
     /// - `03 01 <origin>` — `01` generated on this card, `02` imported
     ///   (a seeded key reports imported);
-    /// - `04 43 86 41 04 ‖ X ‖ Y` — the public key, in the encoding
-    ///   GENERATE returns inside its `7F49` template;
+    /// - `04 43 86 41 04 ‖ X ‖ Y` (P-256) or `04 22 86 20 <key>`
+    ///   (Ed25519) — the public key, in the encoding GENERATE returns
+    ///   inside its `7F49` template;
     ///
     /// and `90 00`. An empty slot, or one that is not a key slot, is
     /// `6A 88` (referenced data not found).
@@ -2768,10 +2967,7 @@ impl VirtualCard {
     /// confirmed by anything in this repository: that jCardSim capture reports
     /// `03 01 00` for a generated key.
     fn handle_get_metadata(&mut self, slot: u8) -> Vec<u8> {
-        let point = self
-            .slot_priv(slot)
-            .and_then(|scalar| Self::public_point(&scalar));
-        let Some(point) = point else {
+        let Some(public) = self.slot_public_key(slot) else {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
@@ -2785,7 +2981,9 @@ impl VirtualCard {
             .get(&slot)
             .copied()
             .unwrap_or(KeyOrigin::Imported);
-        let mut out = vec![0x01, 0x01, 0x11, 0x02, 0x02, pin, touch, 0x03, 0x01];
+        let alg = self.slot_algorithm(slot);
+        let point = public.tag_86_bytes();
+        let mut out = vec![0x01, 0x01, alg, 0x02, 0x02, pin, touch, 0x03, 0x01];
         out.push(origin as u8);
         out.push(0x04);
         push_ber_len(&mut out, 2 + point.len());
@@ -3150,6 +3348,7 @@ fn model_name(model: Model) -> &'static str {
     match model {
         Model::Yk4 => "Yk4 wet-env",
         Model::Yk5 => "Yk5 stub",
+        Model::Yk57 => "Yk5.7 uncaptured",
     }
 }
 
@@ -6073,5 +6272,188 @@ mod tests {
         // Witness was cleared; phase-2 without re-seeding -> 6982.
         let req = hex_to_bytes("0087039b00000c7c0a8208731efc2b4bd5861000");
         assert_eq!(c.transmit(&req).unwrap(), vec![0x69, 0x82]);
+    }
+
+    // -- Ed25519 (alg 0xE0, the yk5.7 model; FDR 0006, piggy#382) ---------
+
+    const ED25519_SEED: [u8; 32] = [0x42; 32];
+
+    /// `00 47 00 <slot> 05 AC 03 80 01 E0`: GENERATE an Ed25519 key.
+    fn generate_ed25519_apdu(slot: u8) -> Vec<u8> {
+        vec![0x00, 0x47, 0x00, slot, 0x05, 0xAC, 0x03, 0x80, 0x01, 0xE0]
+    }
+
+    /// GA sign with algorithm `alg`: `00 87 <alg> <slot> <Lc> 7C <l> 82 00
+    /// 81 <ml> <message>`.
+    fn ga_sign_apdu_alg(alg: u8, slot: u8, message: &[u8]) -> Vec<u8> {
+        let mut apdu = ga_sign_apdu_slot(slot, message);
+        apdu[2] = alg;
+        apdu
+    }
+
+    /// The 64-byte signature out of `7C 42 82 40 <sig> 90 00`.
+    fn ed25519_signature(resp: &[u8]) -> ed25519_dalek::Signature {
+        assert_eq!(&resp[..4], &[0x7C, 0x42, 0x82, 0x40], "got {resp:02X?}");
+        assert_eq!(&resp[resp.len() - 2..], &[0x90, 0x00]);
+        ed25519_dalek::Signature::from_slice(&resp[4..68]).unwrap()
+    }
+
+    fn ed25519_public(seed: &[u8; 32]) -> [u8; 32] {
+        ed25519_dalek::SigningKey::from_bytes(seed)
+            .verifying_key()
+            .to_bytes()
+    }
+
+    #[test]
+    fn yk4_and_yk5_refuse_ed25519_generate_and_sign_as_silicon_before_5_7_does() {
+        for model in [Model::Yk4, Model::Yk5] {
+            let mut c = VirtualCard::with_model(model);
+            authenticate_mgmt(&mut c);
+            assert_eq!(
+                c.transmit(&generate_ed25519_apdu(0x9A)).unwrap(),
+                vec![0x6A, 0x80],
+                "{model:?} GENERATE E0"
+            );
+            c.seed_slot_ed25519(0x9A, ED25519_SEED);
+            c.mark_pin_verified();
+            assert_eq!(
+                c.transmit(&ga_sign_apdu_alg(0xE0, 0x9A, b"msg")).unwrap(),
+                vec![0x6A, 0x80],
+                "{model:?} GA E0"
+            );
+        }
+    }
+
+    #[test]
+    fn yk57_generates_an_ed25519_key_that_signs_whole_messages() {
+        let mut c = VirtualCard::with_model(Model::Yk57);
+        authenticate_mgmt(&mut c);
+        c.set_generate_override(0x9A, ED25519_SEED);
+        let resp = c.transmit(&generate_ed25519_apdu(0x9A)).unwrap();
+        assert_eq!(
+            &resp[..5],
+            &[0x7F, 0x49, 0x22, 0x86, 0x20],
+            "got {resp:02X?}"
+        );
+        let public = extract_generate_point(&resp);
+        assert_eq!(public, ed25519_public(&ED25519_SEED).to_vec());
+
+        c.mark_pin_verified();
+        // Longer than any digest: Ed25519 signs the message itself.
+        let message = b"piggy-test: an ed25519 message, signed whole, not prehashed";
+        let signature =
+            ed25519_signature(&c.transmit(&ga_sign_apdu_alg(0xE0, 0x9A, message)).unwrap());
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&public.try_into().unwrap()).unwrap();
+        key.verify_strict(message, &signature).unwrap();
+    }
+
+    #[test]
+    fn yk57_generates_a_random_ed25519_key_without_an_override() {
+        let mut a = VirtualCard::with_model(Model::Yk57);
+        let mut b = VirtualCard::with_model(Model::Yk57);
+        authenticate_mgmt(&mut a);
+        authenticate_mgmt(&mut b);
+        let pa = extract_generate_point(&a.transmit(&generate_ed25519_apdu(0x9C)).unwrap());
+        let pb = extract_generate_point(&b.transmit(&generate_ed25519_apdu(0x9C)).unwrap());
+        assert_eq!(pa.len(), 32);
+        assert_ne!(pa, pb);
+    }
+
+    #[test]
+    fn an_ed25519_slot_refuses_p256_sign_and_ecdh_and_vice_versa() {
+        let mut c = VirtualCard::with_model(Model::Yk57);
+        c.seed_slot_ed25519(0x9D, ED25519_SEED);
+        c.seed_slot_9a_priv(RFC6979_SCALAR);
+        c.mark_pin_verified();
+        let digest = [0x11u8; 32];
+        assert_eq!(
+            c.transmit(&ga_sign_apdu_alg(0x11, 0x9D, &digest)).unwrap(),
+            vec![0x6A, 0x80],
+            "P-256 sign on an Ed25519 slot"
+        );
+        assert_eq!(
+            c.transmit(&ecdh_9d_apdu()).unwrap(),
+            vec![0x6A, 0x80],
+            "ECDH on an Ed25519 slot"
+        );
+        assert_eq!(
+            c.transmit(&ga_sign_apdu_alg(0xE0, 0x9A, b"msg")).unwrap(),
+            vec![0x6A, 0x80],
+            "Ed25519 sign on a P-256 slot"
+        );
+    }
+
+    #[test]
+    fn a_seeded_ed25519_slot_serves_its_certificate_and_signs() {
+        let mut c = VirtualCard::with_model(Model::Yk57);
+        c.seed_slot_ed25519(0x9C, ED25519_SEED);
+        let resp = c.transmit(&get_data_apdu(TAG_SLOT_9C_CERT)).unwrap();
+        assert!(is_success(&resp), "the slot certificate is served");
+        let (_, object, _) = der_tlv(&resp[..resp.len() - 2]);
+        let (_, cert_der, _) = der_tlv(object);
+        let raw = ed25519_public(&ED25519_SEED);
+        assert!(
+            cert_der.windows(32).any(|w| w == raw),
+            "the certificate carries the slot's public key"
+        );
+        assert!(is_success(&c.transmit(&get_data_apdu(TAG_CHUID)).unwrap()));
+
+        // 9C is PIN-always: VERIFY right before the sign.
+        assert!(is_success(
+            &c.transmit(&verify_default_pin_apdu_short()).unwrap()
+        ));
+        let signature =
+            ed25519_signature(&c.transmit(&ga_sign_apdu_alg(0xE0, 0x9C, b"m")).unwrap());
+        ed25519_dalek::VerifyingKey::from_bytes(&raw)
+            .unwrap()
+            .verify_strict(b"m", &signature)
+            .unwrap();
+    }
+
+    #[test]
+    fn metadata_and_attestation_of_a_generated_ed25519_key() {
+        let mut c = VirtualCard::with_model(Model::Yk57);
+        authenticate_mgmt(&mut c);
+        c.set_generate_override(0x9A, ED25519_SEED);
+        assert!(is_success(
+            &c.transmit(&generate_ed25519_apdu(0x9A)).unwrap()
+        ));
+        let raw = ed25519_public(&ED25519_SEED);
+
+        let mut want = vec![
+            0x01, 0x01, 0xE0, 0x02, 0x02, 0x00, 0x00, 0x03, 0x01, 0x01, 0x04, 0x22, 0x86, 0x20,
+        ];
+        want.extend_from_slice(&raw);
+        want.extend_from_slice(&[0x90, 0x00]);
+        assert_eq!(c.transmit(&metadata_apdu(0x9A)).unwrap(), want);
+
+        let resp = c.transmit(&attest_apdu(0x9A)).unwrap();
+        assert!(is_success(&resp), "a generated Ed25519 key is attestable");
+        let cert = &resp[..resp.len() - 2];
+        // id-Ed25519 (06 03 2B 65 70) followed by the raw key's BIT STRING.
+        let mut spki_tail = vec![0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00];
+        spki_tail.extend_from_slice(&raw);
+        assert!(
+            cert.windows(spki_tail.len()).any(|w| w == spki_tail),
+            "the attestation carries an RFC 8410 SPKI"
+        );
+    }
+
+    #[test]
+    fn factory_reset_forgets_a_slots_ed25519_algorithm() {
+        let mut c = VirtualCard::with_model(Model::Yk57);
+        c.seed_slot_ed25519(0x9A, ED25519_SEED);
+        c.seed_pin_puk_blocked();
+        assert!(is_success(&c.transmit(&factory_reset_apdu()).unwrap()));
+        assert_eq!(c.slot_algorithm(0x9A), algorithm::ECCP256);
+    }
+
+    #[test]
+    fn model_parse_arg_accepts_yk5_7() {
+        assert_eq!(Model::parse_arg("yk5.7"), Ok(Model::Yk57));
+        assert_eq!(Model::parse_arg("yk57"), Ok(Model::Yk57));
+        assert_eq!(Model::Yk57.firmware_version(), [5, 7, 1]);
+        assert!(Model::Yk57.supports_ed25519());
+        assert!(!Model::Yk5.supports_ed25519());
     }
 }

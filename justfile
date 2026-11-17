@@ -392,7 +392,7 @@ _test-optional-linux-only: test-bats-conformance-fibby-pivy-agent-smoke
 _test-optional-linux-only:
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
+_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -1161,6 +1161,26 @@ test-bats-conformance-agent-concurrent-sign:
       SOCAT_BIN="$socat_out/bin/socat" \
       BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_agent_concurrent_sign_fibby.bats
+
+# FDR 0006 phase (c), piggy#382 item 2: the Rust agent lists and signs with
+# an Ed25519 PIV key (alg E0) seeded into fibby's yk5.7 model, and the
+# sshsig verifies; on the yk5 model the same key is refused, as pre-5.7
+# silicon refuses E0. Answers FDR 0006's "does the agent's Ed25519 PIV path
+# work end to end". [linux]-only like the other fibby lanes.
+#
+# run the fibby-backed agent Ed25519 PIV sign bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-agent-ed25519:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_agent_ed25519_fibby.bats
 
 # piggy#299: a sealed pigpen document opens through the real Rust `piggy
 # agent` over fibby's slot 9D, driven by the Go surface a consumer uses
@@ -5050,6 +5070,9 @@ explore-fdr0006-c BIN_DIR="":
     check "holder refuses --backend hardware"        exits 1 "$holder" --socket "$dir/hw.sock" --backend hardware
     check "test double serves with seed flags"       serves "$testdouble" --seed-rfc6979-slot-9a-cert --auto-touch
     check "test double serves with FIBBY_LOG=wire"   serves env FIBBY_LOG=wire "$testdouble"
+    check "test double serves an Ed25519 yk5.7 card" serves "$testdouble" --model yk5.7 \
+      --seed-slot-9a-ed25519 4242424242424242424242424242424242424242424242424242424242424242
+    check "holder serves a yk5.7 card"               serves "$holder" --model yk5.7 --card "piggy-test yk5.7"
     check "holder serves a blank --card"             serves "$holder" --card "piggy-test holder"
     echo "1..$n"
 

@@ -115,6 +115,17 @@ proves the holder binary holds none of those flag names nor the test
 certificates and refuses each flag. *just explore-fdr0006-c* stages the
 phase's hand pass.
 
+*--model* _yk4_ (default), _yk5_ or _yk5.7_ picks the card's firmware
+profile. _yk5.7_ is UNCAPTURED: it borrows _yk5_'s placeholder ATR and
+serials and advertises firmware 5.7.1 until piggy#133 captures a real 5.7
+card (piggy#128). It is the only model that does Ed25519 (PIV algorithm
+_E0_) in GENERATE and GENERAL AUTHENTICATE; _yk4_ and _yk5_ answer 6A80,
+as silicon before 5.7 does. In the test double
+*--seed-slot-9a-ed25519* _HEX_ (and _9c_, _9d_, _9e_) installs an Ed25519
+key from a 32-byte seed, a self-signed certificate over it and the
+canonical CHUID; the fibby lines to count are _GA ED25519 9A -> 9000_.
+*just test-bats-conformance-agent-ed25519* drives the agent over it.
+
 fibby stores the PIN and touch policy a key is generated or imported
 with and enforces it (piggy#303). A slot whose touch policy is _always_
 or _cached_ does not sign or do ECDH until the card is touched:
