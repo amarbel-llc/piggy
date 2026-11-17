@@ -74,6 +74,16 @@ the socket below reaches these as */github-api/repos/...*, and so on.
   without query string, status, byte counts and decision. Never a header
   value, body, query string or credential.
 
+# SIGNALS
+
+*serve* installs no signal handler of its own, so *SIGINT* and *SIGTERM*
+end it by their default action. The credential lived only in the process's
+guarded memory and is gone with it; the sockets stay in _DIR_ until the
+next *serve* replaces them. In a terminal, Ctrl-C works. A script that
+starts *serve* in the background must stop it with *SIGTERM*: a
+non-interactive shell starts background jobs with *SIGINT* ignored, and
+the child inherits that, so *kill -INT* does nothing there.
+
 # EXIT AND RESPONSE STATUS
 
 Requests *pigtrough* answers itself carry a fixed body naming the cause:
