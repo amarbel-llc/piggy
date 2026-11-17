@@ -42,6 +42,15 @@ this page says how they work.
 	points clients at it through _PCSCLITE_CSOCK_NAME_. Real card crypto,
 	no hardware.
 
+*bats over openssl, no card*
+	*just test-bats-conformance-x509-profile* (FDR 0007 phase (i),
+	piggy#393, part of the gate): the test-only _x509-profile-probe_
+	writes root, intermediate and leaf certificates made by piggy-piv's
+	_x509_profile_ builders with software keys, plus certificates no
+	builder may make (an IP leaf, an intermediate without name
+	constraints), and *openssl verify* must accept the permitted chains
+	and reject every foreign-name and IP case.
+
 *NixOS VM lanes*
 	_nix/vm-tests/_, exported as _checks.<system>.vm-piggy-{luks,zfs,agent}_
 	and part of the gate. A guest runs the shipped *piggy* package with

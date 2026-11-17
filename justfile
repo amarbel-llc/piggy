@@ -379,7 +379,7 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-rust test-go test-pigpen test-nix-hm-module test-nix-hm-secrets-module _test-conformance-linux-only _test-vm-linux-only
+test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-bats-conformance-x509-profile test-rust test-go test-pigpen test-nix-hm-module test-nix-hm-secrets-module _test-conformance-linux-only _test-vm-linux-only
 
 [group('post-build')]
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-bats-conformance-pivy-tool-admin-key _test-optional-linux-only
@@ -1461,6 +1461,22 @@ test-bats-conformance-operator-act *FILES:
       OPERATOR_ACT_PROBE_BIN="$PWD/target/debug/operator-act-probe" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       ${files:-zz-tests_bats/conformance/operator_act_*.bats zz-tests_bats/conformance/attestation_bundle.bats}
+
+# FDR 0007 phase (i), piggy#393: the X.509 profile builders in piggy-piv
+# (root, intermediate, leaf) checked with `openssl verify`, including the
+# negative name, IP and widened/unconstrained-intermediate cases. The
+# certificates come from the test-only `x509-profile-probe` (cargo-built on
+# demand, never shipped). No card, no PIN prompt.
+#
+# run the X.509 profile openssl bats gate
+[group('post-build')]
+test-bats-conformance-x509-profile:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -p x509-profile-probe --quiet
+    X509_PROFILE_PROBE_BIN="$PWD/target/debug/x509-profile-probe" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/x509_profile_openssl.bats
 
 # The operator-act lanes against the cargo-built piggy and fibby instead of the
 # nix-built ones: the fast loop while changing the agent or the lanes. The gate

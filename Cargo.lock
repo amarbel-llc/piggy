@@ -2956,6 +2956,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "x509-profile-probe"
+version = "0.1.0"
+dependencies = [
+ "openssl",
+ "piggy-piv",
+]
+
+[[package]]
 name = "yoke"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

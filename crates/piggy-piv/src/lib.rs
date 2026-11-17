@@ -23,6 +23,7 @@ pub mod slot;
 pub mod tlv;
 pub mod token;
 pub mod transport;
+pub mod x509_profile;
 
 pub use admin::DEFAULT_ADMIN_KEY;
 #[cfg(feature = "pcsc-transport")]

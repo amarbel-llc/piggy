@@ -1,0 +1,22 @@
+[package]
+name = "x509-profile-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+
+# Test-only helper for FDR 0007 phase (i) (piggy#393): writes a set of PEM
+# certificates made by piggy-piv's X.509 profile builders (root,
+# intermediate, leaf), signed by software keys through the same signer
+# closure a card fills, plus the certificates no builder may make (an IP
+# leaf, an intermediate without name constraints) made with openssl, for
+# the bats lane to check with `openssl verify`. Built via
+# `cargo build -p x509-profile-probe` by its conformance recipe; not
+# shipped (the wrapped piggy copies only its own binaries).
+
+[[bin]]
+name = "x509-profile-probe"
+path = "src/main.rs"
+
+[dependencies]
+piggy-piv = { path = "../piggy-piv", default-features = false }
+openssl = "0.10"
