@@ -17,30 +17,69 @@ Status: plan. Rulings of 2026-11-17 (operator, relayed by the coordinator):
    start on any parse or validation error; no partial table. The compiled-in
    `github-api` becomes the same record, read from the same parser's output
    or kept as the default when no file is given.
-2. **Per-route sockets**: `proxy-<route>.sock` (mode `0600`) in the runtime
-   directory; a request on a socket can only name that socket's route, so
-   reachability is the scope binding. `load` still names a route.
-3. **Scheme field**: `token` sends `Authorization: token <secret>`, `bearer`
+2. **Per-route sockets** (ON HOLD until the operator rules on how smith
+   reaches the proxy, see below): `proxy-<route>.sock` (mode `0600`) in the
+   runtime directory; a request on a socket can only name that socket's
+   route, so reachability is the scope binding. `load` still names a route.
+3. **Scheme field** (default `token`, which is what smith sends): `token` sends `Authorization: token <secret>`, `bearer`
    sends `Authorization: Bearer <secret>`.
 4. **Extra roots** per route (see `2026-11-17-pigtrough-extra-roots.md`).
 5. **Unit** (docs and nix only until the card day): a home-manager user unit
    running `pigtrough serve`; the operator runs `load` after each start.
 6. **smith end to end** (after the operator's token entry and the card).
 
-## Needs from smith's lane (no live smith session on 2026-11-17)
+## What smith does (answers from smith/loud-fig, read-only, against smith's source)
 
-Question to put to smith, routed by the coordinator:
+Relayed by the coordinator on 2026-11-17; file:line are smith's, not
+verified here.
 
-1. Can smith talk to a Forgejo over a unix socket, or only over TCP? If only
-   TCP, can the base URL be `http://<host>:<port>` for a local listener
-   instead (this would need pigtrough to listen on loopback, which R4 does
-   not cover)?
-2. The exact list of Forgejo calls smith makes for the commands the operator
-   wants proxied: method and path shape for each, and which headers it sets
-   (the allowlist and `forward_headers` come from this list).
-3. Which `Authorization` scheme smith sends today (`token` or `Bearer`).
-4. Does smith's keystore take a base URL and a token from the environment, so
-   it can be pointed at the proxy without a code change?
+1. **Transport**: TCP over http or https only; there is no unix-socket
+   connector (`crates/forgejo-api/src/lib.rs:683-711`). There is no
+   environment variable for the base URL; `--host` accepts a full URL, so
+   `http://127.0.0.1:PORT` works (`src/repo.rs:63-84`). Requests go to
+   `{base}/api/v1/{endpoint}`.
+2. **Calls**: all `GET` under `/api/v1`: issues, `issues/{n}`, pulls,
+   `pulls/{n}`, `pulls/{n}/files`, `pulls/{n}/commits`, `repos/{o}/{r}`,
+   `commits/{ref}/status`, tags, releases, contents. Headers: `Authorization`
+   and `User-Agent` only. Redirects are disabled.
+3. **Scheme**: `Authorization: token <t>`, never `Bearer`
+   (`lib.rs:502-503`, `keys.rs:175, 292-299`). So R2's default is `token`.
+4. **Credentials**: no environment variable for the token; the keystore is
+   `$XDG_DATA_HOME/smith/keys.json` only. With no `keys.json` smith sends no
+   `Authorization` header at all (`keys.rs:97-120, 204-205`), which is the
+   cleanest shape: an empty keystore, and the proxy adds `token <t>`.
+   Aliases exist (`keys.rs:79-86`).
+
+## smith needs a change or an https:443 listener
+
+**Blocker.** Before any call smith does vanity discovery: `GET
+https://{host}/.well-known/forgejo-vanity`, hard-coded https, port 443, the
+port of `--host` dropped. A connect or TLS failure there is a hard error;
+only an HTTP non-2xx is tolerated (`repo.rs:246-247, 465-520`). A loopback
+http listener therefore cannot serve smith as smith is, and R4's unix socket
+cannot be reached by smith at all (point 1).
+
+Two options, for the operator to rule (the coordinator is asking):
+
+- **A. Change smith**: skip or soften discovery when the host is `http://` or
+  localhost, and optionally add a unix connector. pigtrough then needs a
+  loopback TCP listener (new, and with it a new admission question: a
+  loopback port is reachable by every local user, unlike a `0600` socket;
+  the same-user check would have to come from the peer's credentials, which
+  TCP does not give without more work). With a smith unix connector the
+  `0600` socket of R4 stays as ruled.
+- **B. An https:443 listener in pigtrough**: no smith change. Port 443 is
+  privileged, so this needs a capability or a redirect (a systemd socket
+  unit, or a firewall redirect of a high port); the certificate must be
+  trusted by smith, which means a private CA in smith's trust store and a
+  listener that terminates TLS. This adds a TLS server side to pigtrough,
+  which has only the client side today, and the same loopback admission
+  question as A.
+
+Recommendation (a theory, not tested): A with a unix connector keeps R4 and
+the same-user admission as ruled and adds no TLS server; B adds the most to
+pigtrough. Nothing is built until the operator rules. The per-route socket
+code (step 2) is on hold.
 
 ## Test plan for "works for smith"
 
