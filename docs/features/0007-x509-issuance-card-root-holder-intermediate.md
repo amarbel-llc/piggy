@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: experimental
 date: 2026-11-17
 promotion-criteria: >
   proposed -> experimental when the operator has approved this record and
@@ -332,9 +332,10 @@ tailnet HTTP endpoint (a new service, not piggy's); PAPI.
 Every phase closes with the human pass FDR 0006 requires.
 
 **Operator approval, 2026-11-17.** The operator approved this record as
-proposed and had the four phase issues filed (the numbers above). The
-status stays `proposed` until phase (i) lands (see the promotion
-criteria). Rulings made with the approval, folded into the open
+proposed and had the four phase issues filed (the numbers above). Phase
+(i) landed the same day (#393, origin/master f3cfe0515b63), which moved
+the status to `experimental` (see the promotion criteria); the
+operator's acceptance pass on #393 is still to come. Rulings made with the approval, folded into the open
 questions below: the agent refuses operator acts for keys outside the
 slot `card init` provisions (9C); each root signature also produces a
 `piggy-certificate-v1` act, deferred to phase (ii); the intermediate key
