@@ -11,8 +11,20 @@ approval-note: >
   the operator's tty, including a local posh attach, is a privileged
   channel. Implementations conform to this text; the conformance suite
   lands with FDR 0006 phase (a) (piggy#303).
-amended: 2026-11-10
+amended: 2026-11-18
 amendment-note: >
+  Sixth amendment, 2026-11-18 (FDR 0007 phase (ii), piggy#391; operator
+  rulings of 2026-11-17): §2.4 requires the attested slot to be 9C, not
+  only the PIN and touch policy (a key in the retired slot 82 that attests
+  PIN-always and touch-always is refused as an operator act); §2.7 makes
+  every ordinary piggy sign surface refuse DER that parses as a
+  TBSCertificate when the key is in a CA slot; new §3.2 says how an issued
+  X.509 certificate is recorded as a `piggy-certificate-v1` act, and §4
+  widens `piggy-record-digest-v1` to name a certificate's DER. Docs first:
+  the agent, `piggy tool sign` and the conformance rows follow as #391. An
+  agent built before it accepts a non-9C slot that attests the policy and
+  signs a TBSCertificate on an ordinary request; that is what an older
+  agent does, not conformance to this text.
   Fifth amendment, 2026-11-10 (RFC 0013 accepted): §3's text shapes for
   `piggy-certificate-v1`, `piggy-escalation-v1`, `piggy-approval-v1` and
   `piggy-revocation-v1` become "the text is a `piggy-act-v1` document
@@ -189,7 +201,7 @@ refusal, so that it can tell an old agent from a denied act.
 |-------:|-------------------|---------|
 | 0      | `signed`          | `sshsig` holds the signature. |
 | 1      | `no-such-key`     | No card agent reachable from this socket serves `key`. |
-| 2      | `refused-policy`  | The slot's attested policy is not PIN-always and touch-always, or its attestation could not be read. |
+| 2      | `refused-policy`  | The slot's attested policy is not PIN-always and touch-always, the attested slot is not 9C, or its attestation could not be read. |
 | 3      | `refused-namespace` | `namespace` is not registered for operator acts (§3). |
 | 4      | `refused-text`    | `text` is not displayable (§2.5). |
 | 5      | `cancelled`       | The operator declined, the PIN prompt was dismissed, or the touch timed out. |
@@ -210,7 +222,8 @@ YubiKey `ATTEST` command for the slot, as the existing
 1. the attestation certificate's public key equals the key in `key`;
 2. the attested PIN policy is `always`;
 3. the attested touch policy is `always`;
-4. the attestation certificate chains to the card's F9 certificate.
+4. the attestation certificate chains to the card's F9 certificate;
+5. the attestation certificate names slot 9C as the slot it attests.
 
 If any of these cannot be established, including because the card does
 not answer `ATTEST`, the agent MUST answer `refused-policy`. Policy is
@@ -221,10 +234,18 @@ therefore cannot serve operator acts; FDR 0006 phase (c) gives fibby an
 attestation key for this reason.
 
 Slot 9A as enrolled by `piggy card init` (PIN `once`, touch `cached`)
-fails check 2 and 3 and MUST be refused. The specification does not
-name 9C: any slot whose attested policy satisfies §2.4 MAY serve an
-operator act, and 9C is the slot `piggy card init` provisions to satisfy
-it.
+fails check 2 and 3 and MUST be refused. Since the sixth amendment
+(2026-11-18) the specification names 9C: a slot other than 9C MUST be
+refused with `refused-policy` even when it attests PIN-always and
+touch-always. The reason is FDR 0007's CA key in retired slot 82, which
+is enrolled with the same policy as 9C: if policy alone qualified, a
+signature by the certificate authority key could pass for an operator
+act, and the verifier could not tell a deliberate approval from a
+certificate signature. The slot is read from the attestation certificate,
+which the card produced, never from configuration or from the slot the
+caller asked about, so a verifier that checks the exported attestation
+(§5) reaches the same answer. (Before the sixth amendment any slot whose
+attested policy satisfied checks 2 and 3 MAY serve an operator act.)
 
 #### 2.5. Displayable text
 
@@ -337,6 +358,25 @@ prefix only; `file`, `git`, `piggy-record-v1` and non-sshsig data are
 untouched. `piggy sign-bytes` and any other piggy signing surface that
 reaches a card directly MUST apply the same refusal.
 
+**A TBSCertificate is not signed on an ordinary request.** The same
+reasoning covers FDR 0007's card-held certificate authority key: a
+routine PIN prompt and a touch over opaque data would sign a certificate
+the operator never saw. The card agent MUST refuse an ordinary
+`SSH_AGENTC_SIGN_REQUEST` (with `SSH_AGENT_FAILURE`, before any PIN
+prompt), and `piggy tool sign` MUST refuse (a usage error, exit 2), when
+(a) the key is in a CA slot, which is slot 82 today, and (b) the data to
+sign parses as a TBSCertificate: a DER SEQUENCE that consumes the whole
+data and has the shape of RFC 5280 §4.1.2 (an optional explicit `[0]`
+version, an INTEGER serial number, then SEQUENCE elements for the
+signature algorithm, the issuer name and the validity). A data blob that
+does not parse as DER, or parses as something else, is untouched. The
+check is on the key's slot, so 9A, which signs SSH challenges and is not a
+CA, and 9D, which does not sign, are not affected; adding a slot to the
+CA set is an amendment to this paragraph. The issuance verbs of FDR 0007
+(`piggy ca root-cert`, `sign`, `issue`) are not an ordinary request: they
+build the TBSCertificate themselves from a profile and a CSR, and reach
+the card by the route phase (ii) defines, not by this surface.
+
 #### 2.8. Proxy agents
 
 A proxy agent (FDR 0001) MUST advertise `operator-act@piggy` in its
@@ -410,6 +450,43 @@ transition record; an escalation request is answered by an `escalation`.
 
 A kind is added to this table by amendment, like a namespace (§3).
 
+#### 3.2. X.509 certificates recorded as certificate acts
+
+FDR 0007's issuance verbs sign an X.509 certificate with the card's CA
+key (slot 82). The operator ruled (2026-11-17) that each such signature
+also produces a `piggy-certificate-v1` act, so the ledger records that the
+operator touched for it. The act is a different signature from the
+certificate's: the certificate is signed by the CA slot key, the act by
+slot 9C through this extension, so one root signature costs two PIN and
+touch prompts, the second under the `certificate` banner. The shape,
+read through RFC 0013:
+
+- `kind` is `root` for a self-signed root certificate and a card `link`
+  for any other certificate the card signs (an intermediate, or a leaf
+  signed directly under the root). Every card `link` carries `not-after`
+  (RFC 0013 §4.1); it MUST NOT be later than the certificate's `notAfter`.
+- `subject-key` is the certified public key, spelled as RFC 0013 §2
+  requires (`ssh_ecdsa_nistp256_pub`: the key is P-256, the only X.509
+  key type FDR 0007 issues). `subject` is the principal the profile names
+  for the certificate.
+- `records` MUST contain one `piggy-record-digest-v1` markl-id (§4) naming
+  the issued certificate: the digest of its DER encoding, `sha256` or
+  `blake2b256`. A verifier that holds the certificate recomputes the
+  digest and MUST fail if it differs. The id is opaque to the chain rules,
+  as every `records` entry is (RFC 0013 §2).
+- `right` names what the certified key may do. Working names, to be
+  settled with phase (ii): `piggy:x509-ca` for a certificate with the CA
+  basic constraint and `piggy:x509-leaf` otherwise. The profile's name
+  constraints are carried by the certificate, not restated here.
+- `assurance` is `piggy:hardware`; `issuer` is `operator`.
+
+An act is signed only after the certificate's TBSCertificate has been
+built, and the text the operator sees under the `certificate` banner is
+the act's whole head (§2.6), so the digest in `records` is what the
+operator sees and confirms. A certificate signed without this act exists
+only when an older agent or a non-piggy tool signed it; no verifier of
+this document can detect that absence from the certificate alone.
+
 ### 4. markl-id purposes
 
 Two purposes are registered in RFC 0011 §6.1's sense, owned by piggy
@@ -418,7 +495,7 @@ Two purposes are registered in RFC 0011 §6.1's sense, owned by piggy
 
 | Purpose                 | Owner | Compatible formats            | Description |
 |-------------------------|-------|-------------------------------|-------------|
-| `piggy-record-digest-v1` | piggy | `sha256`, `blake2b256`        | Digest of a signed record's canonical bytes (FDR 0032 D8). This is the `H(message)` of a `piggy-record-v1` sshsig when the hash algorithm matches, and the value a `prev` set, a `ledger` line in a quote, an escalation request name, and an approval's decision record name. |
+| `piggy-record-digest-v1` | piggy | `sha256`, `blake2b256`        | Digest of a signed record's canonical bytes (FDR 0032 D8). This is the `H(message)` of a `piggy-record-v1` sshsig when the hash algorithm matches, and the value a `prev` set, a `ledger` line in a quote, an escalation request name, and an approval's decision record name. Since the sixth amendment (2026-11-18) it also names an X.509 certificate: the digest of its DER encoding, in a `piggy-certificate-v1` act's `records` (§3.2). |
 | `piggy-record-sig-v1`    | piggy | `ed25519_sig`, `ecdsa_p256_sig` | The raw signature over a record: the `signature` field of the sshsig blob with its SSH framing stripped to the fixed-width form RFC 0011 §5 defines (as `papi-doc-sig-v1` does). The sshsig blob remains the authoritative, self-describing form; this purpose names it in a markl-id slot. |
 
 Whether a record carries the sshsig blob, the markl-id of its raw
@@ -638,6 +715,9 @@ Tests use binary injection via `bats-emo`:
 | §3, namespace registry | `operator_act_refusals.bats` | `git`, `file`, `piggy-record-v1` and an unregistered name yield `refused-namespace` |
 | §2.6 and §3, the `approval` class | `operator_act_prompt.bats`, `piggy_askpass.bats` | the prompt carries `PIGGY_ASKPASS_KIND=approval` and a banner distinct from the escalation banner |
 | §2.6 and §3, the `revocation` class | `operator_act_prompt.bats`, `piggy_askpass.bats` | the prompt carries `PIGGY_ASKPASS_KIND=revocation` and a banner distinct from the certificate banner |
+| §2.4, refuse a slot other than 9C | `operator_act_policy.bats` | a fibby slot 82 attesting PIN-always and touch-always yields `refused-policy` before any prompt (#391) |
+| §2.7, refuse a TBSCertificate on a CA slot | `operator_act_refusals.bats` | an ordinary sign request over a DER TBSCertificate with a slot 82 key fails with no prompt, and the same data for slot 9A signs (#391) |
+| §3.2, certificate act records the certificate | `ca_issue_act.bats` | the act's `records` digest equals the digest of the issued certificate's DER (#391) |
 | §5, attestation bundle shape | `attestation_bundle.bats` | the export has exactly the five parts in order and the three key spellings agree |
 
 ## Compatibility
@@ -649,6 +729,18 @@ from a refusal. The two markl purposes of §4 are additive to RFC 0011
 them opaquely per RFC 0011 §6.6. A version 2 of the request will change
 the `version` field and MUST be a new amendment; version 1 has no
 extension point by design.
+
+The sixth amendment narrows §2.4 (only 9C may serve an operator act). No
+shipped consumer used another slot: `piggy card init` provisions 9C for
+operator acts, and the agent's only known operator-act keys are 9C keys,
+which is an inference from the provisioning code, not a survey. Three
+points of FDR 0007 stay open and are not decided here: the transport and
+placement of the issuance service (circus and the operator); whether the
+card honours PIN-always and touch-always on retired slot 82 exactly as on
+9C (a hand pass reading `piggy tool attest 82`; if it does not, slot 82
+does not satisfy FDR 0007's root requirement, and §2.4 is unaffected
+because 82 is refused either way); and X.509 over Ed25519, which is not
+pursued while nix's acceptance of it is untested.
 
 ## References
 
