@@ -405,7 +405,7 @@ _test-conformance-linux-only:
 # builder (a bare-metal fleet host, a circus follow-up) would only make
 # them faster.
 [linux]
-_test-vm-linux-only: test-vm-luks test-vm-zfs test-vm-agent
+_test-vm-linux-only: test-vm-luks test-vm-zfs test-vm-agent test-vm-holder
 
 [macos]
 _test-vm-linux-only:
@@ -1800,6 +1800,19 @@ test-vm-zfs:
 [linux]
 test-vm-agent:
     nix build .#checks.{{ vm-check-system }}.vm-piggy-agent --no-link --print-build-logs --show-trace
+
+# Holder sibling (nix/vm-tests/holder.nix, FDR 0006 phase (d), piggy#383
+# item 5): the shipped `services.piggy-holder` module as two hardened
+# system units over the fibby HOLDER build; a bound transient service
+# mints, signs and retires, a sibling service is refused not-bound-scope,
+# and the bound service's exit destroys its card. The hardening is read
+# back from the running processes. No store, no card stack.
+#
+# run the holder-service NixOS VM test
+[group('post-build')]
+[linux]
+test-vm-holder:
+    nix build .#checks.{{ vm-check-system }}.vm-piggy-holder --no-link --print-build-logs --show-trace
 
 # Line coverage from the three VM lanes: re-runs them on a `-C
 # instrument-coverage` build of piggy (.#vm-piggy-*-cov), then
@@ -5107,9 +5120,11 @@ explore-fdr0006-b BIN_DIR="":
 # stage the piggy#383 hand pass: a holder agent over the fibby holder build, a bound and a sibling systemd scope
 [group('explore')]
 [linux]
-explore-fdr0006-d BIN_DIR="":
+explore-fdr0006-d BIN_DIR="" NO_SHELL="":
     #!/usr/bin/env bash
     set -euo pipefail
+    # NO_SHELL=1 as a parameter or in the environment runs unattended.
+    NO_SHELL="${NO_SHELL:-{{ NO_SHELL }}}"
     if [[ -n "{{ BIN_DIR }}" ]]; then
       bin="$(realpath "{{ BIN_DIR }}")"
       holder="$bin/fibby-holder" piggy="$bin/piggy"
@@ -5135,16 +5150,16 @@ explore-fdr0006-d BIN_DIR="":
     trap 'exit 130' INT TERM HUP
 
     n=0 fails=0
-    check() { # check DESCRIPTION COMMAND...
+    check() { # check DESCRIPTION COMMAND...; a failing check's output is printed as diagnostics
       n=$((n + 1))
-      if "${@:2}" >/dev/null 2>&1; then echo "ok $n - $1"; else echo "not ok $n - $1"; fails=$((fails + 1)); fi
+      if "${@:2}" >"$dir/check.out" 2>&1; then
+        echo "ok $n - $1"
+      else
+        echo "not ok $n - $1"
+        sed 's/^/#   /' "$dir/check.out"
+        fails=$((fails + 1))
+      fi
     }
-    exits() { # exits WANT COMMAND...
-      local rc=0
-      timeout 30 "${@:2}" </dev/null >"$dir/last.out" 2>&1 || rc=$?
-      [[ $rc == "$1" ]]
-    }
-    saw() { grep -qF "$1" "$dir/last.out"; }
     # in_scope UNIT CMD...: run CMD inside a fresh transient user scope UNIT.
     in_scope() { systemd-run --user --scope --quiet --unit "$1" "${@:2}"; }
 
@@ -5189,8 +5204,18 @@ explore-fdr0006-d BIN_DIR="":
     check "bound scope: the retired card is gone, the other stays" bash -c "\"$holder\" ctl --socket \"$ctl\" list | grep -qF 'piggy-holder 2' && ! \"$holder\" ctl --socket \"$ctl\" list | grep -qF 'piggy-holder 1'"
     # The sibling scope: the same socket, a different cgroup.
     echo "piggy-test: from the sibling" >"$dir/sdata"
-    sibling_sign_refused() { ! in_scope "$tag-sibling-sign" ssh-keygen -Y sign -f "$dir/b.pub" -U -n file "$dir/sdata"; }
-    sibling_retire_refused() { in_scope "$tag-sibling" "$piggy" holder retire "$dir/b.pub" 2>&1 | grep -q not-bound-scope; }
+    sibling_sign_refused() {
+      local out rc=0
+      out="$(in_scope "$tag-sibling-sign" ssh-keygen -Y sign -f "$dir/b.pub" -U -n file "$dir/sdata" 2>&1)" || rc=$?
+      printf '%s\n(exit %s)\n' "$out" "$rc"
+      [[ $rc -ne 0 ]]
+    }
+    sibling_retire_refused() {
+      local out rc=0
+      out="$(in_scope "$tag-sibling" "$piggy" holder retire "$dir/b.pub" 2>&1)" || rc=$?
+      printf '%s\n(exit %s)\n' "$out" "$rc"
+      [[ $out == *not-bound-scope* ]]
+    }
     check "sibling scope: a sign with the bound key is refused" sibling_sign_refused
     check "sibling scope: the refusal names not-bound-scope in the agent log" grep -q not-bound-scope "$dir/agent.log"
     check "sibling scope: a retire of the bound key is refused not-bound-scope" sibling_retire_refused

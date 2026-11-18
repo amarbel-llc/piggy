@@ -413,9 +413,17 @@ A card dies on retire or when its cgroup directory disappears from
 under `--cgroup-root`; the cap is 16, `cap-reached`. `piggy holder mint`
 and `piggy holder retire` are the clients; the bats lane is
 `test-bats-conformance-holder-mint-fibby`; the hand pass is
-`explore-fdr0006-d`. Not yet built: the `services.piggy-holder` module
-and its VM lane (item 5), and a frontend peer minting for a unit it is
-not in (FDR 0007 phase (iii)).
+`explore-fdr0006-d`. Item 5: `nixosModules.piggy-holder`
+(`nix/nixos/piggy-holder.nix`), a native module with two hardened system
+units under two accounts, `fibby-holder.service` (refuses any build but
+the holder) and `piggy-holder.service` (the only account on fibby's
+sockets; `clientGroup` reaches the agent's), the directive list fixed
+against what the units need (no capabilities, `@system-service` minus
+`@privileged`, `AF_UNIX` only, read-only system, no swap for fibby, a
+memlock limit sized for the cap); the `vm-piggy-holder` lane
+(`nix/vm-tests/holder.nix`) runs it with transient `systemd-run`
+services as the bound and sibling scopes. Not built: a frontend peer
+minting for a unit it is not in (FDR 0007 phase (iii)).
 
 ### Phases
 

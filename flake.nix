@@ -240,7 +240,10 @@
           # `test-vm-*` recipes are the paved paths. The guard wraps the
           # import: runNixOSTest must never be evaluated on darwin.
           vmTests = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
-            import ./nix/vm-tests { inherit pkgs piggy fibby; }
+            import ./nix/vm-tests {
+              inherit pkgs piggy fibby;
+              fibbyHolder = fibby-holder;
+            }
           );
 
           # The same lanes on the instrumented (`-C instrument-coverage`)
@@ -255,6 +258,7 @@
             let
               lanes = import ./nix/vm-tests {
                 inherit pkgs fibby;
+                fibbyHolder = fibby-holder;
                 piggy = piggy-cov;
                 coverage = true;
               };
@@ -1197,6 +1201,13 @@
         # `piggy secrets reconcile` (FDR 0003). Same thin NixOS re-export shape.
         homeManagerModules.piggy-secrets = import ./nix/hm/piggy-secrets.nix;
         nixosModules.piggy-secrets = import ./nix/nixos/piggy-secrets.nix;
+
+        # `services.piggy-holder` — the FDR 0006 key holder as two hardened
+        # system units (fibby holder build + `piggy agent --holder`), a
+        # native NixOS module (phase (d), piggy#383 item 5). The holder
+        # needs the host's cgroup tree and a system account per unit, so
+        # there is no home-manager form. Proven by `vm-piggy-holder`.
+        nixosModules.piggy-holder = import ./nix/nixos/piggy-holder.nix;
 
         # `services.pigtrough` — the systemd user unit that keeps
         # `pigtrough serve` running (FDR 0009, R3): restarts come back with

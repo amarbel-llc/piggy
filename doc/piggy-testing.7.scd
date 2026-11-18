@@ -346,10 +346,23 @@ store initialised against the card, one generated secret proven to
 decrypt through the agent, journal-count helpers). Every decrypt and
 sign is asserted against fibby's journal and the askpass banner.
 
-Paved paths: *just test-vm-luks*, *test-vm-zfs*, *test-vm-agent*;
-*just debug-vm-dry-run* _CHECK_ lists what a lane would build versus
-fetch (the kernel-module cache-miss tripwire for the ZFS guest after a
-pin bump). *nix flake check* boots them because they are _checks_.
+Paved paths: *just test-vm-luks*, *test-vm-zfs*, *test-vm-agent*,
+*test-vm-holder*; *just debug-vm-dry-run* _CHECK_ lists what a lane would
+build versus fetch (the kernel-module cache-miss tripwire for the ZFS
+guest after a pin bump). *nix flake check* boots them because they are
+_checks_.
+
+_holder.nix_ (*vm-piggy-holder*, FDR 0006 phase (d)) imports no stack and
+no store: it runs the shipped *services.piggy-holder* NixOS module (the
+fibby HOLDER build and *piggy agent --holder* as two hardened system
+units) and uses transient *systemd-run* services as the sessions, each
+its own cgroup: a bound service mints, signs, verifies and retires; a
+sibling service is refused *not-bound-scope*; the bound service's exit
+destroys its remaining card. It reads the units' hardening back from the
+running processes (no capabilities, non-dumpable, core limit zero) and
+checks that a session user cannot reach fibby's sockets. The session
+commands carry the askpass discipline with no PIN to supply, so a prompt
+would fail the lane: a minted key signs with none.
 
 They run under TCG: the shared build host has no _/dev/kvm_ and its
 provider exposes no nested virtualisation. Two to three minutes per lane

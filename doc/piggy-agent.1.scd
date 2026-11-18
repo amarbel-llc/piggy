@@ -392,9 +392,15 @@ retire* (piggy(1)) are the clients.
 The holder serves only its own fibby's cards: no *--upstream*, no
 *--proxy-only*, and a request for a key it does not hold is refused, not
 forwarded. It runs as a system service under its own account with the
-fibby under another (FDR 0006 "The holder service"); *just
-explore-fdr0006-d* stages the hand pass on a systemd host, with a bound
-and a sibling transient scope.
+fibby under another (FDR 0006 "The holder service"): the NixOS module
+*services.piggy-holder* (piggy's _nixosModules.piggy-holder_) ships the
+two hardened units, _fibby-holder.service_ (the holder build only; the
+test double is refused at start) and _piggy-holder.service_, with
+_scopes_ as the *--scope* definitions and _clientGroup_ as the group that
+may reach the socket; fibby's sockets are reachable by the agent's
+account alone. *just explore-fdr0006-d* stages the hand pass on a systemd
+host, with a bound and a sibling transient scope; the *vm-piggy-holder*
+lane runs the module in a guest (piggy-testing(7) VM LANES).
 
 # SCOPES
 

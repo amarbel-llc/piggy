@@ -28,10 +28,16 @@
 # for ./coverage-report.nix to merge. fibby is left uninstrumented
 # (test infrastructure). It exits through atexit on SIGTERM (piggy#270),
 # so an instrumented fibby would flush its profile if one is wanted.
+#
+# ./holder.nix runs the shipped `services.piggy-holder` module (FDR 0006
+# phase (d)) with the fibby HOLDER build, not the test double, and needs
+# no store: it imports no stack.
 {
   pkgs,
   piggy,
   fibby,
+  # The holder build (`.#fibby-holder`) for ./holder.nix.
+  fibbyHolder,
   coverage ? false,
 }:
 let
@@ -115,14 +121,17 @@ let
   coverageEpilogue = ''
 
     with subtest("collect coverage profiles"):
-        for unit in ["piggy-front.service", "piggy-agent.service"]:
+        for unit in ["piggy-front.service", "piggy-agent.service", "piggy-holder.service"]:
             active, _ = machine.execute(f"systemctl is-active --quiet {unit}")
             if active != 0:
                 continue
             pid = machine.succeed(f"systemctl show -p MainPID --value {unit}").strip()
             machine.succeed(f"systemctl stop {unit}")
             machine.succeed(f"ls /coverage/{pid}-*.profraw")
-        machine.succeed("systemctl stop fibby.service")
+        for unit in ["fibby.service", "fibby-holder.service"]:
+            active, _ = machine.execute(f"systemctl is-active --quiet {unit}")
+            if active == 0:
+                machine.succeed(f"systemctl stop {unit}")
         machine.copy_from_machine("/coverage", "")
   '';
 
@@ -181,6 +190,30 @@ pkgs.mkVmChecks {
           "soft"
         ];
       };
+    };
+    # The holder service module under systemd (FDR 0006 phase (d)): no
+    # store, no card stack; the lane's own units are the subject. The
+    # session commands get the askpass discipline WITHOUT a PIN to supply,
+    # since a minted key must sign with none; the holder units themselves
+    # never prompt (no askpass is configured for them).
+    vm-piggy-holder = {
+      imports = [
+        (withCoverage (
+          import ./holder.nix {
+            inherit piggy fibbyHolder;
+            holderModule = ../nixos/piggy-holder.nix;
+            prelude = pkgs.vmTestPrelude;
+            sessionEnv = pkgs.lib.concatMapStrings (kv: "${kv} ") (
+              [
+                "SSH_ASKPASS=${askpass}"
+                "SSH_ASKPASS_REQUIRE=force"
+                "DISPLAY="
+              ]
+              ++ coverageEnvShell
+            );
+          }
+        ))
+      ];
     };
   };
 }
