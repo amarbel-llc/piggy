@@ -8,6 +8,7 @@ piggy-agent - PIV-backed SSH signing agent
 
 *piggy agent* [*-A*] [*-g* _GUID_] [*-K* _PUBKEY_] [*-S* _SLOTS_] [*-a* _SOCKET_] [*--upstream* _NAME_=_PATH_...] [*--add-new-keys-to* _NAME_] [*--service-name* _UNIT_] [*--probe-interval* _SECONDS_] [*--poll-only*]++
 *piggy agent* *--proxy-only* *--upstream* _NAME_=_PATH_... [*-a* _SOCKET_] [*--add-new-keys-to* _NAME_] [*--service-name* _UNIT_]++
+*piggy agent* *--holder* *--holder-fibby-ctl* _PATH_ [*--scope* _NAME_=_RULE_...] [*--cgroup-root* _DIR_] [*--scope-poll-interval* _SECONDS_] [*-a* _SOCKET_] [*-S* _SLOTS_] [*--service-name* _UNIT_]++
 *piggy agent* [*-s* | *-c*] [*-d*...] [*-D*] [_command_ [_args_...]]++
 *piggy agent* *-i* [*-A*] [*-g* _GUID_] [*-S* _SLOTS_]++
 *piggy agent* *-k*
@@ -106,6 +107,34 @@ two agents cannot silently fight over one path.
 	correctly). Unset, *piggy health* assumes the platform default
 	(_piggy-agent.service_ or the launchd label). The home-manager module
 	sets it.
+
+*--holder*
+	Holder mode (FDR 0006 phase (d)): serve *mint@piggy* and
+	*retire@piggy*, creating keys on virtual cards in the fibby named by
+	*--holder-fibby-ctl* and binding each to the scope that minted it. See
+	*HOLDER MODE*. Implies *-A*; conflicts with *--proxy-only*,
+	*--upstream*, *-g*, *-K* and *-i*.
+
+*--holder-fibby-ctl* _PATH_
+	The control socket of the fibby that holds the minted cards (*fibby
+	--control-socket* _PATH_). Its PC/SC socket is reached through
+	*PCSCLITE_CSOCK_NAME*, as for any card. Required by *--holder*.
+
+*--scope* _NAME_=_RULE_
+	A scope definition, repeatable: what a mint naming _NAME_ binds to.
+	_RULE_ is *caller* (the calling connection's own cgroup) or
+	*cgroup:*_/absolute/path_ (that cgroup; the caller must be inside
+	it). _NAME_ is opaque and is matched whole; the split is at the first
+	*=*. A mint naming no scope, or a name not defined here, is refused.
+
+*--cgroup-root* _DIR_
+	Where the cgroup2 filesystem is mounted (default
+	_/sys/fs/cgroup_). A bound cgroup whose directory is gone from under
+	it has exited, and its card is destroyed.
+
+*--scope-poll-interval* _SECONDS_
+	How often the holder checks that every bound cgroup still exists
+	(default 2).
 
 *-k*
 	Kill a running agent. Reads *SSH_AGENT_PID* from the environment, sends
@@ -224,7 +253,7 @@ consumes; other agents need not implement them:
 
 *agent-mode@piggy*
 	The agent's role (card-backed or proxy-only), its *--service-name*,
-	and whether presence is event-driven.
+	whether presence is event-driven, and whether it is a holder.
 
 *upstream-status@piggy*
 	One entry per *--upstream*: name, reachable or not, key count, the
@@ -296,6 +325,76 @@ unchanged, to the upstream that listed the key, and the answer is relayed
 unchanged. A *--proxy-only* front does only that: it never shows the text and
 never prompts. The prompt appears on the host where the card is, which is
 what lets *piggy operator-sign* work over a forwarded agent.
+
+# HOLDER MODE
+
+With *--holder* (FDR 0006 phase (d), piggy#383) the agent is a *key
+holder*: it mints short-lived signing keys for unattended sessions, each on
+its own virtual card inside a fibby (the key never leaves fibby; FDR 0006
+phase (c)), and lets each key be used only from the scope that minted it.
+The wire format is piggy RFC 0014; *piggy holder mint* and *piggy holder
+retire* (piggy(1)) are the clients.
+
+*mint@piggy*
+	A caller names a *scope* and a key type (*ssh-ed25519* or
+	*ecdsa-sha2-nistp256*). The scope is a plain versioned name such as
+	_piggy-mint-v1_ that selects one of the holder's *--scope* definitions;
+	the name is a claim, and the calling connection's peer is checked
+	against what the definition resolves to. The holder then has fibby
+	create a card whose slot 9A holds a fresh key with PIN policy *never*
+	and touch policy *never*, reads the key, replaces the card's factory
+	PIN with a random one it keeps on guarded pages (the caller never sees
+	it), serves the key with the comment _holder:<card>_, and answers with
+	the public key and the card's reader name. Minted keys go in slot 9A
+	only: 9C (operator acts) and 9D (the store) are never minted, so a
+	holder key can never sign an operator act.
+
+	Refusals are by name: *scope-unbound* (no scope named; the holder
+	infers none until the scope split of clown#244 exists),
+	*unknown-scope* (no such definition), *not-bound-scope* (the caller
+	is outside the scope's cgroup), *refused-key-type*, *cap-reached* (16
+	live cards per holder; retire one), *peer-unknown* (the connection's
+	peer could not be read), *bad-request* and *error*.
+
+*retire@piggy*
+	Names a minted key. From a peer inside the key's scope the holder
+	destroys the card (fibby wipes it and removes the reader), forgets the
+	PIN and drops the key; from anyone else it is *not-bound-scope*; a key
+	the holder did not mint is *no-such-key*.
+
+*Caller binding.*
+	The peer of every connection is read once, when it is accepted: its
+	credentials from *SO_PEERCRED* and its cgroup v2 path from
+	_/proc/<pid>/cgroup_, through a descriptor on _/proc/<pid>_ opened at
+	that moment, so a pid reused after accept is not misread as the peer
+	(the window between accept and that open remains). A binding is a
+	cgroup path; a peer is inside it when its own cgroup is that path or
+	one below it, component by component. Every use of a minted key goes
+	through that check: an ordinary sign request, ECDH, attestation and
+	retire alike, each answered with a failure naming *not-bound-scope*.
+	Listing is not gated. A peer whose cgroup cannot be read (no cgroup
+	v2 line, no _/proc_) may use no holder key.
+
+*Teardown.*
+	A card is destroyed when its scope retires it or when its bound
+	cgroup's directory disappears from under *--cgroup-root*, which the
+	holder checks every *--scope-poll-interval* seconds. A holder restart
+	loses every key by design: fibby's keys live in its memory, and
+	sessions mint again.
+
+*PIN policy.*
+	A holder key has PIN policy *never*, and the agent asks for no PIN
+	before using it. This is general: for every slot it serves, the agent
+	reads the PIN policy the card attests for the slot once per key and
+	skips the PIN when it is *never* (as it always has for 9E); a slot
+	whose policy cannot be read is prompted for as before.
+
+The holder serves only its own fibby's cards: no *--upstream*, no
+*--proxy-only*, and a request for a key it does not hold is refused, not
+forwarded. It runs as a system service under its own account with the
+fibby under another (FDR 0006 "The holder service"); *just
+explore-fdr0006-d* stages the hand pass on a systemd host, with a bound
+and a sibling transient scope.
 
 # SCOPES
 

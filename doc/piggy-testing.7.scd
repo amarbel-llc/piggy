@@ -127,6 +127,19 @@ certificates and refuses each flag. *just explore-fdr0006-c* stages the
 phase's hand pass; with _NO_SHELL=1_ in the environment it runs unattended,
 skipping the closing shell and exiting 0 only when every check is ok.
 
+The holder agent mode of phase (d) (*piggy agent --holder*, piggy-agent(1)
+HOLDER MODE) is gated by *just test-bats-conformance-holder-mint-fibby*
+over the test double: the lane stages a cgroup tree in a temporary
+directory and points *--cgroup-root* at it, so the mint, the no-PIN sign,
+every refusal by name, the retire, the 16-card cap and the teardown on a
+removed cgroup directory run without systemd. The lane leaves
+_PIGGY_TEST_FIB_PIN_ unset on purpose: a prompt would make the safety-net
+askpass refuse, which is how "a minted key signs with no PIN" is
+asserted. The sibling-scope refusal needs a second real cgroup:
+*just explore-fdr0006-d* makes a bound and a sibling transient scope with
+*systemd-run --user --scope* over the holder build, and honours
+_NO_SHELL=1_ like the phase (c) recipe.
+
 *--model* _yk4_ (default), _yk5_ or _yk5.7_ picks the card's firmware
 profile. _yk5.7_ is UNCAPTURED: it borrows _yk5_'s placeholder ATR and
 serials and advertises firmware 5.7.1 until piggy#133 captures a real 5.7

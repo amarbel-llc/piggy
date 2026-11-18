@@ -392,7 +392,7 @@ _test-optional-linux-only: test-bats-conformance-fibby-pivy-agent-smoke
 _test-optional-linux-only:
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
+_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -1184,6 +1184,29 @@ test-bats-conformance-agent-ed25519:
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_agent_ed25519_fibby.bats
+
+# FDR 0006 phase (d), piggy#383: the holder agent mode over fibby. A
+# `piggy agent --holder` mints a key on a fresh virtual card bound to the
+# caller's cgroup (`--scope piggy-mint-v1=caller`), the key signs with no
+# PIN (the slot is PIN never, item 4), refusals are by name (scope-unbound,
+# unknown-scope, not-bound-scope, cap-reached, no-such-key), a retire
+# destroys the card, and a bound cgroup directory removed from under the
+# staged `--cgroup-root` tears the card down. The sibling-scope refusal
+# needs a second cgroup: `just explore-fdr0006-d` and the VM lane.
+#
+# run the fibby-backed holder mint/retire bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-holder-mint-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=180 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_holder_mint_fibby.bats
 
 # piggy#299: a sealed pigpen document opens through the real Rust `piggy
 # agent` over fibby's slot 9D, driven by the Go surface a consumer uses
@@ -5081,6 +5104,119 @@ explore-fdr0006-b BIN_DIR="":
 # anyway, piggy-testing(7)). BIN_DIR, when given, holds a holder build named
 # fibby-holder, a test-double build named fibby and a piggy to run instead.
 #
+# stage the piggy#383 hand pass: a holder agent over the fibby holder build, a bound and a sibling systemd scope
+[group('explore')]
+[linux]
+explore-fdr0006-d BIN_DIR="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{ BIN_DIR }}" ]]; then
+      bin="$(realpath "{{ BIN_DIR }}")"
+      holder="$bin/fibby-holder" piggy="$bin/piggy"
+    else
+      holder="$(nix build .#fibby-holder --no-link --print-out-paths)/bin/fibby"
+      piggy="$(nix build .#default --no-link --print-out-paths)/bin/piggy"
+    fi
+    command -v systemd-run >/dev/null || { echo "explore-fdr0006-d: systemd-run is needed (a systemd user session makes the scopes)" >&2; exit 1; }
+    dir="$(mktemp -d -t fdr6d.XXXXXX)"
+    # The safety net with NO PIN: a prompt makes the helper refuse (piggy#35),
+    # and a minted key must never need one.
+    export SSH_ASKPASS="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    export SSH_ASKPASS_REQUIRE=force DISPLAY=""
+    unset WAYLAND_DISPLAY PIGGY_TEST_FIB_PIN SSH_AUTH_SOCK PIGGY_AUTH_SOCK
+    pids=()
+    tag="fdr6d-$$"
+    cleanup() {
+      systemctl --user stop "$tag-bound.scope" "$tag-sibling.scope" 2>/dev/null || true
+      kill "${pids[@]}" 2>/dev/null || true
+      rm -rf "$dir"
+    }
+    trap cleanup EXIT
+    trap 'exit 130' INT TERM HUP
+
+    n=0 fails=0
+    check() { # check DESCRIPTION COMMAND...
+      n=$((n + 1))
+      if "${@:2}" >/dev/null 2>&1; then echo "ok $n - $1"; else echo "not ok $n - $1"; fails=$((fails + 1)); fi
+    }
+    exits() { # exits WANT COMMAND...
+      local rc=0
+      timeout 30 "${@:2}" </dev/null >"$dir/last.out" 2>&1 || rc=$?
+      [[ $rc == "$1" ]]
+    }
+    saw() { grep -qF "$1" "$dir/last.out"; }
+    # in_scope UNIT CMD...: run CMD inside a fresh transient user scope UNIT.
+    in_scope() { systemd-run --user --scope --quiet --unit "$1" "${@:2}"; }
+
+    ctl="$dir/ctl.sock" agent="$dir/agent.sock"
+    export PCSCLITE_CSOCK_NAME="$dir/pcscd.comm"
+    "$holder" --socket "$PCSCLITE_CSOCK_NAME" --control-socket "$ctl" --model yk5.7 >"$dir/holder.log" 2>&1 &
+    pids+=($!)
+    for _ in $(seq 1 50); do [[ -S $ctl ]] && break; sleep 0.1; done
+    # The implicit blank card takes a reader slot the holder could use.
+    "$holder" ctl --socket "$ctl" destroy "Virtual PCD piggy fibby 00 00" >/dev/null 2>&1 || true
+    "$piggy" agent --holder --holder-fibby-ctl "$ctl" --scope piggy-mint-v1=caller \
+      --scope-poll-interval 1 -a "$agent" >"$dir/agent.log" 2>&1 &
+    pids+=($!)
+    for _ in $(seq 1 50); do [[ -S $agent ]] && break; sleep 0.1; done
+    export SSH_AUTH_SOCK="$agent"
+    echo "# holder fibby: $holder"
+    echo "# piggy:        $piggy"
+    echo "TAP version 14"
+    check "holder fibby reports profile holder"      test "$("$holder" ctl --socket "$ctl" profile)" = "ok holder"
+    check "a mint naming no scope is refused scope-unbound" bash -c "\"$piggy\" holder mint 2>&1 | grep -q scope-unbound"
+    check "a mint naming an undefined scope is refused unknown-scope" bash -c "\"$piggy\" holder mint --scope piggy-mint-v9 2>&1 | grep -q unknown-scope"
+
+    # The bound scope: mint two keys, sign with the first, then wait for
+    # the go-file so the scope stays alive while the sibling is tried.
+    cat >"$dir/bound.sh" <<EOF
+    set -euo pipefail
+    cd "$dir"
+    "$piggy" holder mint --scope piggy-mint-v1 > a.pub
+    "$piggy" holder mint --scope piggy-mint-v1 > b.pub
+    read -r t k _ < a.pub; printf 'fdr6d %s %s\n' "\$t" "\$k" > signers
+    echo "piggy-test: signed from the bound scope" > data
+    ssh-keygen -Y sign -f a.pub -U -n file data
+    ssh-keygen -Y verify -f signers -I fdr6d -n file -s data.sig < data
+    "$piggy" holder retire a.pub
+    touch bound.ok
+    while [[ ! -e go ]]; do sleep 0.2; done
+    EOF
+    in_scope "$tag-bound" bash "$dir/bound.sh" >"$dir/bound.log" 2>&1 &
+    pids+=($!)
+    for _ in $(seq 1 300); do [[ -e $dir/bound.ok ]] && break; sleep 0.1; done
+    check "bound scope: minted two keys, signed and verified with one, retired it" test -e "$dir/bound.ok"
+    check "bound scope: the retired card is gone, the other stays" bash -c "\"$holder\" ctl --socket \"$ctl\" list | grep -qF 'piggy-holder 2' && ! \"$holder\" ctl --socket \"$ctl\" list | grep -qF 'piggy-holder 1'"
+    # The sibling scope: the same socket, a different cgroup.
+    echo "piggy-test: from the sibling" >"$dir/sdata"
+    sibling_sign_refused() { ! in_scope "$tag-sibling-sign" ssh-keygen -Y sign -f "$dir/b.pub" -U -n file "$dir/sdata"; }
+    sibling_retire_refused() { in_scope "$tag-sibling" "$piggy" holder retire "$dir/b.pub" 2>&1 | grep -q not-bound-scope; }
+    check "sibling scope: a sign with the bound key is refused" sibling_sign_refused
+    check "sibling scope: the refusal names not-bound-scope in the agent log" grep -q not-bound-scope "$dir/agent.log"
+    check "sibling scope: a retire of the bound key is refused not-bound-scope" sibling_retire_refused
+    # The bound scope exits: its card goes by itself.
+    touch "$dir/go"
+    gone=0
+    for _ in $(seq 1 100); do
+      if ! "$holder" ctl --socket "$ctl" list | grep -qF "piggy-holder 2"; then gone=1; break; fi
+      sleep 0.1
+    done
+    check "scope exit: the remaining card was destroyed by the holder" test "$gone" = 1
+    check "scope exit: the agent log says the scope exited" grep -q "its scope exited" "$dir/agent.log"
+    check "scope exit: the key is no longer listed" bash -c "! ssh-add -L 2>/dev/null | grep -qF holder:"
+    echo "1..$n"
+    echo "# Read the unit logs: cat $dir/agent.log $dir/holder.log $dir/bound.log"
+    if [[ "${NO_SHELL:-}" == 1 ]]; then
+      echo "# NO_SHELL=1: no shell; $fails of $n checks failed."
+      ((fails == 0))
+      exit
+    fi
+    echo "# A holder agent is serving $agent over the holder fibby ($ctl)."
+    echo "# Try: systemd-run --user --scope \"\$PIGGY\" holder mint --scope piggy-mint-v1"
+    echo "#      \"\$FIBBY\" ctl --socket \"\$FIBBY_CTL\" list; ssh-add -L; exit the shell to stop everything."
+    FIBBY="$holder" FIBBY_CTL="$ctl" PIGGY="$piggy" "${SHELL:-bash}" -i || true
+    ((fails == 0))
+
 # stage the piggy#382 hand pass: fibby holder build, profiles, test-flag refusal
 [group('explore')]
 [linux]
