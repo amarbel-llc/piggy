@@ -312,4 +312,17 @@ mod tests {
         let err = parse_slot("9e").unwrap_err();
         assert!(err.contains("unsupported slot"));
     }
+
+    /// This rejection is what keeps `sign-bytes` outside the TBSCertificate
+    /// guard (`operator_act::refuse_tbs_certificate_on_ca_slot`, FDR 0007
+    /// phase (ii)): the guard is keyed on the CA slot (82), and `sign-bytes`
+    /// can never name it, locally or through a forwarded agent. Whoever lifts
+    /// this rejection for a retired slot must add the guard here.
+    #[test]
+    fn parse_slot_rejects_the_ca_slot_and_every_retired_slot() {
+        assert!(piggy_piv::slot::is_ca_slot(0x82));
+        for name in ["82", "83", "90", "95", "retired-1", "retired1"] {
+            assert!(parse_slot(name).is_err(), "{name}");
+        }
+    }
 }
