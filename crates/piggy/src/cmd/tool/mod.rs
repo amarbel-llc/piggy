@@ -625,6 +625,11 @@ fn cmd_sign(inv: &Invocation) -> i32 {
         eprintln!("piggy tool sign: {refusal}");
         return 1;
     }
+    // FDR 0007 phase (ii): nor does it sign a certificate with a CA key.
+    if let Err(refusal) = crate::operator_act::refuse_tbs_certificate_on_ca_slot(&input, slot_id) {
+        eprintln!("piggy tool sign: {refusal}");
+        return 1;
+    }
     let digest: Vec<u8> = match algorithm {
         PivAlgorithm::EcP256 => openssl::sha::sha256(&input).to_vec(),
         PivAlgorithm::EcP384 => openssl::sha::sha384(&input).to_vec(),

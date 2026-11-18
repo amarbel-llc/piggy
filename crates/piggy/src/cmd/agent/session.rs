@@ -530,6 +530,12 @@ impl PiggyAgent {
             }
         };
 
+        // FDR 0007 phase (ii): a CA key signs certificates only through
+        // `piggy ca`; the same bytes here would be a certificate signed
+        // behind a routine PIN prompt.
+        crate::operator_act::refuse_tbs_certificate_on_ca_slot(&request.data, key.slot_id)
+            .map_err(|refusal| AgentError::Other(refusal.into()))?;
+
         // Prepare data for signing (independent of the card session).
         let sign_data = prepare_sign_data(key.algorithm, &request.data, request.flags)?;
 

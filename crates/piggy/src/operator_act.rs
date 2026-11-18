@@ -398,6 +398,25 @@ pub fn refuse_operator_act_signed_data(data: &[u8]) -> Result<(), String> {
     }
 }
 
+/// The gate for keys in a CA slot (RFC 0012 §2.7 as amended for FDR 0007
+/// phase (ii)): the card agent's sign request and `piggy tool sign` refuse
+/// data that has the shape of a DER TBSCertificate, because an ordinary
+/// sign request shows the operator a routine PIN prompt with nothing of the
+/// certificate on it. `piggy ca` reaches the card by its own route and
+/// never passes through here. `Err` is the refusal to report; any other
+/// slot, and any other data, passes.
+pub fn refuse_tbs_certificate_on_ca_slot(data: &[u8], slot_id: u8) -> Result<(), String> {
+    if piggy_piv::slot::is_ca_slot(slot_id)
+        && piggy_piv::x509_profile::looks_like_tbs_certificate(data)
+    {
+        return Err(format!(
+            "refusing to sign a TBSCertificate with the CA key in slot {slot_id:02x} here: \
+             a certificate is signed only through `piggy ca`, which says what it is certifying"
+        ));
+    }
+    Ok(())
+}
+
 /// The unarmored sshsig blob (PROTOCOL.sshsig §2). `signature` is the SSH
 /// signature encoding: `string algorithm || string signature-data`.
 pub fn sshsig_blob(
@@ -517,6 +536,44 @@ mod tests {
             Request::decode(&extra).is_none(),
             "bytes after the outer string"
         );
+    }
+
+    /// The outer shape of a v3 TBSCertificate with empty names: enough for
+    /// the guard, which reads shape only.
+    fn tbs_shaped() -> Vec<u8> {
+        let mut body = vec![0xA0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01];
+        for _ in 0..5 {
+            body.extend_from_slice(&[0x30, 0x00]);
+        }
+        let mut out = vec![0x30, body.len() as u8];
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn a_tbs_certificate_is_refused_on_a_ca_slot_only() {
+        let tbs = tbs_shaped();
+        let refusal = refuse_tbs_certificate_on_ca_slot(&tbs, 0x82).unwrap_err();
+        assert!(refusal.contains("TBSCertificate"), "{refusal}");
+        assert!(refusal.contains("slot 82"), "{refusal}");
+        // 9A signs SSH challenges, 9C operator acts, 9D does not sign: not
+        // CA slots, so the same bytes pass there.
+        for slot in [0x9A, 0x9C, 0x9D, 0x9E, 0x83] {
+            assert!(
+                refuse_tbs_certificate_on_ca_slot(&tbs, slot).is_ok(),
+                "slot {slot:02X}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_bytes_pass_on_a_ca_slot() {
+        for data in [&b""[..], b"hello", b"SSHSIG", &tbs_shaped()[1..]] {
+            assert!(
+                refuse_tbs_certificate_on_ca_slot(data, 0x82).is_ok(),
+                "{data:?}"
+            );
+        }
     }
 
     #[test]

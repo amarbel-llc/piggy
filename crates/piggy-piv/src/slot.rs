@@ -150,5 +150,13 @@ pub fn is_valid_piv_slot(slot_id: u8) -> bool {
     slot_to_cert_tag(slot_id).is_some()
 }
 
+/// The slots that hold a certificate authority's key (FDR 0007: slot 82,
+/// `retired-1`, ruled 2026-11-08). 9A signs SSH challenges, 9C operator
+/// acts, and 9D does not sign, so none of them is a CA slot. One place to
+/// widen if another retired slot ever becomes one.
+pub fn is_ca_slot(slot_id: u8) -> bool {
+    slot_id == 0x82
+}
+
 /// Standard PIV slots to probe for certificates
 pub const STANDARD_SLOTS: &[u8] = &[0x9A, 0x9C, 0x9D, 0x9E];

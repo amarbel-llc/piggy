@@ -480,6 +480,67 @@ fn der_err<E: std::fmt::Display>(e: E) -> PivError {
     PivError::Other(format!("x509 profile: {e}"))
 }
 
+/// Whether `data` has the outer shape of a DER `TBSCertificate`
+/// (RFC 5280 §4.1): one SEQUENCE spanning all of `data` that holds an
+/// optional explicit `[0]` version, a serial INTEGER, then the five
+/// SEQUENCEs signature algorithm, issuer, validity, subject and
+/// subjectPublicKeyInfo.
+///
+/// The check is on shape, not on content, so a TBSCertificate with a
+/// malformed name or extension that a lenient verifier would still accept
+/// is caught too. It is the guard behind RFC 0012 §2.7's rule for CA slots
+/// (FDR 0007 phase (ii)): an ordinary sign request over such bytes would be
+/// a certificate signature the operator never saw described. It refuses
+/// BER (indefinite lengths) as "not this shape"; an issuer that signs a
+/// BER TBSCertificate is outside what this can see.
+pub fn looks_like_tbs_certificate(data: &[u8]) -> bool {
+    fn read_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+        let (&tag, rest) = input.split_first()?;
+        let (&first, rest) = rest.split_first()?;
+        let (len, rest) = if first < 0x80 {
+            (first as usize, rest)
+        } else {
+            let n = (first & 0x7f) as usize;
+            if n == 0 || n > 4 || rest.len() < n {
+                return None;
+            }
+            let len = rest[..n]
+                .iter()
+                .fold(0usize, |acc, b| (acc << 8) | *b as usize);
+            (len, &rest[n..])
+        };
+        if rest.len() < len {
+            return None;
+        }
+        Some((tag, &rest[..len], &rest[len..]))
+    }
+
+    let Some((0x30, body, rest)) = read_tlv(data) else {
+        return false;
+    };
+    if !rest.is_empty() {
+        return false;
+    }
+    let mut cursor = body;
+    // Optional `[0] EXPLICIT INTEGER` version.
+    if let Some((0xA0, version, after)) = read_tlv(cursor) {
+        match read_tlv(version) {
+            Some((0x02, _, [])) => cursor = after,
+            _ => return false,
+        }
+    }
+    let Some((0x02, _, mut cursor)) = read_tlv(cursor) else {
+        return false;
+    };
+    for _ in 0..5 {
+        match read_tlv(cursor) {
+            Some((0x30, _, after)) => cursor = after,
+            _ => return false,
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,5 +881,80 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err}").contains("not a CA"), "{err}");
+    }
+
+    /// The TBSCertificate bytes a builder signed, read back out of the
+    /// finished certificate.
+    fn tbs_of(cert_der: &[u8]) -> Vec<u8> {
+        Certificate::from_der(cert_der)
+            .unwrap()
+            .tbs_certificate
+            .to_der()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_builders_tbs_certificates_are_recognised() {
+        for algorithm in [PivAlgorithm::EcP256, PivAlgorithm::EcP384] {
+            let key = Key::new(algorithm);
+            let root_der = root(&key, &["github.com"]);
+            assert!(looks_like_tbs_certificate(&tbs_of(&root_der)));
+            let leaf_der = build_leaf_cert(
+                &key.point(),
+                key.algorithm,
+                &names(&["github.com"]),
+                &root_der,
+                validity(1),
+                &[0x66; 16],
+                key.signer(),
+            )
+            .unwrap();
+            assert!(looks_like_tbs_certificate(&tbs_of(&leaf_der)));
+        }
+    }
+
+    #[test]
+    fn a_whole_certificate_or_other_bytes_are_not_a_tbs_certificate() {
+        let key = Key::new(PivAlgorithm::EcP256);
+        let root_der = root(&key, &["github.com"]);
+        // A certificate is SEQUENCE { tbs, alg, sig }: its first element is
+        // a SEQUENCE, not a version or serial.
+        assert!(!looks_like_tbs_certificate(&root_der));
+        let tbs = tbs_of(&root_der);
+        // Trailing bytes after the SEQUENCE, or a truncation, are not it.
+        let mut trailing = tbs.clone();
+        trailing.push(0);
+        assert!(!looks_like_tbs_certificate(&trailing));
+        assert!(!looks_like_tbs_certificate(&tbs[..tbs.len() - 1]));
+        for other in [
+            &b""[..],
+            b"hello",
+            b"SSHSIG",
+            &[0x30, 0x00],
+            &[0x30, 0x80, 0x00, 0x00],
+        ] {
+            assert!(!looks_like_tbs_certificate(other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_v1_tbs_without_the_version_field_is_recognised() {
+        let key = Key::new(PivAlgorithm::EcP256);
+        let tbs = tbs_of(&root(&key, &["github.com"]));
+        // Drop the `[0] { INTEGER 2 }` version (A0 03 02 01 02) and fix the
+        // outer length: what a v1 TBSCertificate looks like.
+        let body_start = if tbs[1] < 0x80 {
+            2
+        } else {
+            2 + (tbs[1] & 0x7f) as usize
+        };
+        assert_eq!(
+            &tbs[body_start..body_start + 5],
+            &[0xA0, 0x03, 0x02, 0x01, 0x02]
+        );
+        let body = &tbs[body_start + 5..];
+        let mut v1 = vec![0x30, 0x82, (body.len() >> 8) as u8, body.len() as u8];
+        v1.extend_from_slice(body);
+        assert!(looks_like_tbs_certificate(&v1));
     }
 }
