@@ -94,8 +94,65 @@ lane and once on a real host under the hardened units. It lands with an
   field stays an opaque string and the version is a separate field. Open for
   the operator: which of the two is meant. Until clown#244 lands the holder's
   configuration is the only place the id-to-scope mapping lives.
-- Slot, PIN and touch policy: no ruling; the operator asked for context
-  (section 8).
+- Slot, PIN and touch policy: ACCEPTED as proposed (relayed 16:22Z): slot 9A
+  only, random holder-kept PIN, PIN and touch policy `never`. Context is
+  section 8.
+- Scope field value: the operator chose "name plus version" over a digest
+  (relayed 16:22Z). The scope is a human-chosen versioned name shaped like
+  `piggy-mint-v1`. This supersedes the digest reading above.
+
+### 7.1. Is `piggy-mint-v1` a markl id? (checked against RFC 0011, 2026-11-18)
+
+- Bare `piggy-mint-v1`, with no `@` and no payload, is NOT a valid markl id.
+  RFC 0011 §2.1: `markl-id = [ purpose "@" ] format-data`, and
+  `format-data` is `format "-" data`, where `data` is a blech32 payload of at
+  least 7 characters from a fixed alphabet. §2 records that a proposal to
+  accept a bare token in that slot was rejected on purpose, so that a
+  missing payload is a decode error. `piggy-mint-v1` has no payload.
+- It IS a valid **purpose** (an `ident`: letters, digits, `-`, `_`, `/`,
+  §2.1) and follows the registered-purpose naming convention
+  `system-domain-role-version` (§6.2). So a scope name fits the grammar as a
+  purpose, but a markl id built from it still needs a payload after the
+  `@`, for example `piggy-mint-v1@<format>-<data>`. The `@` is the join
+  between purpose and payload: with a payload it is required, and without
+  one there is no markl id.
+- Consequence for the wire: if the field is "a name plus a version", it is a
+  plain string (or the purpose half only), not a markl id. Whether the
+  request should carry a payload after the `@` depends on what the payload
+  would be, which has not been decided.
+- Not established: I have not read the agent's wire code, and `mint@piggy`
+  is undrafted, so I cannot say whether anything in the SSH path needs an
+  `@`. I do not know what the operator meant by the `@` and SSH; this needs
+  their answer.
+
+### 7.2. Does the manpage narrow the markl id? (report only; nothing changed)
+
+The operator's description: a stable versioned identifier that can include
+signatures, keys and digests to build merkle trees, with roots carrying key
+data. Checked sources, and what they say:
+
+- piggy-markl(7) (read through the man tools, not the .scd source):
+  DESCRIPTION calls the module "the purpose/format registry and the Id codec
+  that RFC 0011 specifies". TERMINOLOGY defines markl-id as
+  "`[purpose@]format-data`". Neither mentions trees, roots or composition.
+- RFC 0011 §1 names digests, signatures, type locks and repository public
+  keys as uses; §6.1 registers keys, signatures and digests as purposes. So
+  "can be a signature, a key or a digest" is covered. A text search of the
+  RFC finds no "merkle" and no description of ids that contain other ids or
+  of a root that carries key data.
+- RFC 0011 §2.3 reserves a quoted `format-data` form and requires decoders to
+  reject it until an amendment defines one; §2 rejects a generic bare
+  token. Together these mean the grammar admits exactly one fixed-width typed
+  payload per id, so a composite or tree-shaped id is not expressible today.
+- The Go interface has a note "size works completely different between sha
+  and merkle" (`go/internal/0/domain_interfaces/markl.go`, near line 60),
+  and `MerkleId` in method names (`WriteToMerkleId`, `SetMerkleId`), which suggest a broader original
+  model that the RFC then narrowed. This is my inference from names and one
+  comment, not something I verified.
+
+So: the RFC and manpage describe a typed single-payload identifier and say
+nothing about merkle structure; whether that is a narrowing of the
+operator's intent is theirs to judge. No manpage or RFC text was changed.
 
 ## 8. Plain version (for the operator)
 
@@ -123,8 +180,10 @@ lane and once on a real host under the hardened units. It lands with an
 
 ## 9. Rulings needed
 
-1. Slot 9A only, random holder-held PIN, policy `never` for PIN and touch
-   (sections 1 and 8): yes or no?
-2. The scope field's value: markl id of a scope definition, or an opaque
-   string plus a separate version (section 7)?
-(A sibling's retire is settled; see section 7.)
+Settled (section 7): slot/PIN/touch policy, the scope field being a versioned
+name, and a sibling's retire being refused. Still open:
+
+1. What the operator meant by the `@` for a value like `piggy-mint-v1`, and
+   whether the scope field should be a bare string (section 7.1).
+2. Whether the markl id model is narrower in RFC 0011 than they intended
+   (section 7.2).
