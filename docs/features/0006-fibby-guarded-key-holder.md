@@ -396,6 +396,27 @@ GUID) are generated inside fibby, while `destroy <reader>` wipes the
 card and removes its reader. Which slot a minted key goes in, and its PIN
 (the factory default today), are phase (d)'s to settle with `mint@piggy`.
 
+Phase (d) as built (piggy#383; RFC 0014 draft; rulings of 2026-11-18 in
+`docs/plans/2026-11-18-fdr0006-phase-d-open-decisions.md` §7): `piggy
+agent --holder` serves `mint@piggy` and `retire@piggy`. A mint names a
+**scope** by a plain versioned name (`piggy-mint-v1`), opaque on the
+wire, that selects a holder-configured scope definition (`--scope
+NAME=caller|cgroup:PATH`); an absent name is `scope-unbound`, an
+undefined one `unknown-scope`. The holder reads every connection's peer
+at accept (`SO_PEERCRED`, the cgroup v2 path through a pinned
+`/proc/<pid>` descriptor) and binds the key to a cgroup; a peer outside
+the binding gets `not-bound-scope` for sign, ECDH, attest and retire
+alike. The key is minted in slot **9A** only, PIN and touch `never`, the
+factory PIN replaced by a random one the agent keeps on guarded pages;
+the agent honours a slot's attested PIN `never` for any card (item 4).
+A card dies on retire or when its cgroup directory disappears from
+under `--cgroup-root`; the cap is 16, `cap-reached`. `piggy holder mint`
+and `piggy holder retire` are the clients; the bats lane is
+`test-bats-conformance-holder-mint-fibby`; the hand pass is
+`explore-fdr0006-d`. Not yet built: the `services.piggy-holder` module
+and its VM lane (item 5), and a frontend peer minting for a unit it is
+not in (FDR 0007 phase (iii)).
+
 ### Phases
 
 | Phase | Content | Serves |
@@ -719,12 +740,16 @@ is scheduled, not before.
   rule or unit property exists yet; FDR 0032 assigns it to clown#244.
   Phases (d) and (e) depend on it. The section "Scopes: frontend and
   agent" states what piggy needs from the answer.
-- **Does `ssh-agent-lib` 0.5 expose the peer socket?** The agent hands
-  `listen` a cloneable session today
-  (`crates/piggy/src/cmd/agent/mod.rs:578`, `:620`). Reading peer credentials
-  needs a per-connection hook. Believed available, not read.
-- **How is the peer's cgroup read without a pid-reuse race?** A pidfd
-  from the socket is the likely answer on recent kernels. Not verified.
+- **Does `ssh-agent-lib` 0.5 expose the peer socket?** Yes (2026-11-18,
+  piggy#383): `Agent::new_session` receives the accepted `UnixStream`
+  (`crates/piggy/src/cmd/agent/listener.rs`), and tokio's `peer_cred`
+  gives uid, gid and pid; the holder reads the peer there
+  (`cmd/agent/peer.rs`).
+- **How is the peer's cgroup read without a pid-reuse race?** Through a
+  descriptor on `/proc/<pid>` opened at accept, with `cgroup` read by
+  `openat` on it: once that process has exited the reads fail instead of
+  following a reused pid (2026-11-18, piggy#383). The accept-to-open
+  window remains; a pidfd would not shrink it.
 - **Does the agent's Ed25519 PIV path work end to end?** Yes, against
   fibby (2026-11-17, piggy#382 item 2): `just
   test-bats-conformance-agent-ed25519` lists an Ed25519 key seeded into
