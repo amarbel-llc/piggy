@@ -116,9 +116,9 @@ two agents cannot silently fight over one path.
 	*--upstream*, *-g*, *-K* and *-i*.
 
 *--holder-fibby-ctl* _PATH_
-	The control socket of the fibby that holds the minted cards (*fibby
-	--control-socket* _PATH_). Its PC/SC socket is reached through
-	*PCSCLITE_CSOCK_NAME*, as for any card. Required by *--holder*.
+	The control socket of the fibby that holds the minted cards, the
+	_PATH_ given to *fibby --control-socket*. Its PC/SC socket is reached
+	through *PCSCLITE_CSOCK_NAME*, as for any card. Required by *--holder*.
 
 *--scope* _NAME_=_RULE_
 	A scope definition, repeatable: what a mint naming _NAME_ binds to.
