@@ -17,7 +17,7 @@ with synthetic routes.
 
 | Value | Where it comes from | Status |
 |---|---|---|
-| the module import | piggy flake output `homeManagerModules.pigtrough`, imported beside `homeManagerModules.piggy-agent` | circus `infra/hosts/home/operator.nix`, line 81 (`imports = [ ... piggy.homeManagerModules.piggy-agent (import ./operator-secrets.nix { inherit piggy system; }) ]`); `piggy` is the flake input, passed by `(import ./home/operator.nix { inherit piggy system; })` at `infra/hosts/flake.nix` lines 1476 and 1741 (hosts twerk and nikulin). Mirror it: a `(import ./home/<x>.nix { inherit piggy system; })` entry with `services.pigtrough` inside (answer of circus/free-baobab, read from config, not run) |
+| the module import | piggy flake output `homeManagerModules.pigtrough`, imported beside `homeManagerModules.piggy-agent` | circus `infra/hosts/home/operator.nix`, line 81 (`imports = [ ... piggy.homeManagerModules.piggy-agent (import ./operator-secrets.nix { inherit piggy system; }) ]`); `piggy` is the flake input, passed by `(import ./home/operator.nix { inherit piggy system; })` at `infra/hosts/flake.nix` lines 1476 and 1741 (the operator's two hosts). Mirror it: a `(import ./home/<x>.nix { inherit piggy system; })` entry with `services.pigtrough` inside (answer of circus/free-baobab, read from config, not run) |
 | `package` | `piggy.packages.${system}.pigtrough` | as the module's comment says: no silent fallback |
 | `piggyPackage` | the host's existing piggy package | |
 | Forgejo host | the forge's name as clients use it | `forge.starbrandshoes.com`, tailnet-only (API under `/api/v1`), per circus's config |
@@ -90,8 +90,8 @@ run:
    `crates/pigtrough/src/table.rs` (`auth = "bearer"`, the six allow rows and
    the `forward_headers` list), which asserts the TOML equals the compiled-in
    route. Read, not run.
-2. **The forge is tailnet-only** (circus: it resolves to 100.96.0.4 for
-   headscale members; its nginx front is card-gated for the web UI with
+2. **The forge is tailnet-only** (circus: it resolves only for
+   tailnet members; its nginx front is card-gated for the web UI with
    anonymous read for public git). Whether `/api/v1` with a token passes that
    front without the card is not known to this session: the sitting's step 4
    finds out. The host running pigtrough must be on the tailnet.
