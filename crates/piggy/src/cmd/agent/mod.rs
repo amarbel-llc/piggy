@@ -11,7 +11,10 @@ use tokio::net::UnixListener;
 
 mod cak;
 mod card;
+// pub: the holder's scope rules and bindings (FDR 0006 phase (d)).
+pub mod holder;
 mod listener;
+pub mod peer;
 // pub: `agent_client::probe_agent_mode` (the `piggy health` side) shares
 // the AGENT_MODE_EXT name + AgentMode payload type.
 pub mod mode;
@@ -137,6 +140,42 @@ pub struct AgentArgs {
     /// platform default.
     #[arg(long = "service-name", value_name = "UNIT")]
     pub service_name: Option<String>,
+
+    /// Holder mode (FDR 0006 phase (d)): serve `mint@piggy` and
+    /// `retire@piggy`, creating keys on virtual cards in the fibby reached
+    /// through --holder-fibby-ctl, each bound to the scope that minted it
+    /// (see --scope) and usable from that scope only. Implies -A. Conflicts
+    /// with proxying: a holder serves its own cards and nothing else.
+    #[arg(
+        long = "holder",
+        requires = "holder_fibby_ctl",
+        conflicts_with_all = ["proxy_only", "upstream", "guid", "cak", "info"]
+    )]
+    pub holder: bool,
+
+    /// The control socket of the fibby holding the minted cards
+    /// (`fibby --control-socket PATH`); its PC/SC socket is reached through
+    /// PCSCLITE_CSOCK_NAME as for any card.
+    #[arg(long = "holder-fibby-ctl", value_name = "PATH", requires = "holder")]
+    pub holder_fibby_ctl: Option<String>,
+
+    /// A scope definition, NAME=RULE, repeatable: what a mint naming NAME
+    /// binds to. RULE is `caller` (the calling connection's own cgroup) or
+    /// `cgroup:/absolute/path` (that cgroup; the caller must be inside it).
+    /// A mint naming no scope, or one not defined here, is refused.
+    #[arg(long = "scope", value_name = "NAME=RULE", requires = "holder")]
+    pub scope: Vec<String>,
+
+    /// Where the cgroup2 filesystem is mounted; a bound cgroup whose
+    /// directory disappears from under it has exited, and its card is
+    /// destroyed.
+    #[arg(long = "cgroup-root", value_name = "DIR", default_value = holder::DEFAULT_CGROUP_ROOT)]
+    pub cgroup_root: String,
+
+    /// How often, in seconds, the holder checks that every bound cgroup
+    /// still exists.
+    #[arg(long = "scope-poll-interval", value_name = "SECONDS", default_value_t = holder::DEFAULT_POLL_INTERVAL.as_secs())]
+    pub scope_poll_interval: u64,
 
     /// Command to execute with agent env set
     #[arg(trailing_var_arg = true)]
@@ -278,11 +317,21 @@ pub fn run(full_argv: Vec<String>) -> i32 {
 
     // The full set of inputs that select and shape the key load. Bundled so the
     // piggy#244 reconcile loop can re-run the exact same enumeration each tick.
+    // FDR 0006 phase (d): a holder serves every card its fibby holds.
     let config = KeyLoadConfig {
         guid_filter: cli.guid.clone(),
-        all_cards: cli.all_cards,
+        all_cards: cli.all_cards || cli.holder,
         allowed_slots,
         cak,
+        policies: PolicyMemo::default(),
+    };
+
+    let holder = match build_holder(&cli) {
+        Ok(holder) => holder,
+        Err(e) => {
+            eprintln!("piggy agent: {e}");
+            return 1;
+        }
     };
 
     // Proxy-only (eng#295): skip PIV enumeration entirely — no PCSC
@@ -325,7 +374,7 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         }
     };
 
-    let code = match rt.block_on(run_async(cli, cached_keys, config, upstream_pool)) {
+    let code = match rt.block_on(run_async(cli, cached_keys, config, upstream_pool, holder)) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("piggy agent: {}", e);
@@ -341,6 +390,44 @@ pub fn run(full_argv: Vec<String>) -> i32 {
 
 /// How long a stopping agent waits for card work in blocking threads.
 const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The holder, from the `--holder` flags (FDR 0006 phase (d)), or `None`
+/// without `--holder`. A malformed `--scope` is a startup error.
+fn build_holder(cli: &AgentArgs) -> Result<Option<std::sync::Arc<holder::Holder>>, String> {
+    if !cli.holder {
+        return Ok(None);
+    }
+    let ctl = cli
+        .holder_fibby_ctl
+        .as_deref()
+        .ok_or("--holder needs --holder-fibby-ctl PATH")?;
+    let mut scopes = std::collections::HashMap::new();
+    for spec in &cli.scope {
+        let (name, rule) = holder::parse_scope_spec(spec)?;
+        if scopes.insert(name.clone(), rule).is_some() {
+            return Err(format!("--scope {name:?} is defined twice"));
+        }
+    }
+    if scopes.is_empty() {
+        tracing::warn!("holder: no --scope defined; every mint will be refused unknown-scope");
+    }
+    let config = holder::HolderConfig {
+        scopes,
+        cgroup_root: std::path::PathBuf::from(&cli.cgroup_root),
+        poll_interval: std::time::Duration::from_secs(cli.scope_poll_interval.max(1)),
+        cap: holder::CARD_CAP,
+    };
+    tracing::info!(
+        fibby_ctl = ctl,
+        cgroup_root = %config.cgroup_root.display(),
+        scopes = config.scopes.len(),
+        "holder mode (FDR 0006 phase (d))"
+    );
+    Ok(Some(std::sync::Arc::new(holder::Holder::new(
+        config,
+        Box::new(holder::FibbyControl::new(ctl)),
+    ))))
+}
 
 /// Resolves on SIGINT or SIGTERM (`systemctl stop`, launchd). Falls back
 /// to SIGINT alone when the SIGTERM handler cannot be installed.
@@ -369,6 +456,53 @@ struct KeyLoadConfig {
     all_cards: bool,
     allowed_slots: Option<Vec<u8>>,
     cak: Option<ssh_key::public::KeyData>,
+    /// Each served slot's reported PIN policy, read once (piggy#383 item 4).
+    policies: PolicyMemo,
+}
+
+/// The PIN policy of every (card, slot, key) the agent has looked at, so a
+/// real card answers one ATTEST per slot for the life of the process, not
+/// one per reconcile tick. Keyed by the key's fingerprint too: a slot whose
+/// key was regenerated is read again.
+#[derive(Clone, Default)]
+struct PolicyMemo(std::sync::Arc<std::sync::Mutex<PolicyMap>>);
+
+/// (card GUID hex, slot, key fingerprint) -> the slot's reported PIN policy.
+type PolicyMap = std::collections::HashMap<(String, u8, String), Option<piggy_piv::PinPolicy>>;
+
+impl PolicyMemo {
+    /// The slot's reported PIN policy, from the memo or from the card's
+    /// attestation (`None` when the card does not attest the slot: a seeded
+    /// virtual slot, a non-YubiKey; the agent then prompts as it always did).
+    fn pin_policy_of(
+        &self,
+        token: &piggy_piv::PivToken,
+        slot: &piggy_piv::PivSlot,
+    ) -> Option<piggy_piv::PinPolicy> {
+        let key = (
+            token.guid().to_hex(),
+            slot.id(),
+            slot.public_key()
+                .fingerprint(ssh_key::HashAlg::Sha256)
+                .to_string(),
+        );
+        if let Some(known) = self.0.lock().unwrap().get(&key) {
+            return *known;
+        }
+        let policy = match token.read_slot_policy(slot.id()) {
+            Ok((pin, _touch)) => Some(pin),
+            Err(e) => {
+                tracing::debug!(
+                    guid = %token.guid().short_id(),
+                    slot = format!("{:02X}", slot.id()),
+                    "slot policy not attested ({e}); a PIN will be asked for as before"
+                );
+                None
+            }
+        };
+        self.0.lock().unwrap().insert(key, policy);
+        policy
+    }
 }
 
 /// Enumerate PIV tokens, logging and degrading to an empty list on any PCSC
@@ -426,6 +560,7 @@ fn build_cached_keys(
                 algorithm: slot.algorithm(),
                 public_key: slot.public_key().key_data().clone(),
                 comment: format!("PIV_slot_{:02X} {}", slot.id(), guid.short_id()),
+                pin_policy: config.policies.pin_policy_of(token, slot),
             });
         }
 
@@ -468,6 +603,7 @@ async fn run_async(
     cached_keys: Vec<CachedKey>,
     config: KeyLoadConfig,
     upstream_pool: Option<UpstreamPool>,
+    holder: Option<std::sync::Arc<holder::Holder>>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let use_csh = wants_csh_output(&cli);
     // Determine socket path
@@ -529,6 +665,19 @@ async fn run_async(
     // and the agent behaves exactly as before.
     let agent = match upstream_pool {
         Some(pool) => agent.with_upstream_pool(pool),
+        None => agent,
+    };
+    // FDR 0006 phase (d): the holder's teardown watcher destroys a minted
+    // card once its bound cgroup is gone; retire does the same on request.
+    let agent = match holder {
+        Some(holder) => {
+            tokio::spawn(holder::watch_bindings(
+                holder.clone(),
+                agent.keys_handle(),
+                agent.pin_handle(),
+            ));
+            agent.with_holder(holder)
+        }
         None => agent,
     };
 

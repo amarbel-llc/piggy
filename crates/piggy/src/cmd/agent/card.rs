@@ -466,6 +466,7 @@ mod tests {
             algorithm: piggy_piv::PivAlgorithm::Ed25519,
             public_key: KeyData::Ed25519(Ed25519PublicKey([7u8; 32])),
             comment: "reconcile-test".into(),
+            pin_policy: None,
         }
     }
 

@@ -15,6 +15,7 @@ use std::time::Duration;
 use ssh_agent_lib::agent::{Agent, ListeningSocket, Session};
 use tokio::net::{UnixListener, UnixStream};
 
+use super::holder::PeerStatus;
 use super::session::PiggyAgent;
 
 /// How long `accept` waits before trying again after a transient error. Long
@@ -49,9 +50,25 @@ impl ListeningSocket for ResilientListener {
 }
 
 /// `ssh_agent_lib`'s blanket `Agent` impl covers a bare `UnixListener` only.
+/// A holder reads the peer of every connection here, before its first
+/// request (FDR 0006 phase (d)); any other agent does not look.
 impl Agent<ResilientListener> for PiggyAgent {
-    fn new_session(&mut self, _socket: &UnixStream) -> impl Session {
-        self.clone()
+    fn new_session(&mut self, socket: &UnixStream) -> impl Session {
+        let session = self.clone();
+        if !session.is_holder() {
+            return session;
+        }
+        let peer = match super::peer::peer_of(socket) {
+            Ok(peer) => {
+                tracing::debug!(%peer, "holder: connection accepted");
+                PeerStatus::Known(peer)
+            }
+            Err(e) => {
+                tracing::warn!("holder: connection from an unreadable peer: {e}");
+                PeerStatus::Unknown(e.to_string())
+            }
+        };
+        session.with_peer(peer)
     }
 }
 

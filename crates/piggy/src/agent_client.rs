@@ -886,6 +886,101 @@ fn parse_flat_cstrings(mut buf: &[u8]) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// Why a holder request (`mint@piggy`, `retire@piggy`; FDR 0006 phase (d))
+/// could not be made at all. A request the holder answered, even with a
+/// refusal, comes back as the extension's own response instead.
+#[derive(Debug)]
+pub enum HolderClientError {
+    /// The agent could not be reached.
+    Unreachable(String),
+    /// The agent answered the extension with a failure: it is not a
+    /// holder, or the connection was lost mid-request.
+    NotServed(String),
+    /// The agent answered, but not with the extension's response.
+    Protocol(String),
+}
+
+impl std::fmt::Display for HolderClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable(e) => write!(f, "{e}"),
+            Self::NotServed(e) => write!(
+                f,
+                "the agent is not a holder (it did not serve the extension): {e}"
+            ),
+            Self::Protocol(e) => write!(f, "unexpected answer from the agent: {e}"),
+        }
+    }
+}
+
+/// One holder extension round-trip on a fresh connection: the response's
+/// `details` for `name`, checked to echo `name`.
+fn holder_call(
+    socket_path: &Path,
+    name: &str,
+    details: Vec<u8>,
+) -> Result<Vec<u8>, HolderClientError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| HolderClientError::Unreachable(format!("tokio runtime: {e}")))?;
+    let socket_path = socket_path.to_path_buf();
+    let name = name.to_string();
+    runtime.block_on(async move {
+        let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
+            HolderClientError::Unreachable(format!("connect {}: {e}", socket_path.display()))
+        })?;
+        let mut client = Client::new(stream);
+        let answer = client
+            .extension(Extension {
+                name: name.clone(),
+                details: details.into(),
+            })
+            .await
+            .map_err(|e| HolderClientError::NotServed(e.to_string()))?
+            .ok_or_else(|| {
+                HolderClientError::Protocol(format!("plain SUCCESS, no {name} response"))
+            })?;
+        if answer.name != name {
+            return Err(HolderClientError::Protocol(format!(
+                "a response to {:?}, not to {name}",
+                answer.name
+            )));
+        }
+        Ok(answer.details.as_ref().to_vec())
+    })
+}
+
+/// Ask the holder at `socket_path` to mint a key of `key_type` bound to
+/// `scope` (empty for none; FDR 0006 phase (d)).
+pub fn holder_mint(
+    socket_path: &Path,
+    scope: &str,
+    key_type: crate::holder_ext::KeyType,
+) -> Result<crate::holder_ext::MintResponse, HolderClientError> {
+    use crate::holder_ext::{MINT, MintRequest, MintResponse};
+    let request = MintRequest {
+        scope: scope.to_string(),
+        key_type: key_type.as_str().to_string(),
+    };
+    let details = holder_call(socket_path, MINT, request.encode())?;
+    MintResponse::decode(&details)
+        .ok_or_else(|| HolderClientError::Protocol("malformed mint response".into()))
+}
+
+/// Ask the holder at `socket_path` to retire the key whose ssh public key
+/// blob is `key`.
+pub fn holder_retire(
+    socket_path: &Path,
+    key: &[u8],
+) -> Result<crate::holder_ext::RetireResponse, HolderClientError> {
+    use crate::holder_ext::{RETIRE, RetireRequest, RetireResponse};
+    let request = RetireRequest { key: key.to_vec() };
+    let details = holder_call(socket_path, RETIRE, request.encode())?;
+    RetireResponse::decode(&details)
+        .ok_or_else(|| HolderClientError::Protocol("malformed retire response".into()))
+}
+
 /// The SSH-agent socket override piggy should prefer for PIV decrypt.
 ///
 /// Returns `PIGGY_AUTH_SOCK` when it is set and non-empty, else `None`.

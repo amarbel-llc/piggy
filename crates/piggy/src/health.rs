@@ -1378,6 +1378,7 @@ mod tests {
                 upstreams: 0,
                 service: None,
                 event_driven,
+                holder: false,
             }))
         };
         let presence = |probes: &Probes| {
@@ -1468,6 +1469,7 @@ mod tests {
             upstreams: 2,
             service: None,
             event_driven: false,
+            holder: false,
         }));
         probes.pcsc = PcscProbe::Error("PC/SC unavailable".into());
         probes.cards = None;
@@ -1537,6 +1539,7 @@ mod tests {
             upstreams: 1,
             service: None,
             event_driven: false,
+            holder: false,
         }));
         let mut posh = upstream("posh", false, 0);
         posh.since = Some(1_790_000_000);
@@ -1592,6 +1595,7 @@ mod tests {
             upstreams: 0,
             service: None,
             event_driven: false,
+            holder: false,
         }));
         let results = evaluate(&probes);
         assert!(matches!(results[5].status, Status::Fail));
@@ -1611,6 +1615,7 @@ mod tests {
                 upstreams: 0,
                 service: s.map(str::to_string),
                 event_driven: false,
+                holder: false,
             }))
         };
         assert_eq!(

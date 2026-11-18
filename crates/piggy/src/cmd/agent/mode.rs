@@ -42,4 +42,9 @@ pub struct AgentMode {
     /// `false` (poll-only), which is correct for every pre-#248 agent.
     #[serde(default)]
     pub event_driven: bool,
+    /// `--holder` (FDR 0006 phase (d), piggy#383): this agent is a key
+    /// holder that mints and retires scope-bound keys. An older agent
+    /// (no field) is not one.
+    #[serde(default)]
+    pub holder: bool,
 }

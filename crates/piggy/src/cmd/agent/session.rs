@@ -55,6 +55,20 @@ pub struct CachedKey {
     pub algorithm: PivAlgorithm,
     pub public_key: KeyData,
     pub comment: String,
+    /// The slot's PIN policy as the card reports it (FDR 0006 phase (d),
+    /// piggy#383 item 4): `Some(Never)` means the agent asks for no PIN
+    /// before using the key. `None` is "not known", which keeps today's
+    /// behaviour: a PIN is required for every slot but 9E.
+    pub pin_policy: Option<piggy_piv::PinPolicy>,
+}
+
+impl CachedKey {
+    /// Whether an operation on this key needs the card's PIN verified
+    /// first: never for slot 9E (the Card Authentication Key), never for
+    /// a slot the card reports as PIN `never`, otherwise yes.
+    pub fn needs_pin(&self) -> bool {
+        self.slot_id != 0x9E && self.pin_policy != Some(piggy_piv::PinPolicy::Never)
+    }
 }
 
 #[derive(Clone)]
@@ -108,6 +122,13 @@ pub struct PiggyAgent {
     /// `piggy health` probes the right unit. `None` = not told; health
     /// falls back to the platform default.
     service_name: Option<String>,
+    /// `--holder` (FDR 0006 phase (d), piggy#383): the scope definitions,
+    /// the bindings of minted keys and the card store. Shared by every
+    /// connection; `None` for every other agent.
+    holder: Option<Arc<super::holder::Holder>>,
+    /// Who this connection's peer is, read when it was accepted. Per
+    /// connection, not shared: each connection is its own clone.
+    peer: super::holder::PeerStatus,
 }
 
 /// A PIN acquired for a card op, plus whether it came from an on-demand
@@ -137,7 +158,25 @@ impl PiggyAgent {
             proxy_only: false,
             event_driven: false,
             service_name: None,
+            holder: None,
+            peer: super::holder::PeerStatus::NotRead,
         }
+    }
+
+    /// Make this agent a holder (`--holder`, FDR 0006 phase (d)).
+    pub fn with_holder(mut self, holder: Arc<super::holder::Holder>) -> Self {
+        self.holder = Some(holder);
+        self
+    }
+
+    /// The peer of this connection, as the listener read it.
+    pub fn with_peer(mut self, peer: super::holder::PeerStatus) -> Self {
+        self.peer = peer;
+        self
+    }
+
+    pub fn is_holder(&self) -> bool {
+        self.holder.is_some()
     }
 
     /// Configure the upstream proxy pool (piggy#215, `--upstream`).
@@ -267,9 +306,10 @@ impl PiggyAgent {
         self.pins.lock().await.forget_for(guid);
     }
 
-    /// Run `card_op` on `guid`'s card with slot `slot_id` read and, unless
-    /// the slot is 9E, the PIN verified. The one acquire-verify sequence
-    /// behind sign, ECDH and ECDH-rebox:
+    /// Run `card_op` on `guid`'s card with slot `slot_id` read and, when
+    /// `needs_pin` (slot 9E and PIN-`never` slots do not, piggy#383 item 4),
+    /// the PIN verified. The one acquire-verify sequence behind sign, ECDH
+    /// and ECDH-rebox:
     ///
     /// - The PIN is acquired (cached or prompted) outside the card lock and
     ///   transaction, so a prompt never holds them (piggy#105). Verify and
@@ -288,6 +328,7 @@ impl PiggyAgent {
         op: &str,
         guid: &Guid,
         slot_id: u8,
+        needs_pin: bool,
         mut card_op: impl FnMut(
             &mut piggy_piv::PinSession<'_>,
             &piggy_piv::PivSlot,
@@ -295,7 +336,7 @@ impl PiggyAgent {
     ) -> Result<T, AgentError> {
         let mut attempt = 0u32;
         loop {
-            let acquired = if slot_id != 0x9E {
+            let acquired = if needs_pin {
                 Some(self.ensure_pin(op, guid).await?)
             } else {
                 None
@@ -493,11 +534,17 @@ impl PiggyAgent {
         let sign_data = prepare_sign_data(key.algorithm, &request.data, request.flags)?;
 
         let sig_bytes = self
-            .on_verified_card("sign", &key.guid, key.slot_id, |session, slot| {
-                session
-                    .sign_prehash(slot, &sign_data)
-                    .map_err(|e| AgentError::Other(e.to_string().into()))
-            })
+            .on_verified_card(
+                "sign",
+                &key.guid,
+                key.slot_id,
+                key.needs_pin(),
+                |session, slot| {
+                    session
+                        .sign_prehash(slot, &sign_data)
+                        .map_err(|e| AgentError::Other(e.to_string().into()))
+                },
+            )
             .await?;
         to_ssh_signature(key.algorithm, &sig_bytes, request.flags)
     }
@@ -569,6 +616,11 @@ impl PiggyAgent {
                 // upstream does, which the union below takes care of.
                 if !self.proxy_only {
                     supported.push(crate::operator_act::EXTENSION.to_string());
+                }
+                // FDR 0006 phase (d): only a holder mints and retires.
+                if self.holder.is_some() {
+                    supported.push(crate::holder_ext::MINT.to_string());
+                    supported.push(crate::holder_ext::RETIRE.to_string());
                 }
                 // piggy#215: with upstreams configured, advertise the
                 // self-reporting status extension (piggy health's probe
@@ -684,6 +736,26 @@ impl PiggyAgent {
                     OperatorActAnswer::Relayed(answer) => answer,
                 }
             }
+            // FDR 0006 phase (d): the holder's mint and retire. Every
+            // outcome is a status in a named response, so a caller can
+            // tell a refusal from an agent that is not a holder (which
+            // falls through to the refusal below).
+            n if n == crate::holder_ext::MINT && self.holder.is_some() => {
+                let details = extension.details.clone().into_bytes();
+                let response = self.handle_mint(&details).await;
+                Ok(Some(Extension {
+                    name: crate::holder_ext::MINT.into(),
+                    details: response.encode().into(),
+                }))
+            }
+            n if n == crate::holder_ext::RETIRE && self.holder.is_some() => {
+                let details = extension.details.clone().into_bytes();
+                let response = self.handle_retire(&details).await;
+                Ok(Some(Extension {
+                    name: crate::holder_ext::RETIRE.into(),
+                    details: response.encode().into(),
+                }))
+            }
             // eng#295: self-report the agent's role so `piggy health` can
             // shape its plan (a proxy-only agent has no card to check).
             n if n == super::mode::AGENT_MODE_EXT => {
@@ -693,6 +765,7 @@ impl PiggyAgent {
                     upstreams: self.upstreams.len(),
                     service: self.service_name.clone(),
                     event_driven: self.event_driven,
+                    holder: self.holder.is_some(),
                 };
                 let json = serde_json::to_vec(&mode)
                     .map_err(|e| AgentError::Other(format!("agent-mode: {e}").into()))?;
@@ -1113,6 +1186,166 @@ impl PiggyAgent {
         )))
     }
 
+    /// Serve one `mint@piggy` request (FDR 0006 phase (d)). Judged before
+    /// anything is created: the peer, the key type, the scope, the cap.
+    /// Then fibby creates the card, the agent reads its slot 9A over PC/SC
+    /// and replaces the factory PIN with a random one it keeps, and the key
+    /// joins the served set, bound to the scope's cgroup.
+    async fn handle_mint(&mut self, details: &[u8]) -> crate::holder_ext::MintResponse {
+        use super::holder::{self, Binding, PeerStatus};
+        use crate::holder_ext::{KeyType, MintRequest, MintResponse, Status};
+        fn refuse(status: Status, detail: impl Into<String>) -> MintResponse {
+            MintResponse::refusal(status, detail)
+        }
+        let holder = self
+            .holder
+            .clone()
+            .expect("mint is served by a holder only");
+
+        let Some(request) = MintRequest::decode(details) else {
+            return refuse(Status::BadRequest, "malformed mint request");
+        };
+        let peer = match &self.peer {
+            PeerStatus::Known(peer) => peer.clone(),
+            PeerStatus::Unknown(why) => return refuse(Status::PeerUnknown, why.clone()),
+            PeerStatus::NotRead => {
+                return refuse(Status::PeerUnknown, "the connection's peer was not read");
+            }
+        };
+        let Some(key_type) = KeyType::parse(&request.key_type) else {
+            return refuse(
+                Status::RefusedKeyType,
+                format!(
+                    "{:?}: this holder mints {} and {} keys",
+                    request.key_type,
+                    KeyType::Ed25519.as_str(),
+                    KeyType::EcdsaP256.as_str()
+                ),
+            );
+        };
+        let (scope, cgroup) = match holder.resolve_scope(&peer, &request.scope) {
+            Ok(resolved) => resolved,
+            Err((status, detail)) => return refuse(status, detail),
+        };
+        let reader = match holder.reserve_reader().await {
+            Ok(reader) => reader,
+            Err((status, detail)) => return refuse(status, detail),
+        };
+
+        if let Err(e) = holder.control().create(key_type.fibby_alg(), &reader).await {
+            holder.release_reservation().await;
+            return refuse(
+                Status::Error,
+                format!("the card store did not create a card: {e}"),
+            );
+        }
+        // From here a failure destroys the card again, so a half-minted
+        // card never lingers with the factory PIN.
+        let undo = |why: String| {
+            let holder = holder.clone();
+            let reader = reader.clone();
+            async move {
+                if let Err(e) = holder.control().destroy(&reader).await {
+                    tracing::warn!(reader = %reader, "holder: could not destroy a half-minted card: {e}");
+                }
+                holder.release_reservation().await;
+                refuse(Status::Error, why)
+            }
+        };
+        let pin = match holder::random_pin() {
+            Ok(pin) => pin,
+            Err(e) => return undo(e).await,
+        };
+        let minted = {
+            let _card_guard = self.card_lock.lock().await;
+            let reader = reader.clone();
+            let pin = pin.clone();
+            tokio::task::spawn_blocking(move || holder::provision_minted_card(&reader, &pin)).await
+        };
+        let card = match minted {
+            Ok(Ok(card)) => card,
+            Ok(Err(e)) => return undo(e).await,
+            Err(e) => return undo(format!("provisioning task: {e}")).await,
+        };
+        let blob = match PublicKey::new(card.public_key.clone(), "").to_bytes() {
+            Ok(blob) => blob,
+            Err(e) => return undo(format!("encode the minted key: {e}")).await,
+        };
+
+        self.pins.lock().await.cache_verified(&card.guid, &pin);
+        self.keys.lock().await.push(CachedKey {
+            guid: card.guid.clone(),
+            reader_name: reader.clone(),
+            slot_id: holder::MINTED_SLOT,
+            algorithm: card.algorithm,
+            public_key: card.public_key.clone(),
+            comment: format!("holder:{reader}"),
+            pin_policy: Some(piggy_piv::PinPolicy::Never),
+        });
+        self.remember_served(std::iter::once(&card.public_key))
+            .await;
+        holder
+            .record(Binding {
+                key: card.public_key,
+                guid: card.guid.clone(),
+                reader: reader.clone(),
+                scope: scope.clone(),
+                cgroup: cgroup.clone(),
+            })
+            .await;
+        tracing::info!(
+            reader = %reader,
+            guid = %card.guid.short_id(),
+            key_type = key_type.as_str(),
+            scope = %scope,
+            cgroup = %cgroup,
+            peer = %peer,
+            "holder: minted a key"
+        );
+        MintResponse::minted(blob, reader)
+    }
+
+    /// Serve one `retire@piggy` request: the key's owner (a peer inside its
+    /// scope) destroys the card; anyone else is `not-bound-scope`.
+    async fn handle_retire(&mut self, details: &[u8]) -> crate::holder_ext::RetireResponse {
+        use crate::holder_ext::{RetireRequest, RetireResponse, Status};
+        fn refuse(status: Status, detail: impl Into<String>) -> RetireResponse {
+            RetireResponse::refusal(status, detail)
+        }
+        let holder = self
+            .holder
+            .clone()
+            .expect("retire is served by a holder only");
+
+        let Some(request) = RetireRequest::decode(details) else {
+            return refuse(Status::BadRequest, "malformed retire request");
+        };
+        let Ok(public_key) = PublicKey::from_bytes(&request.key) else {
+            return refuse(Status::BadRequest, "the key is not an ssh public key blob");
+        };
+        let Some(binding) = holder.binding_of(public_key.key_data()).await else {
+            return refuse(Status::NoSuchKey, "this holder minted no such key");
+        };
+        if let Err((status, detail)) = holder.peer_may_use(&binding, &self.peer) {
+            return refuse(status, detail);
+        }
+        match super::holder::teardown(
+            &holder,
+            &self.keys,
+            &self.pins,
+            &binding,
+            "retired by its scope",
+        )
+        .await
+        {
+            Ok(()) => RetireResponse::retired(),
+            Err(e) => refuse(
+                Status::Error,
+                format!("the card store did not destroy the card: {e}"),
+            ),
+        }
+    }
+
     /// Add `keys` to the record of card keys this agent has served.
     async fn remember_served<'a>(&self, keys: impl Iterator<Item = &'a KeyData>) {
         let mut once_served = self.once_served.lock().await;
@@ -1128,9 +1361,26 @@ impl PiggyAgent {
         self.once_served.lock().await.contains(pubkey)
     }
 
+    /// The served key for `pubkey`, if this connection may use it: a key
+    /// the holder minted is usable only from inside the scope it is bound
+    /// to (FDR 0006 phase (d)); every other peer is refused
+    /// `not-bound-scope`, for sign, ECDH and attest alike.
     async fn find_cached_key(&self, pubkey: &KeyData) -> Result<CachedKey, AgentError> {
-        let keys = self.keys.lock().await;
-        Self::find_key(&keys, pubkey).ok_or_else(|| AgentError::Other("key not found".into()))
+        let key = {
+            let keys = self.keys.lock().await;
+            Self::find_key(&keys, pubkey)
+                .ok_or_else(|| AgentError::Other("key not found".into()))?
+        };
+        if let Some(holder) = &self.holder {
+            if let Some(binding) = holder.binding_of(pubkey).await {
+                holder
+                    .peer_may_use(&binding, &self.peer)
+                    .map_err(|(status, detail)| {
+                        AgentError::Other(format!("{}: {detail}", status.name()).into())
+                    })?;
+            }
+        }
+        Ok(key)
     }
 
     /// Serve the card ECDH extension; `name` is the name it was asked under
@@ -1169,11 +1419,17 @@ impl PiggyAgent {
         }
 
         let mut secret = self
-            .on_verified_card("ecdh", &key.guid, key.slot_id, |session, slot| {
-                session
-                    .ecdh_derive(slot, &ec_point)
-                    .map_err(|e| AgentError::Other(e.to_string().into()))
-            })
+            .on_verified_card(
+                "ecdh",
+                &key.guid,
+                key.slot_id,
+                key.needs_pin(),
+                |session, slot| {
+                    session
+                        .ecdh_derive(slot, &ec_point)
+                        .map_err(|e| AgentError::Other(e.to_string().into()))
+                },
+            )
             .await?;
 
         let mut resp = Vec::new();
@@ -1288,12 +1544,25 @@ impl PiggyAgent {
 
         // The card session ends (ResetCard if a PIN was verified) before the
         // offline reseal below, which is pure CPU and needs no card.
+        // A legacy box may name a slot other than the matched key's; only
+        // the key's own slot has a known policy.
+        let needs_pin = if box_slot == key.slot_id {
+            key.needs_pin()
+        } else {
+            box_slot != 0x9E
+        };
         let shared_secret = self
-            .on_verified_card("ecdh-rebox", &key.guid, box_slot, |session, slot| {
-                session
-                    .ecdh_derive(slot, &ec_point)
-                    .map_err(|e| AgentError::Other(e.to_string().into()))
-            })
+            .on_verified_card(
+                "ecdh-rebox",
+                &key.guid,
+                box_slot,
+                needs_pin,
+                |session, slot| {
+                    session
+                        .ecdh_derive(slot, &ec_point)
+                        .map_err(|e| AgentError::Other(e.to_string().into()))
+                },
+            )
             .await?;
 
         piv_box
@@ -1696,7 +1965,25 @@ mod tests {
             algorithm: PivAlgorithm::Ed25519,
             public_key: ed25519_key_data(seed),
             comment: format!("seed-{seed}"),
+            pin_policy: None,
         }
+    }
+
+    /// piggy#383 item 4: the PIN is skipped for 9E and for a slot the card
+    /// reports as PIN `never`, and nowhere else.
+    #[test]
+    fn needs_pin_follows_slot_9e_and_the_reported_policy() {
+        use piggy_piv::PinPolicy;
+        let mut key = cached_ed25519(0x11, 0x9A);
+        assert!(key.needs_pin(), "unknown policy on 9A: prompt as before");
+        key.pin_policy = Some(PinPolicy::Once);
+        assert!(key.needs_pin());
+        key.pin_policy = Some(PinPolicy::Always);
+        assert!(key.needs_pin());
+        key.pin_policy = Some(PinPolicy::Never);
+        assert!(!key.needs_pin(), "a PIN-never slot needs no PIN");
+        let cak = cached_ed25519(0x11, 0x9E);
+        assert!(!cak.needs_pin(), "9E never needs one, policy known or not");
     }
 
     // -------- prepare_sign_data --------
@@ -2718,6 +3005,7 @@ mod tests {
                 upstreams: 0,
                 service: None,
                 event_driven: true,
+                holder: false,
             }
         );
 
@@ -2741,6 +3029,7 @@ mod tests {
                 upstreams: 1,
                 service: Some("piggy-agent-proxy.service".into()),
                 event_driven: false,
+                holder: false,
             }
         );
     }
