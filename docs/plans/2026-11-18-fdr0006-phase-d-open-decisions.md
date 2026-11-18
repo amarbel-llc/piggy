@@ -101,6 +101,16 @@ lane and once on a real host under the hardened units. It lands with an
   (relayed 16:22Z). The scope is a human-chosen versioned name shaped like
   `piggy-mint-v1`. This supersedes the digest reading above.
 
+- Scope form, ruled (relayed 16:56Z): a plain versioned name like
+  `piggy-mint-v1` for now, expecting to add a `format-data` payload (so the
+  value becomes `piggy-mint-v1@<format>-<data>`) once a signed binary or
+  piece of code can be pointed at stably. Design consequence for phase (d):
+  the field's type, wire shape and versioning rule must leave room for an
+  optional `@<format>-<data>` suffix later, so a plain name today must stay
+  valid after the payload form exists. No RFC change is asked for now. The
+  operator did not rule on the 7.2 narrowing report; it is deferred and stays
+  recorded below as an open question. piggy-markl(7) is not to be changed.
+
 ### 7.1. Is `piggy-mint-v1` a markl id? (checked against RFC 0011, 2026-11-18)
 
 - Bare `piggy-mint-v1`, with no `@` and no payload, is NOT a valid markl id.
@@ -183,7 +193,7 @@ operator's intent is theirs to judge. No manpage or RFC text was changed.
 Settled (section 7): slot/PIN/touch policy, the scope field being a versioned
 name, and a sibling's retire being refused. Still open:
 
-1. What the operator meant by the `@` for a value like `piggy-mint-v1`, and
-   whether the scope field should be a bare string (section 7.1).
-2. Whether the markl id model is narrower in RFC 0011 than they intended
-   (section 7.2).
+1. Whether the markl id model is narrower in RFC 0011 than the operator
+   intended (section 7.2): deferred by the operator, no change to
+   piggy-markl(7).
+(The `@` question is answered by the scope-form ruling in section 7.)
