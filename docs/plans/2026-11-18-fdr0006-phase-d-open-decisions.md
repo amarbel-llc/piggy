@@ -77,9 +77,54 @@ refused; retire it; exit the scope and confirm the card is gone. Once in the VM
 lane and once on a real host under the hardened units. It lands with an
 `explore-fdr0006-d` recipe.
 
-## 7. Rulings needed
+## 7. Operator rulings so far (relayed 2026-11-18, 16:18Z)
+
+- Retire from a sibling scope is refused as `not-bound-scope`: accepted as proposed.
+- The `mint@piggy` scope field is opaque and optional: accepted, with the
+  condition "use a markl id so we can version it; we may re-evaluate". The
+  relay's reading, not confirmed by the operator, is that the field's value
+  is a markl id. Fit, checked against piggy-markl(7) and RFC 0011 (§2, §6.2,
+  §6.6): a markl id is `[purpose@]format-data`, a typed content identifier.
+  It fits if the id names a **scope definition document** (the holder's
+  record of which cgroup or scope a mint binds to): purpose a new
+  `piggy-holder_scope-v1` registered by RFC amendment (§6.2), format a digest
+  format from §5, data the digest of the definition. A changed definition then
+  gets a new id, which is the versioning. It does not fit if the intent is a
+  human-chosen scope name, since a digest is not a name; in that case the
+  field stays an opaque string and the version is a separate field. Open for
+  the operator: which of the two is meant. Until clown#244 lands the holder's
+  configuration is the only place the id-to-scope mapping lives.
+- Slot, PIN and touch policy: no ruling; the operator asked for context
+  (section 8).
+
+## 8. Plain version (for the operator)
+
+1. The minted key is a throwaway signing key for one unattended session (an
+   agent or job), so it can use SSH without your real card. The holder
+   process creates it and keeps it; the caller only asks it to sign.
+2. In this design it lives in software, on a virtual card (fibby), inside the
+   holder's locked memory. Phase (c) uses the same virtual card with the
+   factory default PIN as a placeholder. I have not designed a hardware
+   variant; a real deployment would still be software unless you want one.
+3. Slot 9A is the ordinary SSH-login slot; 9C (your approvals) and 9D
+   (store decryption) are kept out of reach on purpose.
+4. A random PIN the holder keeps replaces the factory default; the caller
+   never sees it. PIN `never` and touch `never` mean the agent will sign with
+   no human present.
+5. What that gives up against your card (attested PIN-always, touch-always):
+   nobody approves each signature, and the key is not hardware-held, so
+   anything that can talk to the holder as the bound caller can sign until
+   the card is retired. Its attestation chains to fibby's own key, not Yubico,
+   so verifiers must not treat it as hardware.
+6. Why that is acceptable here: it is short-lived, scoped to one caller,
+   capped at 16, wiped on retire or scope exit, and cannot sign operator
+   acts. If you would rather keep a PIN, a human would have to type it for
+   every unattended session, which defeats the purpose.
+
+## 9. Rulings needed
 
 1. Slot 9A only, random holder-held PIN, policy `never` for PIN and touch
-   (section 1): yes or no?
-2. An opaque optional scope field in `mint@piggy` (section 2): yes or no?
-3. A sibling's retire is refused as `not-bound-scope` (section 4): yes or no?
+   (sections 1 and 8): yes or no?
+2. The scope field's value: markl id of a scope definition, or an opaque
+   string plus a separate version (section 7)?
+(A sibling's retire is settled; see section 7.)
