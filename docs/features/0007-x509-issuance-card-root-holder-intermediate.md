@@ -630,7 +630,12 @@ that exists on every host without piggy.
 ## Open questions
 
 - **Transport and placement.** Which transport carries the CSR, and on
-  which host the signer runs (circus and the operator).
+  which host the signer runs (circus and the operator). **Ruled
+  2026-11-18 (relayed by the coordinator):** an ssh forced command on the
+  signer host running `piggy ca issue --profile NAME`, CSR on stdin, "for
+  now". The tailnet HTTP endpoint and PAPI stay alternatives, open once
+  the ergonomics are known (the operator's words: keep them "in our back
+  pocket"). Which host the signer runs on is not ruled by this.
 - **Signed hyphence documents as a certificate chain (Shape C, ruled;
   answered by RFC 0013, accepted 2026-11-10).** The `piggy-act-v1` field
   set, the seal, the signed bytes, the chain from the card's key down,
