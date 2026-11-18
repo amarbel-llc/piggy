@@ -51,6 +51,7 @@ mod git;
 mod git_ops;
 mod grep;
 mod health;
+mod holder_cli;
 mod init;
 mod insert;
 mod internal_clipboard_restore;
@@ -170,6 +171,14 @@ enum Command {
     /// (`--namespace`/`--slot`/`--guid`/`--hash`).
     #[command(name = "operator-sign", disable_help_flag = true)]
     OperatorSign {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+
+    /// Mint and retire scope-bound keys in a holder agent (FDR 0006 phase
+    /// (d)). `holder` owns its argv parsing (`mint`, `retire`).
+    #[command(name = "holder", disable_help_flag = true)]
+    Holder {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
@@ -890,6 +899,8 @@ fn main() {
         }
 
         Command::OperatorSign { rest } => std::process::exit(operator_sign::run(&rest)),
+
+        Command::Holder { rest } => std::process::exit(holder_cli::run(&rest)),
 
         Command::Act { rest } => std::process::exit(piggy::act::cli::run(&rest)),
 

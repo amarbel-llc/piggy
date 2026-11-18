@@ -18,6 +18,9 @@ piggy - PIV smart-card backed password store and agent
 
 *piggy operator-sign* *--namespace* _NAMESPACE_ [*--slot* _9c_|_9a_] [*--guid* _GUID_] [*--hash* _sha512_|_sha256_]
 
+*piggy holder mint* [*--scope* _NAME_] [*--type* _ed25519_|_p256_]++
+*piggy holder retire* [_FILE_]
+
 *piggy act canon* [_FILE_]
 
 *piggy act verify* *--anchors* _FILE_ [*--store* _DIR_|*--store-stdin*] [*--store-is-revocation-source*] [*--at* _TIME_] [*--format* _text_|_json_] [*--act* _DIGEST_|_PATH_|_FILE_]
@@ -595,6 +598,37 @@ commands:
 	```
 	piggy operator-sign --namespace piggy-escalation-v1 < grant.txt > grant.sig
 	```
+
+*holder mint* [*--scope* _NAME_] [*--type* _ed25519_|_p256_]
+	Ask the holder agent (the socket in *PIGGY_AUTH_SOCK*, else
+	*SSH_AUTH_SOCK*; *piggy agent --holder*, piggy-agent(1) HOLDER MODE)
+	for a new key bound to the scope _NAME_, and print its OpenSSH public
+	key line, with the comment _holder:<card>_, on stdout. _NAME_ is one
+	of the scope definitions the holder was started with, such as
+	_piggy-mint-v1_; without *--scope* the holder refuses the mint as
+	*scope-unbound*. The key is made and kept on a virtual card inside the
+	holder's fibby, in slot 9A, with no PIN and no touch to use it: anything
+	that can reach the holder's socket from inside the bound scope can
+	sign with it until the key is retired or the scope exits, and nothing
+	outside the scope can. The key is not hardware-held: its attestation
+	chains to the holder's own attestation key, not to a Yubico root.
+
+	Exit status: *0* minted; *1* refused, with the holder's reason on
+	stderr (*scope-unbound*, *unknown-scope*, *not-bound-scope*,
+	*refused-key-type*, *cap-reached*, *peer-unknown*, *bad-request*,
+	*error*); *2* usage error; *3* no holder here (no agent socket, an
+	unreachable agent, or one that is not a holder).
+
+	```
+	piggy holder mint --scope piggy-mint-v1 > id.pub
+	ssh-keygen -Y sign -f id.pub -U -n file record
+	```
+
+*holder retire* [_FILE_]
+	Ask the holder to destroy the card of the key whose OpenSSH public key
+	line is in _FILE_ (or stdin). Only a caller inside the key's scope may;
+	anyone else is refused *not-bound-scope*, and a key the holder did not
+	mint is *no-such-key*. Exit status as for *holder mint*.
 
 *act canon* [_FILE_]
 	Read a _piggy-act-v1_ document (piggy RFC 0013; _FILE_, or stdin when
