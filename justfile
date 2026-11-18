@@ -5074,7 +5074,9 @@ explore-fdr0006-b BIN_DIR="":
 # non-dumpable with a zero core limit, creates an Ed25519 card at runtime,
 # reads its attestation with `piggy card export-attestation`, destroys it,
 # and leaves a shell there (`exit` tears it down) so the operator can read
-# `fibby --help` for both builds and drive `fibby ctl` by hand. Virtual
+# `fibby --help` for both builds and drive `fibby ctl` by hand; NO_SHELL=1 in
+# the environment skips the shell, tears down at once and exits 0 only when
+# every check is ok (for an unattended run). Virtual
 # cards only: no real card, no PIN prompt (the askpass safety net is set
 # anyway, piggy-testing(7)). BIN_DIR, when given, holds a holder build named
 # fibby-holder, a test-double build named fibby and a piggy to run instead.
@@ -5100,6 +5102,7 @@ explore-fdr0006-c BIN_DIR="":
     pids=()
     cleanup() { kill "${pids[@]}" 2>/dev/null || true; rm -rf "$dir"; }
     trap cleanup EXIT
+    trap 'exit 130' INT TERM HUP
 
     n=0 fails=0
     check() { # check DESCRIPTION COMMAND...
@@ -5170,6 +5173,11 @@ explore-fdr0006-c BIN_DIR="":
     echo "# NOTE: a created card's key goes in slot 9A with the factory PIN (123456). That is"
     echo "#       phase (c)'s placeholder, not the design: slot and PIN policy are phase (d)'s"
     echo "#       to settle with mint@piggy (FDR 0006)."
+    if [[ "${NO_SHELL:-}" == 1 ]]; then
+      echo "# NO_SHELL=1: no shell; $fails of $n checks failed."
+      ((fails == 0))
+      exit
+    fi
     echo "# A holder is serving $PCSCLITE_CSOCK_NAME (control socket $ctl)."
     echo "# Try: \"\$FIBBY\" ctl --socket \"\$FIBBY_CTL\" profile | list | create [alg=…] NAME | destroy NAME"
     echo "#      \"\$PIGGY\" card export-attestation 9a --reader NAME"

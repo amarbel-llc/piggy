@@ -124,7 +124,8 @@ _test-double_ or _holder_; *fibby --test-flags* (test double only) lists
 the test-only flags. *just lint-fibby-holder*, part of *just lint*,
 proves the holder binary holds none of those flag names nor the test
 certificates and refuses each flag. *just explore-fdr0006-c* stages the
-phase's hand pass.
+phase's hand pass; with _NO_SHELL=1_ in the environment it runs unattended,
+skipping the closing shell and exiting 0 only when every check is ok.
 
 *--model* _yk4_ (default), _yk5_ or _yk5.7_ picks the card's firmware
 profile. _yk5.7_ is UNCAPTURED: it borrows _yk5_'s placeholder ATR and
