@@ -26,6 +26,7 @@ pub mod card_oracle;
 pub mod cmd;
 pub mod ecdh_ext;
 pub mod ecdsa_sig;
+pub mod holder_ext;
 pub mod manage;
 pub mod operator_act;
 pub mod sign_core;
