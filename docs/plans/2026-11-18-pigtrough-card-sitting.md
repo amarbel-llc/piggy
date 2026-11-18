@@ -17,12 +17,20 @@ running (`ssh-add -L` lists the card key); the entries `github/forgejo-mirror`
 and the Forgejo read-only token entry in the operator's **own** store; a second
 account or `sudo` for step 5. `github/forgejo-mirror-push` is never loaded.
 
-Two values only the operator knows are written as `FILL-IN` below: the Forgejo
-host and its CA file. Set them once:
+Update (circus, read from config, not from the live chain): the forge is
+`forge.starbrandshoes.com`, tailnet-only, with a public Let's Encrypt
+certificate, so **no CA file is needed** and `extra_roots` stays unset. The
+"real CA" part of step 4 therefore reduces to a call that verifies against
+the bundled Mozilla roots; `extra_roots` against a real private CA stays
+untested and is not needed. No read-only forge token exists yet; minting one
+(`forgejo-seal-api-token-scoped`, needs the card and krone sudo) is the
+operator's step before step 4. The held patch for the nix side is
+`2026-11-18-pigtrough-hm-held-patch.md`.
 
-    export FORGEJO_HOST=FILL-IN            # e.g. forgejo.example.org
-    export FORGEJO_CA=FILL-IN              # path to the PEM CA file
-    export FORGEJO_SECRET=FILL-IN          # piggy entry name of the read-only token
+Values only the operator knows are written as `FILL-IN` below. Set them once:
+
+    export FORGEJO_HOST=forge.starbrandshoes.com
+    export FORGEJO_SECRET=FILL-IN          # piggy entry name of the read-only token (to be minted)
     export FORGEJO_REPO=FILL-IN            # owner/name of one repo it can read
 
 ## 0. Build once
@@ -96,9 +104,10 @@ Failure meanings:
 
 ## 4. The real Forgejo CA and call
 
-The route needs `extra_roots = [ "<CA file>" ]` in the route table (nix
-`routes`), and `upstream = "<FORGEJO_HOST>"`, `auth = "token"`, an allow entry
-for `GET api/v1/repos/{owner}/{name}`, and `owners` containing your owner.
+The route needs `upstream = "forge.starbrandshoes.com"`, `auth = "token"`, an
+allow entry for `GET api/v1/repos/{owner}/{name}`, and `owners` containing your
+owner (no `extra_roots`: the certificate is public). The host running
+pigtrough must be on the tailnet.
 After editing, `home-manager switch`, `systemctl --user restart pigtrough`,
 `systemctl --user start pigtrough-load`. Then:
 
@@ -111,9 +120,10 @@ Success: `HTTP/1.1 200` and a JSON body for that repository; the serve journal
 `decision=allow`, `status=200`, no token.
 
 Failure meanings:
-- `502 upstream-unavailable`: TLS to the upstream failed. Most likely the CA
-  file is not the issuer of that host's certificate, or the host name differs
-  from the certificate's. Send the exact audit line.
+- `502 upstream-unavailable`: the upstream could not be reached or its
+  certificate did not verify against the bundled roots. Check the host is
+  reachable (tailnet up) and the name is `forge.starbrandshoes.com`. Send the
+  exact audit line.
 - `503 secret-unavailable`: the route is not loaded; run step 3's load.
 - `403 refused`: the path, method or owner is not in the route's allowlist.
 - `401` from Forgejo (shown in the body): the token is wrong or expired.

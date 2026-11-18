@@ -17,12 +17,12 @@ with synthetic routes.
 
 | Value | Where it comes from | Status |
 |---|---|---|
-| the module import | piggy flake output `homeManagerModules.pigtrough`, imported beside `homeManagerModules.piggy-agent` on the operator's host | file unknown; asked circus/free-baobab |
+| the module import | piggy flake output `homeManagerModules.pigtrough`, imported beside `homeManagerModules.piggy-agent` | circus `infra/hosts/home/operator.nix`, line 81 (`imports = [ ... piggy.homeManagerModules.piggy-agent (import ./operator-secrets.nix { inherit piggy system; }) ]`); `piggy` is the flake input, passed by `(import ./home/operator.nix { inherit piggy system; })` at `infra/hosts/flake.nix` lines 1476 and 1741 (hosts twerk and nikulin). Mirror it: a `(import ./home/<x>.nix { inherit piggy system; })` entry with `services.pigtrough` inside (answer of circus/free-baobab, read from config, not run) |
 | `package` | `piggy.packages.${system}.pigtrough` | as the module's comment says: no silent fallback |
 | `piggyPackage` | the host's existing piggy package | |
-| Forgejo host | the forge's name as clients use it | asked circus; `smith auth list` also prints it |
-| CA PEM | the file that signs the forge's TLS certificate | asked circus; unknown |
-| `secret` names | `github/forgejo-mirror` (the pilot's entry, known) and the Forgejo read-only token entry | the second is the operator's: `piggy pass ls \| grep -i forgejo` |
+| Forgejo host | the forge's name as clients use it | `forge.starbrandshoes.com`, tailnet-only (API under `/api/v1`), per circus's config |
+| CA PEM | none needed | circus: the forge serves a public Let's Encrypt certificate (`security.acme.certs."forge.starbrandshoes.com"`, `krone/forge-auth.nix`), so the bundled Mozilla roots verify it and the route needs no `extra_roots`. Read from config, not from the live chain; `just explore-tls-issuers forge.starbrandshoes.com` (circus) prints the served chain from a tailnet host. If an explicit file is ever wanted: the system bundle `/etc/ssl/certs/ca-certificates.crt`, not `pkgs.cacert` |
+| `secret` names | `github/forgejo-mirror` (the pilot's entry, known); Forgejo: none read-only exists | circus has `forge/krone-api-token` (scopes write:organization, write:repository, read:user) and the eng store's `forgejo-cli`. A read-only token is a new `forgejo-seal-api-token-scoped` mint with read scopes: needs the card and krone sudo, the operator's step. Using the existing write token through this route would still be GET-only by the allowlist, but I would not: the proxy's point is least privilege |
 | `loadEnvironment` | what `piggy pass show` needs in a user unit: the agent socket and the askpass display | the operator's session values; see below |
 
 ## The change (shape, to be filled in)
@@ -57,11 +57,11 @@ with synthetic routes.
         }
         {
           name = "forgejo-api";
-          upstream = "FORGEJO_HOST";                   # FILL-IN
+          upstream = "forge.starbrandshoes.com";
           auth = "token";                              # smith sends `token`, never Bearer
-          secret = "FORGEJO_SECRET_ENTRY";             # FILL-IN
-          owners = [ "FORGEJO_OWNER" ];                # FILL-IN
-          extra_roots = [ "/path/to/forge-ca.pem" ];   # FILL-IN
+          secret = "FORGEJO_SECRET_ENTRY";             # FILL-IN: the read-only token entry, once minted
+          owners = [ "FORGEJO_OWNER" ];                # FILL-IN: the owner(s) whose repos may be read
+          # no extra_roots: the forge's certificate is public (Let's Encrypt)
           loopback_port = 8731;                        # only if smith goes through TCP
           allow = [
             { method = "GET"; path = [ "api" "v1" "repos" "{owner}" "{name}" ]; }
@@ -90,9 +90,11 @@ run:
    `crates/pigtrough/src/table.rs` (`auth = "bearer"`, the six allow rows and
    the `forward_headers` list), which asserts the TOML equals the compiled-in
    route. Read, not run.
-2. **`extra_roots` is read by the serve unit**, a user unit with
-   `NoNewPrivileges` and no filesystem restrictions, so a PEM readable by the
-   operator is enough. A store path from nix is simplest.
+2. **The forge is tailnet-only** (circus: it resolves to 100.96.0.4 for
+   headscale members; its nginx front is card-gated for the web UI with
+   anonymous read for public git). Whether `/api/v1` with a token passes that
+   front without the card is not known to this session: the sitting's step 4
+   finds out. The host running pigtrough must be on the tailnet.
 
 ## After it is applied
 
