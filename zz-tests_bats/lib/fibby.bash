@@ -13,17 +13,40 @@
 # to `wire` so callers can grep the trace. Extra args (e.g.
 # `--seed-rfc5903-slot-9d-cert`) pass through verbatim after the standard
 # `--socket` / `--backend` flags.
+#
+# Returns once the pcsc socket exists AND, when `--control-socket PATH` is
+# among the args, that socket too: fibby binds the control socket on its
+# own thread, so a caller's first `fibby ctl` right after this call raced
+# the bind (seen as "connect .../ctl.sock: No such file or directory" on a
+# loaded host). Up to 10 s each, then a failure naming the socket and
+# dumping fibby's log.
 spawn_fibby() {
+  local ctl="" prev=""
+  local arg
+  for arg in "$@"; do
+    [[ $prev == --control-socket ]] && ctl="$arg"
+    prev="$arg"
+  done
   FIBBY_LOG=wire "$FIBBY_BIN" --socket "$FIBBY_SOCK" --backend virtual "$@" \
     >"$FIBBY_LOG" 2>&1 &
   FIBBY_PID=$!
-  local _
-  for _ in $(seq 1 50); do
-    [[ -S $FIBBY_SOCK ]] && return 0
+  _wait_for_fibby_socket "$FIBBY_SOCK" "pcsc" || return 1
+  if [[ -n $ctl ]]; then
+    _wait_for_fibby_socket "$ctl" "control" || return 1
+  fi
+}
+
+# _wait_for_fibby_socket PATH WHAT — poll for the socket up to 10 s; on
+# failure name it and dump fibby's log, so the cause is in the test output.
+_wait_for_fibby_socket() {
+  local path="$1" what="$2" _
+  for _ in $(seq 1 100); do
+    [[ -S $path ]] && return 0
+    kill -0 "$FIBBY_PID" 2>/dev/null || break
     sleep 0.1
   done
-  echo "fibby socket never appeared at $FIBBY_SOCK" >&2
-  echo "--- fibby log ---" >&2
+  echo "fibby $what socket never appeared at $path (fibby pid $FIBBY_PID)" >&2
+  echo "--- fibby log ($FIBBY_LOG) ---" >&2
   cat "$FIBBY_LOG" >&2 || true
   return 1
 }
