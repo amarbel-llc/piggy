@@ -146,8 +146,10 @@ function an_ed25519_key_and_an_unserved_key_are_refused_by_name { # @test
   [[ $status -eq 1 && $output == *"does not hold"* ]] || {
     echo "unserved key: want exit 1 (not held), got $status: $output" >&2; return 1; }
 
+  # No agent is the issuer key being unavailable: exit 6, the one table
+  # every `piggy ca` verb answers from (FDR 0007).
   run env SSH_AUTH_SOCK=/nonexistent "$PIGGY_BIN" ca csr --key "$WORKDIR/soft.pub"
-  [[ $status -eq 3 ]] || { echo "no agent: want exit 3, got $status: $output" >&2; return 1; }
+  [[ $status -eq 6 ]] || { echo "no agent: want exit 6, got $status: $output" >&2; return 1; }
 }
 
 # `piggy health` over the unit's state directory (PIGGY_CA_STATE), against

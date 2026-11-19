@@ -67,9 +67,12 @@ pub fn pem_certificate_request(der: &[u8]) -> String {
     out
 }
 
+/// An agent that cannot be reached is the issuer key being unavailable
+/// (exit 6, the FDR's table); one that holds no such key, or will not
+/// sign, is a refusal.
 fn exit_of(error: &AgentSignError) -> Exit {
     match error {
-        AgentSignError::Unreachable(_) => Exit::NotServed,
+        AgentSignError::Unreachable(_) => Exit::IssuerUnavailable,
         AgentSignError::NoKey(_) | AgentSignError::Refused(_) => Exit::Refused,
     }
 }
@@ -90,7 +93,7 @@ pub(crate) fn execute(args: CsrArgs) -> Result<(), Failure> {
     if args.cn.is_empty() {
         return Err(failure(Exit::Usage)("--cn must not be empty".into()));
     }
-    let socket = super::agent_socket().map_err(failure(Exit::NotServed))?;
+    let socket = super::agent_socket().map_err(failure(Exit::IssuerUnavailable))?;
 
     // The agent call happens inside the builder's closure; its error is
     // carried out through PivError's text and classified afterwards.

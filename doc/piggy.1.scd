@@ -21,7 +21,8 @@ piggy - PIV smart-card backed password store and agent
 *piggy holder mint* [*--scope* _NAME_] [*--type* _ed25519_|_p256_]++
 *piggy holder retire* [_FILE_]
 
-*piggy ca csr* *--key* _FILE_ [*--cn* _NAME_] [*--out* _FILE_]
+*piggy ca csr* *--key* _FILE_ [*--cn* _NAME_] [*--out* _FILE_]++
+*piggy ca root-cert* *--profile* _NAME_ [*--out* _FILE_]
 
 *piggy act canon* [_FILE_]
 
@@ -681,9 +682,10 @@ commands:
 	phase (ii) lands; openssl in the pilot). An Ed25519 key is refused: an
 	intermediate is P-256.
 
-	Exit status: *0* written; *1* refused (the agent does not hold the
-	key, would not sign, or the request could not be built); *2* usage
-	(no such file, not a public key line, not P-256); *3* no agent here.
+	Exit status as for every *ca* verb (below): *1* refused (the agent
+	does not hold the key, would not sign, or the request could not be
+	built); *2* usage (no such file, not a public key line, not P-256);
+	*6* no agent here.
 
 	```
 	piggy holder mint --scope piggy-ca-intermediate-v1 --type p256 > int.pub
@@ -694,6 +696,73 @@ commands:
 	The NixOS module *services.piggy-ca* runs this at every start of its
 	unit, from inside the unit's cgroup, after minting the unit's own key
 	(piggy-agent(1) HOLDER MODE).
+
+*ca root-cert* *--profile* _NAME_ [*--out* _FILE_]
+	Write the self-signed root certificate (PEM) of the card-held
+	certificate authority key a root profile names (FDR 0007 phase (ii)):
+	subject *CN=*_common_name_, *basicConstraints* CA with *pathlen 1*,
+	*keyUsage* keyCertSign and cRLSign, *nameConstraints* permitting
+	exactly the profile's _names_ (and every name under each) and
+	excluding every IPv4 and IPv6 address, a subject key identifier, and
+	a random 128-bit serial; valid from signing time minus the profile's
+	skew to signing time plus its lifetime. The profile is the only input:
+	there is no slot flag, no name flag and no lifetime flag.
+
+	The certificate is signed in-process on the local card, never through
+	an agent (piggy-agent(1) refuses a certificate on an ordinary sign
+	request for this reason): the card the profile's *guid* names must be
+	attached, and its slot's key is proven to be the card's own before
+	anything is signed, by the same checks *piggy tool attest-verify*
+	makes (attestation signed by the card's F9 certificate, F9 chained to
+	Yubico's PIV root, the attested key equal to the slot's, PIN always
+	and touch always). One PIN prompt follows, whose context names the
+	certificate being signed (its *CN*, names, validity and serial), then
+	the touch, which is announced like an agent's. Only the PEM goes to
+	stdout (or _FILE_); every notice goes to stderr.
+
+	The slot is not written: the certificate it serves afterwards is the
+	operator's deliberate next step, *piggy tool write-cert 82*, and a
+	slot that already holds a root (the pilot's, written by hand) keeps it.
+	A key the card cannot attest (one imported, or a slot with nothing in
+	it) is refused. The *piggy-certificate-v1* act that records a root
+	signature (piggy RFC 0012 §3.2) is not produced by this verb yet.
+
+	A *profile* is _ca-profiles/NAME.toml_ under piggy's config home
+	(*PIGGY_CONFIG_HOME*, else _$XDG_CONFIG_HOME/piggy_, else
+	_~/.config/piggy_); _NAME_ is a plain word of lowercase letters,
+	digits, hyphens and underscores. Its fields have two authors: the
+	consumer of the certificates
+	writes the policy, the operator fills *[issuer]* at install time.
+	Unknown fields are refused.
+
+	```
+	kind = "root"                 # root, intermediate or leaf
+	common_name = "shithub root"  # root and intermediate: the subject CN
+	names = ["github.com", "api.github.com"]  # the permitted DNS names, an exact set
+	lifetime_hours = 87600        # the certificate's lifetime
+	not_before_skew_minutes = 5   # notBefore is signing time minus this (default 5)
+	key_types = ["p256", "p384"]  # the request key types sign/issue accept (default both)
+
+	[issuer]
+	slot = "82"                   # the card's CA slot (a root is always 82)
+	guid = "0123456789ABCDEF0123456789ABCDEF"
+	```
+
+	Exit status, one table for every *ca* verb so a renewal timer reads
+	one meaning per code: *0* done; *1* refused for any other reason (on
+	stderr); *2* usage; *3* the profile is unknown, unreadable or not of
+	the verb's kind (the message names the path tried); *4* the request
+	is malformed or its key type refused; *5* the request's names are
+	outside the profile; *6* the issuer key is unavailable (the card is
+	not attached, the slot holds no attestable key, its key is not proven
+	the card's, the PIN was refused or wrong, or no agent serves the key);
+	*7* rate limited.
+
+	```
+	piggy ca root-cert --profile shithub > root.pem
+	openssl x509 -in root.pem -noout -text
+	piggy tool write-cert 82 < root.pem   # when it is the root to serve
+	```
 
 *act canon* [_FILE_]
 	Read a _piggy-act-v1_ document (piggy RFC 0013; _FILE_, or stdin when
@@ -1372,6 +1441,12 @@ _PIGGY_PIGPEN_RESOLVER_TIMEOUT_
 	resolver exits successfully but a process it started still holds its
 	standard output, the command fails after two seconds; one holding only
 	standard error is ignored. Processes a resolver starts are not killed.
+
+_PIGGY_CONFIG_HOME_
+	piggy's config home, where *ca root-cert* (and the other *ca* verbs
+	that take *--profile*) read _ca-profiles/NAME.toml_; when unset,
+	_$XDG_CONFIG_HOME/piggy_, else _~/.config/piggy_. The NixOS module
+	sets it to the directory its profiles are installed in.
 
 _PIGGY_CA_STATE_
 	The issuance unit's state directory *health* reads for its

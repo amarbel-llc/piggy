@@ -69,8 +69,15 @@ struct Spec {
     key_types: Option<Vec<KeyType>>,
     /// Certificate lifetime, in hours.
     lifetime_hours: u64,
+    /// How far before signing time `notBefore` is set, in minutes, for
+    /// verifiers whose clocks run behind (default 5).
+    #[serde(default)]
+    not_before_skew_minutes: Option<u64>,
     issuer: Issuer,
 }
+
+/// The `notBefore` skew a profile gets when it names none.
+pub const DEFAULT_NOT_BEFORE_SKEW_MINUTES: u64 = 5;
 
 /// A checked profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +90,8 @@ pub struct Profile {
     pub names: Vec<String>,
     pub key_types: Vec<KeyType>,
     pub lifetime_hours: u64,
+    /// Minutes before signing time that `notBefore` is set.
+    pub not_before_skew_minutes: u64,
     pub issuer: Issuer,
 }
 
@@ -195,6 +204,9 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
         names: spec.names,
         key_types,
         lifetime_hours: spec.lifetime_hours,
+        not_before_skew_minutes: spec
+            .not_before_skew_minutes
+            .unwrap_or(DEFAULT_NOT_BEFORE_SKEW_MINUTES),
         issuer,
     })
 }
@@ -335,6 +347,18 @@ mod tests {
     #[test]
     fn a_zero_lifetime_is_refused() {
         assert!(parse(&leaf("").replace("720", "0")).is_err());
+    }
+
+    #[test]
+    fn the_not_before_skew_defaults_to_five_minutes() {
+        assert_eq!(parse(&leaf("")).unwrap().not_before_skew_minutes, 5);
+        assert_eq!(
+            parse(&leaf("not_before_skew_minutes = 0"))
+                .unwrap()
+                .not_before_skew_minutes,
+            0
+        );
+        assert!(parse(&leaf("not_before_skew_minutes = -1")).is_err());
     }
 
     #[test]

@@ -1,23 +1,34 @@
-//! `piggy ca`: X.509 issuance (FDR 0007). Phase (iii-a) brings the first
+//! `piggy ca`: X.509 issuance (FDR 0007). Phase (iii-a) brought the first
 //! verb, `csr`, the certificate request for a holder-held intermediate
-//! key; phase (ii) adds `root-cert`, `sign` and `issue` for a card-held
-//! issuer beside it (each verb its own module, so the two land without
-//! conflict).
+//! key; phase (ii) adds `root-cert` (here), `sign` and `issue` for a
+//! card-held issuer beside it (each verb its own module, so they land
+//! without conflict).
 //!
-//! Exit codes, shared by every verb: 0 done; 1 refused (the reason on
-//! stderr); 2 usage; 3 no agent here serves the key.
+//! Exit codes, one table for every verb (FDR 0007 "The issuance verbs"), so
+//! a renewal timer reads one meaning per code: 0 done; 1 refused for any
+//! other reason (on stderr); 2 usage; 3 the profile is unknown or
+//! unreadable; 4 the request is malformed or its key type refused; 5 the
+//! request's names are outside the profile; 6 the issuer key is
+//! unavailable (card absent, slot empty or not proven on-card, PIN
+//! refused, no agent serving the key); 7 rate limited.
+
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+mod card_signer;
 mod csr;
+mod root_cert;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exit {
     Refused = 1,
     Usage = 2,
-    NotServed = 3,
+    Profile = 3,
+    IssuerUnavailable = 6,
 }
 
+#[derive(Debug)]
 pub(crate) struct Failure {
     pub exit: Exit,
     pub message: String,
@@ -44,6 +55,11 @@ enum CaCommand {
     /// intermediate key minted with `piggy holder mint --type p256`),
     /// signed through the agent; PEM on stdout.
     Csr(csr::CsrArgs),
+    /// The self-signed root certificate of the card-held CA key a root
+    /// profile names, signed on the local card after one PIN prompt; PEM
+    /// on stdout. The slot is not written: `piggy tool write-cert` does
+    /// that.
+    RootCert(root_cert::RootCertArgs),
 }
 
 pub fn run(argv: &[String]) -> i32 {
@@ -56,6 +72,7 @@ pub fn run(argv: &[String]) -> i32 {
     };
     let result = match args.cmd {
         CaCommand::Csr(args) => csr::execute(args),
+        CaCommand::RootCert(args) => root_cert::execute(args),
     };
     match result {
         Ok(()) => 0,
@@ -77,12 +94,50 @@ pub(crate) fn agent_socket() -> Result<std::path::PathBuf, String> {
         })
 }
 
+/// piggy's config home, where `ca-profiles/NAME.toml` lives:
+/// `$PIGGY_CONFIG_HOME`, else `$XDG_CONFIG_HOME/piggy`, else
+/// `~/.config/piggy` (the NixOS module sets the first). `None` when none
+/// of the three can be formed.
+pub(crate) fn config_home() -> Option<PathBuf> {
+    config_home_from(
+        std::env::var_os("PIGGY_CONFIG_HOME"),
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn config_home_from(
+    piggy: Option<std::ffi::OsString>,
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let set = |v: Option<std::ffi::OsString>| v.filter(|s| !s.is_empty()).map(PathBuf::from);
+    set(piggy)
+        .or_else(|| set(xdg).map(|d| d.join("piggy")))
+        .or_else(|| set(home).map(|h| h.join(".config").join("piggy")))
+}
+
+/// Read and check the profile `name` (exit 3 for a name that is not a
+/// plain word, a file that is missing or unreadable, or a profile that
+/// does not parse; the message names the path tried).
+pub(crate) fn load_profile(name: &str) -> Result<piggy::ca_profile::Profile, Failure> {
+    let refuse = failure(Exit::Profile);
+    let home = config_home().ok_or_else(|| {
+        refuse("no config home: set PIGGY_CONFIG_HOME, XDG_CONFIG_HOME or HOME".into())
+    })?;
+    let path = piggy::ca_profile::profile_path(&home, name).map_err(|e| refuse(e.to_string()))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| refuse(format!("profile {name}: {}: {e}", path.display())))?;
+    piggy::ca_profile::parse(&text)
+        .map_err(|e| refuse(format!("profile {name} ({}): {e}", path.display())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn csr_is_the_only_verb_and_needs_a_key() {
+    fn csr_needs_a_key_and_root_cert_a_profile() {
         assert!(CaCli::try_parse_from(["piggy ca"]).is_err());
         assert!(
             CaCli::try_parse_from(["piggy ca", "csr"]).is_err(),
@@ -95,6 +150,65 @@ mod tests {
                 assert_eq!(args.cn, csr::DEFAULT_CN);
                 assert!(args.out.is_none());
             }
+            other => panic!("{other:?}"),
         }
+        assert!(
+            CaCli::try_parse_from(["piggy ca", "root-cert"]).is_err(),
+            "--profile is required"
+        );
+        assert!(
+            CaCli::try_parse_from(["piggy ca", "root-cert", "--profile", "x", "--slot", "82"])
+                .is_err(),
+            "the profile is the only source of the issuer: no slot flag"
+        );
+        let cli = CaCli::try_parse_from(["piggy ca", "root-cert", "--profile", "shithub"]).unwrap();
+        match cli.cmd {
+            CaCommand::RootCert(args) => {
+                assert_eq!(args.profile, "shithub");
+                assert!(args.out.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_exit_table_is_the_fdrs() {
+        assert_eq!(Exit::Refused as i32, 1);
+        assert_eq!(Exit::Usage as i32, 2);
+        assert_eq!(Exit::Profile as i32, 3);
+        assert_eq!(Exit::IssuerUnavailable as i32, 6);
+    }
+
+    #[test]
+    fn the_config_home_is_piggys_then_xdgs_then_the_users() {
+        let s = |v: &str| Some(std::ffi::OsString::from(v));
+        assert_eq!(
+            config_home_from(s("/etc/piggy"), s("/x"), s("/h")),
+            Some(PathBuf::from("/etc/piggy"))
+        );
+        assert_eq!(
+            config_home_from(None, s("/x"), s("/h")),
+            Some(PathBuf::from("/x/piggy"))
+        );
+        assert_eq!(
+            config_home_from(s(""), None, s("/h")),
+            Some(PathBuf::from("/h/.config/piggy")),
+            "an empty variable is unset"
+        );
+        assert_eq!(config_home_from(None, None, None), None);
+    }
+
+    #[test]
+    fn a_bad_profile_name_is_exit_3() {
+        // No directory is read for a name that cannot be a profile's; a
+        // test environment with no HOME fails one step earlier, on the
+        // config home, with the same exit.
+        let failure = load_profile("../x").unwrap_err();
+        assert_eq!(failure.exit, Exit::Profile);
+        assert!(
+            failure.message.contains("../x") || failure.message.contains("no config home"),
+            "{}",
+            failure.message
+        );
     }
 }
