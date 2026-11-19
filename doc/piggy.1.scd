@@ -22,7 +22,9 @@ piggy - PIV smart-card backed password store and agent
 *piggy holder retire* [_FILE_]
 
 *piggy ca csr* *--key* _FILE_ [*--cn* _NAME_] [*--out* _FILE_]++
-*piggy ca root-cert* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]
+*piggy ca root-cert* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
+*piggy ca sign* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
+*piggy ca issue* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]
 
 *piggy act canon* [_FILE_]
 
@@ -678,8 +680,8 @@ commands:
 	_piggy-ca-intermediate_, the intermediate profile's); no SAN and no
 	requested extension, since every extension of the certificate comes
 	from the issuer's profile. The request is public data: take it to the
-	machine with the card and sign it under the root (*piggy ca sign* once
-	phase (ii) lands; openssl in the pilot). An Ed25519 key is refused: an
+	machine with the card and sign it under the root (*piggy ca sign*;
+	openssl in the pilot). An Ed25519 key is refused: an
 	intermediate is P-256.
 
 	Exit status as for every *ca* verb (below): *1* refused (the agent
@@ -802,6 +804,47 @@ commands:
 	openssl x509 -in root.pem -noout -text
 	piggy act verify --seal-only root.pem.act
 	piggy tool write-cert 82 < root.pem   # when it is the root to serve
+	```
+
+*ca sign* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
+*ca issue* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]
+	Write (PEM) an intermediate certificate (*sign*, an _intermediate_
+	profile) or a leaf certificate (*issue*, a _leaf_ profile) for the
+	PKCS#10 request on stdin (PEM or DER, at most 1 MiB), signed by the
+	card-held root the profile's *[issuer]* names (FDR 0007 phase (ii)).
+	The request supplies only its key; the profile supplies every name,
+	extension and the lifetime. An intermediate request's *CN* must equal
+	the profile's and ask for no subjectAltName; a leaf request may ask
+	only for DNS names (a *CN* too) the profile permits, and is issued
+	the profile's full name set whatever it asked for. The request's key
+	is P-256 or P-384 and must be one of the profile's _key_types_. A
+	request that does not pass is refused and nothing is signed.
+
+	The card signs as for *root-cert*: in-process, the slot's key proven
+	the card's own first, the issuer certificate read from the slot (a root
+	not yet written back with *piggy tool write-cert* cannot issue, exit
+	*6*), one PIN prompt naming the certificate. Every card signature also
+	leaves a *piggy-certificate-v1* act (a _link_), exactly as for
+	*root-cert*: a second PIN and touch through the agent, the same
+	preflight before the first prompt, *--act-out* as there, the act
+	written before the PEM, and nothing written if the act is not sealed.
+	A P-384 request gets no act, so it is refused before any prompt (exit
+	*1*; RFC 0013 names only P-256).
+
+	Each profile issues at most once in ten minutes (exit *7*). The
+	stamp, and one audit line per certificate (profile, serial,
+	certificate and request digests, _notAfter_), are kept in
+	*PIGGY_CA_STATE*, else _$XDG_STATE_HOME/piggy/ca_, else
+	_~/.local/state/piggy/ca_; the stamp is armed only after the act and
+	the certificate are written, so a refused or failed run does not block
+	the next, and two runs racing inside one window may both pass. A
+	certificate written but not recorded is exit *1*. Exit status as for
+	every *ca* verb (above).
+
+	```
+	piggy ca sign --profile shithub-intermediate --out int.pem < int.csr
+	piggy ca issue --profile shithub-leaf --out leaf.pem < leaf.csr
+	openssl verify -CAfile root.pem -untrusted int.pem leaf.pem
 	```
 
 *act canon* [_FILE_]
