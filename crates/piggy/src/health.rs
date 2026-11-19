@@ -163,6 +163,174 @@ pub struct Probes {
     pub mode: Option<Result<piggy::cmd::agent::mode::AgentMode, String>>,
     pub pcsc: PcscProbe,
     pub cards: Option<Vec<CardInfo>>,
+    /// FDR 0007 phase (iii-a): the issuance unit's intermediate, read from
+    /// its state directory. `None` = no issuance unit on this host (no
+    /// state directory and no `PIGGY_CA_STATE`), so the plan is unchanged.
+    pub issuance: Option<IssuanceProbe>,
+}
+
+/// Overrides the issuance unit's state directory for the intermediate
+/// point (FDR 0007); the tests point it at a scratch directory.
+pub const ISSUANCE_STATE_ENV: &str = "PIGGY_CA_STATE";
+/// `services.piggy-ca`'s `StateDirectory`; probed only when it exists.
+pub const DEFAULT_ISSUANCE_STATE_DIR: &str = "/var/lib/piggy-ca";
+/// The files the issuance unit writes there (nix/nixos/piggy-ca.nix) and
+/// the one the operator installs.
+pub const ISSUANCE_KEY_FILE: &str = "intermediate.pub";
+pub const ISSUANCE_REQUEST_FILE: &str = "intermediate.csr";
+pub const ISSUANCE_CERT_FILE: &str = "intermediate.pem";
+
+/// What the issuance unit's state directory holds (FDR 0007: "the unit's
+/// health reports 'no intermediate'"). The verdict is [`classify_intermediate`].
+pub enum IssuanceProbe {
+    /// The directory (or a file in it) could not be read: permissions, most
+    /// likely (`services.piggy-ca` keeps it 0750). A SKIP, not a verdict.
+    Unreadable(String),
+    State {
+        dir: std::path::PathBuf,
+        /// `intermediate.pub`, the minted key's OpenSSH line; `None` = the
+        /// unit never minted.
+        key: Option<String>,
+        /// `intermediate.pem`, the card-signed certificate; `None` = not
+        /// installed.
+        cert: Option<Vec<u8>>,
+        /// The P-256 points the probed agent serves, when that agent is the
+        /// holder (its `agent-mode@piggy` says so): the only way to tell a
+        /// retired key from a live one. `None` = the probed agent is not
+        /// the holder, so "served" goes unchecked; `Some(Err)` = the holder
+        /// did not answer.
+        holder_keys: Option<Result<Vec<Vec<u8>>, String>>,
+    },
+}
+
+/// The intermediate's state, each "no intermediate" cause its own variant
+/// so the point names it: the operator's remedy differs for each.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Intermediate {
+    /// No `intermediate.pub`: the issuance unit has not run.
+    NeverMinted,
+    /// A key, no certificate: the request waits for the card.
+    Unsigned,
+    /// The certificate's key is not the current key: the unit re-minted
+    /// (a restart) and the new request is unsigned.
+    PreviousKey,
+    /// The certificate matches the key, but the holder no longer serves it.
+    Retired,
+    /// Present and served, outside its validity (the time in the string).
+    Expired(String),
+    NotYetValid(String),
+    /// A file that does not parse (the detail says which and why).
+    Malformed(String),
+    /// Present, matching, served (or unchecked), within validity.
+    Present {
+        not_after: String,
+        subject: String,
+        /// `Some(reason)` when "served" could not be checked.
+        unchecked: Option<String>,
+    },
+}
+
+/// The SEC1 uncompressed point of a P-256 OpenSSH public key line.
+fn openssh_p256_point(line: &str) -> Result<Vec<u8>, String> {
+    use ssh_key::public::{EcdsaPublicKey, KeyData};
+    let key = ssh_key::PublicKey::from_openssh(line.trim())
+        .map_err(|e| format!("not an OpenSSH public key line: {e}"))?;
+    match key.key_data() {
+        KeyData::Ecdsa(EcdsaPublicKey::NistP256(p)) => Ok(p.as_bytes().to_vec()),
+        other => Err(format!(
+            "the key is {}, not ecdsa-sha2-nistp256",
+            other.algorithm()
+        )),
+    }
+}
+
+/// The SEC1 uncompressed point of a certificate's EC public key.
+fn certificate_point(cert: &openssl::x509::X509) -> Result<Vec<u8>, String> {
+    let pkey = cert
+        .public_key()
+        .map_err(|e| format!("certificate public key: {e}"))?;
+    let ec = pkey
+        .ec_key()
+        .map_err(|_| "the certificate's key is not an EC key".to_string())?;
+    let mut ctx = openssl::bn::BigNumContext::new().map_err(|e| e.to_string())?;
+    ec.public_key()
+        .to_bytes(
+            ec.group(),
+            openssl::ec::PointConversionForm::UNCOMPRESSED,
+            &mut ctx,
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// Pure except for the clock: the verdict over the state directory's
+/// contents and the holder's key list. Order of the checks is the order of
+/// the remedies: mint before sign, sign before match, match before serve,
+/// serve before validity.
+pub fn classify_intermediate(
+    key: Option<&str>,
+    cert: Option<&[u8]>,
+    holder_keys: Option<&Result<Vec<Vec<u8>>, String>>,
+) -> Intermediate {
+    let Some(key) = key else {
+        return Intermediate::NeverMinted;
+    };
+    let point = match openssh_p256_point(key) {
+        Ok(p) => p,
+        Err(e) => return Intermediate::Malformed(format!("{ISSUANCE_KEY_FILE}: {e}")),
+    };
+    let Some(cert) = cert else {
+        return Intermediate::Unsigned;
+    };
+    let cert = match openssl::x509::X509::from_pem(cert) {
+        Ok(c) => c,
+        Err(e) => {
+            return Intermediate::Malformed(format!(
+                "{ISSUANCE_CERT_FILE}: not a PEM certificate: {e}"
+            ));
+        }
+    };
+    match certificate_point(&cert) {
+        Ok(p) if p == point => {}
+        Ok(_) => return Intermediate::PreviousKey,
+        Err(e) => return Intermediate::Malformed(format!("{ISSUANCE_CERT_FILE}: {e}")),
+    }
+    let unchecked = match holder_keys {
+        Some(Ok(keys)) if keys.contains(&point) => None,
+        Some(Ok(_)) => return Intermediate::Retired,
+        Some(Err(e)) => Some(format!("the holder did not answer: {e}")),
+        None => Some("the probed agent is not the holder".to_string()),
+    };
+    let now = match openssl::asn1::Asn1Time::days_from_now(0) {
+        Ok(t) => t,
+        Err(e) => return Intermediate::Malformed(format!("clock: {e}")),
+    };
+    use std::cmp::Ordering;
+    if cert.not_before().compare(&now).ok() == Some(Ordering::Greater) {
+        return Intermediate::NotYetValid(cert.not_before().to_string());
+    }
+    if cert.not_after().compare(&now).ok() == Some(Ordering::Less) {
+        return Intermediate::Expired(cert.not_after().to_string());
+    }
+    let subject = cert
+        .subject_name()
+        .entries()
+        .map(|e| {
+            format!(
+                "{}={}",
+                e.object().nid().short_name().unwrap_or("?"),
+                e.data()
+                    .as_utf8()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Intermediate::Present {
+        not_after: cert.not_after().to_string(),
+        subject,
+        unchecked,
+    }
 }
 
 /// Parse `systemctl show` key=value output into a [`ServiceProbe`].
@@ -484,6 +652,51 @@ fn probe_slot_policy(token: &piggy_piv::PivToken, slot: u8) -> PolicyProbe {
     }
 }
 
+/// The issuance unit's state directory to probe: `PIGGY_CA_STATE` when set
+/// non-empty, else the module's directory when it exists, else none (an
+/// ordinary host: no point).
+fn issuance_state_dir() -> Option<std::path::PathBuf> {
+    if let Some(v) = std::env::var_os(ISSUANCE_STATE_ENV).filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(v));
+    }
+    let default = std::path::Path::new(DEFAULT_ISSUANCE_STATE_DIR);
+    default.is_dir().then(|| default.to_path_buf())
+}
+
+/// Read the state directory. A missing key or certificate file is a state,
+/// not an error; any other read failure is `Unreadable` (the operator is
+/// not in the unit's group, typically), so the point SKIPs with the reason
+/// instead of claiming "never minted" over a permissions error.
+fn probe_issuance(
+    dir: &std::path::Path,
+    holder_keys: Option<Result<Vec<Vec<u8>>, String>>,
+) -> IssuanceProbe {
+    fn optional(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+    if let Err(e) = std::fs::read_dir(dir) {
+        return IssuanceProbe::Unreadable(format!("{}: {e}", dir.display()));
+    }
+    let key = match optional(&dir.join(ISSUANCE_KEY_FILE)) {
+        Ok(k) => k.map(|b| String::from_utf8_lossy(&b).trim().to_string()),
+        Err(e) => return IssuanceProbe::Unreadable(e),
+    };
+    let cert = match optional(&dir.join(ISSUANCE_CERT_FILE)) {
+        Ok(c) => c,
+        Err(e) => return IssuanceProbe::Unreadable(e),
+    };
+    IssuanceProbe::State {
+        dir: dir.to_path_buf(),
+        key,
+        cert,
+        holder_keys,
+    }
+}
+
 /// Probe phase: run every probe defensively and short-circuit
 /// dependents — the agent is contacted only when the socket resolved
 /// AND stat'd as a real unix socket, and the `query` extension is sent
@@ -491,6 +704,7 @@ fn probe_slot_policy(token: &piggy_piv::PivToken, slot: u8) -> PolicyProbe {
 /// independent of the agent-side chain.
 pub fn gather() -> Probes {
     let socket = resolve_socket();
+    let issuance_dir = issuance_state_dir();
     let (agent, extensions, upstreams, mode) = match &socket {
         SocketProbe::Resolved {
             path,
@@ -533,6 +747,21 @@ pub fn gather() -> Probes {
     // in a fixed order regardless of probe order.
     let service = probe_service(&service_unit(&mode));
     let (pcsc, cards) = probe_cards();
+    // FDR 0007: the intermediate. "Served" is checked only against the
+    // holder itself (`PIGGY_AUTH_SOCK=/run/piggy-holder/agent.sock`); any
+    // other agent leaves it unchecked rather than guessed.
+    let issuance = issuance_dir.map(|dir| {
+        let is_holder = matches!(&mode, Some(Ok(m)) if m.holder);
+        let holder_keys = match &socket {
+            SocketProbe::Resolved {
+                path,
+                is_socket: true,
+                ..
+            } if is_holder => Some(piggy::agent_client::probe_ecdsa_points(path, PROBE_TIMEOUT)),
+            _ => None,
+        };
+        probe_issuance(&dir, holder_keys)
+    });
     Probes {
         service,
         socket,
@@ -542,6 +771,7 @@ pub fn gather() -> Probes {
         mode,
         pcsc,
         cards,
+        issuance,
     }
 }
 
@@ -1118,7 +1348,120 @@ pub fn evaluate(probes: &Probes) -> Vec<CheckResult> {
     push_upstream_points(&mut out, probes, false);
     push_presence_point(&mut out, probes);
     push_policy_points(&mut out, probes);
+    push_issuance_point(&mut out, probes);
     out
+}
+
+/// FDR 0007 phase (iii-a): one point for the issuance unit's intermediate,
+/// present only on a host with the unit's state directory (or
+/// `PIGGY_CA_STATE`), after every other point. Every "no intermediate"
+/// state FAILs under a name that says which one, with the remedy as a
+/// diagnostic; an expired or not-yet-valid certificate is its own failure,
+/// distinct from a missing one; an unreadable directory SKIPs.
+fn push_issuance_point(out: &mut Vec<CheckResult>, probes: &Probes) {
+    let Some(probe) = &probes.issuance else {
+        return;
+    };
+    let (dir, key, cert, holder_keys) = match probe {
+        IssuanceProbe::Unreadable(why) => {
+            out.push(CheckResult {
+                name: "issuance: intermediate".into(),
+                status: Status::Skip(format!("state not readable: {why}")),
+                diags: vec![],
+            });
+            return;
+        }
+        IssuanceProbe::State {
+            dir,
+            key,
+            cert,
+            holder_keys,
+        } => (dir, key, cert, holder_keys),
+    };
+    let request = dir.join(ISSUANCE_REQUEST_FILE).display().to_string();
+    let cert_path = dir.join(ISSUANCE_CERT_FILE).display().to_string();
+    let sign_hint = format!(
+        "sign {request} at the card (`piggy ca sign`, or openssl under the root) and install the PEM at {cert_path}"
+    );
+    let state_dir = ("state_dir".to_string(), dir.display().to_string());
+    let (name, status, mut diags) = match classify_intermediate(
+        key.as_deref(),
+        cert.as_deref(),
+        holder_keys.as_ref(),
+    ) {
+        Intermediate::NeverMinted => (
+            "issuance: no intermediate (never minted)",
+            Status::Fail,
+            vec![(
+                "hint".to_string(),
+                "the issuance unit has not run: start piggy-ca.service; it mints the key and writes the request".to_string(),
+            )],
+        ),
+        Intermediate::Unsigned => (
+            "issuance: no intermediate (key minted, not yet signed)",
+            Status::Fail,
+            vec![("hint".to_string(), sign_hint)],
+        ),
+        Intermediate::PreviousKey => (
+            "issuance: no intermediate (certificate names a previous key)",
+            Status::Fail,
+            vec![(
+                "hint".to_string(),
+                format!("the unit re-minted (a restart); {sign_hint}"),
+            )],
+        ),
+        Intermediate::Retired => (
+            "issuance: no intermediate (key retired)",
+            Status::Fail,
+            vec![(
+                "hint".to_string(),
+                "the holder no longer serves the key the certificate names: restart piggy-ca.service to mint again, then sign the new request".to_string(),
+            )],
+        ),
+        Intermediate::Expired(when) => (
+            "issuance: intermediate expired",
+            Status::Fail,
+            vec![
+                ("not_after".to_string(), when),
+                ("hint".to_string(), sign_hint),
+            ],
+        ),
+        Intermediate::NotYetValid(when) => (
+            "issuance: intermediate not yet valid",
+            Status::Fail,
+            vec![("not_before".to_string(), when)],
+        ),
+        Intermediate::Malformed(why) => (
+            "issuance: intermediate unreadable",
+            Status::Fail,
+            vec![("error".to_string(), why)],
+        ),
+        Intermediate::Present {
+            not_after,
+            subject,
+            unchecked,
+        } => {
+            let served = match unchecked {
+                None => "yes".to_string(),
+                Some(why) => format!("unchecked ({why})"),
+            };
+            (
+                "issuance: intermediate present",
+                Status::Pass,
+                vec![
+                    ("subject".to_string(), subject),
+                    ("not_after".to_string(), not_after),
+                    ("served".to_string(), served),
+                ],
+            )
+        }
+    };
+    diags.push(state_dir);
+    out.push(CheckResult {
+        name: name.into(),
+        status,
+        diags,
+    });
 }
 
 /// FDR 0006: two points per attached card, after every other point so the
@@ -1322,6 +1665,7 @@ mod tests {
             mode: None,
             pcsc: PcscProbe::Error("PC/SC unavailable".into()),
             cards: None,
+            issuance: None,
         }
     }
 
@@ -1352,6 +1696,7 @@ mod tests {
                 slot_9d: SlotProbe::Populated,
                 policies: vec![],
             }]),
+            issuance: None,
         }
     }
 
@@ -1360,6 +1705,336 @@ mod tests {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    // -------- FDR 0007 phase (iii-a): the issuance unit's intermediate --------
+
+    mod issuance {
+        use super::*;
+        use openssl::asn1::Asn1Time;
+        use openssl::bn::BigNum;
+        use openssl::ec::{EcGroup, EcKey};
+        use openssl::hash::MessageDigest;
+        use openssl::nid::Nid;
+        use openssl::pkey::{PKey, Private};
+        use openssl::x509::{X509Builder, X509NameBuilder};
+
+        fn key() -> PKey<Private> {
+            let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+            PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap()
+        }
+
+        /// The key's SEC1 uncompressed point, as the holder lists it.
+        fn point(k: &PKey<Private>) -> Vec<u8> {
+            let ec = k.ec_key().unwrap();
+            let mut ctx = openssl::bn::BigNumContext::new().unwrap();
+            ec.public_key()
+                .to_bytes(
+                    ec.group(),
+                    openssl::ec::PointConversionForm::UNCOMPRESSED,
+                    &mut ctx,
+                )
+                .unwrap()
+        }
+
+        /// The key as `piggy holder mint` prints it.
+        fn openssh_line(k: &PKey<Private>) -> String {
+            use ssh_key::public::{EcdsaPublicKey, KeyData};
+            let ecdsa = EcdsaPublicKey::from_sec1_bytes(&point(k)).unwrap();
+            let mut pk = ssh_key::PublicKey::from(KeyData::Ecdsa(ecdsa));
+            pk.set_comment("holder:piggy-holder 3");
+            pk.to_openssh().unwrap()
+        }
+
+        /// A certificate for `subject`, self-issued, valid over the given
+        /// GeneralizedTime bounds, as PEM.
+        fn cert_pem(
+            cn: &str,
+            subject: &PKey<Private>,
+            not_before: &str,
+            not_after: &str,
+        ) -> Vec<u8> {
+            let mut name = X509NameBuilder::new().unwrap();
+            name.append_entry_by_text("CN", cn).unwrap();
+            let name = name.build();
+            let mut b = X509Builder::new().unwrap();
+            b.set_version(2).unwrap();
+            b.set_serial_number(&BigNum::from_u32(7).unwrap().to_asn1_integer().unwrap())
+                .unwrap();
+            b.set_subject_name(&name).unwrap();
+            b.set_issuer_name(&name).unwrap();
+            b.set_pubkey(subject).unwrap();
+            b.set_not_before(&Asn1Time::from_str(not_before).unwrap())
+                .unwrap();
+            b.set_not_after(&Asn1Time::from_str(not_after).unwrap())
+                .unwrap();
+            b.sign(subject, MessageDigest::sha256()).unwrap();
+            b.build().to_pem().unwrap()
+        }
+
+        const PAST: &str = "20200101000000Z";
+        const PAST_END: &str = "20200102000000Z";
+        const FAR: &str = "20990101000000Z";
+        const FARTHER: &str = "20990102000000Z";
+
+        fn served(keys: &[&PKey<Private>]) -> Result<Vec<Vec<u8>>, String> {
+            Ok(keys.iter().map(|k| point(k)).collect())
+        }
+
+        #[test]
+        fn each_state_is_its_own_verdict() {
+            let (k1, k2) = (key(), key());
+            let line = openssh_line(&k1);
+            let pem = cert_pem("piggy-ca-intermediate", &k1, PAST, FAR);
+            let live = served(&[&k1]);
+            let gone = served(&[&k2]);
+
+            let line = line.as_str();
+            assert_eq!(
+                classify_intermediate(None, None, None),
+                Intermediate::NeverMinted
+            );
+            assert_eq!(
+                classify_intermediate(None, Some(pem.as_slice()), Some(&live)),
+                Intermediate::NeverMinted,
+                "a leftover certificate without a key is still never minted"
+            );
+            assert_eq!(
+                classify_intermediate(Some(line), None, Some(&live)),
+                Intermediate::Unsigned
+            );
+            let other = cert_pem("piggy-ca-intermediate", &k2, PAST, FAR);
+            assert_eq!(
+                classify_intermediate(Some(line), Some(other.as_slice()), Some(&live)),
+                Intermediate::PreviousKey
+            );
+            assert_eq!(
+                classify_intermediate(Some(line), Some(pem.as_slice()), Some(&gone)),
+                Intermediate::Retired
+            );
+            let expired = cert_pem("x", &k1, PAST, PAST_END);
+            assert_eq!(
+                classify_intermediate(Some(line), Some(expired.as_slice()), Some(&live)),
+                Intermediate::Expired("Jan  2 00:00:00 2020 GMT".into())
+            );
+            let early = cert_pem("x", &k1, FAR, FARTHER);
+            assert!(matches!(
+                classify_intermediate(Some(line), Some(early.as_slice()), Some(&live)),
+                Intermediate::NotYetValid(_)
+            ));
+            match classify_intermediate(Some(line), Some(pem.as_slice()), Some(&live)) {
+                Intermediate::Present {
+                    subject, unchecked, ..
+                } => {
+                    assert_eq!(subject, "CN=piggy-ca-intermediate");
+                    assert_eq!(unchecked, None);
+                }
+                other => panic!("want Present, got {other:?}"),
+            }
+        }
+
+        /// Without the holder on the probed socket, "served" is reported as
+        /// unchecked, never as retired: health does not guess.
+        #[test]
+        fn served_is_unchecked_when_the_probed_agent_is_not_the_holder() {
+            let k = key();
+            let line = openssh_line(&k);
+            let pem = cert_pem("piggy-ca-intermediate", &k, PAST, FAR);
+            match classify_intermediate(Some(line.as_str()), Some(pem.as_slice()), None) {
+                Intermediate::Present { unchecked, .. } => {
+                    assert_eq!(
+                        unchecked.as_deref(),
+                        Some("the probed agent is not the holder")
+                    );
+                }
+                other => panic!("want Present, got {other:?}"),
+            }
+            let down: Result<Vec<Vec<u8>>, String> = Err("timeout after 2s".into());
+            match classify_intermediate(Some(line.as_str()), Some(pem.as_slice()), Some(&down)) {
+                Intermediate::Present { unchecked, .. } => {
+                    assert!(unchecked.unwrap().contains("did not answer"));
+                }
+                other => panic!("want Present, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn malformed_files_name_the_file() {
+            let k = key();
+            let line = openssh_line(&k);
+            assert!(matches!(
+                classify_intermediate(Some("ssh-ed25519 AAAA nope"), None, None),
+                Intermediate::Malformed(m) if m.starts_with(ISSUANCE_KEY_FILE)
+            ));
+            assert!(matches!(
+                classify_intermediate(Some(line.as_str()), Some(&b"not pem"[..]), None),
+                Intermediate::Malformed(m) if m.starts_with(ISSUANCE_CERT_FILE)
+            ));
+        }
+
+        fn with_state(
+            key: Option<&PKey<Private>>,
+            cert: Option<Vec<u8>>,
+            holder: Option<&[&PKey<Private>]>,
+        ) -> Probes {
+            let mut probes = healthy_probes();
+            probes.issuance = Some(IssuanceProbe::State {
+                dir: "/var/lib/piggy-ca".into(),
+                key: key.map(openssh_line),
+                cert,
+                holder_keys: holder.map(served),
+            });
+            probes
+        }
+
+        /// No state directory: the plan is exactly as before.
+        #[test]
+        fn no_point_without_a_state_directory() {
+            let results = evaluate(&healthy_probes());
+            assert_eq!(results.len(), 9);
+            assert!(results.iter().all(|r| !r.name.starts_with("issuance:")));
+        }
+
+        /// Every "no intermediate" state is one failing point, last in the
+        /// plan, named for its cause, carrying the remedy; the run exits 1.
+        #[test]
+        fn each_missing_state_fails_under_its_own_name() {
+            let (k1, k2) = (key(), key());
+            let pem1 = cert_pem("piggy-ca-intermediate", &k1, PAST, FAR);
+            let only1: &[&PKey<Private>] = &[&k1];
+            let only2: &[&PKey<Private>] = &[&k2];
+            let cases: Vec<(Probes, &str, &str)> = vec![
+                (
+                    with_state(None, None, None),
+                    "issuance: no intermediate (never minted)",
+                    "piggy-ca.service",
+                ),
+                (
+                    with_state(Some(&k1), None, Some(only1)),
+                    "issuance: no intermediate (key minted, not yet signed)",
+                    "intermediate.csr",
+                ),
+                (
+                    with_state(Some(&k2), Some(pem1.clone()), Some(only2)),
+                    "issuance: no intermediate (certificate names a previous key)",
+                    "re-minted",
+                ),
+                (
+                    with_state(Some(&k1), Some(pem1.clone()), Some(only2)),
+                    "issuance: no intermediate (key retired)",
+                    "restart piggy-ca.service",
+                ),
+            ];
+            for (probes, name, hint_part) in cases {
+                let results = evaluate(&probes);
+                let last = results.last().unwrap();
+                assert_eq!(last.name, name);
+                assert!(matches!(last.status, Status::Fail), "{name}");
+                assert!(
+                    diag(last, "hint").unwrap().contains(hint_part),
+                    "{name}: {:?}",
+                    last.diags
+                );
+                assert_eq!(diag(last, "state_dir"), Some("/var/lib/piggy-ca"));
+                assert_eq!(exit_code(&results), 1, "{name}");
+            }
+        }
+
+        /// Expired is a failure distinct from every missing state.
+        #[test]
+        fn expired_is_distinct_from_missing() {
+            let k = key();
+            let only: &[&PKey<Private>] = &[&k];
+            let probes = with_state(
+                Some(&k),
+                Some(cert_pem("x", &k, PAST, PAST_END)),
+                Some(only),
+            );
+            let results = evaluate(&probes);
+            let last = results.last().unwrap();
+            assert_eq!(last.name, "issuance: intermediate expired");
+            assert!(matches!(last.status, Status::Fail));
+            assert_eq!(diag(last, "not_after"), Some("Jan  2 00:00:00 2020 GMT"));
+            assert_eq!(exit_code(&results), 1);
+        }
+
+        #[test]
+        fn present_passes_with_its_facts() {
+            let k = key();
+            let only: &[&PKey<Private>] = &[&k];
+            let probes = with_state(
+                Some(&k),
+                Some(cert_pem("piggy-ca-intermediate", &k, PAST, FAR)),
+                Some(only),
+            );
+            let results = evaluate(&probes);
+            assert_eq!(results.len(), 10);
+            let last = &results[9];
+            assert_eq!(last.name, "issuance: intermediate present");
+            assert!(matches!(last.status, Status::Pass));
+            assert_eq!(diag(last, "subject"), Some("CN=piggy-ca-intermediate"));
+            assert_eq!(diag(last, "served"), Some("yes"));
+            assert_eq!(exit_code(&results), 0);
+
+            let probes = with_state(
+                Some(&k),
+                Some(cert_pem("piggy-ca-intermediate", &k, PAST, FAR)),
+                None,
+            );
+            let results = evaluate(&probes);
+            assert_eq!(
+                diag(&results[9], "served"),
+                Some("unchecked (the probed agent is not the holder)")
+            );
+        }
+
+        /// A directory health cannot read is a SKIP with the reason, not a
+        /// "never minted" verdict.
+        #[test]
+        fn unreadable_state_skips() {
+            let mut probes = healthy_probes();
+            probes.issuance = Some(IssuanceProbe::Unreadable(
+                "/var/lib/piggy-ca: Permission denied (os error 13)".into(),
+            ));
+            let results = evaluate(&probes);
+            let last = results.last().unwrap();
+            assert_eq!(last.name, "issuance: intermediate");
+            assert!(matches!(&last.status, Status::Skip(r) if r.contains("Permission denied")));
+            assert_eq!(exit_code(&results), 0);
+        }
+
+        /// The probe over a real directory: absent files are states, a
+        /// directory that is not there is unreadable.
+        #[test]
+        fn probe_reads_the_directory() {
+            let dir = std::env::temp_dir().join(format!(
+                "piggy-health-issuance-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            match probe_issuance(&dir, None) {
+                IssuanceProbe::State { key, cert, .. } => {
+                    assert!(key.is_none() && cert.is_none());
+                }
+                IssuanceProbe::Unreadable(e) => panic!("{e}"),
+            }
+            std::fs::write(dir.join(ISSUANCE_KEY_FILE), "ecdsa-sha2-nistp256 AAAA x\n").unwrap();
+            match probe_issuance(&dir, None) {
+                IssuanceProbe::State { key, .. } => {
+                    assert_eq!(key.as_deref(), Some("ecdsa-sha2-nistp256 AAAA x"));
+                }
+                IssuanceProbe::Unreadable(e) => panic!("{e}"),
+            }
+            assert!(matches!(
+                probe_issuance(&dir.join("missing"), None),
+                IssuanceProbe::Unreadable(_)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// piggy#248/#255: the agent's presence-detection mode is surfaced as a

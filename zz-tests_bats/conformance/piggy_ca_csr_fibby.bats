@@ -75,10 +75,13 @@ teardown() {
 _spawn_holder() {
   spawn_fibby --model yk5.7 --control-socket "$FIBBY_CTL" 3>&-
   "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" destroy "Virtual PCD piggy fibby 00 00" >/dev/null
+  # --service-name: health's service point then SKIPs instead of reading
+  # the build host's own piggy-agent unit (piggy#243).
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent --holder \
     --holder-fibby-ctl "$FIBBY_CTL" \
     --scope "piggy-ca-intermediate-v1=cgroup:$OWN_CGROUP" \
     --cgroup-root "$CGROUP_ROOT" --scope-poll-interval 1 \
+    --service-name piggy-agent-conformance-absent.service \
     -a "$AGENT_SOCK" >"$AGENT_LOG" 2>&1 3>&- &
   AGENT_PID=$!
   local _
@@ -145,4 +148,88 @@ function an_ed25519_key_and_an_unserved_key_are_refused_by_name { # @test
 
   run env SSH_AUTH_SOCK=/nonexistent "$PIGGY_BIN" ca csr --key "$WORKDIR/soft.pub"
   [[ $status -eq 3 ]] || { echo "no agent: want exit 3, got $status: $output" >&2; return 1; }
+}
+
+# `piggy health` over the unit's state directory (PIGGY_CA_STATE), against
+# the holder itself so "served" is checked.
+_health_ca() {
+  PIGGY_AUTH_SOCK="$AGENT_SOCK" PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" PIGGY_CA_STATE="$CA" \
+    run "$PIGGY_BIN" health --format tap -v
+}
+
+# _expect_issuance KIND NAME — the one issuance point reads `KIND N - NAME`.
+_expect_issuance() {
+  local kind="$1" name="$2" line
+  line="$(grep -F -- "- $name" <<<"$output" || true)"
+  [[ -n $line && $line == "$kind "* ]] || {
+    echo "want '$kind N - $name', health printed:" >&2
+    printf '%s\n' "$output" >&2
+    _dump_logs
+    return 1
+  }
+  if [[ $kind == "not ok" ]]; then
+    [[ $status -ne 0 ]] || { echo "a failing issuance point must exit non-zero" >&2; return 1; }
+  fi
+}
+
+# Each state the issuance unit can be in, walked in the order the unit and
+# the operator produce them: never run; key minted, request unsigned; the
+# certificate installed (present); a restart's re-mint (the certificate
+# names the previous key); the key retired; an expired certificate. The
+# throwaway root stands in for the card's slot 82.
+function health_names_each_issuance_state { # @test
+  _spawn_holder
+  CA="$WORKDIR/ca"
+  mkdir -p "$CA"
+
+  _health_ca
+  _expect_issuance "not ok" "issuance: no intermediate (never minted)"
+  [[ $output == *"start piggy-ca.service"* ]] || { echo "no remedy in the diagnostics" >&2; return 1; }
+
+  "$PIGGY_BIN" holder mint --scope piggy-ca-intermediate-v1 --type p256 >"$CA/intermediate.pub"
+  "$PIGGY_BIN" ca csr --key "$CA/intermediate.pub" --out "$CA/intermediate.csr"
+  _health_ca
+  _expect_issuance "not ok" "issuance: no intermediate (key minted, not yet signed)"
+  [[ $output == *"$CA/intermediate.csr"* ]] || { echo "the hint does not name the request" >&2; return 1; }
+
+  # A throwaway root signs the request (what the card does in phase (ii)).
+  openssl ecparam -genkey -name prime256v1 -noout -out "$WORKDIR/root.key"
+  openssl req -x509 -new -key "$WORKDIR/root.key" -subj /CN=piggy-test-root -days 2 \
+    -out "$WORKDIR/root.pem" 2>/dev/null
+  openssl x509 -req -in "$CA/intermediate.csr" -CA "$WORKDIR/root.pem" -CAkey "$WORKDIR/root.key" \
+    -CAcreateserial -days 2 -out "$CA/intermediate.pem" 2>/dev/null
+  _health_ca
+  _expect_issuance "ok" "issuance: intermediate present"
+  # The -v diagnostics are TAP YAML: values are quoted.
+  [[ $output == *'served: "yes"'* && $output == *"CN=piggy-ca-intermediate"* ]] || {
+    echo "the present point lacks its facts" >&2; printf '%s\n' "$output" >&2; return 1; }
+
+  # A restart re-mints: the certificate now names the previous key.
+  cp "$CA/intermediate.pub" "$WORKDIR/first.pub"
+  "$PIGGY_BIN" holder mint --scope piggy-ca-intermediate-v1 --type p256 >"$CA/intermediate.pub"
+  _health_ca
+  _expect_issuance "not ok" "issuance: no intermediate (certificate names a previous key)"
+
+  # The first key retired while its certificate is back in place: served no more.
+  "$PIGGY_BIN" holder retire "$WORKDIR/first.pub"
+  cp "$WORKDIR/first.pub" "$CA/intermediate.pub"
+  _health_ca
+  _expect_issuance "not ok" "issuance: no intermediate (key retired)"
+
+  # Expired: distinct from every missing state. (-not_before/-not_after
+  # need OpenSSL 3.4 or newer.)
+  "$PIGGY_BIN" holder mint --scope piggy-ca-intermediate-v1 --type p256 >"$CA/intermediate.pub"
+  "$PIGGY_BIN" ca csr --key "$CA/intermediate.pub" --out "$CA/intermediate.csr"
+  openssl x509 -req -in "$CA/intermediate.csr" -CA "$WORKDIR/root.pem" -CAkey "$WORKDIR/root.key" \
+    -CAcreateserial -not_before 20200101000000Z -not_after 20200102000000Z \
+    -out "$CA/intermediate.pem" 2>/dev/null
+  _health_ca
+  _expect_issuance "not ok" "issuance: intermediate expired"
+  [[ $output == *'not_after: "Jan  2 00:00:00 2020 GMT"'* ]] || {
+    echo "the expiry is not in the diagnostics" >&2; printf '%s\n' "$output" >&2; return 1; }
+
+  # Nothing on this socket but the holder: no PIN reached the card at any step.
+  if grep -q "VERIFY" "$FIBBY_LOG"; then
+    echo "a PIN was verified during health" >&2; _dump_logs; return 1
+  fi
 }

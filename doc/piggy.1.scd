@@ -1003,6 +1003,24 @@ commands:
 	why (9C empty, a weaker policy, or no attestation); it is not a
 	failure, and *card add-key 9c* is the remedy for an empty 9C.
 
+	On a host running the issuance unit (*services.piggy-ca*, FDR 0007),
+	one last point reports its intermediate, read from the unit's state
+	directory (_/var/lib/piggy-ca_ when it exists, or _PIGGY_CA_STATE_).
+	It passes as _issuance: intermediate present_ (with the subject, the
+	expiry and whether the holder serves the key) and fails under a name
+	that says what is missing: _no intermediate (never minted)_ (the unit
+	has not run), _(key minted, not yet signed)_ (the request waits for the
+	card), _(certificate names a previous key)_ (the unit re-minted after a
+	restart; sign the new request), _(key retired)_ (the holder no longer
+	serves it; restart the unit). _intermediate expired_ and _not yet
+	valid_ are their own failures, distinct from a missing one, with the
+	bound as a diagnostic; every failure carries the remedy as _hint_. A
+	state directory the caller cannot read SKIPs with the reason. "Served"
+	is checked only when the probed agent is the holder itself
+	(_PIGGY_AUTH_SOCK=/run/piggy-holder/agent.sock_); against any other
+	agent it reads _unchecked_. Exit 1 on any failing state, as for every
+	point.
+
 	*--sign-test* adds an agent self-sign probe with every served identity
 	— the only path that exercises the private key and MAY prompt for a
 	PIN — catching an agent that lists keys but refuses to sign.
@@ -1317,6 +1335,12 @@ _PIGGY_PIGPEN_RESOLVER_TIMEOUT_
 	resolver exits successfully but a process it started still holds its
 	standard output, the command fails after two seconds; one holding only
 	standard error is ignored. Processes a resolver starts are not killed.
+
+_PIGGY_CA_STATE_
+	The issuance unit's state directory *health* reads for its
+	intermediate point (FDR 0007), in place of _/var/lib/piggy-ca_; set
+	non-empty, the point is reported even where that directory is absent
+	(an unreadable or missing one SKIPs with the reason).
 
 _PIGGY_GETOPT_
 	Override the path to GNU *getopt*(1). Useful in Nix environments where

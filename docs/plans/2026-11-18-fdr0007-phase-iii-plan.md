@@ -66,6 +66,10 @@ split:
 4. **Health.** A `piggy health` point "intermediate: present, matches the
    holder key, within validity"; FAIL with "no intermediate" after any
    restart until the operator signs again. This is the visible re-mint.
+   (Built 2026-11-19: `issuance: intermediate present` / `no intermediate
+   (never minted | key minted, not yet signed | certificate names a
+   previous key | key retired)` / `intermediate expired`, over
+   `PIGGY_CA_STATE` or `/var/lib/piggy-ca`; piggy(1) HEALTH.)
 5. **Tests.** Unit: the CSR builder over a fake signer (DER shape,
    signature verifies with p256). bats over fibby: a holder with the
    `cgroup:` scope under a staged `--cgroup-root`, a mint from inside the

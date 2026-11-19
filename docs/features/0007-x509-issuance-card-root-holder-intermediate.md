@@ -377,8 +377,17 @@ intermediate stays in slot 9A of its virtual card (design owner's ruling,
 2026-11-18): RFC 0012's TBSCertificate refusal keys on the CA slot 82, so
 it does not apply to holder keys, and the cgroup binding is the only gate.
 Lanes: `test-bats-conformance-ca-csr-fibby`, the `vm-piggy-holder`
-subtests for the unit. Not built: the health point "no intermediate"
-(follows), `issue` with the holder key (phase (iii-b), after (ii)).
+subtests for the unit. `piggy health` reports the intermediate as one
+last point on a host with the unit's state directory (or
+`PIGGY_CA_STATE`): `issuance: intermediate present` passes with the
+subject, the expiry and whether the holder serves the key; each way of
+having none fails under its own name, `no intermediate (never minted)`,
+`(key minted, not yet signed)`, `(certificate names a previous key)` (the
+re-mint after a restart), `(key retired)`, with the remedy as a `hint`
+diagnostic; `intermediate expired` and `not yet valid` are failures of
+their own, distinct from a missing one. "Served" is checked only against
+the holder itself (the probed agent reports holder mode), never guessed.
+Not built: `issue` with the holder key (phase (iii-b), after (ii)).
 
 **Operator approval, 2026-11-17.** The operator approved this record as
 proposed and had the four phase issues filed (the numbers above). Phase
