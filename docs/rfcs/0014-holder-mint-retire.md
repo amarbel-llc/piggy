@@ -127,18 +127,22 @@ In this order:
 1. Read the peer (§6); without one, `peer-unknown`.
 2. Resolve `scope` (§5) to a binding, or refuse `scope-unbound`,
    `unknown-scope` or `not-bound-scope`.
-3. Refuse `cap-reached` when the holder already serves its cap of live
+3. Refuse `refused-key-type` for a `key_type` the holder does not mint.
+   When several refusals apply, the first in this order is the one
+   answered: `peer-unknown`, the scope refusals, `refused-key-type`,
+   `cap-reached`.
+4. Refuse `cap-reached` when the holder already serves its cap of live
    cards, mints in progress included. The cap is 16 per holder (FDR
    0006; the pcsc-lite reader table).
-4. Ask the card store for a card whose slot **9A** holds a fresh key of
+5. Ask the card store for a card whose slot **9A** holds a fresh key of
    `key_type` with PIN policy `never` and touch policy `never`. The key
    MUST be generated inside the card store and MUST NOT be exportable.
    No other slot is minted: 9C and 9D MUST NOT be.
-5. Read the slot's public key, and replace the card's factory PIN with a
+6. Read the slot's public key, and replace the card's factory PIN with a
    random PIN of at least 8 characters that the holder keeps in guarded
-   memory and never returns. A failure after step 4 MUST destroy the
+   memory and never returns. A failure after step 5 MUST destroy the
    card again before answering `error`.
-6. Serve the key (it appears in `SSH_AGENT_IDENTITIES_ANSWER`, with a
+7. Serve the key (it appears in `SSH_AGENT_IDENTITIES_ANSWER`, with a
    comment naming the card), record the binding, and answer `ok` with
    `key` and `card`.
 
@@ -146,9 +150,11 @@ In this order:
 
 A minted key is usable only from inside its binding (§6.3): the holder
 MUST refuse an ordinary sign request, an ECDH or attestation extension
-and a `retire@piggy` for it from any other peer, with a failure whose
-text names `not-bound-scope` (an ordinary agent failure for the sign
-path, since that message has no status field). Listing is not gated.
+and a `retire@piggy` for it from any other peer. A `retire@piggy` is
+answered `not-bound-scope` (§4.2). An ordinary sign request is answered
+`SSH_AGENT_FAILURE`, which carries no text, so the holder MUST log
+`not-bound-scope` with the key and the peer; a caller cannot tell this
+refusal from any other failure on the wire. Listing is not gated.
 Because the slot's policy is `never`, the holder MUST NOT ask for a PIN
 to use the key; more generally an agent SHOULD honour a slot's attested
 PIN policy of `never` for any card (piggy#383 item 4).
@@ -258,6 +264,14 @@ cgroup directory no longer exists under the cgroup2 mount
 seconds (`--scope-poll-interval`, default 2). A holder restart loses
 every key.
 
+The disappearance of a cgroup directory is the backstop for a scope that
+exits, not a guarantee for a service that restarts: a systemd unit's
+cgroup can outlive `systemctl restart`, so a key bound to it survives
+the restart (observed in the FDR 0007 phase (iii-a) VM lane). A service
+that mints under a `cgroup:` scope MUST retire its previous key itself
+when it starts (the new instance is inside the same binding, so the
+holder permits it).
+
 ### 7. Examples
 
 A session minting and using a key (piggy(1) `holder mint`):
@@ -298,6 +312,21 @@ its frontend share a cgroup is clown#244's.
 is PIN `never`; it keeps the factory PIN from unlocking any PIN-gated
 operation on the card.
 
+**A connection's credentials are its origin's, not its user's.**
+`SO_PEERCRED` describes the process that connected. A peer inside a
+binding can hand its connected socket to a process outside it
+(`SCM_RIGHTS`), or proxy requests for one, and the holder will treat the
+connection as inside. The binding authenticates where a connection came
+from, not who holds it now; whatever is allowed to act inside a scope
+can act for others from it. The holder cannot close this; the host's
+process and socket hygiene (clown#244) bounds it.
+
+**One cap, shared.** The cap of 16 is one pool for the whole holder, so
+a single scope can mint 16 keys and make every other scope's mint
+`cap-reached`. The socket's permissions limit who can try. Not closed in
+version 1; a per-binding sub-cap, set in the scope definition, is the
+follow-up.
+
 **Pid reuse.** §6.1's descriptor closes the reuse window after accept;
 the window before it remains and is bounded by how fast a pid space
 wraps.
@@ -311,7 +340,7 @@ real sibling scope under systemd for the hand pass.
 
 | Requirement | Test | Description |
 |---|---|---|
-| §3.3 steps 4 to 6, §3.4 no PIN | `piggy_holder_mint_fibby.bats` | a minted Ed25519 key is listed with its card comment, signs under `ssh-keygen -Y sign` with no VERIFY reaching fibby, and the factory PIN no longer changes the PIN |
+| §3.3 steps 5 to 7, §3.4 no PIN | `piggy_holder_mint_fibby.bats` | a minted Ed25519 key is listed with its card comment, signs under `ssh-keygen -Y sign` with no VERIFY reaching fibby, and the factory PIN no longer changes the PIN |
 | §3.1 key types | same | a P-256 mint succeeds; `rsa` is a client usage error |
 | §2 statuses 3, 4; §5 | same | no scope is `scope-unbound`; an undefined one is `unknown-scope` naming the defined ones; a `cgroup:` scope the caller is outside is `not-bound-scope`; no card is created |
 | §4 | same | a retire destroys the card and drops the key; a second retire is `no-such-key` |
