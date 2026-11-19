@@ -1085,7 +1085,9 @@ fn main() {
         // op or an unmodeled option is a usage error (exit 2), not a silent
         // hop to `pivy-tool`. The full C surface (list, pinfo, init, req-cert,
         // …) stays reachable via `piggy pivy tool` while C is shipped.
-        Command::Tool { rest } => std::process::exit(piggy::cmd::tool::run(&rest)),
+        Command::Tool { rest } => {
+            std::process::exit(piggy::cmd::tool::run(&rest, &seal_store::StoreSealer))
+        }
 
         Command::Pivy { tool, rest } => match tool {
             Some(tool) => exec::exec_pivy(&tool, &rest),

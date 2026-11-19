@@ -104,7 +104,28 @@ commands:
   passthrough): *pubkey*, *cert*, *attest*, *sign*, *ecdh*, the PIN/PUK ops,
   *set-admin*, *delete-cert*, *update-keyhist*, *write-cert*, *generate*,
   *import*, *pinfo*, *list* (human, *-p* and *-j*), *factory-reset*,
-  *req-cert* and *version*. Human *list* omits C's *xapdu* line: piggy does
+  *req-cert*, *version* and *auth-test*. The admin operations authenticate
+  with the management key *-K* names: *default* (the factory key), 48 hex
+  digits, or *@store*[*:*_pass-name_], the key read from the password
+  store's sealed entry (*card init --seal-management-key*'s
+  _piv/<GUID>/management-key_ of the selected card unless named; one 9D
+  decrypt, before the card session opens), so the key need never be on a
+  command line; a card with no sealed entry fails plainly and never falls
+  back to the factory key. The decrypted key lives in a zeroed buffer of the
+  *piggy tool* process; with a forwarded agent the 9D decrypt can be made
+  from a remote host, which puts the key into that host's process, so run
+  admin operations on the card's own host. *set-admin -* reads the NEW key
+  as one hex line on standard input for the same reason; *auth-test*
+  performs the mutual authentication and nothing else (no PIN, nothing
+  written, exit 0, or 1 with _failed to authenticate with current admin
+  key_), the read-only proof a key rotation ends with. A first rotation
+  seals the new key, proves the sealed copy reads back, rotates with
+  *set-admin -*, then proves with *-K @store auth-test*; a LATER rotation,
+  with an entry already in place, seals the new key under a pending name,
+  rotates, proves with *-K @store:*_pending_ *auth-test*, and only then
+  replaces the entry, so the old key is kept until the new one is proven.
+  Other *@* forms are reserved for further key sources and are usage
+  errors today. Human *list* omits C's *xapdu* line: piggy does
   not probe the card for extended-length APDU support (piggy#345). *version* prints piggy's bare version on one
   line, the shape of C's, which printed pivy's own version. C's *auth* is
   dropped, not ported: *piggy tool sign* plus a verify against the expected

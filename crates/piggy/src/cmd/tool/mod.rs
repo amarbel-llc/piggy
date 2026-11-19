@@ -139,6 +139,9 @@ enum ListMode {
     Json,
 }
 
+use crate::card::seal::{ManagementKeySealer, default_pass_name};
+use zeroize::Zeroizing;
+
 /// Parse `piggy tool <args>` into an [`Invocation`], or `None` if the op is
 /// unrecognized OR an unmodeled option is present. Since the 3.6 cutover
 /// [`run`] maps `None` to a usage error (exit 2) — no C fallback — so `None`
@@ -244,6 +247,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "factory-reset"
             | "req-cert"
             | "version"
+            | "auth-test"
     ) {
         return None;
     }
@@ -261,12 +265,18 @@ fn parse(args: &[String]) -> Option<Invocation> {
         return None;
     }
     let positionals = args[i + 1..].to_vec();
-    // The admin-key–gated write ops authenticate with `-K`; validate the
-    // modeled key form so `random`/`@file` fall through to C, keeping the
-    // superset honest.
+    // The admin-key–gated ops authenticate with `-K`; validate the modeled
+    // key forms (`default`, hex, `@store[:<pass-name>]`, piggy#396) so
+    // `random`/`@file` stay usage errors.
     if matches!(
         op.as_str(),
-        "set-admin" | "delete-cert" | "update-keyhist" | "write-cert" | "generate" | "import"
+        "set-admin"
+            | "delete-cert"
+            | "update-keyhist"
+            | "write-cert"
+            | "generate"
+            | "import"
+            | "auth-test"
     ) {
         if let Some(k) = &admin_key {
             if !is_admin_key_arg(k) {
@@ -286,20 +296,21 @@ fn parse(args: &[String]) -> Option<Invocation> {
             return None;
         }
     }
-    // `update-keyhist`, `pinfo`, `list`, and `factory-reset` take no positionals
-    // (C errors "too many arguments").
+    // `update-keyhist`, `pinfo`, `list`, `factory-reset` and `auth-test` take
+    // no positionals (C errors "too many arguments").
     if matches!(
         op.as_str(),
-        "update-keyhist" | "pinfo" | "list" | "factory-reset" | "version"
+        "update-keyhist" | "pinfo" | "list" | "factory-reset" | "version" | "auth-test"
     ) && !positionals.is_empty()
     {
         return None;
     }
     // `set-admin` is 3DES-only in this port: the new key positional must be
-    // `default` or a hex string (not `random`, `@file`, an AES `-N`, or `-R`).
+    // `default`, a hex string, or `-` (one hex line on stdin, piggy#396); not
+    // `random`, `@file`, `@store`, an AES `-N`, or `-R`.
     if op == "set-admin" {
         let new_key = positionals.first()?;
-        if positionals.len() != 1 || !is_admin_key_arg(new_key) {
+        if positionals.len() != 1 || !(new_key == "-" || is_key_literal(new_key)) {
             return None;
         }
     }
@@ -343,12 +354,105 @@ fn parse_ec_alg(s: &str) -> Option<(PivAlgorithm, u8)> {
     }
 }
 
-/// Whether an admin-key argument is one this port models: the literal
-/// `default` (the factory 3DES key) or a plain hex string. `random`, an
-/// `@file` reference, and anything else fall through to C `pivy-tool`.
-fn is_admin_key_arg(s: &str) -> bool {
+/// A management key written out: the literal `default` (the factory 3DES
+/// key) or a plain hex string.
+fn is_key_literal(s: &str) -> bool {
     s == "default"
         || (!s.is_empty() && s.len().is_multiple_of(2) && s.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// `-K @store` or `-K @store:<pass-name>` (piggy#396): the current key is
+/// read from the password store instead of argv. `Some(None)` is the bare
+/// form (the entry `card init` seals, `piv/<GUID>/management-key` of the
+/// selected card); `Some(Some(name))` names the entry.
+fn store_ref(s: &str) -> Option<Option<&str>> {
+    if s == "@store" {
+        return Some(None);
+    }
+    s.strip_prefix("@store:")
+        .filter(|n| !n.is_empty())
+        .map(Some)
+}
+
+/// Whether a `-K` argument is one this port models: a key literal or a
+/// store reference. `random`, an `@file` reference, and anything else are
+/// usage errors (C `pivy-tool` forms this port does not carry).
+fn is_admin_key_arg(s: &str) -> bool {
+    is_key_literal(s) || store_ref(s).is_some()
+}
+
+/// The current management key an admin op authenticates with (piggy#396):
+/// `-K default` or hex as before, or `-K @store[:<pass-name>]`, read from the
+/// password store, the entry `card init` sealed (`piv/<GUID>/management-key`
+/// of the selected card) unless named. The store read is a decrypt, through
+/// the agent or a card over PC/SC, so it happens BEFORE the card session
+/// opens (as `card add-key --management-key-from-store` does); the key is
+/// never in argv. `Err` carries the exit code and the message.
+fn current_admin_key(
+    inv: &Invocation,
+    sealer: &dyn ManagementKeySealer,
+    guid_hex: &str,
+) -> Result<Zeroizing<Vec<u8>>, (i32, String)> {
+    let arg = inv.admin_key.as_deref().unwrap_or("default");
+    match store_ref(arg) {
+        None => resolve_admin_key(arg)
+            .map(Zeroizing::new)
+            .map_err(|e| (2, format!("current admin key: {e}"))),
+        Some(name) => {
+            let pass_name = name
+                .map(str::to_string)
+                .unwrap_or_else(|| default_pass_name(guid_hex));
+            // A card with no sealed entry (a holder-minted virtual card, a card
+            // never sealed) is a plain failure here, never a fall back to the
+            // factory key: `@store` means the store or nothing.
+            let hex = sealer.recover(&pass_name).map_err(|e| {
+                let what = match name {
+                    Some(_) => format!("current admin key from {pass_name}"),
+                    None => format!("no sealed management key for this card ({pass_name})"),
+                };
+                (1, format!("{what}: {e}"))
+            })?;
+            // The entry's content is never quoted back: a wrong entry is some
+            // other secret.
+            let key = hex.trim();
+            if key.len() != 48 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err((
+                    1,
+                    format!(
+                        "current admin key from {pass_name}: the entry does not hold a 48-hex-digit key ({} characters)",
+                        key.len()
+                    ),
+                ));
+            }
+            resolve_admin_key(key).map(Zeroizing::new).map_err(|_| {
+                (
+                    1,
+                    format!("current admin key from {pass_name}: not a 3DES key"),
+                )
+            })
+        }
+    }
+}
+
+/// `set-admin -`: the NEW key as one hex line on stdin (piggy#396), so it
+/// is never in argv. Trailing whitespace is dropped; nothing of the line is
+/// echoed in an error.
+fn read_new_admin_key(input: &mut dyn std::io::BufRead) -> Result<Zeroizing<Vec<u8>>, String> {
+    let mut line = Zeroizing::new(String::new());
+    let n = input
+        .read_line(&mut line)
+        .map_err(|e| format!("stdin: {e}"))?;
+    if n == 0 {
+        return Err("stdin held no key line (expected 48 hex digits on one line)".into());
+    }
+    let key = line.trim();
+    if key.len() != 48 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "the new key must be 48 hex digits on one line ({} characters read)",
+            key.len()
+        ));
+    }
+    resolve_admin_key(key).map(Zeroizing::new)
 }
 
 /// Whether a slot argument names a key slot the write ops (`generate`,
@@ -370,7 +474,10 @@ fn is_key_slot(slot_id: u8) -> bool {
 /// superset that falls back to C: an unported op or an unmodeled option
 /// (whatever [`parse`] rejects) is a usage error (exit 2), not a silent hop to
 /// `pivy-tool`. The full C surface stays reachable via `piggy pivy tool`.
-pub fn run(args: &[String]) -> i32 {
+///
+/// `sealer` is the password store the admin ops read a `-K @store` key from
+/// (piggy#396); the binary passes its store-backed one.
+pub fn run(args: &[String], sealer: &dyn ManagementKeySealer) -> i32 {
     let Some(inv) = parse(args) else {
         return usage();
     };
@@ -383,20 +490,57 @@ pub fn run(args: &[String]) -> i32 {
         "change-pin" => cmd_change_secret(&inv, Secret::Pin),
         "change-puk" => cmd_change_secret(&inv, Secret::Puk),
         "reset-pin" => cmd_reset_pin(&inv),
-        "set-admin" => cmd_set_admin(&inv),
-        "delete-cert" => cmd_delete_cert(&inv),
-        "update-keyhist" => cmd_update_keyhist(&inv),
-        "write-cert" => cmd_write_cert(&inv),
-        "generate" => cmd_generate(&inv),
-        "import" => cmd_import(&inv),
+        "set-admin" => cmd_set_admin(&inv, sealer),
+        "delete-cert" => cmd_delete_cert(&inv, sealer),
+        "update-keyhist" => cmd_update_keyhist(&inv, sealer),
+        "write-cert" => cmd_write_cert(&inv, sealer),
+        "generate" => cmd_generate(&inv, sealer),
+        "import" => cmd_import(&inv, sealer),
         "pinfo" => cmd_pinfo(&inv),
         "list" => cmd_list(&inv),
         "factory-reset" => cmd_factory_reset(&inv),
         "req-cert" => cmd_req_cert(&inv),
         "version" => cmd_version(),
+        "auth-test" => cmd_auth_test(&inv, sealer),
         // parse() only returns these ops.
         _ => unreachable!(),
     }
+}
+
+/// `piggy tool auth-test`: the management-key mutual authentication and
+/// nothing else (piggy#396): no PUT DATA, no PIN, nothing printed on success.
+/// Exit 0 when the current key (`-K`) authenticates, 1 with "failed to
+/// authenticate with current admin key" when it does not (and the usual 1
+/// for no card). A failed try costs nothing: PIV keeps no retry counter on
+/// the management key. The read-only proof a rotation ends with.
+fn cmd_auth_test(inv: &Invocation, sealer: &dyn ManagementKeySealer) -> i32 {
+    let op = "auth-test";
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let admin_key = match current_admin_key(inv, sealer, &token.guid().to_hex()) {
+        Ok(k) => k,
+        Err((code, msg)) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return code;
+        }
+    };
+    let mut session = match token.begin_pin_session() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: begin session: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = session.authenticate_admin(&admin_key, piggy_piv::apdu::alg::TDEA_3KEY) {
+        eprintln!("piggy tool {op}: failed to authenticate with current admin key: {e}");
+        return 1;
+    }
+    0
 }
 
 /// `piggy tool version`: piggy's bare version, the value `piggy version`'s
@@ -420,7 +564,7 @@ fn usage() -> i32 {
     eprintln!(
         "supported: pubkey, cert, attest, sign, ecdh, change-pin, change-puk, \
          reset-pin, set-admin, delete-cert, update-keyhist, write-cert, generate, import, \
-         pinfo, list, factory-reset, req-cert, version"
+         pinfo, list, factory-reset, req-cert, version, auth-test"
     );
     eprintln!(
         "for the rest of the pivy-tool surface (init, RSA/Ed25519, …) \
@@ -1020,21 +1164,25 @@ fn cmd_reset_pin(inv: &Invocation) -> i32 {
 /// key is the positional (`default` or hex). 3DES-only in this port — AES
 /// admin keys, `random`, `@file`, and `-R` PINFO-save fall through to C
 /// (rejected in `parse`). No stdout on success, matching C.
-fn cmd_set_admin(inv: &Invocation) -> i32 {
+fn cmd_set_admin(inv: &Invocation, sealer: &dyn ManagementKeySealer) -> i32 {
     let op = "set-admin";
-    let old_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("piggy tool {op}: current admin key: {e}");
-            return 2;
+    // parse() guaranteed exactly one positional: `-` (one hex line on stdin,
+    // piggy#396) or a modeled key form.
+    let new_key = if inv.positionals[0] == "-" {
+        match read_new_admin_key(&mut std::io::stdin().lock()) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("piggy tool {op}: new admin key: {e}");
+                return 2;
+            }
         }
-    };
-    // parse() guaranteed exactly one positional in a modeled key form.
-    let new_key = match resolve_admin_key(&inv.positionals[0]) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("piggy tool {op}: new admin key: {e}");
-            return 2;
+    } else {
+        match resolve_admin_key(&inv.positionals[0]) {
+            Ok(k) => Zeroizing::new(k),
+            Err(e) => {
+                eprintln!("piggy tool {op}: new admin key: {e}");
+                return 2;
+            }
         }
     };
     let mut token = match select_token(inv.guid.as_deref()) {
@@ -1042,6 +1190,13 @@ fn cmd_set_admin(inv: &Invocation) -> i32 {
         Err(msg) => {
             eprintln!("piggy tool {op}: {msg}");
             return 1;
+        }
+    };
+    let old_key = match current_admin_key(inv, sealer, &token.guid().to_hex()) {
+        Ok(k) => k,
+        Err((code, msg)) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return code;
         }
     };
     let mut session = match token.begin_pin_session() {
@@ -1092,24 +1247,24 @@ fn resolve_admin_key(arg: &str) -> Result<Vec<u8>, String> {
 /// current key comes from `-K` (`default` or hex; default: the factory 3DES
 /// key). Slots 9A/9C/9D/9E and the retired 82..95. On a YubiKey <5.7 (fibby's model) this clears only
 /// the cert, not the private key, exactly as C does. No stdout on success.
-fn cmd_delete_cert(inv: &Invocation) -> i32 {
+fn cmd_delete_cert(inv: &Invocation, sealer: &dyn ManagementKeySealer) -> i32 {
     let op = "delete-cert";
     let slot_id = match slot_arg(inv, op) {
         Ok(s) => s,
         Err(code) => return code,
-    };
-    let admin_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("piggy tool {op}: current admin key: {e}");
-            return 2;
-        }
     };
     let mut token = match select_token(inv.guid.as_deref()) {
         Ok(t) => t,
         Err(msg) => {
             eprintln!("piggy tool {op}: {msg}");
             return 1;
+        }
+    };
+    let admin_key = match current_admin_key(inv, sealer, &token.guid().to_hex()) {
+        Ok(k) => k,
+        Err((code, msg)) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return code;
         }
     };
     let mut session = match token.begin_pin_session() {
@@ -1136,20 +1291,20 @@ fn cmd_delete_cert(inv: &Invocation) -> i32 {
 /// `offcard` count and off-card URL are preserved from the existing object;
 /// then mgmt-key mutual auth (current key from `-K`, default factory 3DES)
 /// gates the PUT DATA at `5FC10C`. No stdout on success, matching C.
-fn cmd_update_keyhist(inv: &Invocation) -> i32 {
+fn cmd_update_keyhist(inv: &Invocation, sealer: &dyn ManagementKeySealer) -> i32 {
     let op = "update-keyhist";
-    let admin_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("piggy tool {op}: current admin key: {e}");
-            return 2;
-        }
-    };
     let mut token = match select_token(inv.guid.as_deref()) {
         Ok(t) => t,
         Err(msg) => {
             eprintln!("piggy tool {op}: {msg}");
             return 1;
+        }
+    };
+    let admin_key = match current_admin_key(inv, sealer, &token.guid().to_hex()) {
+        Ok(k) => k,
+        Err((code, msg)) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return code;
         }
     };
     // Recompute oncard from the retired slots; preserve offcard/url from the
@@ -1186,18 +1341,11 @@ fn cmd_update_keyhist(inv: &Invocation) -> i32 {
 /// slot's cert tag wrapping the DER as `70 <cert> 71 00`). The current key
 /// comes from `-K` (`default` or hex). Slots 9A/9C/9D/9E and the retired
 /// 82..95. No stdout on success, matching C.
-fn cmd_write_cert(inv: &Invocation) -> i32 {
+fn cmd_write_cert(inv: &Invocation, sealer: &dyn ManagementKeySealer) -> i32 {
     let op = "write-cert";
     let slot_id = match slot_arg(inv, op) {
         Ok(s) => s,
         Err(code) => return code,
-    };
-    let admin_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("piggy tool {op}: current admin key: {e}");
-            return 2;
-        }
     };
     let mut input = Vec::new();
     if let Err(e) = std::io::stdin().read_to_end(&mut input) {
@@ -1216,6 +1364,13 @@ fn cmd_write_cert(inv: &Invocation) -> i32 {
         Err(msg) => {
             eprintln!("piggy tool {op}: {msg}");
             return 1;
+        }
+    };
+    let admin_key = match current_admin_key(inv, sealer, &token.guid().to_hex()) {
+        Ok(k) => k,
+        Err((code, msg)) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return code;
         }
     };
     let mut session = match token.begin_pin_session() {
@@ -1261,7 +1416,7 @@ fn parse_cert_input(bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// writes carries a random serial (a side effect that legitimately differs).
 /// Prints `<openssh-pubkey> PIV_slot_XX@<GUID>`, matching C's format (a bare
 /// slot/GUID comment — no cert subject, unlike `pubkey`).
-fn cmd_generate(inv: &Invocation) -> i32 {
+fn cmd_generate(inv: &Invocation, sealer: &dyn ManagementKeySealer) -> i32 {
     let op = "generate";
     let slot_id = match slot_arg(inv, op) {
         Ok(s) => s,
@@ -1273,11 +1428,19 @@ fn cmd_generate(inv: &Invocation) -> i32 {
         .as_deref()
         .and_then(parse_ec_alg)
         .expect("parse() validated -a");
-    let admin_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
+    let mut token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let guid = token.guid().to_hex();
+    let admin_key = match current_admin_key(inv, sealer, &guid) {
         Ok(k) => k,
-        Err(e) => {
-            eprintln!("piggy tool {op}: current admin key: {e}");
-            return 2;
+        Err((code, msg)) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return code;
         }
     };
     let pin = match get_pin(inv, op) {
@@ -1287,14 +1450,6 @@ fn cmd_generate(inv: &Invocation) -> i32 {
             return 1;
         }
     };
-    let mut token = match select_token(inv.guid.as_deref()) {
-        Ok(t) => t,
-        Err(msg) => {
-            eprintln!("piggy tool {op}: {msg}");
-            return 1;
-        }
-    };
-    let guid = token.guid().to_hex();
     let mut session = match token.begin_pin_session() {
         Ok(s) => s,
         Err(e) => {
@@ -1378,18 +1533,11 @@ const IMPORT_UNSUPPORTED: &str =
 /// Modeled for EC P-256/P-384 keys (piggy is EC-only); an RSA/Ed25519 key
 /// errors and points at `piggy pivy tool import` for the C path. Needs `-K`
 /// (mgmt) and a PIN (`-P`/askpass, for the self-sign). Silent on success.
-fn cmd_import(inv: &Invocation) -> i32 {
+fn cmd_import(inv: &Invocation, sealer: &dyn ManagementKeySealer) -> i32 {
     let op = "import";
     let slot_id = match slot_arg(inv, op) {
         Ok(s) => s,
         Err(code) => return code,
-    };
-    let admin_key = match resolve_admin_key(inv.admin_key.as_deref().unwrap_or("default")) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("piggy tool {op}: current admin key: {e}");
-            return 2;
-        }
     };
     let pin = match get_pin(inv, op) {
         Ok(p) => p,
@@ -1415,6 +1563,13 @@ fn cmd_import(inv: &Invocation) -> i32 {
         Err(msg) => {
             eprintln!("piggy tool {op}: {msg}");
             return 1;
+        }
+    };
+    let admin_key = match current_admin_key(inv, sealer, &token.guid().to_hex()) {
+        Ok(k) => k,
+        Err((code, msg)) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return code;
         }
     };
     let mut session = match token.begin_pin_session() {
@@ -1962,9 +2117,192 @@ fn select_token(guid_prefix: Option<&str>) -> Result<PivToken, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListMode, generated_key_openssh_line, is_admin_key_arg, is_key_slot,
-        is_supported_cert_slot, parse,
+        ListMode, current_admin_key, generated_key_openssh_line, is_admin_key_arg, is_key_slot,
+        is_supported_cert_slot, parse, read_new_admin_key, store_ref,
     };
+
+    // -------- piggy#396: the management key off argv --------
+
+    /// A store holding one sealed key, or none.
+    struct FakeStore(Option<(&'static str, &'static str)>);
+
+    impl crate::card::seal::ManagementKeySealer for FakeStore {
+        fn prepare(&self, _: &str) -> Result<Box<dyn crate::card::seal::KeyEscrow>, String> {
+            Err("not a sealing store".into())
+        }
+        fn recover(&self, pass_name: &str) -> Result<zeroize::Zeroizing<String>, String> {
+            match self.0 {
+                Some((name, hex)) if name == pass_name => {
+                    Ok(zeroize::Zeroizing::new(format!("{hex}\n")))
+                }
+                _ => Err(format!("{pass_name} is not in the password store")),
+            }
+        }
+    }
+
+    const GUID: &str = "0123456789ABCDEF0123456789ABCDEF";
+
+    #[test]
+    fn store_ref_forms() {
+        assert_eq!(store_ref("@store"), Some(None));
+        assert_eq!(
+            store_ref("@store:piv/x/management-key"),
+            Some(Some("piv/x/management-key"))
+        );
+        assert_eq!(store_ref("@store:"), None);
+        assert_eq!(store_ref("@file"), None);
+        assert_eq!(store_ref("default"), None);
+        assert!(is_admin_key_arg("@store"));
+        assert!(is_admin_key_arg("@store:a/b"));
+        assert!(!is_admin_key_arg("@file"));
+    }
+
+    #[test]
+    fn parse_accepts_the_store_forms_and_auth_test() {
+        assert!(parse(&argv(&["-K", "@store", "auth-test"])).is_some());
+        assert!(parse(&argv(&["auth-test"])).is_some());
+        assert!(parse(&argv(&["-g", GUID, "-K", "default", "auth-test"])).is_some());
+        assert!(parse(&argv(&["auth-test", "extra"])).is_none());
+        assert!(
+            parse(&argv(&[
+                "-K",
+                "@store:piv/x/management-key",
+                "write-cert",
+                "82"
+            ]))
+            .is_some()
+        );
+        assert!(parse(&argv(&["-K", "@store", "set-admin", "-"])).is_some());
+        assert!(parse(&argv(&["-K", "default", "set-admin", "-"])).is_some());
+        // The NEW key is never a store reference, and `@file` stays out.
+        assert!(parse(&argv(&["set-admin", "@store"])).is_none());
+        assert!(parse(&argv(&["-K", "@file", "auth-test"])).is_none());
+        assert!(
+            parse(&argv(&["-K", "@store", "pubkey", "9a"])).is_some(),
+            "ignored by a read, as -K always was"
+        );
+    }
+
+    #[test]
+    fn current_key_from_the_store_defaults_to_the_selected_cards_entry() {
+        let store = FakeStore(Some((
+            "piv/0123456789ABCDEF0123456789ABCDEF/management-key",
+            HEX24,
+        )));
+        let inv = parse(&argv(&["-K", "@store", "auth-test"])).unwrap();
+        let key = current_admin_key(&inv, &store, GUID).unwrap();
+        assert_eq!(hex::encode(&*key), HEX24);
+
+        let inv = parse(&argv(&[
+            "-K",
+            "@store:piv/other/management-key",
+            "auth-test",
+        ]))
+        .unwrap();
+        let (code, msg) = current_admin_key(&inv, &store, GUID).unwrap_err();
+        assert_eq!(code, 1);
+        assert!(msg.contains("piv/other/management-key"), "{msg}");
+
+        let inv = parse(&argv(&["-K", "@store", "auth-test"])).unwrap();
+        let (code, msg) = current_admin_key(&inv, &FakeStore(None), GUID).unwrap_err();
+        assert_eq!(code, 1);
+        assert!(
+            msg.contains("no sealed management key for this card")
+                && msg.contains("not in the password store"),
+            "{msg}"
+        );
+
+        // Literal forms do not touch the store.
+        let inv = parse(&argv(&["-K", "default", "auth-test"])).unwrap();
+        let key = current_admin_key(&inv, &FakeStore(None), GUID).unwrap();
+        assert_eq!(key.len(), 24);
+        let inv = parse(&argv(&["auth-test"])).unwrap();
+        assert_eq!(
+            current_admin_key(&inv, &FakeStore(None), GUID)
+                .unwrap()
+                .len(),
+            24
+        );
+    }
+
+    /// FDR 0006 owner's condition (2026-11-19): `@store` against a card with
+    /// no sealed entry fails plainly and NEVER falls back to the factory key.
+    /// A holder-minted virtual card has a random GUID and no entry.
+    #[test]
+    fn store_form_never_falls_back_to_the_factory_key() {
+        use super::resolve_admin_key;
+        let factory = resolve_admin_key("default").unwrap();
+        for guid in [
+            "0123456789ABCDEF0123456789ABCDEF",
+            "4C454C35AEB9E7D2F3356DE7580556EA",
+        ] {
+            let inv = parse(&argv(&["-K", "@store", "auth-test"])).unwrap();
+            match current_admin_key(&inv, &FakeStore(None), guid) {
+                Err((1, msg)) => assert!(msg.contains("no sealed management key"), "{msg}"),
+                Err((code, msg)) => panic!("exit {code}: {msg}"),
+                Ok(key) => panic!(
+                    "resolved a key with no entry{}",
+                    if *key == factory {
+                        ": the factory key"
+                    } else {
+                        ""
+                    }
+                ),
+            }
+        }
+    }
+
+    /// `@` is a reserved prefix: only `@store` is a key source today, so the
+    /// on-card PIN-protected key (piggy#198) can become `-K @pin` later without
+    /// a flag change; anything else under `@` is a usage error, not hex.
+    #[test]
+    fn at_prefix_is_reserved_for_key_sources() {
+        for form in ["@pin", "@file", "@store:", "@", "@env"] {
+            assert!(!is_admin_key_arg(form), "{form} must not parse as a key");
+            assert!(parse(&argv(&["-K", form, "auth-test"])).is_none(), "{form}");
+        }
+    }
+
+    #[test]
+    fn a_store_entry_that_is_not_a_key_is_an_error_naming_the_entry() {
+        let store = FakeStore(Some(("piv/x/management-key", "hunter2-not-a-key")));
+        let inv = parse(&argv(&["-K", "@store:piv/x/management-key", "auth-test"])).unwrap();
+        let (code, msg) = current_admin_key(&inv, &store, GUID).unwrap_err();
+        assert_eq!(code, 1);
+        assert!(
+            msg.contains("piv/x/management-key") && msg.contains("48-hex-digit key"),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains("hunter2"),
+            "the entry's content is never echoed: {msg}"
+        );
+    }
+
+    #[test]
+    fn new_key_from_stdin_is_one_hex_line() {
+        let key = read_new_admin_key(&mut format!("{HEX24}\n").as_bytes()).unwrap();
+        assert_eq!(hex::encode(&*key), HEX24);
+        // Trailing whitespace is tolerated; a second line is ignored.
+        let key = read_new_admin_key(&mut format!("{HEX24}  \r\nsecond\n").as_bytes()).unwrap();
+        assert_eq!(hex::encode(&*key), HEX24);
+        let err = read_new_admin_key(&mut "".as_bytes()).unwrap_err();
+        assert!(err.contains("no key line"), "{err}");
+        let err = read_new_admin_key(&mut "0102\n".as_bytes()).unwrap_err();
+        assert!(
+            err.contains("48 hex digits") && err.contains("4 characters"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("0102"),
+            "the line's content is not echoed: {err}"
+        );
+        let err = read_new_admin_key(
+            &mut "zz02030405060708010203040506070801020304050607ff\n".as_bytes(),
+        )
+        .unwrap_err();
+        assert!(err.contains("48 hex digits"), "{err}");
+    }
 
     /// The P-256 base point, uncompressed: a valid public key to render.
     const P256_G: &str = "046B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C2964FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5";
