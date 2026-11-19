@@ -1,0 +1,3 @@
+# Paths whose change alone may skip the merge gate (gate-guard).
+# Plans are prose only; nothing reads them at build or test time.
+docs/plans/**
