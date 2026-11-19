@@ -225,9 +225,19 @@ pub(crate) fn preflight(
             "{e}; the certificate act (RFC 0012 §3.2) is signed through the agent that serves the card's slot 9C"
         ))
     })?;
-    let extensions = probe_extensions(&socket, PROBE_TIMEOUT)
-        .map_err(|e| unavailable(format!("the agent at {}: {e}", socket.display())))?;
-    if !extensions.iter().any(|name| name == EXTENSION) {
+    // An agent that cannot answer `query` (OpenSSH's ssh-agent, for one)
+    // serves no extension either: the same refusal, with its answer.
+    let serves = match probe_extensions(&socket, PROBE_TIMEOUT) {
+        Ok(extensions) => extensions.iter().any(|name| name == EXTENSION),
+        Err(e) if e.contains("connect ") => {
+            return Err(unavailable(format!(
+                "the agent at {}: {e}",
+                socket.display()
+            )));
+        }
+        Err(_) => false,
+    };
+    if !serves {
         return Err(unavailable(format!(
             "the agent at {} does not serve {EXTENSION}; the certificate act (RFC 0012 §3.2) needs piggy agent with the card",
             socket.display()

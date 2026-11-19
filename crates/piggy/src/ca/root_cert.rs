@@ -165,6 +165,9 @@ pub(crate) fn execute(args: RootCertArgs) -> Result<(), Failure> {
     let subject = profile.principal_for(&args.profile);
 
     let mut signer = CardSigner::open(&profile.issuer)?;
+    // A key the act cannot name is refused on its type alone, before the
+    // attestation is read.
+    certificate_act::check_certified_key(signer.algorithm())?;
     signer.verify_on_card(attestation_root.as_deref())?;
     // Everything the act needs from the card and the agent is settled
     // before the first PIN prompt, so a missing agent never costs a card
