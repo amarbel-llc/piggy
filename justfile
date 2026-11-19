@@ -392,7 +392,7 @@ _test-optional-linux-only: test-bats-conformance-fibby-pivy-agent-smoke
 _test-optional-linux-only:
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-ca-csr-fibby test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
+_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-ca-csr-fibby test-bats-conformance-root-cert-guard test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -1207,6 +1207,20 @@ test-bats-conformance-holder-mint-fibby:
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=180 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_holder_mint_fibby.bats
+
+# FDR 0007: the guards of `explore-fdr0007-root-cert` with fake tools on
+# PATH and no card: CARD=real required, module and provider checked before
+# any card read, and a failed step-1 read (rollback or evidence) bails out
+# before the card is asked to sign. Shell and just only, no nix build.
+#
+# run the explore-fdr0007-root-cert guard bats (fake tools, no card)
+[group('post-build')]
+[linux]
+test-bats-conformance-root-cert-guard:
+    # The test is told which justfile to drive: a path derived from the test
+    # file's own location can point at a store snapshot of the tree.
+    PIGGY_JUSTFILE="$PWD/justfile" BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/explore_fdr0007_root_cert_guard.bats
 
 # FDR 0007 phase (iii-a), piggy#392: `piggy ca csr` for a holder-held
 # intermediate key. A holder agent over fibby with the intermediate scope
@@ -5263,12 +5277,16 @@ explore-fdr0006-d BIN_DIR="" NO_SHELL="":
     FIBBY="$holder" FIBBY_CTL="$ctl" PIGGY="$piggy" "${SHELL:-bash}" -i || true
     ((fails == 0))
 
-# UNRUN AGAINST A REAL CARD (drafted 2026-11-19 while the card was away):
-# the ykcs11 object label, the provider's PIN prompt and the key URI are
-# from memory; notBefore is "now" (no skew). The root's CN, its validity
-# and the permitted DNS set are the OPERATOR's choice (FDR 0007's open
-# questions), and running this at all is the operator's decision at the
-# card hour, not a default of any lane.
+# UNRUN AGAINST A REAL CARD (drafted 2026-11-19 while the card was away;
+# its guards are exercised with fake tools by explore_fdr0007_root_cert_
+# guard.bats, the card path is not): the ykcs11 object label, the
+# provider's PIN prompt and the key URI are from memory; notBefore is
+# "now" (no skew), printed in the read-back and not asserted. The root's
+# CN, its validity and the permitted DNS set are the OPERATOR's choice
+# (FDR 0007's open questions), and running this at all is the operator's
+# decision at the card hour, not a default of any lane. A failed card read
+# in step 1 (the rollback or the evidence not saved) bails out BEFORE the
+# card is asked to sign.
 #
 # The pilot root certificate on the operator's card (FDR 0007, slot 82),
 # in one command instead of a transcript: the card reads (public key,
@@ -5338,6 +5356,11 @@ explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_P
     check "slot $slot attestation saved"                                   bash -c "piggy tool attest $slot > '$out/slot$slot-attest.pem'"
     echo "# The attested policy, as piggy lists it (expect pin_policy always, touch_policy always, P-256):"
     piggy list --format=ndjson 2>/dev/null | grep -i '"slot": *"82"' | sed 's/^/#   /' || echo "#   (piggy list printed no slot 82 line; read the attestation PEM by hand)"
+    echo "# step 1: $fails of $n card reads failed"
+    if [[ $fails -gt 0 ]]; then
+      echo "Bail out! a card read failed: the rollback or the evidence is not saved, so the card is not asked to sign"
+      exit 1
+    fi
 
     echo "# 2. the root profile as an openssl extension section"
     permitted=""
@@ -5359,6 +5382,10 @@ explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_P
     sed 's/^/#   /' "$out/root.cnf"
 
     echo "# 3. the key as PKCS#11 sees it (check KEY_URI against this list BEFORE typing the PIN)"
+    # Without --login this lists PUBLIC objects only: the private key's label
+    # ("Private key for Retired Key 1") may be absent here and still exist;
+    # the matching public key / certificate for Retired Key 1 is the check.
+    echo "# (public objects only, no login: look for Retired Key 1's public key or certificate; the private key shows after login)"
     pkcs11-tool --module "$module" --list-objects 2>&1 | sed 's/^/#   /' || true
     echo "# KEY_URI: $key_uri"
     echo "# The next step signs with the card: it asks for the PIN once, then the key waits for ONE touch."
@@ -5377,9 +5404,10 @@ explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_P
     echo "# 4. read-back"
     openssl x509 -in "$out/root.pem" -noout -text >"$out/root.txt"
     check "the root verifies against itself"                        openssl verify -CAfile "$out/root.pem" "$out/root.pem"
-    check "basicConstraints critical CA:TRUE pathlen:1"            grep -A1 'X509v3 Basic Constraints: critical' "$out/root.txt"
-    check "keyUsage keyCertSign, cRLSign"                           grep -A1 'X509v3 Key Usage: critical' "$out/root.txt"
-    check "name constraints present, with permitted and excluded"  bash -c "grep -q 'Name Constraints: critical' '$out/root.txt' && grep -q 'Permitted:' '$out/root.txt' && grep -q 'Excluded:' '$out/root.txt'"
+    check "basicConstraints critical CA:TRUE pathlen:1"            bash -c "grep -A1 'X509v3 Basic Constraints: critical' '$out/root.txt' | grep -q 'CA:TRUE, pathlen:1'"
+    check "keyUsage keyCertSign, cRLSign"                           bash -c "grep -A1 'X509v3 Key Usage: critical' '$out/root.txt' | grep -q 'Certificate Sign, CRL Sign'"
+    check "name constraints permit exactly the given DNS names"     bash -c "grep -q 'Name Constraints: critical' '$out/root.txt' && for name in ${names//,/ }; do grep -q \"DNS:\$name\" '$out/root.txt' || exit 1; done"
+    check "name constraints exclude every IPv4 and IPv6 address"    bash -c "grep -q 'IP:0.0.0.0/0.0.0.0' '$out/root.txt' && grep -qE 'IP:(0:0:0:0:0:0:0:0|::)/' '$out/root.txt'"
     check "subject and authority key identifiers present"          bash -c "grep -q 'Subject Key Identifier' '$out/root.txt' && grep -q 'Authority Key Identifier' '$out/root.txt'"
     check "the certificate's key is slot $slot's key"               bash -c "cmp -s <(openssl x509 -in '$out/root.pem' -pubkey -noout) <(ssh-keygen -e -m PKCS8 -f '$out/slot$slot.pub')"
     check "the serial has at least 64 bits"                         bash -c "[[ \$(openssl x509 -in '$out/root.pem' -noout -serial | cut -d= -f2 | wc -c) -ge 17 ]]"
