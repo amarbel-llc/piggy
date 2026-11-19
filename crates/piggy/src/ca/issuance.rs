@@ -27,6 +27,7 @@ use piggy::ca_issue::{self, ExitCode, Inputs, Refusal, Verb};
 use piggy_markl::{FormatId, Id, PurposeId};
 
 use super::card_signer::CardSigner;
+use super::certificate_act::{self, CertifiedAs};
 use super::root_cert::{SERIAL_BYTES, pem_certificate};
 use super::{Exit, Failure, failure};
 
@@ -39,6 +40,11 @@ pub struct IssuanceArgs {
     /// Write the PEM here instead of stdout.
     #[arg(long, value_name = "FILE")]
     pub out: Option<PathBuf>,
+    /// Where the certificate act (RFC 0012 §3.2) goes: by default `--out`'s
+    /// path plus `.act`, required when the PEM goes to stdout. Never
+    /// written over an existing file.
+    #[arg(long, value_name = "FILE")]
+    pub act_out: Option<PathBuf>,
 }
 
 /// `$PIGGY_CA_STATE`, else `$XDG_STATE_HOME/piggy/ca`, else
@@ -176,9 +182,24 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
         .map_err(|e| failure(Exit::Refused)(format!("random serial: {e}")))?;
     random[0] &= 0x7F;
 
+    // The act names the certified key, so its type is read now; a request
+    // that does not parse is refused here with the exit `issue` would give.
+    let csr_algorithm = piggy_piv::csr_check::parse_csr(&csr_der)
+        .map_err(|e| refused(Refusal::Csr(e)))?
+        .algorithm;
+    // The act's path is judged before the card is looked for: a taken path
+    // or a missing directory is refused with nothing else touched.
+    let act_out = certificate_act::act_out_path(args.out.as_deref(), args.act_out.clone())?;
+    certificate_act::precheck(&act_out, args.out.as_deref())?;
+    let subject = profile.principal_for(&args.profile);
+
     let mut signer = CardSigner::open(&profile.issuer)?;
     signer.verify_on_card(attestation_root.as_deref())?;
     let issuer_cert = signer.cert_der()?.to_vec();
+    // Everything the act needs from the card and the agent is settled
+    // before the first PIN prompt, so a missing agent never costs a card
+    // signature.
+    let operator = certificate_act::preflight(&signer, csr_algorithm, act_out)?;
     let describing = format!(
         "a {} certificate under profile {} for {} (serial {})",
         match verb {
@@ -190,7 +211,7 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
         hex::encode(random)
     );
     eprintln!(
-        "piggy ca: card {} slot {:02X} signs {describing}; one PIN prompt, then a touch",
+        "piggy ca: card {} slot {:02X} signs {describing}; two PIN prompts and touches: the certificate's, then the certificate act's (slot 9C, through the agent)",
         signer.card_label(),
         signer.slot()
     );
@@ -213,6 +234,22 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
             });
         }
     };
+
+    // The act names the signed DER, so it comes after the signature; the
+    // certificate is written only once the act is sealed and on disk.
+    let act = certificate_act::plan(
+        &issued.cert_der,
+        &subject,
+        CertifiedAs::Link,
+        &operator.key,
+        now.as_secs(),
+        &describing,
+    )?;
+    let act_digest = certificate_act::seal_and_write(&act, &operator)?;
+    eprintln!(
+        "piggy ca: the certificate act {act_digest} is written to {}",
+        operator.act_out.display()
+    );
 
     let pem = pem_certificate(&issued.cert_der);
     match &args.out {

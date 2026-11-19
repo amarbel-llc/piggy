@@ -62,9 +62,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CertifiedAs {
     Root,
-    // Constructed by `sign` and `issue` (#391 slice (d)), which land after
-    // this seam; the tests exercise it meanwhile.
-    #[allow(dead_code)]
     Link,
 }
 
