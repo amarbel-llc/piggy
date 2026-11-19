@@ -7,6 +7,7 @@ pub mod cert_builder;
 pub mod chuid;
 #[cfg(feature = "pcsc-transport")]
 pub mod context;
+pub mod csr_check;
 pub mod error;
 pub mod fascn;
 pub mod guid;

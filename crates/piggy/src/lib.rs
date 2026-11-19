@@ -21,6 +21,7 @@
 
 pub mod act;
 pub mod agent_client;
+pub mod ca_profile;
 pub mod card;
 pub mod card_oracle;
 pub mod cmd;

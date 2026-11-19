@@ -60,6 +60,9 @@ libc = "0.2"
 # of use.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `piggy ca` profile files (FDR 0007): parse-only, the same build pigtrough
+# uses, so the lock gains no package.
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 # TAP-14 text + tap-ndjson(7) writers for `piggy health`. Git dep on the
 # spec repo's Rust crate; see docs/plans/2026-06-07-piggy-health-design.md.
 tap-dancer = { git = "https://github.com/amarbel-llc/tap", tag = "v0.1.12" }

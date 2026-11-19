@@ -1465,6 +1465,7 @@ dependencies = [
  "tap-dancer",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "zeroize",
