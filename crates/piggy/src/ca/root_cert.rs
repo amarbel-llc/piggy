@@ -159,14 +159,17 @@ pub(crate) fn execute(args: RootCertArgs) -> Result<(), Failure> {
     // The profile's half is checked whole before the card is touched.
     let attestation_root = super::attestation_root_pem(&profile.issuer)?;
     let act_out = certificate_act::act_out_path(args.out.as_deref(), args.act_out.clone())?;
+    // The paths are judged before the card is looked for: a taken act path
+    // or a missing directory is refused with nothing else touched.
+    certificate_act::precheck(&act_out, args.out.as_deref())?;
     let subject = profile.principal_for(&args.profile);
 
     let mut signer = CardSigner::open(&profile.issuer)?;
     signer.verify_on_card(attestation_root.as_deref())?;
-    // Everything the act needs is settled before the first PIN prompt, so
-    // a missing agent never costs a card signature.
-    let operator =
-        certificate_act::preflight(&signer, signer.algorithm(), act_out, args.out.as_deref())?;
+    // Everything the act needs from the card and the agent is settled
+    // before the first PIN prompt, so a missing agent never costs a card
+    // signature.
+    let operator = certificate_act::preflight(&signer, signer.algorithm(), act_out)?;
     let describing = plan.describe();
     eprintln!(
         "piggy ca root-cert: card {} slot {:02X} signs {describing}; two PIN prompts and touches: the certificate's, then the certificate act's (slot 9C, through the agent)",

@@ -189,11 +189,8 @@ impl CardSigner {
         // The policy the card attests, judged as `piggy health` judges it:
         // what the agent would refuse at the second prompt is refused here,
         // before the certificate signature is spent.
-        let attested = self
-            .token
-            .read_slot_policy(OPERATOR_ACT_SLOT)
-            .ok()
-            .map(|(pin, touch)| piggy_piv::KeyPolicy { pin, touch });
+        let attested =
+            super::certificate_act::attested_policy(self.token.read_slot_policy(OPERATOR_ACT_SLOT));
         super::certificate_act::operator_key_verdict(attested, &card)?;
         let point = held
             .ec_sec1_point()

@@ -179,26 +179,43 @@ pub(crate) fn operator_key_verdict(attested: Option<KeyPolicy>, card: &str) -> R
     }
 }
 
-/// Everything the act will need, checked before the first PIN prompt, so a
-/// missing agent or a taken path never costs a card signature: the certified
-/// key is P-256; `act_out` does not exist and its directory does (the act
-/// is created exclusively, never over an earlier one); `pem_out`'s
-/// directory exists, when the PEM goes to a file; an agent socket is set,
-/// the agent answers and serves `operator-act@piggy`; the card holds a 9C
-/// key attested PIN always and touch always; the agent lists it. Each
-/// failure names what is missing; the agent and card ones are exit 6
-/// ("no agent serving the key", "the slot's key is not proven").
+/// The checks that need no card, run before the card is opened so a taken
+/// path is refused with nothing else looked for: `act_out` does not exist
+/// and its directory does (the act is created exclusively, never over an
+/// earlier one), and `pem_out`'s directory exists when the PEM goes to a
+/// file. Exit 1.
+pub(crate) fn precheck(act_out: &Path, pem_out: Option<&Path>) -> Result<(), Failure> {
+    check_act_out(act_out)?;
+    if let Some(pem) = pem_out {
+        check_output_dir(pem)?;
+    }
+    Ok(())
+}
+
+/// The slot's attested policy as [`operator_key_verdict`] judges it: a
+/// card that cannot attest the slot (no F9 key, not a YubiKey, an APDU
+/// error) attests nothing, which the verdict refuses.
+pub(crate) fn attested_policy(
+    read: Result<(piggy_piv::PinPolicy, piggy_piv::TouchPolicy), piggy_piv::PivError>,
+) -> Option<KeyPolicy> {
+    read.ok().map(|(pin, touch)| KeyPolicy { pin, touch })
+}
+
+/// Everything the act will need from the card and the agent, checked
+/// after the card's attestation and before the first PIN prompt, so a
+/// missing agent never costs a card signature: the certified key is P-256;
+/// an agent socket is set, the agent answers and serves
+/// `operator-act@piggy`; the card holds a 9C key attested PIN always and
+/// touch always; the agent lists it. Each failure names what is missing;
+/// the agent and card ones are exit 6 ("no agent serving the key", "the
+/// slot's key is not proven"). The path checks are [`precheck`], run
+/// before the card is opened.
 pub(crate) fn preflight(
     signer: &CardSigner,
     certified: PivAlgorithm,
     act_out: PathBuf,
-    pem_out: Option<&Path>,
 ) -> Result<Operator, Failure> {
     check_certified_key(certified)?;
-    check_act_out(&act_out)?;
-    if let Some(pem) = pem_out {
-        check_output_dir(pem)?;
-    }
     let unavailable = failure(Exit::IssuerUnavailable);
     let socket = super::agent_socket().map_err(|e| {
         unavailable(format!(
@@ -682,6 +699,46 @@ mod tests {
             "{}",
             unattested.message
         );
+
+        // A slot-policy read that errors (the card cannot attest) is the
+        // unattested verdict, never a pass.
+        assert_eq!(
+            attested_policy(Err(piggy_piv::PivError::Other("SW 6D00".into()))),
+            None
+        );
+        assert_eq!(
+            attested_policy(Ok((PinPolicy::Always, TouchPolicy::Always))),
+            Some(KeyPolicy::OPERATOR_ACT)
+        );
+        let errored = operator_key_verdict(
+            attested_policy(Err(piggy_piv::PivError::Other("SW 6D00".into()))),
+            "c1",
+        )
+        .unwrap_err();
+        assert_eq!(errored.exit, Exit::IssuerUnavailable);
+    }
+
+    #[test]
+    fn the_path_checks_run_without_a_card() {
+        let dir = std::env::temp_dir().join(format!("piggy-cert-pre-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(precheck(&dir.join("root.act"), Some(&dir.join("root.pem"))).is_ok());
+        assert!(precheck(&dir.join("root.act"), None).is_ok());
+        std::fs::write(dir.join("taken.act"), b"x").unwrap();
+        assert_eq!(
+            precheck(&dir.join("taken.act"), None).unwrap_err().exit,
+            Exit::Refused
+        );
+        assert_eq!(
+            precheck(
+                &dir.join("root.act"),
+                Some(&dir.join("nodir").join("root.pem"))
+            )
+            .unwrap_err()
+            .exit,
+            Exit::Refused
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
