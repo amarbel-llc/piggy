@@ -274,10 +274,13 @@ namespace; the agent, and only the agent, makes the signature:
   empty, over 4096 bytes, or holding a control character other than newline
   and tab).
 . It asks the card to attest the slot's key, and refuses unless the
-  attestation is for that key, is signed by the card's F9 certificate, and
-  states PIN always and touch always. The policy is read from the card for
-  every request; nothing configured stands in for it. A key that was
-  imported, or that a card cannot attest, is refused.
+  attestation is for that key, is signed by the card's F9 certificate,
+  states PIN always and touch always, and names slot 9C as the slot it
+  attests. The policy and the slot are read from the card for every
+  request; nothing configured stands in for them. A key that was imported,
+  or that a card cannot attest, is refused; so is the certificate authority
+  key in slot 82, which is enrolled with the same policy as 9C (a
+  certificate signature must never pass for an operator act).
 . It asks for the PIN on a prompt that shows the act: its class (quote,
   escalation, certificate, approval for a decision that grants no right, or
   revocation for an act that cancels earlier acts), the card and slot, the

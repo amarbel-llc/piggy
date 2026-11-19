@@ -929,9 +929,11 @@ enum OperatorActAnswer {
 
 /// Check that the card attests `slot`'s key as an operator-act key (RFC 0012
 /// §2.4): the attestation is for `requested`, states PIN always and touch
-/// always, and is signed by the card's F9 certificate. The policy is read
+/// always, names slot 9C as the slot it attests (the CA key in slot 82
+/// attests the same policy and is refused here, before any prompt), and is
+/// signed by the card's F9 certificate. The policy and the slot are read
 /// from the card on every request; nothing configured or cached stands in
-/// for it. `Err` is the `detail` of a `refused-policy` answer.
+/// for them. `Err` is the `detail` of a `refused-policy` answer.
 fn check_operator_act_attestation(
     token: &piggy_piv::PivToken,
     slot: u8,
@@ -946,6 +948,7 @@ fn check_operator_act_attestation(
     if !policy.serves_operator_acts() {
         return Err(format!("slot {slot:02X}: {policy}"));
     }
+    crate::operator_act::refuse_attestation_not_for_slot_9c(&attestation, slot)?;
     let (_, attested_key) = piggy_piv::cert::extract_public_key(&attestation)
         .map_err(|e| format!("slot {slot:02X}: unreadable attestation ({e})"))?;
     if attested_key.key_data() != requested {

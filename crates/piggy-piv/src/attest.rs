@@ -80,6 +80,50 @@ pub fn extension_value(cert_der: &[u8], oid_body: &[u8]) -> Result<Option<Vec<u8
     find_extension(cert_der, oid_body)
 }
 
+/// The slot an attestation certificate names as the one it attests: the
+/// trailing hex pair of its subject `CN` (`YubiKey PIV Attestation 9c` on
+/// a YubiKey, `fibby PIV attestation 9c` on fibby). `Ok(None)` when the
+/// subject has no `CN`, or the `CN` ends in no slot. RFC 0012 §2.4 item 5
+/// reads the slot from here, the card's own statement, never from the
+/// slot a caller asked about.
+pub fn attested_slot(cert_der: &[u8]) -> Result<Option<u8>, PivError> {
+    use der::Decode;
+    use der::asn1::{PrintableStringRef, Utf8StringRef};
+    use x509_cert::Certificate;
+
+    const OID_COMMON_NAME: const_oid::ObjectIdentifier =
+        const_oid::ObjectIdentifier::new_unwrap("2.5.4.3");
+
+    let cert = Certificate::from_der(cert_der).map_err(|e| PivError::Tlv {
+        message: format!("attestation certificate: {e}"),
+    })?;
+    for rdn in cert.tbs_certificate.subject.0.iter() {
+        for atv in rdn.0.iter() {
+            if atv.oid != OID_COMMON_NAME {
+                continue;
+            }
+            let text = if let Ok(s) = atv.value.decode_as::<Utf8StringRef<'_>>() {
+                s.as_str().to_owned()
+            } else if let Ok(s) = atv.value.decode_as::<PrintableStringRef<'_>>() {
+                s.as_str().to_owned()
+            } else {
+                return Ok(None);
+            };
+            return Ok(slot_named_by(&text));
+        }
+    }
+    Ok(None)
+}
+
+/// The slot a `CN` of the shape `<words> <two hex digits>` names.
+fn slot_named_by(common_name: &str) -> Option<u8> {
+    let last = common_name.split_whitespace().last()?;
+    if last.len() != 2 {
+        return None;
+    }
+    u8::from_str_radix(last, 16).ok()
+}
+
 /// Whether the slot attestation certificate `attestation_der` is signed by
 /// the card's attestation certificate `intermediate_der` (the one read from
 /// slot F9). `Ok(false)` is a signature that does not check out; `Err` is a
@@ -403,5 +447,87 @@ mod tests {
         let cert = synthetic_cert(0xFF, 0x01);
         let err = parse_policy(&cert).unwrap_err();
         assert!(err.to_string().contains("0xFF"), "got: {err}");
+    }
+
+    #[test]
+    fn the_attested_slot_is_the_cn_suffix() {
+        assert_eq!(slot_named_by("YubiKey PIV Attestation 9c"), Some(0x9C));
+        assert_eq!(slot_named_by("YubiKey PIV Attestation 82"), Some(0x82));
+        assert_eq!(slot_named_by("fibby PIV attestation 9C"), Some(0x9C));
+        assert_eq!(
+            slot_named_by("Yubico PIV Attestation"),
+            None,
+            "the F9 subject"
+        );
+        assert_eq!(slot_named_by("attestation 9c "), Some(0x9C));
+        assert_eq!(slot_named_by("attestation 0x9c"), None);
+        assert_eq!(slot_named_by("attestation zz"), None);
+        assert_eq!(slot_named_by(""), None);
+        assert_eq!(
+            slot_named_by("9c"),
+            Some(0x9C),
+            "a bare slot is the degenerate shape"
+        );
+    }
+
+    /// A self-signed P-256 certificate whose subject is `CN=<cn>`, built
+    /// by OpenSSL so the subject is encoded the way a real certificate's
+    /// is (a UTF8String).
+    fn cert_with_subject(cn: &str) -> Vec<u8> {
+        use openssl::asn1::Asn1Time;
+        use openssl::bn::BigNum;
+        use openssl::ec::{EcGroup, EcKey};
+        use openssl::hash::MessageDigest;
+        use openssl::nid::Nid;
+        use openssl::pkey::PKey;
+        use openssl::x509::{X509Builder, X509NameBuilder};
+
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", cn).unwrap();
+        let name = name.build();
+        let mut b = X509Builder::new().unwrap();
+        b.set_version(2).unwrap();
+        b.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+            .unwrap();
+        b.set_subject_name(&name).unwrap();
+        b.set_issuer_name(&name).unwrap();
+        b.set_pubkey(&key).unwrap();
+        b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+            .unwrap();
+        b.sign(&key, MessageDigest::sha256()).unwrap();
+        b.build().to_der().unwrap()
+    }
+
+    #[test]
+    fn attested_slot_is_read_from_a_real_certificates_subject() {
+        assert_eq!(
+            attested_slot(&cert_with_subject("YubiKey PIV Attestation 9c")).unwrap(),
+            Some(0x9C)
+        );
+        assert_eq!(
+            attested_slot(&cert_with_subject("YubiKey PIV Attestation 82")).unwrap(),
+            Some(0x82)
+        );
+        assert_eq!(
+            attested_slot(&cert_with_subject("fibby PIV attestation 9d")).unwrap(),
+            Some(0x9D)
+        );
+        assert_eq!(
+            attested_slot(&cert_with_subject("Yubico PIV Attestation")).unwrap(),
+            None,
+            "an F9 certificate names no slot"
+        );
+        assert!(
+            attested_slot(b"not a certificate").is_err(),
+            "unreadable DER is an error, not an absent slot"
+        );
+        // The synthetic extension-only shape the policy walker accepts is
+        // not a whole certificate: the slot reader, which decodes one,
+        // reports it unreadable rather than guessing an absent slot.
+        assert!(attested_slot(&synthetic_cert(0x03, 0x02)).is_err());
     }
 }

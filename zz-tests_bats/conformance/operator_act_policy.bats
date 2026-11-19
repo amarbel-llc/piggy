@@ -72,6 +72,19 @@ function attested_9c_with_a_weaker_pin_policy_is_refused { # @test
   _assert_refused_policy 9C "slot 9C: PIN once, touch always"
 }
 
+# RFC 0012 §2.4 item 5 (the sixth amendment): policy alone does not qualify
+# a slot. 9A generated with the 9C policy attests PIN always and touch
+# always, passes the first four checks, and is refused on the slot its
+# attestation names; so is the CA key in slot 82, which fibby does not
+# model (the unit tests over `operator_act::refuse_attestation_not_for_slot_9c`
+# cover it).
+function attested_slot_other_than_9c_is_refused_whatever_its_policy { # @test
+  spawn_operator_card
+  _add_key 9a --replace --pin-policy always --touch-policy always
+  spawn_card_agent
+  _assert_refused_policy 9A "slot 9A: the attestation names slot 9A, not 9C"
+}
+
 # The policy is not remembered: the same agent serves 9C, the key is replaced
 # by a weaker one behind its back, and the next request is judged afresh.
 function policy_is_read_from_the_card_at_request_time { # @test

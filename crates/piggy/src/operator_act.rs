@@ -417,6 +417,29 @@ pub fn refuse_tbs_certificate_on_ca_slot(data: &[u8], slot_id: u8) -> Result<(),
     Ok(())
 }
 
+/// The slot gate of RFC 0012 §2.4 item 5 (the sixth amendment): an operator
+/// act is signed only by a key whose attestation names slot 9C. The CA key
+/// in slot 82 attests the same PIN-always, touch-always policy, and a
+/// signature by it must never pass for an approval, so policy alone does
+/// not qualify a slot. The slot is read from the attestation certificate
+/// the card produced; `slot_id`, the slot the caller asked about, is for
+/// the wording only. `Err` is the `refused-policy` detail.
+pub fn refuse_attestation_not_for_slot_9c(
+    attestation_der: &[u8],
+    slot_id: u8,
+) -> Result<(), String> {
+    use crate::card::slot_policy::SLOT_SIGNATURE;
+    match piggy_piv::attest::attested_slot(attestation_der) {
+        Ok(Some(SLOT_SIGNATURE)) => Ok(()),
+        Ok(Some(named)) => Err(format!(
+            "slot {slot_id:02X}: the attestation names slot {named:02X}, not 9C; only the \
+             9C key signs operator acts"
+        )),
+        Ok(None) => Err(format!("slot {slot_id:02X}: the attestation names no slot")),
+        Err(e) => Err(format!("slot {slot_id:02X}: unreadable attestation ({e})")),
+    }
+}
+
 /// The unarmored sshsig blob (PROTOCOL.sshsig §2). `signature` is the SSH
 /// signature encoding: `string algorithm || string signature-data`.
 pub fn sshsig_blob(
@@ -574,6 +597,91 @@ mod tests {
                 "{data:?}"
             );
         }
+    }
+
+    /// A self-signed certificate with subject `CN=<cn>`: the shape of a
+    /// slot attestation as far as the slot gate reads it.
+    fn attestation_naming(cn: &str) -> Vec<u8> {
+        use openssl::asn1::Asn1Time;
+        use openssl::bn::BigNum;
+        use openssl::ec::{EcGroup, EcKey};
+        use openssl::hash::MessageDigest;
+        use openssl::nid::Nid;
+        use openssl::pkey::PKey;
+        use openssl::x509::{X509Builder, X509NameBuilder};
+
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", cn).unwrap();
+        let name = name.build();
+        let mut b = X509Builder::new().unwrap();
+        b.set_version(2).unwrap();
+        b.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+            .unwrap();
+        b.set_subject_name(&name).unwrap();
+        b.set_issuer_name(&name).unwrap();
+        b.set_pubkey(&key).unwrap();
+        b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+            .unwrap();
+        b.sign(&key, MessageDigest::sha256()).unwrap();
+        b.build().to_der().unwrap()
+    }
+
+    /// RFC 0012 §2.4 item 5: the CA key in slot 82 attests PIN always and
+    /// touch always like 9C does, and is refused on the slot its
+    /// attestation names, whatever slot the caller asked about.
+    #[test]
+    fn an_attestation_naming_a_slot_other_than_9c_is_refused() {
+        assert_eq!(
+            refuse_attestation_not_for_slot_9c(
+                &attestation_naming("YubiKey PIV Attestation 9c"),
+                0x9C
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            refuse_attestation_not_for_slot_9c(
+                &attestation_naming("fibby PIV attestation 9c"),
+                0x9C
+            ),
+            Ok(())
+        );
+
+        let refusal = refuse_attestation_not_for_slot_9c(
+            &attestation_naming("YubiKey PIV Attestation 82"),
+            0x82,
+        )
+        .unwrap_err();
+        assert!(refusal.starts_with("slot 82: "), "{refusal}");
+        assert!(refusal.contains("names slot 82, not 9C"), "{refusal}");
+
+        // The verdict is the certificate's: a caller asking about 9C with
+        // an attestation naming 82 is refused just the same.
+        let refusal = refuse_attestation_not_for_slot_9c(
+            &attestation_naming("YubiKey PIV Attestation 82"),
+            0x9C,
+        )
+        .unwrap_err();
+        assert!(refusal.contains("names slot 82, not 9C"), "{refusal}");
+
+        for other in ["YubiKey PIV Attestation 9a", "YubiKey PIV Attestation 9d"] {
+            assert!(
+                refuse_attestation_not_for_slot_9c(&attestation_naming(other), 0x9C).is_err(),
+                "{other}"
+            );
+        }
+        let no_slot =
+            refuse_attestation_not_for_slot_9c(&attestation_naming("Yubico PIV Attestation"), 0x9C)
+                .unwrap_err();
+        assert!(no_slot.contains("names no slot"), "{no_slot}");
+        let unreadable = refuse_attestation_not_for_slot_9c(b"\x30\x00", 0x9C).unwrap_err();
+        assert!(
+            unreadable.contains("unreadable attestation"),
+            "{unreadable}"
+        );
     }
 
     #[test]
