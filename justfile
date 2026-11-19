@@ -5415,7 +5415,12 @@ explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_P
     check "subject and authority key identifiers present"          bash -c "grep -q 'Subject Key Identifier' '$out/root.txt' && grep -q 'Authority Key Identifier' '$out/root.txt'"
     check "the certificate's key is slot $slot's key"               bash -c "cmp -s <(openssl x509 -in '$out/root.pem' -pubkey -noout) <(ssh-keygen -e -m PKCS8 -f '$out/slot$slot.pub')"
     check "the serial has at least 64 bits"                         bash -c "[[ \$(openssl x509 -in '$out/root.pem' -noout -serial | cut -d= -f2 | wc -c) -ge 17 ]]"
-    check "slot $slot's attested policy is unchanged"               bash -c "cmp -s <(piggy tool attest $slot) '$out/slot$slot-attest.pem'"
+    # Each `attest` makes the card sign a fresh attestation; whether the
+    # signature's nonce is deterministic on real firmware is not known, so
+    # the bytes are not compared: the attested key and the YubicoPIV policy
+    # extension (1.3.6.1.4.1.41482.3.8, [pin, touch]) are.
+    check "slot $slot's attested key is unchanged"                  bash -c "cmp -s <(piggy tool attest $slot | openssl x509 -noout -pubkey) <(openssl x509 -in '$out/slot$slot-attest.pem' -noout -pubkey)"
+    check "slot $slot's attested PIN and touch policy are unchanged"  bash -c "cmp -s <(piggy tool attest $slot | openssl x509 -noout -text | grep -A1 '1.3.6.1.4.1.41482.3.8') <(openssl x509 -in '$out/slot$slot-attest.pem' -noout -text | grep -A1 '1.3.6.1.4.1.41482.3.8')"
     echo "1..$n"
     grep -E 'Not Before|Not After|Subject:|Permitted|Excluded|DNS:|IP:' "$out/root.txt" | sed 's/^/#   /'
     echo "# NEXT, by hand, after judging the read-back (the only step that changes the card; needs the management key the store escrowed, no PIN, no touch unless the management key is touch-protected):"
