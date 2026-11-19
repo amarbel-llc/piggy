@@ -436,6 +436,7 @@ pub fn plan_add_key(
     if !fe.confirm(ConfirmRequest {
         message,
         default: Some(false),
+        word: None,
     })? {
         return Err(ProvisionError::Aborted("declined at confirmation".into()));
     }
@@ -602,6 +603,7 @@ fn run_inner(
     let proceed = fe.confirm(ConfirmRequest {
         message,
         default: Some(false),
+        word: None,
     })?;
     if !proceed {
         return Err(ProvisionError::Aborted("declined at confirmation".into()));
@@ -807,6 +809,7 @@ fn offer_seal(
             if n == 1 { "" } else { "s" }
         ),
         default: Some(false),
+        word: None,
     })
 }
 

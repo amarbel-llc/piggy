@@ -119,8 +119,22 @@ secret.
 
 #### 2.4 `confirm` — a yes/no decision
 
-    request params := { "message": <string>, "default": <boolean> }  ; default OPTIONAL
+    request params := { "message": <string>, "default": <boolean>, "word": <string> }  ; default, word OPTIONAL
     response result := { "confirmed": <boolean> }
+
+With `word` (added 2026-11-19 for `piggy card rotate-admin`, whose one card
+write follows the decision), the decision is a typed word: a frontend MUST
+answer `confirmed: true` only when the operator typed exactly `word`, so a
+stray Enter never stands for a yes. The tty frontend prints the message,
+then `Type 'WORD' to continue (anything else stops):`, and compares the
+line it reads; every other answer, and EOF, is `false`, never an error. A
+JSON-RPC frontend renders the word as it sees fit (a button that types it
+is one rendering) and answers on its own trust, as for every confirm: a
+frontend that answers `confirmed: true` with no human is the frontend's
+doing, not the protocol's. A word is not a secret and MUST NOT be asked
+through `secret.request`. A frontend built before this field ignores it
+and answers the yes/no as before; an operation whose write must not follow
+a bare yes SHOULD refuse to run against such a frontend if it can tell.
 
 #### 2.5 `card_select` — choose among candidate cards
 

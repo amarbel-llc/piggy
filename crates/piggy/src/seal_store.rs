@@ -6,6 +6,7 @@
 
 use std::io::Cursor;
 
+use piggy::card::rotate::RotateStore;
 use piggy::card::seal::{KeyEscrow, ManagementKeySealer};
 use piggy_ids::RecipientFile;
 use piggy_markl::Id;
@@ -50,6 +51,65 @@ impl ManagementKeySealer for StoreSealer {
         let text = std::str::from_utf8(&line)
             .map_err(|_| format!("{pass_name} does not hold a management key (not text)"))?;
         Ok(Zeroizing::new(text.trim().to_string()))
+    }
+}
+
+/// The pass-name checked and resolved against the store, for the
+/// rotation's questions and moves.
+fn checked_entry(pass_name: &str) -> Result<StoreEntry, String> {
+    if let Some(reason) = sneaky_path_reason(pass_name) {
+        return Err(format!("invalid store path {pass_name:?} ({reason})"));
+    }
+    if pass_name.is_empty() {
+        return Err(format!(
+            "invalid store path {pass_name:?} (must be a non-empty path relative to the store)"
+        ));
+    }
+    StoreEntry::resolve(store_root(), pass_name)
+}
+
+impl RotateStore for StoreSealer {
+    fn exists(&self, name: &str) -> Result<bool, String> {
+        Ok(checked_entry(name)?.ebox.exists())
+    }
+
+    /// One `rename(2)` within the entry's directory, so the entry is either
+    /// the old key or the new one and never absent, then one commit that
+    /// records the entry and the pending path's removal.
+    fn promote(&self, pending: &str, entry: &str) -> Result<(), String> {
+        let from = checked_entry(pending)?;
+        let to = checked_entry(entry)?;
+        to.create_parent()?;
+        std::fs::rename(&from.ebox, &to.ebox).map_err(|e| {
+            format!(
+                "rename {} over {}: {e}",
+                from.ebox.display(),
+                to.ebox.display()
+            )
+        })?;
+        if let Some(work_tree) = crate::git_ops::find_inner_git_dir(&to.ebox, &to.root) {
+            let _ = crate::git_ops::add_and_commit_with(
+                &work_tree,
+                &to.ebox,
+                &[from.ebox.as_path()],
+                &format!("Promote {pending} over {entry}."),
+            );
+        }
+        Ok(())
+    }
+
+    fn remove(&self, name: &str) -> Result<(), String> {
+        let entry = checked_entry(name)?;
+        std::fs::remove_file(&entry.ebox)
+            .map_err(|e| format!("remove {}: {e}", entry.ebox.display()))?;
+        if let Some(work_tree) = crate::git_ops::find_inner_git_dir(&entry.ebox, &entry.root) {
+            let _ = crate::git_ops::commit(
+                &work_tree,
+                &format!("Remove {name}."),
+                &[entry.ebox.as_path()],
+            );
+        }
+        Ok(())
     }
 }
 

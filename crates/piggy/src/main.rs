@@ -616,6 +616,35 @@ enum CardCommand {
         #[command(flatten)]
         selector: piggy::card::init_cmd::CardSelectorArgs,
     },
+    /// Rotate a card's management key to a new random key sealed in the
+    /// password store, without a moment in which the key exists only in
+    /// memory: the key is sealed to the entry's recipients, read back once
+    /// (one 9D PIN) and compared, and only then set on the card, which is
+    /// then proven to take it and to refuse the old one. The first rotation
+    /// moves off the factory key; a later one (the entry already holds the
+    /// card's key) seals the new key at `<entry>.pending` and promotes it
+    /// over the entry after the proof. Where to start is read from the card
+    /// and the store, so an interrupted run is finished by running again.
+    /// Nothing is written before the operator types `seal` under the
+    /// resolved recipients. Prints a TAP-14 account; exit 1 stopped, 2
+    /// usage, 3 the store, 4 the operator declined, 5 the card refused or
+    /// is not managed this way, 6 the card is on a key piggy does not hold.
+    RotateAdmin {
+        /// The store entry that holds the card's management key; default
+        /// `piv/<GUID>/management-key`, where `card init` seals it.
+        #[arg(long, value_name = "PASS-NAME")]
+        entry: Option<String>,
+        #[command(flatten)]
+        selector: piggy::card::init_cmd::CardSelectorArgs,
+        /// Interaction frontend: `tty` (default, askpass) or `jsonrpc` (an
+        /// external program drives the prompts over `--socket`).
+        #[arg(long, value_enum, default_value_t = piggy::card::frontend::select::FrontendKind::Tty)]
+        frontend: piggy::card::frontend::select::FrontendKind,
+        /// `AF_UNIX` socket path the JSON-RPC frontend listens on. Required
+        /// (and only used) when `--frontend jsonrpc`.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -972,6 +1001,20 @@ fn main() {
                     piggy::card::attestation_cmd::run(selector.selector(), &slot)
                 }))
             }
+            CardCommand::RotateAdmin {
+                entry,
+                selector,
+                frontend,
+                socket,
+            } => std::process::exit(piggy::stats::timed_card("rotate_admin", || {
+                piggy::card::rotate_cmd::run(
+                    selector.selector(),
+                    entry,
+                    &seal_store::StoreSealer,
+                    frontend,
+                    socket.as_deref(),
+                )
+            })),
         },
 
         Command::Secrets(args) => match args.cmd {

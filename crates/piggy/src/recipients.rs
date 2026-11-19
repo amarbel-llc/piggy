@@ -255,6 +255,7 @@ fn add_all_attached(
             let proceed = match fe.confirm(ConfirmRequest {
                 message: format!("Continue and add the {} supported card(s)?", to_add.len()),
                 default: Some(false),
+                word: None,
             }) {
                 Ok(p) => p,
                 Err(e) => {

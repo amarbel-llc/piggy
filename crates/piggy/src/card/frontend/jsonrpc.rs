@@ -380,6 +380,7 @@ mod tests {
             .confirm(ConfirmRequest {
                 message: "ok?".into(),
                 default: Some(true),
+                word: None,
             })
             .unwrap_err();
         assert!(matches!(err, FrontendError::Protocol(_)), "got {err:?}");
@@ -399,6 +400,7 @@ mod tests {
             .confirm(ConfirmRequest {
                 message: "proceed?".into(),
                 default: None,
+                word: None,
             })
             .unwrap();
         assert!(ok);
@@ -412,6 +414,7 @@ mod tests {
             .confirm(ConfirmRequest {
                 message: "x".into(),
                 default: None,
+                word: None,
             })
             .unwrap_err();
         assert!(matches!(err, FrontendError::Transport(_)), "got {err:?}");
@@ -428,6 +431,7 @@ mod tests {
             .confirm(ConfirmRequest {
                 message: "x".into(),
                 default: None,
+                word: None,
             })
             .unwrap_err();
         assert!(matches!(err, FrontendError::Protocol(_)), "got {err:?}");
@@ -445,6 +449,7 @@ mod tests {
         let _ = fe.confirm(ConfirmRequest {
             message: "go?".into(),
             default: None,
+            word: None,
         });
         fe.progress(ProgressEvent {
             step: "generate-9d".into(),

@@ -15,6 +15,8 @@ pub mod engine;
 pub mod frontend;
 pub mod init_cmd;
 pub mod protocol;
+pub mod rotate;
+pub mod rotate_cmd;
 pub mod seal;
 pub mod slot_policy;
 

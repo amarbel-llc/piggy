@@ -122,6 +122,46 @@ fn secret_context(req: &SecretRequest, operation: &str) -> Option<String> {
     Some(format!("piggy {operation}: card {id}"))
 }
 
+/// A typed-word confirm (RFC 0006 §2.4 `word`): the message, then
+/// `Type 'WORD' to continue (anything else stops):`, read from the
+/// controlling tty when stdin is one, else from stdin with the prompt on
+/// stderr, as the yes/no confirm does. Only the exact word, trimmed of its
+/// line ending, is a yes; every other answer, and EOF, is a no, never an
+/// error, so the operation stops as the operator asked.
+fn confirm_word(message: &str, word: &str) -> Result<bool, FrontendError> {
+    let prompt = format!("{message}\nType '{word}' to continue (anything else stops): ");
+    let controlling_tty = if std::io::stdin().is_terminal() {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+    } else {
+        Err(std::io::Error::other("stdin is not a terminal"))
+    };
+    let answer = match controlling_tty {
+        Ok(mut tty) => {
+            write!(tty, "{prompt}")
+                .and_then(|()| tty.flush())
+                .map_err(|e| FrontendError::Transport(e.to_string()))?;
+            let mut buf = [0u8; 256];
+            let n = tty
+                .read(&mut buf)
+                .map_err(|e| FrontendError::Transport(e.to_string()))?;
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        }
+        Err(_) => {
+            eprint!("{prompt}");
+            let _ = std::io::stderr().flush();
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .map_err(|e| FrontendError::Transport(e.to_string()))?;
+            line
+        }
+    };
+    Ok(answer.trim_end_matches(['\r', '\n']) == word)
+}
+
 /// Interpret a tty yes/no answer. Empty falls back to `default` (if a default
 /// was offered); `y`/`yes` → true, `n`/`no` → false; anything else → `None`
 /// (the caller re-prompts or aborts). Pure, for unit testing.
@@ -151,6 +191,9 @@ impl Frontend for TtyFrontend {
     }
 
     fn confirm(&mut self, req: ConfirmRequest) -> Result<bool, FrontendError> {
+        if let Some(word) = &req.word {
+            return confirm_word(&req.message, word);
+        }
         let hint = match req.default {
             Some(true) => " [Y/n] ",
             Some(false) => " [y/N] ",

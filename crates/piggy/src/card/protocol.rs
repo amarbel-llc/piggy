@@ -108,12 +108,19 @@ pub enum MgmtKeyChoice {
     Random,
 }
 
-/// A yes/no decision (RFC 0006 §2.4).
+/// A yes/no decision (RFC 0006 §2.4). With `word`, a typed-word decision:
+/// the frontend answers `true` only for that exact word typed in full (the
+/// tty asks for it; a JSON-RPC frontend renders it as it sees fit and
+/// answers `confirmed` on its own trust, as for every confirm), so a stray
+/// Enter never stands for the operator's yes where a card write follows.
+/// A word is not a secret and is never asked through `request_secret`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfirmRequest {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub default: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub word: Option<String>,
 }
 
 /// The `confirm` response payload (RFC 0006 §2.4).
