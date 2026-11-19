@@ -22,7 +22,7 @@ piggy - PIV smart-card backed password store and agent
 *piggy holder retire* [_FILE_]
 
 *piggy ca csr* *--key* _FILE_ [*--cn* _NAME_] [*--out* _FILE_]++
-*piggy ca root-cert* *--profile* _NAME_ [*--out* _FILE_]
+*piggy ca root-cert* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]
 
 *piggy act canon* [_FILE_]
 
@@ -697,7 +697,7 @@ commands:
 	unit, from inside the unit's cgroup, after minting the unit's own key
 	(piggy-agent(1) HOLDER MODE).
 
-*ca root-cert* *--profile* _NAME_ [*--out* _FILE_]
+*ca root-cert* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]
 	Write the self-signed root certificate (PEM) of the card-held
 	certificate authority key a root profile names (FDR 0007 phase (ii)):
 	subject *CN=*_common_name_, *basicConstraints* CA with *pathlen 1*,
@@ -720,12 +720,36 @@ commands:
 	the touch, which is announced like an agent's. Only the PEM goes to
 	stdout (or _FILE_); every notice goes to stderr.
 
+	Every root signature also leaves a *piggy-certificate-v1* act in the
+	ledger (piggy RFC 0012 §3.2, RFC 0013), so the ledger records that the
+	operator touched for it: a second PIN prompt and touch, under the
+	*certificate* banner, signed by the same card's slot 9C through the
+	agent *SSH_AUTH_SOCK* (or *PIGGY_AUTH_SOCK*) names. The act's every
+	field is read from the certificate: _subject-key_ is its key,
+	_records_ the SHA-256 of its DER as a _piggy-record-digest-v1_
+	markl-id, _not-after_ its *notAfter*, _right_ *piggy:x509-ca*;
+	_subject_ is the profile's _principal_ (default
+	*piggy:ca:*_NAME_); its description line repeats the first prompt's
+	words and adds the DER's SHA-256 in hex, so the two prompts describe
+	one certificate and the hex can be checked against
+	*openssl x509 -outform DER | sha256sum*. The sealed act is written to
+	*--act-out* _FILE_, else to the *--out* path with _.act_ appended; it
+	is required when the PEM goes to stdout, and never written over an
+	existing file. Before the first prompt, the verb checks that the agent
+	serves *operator-act@piggy* and lists the card's slot-9C key (exit *6*
+	otherwise), that _FILE_ is free, and that the key is P-256 (RFC 0013
+	names no P-384 key, so a P-384 root gets no act and is refused, exit
+	*1*). The act is sealed after the certificate is signed, since it
+	names the signed bytes, and the act file is written before the PEM;
+	an act that is not sealed (the prompt cancelled, the card gone, the
+	agent refusing) means the card's signature is dropped and nothing is
+	written.
+
 	The slot is not written: the certificate it serves afterwards is the
 	operator's deliberate next step, *piggy tool write-cert 82*, and a
 	slot that already holds a root (the pilot's, written by hand) keeps it.
 	A key the card cannot attest (one imported, or a slot with nothing in
-	it) is refused. The *piggy-certificate-v1* act that records a root
-	signature (piggy RFC 0012 §3.2) is not produced by this verb yet.
+	it) is refused.
 
 	A *profile* is _ca-profiles/NAME.toml_ under piggy's config home
 	(*PIGGY_CONFIG_HOME*, else _$XDG_CONFIG_HOME/piggy_, else
@@ -742,6 +766,7 @@ commands:
 	lifetime_hours = 87600        # the certificate's lifetime
 	not_before_skew_minutes = 5   # notBefore is signing time minus this (default 5)
 	key_types = ["p256", "p384"]  # the request key types sign/issue accept (default both)
+	# principal = "piggy:ca:shithub"  # the certificate acts' subject (default piggy:ca:NAME)
 
 	[issuer]
 	slot = "82"                   # the card's CA slot (a root is always 82)
@@ -770,8 +795,9 @@ commands:
 	*7* rate limited.
 
 	```
-	piggy ca root-cert --profile shithub > root.pem
+	piggy ca root-cert --profile shithub --out root.pem   # and root.pem.act
 	openssl x509 -in root.pem -noout -text
+	piggy act verify --seal-only root.pem.act
 	piggy tool write-cert 82 < root.pem   # when it is the root to serve
 	```
 

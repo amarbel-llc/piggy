@@ -79,11 +79,22 @@ struct Spec {
     /// verifiers whose clocks run behind (default 5).
     #[serde(default)]
     not_before_skew_minutes: Option<u64>,
+    /// The principal the certificate act is about (RFC 0013 `subject`, a
+    /// bare word); default `piggy:ca:<profile name>`.
+    #[serde(default)]
+    principal: Option<String>,
     issuer: Issuer,
 }
 
 /// The `notBefore` skew a profile gets when it names none.
 pub const DEFAULT_NOT_BEFORE_SKEW_MINUTES: u64 = 5;
+
+/// The `subject` of a profile's certificate acts when the profile names no
+/// `principal`: `piggy:ca:<profile name>`, a bare word for every name
+/// [`profile_path`] admits.
+pub fn default_principal(profile_name: &str) -> String {
+    format!("piggy:ca:{profile_name}")
+}
 
 /// A checked profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +109,8 @@ pub struct Profile {
     pub lifetime_hours: u64,
     /// Minutes before signing time that `notBefore` is set.
     pub not_before_skew_minutes: u64,
+    /// The `subject` of the profile's certificate acts, when set.
+    pub principal: Option<String>,
     pub issuer: Issuer,
 }
 
@@ -211,6 +224,14 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
         Some(list) => list,
     };
 
+    if let Some(principal) = &spec.principal {
+        if !crate::act::spells_bare(principal) {
+            return bad(format!(
+                "principal {principal:?} must be a bare word (no spaces, quotes or commas): it is the certificate act's subject (RFC 0013 §2)"
+            ));
+        }
+    }
+
     Ok(Profile {
         kind: spec.kind,
         common_name: spec.common_name,
@@ -220,6 +241,7 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
         not_before_skew_minutes: spec
             .not_before_skew_minutes
             .unwrap_or(DEFAULT_NOT_BEFORE_SKEW_MINUTES),
+        principal: spec.principal,
         issuer,
     })
 }
@@ -228,6 +250,14 @@ impl Profile {
     /// Whether a request key of `algorithm` is accepted.
     pub fn accepts(&self, algorithm: PivAlgorithm) -> bool {
         self.key_types.iter().any(|k| k.algorithm() == algorithm)
+    }
+
+    /// The `subject` of this profile's certificate acts: its `principal`,
+    /// else [`default_principal`] of `profile_name`.
+    pub fn principal_for(&self, profile_name: &str) -> String {
+        self.principal
+            .clone()
+            .unwrap_or_else(|| default_principal(profile_name))
     }
 }
 
@@ -387,6 +417,26 @@ mod tests {
             0
         );
         assert!(parse(&leaf("not_before_skew_minutes = -1")).is_err());
+    }
+
+    /// RFC 0013 §2: `subject` is a bare word. The default must be one for
+    /// every profile name the directory admits, and a set `principal` is
+    /// held to the same rule, by the encoder's own verdict.
+    #[test]
+    fn the_principal_defaults_to_a_bare_word_named_after_the_profile() {
+        let p = parse(&leaf("")).unwrap();
+        assert_eq!(p.principal, None);
+        assert_eq!(p.principal_for("shithub-github"), "piggy:ca:shithub-github");
+        for name in ["shithub", "a-b_c", "x0", &"z".repeat(64)] {
+            assert!(crate::act::spells_bare(&default_principal(name)), "{name}");
+        }
+
+        let set = parse(&leaf("principal = \"shithub:proxy\"")).unwrap();
+        assert_eq!(set.principal_for("ignored"), "shithub:proxy");
+        for bad in ["a b", "a,b", "\"q\"", ""] {
+            let err = parse(&leaf(&format!("principal = {bad:?}"))).unwrap_err();
+            assert!(err.0.contains("bare word"), "{bad:?}: {err}");
+        }
     }
 
     #[test]

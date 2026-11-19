@@ -1266,8 +1266,9 @@ test-bats-conformance-root-cert-guard:
 # FDR 0007 phase (ii), piggy#391: `piggy ca root-cert` off the card: the
 # profile is the only input and every refusal answers from the `ca` exit
 # table (2 usage, 3 profile, 6 issuer card absent), with nothing on stdout
-# and no PIN prompt. The signature needs a card with a key in slot 82,
-# which fibby does not model (piggy#399); the unit tests sign in software.
+# and no PIN prompt. The signature itself runs against fibby's slot 82
+# (modelled since piggy#399) in the fibby-backed lane; the unit tests sign
+# in software.
 #
 # run the `piggy ca root-cert` refusals bats gate (no card)
 [group('post-build')]

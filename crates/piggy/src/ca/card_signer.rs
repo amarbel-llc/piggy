@@ -25,10 +25,14 @@ use zeroize::Zeroizing;
 use piggy::card_oracle::{notify_operator, run_askpass};
 use piggy::cmd::tool::{AttestInputs, PointStatus, verify_attestation};
 
+use super::certificate_act::OperatorKey;
 use super::{Exit, Failure, failure};
 
 /// Wrong-PIN re-prompts before giving up, as `sign-bytes` allows.
 const PIN_RETRY_LIMIT: u32 = piggy::sign_core::PIN_RETRY_LIMIT;
+
+/// The slot whose key signs operator acts (RFC 0012 §2.4 item 5).
+const OPERATOR_ACT_SLOT: u8 = 0x9C;
 
 /// A card and the CA slot on it a profile names as its issuer.
 pub(crate) struct CardSigner {
@@ -158,6 +162,32 @@ impl CardSigner {
     /// The card, as prompts name it: its short GUID.
     pub(crate) fn card_label(&self) -> String {
         self.token.guid().short_id()
+    }
+
+    /// The card's operator-act key, slot 9C's: the key that seals the
+    /// `piggy-certificate-v1` act over what this card's CA slot signs (RFC
+    /// 0012 §3.2). Read from the slot's certificate. A card without one has
+    /// not been through `card init`; no act could be signed, so no
+    /// certificate is (exit 6, before any prompt).
+    pub(crate) fn operator_act_key(&self) -> Result<OperatorKey, Failure> {
+        let unavailable = failure(Exit::IssuerUnavailable);
+        let card = self.card_label();
+        let held = self.token.read_slot(OPERATOR_ACT_SLOT).map_err(|e| {
+            unavailable(format!(
+                "card {card} holds no operator-act key in slot 9C ({e}); `piggy card init` provisions it, and without it no certificate act, so no certificate, is signed"
+            ))
+        })?;
+        if held.algorithm() != PivAlgorithm::EcP256 {
+            return Err(unavailable(format!(
+                "card {card}'s slot-9C key is {:?}, not EC P-256; it cannot seal an act (RFC 0013 §2)",
+                held.algorithm()
+            )));
+        }
+        let point = held
+            .ec_sec1_point()
+            .map_err(|e| unavailable(format!("card {card} slot 9C: {e}")))?;
+        OperatorKey::from_p256_point(&point)
+            .map_err(|e| unavailable(format!("card {card} slot 9C: {e}")))
     }
 
     /// Prove the key is the card's own before anything is signed with it:

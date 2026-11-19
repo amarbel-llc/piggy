@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 mod card_signer;
+mod certificate_act;
 mod csr;
 mod issuance;
 mod root_cert;
@@ -199,6 +200,7 @@ mod tests {
             CaCommand::RootCert(args) => {
                 assert_eq!(args.profile, "shithub");
                 assert!(args.out.is_none());
+                assert!(args.act_out.is_none());
             }
             other => panic!("{other:?}"),
         }

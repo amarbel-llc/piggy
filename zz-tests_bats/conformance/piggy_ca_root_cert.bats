@@ -5,9 +5,11 @@
 # and every refusal answers from the one exit table the `ca` verbs share.
 # Exit 2 usage, 3 for a profile that is unknown, unreadable or not a root
 # profile (naming the path tried), 6 for an issuer card that is not there;
-# nothing on stdout and no PIN prompt on any refusal. The signature itself
-# needs a card holding a key in slot 82, which fibby does not model yet
-# (piggy#399); the unit tests sign with a software key.
+# nothing on stdout and no PIN prompt on any refusal. The certificate act
+# (RFC 0012 §3.2) has to land somewhere: --act-out, or the PEM path plus
+# .act, is settled before the card is looked for. The signature itself,
+# and the act's second prompt, run against fibby's slot 82 (modelled since
+# piggy#399) in the fibby-backed lane; the unit tests sign in software.
 #
 # Required env (supplied by `just test-bats-conformance-ca-root-cert`):
 #   PIGGY_BIN=/path/to/piggy   (nix build .#default)
@@ -63,6 +65,13 @@ EOF
 
 _root_cert() {
   run "$PIGGY_BIN" ca root-cert "$@"
+}
+
+# Past the profile, the act needs a place to land before the card is
+# looked for; rows that reach the card pass one.
+ACT_OUT_FLAG=()
+_with_act_out() {
+  ACT_OUT_FLAG=(--act-out "$WORKDIR/root.act")
 }
 
 _assert_refusal() {
@@ -132,33 +141,56 @@ EOF
   [[ $output == *"leaf profile"* ]] || { echo "the kind is not named: $output" >&2; return 1; }
 }
 
+function the_certificate_act_needs_somewhere_to_land_before_the_card { # @test
+  _root_profile shithub ''
+  # PEM to stdout and no --act-out: nowhere for the act, usage.
+  _root_cert --profile shithub
+  _assert_refusal 2 "no --act-out with the PEM on stdout"
+  [[ $output == *"--act-out"* ]] || { echo "the usage error does not name --act-out: $output" >&2; return 1; }
+  # A taken act path is refused before the card is looked for, exit 1,
+  # and never overwritten.
+  echo keep >"$WORKDIR/taken.act"
+  _root_cert --profile shithub --act-out "$WORKDIR/taken.act"
+  _assert_refusal 1 "an act path that exists"
+  [[ $output == *"exists"* ]] || { echo "the refusal does not say the path exists: $output" >&2; return 1; }
+  [[ $(cat "$WORKDIR/taken.act") == keep ]] || { echo "the existing act file was touched" >&2; return 1; }
+  # --out alone gives the act a default home beside the PEM; a missing
+  # directory for it is refused the same way.
+  _root_cert --profile shithub --out "$WORKDIR/nodir/root.pem"
+  _assert_refusal 1 "an act directory that does not exist"
+  [[ $output == *"directory"* ]] || { echo "the refusal does not name the directory: $output" >&2; return 1; }
+}
+
 function an_absent_issuer_card_is_exit_6_before_any_prompt { # @test
   _root_profile shithub ''
-  _root_cert --profile shithub
+  _with_act_out
+  _root_cert --profile shithub "${ACT_OUT_FLAG[@]}"
   _assert_refusal 6 "no card"
   # PC/SC cannot be reached at all here; the message says so rather than
   # pretending a card was looked for.
   [[ $output == *"PC/SC"* || $output == *"$GUID"* ]] || {
     echo "the refusal names neither PC/SC nor the card: $output" >&2; return 1; }
+  [[ ! -e $WORKDIR/root.act ]] || { echo "a refusal left an act file" >&2; return 1; }
 }
 
 function the_config_home_falls_back_to_xdg_then_home { # @test
   _root_profile shithub ''
+  _with_act_out
   mkdir -p "$WORKDIR/xdg/piggy/ca-profiles" "$WORKDIR/home/.config/piggy/ca-profiles"
   cp "$CONFIG/ca-profiles/shithub.toml" "$WORKDIR/xdg/piggy/ca-profiles/viaxdg.toml"
   cp "$CONFIG/ca-profiles/shithub.toml" "$WORKDIR/home/.config/piggy/ca-profiles/viahome.toml"
 
   run env -u PIGGY_CONFIG_HOME XDG_CONFIG_HOME="$WORKDIR/xdg" HOME="$WORKDIR/home" \
-    "$PIGGY_BIN" ca root-cert --profile viaxdg
+    "$PIGGY_BIN" ca root-cert --profile viaxdg "${ACT_OUT_FLAG[@]}"
   _assert_refusal 6 "read through XDG_CONFIG_HOME (past the profile, to the card)"
   run env -u PIGGY_CONFIG_HOME XDG_CONFIG_HOME="$WORKDIR/xdg" HOME="$WORKDIR/home" \
-    "$PIGGY_BIN" ca root-cert --profile viahome
+    "$PIGGY_BIN" ca root-cert --profile viahome "${ACT_OUT_FLAG[@]}"
   _assert_refusal 3 "XDG_CONFIG_HOME set: HOME is not consulted"
   run env -u PIGGY_CONFIG_HOME -u XDG_CONFIG_HOME HOME="$WORKDIR/home" \
-    "$PIGGY_BIN" ca root-cert --profile viahome
+    "$PIGGY_BIN" ca root-cert --profile viahome "${ACT_OUT_FLAG[@]}"
   _assert_refusal 6 "read through HOME"
   # PIGGY_CONFIG_HOME wins over both.
   run env XDG_CONFIG_HOME="$WORKDIR/xdg" HOME="$WORKDIR/home" \
-    "$PIGGY_BIN" ca root-cert --profile viaxdg
+    "$PIGGY_BIN" ca root-cert --profile viaxdg "${ACT_OUT_FLAG[@]}"
   _assert_refusal 3 "PIGGY_CONFIG_HOME set: XDG_CONFIG_HOME is not consulted"
 }

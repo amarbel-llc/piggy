@@ -19,7 +19,7 @@ use std::fmt;
 
 use hyphence::{Document, Head, HeadLine, Line, Prefix, Value};
 
-pub use fields::{is_card_namespace, parsed_bytes};
+pub use fields::{is_card_namespace, parsed_bytes, spells_bare};
 
 /// The type line of an act.
 pub const TYPE: &str = "piggy-act-v1";

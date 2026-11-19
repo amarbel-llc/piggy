@@ -715,7 +715,7 @@ Tests use binary injection via `bats-emo`:
 | §3, namespace registry | `operator_act_refusals.bats` | `git`, `file`, `piggy-record-v1` and an unregistered name yield `refused-namespace` |
 | §2.6 and §3, the `approval` class | `operator_act_prompt.bats`, `piggy_askpass.bats` | the prompt carries `PIGGY_ASKPASS_KIND=approval` and a banner distinct from the escalation banner |
 | §2.6 and §3, the `revocation` class | `operator_act_prompt.bats`, `piggy_askpass.bats` | the prompt carries `PIGGY_ASKPASS_KIND=revocation` and a banner distinct from the certificate banner |
-| §2.4, refuse a slot other than 9C | `operator_act_policy.bats` | a fibby slot other than 9C (9A generated PIN-always and touch-always) yields `refused-policy` before any prompt; a unit test of the slot check covers slot 82, which fibby does not model (#391) |
+| §2.4, refuse a slot other than 9C | `operator_act_policy.bats` | a fibby slot other than 9C (9A generated PIN-always and touch-always) yields `refused-policy` before any prompt, and so does a key generated in fibby's slot 82 (modelled since piggy#399); a unit test covers the slot check alone (#391) |
 | §2.7, refuse a TBSCertificate on a CA slot | `operator_act_refusals.bats` | an ordinary sign request over a DER TBSCertificate with a slot 82 key fails with no prompt, and the same data for slot 9A signs (#391) |
 | §3.2, certificate act records the certificate | `ca_issue_act.bats` | the act's `records` digest equals the digest of the issued certificate's DER (#391) |
 | §5, attestation bundle shape | `attestation_bundle.bats` | the export has exactly the five parts in order and the three key spellings agree |

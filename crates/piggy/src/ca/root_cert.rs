@@ -9,10 +9,13 @@
 //! key is proven to be the card's (its attestation verifies) before the
 //! one PIN prompt, which describes what is being certified.
 //!
-//! Only the PEM goes to stdout; every notice goes to stderr. Writing the
-//! certificate back into the slot is a separate, deliberate step
-//! (`piggy tool write-cert 82`), as is the `piggy-certificate-v1` act that
-//! records the signature (RFC 0012 §3.2; not produced here yet).
+//! Every root signature also leaves a `piggy-certificate-v1` act in the
+//! ledger (RFC 0012 §3.2, `super::certificate_act`): a second PIN and
+//! touch, through the agent, under the `certificate` banner, after the
+//! certificate is signed and before anything is written. Only the PEM goes
+//! to stdout; the act goes to `--act-out` (else the PEM's path plus
+//! `.act`); every notice goes to stderr. Writing the certificate back into
+//! the slot is a separate, deliberate step (`piggy tool write-cert 82`).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -24,6 +27,7 @@ use piggy_piv::PivAlgorithm;
 use piggy_piv::x509_profile::{CertValidity, build_root_cert};
 
 use super::card_signer::CardSigner;
+use super::certificate_act::{self, CertifiedAs};
 use super::{Exit, Failure, failure};
 
 /// The serial's size: 128 random bits, well over the profile's 64-bit
@@ -38,6 +42,11 @@ pub struct RootCertArgs {
     /// Write the PEM here instead of stdout.
     #[arg(long, value_name = "FILE")]
     pub out: Option<PathBuf>,
+    /// Write the sealed piggy-certificate-v1 act here (RFC 0012 §3.2);
+    /// default --out's path plus `.act`, required when the PEM goes to
+    /// stdout. Never written over an existing file.
+    #[arg(long, value_name = "FILE")]
+    pub act_out: Option<PathBuf>,
 }
 
 /// What the profile and the clock decide about the certificate, before
@@ -149,12 +158,17 @@ pub(crate) fn execute(args: RootCertArgs) -> Result<(), Failure> {
     let plan = plan_root(&profile, now, random)?;
     // The profile's half is checked whole before the card is touched.
     let attestation_root = super::attestation_root_pem(&profile.issuer)?;
+    let act_out = certificate_act::act_out_path(args.out.as_deref(), args.act_out.clone())?;
+    let subject = profile.principal_for(&args.profile);
 
     let mut signer = CardSigner::open(&profile.issuer)?;
     signer.verify_on_card(attestation_root.as_deref())?;
+    // Everything the act needs is settled before the first PIN prompt, so
+    // a missing agent never costs a card signature.
+    let operator = certificate_act::preflight(&signer, signer.algorithm(), act_out)?;
     let describing = plan.describe();
     eprintln!(
-        "piggy ca root-cert: card {} slot {:02X} signs {describing}; one PIN prompt, then a touch",
+        "piggy ca root-cert: card {} slot {:02X} signs {describing}; two PIN prompts and touches: the certificate's, then the certificate act's (slot 9C, through the agent)",
         signer.card_label(),
         signer.slot()
     );
@@ -170,6 +184,22 @@ pub(crate) fn execute(args: RootCertArgs) -> Result<(), Failure> {
             }));
         }
     };
+
+    // The act names the signed DER, so it comes after the signature; the
+    // certificate is written only once the act is sealed and on disk.
+    let act = certificate_act::plan(
+        &der,
+        &subject,
+        CertifiedAs::Root,
+        &operator.key,
+        now.as_secs(),
+        &describing,
+    )?;
+    let act_digest = certificate_act::seal_and_write(&act, &operator)?;
+    eprintln!(
+        "piggy ca root-cert: the certificate act {act_digest} is written to {}",
+        operator.act_out.display()
+    );
 
     let pem = pem_certificate(&der);
     match &args.out {

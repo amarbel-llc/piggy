@@ -271,6 +271,53 @@ impl Issuer {
     }
 }
 
+/// What a certificate says about itself, read back from its DER: the facts
+/// a `piggy-certificate-v1` act (piggy RFC 0012 §3.2) is built from, so
+/// the act can never disagree with the certificate it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateFacts {
+    pub algorithm: PivAlgorithm,
+    /// The subject's key, SEC1 uncompressed.
+    pub pubkey_point: Vec<u8>,
+    /// basicConstraints says CA.
+    pub is_ca: bool,
+    pub not_before: Duration,
+    pub not_after: Duration,
+    /// Subject equals issuer (with `is_ca`, a root).
+    pub self_issued: bool,
+}
+
+/// Read [`CertificateFacts`] from a DER certificate with an EC P-256 or
+/// P-384 subject key.
+pub fn inspect(der: &[u8]) -> Result<CertificateFacts, PivError> {
+    let cert = Certificate::from_der(der).map_err(der_err)?;
+    let tbs = cert.tbs_certificate;
+    let algorithm = ec_algorithm_of(&tbs.subject_public_key_info)
+        .map_err(|_| PivError::Other("the certificate's key is not EC P-256 or P-384".into()))?;
+    let is_ca = tbs
+        .extensions
+        .iter()
+        .flatten()
+        .find(|e| e.extn_id == BasicConstraints::OID)
+        .map(|e| BasicConstraints::from_der(e.extn_value.as_bytes()).map_err(der_err))
+        .transpose()?
+        .is_some_and(|bc| bc.ca);
+    let self_issued =
+        tbs.subject.to_der().map_err(der_err)? == tbs.issuer.to_der().map_err(der_err)?;
+    Ok(CertificateFacts {
+        algorithm,
+        pubkey_point: tbs
+            .subject_public_key_info
+            .subject_public_key
+            .raw_bytes()
+            .to_vec(),
+        is_ca,
+        not_before: tbs.validity.not_before.to_unix_duration(),
+        not_after: tbs.validity.not_after.to_unix_duration(),
+        self_issued,
+    })
+}
+
 use der::oid::AssociatedOid;
 
 /// Encode, hash and sign one TBSCertificate, then assemble the certificate.
