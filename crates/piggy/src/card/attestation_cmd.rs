@@ -16,13 +16,23 @@ pub const BUNDLE_HEADER: &str = "# piggy-attestation-bundle v1";
 /// The slot holding the card's own attestation certificate.
 const SLOT_ATTESTATION: u8 = 0xF9;
 
-/// The slots whose key has a signing purpose and so can be exported: 9C, the
-/// operator-act key and the default, and 9A.
+/// The slots whose attestation can be exported as a bundle: the SSH-style
+/// key slots 9A, 9C (the operator-act key and the default) and 9E, the ones
+/// with a markl id for the bundle's `# key` line. The key-management slots
+/// 9D and 82..95 have no SSH markl id, so no bundle; their attestation is
+/// checked with `piggy tool attest-verify` instead (piggy#397).
 pub fn export_slot(slot: &str) -> Result<u8, String> {
-    match named_slot(slot) {
-        Some(id @ (SLOT_SIGNATURE | SLOT_PIV_AUTH)) => Ok(id),
+    let id = named_slot(slot).or_else(|| {
+        let hex = slot.strip_prefix("0x").unwrap_or(slot);
+        u8::from_str_radix(hex, 16).ok()
+    });
+    match id {
+        Some(id @ (SLOT_SIGNATURE | SLOT_PIV_AUTH | 0x9E)) => Ok(id),
+        Some(0x9D | 0x82..=0x95) => Err(format!(
+            "slot {slot} is a key-management slot with no SSH markl id, so it has no bundle; check its attestation with `piggy tool attest-verify {slot}`"
+        )),
         _ => Err(format!(
-            "unknown slot {slot:?} (export-attestation takes 9c or 9a)"
+            "unknown slot {slot:?} (export-attestation takes 9a, 9c or 9e)"
         )),
     }
 }
@@ -269,9 +279,17 @@ mod tests {
     }
 
     #[test]
-    fn only_signing_slots_export() {
+    fn ssh_style_slots_export_and_key_management_slots_point_at_attest_verify() {
         assert_eq!(export_slot("9C"), Ok(0x9C));
         assert_eq!(export_slot("9a"), Ok(0x9A));
-        assert!(export_slot("9d").unwrap_err().contains("9c or 9a"));
+        assert_eq!(export_slot("9e"), Ok(0x9E));
+        assert_eq!(export_slot("0x9E"), Ok(0x9E));
+        for km in ["9d", "82", "0x95"] {
+            let err = export_slot(km).unwrap_err();
+            assert!(err.contains("attest-verify") && err.contains(km), "{err}");
+        }
+        assert!(export_slot("f9").unwrap_err().contains("9a, 9c or 9e"));
+        assert!(export_slot("9b").unwrap_err().contains("9a, 9c or 9e"));
+        assert!(export_slot("96").unwrap_err().contains("9a, 9c or 9e"));
     }
 }

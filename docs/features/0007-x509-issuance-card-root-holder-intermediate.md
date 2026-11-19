@@ -220,8 +220,17 @@ leaf `YubiKey PIV Attestation 82`, then this card's F9 certificate, then
 `Yubico PIV Root CA Serial 263751`; the attested key is slot 82's key
 (`ecdsa-sha2-nistp256`, P-256); the attested policy is PIN always and
 touch always; firmware 5.2.7; the root's SHA-256 fingerprint as read,
-`63:EC:E9:14:E5:4D:D8:79:15:F3:40:33:C8:5A:F4:C0:69:6B:A1:51:2F:8A:DD:66:CE:D7:38:33:12:07:B5:46`,
-not yet compared with Yubico's published page. The stored certificate is
+`63:EC:E9:14:E5:4D:D8:79:15:F3:40:33:C8:5A:F4:C0:69:6B:A1:51:2F:8A:DD:66:CE:D7:38:33:12:07:B5:46`.
+That fingerprint was compared on 2026-11-19 with Yubico's published PEM,
+fetched at 11:26:54Z by the coordinator session with an anonymous GET of
+`https://developers.yubico.com/PIV/Introduction/piv-attestation-ca.pem`
+(a 301, through a plain-http hop, to
+`https://developers.yubico.com/PKI/yubico-piv-ca-1.pem`): identical, and
+that PEM is now embedded in piggy as `piggy tool attest-verify`'s default
+root, pinned to the fingerprint and checked at every use (piggy#397).
+Both readings come from Yubico's own server over TLS, so the match is a
+consistency check between two downloads, not an independent anchor; a
+verifier with a root of its own passes `--root`. The stored certificate is
 a self-signed placeholder, `CN=PIV slot 82`, with no extensions. The
 operator ruled (23:04Z): use slot 82 as it is, do not regenerate. The
 first card act with it is the pilot root certificate (the checklist and

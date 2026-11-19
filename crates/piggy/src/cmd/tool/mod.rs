@@ -126,6 +126,14 @@ struct Invocation {
     touch_policy: TouchPolicy,
     /// `list`'s output mode: human (default), `-p` parseable, or `-j` JSON.
     list_mode: ListMode,
+    /// `attest-verify` only (piggy#397): `--root FILE`, the PEM the card's
+    /// F9 certificate must chain to; `--saved FILE`, an earlier attestation
+    /// to compare with; `--expect-pin` / `--expect-touch`, the policy the
+    /// attestation must state.
+    root: Option<String>,
+    saved: Option<String>,
+    expect_pin: Option<PinPolicy>,
+    expect_touch: Option<TouchPolicy>,
     op: String,
     positionals: Vec<String>,
 }
@@ -158,6 +166,10 @@ fn parse(args: &[String]) -> Option<Invocation> {
     let mut pin_policy = PinPolicy::Default;
     let mut touch_policy = TouchPolicy::Default;
     let mut policy_given = false;
+    let mut root = None;
+    let mut saved = None;
+    let mut expect_pin = None;
+    let mut expect_touch = None;
     let mut i = 0;
     // Leading options (pivy-tool style: options precede the operation).
     while i < args.len() {
@@ -218,6 +230,23 @@ fn parse(args: &[String]) -> Option<Invocation> {
                 policy_given = true;
                 i += 2;
             }
+            // piggy-native (piggy#397): `attest-verify`'s inputs.
+            "--root" => {
+                root = Some(args.get(i + 1)?.clone());
+                i += 2;
+            }
+            "--saved" => {
+                saved = Some(args.get(i + 1)?.clone());
+                i += 2;
+            }
+            "--expect-pin" => {
+                expect_pin = Some(args.get(i + 1)?.parse().ok()?);
+                i += 2;
+            }
+            "--expect-touch" => {
+                expect_touch = Some(args.get(i + 1)?.parse().ok()?);
+                i += 2;
+            }
             // Any other flag is not modeled here — `None` becomes a usage
             // error in `run` (the 3.6 cutover; no C fallback).
             _ => return None,
@@ -248,7 +277,15 @@ fn parse(args: &[String]) -> Option<Invocation> {
             | "req-cert"
             | "version"
             | "auth-test"
+            | "attest-verify"
     ) {
+        return None;
+    }
+    // `attest-verify`'s options belong to it alone: given to another op they
+    // would be silently ignored, which is a usage error here.
+    let verify_option_given =
+        root.is_some() || saved.is_some() || expect_pin.is_some() || expect_touch.is_some();
+    if verify_option_given && op != "attest-verify" {
         return None;
     }
     let list_mode = if json {
@@ -321,7 +358,7 @@ fn parse(args: &[String]) -> Option<Invocation> {
     // is likewise in cmd_req_cert once the slot key is read.)
     if matches!(
         op.as_str(),
-        "delete-cert" | "write-cert" | "import" | "req-cert"
+        "delete-cert" | "write-cert" | "import" | "req-cert" | "attest-verify"
     ) {
         let slot = positionals.first()?;
         if positionals.len() != 1 || !is_supported_cert_slot(slot) {
@@ -338,6 +375,10 @@ fn parse(args: &[String]) -> Option<Invocation> {
         pin_policy,
         touch_policy,
         list_mode,
+        root,
+        saved,
+        expect_pin,
+        expect_touch,
         op,
         positionals,
     })
@@ -502,8 +543,579 @@ pub fn run(args: &[String], sealer: &dyn ManagementKeySealer) -> i32 {
         "req-cert" => cmd_req_cert(&inv),
         "version" => cmd_version(),
         "auth-test" => cmd_auth_test(&inv, sealer),
+        "attest-verify" => cmd_attest_verify(&inv),
         // parse() only returns these ops.
         _ => unreachable!(),
+    }
+}
+
+/// What `attest-verify` checks (piggy#397), over bytes only, so the checks
+/// are unit-tested with generated chains and the card path only supplies
+/// the bytes: the fresh slot attestation, the card's F9 certificate, the
+/// slot's public key point as the card reports it, and the operator's
+/// inputs.
+pub struct AttestInputs<'a> {
+    pub attestation_der: &'a [u8],
+    pub f9_der: &'a [u8],
+    /// The slot's key, SEC1 uncompressed, from the slot certificate the card
+    /// serves; `None` when the slot key is not an EC key.
+    pub slot_point: Option<&'a [u8]>,
+    /// `--root FILE`: the PEM the F9 certificate must chain to; `None` is
+    /// the embedded [`YUBICO_PIV_ROOT_CA_PEM`], checked against its pin.
+    pub root_pem: Option<&'a [u8]>,
+    /// `--saved FILE`: an earlier `piggy tool attest` output to compare with
+    /// (its first PEM block): same key, same policy, same issuer.
+    pub saved_pem: Option<&'a [u8]>,
+    pub expect_pin: Option<PinPolicy>,
+    pub expect_touch: Option<TouchPolicy>,
+}
+
+pub enum PointStatus {
+    Pass,
+    Fail,
+    Skip(String),
+}
+
+/// Yubico's published PIV attestation root, "Yubico PIV Root CA Serial
+/// 263751", the default root `attest-verify` chains a card's F9 certificate
+/// to (piggy#397). PROVENANCE: fetched 2026-11-19T11:26:54Z by the
+/// coordinator session (circus/eager-holly) with an anonymous GET of
+/// https://developers.yubico.com/PIV/Introduction/piv-attestation-ca.pem,
+/// which answered 301 (through a plain-http hop) to
+/// https://developers.yubico.com/PKI/yubico-piv-ca-1.pem, HTTP 200; the
+/// served file's sha256 was
+/// 6234f33d5f652109d265b391f2898b8ba92f62df406b684db18363f50d7c9129. The
+/// certificate's SHA-256 fingerprint, [`YUBICO_PIV_ROOT_CA_SHA256`], is
+/// identical to the reading FDR 0007 recorded from the operator's card host
+/// on 2026-11-18. Both readings come from Yubico's own server over TLS: a
+/// consistency check between two downloads, not an independent anchor. A
+/// verifier with its own copy passes `--root FILE` instead. The pin is
+/// checked every time the embedded root is used, and by a unit test.
+pub const YUBICO_PIV_ROOT_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIDFzCCAf+gAwIBAgIDBAZHMA0GCSqGSIb3DQEBCwUAMCsxKTAnBgNVBAMMIFl1
+YmljbyBQSVYgUm9vdCBDQSBTZXJpYWwgMjYzNzUxMCAXDTE2MDMxNDAwMDAwMFoY
+DzIwNTIwNDE3MDAwMDAwWjArMSkwJwYDVQQDDCBZdWJpY28gUElWIFJvb3QgQ0Eg
+U2VyaWFsIDI2Mzc1MTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMN2
+cMTNR6YCdcTFRxuPy31PabRn5m6pJ+nSE0HRWpoaM8fc8wHC+Tmb98jmNvhWNE2E
+ilU85uYKfEFP9d6Q2GmytqBnxZsAa3KqZiCCx2LwQ4iYEOb1llgotVr/whEpdVOq
+joU0P5e1j1y7OfwOvky/+AXIN/9Xp0VFlYRk2tQ9GcdYKDmqU+db9iKwpAzid4oH
+BVLIhmD3pvkWaRA2H3DA9t7H/HNq5v3OiO1jyLZeKqZoMbPObrxqDg+9fOdShzgf
+wCqgT3XVmTeiwvBSTctyi9mHQfYd2DwkaqxRnLbNVyK9zl+DzjSGp9IhVPiVtGet
+X02dxhQnGS7K6BO0Qe8CAwEAAaNCMEAwHQYDVR0OBBYEFMpfyvLEojGc6SJf8ez0
+1d8Cv4O/MA8GA1UdEwQIMAYBAf8CAQEwDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3
+DQEBCwUAA4IBAQBc7Ih8Bc1fkC+FyN1fhjWioBCMr3vjneh7MLbA6kSoyWF70N3s
+XhbXvT4eRh0hvxqvMZNjPU/VlRn6gLVtoEikDLrYFXN6Hh6Wmyy1GTnspnOvMvz2
+lLKuym9KYdYLDgnj3BeAvzIhVzzYSeU77/Cupofj093OuAswW0jYvXsGTyix6B3d
+bW5yWvyS9zNXaqGaUmP3U9/b6DlHdDogMLu3VLpBB9bm5bjaKWWJYgWltCVgUbFq
+Fqyi4+JE014cSgR57Jcu3dZiehB6UtAPgad9L5cNvua/IWRmm+ANy3O2LH++Pyl8
+SREzU8onbBsjMg9QDiSf5oJLKvd/Ren+zGY7
+-----END CERTIFICATE-----
+";
+
+/// The pinned SHA-256 fingerprint of [`YUBICO_PIV_ROOT_CA_PEM`]'s DER.
+pub const YUBICO_PIV_ROOT_CA_SHA256: &str = "63:EC:E9:14:E5:4D:D8:79:15:F3:40:33:C8:5A:F4:C0:69:6B:A1:51:2F:8A:DD:66:CE:D7:38:33:12:07:B5:46";
+
+/// The embedded Yubico root, parsed and checked against its pin; an
+/// embedded PEM that does not match the pin is refused, never used.
+pub fn embedded_yubico_root() -> Result<openssl::x509::X509, String> {
+    let root = openssl::x509::X509::from_pem(YUBICO_PIV_ROOT_CA_PEM.as_bytes())
+        .map_err(|e| format!("the embedded Yubico root does not parse: {e}"))?;
+    let fingerprint = x509_fingerprint(&root);
+    if fingerprint != YUBICO_PIV_ROOT_CA_SHA256 {
+        return Err(format!(
+            "the embedded Yubico root's fingerprint {fingerprint} is not the pinned {YUBICO_PIV_ROOT_CA_SHA256}"
+        ));
+    }
+    Ok(root)
+}
+
+/// One TAP point of the verdict.
+pub struct AttestPoint {
+    pub name: String,
+    pub status: PointStatus,
+    pub diags: Vec<(String, String)>,
+}
+
+fn point(
+    name: impl Into<String>,
+    status: PointStatus,
+    diags: Vec<(String, String)>,
+) -> AttestPoint {
+    AttestPoint {
+        name: name.into(),
+        status,
+        diags,
+    }
+}
+
+/// The EC public key of a certificate as a SEC1 uncompressed point.
+fn x509_ec_point(cert: &openssl::x509::X509) -> Result<Vec<u8>, String> {
+    let pkey = cert
+        .public_key()
+        .map_err(|e| format!("certificate public key: {e}"))?;
+    let ec = pkey
+        .ec_key()
+        .map_err(|_| "the certificate's key is not an EC key".to_string())?;
+    let mut ctx = openssl::bn::BigNumContext::new().map_err(|e| e.to_string())?;
+    ec.public_key()
+        .to_bytes(
+            ec.group(),
+            openssl::ec::PointConversionForm::UNCOMPRESSED,
+            &mut ctx,
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn x509_fingerprint(cert: &openssl::x509::X509) -> String {
+    match cert.digest(openssl::hash::MessageDigest::sha256()) {
+        Ok(d) => d
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(":"),
+        Err(e) => format!("(digest failed: {e})"),
+    }
+}
+
+fn x509_name_oneline(name: &openssl::x509::X509NameRef) -> String {
+    name.entries()
+        .map(|e| {
+            format!(
+                "{}={}",
+                e.object().nid().short_name().unwrap_or("?"),
+                e.data()
+                    .as_utf8()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The checks, in the order a reader wants them: the signature chain, then
+/// the key, then what the attestation states, then the comparison with a
+/// saved one. A certificate that does not parse fails its point and the
+/// points that need it SKIP naming the cause.
+pub fn verify_attestation(inputs: &AttestInputs) -> Vec<AttestPoint> {
+    use openssl::x509::X509;
+    let mut out = Vec::new();
+    let attestation = X509::from_der(inputs.attestation_der);
+    let f9 = X509::from_der(inputs.f9_der);
+
+    // 1. the attestation is signed by the card's F9 certificate
+    out.push(
+        match piggy_piv::attest::attestation_signed_by(inputs.attestation_der, inputs.f9_der) {
+            Ok(true) => point(
+                "attestation signed by the card's F9 certificate",
+                PointStatus::Pass,
+                f9.as_ref()
+                    .map(|c| {
+                        vec![(
+                            "f9_subject".to_string(),
+                            x509_name_oneline(c.subject_name()),
+                        )]
+                    })
+                    .unwrap_or_default(),
+            ),
+            Ok(false) => point(
+                "attestation signed by the card's F9 certificate",
+                PointStatus::Fail,
+                vec![(
+                    "error".to_string(),
+                    "the signature does not verify under F9's key".to_string(),
+                )],
+            ),
+            Err(e) => point(
+                "attestation signed by the card's F9 certificate",
+                PointStatus::Fail,
+                vec![("error".to_string(), e)],
+            ),
+        },
+    );
+
+    // 2. F9 chains to the root: the given one, else the embedded Yubico root
+    let root = match inputs.root_pem {
+        Some(pem) => X509::from_pem(pem)
+            .map(|r| (r, "--root FILE"))
+            .map_err(|e| format!("--root is not a PEM certificate: {e}")),
+        None => embedded_yubico_root().map(|r| (r, "embedded Yubico PIV Root CA Serial 263751")),
+    };
+    out.push(match (root, &f9) {
+        (Err(e), _) => point(
+            "F9 certificate chains to the root",
+            PointStatus::Fail,
+            vec![("error".to_string(), e)],
+        ),
+        (Ok(_), Err(e)) => point(
+            "F9 certificate chains to the root",
+            PointStatus::Fail,
+            vec![(
+                "error".to_string(),
+                format!("the F9 certificate does not parse: {e}"),
+            )],
+        ),
+        (Ok((root, source)), Ok(f9)) => {
+            let signed = root
+                .public_key()
+                .and_then(|k| f9.verify(&k))
+                .map_err(|e| e.to_string());
+            let names_agree = match (f9.issuer_name().to_der(), root.subject_name().to_der()) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            };
+            let mut diags = vec![
+                ("root_source".to_string(), source.to_string()),
+                (
+                    "root_subject".to_string(),
+                    x509_name_oneline(root.subject_name()),
+                ),
+                ("root_sha256".to_string(), x509_fingerprint(&root)),
+            ];
+            let status = match signed {
+                Ok(true) if names_agree => PointStatus::Pass,
+                Ok(true) => {
+                    diags.push((
+                        "error".to_string(),
+                        format!(
+                            "F9's issuer is {} but the root's subject is {}",
+                            x509_name_oneline(f9.issuer_name()),
+                            x509_name_oneline(root.subject_name())
+                        ),
+                    ));
+                    PointStatus::Fail
+                }
+                Ok(false) => {
+                    diags.push((
+                        "error".to_string(),
+                        "F9's signature does not verify under the root's key".to_string(),
+                    ));
+                    PointStatus::Fail
+                }
+                Err(e) => {
+                    diags.push(("error".to_string(), e));
+                    PointStatus::Fail
+                }
+            };
+            point("F9 certificate chains to the root", status, diags)
+        }
+    });
+
+    // 3. the attested key is the slot's key
+    out.push(match (&attestation, inputs.slot_point) {
+        (Err(e), _) => point(
+            "attested key is the slot's key",
+            PointStatus::Fail,
+            vec![(
+                "error".to_string(),
+                format!("the attestation does not parse: {e}"),
+            )],
+        ),
+        (Ok(_), None) => point(
+            "attested key is the slot's key",
+            PointStatus::Fail,
+            vec![(
+                "error".to_string(),
+                "the slot's key is not an EC key".to_string(),
+            )],
+        ),
+        (Ok(att), Some(slot_point)) => match x509_ec_point(att) {
+            Ok(p) if p == slot_point => {
+                point("attested key is the slot's key", PointStatus::Pass, vec![])
+            }
+            Ok(_) => point(
+                "attested key is the slot's key",
+                PointStatus::Fail,
+                vec![(
+                    "error".to_string(),
+                    "the attestation is for a different key".to_string(),
+                )],
+            ),
+            Err(e) => point(
+                "attested key is the slot's key",
+                PointStatus::Fail,
+                vec![("error".to_string(), e)],
+            ),
+        },
+    });
+
+    // 4. the policy the attestation states
+    out.push(
+        match piggy_piv::attest::parse_policy(inputs.attestation_der) {
+            Ok((pin, touch)) => {
+                let stated = piggy_piv::KeyPolicy { pin, touch };
+                let mut diags = vec![("policy".to_string(), stated.to_string())];
+                let pin_ok = inputs.expect_pin.is_none_or(|e| e == pin);
+                let touch_ok = inputs.expect_touch.is_none_or(|e| e == touch);
+                let status = if pin_ok && touch_ok {
+                    PointStatus::Pass
+                } else {
+                    diags.push((
+                        "expected".to_string(),
+                        format!(
+                            "PIN {}, touch {}",
+                            inputs
+                                .expect_pin
+                                .map_or("any".to_string(), |p| p.to_string()),
+                            inputs
+                                .expect_touch
+                                .map_or("any".to_string(), |t| t.to_string())
+                        ),
+                    ));
+                    PointStatus::Fail
+                };
+                point(format!("attested policy: {stated}"), status, diags)
+            }
+            Err(e) => point(
+                "attested policy",
+                PointStatus::Fail,
+                vec![("error".to_string(), e.to_string())],
+            ),
+        },
+    );
+
+    // 5. firmware and serial, as stated
+    out.push({
+        let firmware = piggy_piv::attest::firmware_version(inputs.attestation_der);
+        let serial = piggy_piv::attest::serial_number(inputs.attestation_der);
+        match (firmware, serial) {
+            (Ok(Some((a, b, c))), Ok(Some(serial))) => point(
+                format!("attestation names firmware {a}.{b}.{c}, serial {serial}"),
+                PointStatus::Pass,
+                vec![
+                    ("firmware".to_string(), format!("{a}.{b}.{c}")),
+                    ("serial".to_string(), serial.to_string()),
+                ],
+            ),
+            (Ok(None), Ok(None)) => point(
+                "attestation names firmware and serial",
+                PointStatus::Skip("no YubicoPIV firmware or serial extension".to_string()),
+                vec![],
+            ),
+            // One of the two: informational, so stated rather than failed.
+            (Ok(f), Ok(s)) => point(
+                format!(
+                    "attestation names firmware {}, serial {}",
+                    f.map_or("absent".to_string(), |(a, b, c)| format!("{a}.{b}.{c}")),
+                    s.map_or("absent".to_string(), |n| n.to_string())
+                ),
+                PointStatus::Pass,
+                vec![
+                    (
+                        "firmware".to_string(),
+                        f.map_or("absent".to_string(), |(a, b, c)| format!("{a}.{b}.{c}")),
+                    ),
+                    (
+                        "serial".to_string(),
+                        s.map_or("absent".to_string(), |n| n.to_string()),
+                    ),
+                ],
+            ),
+            (Err(e), _) | (_, Err(e)) => point(
+                "attestation names firmware and serial",
+                PointStatus::Fail,
+                vec![("error".to_string(), e.to_string())],
+            ),
+        }
+    });
+
+    // 6. a saved attestation agrees
+    if let Some(saved_pem) = inputs.saved_pem {
+        out.push(match (X509::from_pem(saved_pem), &attestation) {
+            (Err(e), _) => point(
+                "saved attestation agrees (key, policy, issuer)",
+                PointStatus::Fail,
+                vec![(
+                    "error".to_string(),
+                    format!("--saved is not a PEM certificate: {e}"),
+                )],
+            ),
+            (_, Err(e)) => point(
+                "saved attestation agrees (key, policy, issuer)",
+                PointStatus::Fail,
+                vec![(
+                    "error".to_string(),
+                    format!("the attestation does not parse: {e}"),
+                )],
+            ),
+            (Ok(saved), Ok(att)) => {
+                let mut differ = Vec::new();
+                match (x509_ec_point(&saved), x509_ec_point(att)) {
+                    (Ok(a), Ok(b)) if a == b => {}
+                    _ => differ.push("key"),
+                }
+                let saved_der = saved.to_der().unwrap_or_default();
+                match (
+                    piggy_piv::attest::parse_policy(&saved_der),
+                    piggy_piv::attest::parse_policy(inputs.attestation_der),
+                ) {
+                    (Ok(a), Ok(b)) if a == b => {}
+                    _ => differ.push("policy"),
+                }
+                match (saved.issuer_name().to_der(), att.issuer_name().to_der()) {
+                    (Ok(a), Ok(b)) if a == b => {}
+                    _ => differ.push("issuer"),
+                }
+                if differ.is_empty() {
+                    point(
+                        "saved attestation agrees (key, policy, issuer)",
+                        PointStatus::Pass,
+                        vec![],
+                    )
+                } else {
+                    point(
+                        "saved attestation agrees (key, policy, issuer)",
+                        PointStatus::Fail,
+                        vec![("differs".to_string(), differ.join(", "))],
+                    )
+                }
+            }
+        });
+    }
+    out
+}
+
+/// Render the verdict as TAP 14 (or, with `-j`, one JSON object per point).
+fn render_attest_points(
+    points: &[AttestPoint],
+    json: bool,
+    out: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    if json {
+        for (i, p) in points.iter().enumerate() {
+            let (ok, skip) = match &p.status {
+                PointStatus::Pass => (true, None),
+                PointStatus::Fail => (false, None),
+                PointStatus::Skip(why) => (true, Some(why.as_str())),
+            };
+            let diags: serde_json::Map<String, serde_json::Value> = p
+                .diags
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+            let line = serde_json::json!({
+                "n": i + 1,
+                "name": p.name,
+                "ok": ok,
+                "skip": skip,
+                "diags": diags,
+            });
+            writeln!(out, "{line}")?;
+        }
+        return Ok(());
+    }
+    writeln!(out, "TAP version 14")?;
+    writeln!(out, "1..{}", points.len())?;
+    for (i, p) in points.iter().enumerate() {
+        let n = i + 1;
+        match &p.status {
+            PointStatus::Pass => writeln!(out, "ok {n} - {}", p.name)?,
+            PointStatus::Fail => writeln!(out, "not ok {n} - {}", p.name)?,
+            PointStatus::Skip(why) => writeln!(out, "ok {n} - {} # SKIP {why}", p.name)?,
+        }
+        if !p.diags.is_empty() {
+            writeln!(out, "  ---")?;
+            for (k, v) in &p.diags {
+                writeln!(out, "  {k}: {}", serde_json::Value::String(v.clone()))?;
+            }
+            writeln!(out, "  ...")?;
+        }
+    }
+    Ok(())
+}
+
+/// `piggy tool attest-verify <slot>` (piggy#397): the slot's attestation
+/// checked, not just printed: signed by the card's F9, F9 chained to the
+/// given root, the attested key equal to the slot's key, the PIN and touch
+/// policy decoded (and asserted with `--expect-*`), firmware and serial
+/// read, and, with `--saved`, an earlier attestation compared by what it
+/// states. Read-only, no PIN, any key slot 9A/9C/9D/9E and 82..95. TAP on
+/// stdout (`-j` for JSON lines); exit 0 when no point fails, 1 when one
+/// does, 2 for a usage error or an unreadable --root/--saved file.
+fn cmd_attest_verify(inv: &Invocation) -> i32 {
+    let op = "attest-verify";
+    let slot_id = match slot_arg(inv, op) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let read_file = |what: &str, path: &Option<String>| -> Result<Option<Vec<u8>>, i32> {
+        match path {
+            None => Ok(None),
+            Some(p) => std::fs::read(p).map(Some).map_err(|e| {
+                eprintln!("piggy tool {op}: {what} {p}: {e}");
+                2
+            }),
+        }
+    };
+    let root_pem = match read_file("--root", &inv.root) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let saved_pem = match read_file("--saved", &inv.saved) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let token = match select_token(inv.guid.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("piggy tool {op}: {msg}");
+            return 1;
+        }
+    };
+    let slot = match token.read_slot(slot_id) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("piggy tool {op}: slot {slot_id:02X}: {e}");
+            return 1;
+        }
+    };
+    let slot_point: Option<Vec<u8>> = match slot.public_key().key_data() {
+        ssh_key::public::KeyData::Ecdsa(ssh_key::public::EcdsaPublicKey::NistP256(p)) => {
+            Some(p.as_bytes().to_vec())
+        }
+        ssh_key::public::KeyData::Ecdsa(ssh_key::public::EcdsaPublicKey::NistP384(p)) => {
+            Some(p.as_bytes().to_vec())
+        }
+        _ => None,
+    };
+    let attestation_der = match token.yk_attest(slot_id) {
+        Ok(der) => der,
+        Err(e) => {
+            eprintln!(
+                "piggy tool {op}: the card will not attest slot {slot_id:02X} ({e}): only a key generated on a YubiKey can be attested, not an imported one"
+            );
+            return 1;
+        }
+    };
+    let f9_der = match token.read_slot(0xF9) {
+        Ok(s) => s.cert_der().to_vec(),
+        Err(e) => {
+            eprintln!(
+                "piggy tool {op}: cannot read the card's attestation certificate (slot F9): {e}"
+            );
+            return 1;
+        }
+    };
+    let points = verify_attestation(&AttestInputs {
+        attestation_der: &attestation_der,
+        f9_der: &f9_der,
+        slot_point: slot_point.as_deref(),
+        root_pem: root_pem.as_deref(),
+        saved_pem: saved_pem.as_deref(),
+        expect_pin: inv.expect_pin,
+        expect_touch: inv.expect_touch,
+    });
+    let stdout = std::io::stdout();
+    if let Err(e) =
+        render_attest_points(&points, inv.list_mode == ListMode::Json, &mut stdout.lock())
+    {
+        eprintln!("piggy tool {op}: write the report: {e}");
+        return 2;
+    }
+    if points.iter().any(|p| matches!(p.status, PointStatus::Fail)) {
+        1
+    } else {
+        0
     }
 }
 
@@ -564,7 +1176,7 @@ fn usage() -> i32 {
     eprintln!(
         "supported: pubkey, cert, attest, sign, ecdh, change-pin, change-puk, \
          reset-pin, set-admin, delete-cert, update-keyhist, write-cert, generate, import, \
-         pinfo, list, factory-reset, req-cert, version, auth-test"
+         pinfo, list, factory-reset, req-cert, version, auth-test, attest-verify"
     );
     eprintln!(
         "for the rest of the pivy-tool surface (init, RSA/Ed25519, …) \
@@ -2260,6 +2872,461 @@ mod tests {
         for form in ["@pin", "@file", "@store:", "@", "@env"] {
             assert!(!is_admin_key_arg(form), "{form} must not parse as a key");
             assert!(parse(&argv(&["-K", form, "auth-test"])).is_none(), "{form}");
+        }
+    }
+
+    // -------- piggy#397: attest-verify over generated chains --------
+
+    mod attest_verify {
+        use super::super::{AttestInputs, AttestPoint, PointStatus, parse, verify_attestation};
+        use super::argv;
+        use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
+        use openssl::bn::BigNum;
+        use openssl::ec::{EcGroup, EcKey};
+        use openssl::hash::MessageDigest;
+        use openssl::nid::Nid;
+        use openssl::pkey::{PKey, Private};
+        use openssl::x509::{X509, X509Builder, X509Extension, X509NameBuilder};
+        use piggy_piv::{PinPolicy, TouchPolicy};
+
+        fn key() -> PKey<Private> {
+            let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+            PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap()
+        }
+
+        fn point(k: &PKey<Private>) -> Vec<u8> {
+            let ec = k.ec_key().unwrap();
+            let mut ctx = openssl::bn::BigNumContext::new().unwrap();
+            ec.public_key()
+                .to_bytes(
+                    ec.group(),
+                    openssl::ec::PointConversionForm::UNCOMPRESSED,
+                    &mut ctx,
+                )
+                .unwrap()
+        }
+
+        fn name(cn: &str) -> openssl::x509::X509Name {
+            let mut b = X509NameBuilder::new().unwrap();
+            b.append_entry_by_text("CN", cn).unwrap();
+            b.build()
+        }
+
+        /// A YubicoPIV-shaped extension: an arbitrary OID with raw DER contents.
+        fn yk_ext(oid: &str, contents: &[u8]) -> X509Extension {
+            X509Extension::new_from_der(
+                &Asn1Object::from_str(oid).unwrap(),
+                false,
+                &Asn1OctetString::new_from_bytes(contents).unwrap(),
+            )
+            .unwrap()
+        }
+
+        /// A certificate for `subject` issued by `issuer` under `issuer_name`,
+        /// with the given extensions.
+        fn cert(
+            cn: &str,
+            subject: &PKey<Private>,
+            issuer: &PKey<Private>,
+            issuer_cn: &str,
+            exts: Vec<X509Extension>,
+        ) -> X509 {
+            let mut b = X509Builder::new().unwrap();
+            b.set_version(2).unwrap();
+            b.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+                .unwrap();
+            b.set_subject_name(&name(cn)).unwrap();
+            b.set_issuer_name(&name(issuer_cn)).unwrap();
+            b.set_pubkey(subject).unwrap();
+            b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+                .unwrap();
+            b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+                .unwrap();
+            for e in exts {
+                b.append_extension(e).unwrap();
+            }
+            b.sign(issuer, MessageDigest::sha256()).unwrap();
+            b.build()
+        }
+
+        /// A full chain: root (self-signed), F9 under the root, the slot's
+        /// attestation under F9 with policy, firmware 5.2.7 and serial.
+        struct Chain {
+            root: X509,
+            f9: X509,
+            attestation: X509,
+            slot: PKey<Private>,
+            f9_key: PKey<Private>,
+        }
+
+        const ROOT_CN: &str = "Yubico PIV Root CA Serial 263751";
+        const F9_CN: &str = "Yubico PIV Attestation";
+
+        fn attestation_exts(pin: u8, touch: u8) -> Vec<X509Extension> {
+            vec![
+                yk_ext("1.3.6.1.4.1.41482.3.8", &[pin, touch]),
+                yk_ext("1.3.6.1.4.1.41482.3.3", &[5, 2, 7]),
+                // INTEGER 0x00F2C8D6 = 15911126 (a leading zero for the high bit)
+                yk_ext(
+                    "1.3.6.1.4.1.41482.3.7",
+                    &[0x02, 0x04, 0x00, 0xF2, 0xC8, 0xD6],
+                ),
+            ]
+        }
+
+        fn chain(pin: u8, touch: u8) -> Chain {
+            let (root_key, f9_key, slot) = (key(), key(), key());
+            let root = cert(ROOT_CN, &root_key, &root_key, ROOT_CN, vec![]);
+            let f9 = cert(F9_CN, &f9_key, &root_key, ROOT_CN, vec![]);
+            let attestation = cert(
+                "YubiKey PIV Attestation 82",
+                &slot,
+                &f9_key,
+                F9_CN,
+                attestation_exts(pin, touch),
+            );
+            Chain {
+                root,
+                f9,
+                attestation,
+                slot,
+                f9_key,
+            }
+        }
+
+        fn status<'a>(points: &'a [AttestPoint], prefix: &str) -> &'a PointStatus {
+            &points
+                .iter()
+                .find(|p| p.name.starts_with(prefix))
+                .unwrap_or_else(|| panic!("no point {prefix}"))
+                .status
+        }
+
+        fn diag<'a>(points: &'a [AttestPoint], prefix: &str, key: &str) -> Option<&'a str> {
+            points
+                .iter()
+                .find(|p| p.name.starts_with(prefix))
+                .and_then(|p| p.diags.iter().find(|(k, _)| k == key))
+                .map(|(_, v)| v.as_str())
+        }
+
+        // YubicoPIV policy bytes: PIN 1 never, 2 once, 3 always; touch 1
+        // never, 2 always, 3 cached (piggy-piv's policy table).
+        const PIN_ALWAYS: u8 = 0x03;
+        const PIN_ONCE: u8 = 0x02;
+        const TOUCH_ALWAYS: u8 = 0x02;
+
+        #[test]
+        fn a_good_chain_passes_every_point() {
+            let c = chain(PIN_ALWAYS, TOUCH_ALWAYS);
+            let (att, f9, root) = (
+                c.attestation.to_der().unwrap(),
+                c.f9.to_der().unwrap(),
+                c.root.to_pem().unwrap(),
+            );
+            let slot_point = point(&c.slot);
+            let points = verify_attestation(&AttestInputs {
+                attestation_der: &att,
+                f9_der: &f9,
+                slot_point: Some(&slot_point),
+                root_pem: Some(&root),
+                saved_pem: Some(&c.attestation.to_pem().unwrap()),
+                expect_pin: Some(PinPolicy::Always),
+                expect_touch: Some(TouchPolicy::Always),
+            });
+            assert_eq!(points.len(), 6);
+            for p in &points {
+                assert!(
+                    matches!(p.status, PointStatus::Pass),
+                    "{} did not pass: {:?}",
+                    p.name,
+                    p.diags
+                );
+            }
+            assert!(
+                points[3].name.contains("PIN always, touch always"),
+                "{}",
+                points[3].name
+            );
+            assert_eq!(
+                diag(&points, "attestation names", "firmware"),
+                Some("5.2.7")
+            );
+            assert_eq!(
+                diag(&points, "attestation names", "serial"),
+                Some("15911126")
+            );
+            assert!(
+                diag(&points, "F9 certificate", "root_sha256")
+                    .unwrap()
+                    .len()
+                    == 95
+            );
+        }
+
+        /// The embedded root is exactly the certificate whose fingerprint FDR
+        /// 0007 recorded and the coordinator's fetch confirmed; the DER hash
+        /// is computed here from the PEM bytes, not copied.
+        #[test]
+        fn embedded_yubico_root_matches_its_pin() {
+            use super::super::{
+                YUBICO_PIV_ROOT_CA_PEM, YUBICO_PIV_ROOT_CA_SHA256, embedded_yubico_root,
+            };
+            let root = X509::from_pem(YUBICO_PIV_ROOT_CA_PEM.as_bytes()).unwrap();
+            let digest = root.digest(MessageDigest::sha256()).unwrap();
+            let hex: Vec<String> = digest.iter().map(|b| format!("{b:02X}")).collect();
+            assert_eq!(hex.join(":"), YUBICO_PIV_ROOT_CA_SHA256);
+            let root = embedded_yubico_root().unwrap();
+            assert!(
+                format!("{:?}", root.subject_name()).contains("Yubico PIV Root CA Serial 263751"),
+                "{:?}",
+                root.subject_name()
+            );
+            assert_eq!(
+                root.issuer_name().to_der().unwrap(),
+                root.subject_name().to_der().unwrap(),
+                "self-signed"
+            );
+        }
+
+        /// With no --root the embedded Yubico root is the anchor: a generated
+        /// F9 does not chain to it, and the diagnostics name the source.
+        #[test]
+        fn no_root_means_the_embedded_yubico_root() {
+            let c = chain(0x03, 0x03);
+            let (att, f9) = (c.attestation.to_der().unwrap(), c.f9.to_der().unwrap());
+            let slot_point = point(&c.slot);
+            let points = verify_attestation(&AttestInputs {
+                attestation_der: &att,
+                f9_der: &f9,
+                slot_point: Some(&slot_point),
+                root_pem: None,
+                saved_pem: None,
+                expect_pin: None,
+                expect_touch: None,
+            });
+            assert_eq!(points.len(), 5, "no --saved, no saved point");
+            assert!(matches!(
+                status(&points, "F9 certificate"),
+                PointStatus::Fail
+            ));
+            assert!(
+                diag(&points, "F9 certificate", "root_source")
+                    .unwrap()
+                    .starts_with("embedded Yubico")
+            );
+            assert!(
+                diag(&points, "F9 certificate", "root_subject")
+                    .unwrap()
+                    .contains("Serial 263751")
+            );
+            assert!(matches!(
+                status(&points, "attestation signed"),
+                PointStatus::Pass
+            ));
+            assert!(matches!(status(&points, "attested key"), PointStatus::Pass));
+        }
+
+        #[test]
+        fn each_wrong_input_fails_its_own_point() {
+            let c = chain(0x03, 0x03);
+            let (att, f9, root) = (
+                c.attestation.to_der().unwrap(),
+                c.f9.to_der().unwrap(),
+                c.root.to_pem().unwrap(),
+            );
+            let slot_point = point(&c.slot);
+            let good = |att: &[u8], f9: &[u8], root: &[u8], sp: &[u8], saved: Option<&[u8]>| {
+                verify_attestation(&AttestInputs {
+                    attestation_der: att,
+                    f9_der: f9,
+                    slot_point: Some(sp),
+                    root_pem: Some(root),
+                    saved_pem: saved,
+                    expect_pin: None,
+                    expect_touch: None,
+                })
+            };
+
+            // A stranger's F9: the attestation is not signed by it.
+            let stranger = key();
+            let other_f9 = cert(F9_CN, &stranger, &key(), ROOT_CN, vec![])
+                .to_der()
+                .unwrap();
+            let points = good(&att, &other_f9, &root, &slot_point, None);
+            assert!(matches!(
+                status(&points, "attestation signed"),
+                PointStatus::Fail
+            ));
+
+            // A different root: F9 does not chain to it.
+            let other_root = {
+                let k = key();
+                cert(ROOT_CN, &k, &k, ROOT_CN, vec![]).to_pem().unwrap()
+            };
+            let points = good(&att, &f9, &other_root, &slot_point, None);
+            assert!(matches!(
+                status(&points, "F9 certificate"),
+                PointStatus::Fail
+            ));
+            assert!(
+                diag(&points, "F9 certificate", "error")
+                    .unwrap()
+                    .contains("does not verify")
+            );
+
+            // A root whose key signed F9 but whose name is not F9's issuer.
+            let root_key_reused = {
+                // Re-sign F9's chain with a root of another name: build a
+                // fresh chain whose root CN differs from F9's issuer field.
+                let (rk, fk, sk) = (key(), key(), key());
+                let root = cert("Other Root", &rk, &rk, "Other Root", vec![])
+                    .to_pem()
+                    .unwrap();
+                let f9 = cert(F9_CN, &fk, &rk, ROOT_CN, vec![]).to_der().unwrap();
+                let att = cert("att", &sk, &fk, F9_CN, attestation_exts(3, 3))
+                    .to_der()
+                    .unwrap();
+                (root, f9, att, point(&sk))
+            };
+            let points = good(
+                &root_key_reused.2,
+                &root_key_reused.1,
+                &root_key_reused.0,
+                &root_key_reused.3,
+                None,
+            );
+            assert!(matches!(
+                status(&points, "F9 certificate"),
+                PointStatus::Fail
+            ));
+            assert!(
+                diag(&points, "F9 certificate", "error")
+                    .unwrap()
+                    .contains("issuer")
+            );
+
+            // A slot key other than the attested one.
+            let points = good(&att, &f9, &root, &point(&key()), None);
+            assert!(matches!(status(&points, "attested key"), PointStatus::Fail));
+
+            // A saved attestation for another key.
+            let other_att = cert("att", &key(), &c.f9_key, F9_CN, attestation_exts(3, 3))
+                .to_pem()
+                .unwrap();
+            let points = good(&att, &f9, &root, &slot_point, Some(&other_att));
+            assert!(matches!(
+                status(&points, "saved attestation"),
+                PointStatus::Fail
+            ));
+            assert_eq!(diag(&points, "saved attestation", "differs"), Some("key"));
+
+            // A saved attestation with another policy for the same key.
+            let other_policy = cert("att", &c.slot, &c.f9_key, F9_CN, attestation_exts(1, 1))
+                .to_pem()
+                .unwrap();
+            let points = good(&att, &f9, &root, &slot_point, Some(&other_policy));
+            assert_eq!(
+                diag(&points, "saved attestation", "differs"),
+                Some("policy")
+            );
+        }
+
+        #[test]
+        fn expected_policy_is_asserted_and_absent_extensions_are_named() {
+            let c = chain(PIN_ONCE, TOUCH_ALWAYS); // PIN once, touch always
+            let (att, f9) = (c.attestation.to_der().unwrap(), c.f9.to_der().unwrap());
+            let slot_point = point(&c.slot);
+            let points = verify_attestation(&AttestInputs {
+                attestation_der: &att,
+                f9_der: &f9,
+                slot_point: Some(&slot_point),
+                root_pem: None,
+                saved_pem: None,
+                expect_pin: Some(PinPolicy::Always),
+                expect_touch: Some(TouchPolicy::Always),
+            });
+            assert!(matches!(
+                status(&points, "attested policy"),
+                PointStatus::Fail
+            ));
+            assert_eq!(
+                diag(&points, "attested policy", "policy"),
+                Some("PIN once, touch always")
+            );
+            assert_eq!(
+                diag(&points, "attested policy", "expected"),
+                Some("PIN always, touch always")
+            );
+
+            // No YubicoPIV extensions at all: the policy point fails naming
+            // the OID, the firmware/serial point skips.
+            let bare = cert("att", &c.slot, &c.f9_key, F9_CN, vec![])
+                .to_der()
+                .unwrap();
+            let points = verify_attestation(&AttestInputs {
+                attestation_der: &bare,
+                f9_der: &f9,
+                slot_point: Some(&slot_point),
+                root_pem: None,
+                saved_pem: None,
+                expect_pin: None,
+                expect_touch: None,
+            });
+            assert!(matches!(
+                status(&points, "attested policy"),
+                PointStatus::Fail
+            ));
+            assert!(
+                diag(&points, "attested policy", "error")
+                    .unwrap()
+                    .contains("41482.3.8"),
+                "{:?}",
+                diag(&points, "attested policy", "error")
+            );
+            assert!(matches!(
+                status(&points, "attestation names"),
+                PointStatus::Skip(_)
+            ));
+        }
+
+        #[test]
+        fn parse_takes_the_verify_options_only_with_attest_verify() {
+            assert!(parse(&argv(&["attest-verify", "82"])).is_some());
+            assert!(
+                parse(&argv(&[
+                    "--root",
+                    "r.pem",
+                    "--saved",
+                    "s.pem",
+                    "attest-verify",
+                    "9c"
+                ]))
+                .is_some()
+            );
+            assert!(
+                parse(&argv(&[
+                    "--expect-pin",
+                    "always",
+                    "--expect-touch",
+                    "always",
+                    "attest-verify",
+                    "9a"
+                ]))
+                .is_some()
+            );
+            assert!(parse(&argv(&["-j", "attest-verify", "9d"])).is_some());
+            assert!(
+                parse(&argv(&["attest-verify", "f9"])).is_none(),
+                "F9 is not a key slot"
+            );
+            assert!(parse(&argv(&["attest-verify"])).is_none());
+            assert!(parse(&argv(&["attest-verify", "82", "extra"])).is_none());
+            assert!(parse(&argv(&["--expect-pin", "sometimes", "attest-verify", "82"])).is_none());
+            assert!(
+                parse(&argv(&["--root", "r.pem", "attest", "82"])).is_none(),
+                "only attest-verify takes --root"
+            );
         }
     }
 

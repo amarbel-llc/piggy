@@ -125,7 +125,20 @@ commands:
   rotates, proves with *-K @store:*_pending_ *auth-test*, and only then
   replaces the entry, so the old key is kept until the new one is proven.
   Other *@* forms are reserved for further key sources and are usage
-  errors today. Human *list* omits C's *xapdu* line: piggy does
+  errors today. *attest-verify* _SLOT_ [*--root* _FILE_] [*--saved* _FILE_]
+  [*--expect-pin* _P_] [*--expect-touch* _T_] checks a key slot's
+  attestation instead of printing it (read-only, no PIN; any key slot 9A,
+  9C, 9D, 9E or 82..95): TAP points for the attestation signed by the
+  card's F9 certificate, F9 chaining to the root (Yubico's published PIV
+  root, embedded with its SHA-256 fingerprint pinned and checked at every
+  use, unless *--root* names another), the attested key being the slot's
+  key, the PIN and touch policy the attestation states (asserted with
+  *--expect-\**), the firmware and serial it names, and, with *--saved*, an
+  earlier *attest* output agreeing in key, policy and issuer (a fresh
+  attestation never equals a saved one byte for byte: the card signs it
+  anew each time). *-j* prints one JSON object per point. Exit 0 when no
+  point fails, 1 when one does, 2 for a usage error or an unreadable file.
+  Human *list* omits C's *xapdu* line: piggy does
   not probe the card for extended-length APDU support (piggy#345). *version* prints piggy's bare version on one
   line, the shape of C's, which printed pivy's own version. C's *auth* is
   dropped, not ported: *piggy tool sign* plus a verify against the expected
@@ -960,7 +973,10 @@ commands:
 *card export-attestation* [_SLOT_] [*--serial* _N_|*--guid* _HEX_|*--reader* _NAME_]
 	Print the attestation bundle for a slot's key (RFC 0012 section 5), to
 	publish beside the key. _SLOT_ is _9c_ (the default, the operator-act
-	key) or _9a_. Read-only; needs no PIN and no touch.
+	key), _9a_ or _9e_: the SSH-style slots, whose key has the markl id the
+	bundle's _# key_ line carries. The key-management slots _9d_ and _82_
+	to _95_ have no bundle; to CHECK any slot's attestation, including
+	those, see *tool attest-verify*. Read-only; needs no PIN and no touch.
 
 	The bundle is a text document: a header line, a _# key_ line with the
 	key's markl id, the key as an OpenSSH line (its comment names the slot

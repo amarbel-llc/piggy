@@ -392,7 +392,7 @@ _test-optional-linux-only: test-bats-conformance-fibby-pivy-agent-smoke
 _test-optional-linux-only:
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-ca-csr-fibby test-bats-conformance-root-cert-guard test-bats-conformance-tool-admin-store-fibby test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
+_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-ca-csr-fibby test-bats-conformance-root-cert-guard test-bats-conformance-tool-admin-store-fibby test-bats-conformance-tool-attest-verify-fibby test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -1207,6 +1207,27 @@ test-bats-conformance-holder-mint-fibby:
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=180 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_holder_mint_fibby.bats
+
+# piggy#397 over fibby: `piggy tool attest-verify <slot>` (the attestation
+# checked: F9 signature, chain to a root, key, policy, saved compare) and
+# `card export-attestation` for any key slot. fibby attests only generated
+# keys and its F9 is self-signed, so the lane generates keys and passes the
+# F9 certificate as --root; without --root the embedded Yubico root fails
+# the chain point, which the lane asserts too.
+#
+# run the fibby-backed piggy tool attest-verify bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-tool-attest-verify-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_tool_attest_verify_fibby.bats
 
 # piggy#396: the management key off argv, over fibby: `piggy tool
 # auth-test` (mutual authentication only, nothing written), `set-admin -`

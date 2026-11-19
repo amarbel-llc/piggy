@@ -22,6 +22,63 @@ use crate::tlv::TlvReader;
 /// OID OBJECT IDENTIFIER tag, not including the leading `06 LL` tag
 /// and length bytes.
 const YK_POLICY_OID_BODY: &[u8] = &[0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xC4, 0x0A, 0x03, 0x08];
+/// `1.3.6.1.4.1.41482.3.3`: the firmware version, three bytes
+/// (major, minor, patch).
+const YK_FIRMWARE_OID_BODY: &[u8] = &[0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xC4, 0x0A, 0x03, 0x03];
+/// `1.3.6.1.4.1.41482.3.7`: the device serial number, a DER INTEGER.
+const YK_SERIAL_OID_BODY: &[u8] = &[0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xC4, 0x0A, 0x03, 0x07];
+
+/// The firmware version an attestation names, `(major, minor, patch)`, or
+/// `Ok(None)` when the extension is absent (a non-YubiKey attestation).
+pub fn firmware_version(cert_der: &[u8]) -> Result<Option<(u8, u8, u8)>, PivError> {
+    match extension_value(cert_der, YK_FIRMWARE_OID_BODY)? {
+        Some(v) if v.len() == 3 => Ok(Some((v[0], v[1], v[2]))),
+        Some(v) => Err(PivError::Tlv {
+            message: format!(
+                "YubicoPIV firmware extension is {} bytes, expected 3",
+                v.len()
+            ),
+        }),
+        None => Ok(None),
+    }
+}
+
+/// The device serial an attestation names (the DER INTEGER inside the
+/// extension), or `Ok(None)` when absent.
+pub fn serial_number(cert_der: &[u8]) -> Result<Option<u32>, PivError> {
+    let Some(v) = extension_value(cert_der, YK_SERIAL_OID_BODY)? else {
+        return Ok(None);
+    };
+    let mut reader = TlvReader::new(&v);
+    let tag = reader.read_tag()?;
+    if tag != 0x02 {
+        return Err(PivError::Tlv {
+            message: format!(
+                "YubicoPIV serial extension: expected INTEGER (0x02), got 0x{tag:02X}"
+            ),
+        });
+    }
+    let bytes = reader.read_value()?;
+    if bytes.is_empty() || bytes.len() > 5 || (bytes.len() == 5 && bytes[0] != 0) {
+        return Err(PivError::Tlv {
+            message: format!(
+                "YubicoPIV serial extension: INTEGER of {} bytes",
+                bytes.len()
+            ),
+        });
+    }
+    Ok(Some(
+        bytes.iter().fold(0u32, |acc, b| (acc << 8) | u32::from(*b)),
+    ))
+}
+
+/// The `extnValue` contents of the extension with the given OID body, or
+/// `Ok(None)` when the certificate carries no such extension. The one
+/// walker behind [`parse_policy`], [`firmware_version`] and
+/// [`serial_number`].
+pub fn extension_value(cert_der: &[u8], oid_body: &[u8]) -> Result<Option<Vec<u8>>, PivError> {
+    find_extension(cert_der, oid_body)
+}
 
 /// Whether the slot attestation certificate `attestation_der` is signed by
 /// the card's attestation certificate `intermediate_der` (the one read from
@@ -58,6 +115,25 @@ pub fn parse_policy(cert_der: &[u8]) -> Result<(PinPolicy, TouchPolicy), PivErro
 }
 
 fn find_policy_bytes(cert_der: &[u8]) -> Result<[u8; 2], PivError> {
+    match find_extension(cert_der, YK_POLICY_OID_BODY)? {
+        Some(v) if v.len() == 2 => Ok([v[0], v[1]]),
+        Some(v) => Err(PivError::Tlv {
+            message: format!(
+                "YubicoPIV policy extension extnValue is {} bytes, expected 2",
+                v.len(),
+            ),
+        }),
+        None => Err(PivError::Tlv {
+            message: "YubicoPIV policy extension (OID 1.3.6.1.4.1.41482.3.8) \
+                      not present in attestation cert"
+                .into(),
+        }),
+    }
+}
+
+/// Walk the certificate to its extensions and return the `extnValue` of
+/// the one with `oid_body`, or `None` when it is absent.
+fn find_extension(cert_der: &[u8], oid_body: &[u8]) -> Result<Option<Vec<u8>>, PivError> {
     // Certificate ::= SEQUENCE
     let mut reader = TlvReader::new(cert_der);
     let tag = reader.read_tag()?;
@@ -79,21 +155,24 @@ fn find_policy_bytes(cert_der: &[u8]) -> Result<[u8; 2], PivError> {
     let tbs = reader.read_value()?;
 
     // Walk TBSCertificate fields, looking for [3] EXPLICIT extensions
-    // (context-specific constructed tag 0xA3).
+    // (context-specific constructed tag 0xA3). A certificate with no
+    // extensions block has no extension of any OID: that is absence, not a
+    // malformed certificate.
     let mut reader = TlvReader::new(tbs);
     while reader.has_remaining() {
         let tag = reader.read_tag()?;
         let value = reader.read_value()?;
         if tag == 0xA3 {
-            return find_policy_in_extensions(value);
+            return find_in_extensions(value, oid_body);
         }
     }
-    Err(PivError::Tlv {
-        message: "TBSCertificate has no extensions ([3] context tag)".into(),
-    })
+    Ok(None)
 }
 
-fn find_policy_in_extensions(extensions_wrapper: &[u8]) -> Result<[u8; 2], PivError> {
+fn find_in_extensions(
+    extensions_wrapper: &[u8],
+    oid_body: &[u8],
+) -> Result<Option<Vec<u8>>, PivError> {
     // The [3] EXPLICIT wrapper contains a single SEQUENCE OF Extension.
     let mut reader = TlvReader::new(extensions_wrapper);
     let tag = reader.read_tag()?;
@@ -115,21 +194,20 @@ fn find_policy_in_extensions(extensions_wrapper: &[u8]) -> Result<[u8; 2], PivEr
             continue;
         }
         let one_ext = reader.read_value()?;
-        if let Some(policy) = try_parse_policy_extension(one_ext)? {
-            return Ok(policy);
+        if let Some(value) = try_parse_extension(one_ext, oid_body)? {
+            return Ok(Some(value));
         }
     }
-    Err(PivError::Tlv {
-        message: "YubicoPIV policy extension (OID 1.3.6.1.4.1.41482.3.8) \
-                  not present in attestation cert"
-            .into(),
-    })
+    Ok(None)
 }
 
-/// If `extension_body` is the YubiKey policy extension, return its two
-/// policy bytes. Otherwise return `Ok(None)` — the caller is iterating
-/// every extension and only this OID matters.
-fn try_parse_policy_extension(extension_body: &[u8]) -> Result<Option<[u8; 2]>, PivError> {
+/// If `extension_body` is the extension with `oid_body`, return its
+/// `extnValue` contents. Otherwise return `Ok(None)` — the caller is
+/// iterating every extension and only this OID matters.
+fn try_parse_extension(
+    extension_body: &[u8],
+    oid_body: &[u8],
+) -> Result<Option<Vec<u8>>, PivError> {
     let mut reader = TlvReader::new(extension_body);
 
     let oid_tag = reader.read_tag()?;
@@ -140,7 +218,7 @@ fn try_parse_policy_extension(extension_body: &[u8]) -> Result<Option<[u8; 2]>, 
         return Ok(None);
     }
     let oid = reader.read_value()?;
-    if oid != YK_POLICY_OID_BODY {
+    if oid != oid_body {
         return Ok(None);
     }
 
@@ -150,9 +228,8 @@ fn try_parse_policy_extension(extension_body: &[u8]) -> Result<Option<[u8; 2]>, 
     //     critical  BOOLEAN DEFAULT FALSE,
     //     extnValue OCTET STRING
     //   }
-    // BOOLEAN is encoded only when non-default. YubiKey's policy
-    // extension is non-critical, so the byte is typically absent, but
-    // handle both shapes.
+    // BOOLEAN is encoded only when non-default. YubiKey's extensions are
+    // non-critical, so the byte is typically absent, but handle both shapes.
     let mut next_tag = reader.read_tag()?;
     if next_tag == 0x01 {
         let _ = reader.read_value()?;
@@ -161,20 +238,11 @@ fn try_parse_policy_extension(extension_body: &[u8]) -> Result<Option<[u8; 2]>, 
     if next_tag != 0x04 {
         return Err(PivError::Tlv {
             message: format!(
-                "YubicoPIV policy extension extnValue: expected OCTET STRING (0x04), got 0x{next_tag:02X}"
+                "YubicoPIV extension extnValue: expected OCTET STRING (0x04), got 0x{next_tag:02X}"
             ),
         });
     }
-    let extn_value = reader.read_value()?;
-    if extn_value.len() != 2 {
-        return Err(PivError::Tlv {
-            message: format!(
-                "YubicoPIV policy extension extnValue is {} bytes, expected 2",
-                extn_value.len(),
-            ),
-        });
-    }
-    Ok(Some([extn_value[0], extn_value[1]]))
+    Ok(Some(reader.read_value()?.to_vec()))
 }
 
 #[cfg(test)]
@@ -269,6 +337,61 @@ mod tests {
         assert!(
             err.to_string().contains("not present"),
             "expected missing-extension error, got: {err}"
+        );
+    }
+
+    /// A certificate whose single extension has the given OID body and
+    /// contents, in the same shape as [`synthetic_cert`].
+    fn synthetic_cert_with(oid_body: &[u8], contents: &[u8]) -> Vec<u8> {
+        let mut extension = vec![0x06, oid_body.len() as u8];
+        extension.extend_from_slice(oid_body);
+        extension.push(0x04);
+        extension.push(contents.len() as u8);
+        extension.extend_from_slice(contents);
+        let mut extension_wrap = vec![0x30, extension.len() as u8];
+        extension_wrap.extend(extension);
+        let mut extensions_seq = vec![0x30, extension_wrap.len() as u8];
+        extensions_seq.extend(extension_wrap);
+        let mut ctx3 = vec![0xA3, extensions_seq.len() as u8];
+        ctx3.extend(extensions_seq);
+        let mut tbs = vec![0x30, ctx3.len() as u8];
+        tbs.extend(ctx3);
+        let mut cert = vec![0x30, tbs.len() as u8];
+        cert.extend(tbs);
+        cert
+    }
+
+    #[test]
+    fn firmware_and_serial_read_from_their_extensions() {
+        let cert = synthetic_cert_with(YK_FIRMWARE_OID_BODY, &[5, 2, 7]);
+        assert_eq!(firmware_version(&cert).unwrap(), Some((5, 2, 7)));
+        assert_eq!(serial_number(&cert).unwrap(), None, "no serial extension");
+        assert!(parse_policy(&cert).is_err(), "no policy extension");
+
+        // INTEGER 0x00F2C8D6 = 15911126, a leading zero for the high bit.
+        let cert = synthetic_cert_with(YK_SERIAL_OID_BODY, &[0x02, 0x04, 0x00, 0xF2, 0xC8, 0xD6]);
+        assert_eq!(serial_number(&cert).unwrap(), Some(0x00F2_C8D6));
+        assert_eq!(serial_number(&cert).unwrap(), Some(15_911_126));
+        assert_eq!(firmware_version(&cert).unwrap(), None);
+
+        // A small serial without the leading zero.
+        let cert = synthetic_cert_with(YK_SERIAL_OID_BODY, &[0x02, 0x02, 0x01, 0x02]);
+        assert_eq!(serial_number(&cert).unwrap(), Some(0x0102));
+
+        // Malformed contents are errors naming the extension, not silence.
+        let cert = synthetic_cert_with(YK_FIRMWARE_OID_BODY, &[5, 2]);
+        assert!(
+            firmware_version(&cert)
+                .unwrap_err()
+                .to_string()
+                .contains("firmware")
+        );
+        let cert = synthetic_cert_with(YK_SERIAL_OID_BODY, &[0x04, 0x01, 0x00]);
+        assert!(
+            serial_number(&cert)
+                .unwrap_err()
+                .to_string()
+                .contains("INTEGER")
         );
     }
 
