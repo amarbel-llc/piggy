@@ -310,44 +310,27 @@ pub struct VirtualCard {
     /// successful PUK change; decremented on a wrong-PUK attempt; blocks
     /// at 0. Mirrors `pin_retries`.
     puk_retries: u8,
-    /// Raw P-256 scalar (big-endian) installed in slot 9A (PIV
-    /// Authentication), or `None` if no key is present. This is the
-    /// SSH-auth signing slot: GA ECDSA requests (INS 0x87, P1=0x11,
-    /// P2=0x9A) sign the client-supplied prehash under RFC 6979
-    /// deterministic ECDSA. Set via [`Self::seed_slot_9a_priv`], or
-    /// implicitly by [`Self::seed_rfc6979_slot_9a_cert`] which seeds the
-    /// scalar matching the canonical slot-9A cert. Empty (`6A 88` to GA)
-    /// until a future generate-asymmetric branch lands for production runs.
-    /// This and the three slot fields below are guarded (`secret.rs`).
-    slot_9a_priv: Option<Secret>,
-    /// Raw P-256 scalar (big-endian) installed in slot 9D, or `None`
-    /// if no key is present. Mirrors real silicon's PIV state: a slot
-    /// can be either populated (key + optional cert) or empty
-    /// (returns `6A 88` to GA). Set via [`Self::seed_slot_9d_priv`]
-    /// by tests that import a test-vector scalar (see piggy#134) so
-    /// GA ECDH responses are byte-deterministic across captures.
-    /// Production VirtualCard runs always have this `None` until a
-    /// future generate-asymmetric branch lands.
-    slot_9d_priv: Option<Secret>,
-    /// Raw P-256 scalar (big-endian) installed in slot 9C (Digital
-    /// Signature), or `None` if no key is present. The signature slot
-    /// with PIV PIN policy **"always"**: GA ECDSA requests (INS 0x87,
-    /// P1=0x11, P2=0x9C) sign the client-supplied prehash under RFC 6979
-    /// deterministic ECDSA, but unlike slot 9A ("once") the PIN
-    /// verification is *consumed* by each sign — see
-    /// [`Self::sign_slot`]. Set via [`Self::seed_slot_9c_priv`], or
-    /// implicitly by [`Self::seed_fibby_slot_9c_cert`]. Empty (`6A 88` to
-    /// GA) until seeded.
-    slot_9c_priv: Option<Secret>,
-    /// Raw P-256 scalar (big-endian) installed in slot 9E (Card
-    /// Authentication), or `None` if no key is present. This is the
-    /// **PIN-never** slot: GA ECDSA requests (INS 0x87, P1=0x11, P2=0x9E)
-    /// sign the client-supplied prehash WITHOUT a prior VERIFY — used by
-    /// the CAK (Card Authentication Key) challenge/response a `piggy
-    /// agent -K` authenticates the card with (piggy#143). Set via
-    /// [`Self::seed_slot_9e_priv`], or implicitly by
-    /// [`Self::seed_rfc6979_slot_9e_cert`]. Empty (`6A 88` to GA) until seeded.
-    slot_9e_priv: Option<Secret>,
+    /// The private key in each key slot ([`is_key_slot`]) that holds one:
+    /// a big-endian P-256 scalar, or an Ed25519 seed when
+    /// `slot_algorithms` says so. A slot with no entry is empty (`6A 88`
+    /// to GA), as on silicon. Every key is guarded (`secret.rs`).
+    ///
+    /// - 9A (PIV Authentication): the SSH-auth signing slot, PIN once by
+    ///   default ([`Self::seed_slot_9a_priv`],
+    ///   [`Self::seed_rfc6979_slot_9a_cert`]).
+    /// - 9C (Digital Signature): PIN **always** by default, so each sign
+    ///   consumes the PIN verification ([`Self::sign_slot`],
+    ///   [`Self::seed_slot_9c_priv`], [`Self::seed_fibby_slot_9c_cert`]).
+    /// - 9D (Key Management): ECDH for the decrypt path, and ECDSA
+    ///   ([`Self::seed_slot_9d_priv`], test-vector scalars so GA ECDH is
+    ///   byte-deterministic, piggy#134).
+    /// - 9E (Card Authentication): PIN **never**, the CAK challenge a
+    ///   `piggy agent -K` authenticates the card with (piggy#143;
+    ///   [`Self::seed_slot_9e_priv`], [`Self::seed_rfc6979_slot_9e_cert`]).
+    /// - 82..95 (the retired Key Management slots): PIN once by default;
+    ///   FDR 0007's card-held root is in 82 (piggy#399). Filled by GENERATE
+    ///   or IMPORT.
+    slot_keys: HashMap<u8, Secret>,
     /// 24-byte TripleDES management key. Defaults to YubiKey's factory
     /// constant `01 02 03 04 05 06 07 08 01 02 03 04 05 06 07 08 01
     /// 02 03 04 05 06 07 08` — the same value our throwaway captures
@@ -586,6 +569,23 @@ const FIBBY_SLOT_9C_TEST_PRIV: [u8; 32] = [
 /// rejects with `6D00`). The fibby↔pivy-agent Phase 0 smoke caught
 /// exactly this. See `pivy-piv/src/slot.rs` for the full slot→tag map.
 const TAG_SLOT_9A_CERT: &[u8] = &[0x5F, 0xC1, 0x05];
+
+/// SP 800-73-4's retired Key Management slots, `82` through `95`: twenty
+/// more key slots, each with its own certificate object.
+const RETIRED_KEY_SLOTS: std::ops::RangeInclusive<u8> = 0x82..=0x95;
+
+/// A slot VirtualCard can hold a key in: 9A, 9C, 9D, 9E and the retired
+/// slots 82..95 (piggy#399).
+fn is_key_slot(slot: u8) -> bool {
+    matches!(slot, 0x9A | 0x9C | 0x9D | 0x9E) || RETIRED_KEY_SLOTS.contains(&slot)
+}
+
+/// The certificate object tag of retired slot `slot`: `5F C1 0D` for 82
+/// through `5F C1 20` for 95, the map piggy-piv's `slot_to_cert_tag` uses.
+#[cfg(feature = "test-double")]
+fn retired_slot_cert_tag(slot: u8) -> [u8; 3] {
+    [0x5F, 0xC1, 0x0D + (slot - 0x82)]
+}
 
 /// PIV tag for the slot 9E (Card Authentication) X.509 cert object, per
 /// SP 800-73-4 §3.3 Table 6 / pivy `PIV_TAG_CERT_9E`: `5F C1 01`. Seeding
@@ -858,10 +858,7 @@ impl VirtualCard {
             require_select: false,
             puk: Secret::new(DEFAULT_PUK),
             puk_retries: DEFAULT_PUK_RETRIES,
-            slot_9a_priv: None,
-            slot_9d_priv: None,
-            slot_9c_priv: None,
-            slot_9e_priv: None,
+            slot_keys: HashMap::new(),
             mgmt_key: Secret::new(&DEFAULT_MGMT_KEY),
             pending_mgmt_witness: None,
             mgmt_authenticated: false,
@@ -902,25 +899,7 @@ impl VirtualCard {
     /// A zeroizing copy of the key in `slot`, for one operation, if it is a
     /// slot VirtualCard models and holds one.
     fn slot_priv(&self, slot: u8) -> Option<Zeroizing<[u8; 32]>> {
-        let guarded = match slot {
-            0x9A => &self.slot_9a_priv,
-            0x9C => &self.slot_9c_priv,
-            0x9D => &self.slot_9d_priv,
-            0x9E => &self.slot_9e_priv,
-            _ => return None,
-        };
-        guarded.as_ref().map(Secret::array)
-    }
-
-    /// The key slot field for `slot`. Panics on any other slot.
-    fn slot_field(&mut self, slot: u8) -> &mut Option<Secret> {
-        match slot {
-            0x9A => &mut self.slot_9a_priv,
-            0x9C => &mut self.slot_9c_priv,
-            0x9D => &mut self.slot_9d_priv,
-            0x9E => &mut self.slot_9e_priv,
-            _ => unreachable!("slot {slot:#04x} is not a key slot"),
-        }
+        self.slot_keys.get(&slot).map(Secret::array)
     }
 
     /// Test access to the guarded secrets, as copies.
@@ -965,8 +944,8 @@ impl VirtualCard {
     }
 
     /// Put a key that arrived over the wire into `slot` with the algorithm,
-    /// policy and origin it came with. `slot` must be one of the four key
-    /// slots (9A, 9C, 9D, 9E); the handlers validate it first. `private` is
+    /// policy and origin it came with. `slot` must be a key slot
+    /// ([`is_key_slot`]); the handlers validate it first. `private` is
     /// a P-256 scalar or, for [`algorithm::ED25519`], an Ed25519 seed.
     fn install_slot_key(
         &mut self,
@@ -982,8 +961,10 @@ impl VirtualCard {
         self.slot_origins.insert(slot, origin);
     }
 
+    /// Panics on a slot that is not a key slot: callers validate it first.
     fn set_slot_private(&mut self, slot: u8, private: &[u8; 32]) {
-        *self.slot_field(slot) = Some(Secret::new(private));
+        assert!(is_key_slot(slot), "slot {slot:#04x} is not a key slot");
+        self.slot_keys.insert(slot, Secret::new(private));
     }
 
     /// A seeded key replaces whatever the slot held: it carries no
@@ -1479,7 +1460,7 @@ impl VirtualCard {
     }
 
     /// Install an Ed25519 key (`seed`, the 32-byte RFC 8032 private key)
-    /// into key slot `slot` (9A, 9C, 9D or 9E) with a self-signed
+    /// into key slot `slot` (9A, 9C, 9D, 9E or 82..95) with a self-signed
     /// certificate over it at the slot's certificate tag and the canonical
     /// CHUID, so clients that read the certificate to learn a slot's
     /// algorithm (piggy-piv's `read_slot`, the agent) see an Ed25519
@@ -1488,10 +1469,11 @@ impl VirtualCard {
     /// on any model. Panics on any other slot — a test-fixture error.
     pub fn seed_slot_ed25519(&mut self, slot: u8, seed: [u8; 32]) {
         let tag = match slot {
-            0x9A => TAG_SLOT_9A_CERT,
-            0x9C => TAG_SLOT_9C_CERT,
-            0x9D => TAG_SLOT_9D_CERT,
-            0x9E => TAG_SLOT_9E_CERT,
+            0x9A => TAG_SLOT_9A_CERT.to_vec(),
+            0x9C => TAG_SLOT_9C_CERT.to_vec(),
+            0x9D => TAG_SLOT_9D_CERT.to_vec(),
+            0x9E => TAG_SLOT_9E_CERT.to_vec(),
+            _ if RETIRED_KEY_SLOTS.contains(&slot) => retired_slot_cert_tag(slot).to_vec(),
             _ => panic!("seed_slot_ed25519: slot {slot:#04x} is not a key slot"),
         };
         self.set_slot_private(slot, &seed);
@@ -1502,7 +1484,7 @@ impl VirtualCard {
             &seed,
             &format!("fibby-test-slot-{slot:02x}-ed25519"),
         );
-        self.seed_data_object(tag.to_vec(), crate::attest::piv_cert_object(&cert));
+        self.seed_data_object(tag, crate::attest::piv_cert_object(&cert));
         self.seed_chuid();
     }
 
@@ -1559,9 +1541,7 @@ impl Backend for VirtualCard {
     /// shared with the other cards, so it stays.
     fn destroy(&mut self) {
         self.set_present(false);
-        for slot in [0x9A, 0x9C, 0x9D, 0x9E] {
-            *self.slot_field(slot) = None;
-        }
+        self.slot_keys.clear();
         self.pin = Secret::new(DEFAULT_PIN);
         self.puk = Secret::new(DEFAULT_PUK);
         self.mgmt_key = Secret::new(&DEFAULT_MGMT_KEY);
@@ -1940,7 +1920,7 @@ impl VirtualCard {
         if cla == 0x00
             && ins == apdu::ins::GENERAL_AUTHENTICATE
             && p1 == algorithm::ED25519
-            && matches!(p2, 0x9A | 0x9C | 0x9D | 0x9E)
+            && is_key_slot(p2)
         {
             if !self.model.supports_ed25519() {
                 trace::emit(
@@ -1965,12 +1945,10 @@ impl VirtualCard {
         // Signature) PIN "always" — each sign consumes the PIN
         // verification — and slot 9E (Card Authentication) PIN "never":
         // it answers the CAK challenge/response (`piggy agent -K`,
-        // piggy#143) without a VERIFY.
-        if cla == 0x00
-            && ins == apdu::ins::GENERAL_AUTHENTICATE
-            && p1 == 0x11
-            && matches!(p2, 0x9A | 0x9C | 0x9E)
-        {
+        // piggy#143) without a VERIFY. The retired slots 82..95 are PIN
+        // "once" by default (FDR 0007's root signs from 82, piggy#399).
+        // 9D was routed above.
+        if cla == 0x00 && ins == apdu::ins::GENERAL_AUTHENTICATE && p1 == 0x11 && is_key_slot(p2) {
             return Ok(self.sign_slot(apdu_body(command_apdu), p2, algorithm::ECCP256));
         }
 
@@ -2376,10 +2354,7 @@ impl VirtualCard {
         }
         // Wipe every slot key and every stored object, then restore factory
         // credentials — the card is indistinguishable from a fresh applet.
-        self.slot_9a_priv = None;
-        self.slot_9c_priv = None;
-        self.slot_9d_priv = None;
-        self.slot_9e_priv = None;
+        self.slot_keys.clear();
         // The keys' policies and origins go with them. The attestation key
         // stays, as the factory attestation key does on hardware.
         self.slot_policies.clear();
@@ -2463,7 +2438,7 @@ impl VirtualCard {
     ///   request body or invalid ephemeral point.
     /// - `90 00` + `7C 22 82 20 <X>` on success.
     ///
-    /// Reads the scalar from `self.slot_9d_priv` and uses
+    /// Reads the 9D scalar from `self.slot_keys` and uses
     /// `p256::ecdh::diffie_hellman` for the math, whose output is the
     /// raw X-coordinate in the exact byte form real silicon emits.
     fn handle_general_authenticate_ecdh_slot_9d(&mut self, body: Option<&[u8]>) -> Vec<u8> {
@@ -2798,7 +2773,8 @@ impl VirtualCard {
     /// - `69 82` if the mgmt-key auth hasn't succeeded this session.
     /// - `6A 80` on a missing/malformed request, or an algorithm other than
     ///   ECCP256 (`11`) and, on the yk5.7 model only, Ed25519 (`E0`).
-    /// - `6A 86` if `slot` isn't one VirtualCard models (9A/9C/9D).
+    /// - `6A 86` if `slot` isn't one VirtualCard generates into (9A, 9C,
+    ///   9D, 82..95; 9E keys are only seeded or imported).
     /// - `7F 49 43 86 41 04 ‖ X ‖ Y` (P-256) or `7F 49 22 86 20 <key>`
     ///   (Ed25519) + `90 00` on success.
     ///
@@ -2852,11 +2828,13 @@ impl VirtualCard {
             );
             return sw(0x6A, 0x80);
         }
-        if !matches!(slot, 0x9A | 0x9C | 0x9D) {
+        if slot == 0x9E || !is_key_slot(slot) {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
-                &format!("GENERATE slot={slot:#04x} -> 6A86 (slot not modeled; 9A/9C/9D only)"),
+                &format!(
+                    "GENERATE slot={slot:#04x} -> 6A86 (slot not modeled; 9A/9C/9D/82..95 only)"
+                ),
             );
             return sw(0x6A, 0x86);
         }
@@ -2939,7 +2917,7 @@ impl VirtualCard {
     /// - `69 82` if the mgmt-key auth hasn't succeeded this session.
     /// - `6A 80` on a malformed body, a non-ECCP256 algorithm, or an invalid
     ///   scalar.
-    /// - `6A 86` if `slot` isn't one VirtualCard models (9A/9C/9D/9E).
+    /// - `6A 86` if `slot` isn't a key slot ([`is_key_slot`]).
     /// - `90 00` on success (the slot can then sign / do ECDH with the key).
     #[cfg(feature = "test-double")]
     fn handle_import_asymmetric(&mut self, alg: u8, slot: u8, body: Option<&[u8]>) -> Vec<u8> {
@@ -2961,7 +2939,7 @@ impl VirtualCard {
             );
             return sw(0x6A, 0x80);
         }
-        if !matches!(slot, 0x9A | 0x9C | 0x9D | 0x9E) {
+        if !is_key_slot(slot) {
             trace::emit(
                 trace::DEBUG,
                 "vcard",
@@ -3491,7 +3469,7 @@ mod holder_tests {
         let mut apdu = vec![0x00, apdu::ins::IMPORT_ASYM, 0x11, 0x9A, 34, 0x06, 32];
         apdu.extend_from_slice(&[0x11; 32]);
         assert_eq!(c.transmit(&apdu).unwrap(), vec![0x6D, 0x00]);
-        assert!(c.slot_9a_priv.is_none(), "nothing was installed");
+        assert!(c.slot_keys.is_empty(), "nothing was installed");
     }
 
     /// Phase 1 of the management-key challenge: `00 87 03 9B 04 7C 02 81 00`.
@@ -5077,15 +5055,86 @@ mod tests {
     fn import_unmodeled_slot_returns_6a86() {
         let mut c = VirtualCard::new();
         c.mgmt_authenticated = true;
-        // Slot 0x82 (retired) isn't one VirtualCard models.
+        // 0x81 and 0x96 bracket the retired key slots (82..95); neither is
+        // a key slot.
+        for slot in [0x81, 0x96] {
+            assert_eq!(
+                c.transmit(&import_apdu(slot, &RFC6979_SCALAR)).unwrap(),
+                vec![0x6A, 0x86],
+                "slot {slot:#04x}"
+            );
+        }
+    }
+
+    /// piggy#399: retired slot 82 (FDR 0007's card-held root) holds a key.
+    /// GENERATE returns its point, the slot signs once the PIN is verified
+    /// (the retired slots' default policy is PIN once), its metadata says
+    /// generated, and it attests.
+    #[test]
+    fn retired_slot_82_generates_signs_and_attests() {
+        use p256::ecdsa::signature::hazmat::PrehashVerifier;
+        use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        c.set_generate_override(0x82, RFC6979_SCALAR);
+        let point = extract_generate_point(&c.transmit(&generate_apdu(0x82)).unwrap());
+        let vk = VerifyingKey::from(&SigningKey::from_slice(&RFC6979_SCALAR).unwrap());
+        assert_eq!(point, vk.to_encoded_point(false).as_bytes());
+
+        let prehash = [0x82u8; 32];
         assert_eq!(
-            c.transmit(&import_apdu(0x82, &RFC6979_SCALAR)).unwrap(),
-            vec![0x6A, 0x86]
+            c.transmit(&ga_sign_apdu_slot(0x82, &prehash)).unwrap(),
+            vec![0x69, 0x82],
+            "82 sign needs a verified PIN"
         );
+        c.mark_pin_verified();
+        let der = extract_ga_sign_der(&c.transmit(&ga_sign_apdu_slot(0x82, &prehash)).unwrap());
+        let sig = Signature::from_der(&der).expect("DER ECDSA sig");
+        assert!(
+            vk.verify_prehash(&prehash, &sig).is_ok(),
+            "slot-82 signature verifies against the 82 public key"
+        );
+
+        let metadata = c.transmit(&metadata_apdu(0x82)).unwrap();
+        assert_eq!(
+            &metadata[..10],
+            &[0x01, 0x01, 0x11, 0x02, 0x02, 0x00, 0x00, 0x03, 0x01, 0x01],
+            "P-256, default policy, generated"
+        );
+        assert!(is_success(&c.transmit(&attest_apdu(0x82)).unwrap()));
+    }
+
+    /// piggy#399: the last retired slot, 95, takes an imported key, and
+    /// GENERATE refuses the slot past the range.
+    #[test]
+    fn retired_slot_95_imports_and_96_is_not_a_key_slot() {
+        let mut c = VirtualCard::new();
+        c.mgmt_authenticated = true;
+        assert_eq!(
+            c.transmit(&import_apdu(0x95, &RFC6979_SCALAR)).unwrap(),
+            vec![0x90, 0x00]
+        );
+        assert_eq!(c.slot_private_copy(0x95), Some(RFC6979_SCALAR));
+        assert_eq!(c.transmit(&generate_apdu(0x96)).unwrap(), vec![0x6A, 0x86]);
+    }
+
+    /// piggy#399: an Ed25519 key seeded into a retired slot gets its
+    /// certificate at that slot's tag (82 -> 5FC10D, 95 -> 5FC120).
+    #[test]
+    fn seeding_ed25519_into_a_retired_slot_writes_its_certificate_tag() {
+        let mut c = VirtualCard::new();
+        c.seed_slot_ed25519(0x82, ED25519_SEED);
+        c.seed_slot_ed25519(0x95, ED25519_SEED);
+        assert!(is_success(
+            &c.transmit(&get_data_apdu(&[0x5F, 0xC1, 0x0D])).unwrap()
+        ));
+        assert!(is_success(
+            &c.transmit(&get_data_apdu(&[0x5F, 0xC1, 0x20])).unwrap()
+        ));
     }
 
     /// GENERATE on slot 9D installs the key into the ECDH slot (returned
-    /// point matches the override; `slot_9d_priv` is populated).
+    /// point matches the override; the 9D key is installed).
     #[test]
     fn generate_slot_9d_override_installs_key() {
         use p256::ecdsa::{SigningKey, VerifyingKey};
@@ -5261,8 +5310,12 @@ mod tests {
         c.seed_rfc6979_slot_9a_cert(); // 9A key + cert + canonical CHUID
         c.seed_pin("999999"); // rotate PIN off the factory default
         c.seed_mgmt_key([0xAB; 24]); // rotate mgmt-key off the factory default
+        c.set_slot_private(0x82, &RFC6979_SCALAR); // a retired-slot key
         c.seed_pin_puk_blocked();
-        assert!(c.slot_9a_priv.is_some(), "precondition: 9A key present");
+        assert!(
+            c.slot_keys.contains_key(&0x9A),
+            "precondition: 9A key present"
+        );
         assert!(!c.data_objects.is_empty(), "precondition: objects present");
 
         assert_eq!(
@@ -5271,10 +5324,7 @@ mod tests {
             "RESET succeeds once both PIN and PUK are blocked"
         );
 
-        assert!(c.slot_9a_priv.is_none(), "9A key wiped");
-        assert!(c.slot_9c_priv.is_none(), "9C key wiped");
-        assert!(c.slot_9d_priv.is_none(), "9D key wiped");
-        assert!(c.slot_9e_priv.is_none(), "9E key wiped");
+        assert!(c.slot_keys.is_empty(), "every slot key wiped, 82's too");
         assert!(c.data_objects.is_empty(), "all data objects wiped");
         assert_eq!(
             c.pin_bytes(),
@@ -5306,7 +5356,7 @@ mod tests {
             "RESET refused: conditions not satisfied"
         );
         assert!(
-            c.slot_9a_priv.is_some(),
+            c.slot_keys.contains_key(&0x9A),
             "card unchanged: 9A key still present"
         );
         assert!(
@@ -5325,7 +5375,7 @@ mod tests {
             vec![0x69, 0x85],
             "RESET needs BOTH blocked, not just the PIN"
         );
-        assert!(c.slot_9a_priv.is_some(), "card unchanged");
+        assert!(c.slot_keys.contains_key(&0x9A), "card unchanged");
     }
 
     /// Build a RESET RETRY COUNTER APDU: `00 2C 00 80 10 <puk8> <newpin8>`.
@@ -5564,7 +5614,7 @@ mod tests {
                 vec![0x6A, 0x80],
                 "pin={pin:?} touch={touch:?}"
             );
-            assert!(c.slot_9a_priv.is_none(), "no key was generated");
+            assert!(!c.slot_keys.contains_key(&0x9A), "no key was generated");
             assert!(c.slot_policies.is_empty() && c.slot_origins.is_empty());
         }
     }
@@ -5614,7 +5664,7 @@ mod tests {
             vec![0x6A, 0x80],
             "out-of-range PIN policy"
         );
-        assert!(c.slot_9d_priv.is_none());
+        assert!(!c.slot_keys.contains_key(&0x9D));
     }
 
     #[test]
@@ -6640,8 +6690,8 @@ mod tests {
             &c.transmit(&generate_ed25519_apdu(0x9C)).unwrap()
         ));
         for (what, secret) in [
-            ("9A key", c.slot_9a_priv.as_ref().unwrap()),
-            ("9C key", c.slot_9c_priv.as_ref().unwrap()),
+            ("9A key", &c.slot_keys[&0x9A]),
+            ("9C key", &c.slot_keys[&0x9C]),
             ("PIN", &c.pin),
             ("PUK", &c.puk),
             ("management key", &c.mgmt_key),
@@ -6694,9 +6744,10 @@ mod tests {
     #[test]
     fn destroying_a_card_drops_its_keys_and_objects() {
         let mut c = VirtualCard::mint(Model::Yk4, "piggy-test d", 0x11, [0, 0]).unwrap();
+        c.set_slot_private(0x82, &RFC6979_SCALAR);
         c.destroy();
         assert!(!c.card_present());
-        assert!(c.slot_9a_priv.is_none(), "the key is gone");
+        assert!(c.slot_keys.is_empty(), "the keys are gone, 82's too");
         assert!(c.data_objects.is_empty(), "the objects are gone");
     }
 
