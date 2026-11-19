@@ -585,7 +585,9 @@ mod tests {
             Options {
                 at: timestamp(NOW + 60),
                 anchors: BTreeSet::from([operator.id.clone()]),
-                revocation_source: false,
+                // An empty store asserted complete: without the assertion
+                // the walk answers undetermined (§5.3), never valid.
+                revocation_source: true,
             },
         );
         let outcome = verifier.verify(&sealed);
