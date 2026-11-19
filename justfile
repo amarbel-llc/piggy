@@ -5391,7 +5391,11 @@ explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_P
     echo "# The next step signs with the card: it asks for the PIN once, then the key waits for ONE touch."
     read -r -p "# Press Enter to sign the root with slot $slot, or Ctrl-C to stop: " _
     export PKCS11_PROVIDER_MODULE="$module"
-    if openssl req -new -x509 -provider pkcs11 -provider default -provider-path "$provider_path" \
+    # openssl acts on each provider option as it parses it: -provider-path
+    # must come BEFORE -provider pkcs11, or pkcs11 is looked up in openssl's
+    # own module directory (seen on the card host, 2026-11-19, before any
+    # PIN). OPENSSL_MODULES set to the same directory also works.
+    if openssl req -new -x509 -provider-path "$provider_path" -provider pkcs11 -provider default \
         -key "$key_uri" -config "$out/root.cnf" -extensions v3_root -days "$days" -sha256 \
         -out "$out/root.pem"; then
       echo "ok $((n += 1)) - the card signed the root certificate ($out/root.pem)"
