@@ -124,13 +124,15 @@ where `contents` is:
 
 In this order:
 
-1. Read the peer (§6); without one, `peer-unknown`.
-2. Resolve `scope` (§5) to a binding, or refuse `scope-unbound`,
-   `unknown-scope` or `not-bound-scope`.
-3. Refuse `refused-key-type` for a `key_type` the holder does not mint.
-   When several refusals apply, the first in this order is the one
-   answered: `peer-unknown`, the scope refusals, `refused-key-type`,
+1. Refuse `refused-key-type` for a `key_type` the holder does not mint.
+   This is a check of the request alone, so it comes before anything
+   about the caller is read. When several refusals apply, the first in
+   this order is the one answered: `bad-request` (§3.1),
+   `refused-key-type`, `peer-unknown`, the scope refusals,
    `cap-reached`.
+2. Read the peer (§6); without one, `peer-unknown`.
+3. Resolve `scope` (§5) to a binding, or refuse `scope-unbound`,
+   `unknown-scope` or `not-bound-scope`.
 4. Refuse `cap-reached` when the holder already serves its cap of live
    cards, mints in progress included. The cap is 16 per holder (FDR
    0006; the pcsc-lite reader table).
