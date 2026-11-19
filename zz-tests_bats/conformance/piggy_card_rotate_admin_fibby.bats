@@ -152,11 +152,12 @@ function a_later_rotation_seals_at_pending_and_promotes_after_the_proof { # @tes
 }
 
 function a_refused_pin_at_the_read_back_rolls_the_seal_back { # @test
-  # Without the test PIN the askpass refuses, so the read-back (a 9D decrypt)
-  # fails after the seal: the entry is removed and the card is untouched.
+  # Without the test PIN the askpass refuses the PIN the verb asks through
+  # its frontend for the read-back (a 9D decrypt): the operator's no, exit
+  # 4, the entry removed and the card untouched.
   unset PIGGY_TEST_FIB_PIN
   _rotate seal
-  [[ $status -ne 0 ]] || { echo "a refused read-back ended 0" >&2; _show; return 1; }
+  [[ $status -eq 4 ]] || { echo "a refused read-back: want exit 4, got $status" >&2; _show; return 1; }
   [[ $output == *"the sealed copy reads back identical"* && $output == *"card is untouched"* ]] || {
     echo "the TAP does not name the read-back stop" >&2; _show; return 1; }
   [[ ! -e $ENTRY ]] || { echo "the seal was not rolled back" >&2; return 1; }

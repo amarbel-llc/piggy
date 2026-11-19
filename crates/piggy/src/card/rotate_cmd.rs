@@ -16,13 +16,27 @@ use crate::card::frontend::select::{FrontendKind, build_frontend};
 use crate::card::init_cmd::{CardSelector, select_provisioned_card};
 use crate::card::protocol::{CardId, CompletedEvent, CompletedStatus, Frontend};
 use crate::card::rotate::{
-    self, Exit, Point, Report, RotateCard, RotateConfig, RotateRefusal, RotateStore,
+    self, Exit, PinProtection, Point, Report, RotateCard, RotateConfig, RotateRefusal, RotateStore,
 };
 use crate::card::seal::default_pass_name;
 
 /// A live card behind the rotation's seam.
 struct TokenCard {
     token: PivToken,
+}
+
+/// The Printed Information object's answer as the gate reads it: the
+/// YubicoPIV `88 { 89 … }` escrow present means the management key lives
+/// under the PIN; `6982` means the object itself is behind the PIN.
+fn protection_of(read: Result<piggy_piv::pinfo::Pinfo, PivError>) -> PinProtection {
+    match read {
+        Ok(pinfo) if pinfo.has_admin_key => PinProtection::Yes,
+        Ok(_) => PinProtection::No,
+        Err(PivError::Apdu { sw: 0x6982 }) => PinProtection::NeedsPin,
+        // No such object: nothing is escrowed there.
+        Err(PivError::Apdu { sw: 0x6A82 }) => PinProtection::No,
+        Err(e) => PinProtection::Unreadable(e.to_string()),
+    }
 }
 
 impl RotateCard for TokenCard {
@@ -57,11 +71,14 @@ impl RotateCard for TokenCard {
         }
     }
 
-    fn pin_protected_management_key(&mut self) -> Option<bool> {
-        self.token
-            .read_pinfo()
-            .ok()
-            .map(|pinfo| pinfo.has_admin_key)
+    fn pin_protection(&mut self) -> PinProtection {
+        protection_of(self.token.read_pinfo())
+    }
+
+    fn pin_protection_with_pin(&mut self, pin: &str) -> Result<PinProtection, PivError> {
+        let mut session = self.token.begin_pin_session()?;
+        session.verify_pin(pin)?;
+        Ok(protection_of(session.read_pinfo()))
     }
 }
 

@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use piggy_box::stream::EboxStream;
 use piggy_box::unlock::unlock_ebox;
+use zeroize::Zeroizing;
 
 /// Entry point for `piggy box ...`. `args` is the argv *after* `box`
 /// (i.e. `Command::Box { rest }`), dispatched as `<type> <operation>` to
@@ -228,6 +229,21 @@ impl Decryptor {
             }
         };
         Self { agent, card }
+    }
+
+    /// A decryptor over the local card alone, with `pin` as the PIN (no
+    /// askpass, no agent): for a caller that has already asked the operator
+    /// for the PIN through a typed channel (an RFC 0006 frontend) and must
+    /// tell that operator's refusal from a decrypt failure, which the
+    /// askpass route folds into one string. Fails when PC/SC is unreachable.
+    pub fn local_card_with_pin(pin: Zeroizing<String>) -> Result<Self, String> {
+        let card =
+            crate::card_oracle::CardEcdhOracle::new(Box::new(move |_prompt: &str| Ok(pin.clone())))
+                .map_err(|e| format!("card oracle: {e}"))?;
+        Ok(Self {
+            agent: None,
+            card: Some(card),
+        })
     }
 
     /// Decrypt one on-disk ebox stream (header + chunk frames) to its

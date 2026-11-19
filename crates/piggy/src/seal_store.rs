@@ -6,7 +6,7 @@
 
 use std::io::Cursor;
 
-use piggy::card::rotate::RotateStore;
+use piggy::card::rotate::{Recorded, RotateStore};
 use piggy::card::seal::{KeyEscrow, ManagementKeySealer};
 use piggy_ids::RecipientFile;
 use piggy_markl::Id;
@@ -68,15 +68,63 @@ fn checked_entry(pass_name: &str) -> Result<StoreEntry, String> {
     StoreEntry::resolve(store_root(), pass_name)
 }
 
+/// What `git` made of a change under the store: told to the rotation, which
+/// tells the operator, instead of the best-effort silence `pass insert` has.
+fn recorded(result: Option<Result<(), i32>>) -> Recorded {
+    match result {
+        None => Recorded::NoGitStore,
+        Some(Ok(())) => Recorded::Committed,
+        Some(Err(code)) => Recorded::CommitFailed(format!("git exited {code}")),
+    }
+}
+
 impl RotateStore for StoreSealer {
     fn exists(&self, name: &str) -> Result<bool, String> {
         Ok(checked_entry(name)?.ebox.exists())
     }
 
+    fn recipients_for(&self, name: &str) -> Result<Vec<Id>, String> {
+        let entry = checked_entry(name)?;
+        let file = RecipientFile::read(&entry.piggy_ids).map_err(|e| e.to_string())?;
+        Ok(file
+            .encryption_recipients()
+            .map(|r| r.id().clone())
+            .collect())
+    }
+
+    /// The entry decrypted on the local card with `pin`, which the caller
+    /// obtained through its own typed channel; no askpass, no agent.
+    fn recover_with_pin(&self, name: &str, pin: &str) -> Result<Zeroizing<String>, String> {
+        let entry = checked_entry(name)?;
+        let input = std::fs::read(&entry.ebox)
+            .map_err(|e| format!("open {}: {e}", entry.ebox.display()))?;
+        let plaintext = Zeroizing::new(
+            piggy::cmd::pivy_box::Decryptor::local_card_with_pin(Zeroizing::new(pin.to_owned()))?
+                .decrypt(&input)?,
+        );
+        let end = plaintext
+            .iter()
+            .position(|b| *b == b'\n')
+            .unwrap_or(plaintext.len());
+        let line = std::str::from_utf8(&plaintext[..end])
+            .map_err(|_| format!("{name} does not hold a management key (not text)"))?;
+        Ok(Zeroizing::new(line.trim().to_owned()))
+    }
+
+    fn record(&self, name: &str, message: &str) -> Recorded {
+        let Ok(entry) = checked_entry(name) else {
+            return Recorded::CommitFailed(format!("{name}: not a store path"));
+        };
+        recorded(
+            crate::git_ops::find_inner_git_dir(&entry.ebox, &entry.root)
+                .map(|work_tree| crate::git_ops::add_and_commit(&work_tree, &entry.ebox, message)),
+        )
+    }
+
     /// One `rename(2)` within the entry's directory, so the entry is either
     /// the old key or the new one and never absent, then one commit that
     /// records the entry and the pending path's removal.
-    fn promote(&self, pending: &str, entry: &str) -> Result<(), String> {
+    fn promote(&self, pending: &str, entry: &str) -> Result<Recorded, String> {
         let from = checked_entry(pending)?;
         let to = checked_entry(entry)?;
         to.create_parent()?;
@@ -87,29 +135,31 @@ impl RotateStore for StoreSealer {
                 to.ebox.display()
             )
         })?;
-        if let Some(work_tree) = crate::git_ops::find_inner_git_dir(&to.ebox, &to.root) {
-            let _ = crate::git_ops::add_and_commit_with(
-                &work_tree,
-                &to.ebox,
-                &[from.ebox.as_path()],
-                &format!("Promote {pending} over {entry}."),
-            );
-        }
-        Ok(())
+        Ok(recorded(
+            crate::git_ops::find_inner_git_dir(&to.ebox, &to.root).map(|work_tree| {
+                crate::git_ops::add_and_commit_with(
+                    &work_tree,
+                    &to.ebox,
+                    &[from.ebox.as_path()],
+                    &format!("Promote {pending} over {entry}."),
+                )
+            }),
+        ))
     }
 
-    fn remove(&self, name: &str) -> Result<(), String> {
+    fn remove(&self, name: &str) -> Result<Recorded, String> {
         let entry = checked_entry(name)?;
         std::fs::remove_file(&entry.ebox)
             .map_err(|e| format!("remove {}: {e}", entry.ebox.display()))?;
-        if let Some(work_tree) = crate::git_ops::find_inner_git_dir(&entry.ebox, &entry.root) {
-            let _ = crate::git_ops::commit(
-                &work_tree,
-                &format!("Remove {name}."),
-                &[entry.ebox.as_path()],
-            );
-        }
-        Ok(())
+        Ok(recorded(
+            crate::git_ops::find_inner_git_dir(&entry.ebox, &entry.root).map(|work_tree| {
+                crate::git_ops::commit(
+                    &work_tree,
+                    &format!("Remove {name}."),
+                    &[entry.ebox.as_path()],
+                )
+            }),
+        ))
     }
 }
 

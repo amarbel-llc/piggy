@@ -772,6 +772,21 @@ impl PinSession<'_> {
         let (pin, touch) = crate::attest::parse_policy(&attestation_cert_der(data))?;
         Ok(crate::policy::KeyPolicy { pin, touch })
     }
+
+    /// Read and parse the Printed Information object (`5FC109`) inside the
+    /// session, so a PIN-gated object (a YubiKey's, which keeps a
+    /// PIN-protected management key there) is read after
+    /// [`PinSession::verify_pin`]. The PIN-free read is
+    /// [`PivToken::read_pinfo`]; this one surfaces the same `6982`/`6A82`
+    /// statuses in `PivError::Apdu` when the PIN has not been verified.
+    pub fn read_pinfo(&self) -> Result<crate::pinfo::Pinfo, PivError> {
+        let apdu = Apdu::get_data(crate::pinfo::PINFO_TAG);
+        let (data, sw) = self.transmit(&apdu)?;
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+        Ok(crate::pinfo::parse_pinfo(&data))
+    }
 }
 
 /// The cert DER inside a PIV cert data object `0x53 { 0x70 cert, 0x71

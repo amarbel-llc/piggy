@@ -72,16 +72,28 @@ First rotation (no entry; the card is on the factory default key):
   PIN, in the Printed Information object (`5FC109`; piggy#198 is the mode in
   piggy, not built). Such a card is keyed by a key the store never held, so
   sealing a key to the store and calling it the card's would be false. The
-  verb reads the Printed Information object's management-key field when the
-  card lets it (the read may be PIN-gated: one PIN, through the frontend) and
-  refuses a card that keeps the key there (exit 5, naming the mode and
-  piggy#198), before the state table is consulted; and the state table's
-  "none authenticates" row says the same before it says "factory reset".
-  fibby does not model the mode; a `MockCard` row covers the gate.
-- **b. generate.** 24 random bytes in guarded memory.
-- **c. seal and read back.** `KeyEscrow::seal`, then `recover` (one 9D PIN,
-  through the askpass safety net); compared in guarded memory. A mismatch
-  rolls the seal back and stops; the card is untouched.
+  object is PIN-gated on a YubiKey (`read_pinfo` answers `6982` without the
+  PIN; verified in piggy-piv), so the gate is best-effort by construction:
+  the verb reads the object without a PIN first and, when the card answers
+  (fibby does, PIN-free), refuses a card that keeps the key there (exit 5,
+  naming the mode, piggy#198, and that the key is recoverable with the PIN
+  through the card's own tooling). When the object is behind the PIN the
+  keys decide, and the question is asked again, with the PIN through the
+  frontend, only before the irreversible verdict, so a PIN-protected card
+  is never told "only a factory reset remains". An object that cannot be
+  read at all leaves that verdict with a caveat sentence instead of a
+  false certainty. `MockCard` rows cover every answer.
+- **b. generate.** 24 random bytes on guarded pages (`piggy-guard`). The
+  one copy outside them is the hex spelling the store seals, a
+  `Zeroizing<String>` zeroized when dropped.
+- **c. seal and read back.** `KeyEscrow::seal`, then the entry decrypted
+  on the local card with the 9D PIN the verb asks for through the RFC 0006
+  frontend (`secret.request`), not through the askpass route, so the
+  operator's refusal reaches the verb typed (`FrontendError::Declined`,
+  exit 4) and a decrypt failure stays the store's (exit 3): nothing is
+  told from error text. One PIN prompt serves every store read of a run.
+  The read-back is compared in memory; a mismatch rolls the seal back and
+  stops; the card is untouched.
 - **d. rotate.** `set_management_key_3des(new)` authenticated with the
   factory key. A refusal leaves the card on the factory key and the entry
   sealed and proven: the state §4 resumes from.
@@ -110,6 +122,17 @@ Later rotation (the entry exists and authenticates; circus#448):
   crash anywhere before it leaves the old key in the store and the new one,
   if it reached the card, in the pending entry (§4).
 
+Every card write is behind the typed word, a resumed run's too: a run that
+finds a sealed, proven key and the card still on the previous one asks the
+word again, naming the entry it is about to write from (§4). The promotion
+alone (no card write) asks none.
+
+What git made of each store change is told, never assumed: the point that
+records, promotes or removes carries a `git` diagnostic (`committed`, `not
+a git work tree`, or `COMMIT FAILED` with the words to commit by hand),
+and a failed commit is also a warning on the frontend. The rotation itself
+is still done when git is not: the tree holds the change.
+
 Steps d and e run under one `PinSession`, which is one PC/SC transaction
 (`begin_pin_session` takes it; `authenticate_admin` and
 `set_management_key_3des` are its methods), so the agent's own use of the
@@ -122,17 +145,18 @@ has been read back from the store.
 
 ## 4. State, not flags, decides where to start
 
-The verb reads three facts before any PIN: does the entry exist, does the
-pending entry exist, and which key authenticates (factory, entry, pending:
-`auth-test` costs nothing and no PIN; a store read costs one 9D PIN and is
-done only when the state needs it). Every combination is a row:
+The verb reads three facts: does the entry exist, does the pending entry
+exist, and which key authenticates (factory, entry, pending: `auth-test`
+costs nothing and no PIN; a store read costs the one 9D PIN of the run,
+asked through the frontend, and is done only when the state needs it).
+Every combination is a row:
 
 | entry | pending | authenticates | meaning | action |
 |---|---|---|---|---|
 | no | no | factory | fresh card | first rotation, a to e |
 | yes | no | factory | first rotation died between c and d | read the entry back, d, e |
 | yes | no | entry | steady state | later rotation, a to e |
-| yes | yes | entry | later rotation died between c and d | read the pending entry back, d, e; a pending entry that will not read back (partial, unreadable, not 48 hex digits) is deleted and the later rotation starts again from a: the entry authenticates, so the pending key never reached the card, and a corrupt pending entry must not hold the card hostage |
+| yes | yes | entry | later rotation died between c and d | read the pending entry back, the word, d, e; a pending entry that will not read back (partial, unreadable, not 48 hex digits) is a later rotation from a whose word also covers removing it, which happens after the word with the other writes: the entry authenticates, so the pending key never reached the card, and a corrupt pending entry must not hold the card hostage |
 | yes | yes | pending | later rotation died before promotion | e's promotion only |
 | no | yes | pending | not a state the promotion's rename produces, but one the verb can finish | e's promotion only: rename the pending entry to the entry, commit |
 | no | no | none of them | the card is on an unknown key and nothing is sealed | stop (§6, exit 6) after the PIN-protected gate has spoken: the recovery is a factory reset, which this verb never does |
@@ -173,7 +197,7 @@ One table, as the `ca` verbs have one:
 | 1 | stopped with nothing changed, for a reason the TAP names (store not writable, a state row that stops short of the irreversible one, a read-back mismatch after rollback) |
 | 2 | usage |
 | 3 | the store cannot seal: no store, no recipients, only the doomed recipient, a pointer that does not resolve |
-| 4 | the operator declined: the word was not typed, or a PIN prompt was cancelled; nothing changed (or, after d, nothing further changed and the state row says how to resume) |
+| 4 | the operator declined: the word was not typed, or a PIN prompt was cancelled (typed, through the frontend; never inferred from an error's words); nothing changed (or, after d, nothing further changed and the state row says how to resume) |
 | 5 | the card refused, or is not a card this verb manages: no card or more than one, the current key does not authenticate, `set-admin` refused with the card still on the current key, a card in PIN-protected management-key mode (§3's gate) |
 | 6 | the irreversible state: `set-admin` was accepted and neither the new nor the old key authenticates, or the state table's "none of them" row on a card the PIN-protected gate has cleared. The TAP says, in words, that only a factory reset remains and that this verb will not do it |
 
@@ -190,13 +214,20 @@ itself. The circus wrapper becomes one call of the verb plus those.
 
 ## 8. Where it lives, what it reuses
 
-`crates/piggy/src/card/rotate_cmd.rs` beside `init_cmd.rs` and
-`add_key_cmd.rs`; the engine half (`card/engine.rs`) gains `rotate_admin`
-over the same seams `card init` uses: `ProvisionCard` (auth with a
-management key, `set_management_key_3des`), `KeyEscrow` (`seal`,
-`rollback`, `commit`) and `ManagementKeySealer::recover`, the `Frontend`
-(`confirm` with a word, `progress`, `request_secret` for the 9D PIN through
-the store read), `check_escrow_recipients`, `piggy-guard` for the key.
+`crates/piggy/src/card/rotate.rs`, the pure engine over its own three
+seams (`RotateCard`: authenticate, rotate-and-prove under one transaction,
+the PIN-protected question with and without the PIN; `RotateStore`: `card
+init`'s `ManagementKeySealer` plus `exists`, `recipients_for`,
+`recover_with_pin`, `record`, `promote`, `remove`, each store change
+answering what git made of it; the RFC 0006 `Frontend`: `confirm` with a
+word, `progress`, `request_secret` for the 9D PIN), and
+`card/rotate_cmd.rs`, the driver beside `init_cmd.rs` and
+`add_key_cmd.rs`: the `PivToken` behind `RotateCard` (a `PinSession` per
+authentication, one for the rotation and its proof, `read_pinfo` inside a
+PIN-verified session for the gate), the binary's `StoreSealer` behind
+`RotateStore` (the entry decrypted on the local card with the given PIN
+through a `Decryptor` built for that), and the TAP-14 account.
+`check_escrow_recipients` and `piggy-guard` are reused as they are.
 Nothing of `cmd/tool` is called: `auth-test`, `set-admin -` and `-K @store`
 stay the hand tools; the verb is their sequence with the state and the
 proofs. piggy(1) gets the verb; piggy-testing(7) the lane.
