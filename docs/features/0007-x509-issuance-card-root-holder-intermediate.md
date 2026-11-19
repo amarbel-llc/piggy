@@ -739,8 +739,27 @@ that exists on every host without piggy.
   SSH challenges and is not a CA, and 9D does not sign. Built in phase
   (ii) (#391).
 - **Retired-slot policy.** Whether a YubiKey honours PIN always and
-  touch always on slot 82 exactly as on 9C (the hand pass reads the
-  attestation).
+  touch always on slot 82 exactly as on 9C. **Answered 2026-11-18:** it
+  does; the attestation was verified on the operator's card host (see
+  "Slot 82 as it stands" above: PIN always, touch always, bytes `03 02`,
+  which piggy's own decoder reads the same way: `piggy-piv/src/attest.rs`
+  `parse_policy` and the `policy.rs` tests, read by me, not run). The
+  operator ruled to use the key as it is; regeneration through papi and
+  piggy stays pre-approved if a criterion below fails.
+  **Provenance, as the operator recalls it (beliefs, not verified; a
+  card keeps no signing log):** generated in a prior session, believed
+  unused, believed to be the prototype shithub CA key. The two beliefs sit
+  uneasily together, and the key-identifier search above found no
+  certificate issued by it on the build host, which does not rule out one
+  elsewhere. **Criteria for reuse (coordinator's, accepted by the
+  operator):** generated on the card (attested); PIN always and touch
+  always (fixed at generation); P-256; the stored certificate a
+  self-signed placeholder with no CA extensions, replaced by `root-cert`
+  with generic placeholder dates (2024 to 2074) not meaning anything; no
+  certificate signed by the key found; and the first signature with it
+  recorded as a `piggy-certificate-v1` act (RFC 0012 §3.2). Residual
+  risk: "nothing was signed" stays the operator's belief, mitigated by
+  the new root's name constraints.
 - **Ed25519 X.509.** Not pursued while nix's acceptance is untested.
 
 ## More Information
