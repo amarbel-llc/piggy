@@ -159,6 +159,13 @@ function the_certificate_act_needs_somewhere_to_land_before_the_card { # @test
   _root_cert --profile shithub --out "$WORKDIR/nodir/root.pem"
   _assert_refusal 1 "an act directory that does not exist"
   [[ $output == *"directory"* ]] || { echo "the refusal does not name the directory: $output" >&2; return 1; }
+  # And the PEM's own directory, when the act goes elsewhere: a PEM that
+  # cannot be written after two prompts would leave an act with no
+  # certificate.
+  _root_cert --profile shithub --out "$WORKDIR/nodir/root.pem" --act-out "$WORKDIR/root.act"
+  _assert_refusal 1 "a PEM directory that does not exist"
+  [[ $output == *"directory"* && $output == *"root.pem"* ]] || {
+    echo "the refusal does not name the PEM's directory: $output" >&2; return 1; }
 }
 
 function an_absent_issuer_card_is_exit_6_before_any_prompt { # @test

@@ -736,8 +736,11 @@ commands:
 	*--act-out* _FILE_, else to the *--out* path with _.act_ appended; it
 	is required when the PEM goes to stdout, and never written over an
 	existing file. Before the first prompt, the verb checks that the agent
-	serves *operator-act@piggy* and lists the card's slot-9C key (exit *6*
-	otherwise), that _FILE_ is free, and that the key is P-256 (RFC 0013
+	serves *operator-act@piggy* and lists the card's slot-9C key, and that
+	the card attests that key PIN always and touch always, as *piggy
+	health*'s operator-act point judges it (exit *6* otherwise, since the
+	agent would refuse the act at the second prompt), that _FILE_ and the
+	*--out* directory are free to write, and that the key is P-256 (RFC 0013
 	names no P-384 key, so a P-384 root gets no act and is refused, exit
 	*1*). The act is sealed after the certificate is signed, since it
 	names the signed bytes, and the act file is written before the PEM;

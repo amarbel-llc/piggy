@@ -166,9 +166,12 @@ impl CardSigner {
 
     /// The card's operator-act key, slot 9C's: the key that seals the
     /// `piggy-certificate-v1` act over what this card's CA slot signs (RFC
-    /// 0012 §3.2). Read from the slot's certificate. A card without one has
-    /// not been through `card init`; no act could be signed, so no
-    /// certificate is (exit 6, before any prompt).
+    /// 0012 §3.2). Read from the slot's certificate, and its attested policy
+    /// judged as `piggy health` judges it. A card without one has not been
+    /// through `card init`, and one whose 9C is not attested PIN always and
+    /// touch always would be refused by the agent (RFC 0012 §2.4); either
+    /// way no act could be signed, so no certificate is (exit 6, before any
+    /// prompt).
     pub(crate) fn operator_act_key(&self) -> Result<OperatorKey, Failure> {
         let unavailable = failure(Exit::IssuerUnavailable);
         let card = self.card_label();
@@ -183,6 +186,15 @@ impl CardSigner {
                 held.algorithm()
             )));
         }
+        // The policy the card attests, judged as `piggy health` judges it:
+        // what the agent would refuse at the second prompt is refused here,
+        // before the certificate signature is spent.
+        let attested = self
+            .token
+            .read_slot_policy(OPERATOR_ACT_SLOT)
+            .ok()
+            .map(|(pin, touch)| piggy_piv::KeyPolicy { pin, touch });
+        super::certificate_act::operator_key_verdict(attested, &card)?;
         let point = held
             .ec_sec1_point()
             .map_err(|e| unavailable(format!("card {card} slot 9C: {e}")))?;

@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use piggy_markl::{FormatId, Id, PurposeId};
-use piggy_piv::PivAlgorithm;
 use piggy_piv::x509_profile::{self, CertificateFacts};
+use piggy_piv::{KeyPolicy, PivAlgorithm};
 use sha2::{Digest, Sha256};
 
 use piggy::act::produce::{SealError, check_before_signing, seal_act};
@@ -39,6 +39,7 @@ use piggy::act::seal::{DigestFormat, act_digest, public_key_blob};
 use piggy::act::verify::timestamp;
 use piggy::act::{Act, parse};
 use piggy::agent_client::{probe_ecdsa_points, probe_extensions};
+use piggy::card::slot_policy::{OperatorActBlocker, operator_act_verdict};
 use piggy::operator_act::EXTENSION;
 
 use super::card_signer::CardSigner;
@@ -160,20 +161,44 @@ pub(crate) fn check_certified_key(algorithm: PivAlgorithm) -> Result<(), Failure
     }
 }
 
+/// Whether the card's 9C key, attested with `attested` (`None`: the card
+/// did not attest it), can seal an act: the verdict `piggy health` and
+/// `card init` give, so the three cannot disagree. The agent applies RFC
+/// 0012 §2.4 at the second prompt; this says no before the first, while
+/// the certificate signature is still unspent.
+pub(crate) fn operator_key_verdict(attested: Option<KeyPolicy>, card: &str) -> Result<(), Failure> {
+    let unavailable = failure(Exit::IssuerUnavailable);
+    match operator_act_verdict(attested) {
+        Ok(()) => Ok(()),
+        Err(OperatorActBlocker::Policy(policy)) => Err(unavailable(format!(
+            "card {card}'s slot-9C key is attested {policy}, not PIN always, touch always: the agent would refuse the certificate act (RFC 0012 §2.4), so nothing is signed"
+        ))),
+        Err(OperatorActBlocker::Unattested) => Err(unavailable(format!(
+            "card {card} cannot attest its 9C key: the agent would refuse the certificate act (RFC 0012 §2.4), so nothing is signed"
+        ))),
+    }
+}
+
 /// Everything the act will need, checked before the first PIN prompt, so a
 /// missing agent or a taken path never costs a card signature: the certified
 /// key is P-256; `act_out` does not exist and its directory does (the act
-/// is created exclusively, never over an earlier one); an agent socket is
-/// set, the agent answers and serves `operator-act@piggy`; the card holds a
-/// 9C key; the agent lists it. Each failure names what is missing; the
-/// agent ones are exit 6 ("no agent serving the key").
+/// is created exclusively, never over an earlier one); `pem_out`'s
+/// directory exists, when the PEM goes to a file; an agent socket is set,
+/// the agent answers and serves `operator-act@piggy`; the card holds a 9C
+/// key attested PIN always and touch always; the agent lists it. Each
+/// failure names what is missing; the agent and card ones are exit 6
+/// ("no agent serving the key", "the slot's key is not proven").
 pub(crate) fn preflight(
     signer: &CardSigner,
     certified: PivAlgorithm,
     act_out: PathBuf,
+    pem_out: Option<&Path>,
 ) -> Result<Operator, Failure> {
     check_certified_key(certified)?;
     check_act_out(&act_out)?;
+    if let Some(pem) = pem_out {
+        check_output_dir(pem)?;
+    }
     let unavailable = failure(Exit::IssuerUnavailable);
     let socket = super::agent_socket().map_err(|e| {
         unavailable(format!(
@@ -206,21 +231,28 @@ pub(crate) fn preflight(
 }
 
 fn check_act_out(path: &Path) -> Result<(), Failure> {
-    let refuse = failure(Exit::Refused);
     if path.exists() {
-        return Err(refuse(format!(
+        return Err(failure(Exit::Refused)(format!(
             "{} exists; an act is never written over another (pass another --act-out)",
             path.display()
         )));
     }
+    check_output_dir(path)
+}
+
+/// The directory an output file would be created in exists. Checked before
+/// any prompt: a write that fails after the signatures would leave an act
+/// with no certificate, or cost the operator two prompts for nothing.
+fn check_output_dir(path: &Path) -> Result<(), Failure> {
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
     };
     if !dir.is_dir() {
-        return Err(refuse(format!(
-            "{}: the directory for the act does not exist",
-            dir.display()
+        return Err(failure(Exit::Refused)(format!(
+            "{}: the directory for {} does not exist",
+            dir.display(),
+            path.display()
         )));
     }
     Ok(())
@@ -620,6 +652,55 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(wrong.exit, Exit::Refused);
+    }
+
+    /// The 9C policy is judged before the first prompt with health's
+    /// verdict, so a card whose 9C the agent would refuse at the second
+    /// prompt never spends a certificate signature.
+    #[test]
+    fn a_9c_key_the_agent_would_refuse_is_refused_before_the_first_prompt() {
+        use piggy_piv::{PinPolicy, TouchPolicy};
+        assert!(operator_key_verdict(Some(KeyPolicy::OPERATOR_ACT), "c1").is_ok());
+        let weak = operator_key_verdict(
+            Some(KeyPolicy {
+                pin: PinPolicy::Always,
+                touch: TouchPolicy::Cached,
+            }),
+            "c1",
+        )
+        .unwrap_err();
+        assert_eq!(weak.exit, Exit::IssuerUnavailable);
+        assert!(
+            weak.message.contains("touch cached") && weak.message.contains("RFC 0012"),
+            "{}",
+            weak.message
+        );
+        let unattested = operator_key_verdict(None, "c1").unwrap_err();
+        assert_eq!(unattested.exit, Exit::IssuerUnavailable);
+        assert!(
+            unattested.message.contains("cannot attest"),
+            "{}",
+            unattested.message
+        );
+    }
+
+    #[test]
+    fn the_pems_directory_is_checked_before_any_prompt_too() {
+        let dir = std::env::temp_dir().join(format!("piggy-cert-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(check_output_dir(&dir.join("root.pem")).is_ok());
+        assert!(
+            check_output_dir(Path::new("root.pem")).is_ok(),
+            "the working directory"
+        );
+        let missing = check_output_dir(&dir.join("nodir").join("root.pem")).unwrap_err();
+        assert_eq!(missing.exit, Exit::Refused);
+        assert!(
+            missing.message.contains("nodir") && missing.message.contains("root.pem"),
+            "{}",
+            missing.message
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
