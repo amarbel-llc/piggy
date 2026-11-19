@@ -78,6 +78,54 @@ function the_recipe_refuses_a_missing_module_or_provider_before_any_card_read { 
   [[ ! -e $WORK/calls ]] || { echo "a tool was called before the preconditions held: $(cat "$WORK/calls")" >&2; return 1; }
 }
 
+# A fake piggy whose reads all succeed, so the recipe reaches the signing
+# call; the fake openssl records its argv and writes the -out file empty.
+_fake_piggy_reads_ok() {
+  cat >"$FAKE/piggy" <<EOF
+#!/usr/bin/env bash
+echo "piggy \$*" >>"$WORK/calls"
+case "\$1 \$2" in
+  "tool pubkey") echo "ecdsa-sha2-nistp256 AAAA PIV_slot_82" ;;
+  "tool attest"|"tool cert") echo "-----BEGIN CERTIFICATE-----" ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE/piggy"
+  cat >"$FAKE/openssl" <<EOF
+#!/usr/bin/env bash
+echo "openssl \$*" >>"$WORK/calls"
+if [[ \$1 == req ]]; then
+  printf '%s\n' "\$@" >"$WORK/req.argv"
+  while [[ \$# -gt 0 ]]; do [[ \$1 == -out ]] && : >"\$2"; shift; done
+fi
+exit 0
+EOF
+  chmod +x "$FAKE/openssl"
+}
+
+# OpenSSL 3 acts on each provider option as it parses it: the provider
+# path must be named before the provider, or pkcs11 is looked up in
+# openssl's own module directory (seen on the card host, 2026-11-19).
+function the_signing_call_names_the_provider_path_before_the_provider { # @test
+  _fake_piggy_reads_ok
+  _recipe "piggy-test-root" github.com 180 "$WORK/libfake-pkcs11.so" "$WORK/provider" "pkcs11:x" "$WORK/out" real <<<""
+  [[ -s $WORK/req.argv ]] || { echo "openssl req was not reached: $output" >&2; return 1; }
+  [[ $output == *"the card signed the root certificate"* ]] || {
+    echo "no signed line after a successful openssl req: $output" >&2; return 1; }
+  local path_at provider_at
+  path_at=$(grep -n -x -- '-provider-path' "$WORK/req.argv" | cut -d: -f1)
+  provider_at=$(grep -n -x -- '-provider' "$WORK/req.argv" | head -n1 | cut -d: -f1)
+  [[ -n $path_at && -n $provider_at && $path_at -lt $provider_at ]] || {
+    echo "want -provider-path before the first -provider; argv:" >&2; cat "$WORK/req.argv" >&2; return 1; }
+  # The path named is the one given, and the module reaches the provider
+  # through its environment variable.
+  grep -q -x -F -- "$WORK/provider" "$WORK/req.argv" || { echo "PROVIDER_PATH not in argv" >&2; return 1; }
+  # A read-back failure after the signature says so, instead of implying
+  # nothing happened (the fake openssl prints no certificate text).
+  [[ $output == *"the signature was made and"*"root.pem exists"* ]] || {
+    echo "no after-signature notice: $output" >&2; return 1; }
+}
+
 function a_failed_rollback_read_bails_out_before_the_card_is_asked_to_sign { # @test
   _fake_piggy_failing_cert
   _recipe "piggy-test-root" github.com 3650 "$WORK/libfake-pkcs11.so" "$WORK/provider" "pkcs11:x" "$WORK/out" real </dev/null

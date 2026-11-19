@@ -5422,6 +5422,10 @@ explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_P
     check "slot $slot's attested key is unchanged"                  bash -c "cmp -s <(piggy tool attest $slot | openssl x509 -noout -pubkey) <(openssl x509 -in '$out/slot$slot-attest.pem' -noout -pubkey)"
     check "slot $slot's attested PIN and touch policy are unchanged"  bash -c "cmp -s <(piggy tool attest $slot | openssl x509 -noout -text | grep -A1 '1.3.6.1.4.1.41482.3.8') <(openssl x509 -in '$out/slot$slot-attest.pem' -noout -text | grep -A1 '1.3.6.1.4.1.41482.3.8')"
     echo "1..$n"
+    if ((fails > 0)); then
+      echo "# $fails read-back check(s) failed AFTER the signature: the signature was made and $out/root.pem exists."
+      echo "# Nothing was written to the card. Compare root.pem by hand (openssl x509 -text) before any write-cert."
+    fi
     grep -E 'Not Before|Not After|Subject:|Permitted|Excluded|DNS:|IP:' "$out/root.txt" | sed 's/^/#   /'
     echo "# NEXT, by hand, after judging the read-back (the only step that changes the card; needs the management key the store escrowed, no PIN, no touch unless the management key is touch-protected):"
     echo "#   piggy tool -K <management-key> write-cert $slot < $out/root.pem"
