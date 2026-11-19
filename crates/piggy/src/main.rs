@@ -41,6 +41,7 @@
 //! mode); the C `pivy-agent` and its C-only features (`-C`, `-K`,
 //! `install-service`, …) stay reachable via `piggy pivy agent`.
 
+mod ca;
 mod copy_move;
 mod crypt;
 mod edit;
@@ -179,6 +180,14 @@ enum Command {
     /// (d)). `holder` owns its argv parsing (`mint`, `retire`).
     #[command(name = "holder", disable_help_flag = true)]
     Holder {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+
+    /// X.509 issuance (FDR 0007): `csr` for a holder-held intermediate
+    /// key. `ca` owns its argv parsing.
+    #[command(name = "ca", disable_help_flag = true)]
+    Ca {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
@@ -901,6 +910,8 @@ fn main() {
         Command::OperatorSign { rest } => std::process::exit(operator_sign::run(&rest)),
 
         Command::Holder { rest } => std::process::exit(holder_cli::run(&rest)),
+
+        Command::Ca { rest } => std::process::exit(ca::run(&rest)),
 
         Command::Act { rest } => std::process::exit(piggy::act::cli::run(&rest)),
 

@@ -392,7 +392,7 @@ _test-optional-linux-only: test-bats-conformance-fibby-pivy-agent-smoke
 _test-optional-linux-only:
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
+_test-conformance-linux-only: test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-ca-csr-fibby test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -1207,6 +1207,27 @@ test-bats-conformance-holder-mint-fibby:
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=180 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_holder_mint_fibby.bats
+
+# FDR 0007 phase (iii-a), piggy#392: `piggy ca csr` for a holder-held
+# intermediate key. A holder agent over fibby with the intermediate scope
+# as a fixed cgroup (the test's own, standing in for the issuance unit),
+# a P-256 mint under it, the request signed through the agent with no PIN
+# and verified by openssl, its key equal to the minted key; an Ed25519 key
+# and an unserved key refused by name.
+#
+# run the fibby-backed `piggy ca csr` bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-ca-csr-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_ca_csr_fibby.bats
 
 # piggy#299: a sealed pigpen document opens through the real Rust `piggy
 # agent` over fibby's slot 9D, driven by the Go surface a consumer uses
@@ -5241,6 +5262,168 @@ explore-fdr0006-d BIN_DIR="" NO_SHELL="":
     echo "#      \"\$FIBBY\" ctl --socket \"\$FIBBY_CTL\" list; ssh-add -L; exit the shell to stop everything."
     FIBBY="$holder" FIBBY_CTL="$ctl" PIGGY="$piggy" "${SHELL:-bash}" -i || true
     ((fails == 0))
+
+# UNRUN AGAINST A REAL CARD (drafted 2026-11-19 while the card was away):
+# the ykcs11 object label, the provider's PIN prompt and the key URI are
+# from memory; notBefore is "now" (no skew). The root's CN, its validity
+# and the permitted DNS set are the OPERATOR's choice (FDR 0007's open
+# questions), and running this at all is the operator's decision at the
+# card hour, not a default of any lane.
+#
+# The pilot root certificate on the operator's card (FDR 0007, slot 82),
+# in one command instead of a transcript: the card reads (public key,
+# the placeholder certificate, the attestation: the rollback and the
+# evidence), the openssl extension file carrying the root profile
+# (CA:TRUE pathlen:1, keyCertSign+cRLSign, name constraints with every IP
+# excluded, SKI/AKI), the signature by the card through OpenSSL 3's
+# PKCS#11 provider (ONE PIN, ONE touch), and the read-back checks as TAP.
+# It never writes the card: the `write-cert` line and its rollback are
+# printed for the operator to run by hand after judging the read-back.
+# DRAFTED UNRUN on 2026-11-19 (edit-only; the card was away): the PKCS#11
+# object label and the provider's PIN handling are from memory of ykcs11
+# and pkcs11-provider, not verified; `KEY_URI` and the printed object list
+# are there so a wrong label is seen before any PIN is typed. Phase (ii)'s
+# `piggy ca root-cert` (#391) replaces this recipe.
+#   CN      the root's common name (required; FDR 0007: operator's choice)
+#   NAMES   permitted DNS names, comma-separated (DNS:github.com already
+#           covers api./codeload.github.com under RFC 5280)
+#   DAYS    validity in days (FDR 0007: years; default ten)
+#   MODULE  the PKCS#11 module: yubico-piv-tool's libykcs11.so (nixpkgs
+#           `yubico-piv-tool`, lib/libykcs11.so) or opensc-pkcs11.so (the
+#           dev shell's `opensc`, lib/opensc-pkcs11.so)
+#   PROVIDER_PATH  the directory holding OpenSSL 3's pkcs11.so provider
+#           (nixpkgs `pkcs11-provider`, lib/ossl-modules)
+#   KEY_URI the PKCS#11 URI of slot 82's private key (ykcs11 labels it
+#           "Private key for Retired Key 1"; OpenSC labels differ)
+#   OUT     where the PEMs land (default: a new directory under $PWD)
+#
+# stage the FDR 0007 pilot root certificate from slot 82: card reads, openssl profile, one card signature, read-back (never writes the card)
+[group('explore')]
+[linux]
+explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_PATH="" KEY_URI="pkcs11:object=Private%20key%20for%20Retired%20Key%201;type=private" OUT="" CARD="virtual":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cn={{ quote(CN) }} names={{ quote(NAMES) }} days={{ quote(DAYS) }}
+    module={{ quote(MODULE) }} provider_path={{ quote(PROVIDER_PATH) }} key_uri={{ quote(KEY_URI) }}
+    out={{ quote(OUT) }} card={{ quote(CARD) }} slot=82
+    if [[ $card != real ]]; then
+      echo "explore-fdr0007-root-cert: this signs with the OPERATOR'S CARD (slot $slot, one PIN, one touch)." >&2
+      echo "Run it as: CN=... MODULE=... PROVIDER_PATH=... just explore-fdr0007-root-cert ... CARD=real" >&2
+      exit 2
+    fi
+    [[ -n $cn ]] || { echo "CN is required" >&2; exit 2; }
+    [[ -f $module ]] || { echo "MODULE must name the PKCS#11 module (libykcs11.so or opensc-pkcs11.so), got '$module'" >&2; exit 2; }
+    [[ -f $provider_path/pkcs11.so ]] || { echo "PROVIDER_PATH must hold OpenSSL 3's pkcs11.so provider, got '$provider_path'" >&2; exit 2; }
+    for tool in piggy openssl ssh-keygen pkcs11-tool; do
+      command -v "$tool" >/dev/null || { echo "$tool is not on PATH" >&2; exit 2; }
+    done
+    [[ -n $out ]] || out="$PWD/fdr0007-root-$(date -u +%Y%m%dT%H%M%SZ)"
+    mkdir -p "$out"
+    chmod 700 "$out"
+    n=0 fails=0
+    check() { # check DESCRIPTION COMMAND...; a failing check's output is printed as diagnostics
+      n=$((n + 1))
+      if "${@:2}" >"$out/check.out" 2>&1; then
+        echo "ok $n - $1"
+      else
+        echo "not ok $n - $1"
+        sed 's/^/#   /' "$out/check.out"
+        fails=$((fails + 1))
+      fi
+    }
+    echo "TAP version 14"
+    echo "# 1. card reads (no PIN, no touch): the rollback and the evidence"
+    check "slot $slot public key saved ($out/slot$slot.pub)"            bash -c "piggy tool pubkey $slot > '$out/slot$slot.pub'"
+    check "slot $slot stored certificate saved (the rollback)"            bash -c "piggy tool cert $slot > '$out/slot$slot-placeholder.pem'"
+    check "slot $slot attestation saved"                                   bash -c "piggy tool attest $slot > '$out/slot$slot-attest.pem'"
+    echo "# The attested policy, as piggy lists it (expect pin_policy always, touch_policy always, P-256):"
+    piggy list --format=ndjson 2>/dev/null | grep -i '"slot": *"82"' | sed 's/^/#   /' || echo "#   (piggy list printed no slot 82 line; read the attestation PEM by hand)"
+
+    echo "# 2. the root profile as an openssl extension section"
+    permitted=""
+    IFS=, read -ra name_list <<<"$names"
+    for name in "${name_list[@]}"; do permitted+="permitted;DNS:${name},"; done
+    cat >"$out/root.cnf" <<EOF
+    [ req ]
+    distinguished_name = dn
+    prompt = no
+    [ dn ]
+    CN = $cn
+    [ v3_root ]
+    basicConstraints = critical, CA:TRUE, pathlen:1
+    keyUsage = critical, keyCertSign, cRLSign
+    nameConstraints = critical, ${permitted}excluded;IP:0.0.0.0/0.0.0.0, excluded;IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0
+    subjectKeyIdentifier = hash
+    authorityKeyIdentifier = keyid:always
+    EOF
+    sed 's/^/#   /' "$out/root.cnf"
+
+    echo "# 3. the key as PKCS#11 sees it (check KEY_URI against this list BEFORE typing the PIN)"
+    pkcs11-tool --module "$module" --list-objects 2>&1 | sed 's/^/#   /' || true
+    echo "# KEY_URI: $key_uri"
+    echo "# The next step signs with the card: it asks for the PIN once, then the key waits for ONE touch."
+    read -r -p "# Press Enter to sign the root with slot $slot, or Ctrl-C to stop: " _
+    export PKCS11_PROVIDER_MODULE="$module"
+    if openssl req -new -x509 -provider pkcs11 -provider default -provider-path "$provider_path" \
+        -key "$key_uri" -config "$out/root.cnf" -extensions v3_root -days "$days" -sha256 \
+        -out "$out/root.pem"; then
+      echo "ok $((n += 1)) - the card signed the root certificate ($out/root.pem)"
+    else
+      echo "not ok $((n += 1)) - the card signature failed; nothing was written to the card"
+      echo "1..$n"
+      exit 1
+    fi
+
+    echo "# 4. read-back"
+    openssl x509 -in "$out/root.pem" -noout -text >"$out/root.txt"
+    check "the root verifies against itself"                        openssl verify -CAfile "$out/root.pem" "$out/root.pem"
+    check "basicConstraints critical CA:TRUE pathlen:1"            grep -A1 'X509v3 Basic Constraints: critical' "$out/root.txt"
+    check "keyUsage keyCertSign, cRLSign"                           grep -A1 'X509v3 Key Usage: critical' "$out/root.txt"
+    check "name constraints present, with permitted and excluded"  bash -c "grep -q 'Name Constraints: critical' '$out/root.txt' && grep -q 'Permitted:' '$out/root.txt' && grep -q 'Excluded:' '$out/root.txt'"
+    check "subject and authority key identifiers present"          bash -c "grep -q 'Subject Key Identifier' '$out/root.txt' && grep -q 'Authority Key Identifier' '$out/root.txt'"
+    check "the certificate's key is slot $slot's key"               bash -c "cmp -s <(openssl x509 -in '$out/root.pem' -pubkey -noout) <(ssh-keygen -e -m PKCS8 -f '$out/slot$slot.pub')"
+    check "the serial has at least 64 bits"                         bash -c "[[ \$(openssl x509 -in '$out/root.pem' -noout -serial | cut -d= -f2 | wc -c) -ge 17 ]]"
+    check "slot $slot's attested policy is unchanged"               bash -c "cmp -s <(piggy tool attest $slot) '$out/slot$slot-attest.pem'"
+    echo "1..$n"
+    grep -E 'Not Before|Not After|Subject:|Permitted|Excluded|DNS:|IP:' "$out/root.txt" | sed 's/^/#   /'
+    echo "# NEXT, by hand, after judging the read-back (the only step that changes the card; needs the management key the store escrowed, no PIN, no touch unless the management key is touch-protected):"
+    echo "#   piggy tool -K <management-key> write-cert $slot < $out/root.pem"
+    echo "#   piggy tool cert $slot | diff - $out/root.pem      # must be identical"
+    echo "# ROLLBACK (the key is never changed by write-cert):"
+    echo "#   piggy tool -K <management-key> write-cert $slot < $out/slot$slot-placeholder.pem"
+    echo "# Then root.pem travels to circus by reviewed commit; nix's curl trusts it per process through NIX_SSL_CERT_FILE."
+    ((fails == 0))
+
+# The X.509 key identifiers of an SSH public key (FDR 0007): what an
+# authority key identifier would carry for a certificate this key issued,
+# so a repository can be searched for one. KEY is an OpenSSH public key
+# line or its bare base64 (ecdsa-sha2-nistp256 only: the point is the last
+# 65 bytes of the blob). Prints RFC 5280 method 1 (SHA-1 of the point,
+# what openssl's `subjectKeyIdentifier=hash` writes) and RFC 7093 method 1
+# (SHA-256 truncated to 160 bits, what piggy-piv's profile builders write),
+# each as plain hex and colon-separated. Pure reads; no card.
+#
+# print the SKI forms (SHA-1 and RFC 7093) of an ecdsa-sha2-nistp256 OpenSSH public key
+[group('debug')]
+debug-ssh-key-identifiers KEY:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    key={{ quote(KEY) }}
+    # Accept "ecdsa-sha2-nistp256 AAAA... comment" or the bare base64.
+    if [[ $key == *" "* ]]; then key="$(awk '{print $2}' <<<"$key")"; fi
+    blob="$(printf %s "$key" | base64 -d | od -An -v -tx1 | tr -d ' \n')"
+    len=$(( ${#blob} / 2 ))
+    [[ $len -eq 104 ]] || { echo "not an ecdsa-sha2-nistp256 blob: $len bytes, want 104" >&2; exit 2; }
+    point="${blob:78}"   # bytes 39..104: 04 || X || Y
+    [[ ${point:0:2} == 04 ]] || { echo "the point is not uncompressed (first byte ${point:0:2})" >&2; exit 2; }
+    colons() { sed 's/../&:/g; s/:$//' <<<"$1" | tr a-f A-F; }
+    sha1="$(printf %s "$point" | xxd -r -p | sha1sum | cut -d' ' -f1)"
+    r7093="$(printf %s "$point" | xxd -r -p | sha256sum | cut -c1-40)"
+    echo "point:            $point"
+    echo "ski-sha1:         $sha1"
+    echo "ski-sha1-colons:  $(colons "$sha1")"
+    echo "ski-rfc7093:      $r7093"
+    echo "ski-rfc7093-cols: $(colons "$r7093")"
 
 # stage the piggy#382 hand pass: fibby holder build, profiles, test-flag refusal
 [group('explore')]

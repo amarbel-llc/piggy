@@ -21,6 +21,8 @@ piggy - PIV smart-card backed password store and agent
 *piggy holder mint* [*--scope* _NAME_] [*--type* _ed25519_|_p256_]++
 *piggy holder retire* [_FILE_]
 
+*piggy ca csr* *--key* _FILE_ [*--cn* _NAME_] [*--out* _FILE_]
+
 *piggy act canon* [_FILE_]
 
 *piggy act verify* *--anchors* _FILE_ [*--store* _DIR_|*--store-stdin*] [*--store-is-revocation-source*] [*--at* _TIME_] [*--format* _text_|_json_] [*--act* _DIGEST_|_PATH_|_FILE_]
@@ -629,6 +631,35 @@ commands:
 	line is in _FILE_ (or stdin). Only a caller inside the key's scope may;
 	anyone else is refused *not-bound-scope*, and a key the holder did not
 	mint is *no-such-key*. Exit status as for *holder mint*.
+
+*ca csr* *--key* _FILE_ [*--cn* _NAME_] [*--out* _FILE_]
+	Write a PKCS#10 certificate request (PEM) for the P-256 key whose
+	OpenSSH public key line is in _FILE_, as *piggy holder mint --type
+	p256* printed it: the request of a holder-held intermediate (FDR 0007
+	phase (iii)). The request is signed through the agent in
+	*PIGGY_AUTH_SOCK*, else *SSH_AUTH_SOCK*, by an ordinary sign request,
+	so it works only from inside the scope the key is bound to and needs
+	no PIN and no touch. The subject is the one *CN* (*--cn*, default
+	_piggy-ca-intermediate_, the intermediate profile's); no SAN and no
+	requested extension, since every extension of the certificate comes
+	from the issuer's profile. The request is public data: take it to the
+	machine with the card and sign it under the root (*piggy ca sign* once
+	phase (ii) lands; openssl in the pilot). An Ed25519 key is refused: an
+	intermediate is P-256.
+
+	Exit status: *0* written; *1* refused (the agent does not hold the
+	key, would not sign, or the request could not be built); *2* usage
+	(no such file, not a public key line, not P-256); *3* no agent here.
+
+	```
+	piggy holder mint --scope piggy-ca-intermediate-v1 --type p256 > int.pub
+	piggy ca csr --key int.pub --out int.csr
+	openssl req -in int.csr -noout -verify -subject
+	```
+
+	The NixOS module *services.piggy-ca* runs this at every start of its
+	unit, from inside the unit's cgroup, after minting the unit's own key
+	(piggy-agent(1) HOLDER MODE).
 
 *act canon* [_FILE_]
 	Read a _piggy-act-v1_ document (piggy RFC 0013; _FILE_, or stdin when

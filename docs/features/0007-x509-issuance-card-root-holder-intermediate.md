@@ -212,6 +212,29 @@ that cannot collide with 9A (SSH authentication), 9C (operator acts) or
 | 82h to 95h (retired key management) | NIST's archive of rotated 9D keys; a YubiKey generates into them and attests them like any slot (V piggy-piv-slots(7)); `piggy-piv` reads their certificates (V `token.rs:372`); `piggy tool sign`, `pubkey`, `cert` and `attest` accept them (V `slot_arg` -> `is_valid_piv_slot`); `piggy tool generate`, `write-cert`, `req-cert`, `import` and `delete-cert` **refuse** them today (V `is_supported_cert_slot`, `mod.rs:357`, and the parse guard at `mod.rs:311-319`), and C `pivy-tool` is no longer in the runtime closure (V AGENTS.md) | **ruled: slot 82 (`retired-1`)** (R, 2026-11-08). The operator called the refusal self-imposed and ruled it lifted for retired slots, 82 at least (implementation item I1 below); until that lands only outside tooling can generate into it and write its certificate, and in every case `piggy tool attest 82` must show PIN always, touch always before the key is trusted |
 | a second, dedicated YubiKey | its 9C, PIN always, touch always; kept offline | the cleanest separation, at the cost of a card; needs no piggy change |
 
+**Slot 82 as it stands on the operator's card (2026-11-18, relayed by
+the coordinator, circus/eager-holly; recorded here by piggy/lucid-larch
+for the hung design-owner session).** The slot's attestation was
+VERIFIED on the host twerk against the Yubico root: the chain is the
+leaf `YubiKey PIV Attestation 82`, then this card's F9 certificate, then
+`Yubico PIV Root CA Serial 263751`; the attested key is slot 82's key
+(`ecdsa-sha2-nistp256`, P-256); the attested policy is PIN always and
+touch always; firmware 5.2.7; the root's SHA-256 fingerprint as read,
+`63:EC:E9:14:E5:4D:D8:79:15:F3:40:33:C8:5A:F4:C0:69:6B:A1:51:2F:8A:DD:66:CE:D7:38:33:12:07:B5:46`,
+not yet compared with Yubico's published page. The stored certificate is
+a self-signed placeholder, `CN=PIV slot 82`, with no extensions. The
+operator ruled (23:04Z): use slot 82 as it is, do not regenerate. The
+first card act with it is the pilot root certificate (the checklist and
+the drafted `just explore-fdr0007-root-cert` recipe). No earlier
+certificate issued by this key is known: its subject key identifier is
+`F7:6B:D0:9E:62:5A:C9:52:DE:FF:EB:7F:FE:29:39:D8:61:DC:3E:77` (RFC 5280
+method 1, SHA-1 of the point; `just debug-ssh-key-identifiers`) or
+`38:55:AD:D7:AA:F6:96:4B:F1:F6:49:11:4A:0B:F6:D1:F8:54:5A:BE` (RFC 7093
+method 1, what piggy-piv's builders write), and a search of every
+repository checked out on the build host on 2026-11-19 found neither as
+an authority key identifier, nor the placeholder's issuer name, nor a copy
+of the key.
+
 Two cautions on a retired slot: piggy-piv-slots(7) warns that a
 **generic PKCS#11 backend** may not honour differing policies between 9D
 and a retired slot (V; the caution is about middleware, and so bites
@@ -330,6 +353,32 @@ tailnet HTTP endpoint (a new service, not piggy's); PAPI.
 | (iv) #394 | the issuance service unit in the NixOS module; whatever part of the transport the operator rules is piggy's, if any | the proxy host's renewal |
 
 Every phase closes with the human pass FDR 0006 requires.
+
+**Phase (iii-a) as built (2026-11-18, piggy#392; plan
+`docs/plans/2026-11-18-fdr0007-phase-iii-plan.md`).** With phase (ii) not
+yet on master, the part of (iii) that needs no `piggy ca sign`/`issue`
+landed first, on FDR 0006 phase (d)'s holder: the issuance unit
+(`services.piggy-ca`, `nix/nixos/piggy-ca.nix`) mints its own P-256
+intermediate key at start from inside its cgroup, under the holder scope
+`piggy-ca-intermediate-v1 = cgroup:/system.slice/piggy-ca.service`; so no
+session can mint for the unit and nothing outside the unit can sign with
+or retire the key, which answers the four needs listed under "What FDR
+0006's service-principal question needs" without a service peer class.
+`piggy ca csr --key FILE [--cn NAME]` writes the intermediate's PKCS#10
+request, signed through the holder agent's ordinary sign path (no PIN, no
+touch, no new extension; `agent_client::agent_sign_ecdsa_der`,
+`piggy_piv::cert_builder::build_csr_over_info`). The certificate comes
+back from the card to `intermediateCertFile`; at every start the unit
+retires its previous key (a unit's cgroup can outlive a `systemctl
+restart`, so the holder's teardown-on-cgroup-exit is not relied on) and
+mints a new one, so after any restart the file names the old key, which
+is the visible re-mint. The
+intermediate stays in slot 9A of its virtual card (design owner's ruling,
+2026-11-18): RFC 0012's TBSCertificate refusal keys on the CA slot 82, so
+it does not apply to holder keys, and the cgroup binding is the only gate.
+Lanes: `test-bats-conformance-ca-csr-fibby`, the `vm-piggy-holder`
+subtests for the unit. Not built: the health point "no intermediate"
+(follows), `issue` with the holder key (phase (iii-b), after (ii)).
 
 **Operator approval, 2026-11-17.** The operator approved this record as
 proposed and had the four phase issues filed (the numbers above). Phase

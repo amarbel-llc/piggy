@@ -202,6 +202,7 @@ pkgs.mkVmChecks {
           import ./holder.nix {
             inherit piggy fibbyHolder;
             holderModule = ../nixos/piggy-holder.nix;
+            caModule = ../nixos/piggy-ca.nix;
             prelude = pkgs.vmTestPrelude;
             sessionEnv = pkgs.lib.concatMapStrings (kv: "${kv} ") (
               [

@@ -362,7 +362,13 @@ destroys its remaining card. It reads the units' hardening back from the
 running processes (no capabilities, non-dumpable, core limit zero) and
 checks that a session user cannot reach fibby's sockets. The session
 commands carry the askpass discipline with no PIN to supply, so a prompt
-would fail the lane: a minted key signs with none.
+would fail the lane: a minted key signs with none. Its last subtests start
+*services.piggy-ca* (FDR 0007 phase (iii)): the unit mints its own
+intermediate key from inside its cgroup, its request verifies under
+*openssl req -verify*, a session cannot retire the key, and a restart
+mints a new key with the old one gone. The bats sibling is *just
+test-bats-conformance-ca-csr-fibby*, which stands the test's own cgroup in
+for the unit.
 
 They run under TCG: the shared build host has no _/dev/kvm_ and its
 provider exposes no nested virtualisation. Two to three minutes per lane

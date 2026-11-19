@@ -1209,6 +1209,11 @@
         # there is no home-manager form. Proven by `vm-piggy-holder`.
         nixosModules.piggy-holder = import ./nix/nixos/piggy-holder.nix;
 
+        # `services.piggy-ca` — the issuance unit of FDR 0007 phase (iii):
+        # mints its own intermediate key in the holder from inside its
+        # cgroup and writes the request the card signs. Needs piggy-holder.
+        nixosModules.piggy-ca = import ./nix/nixos/piggy-ca.nix;
+
         # `services.pigtrough` — the systemd user unit that keeps
         # `pigtrough serve` running (FDR 0009, R3): restarts come back with
         # every route unloaded, never touching the card.

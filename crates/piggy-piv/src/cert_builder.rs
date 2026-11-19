@@ -115,7 +115,25 @@ pub fn build_csr(
     common_name: &str,
     sign_digest: impl FnOnce(&[u8]) -> Result<Vec<u8>, PivError>,
 ) -> Result<Vec<u8>, PivError> {
-    let (curve_oid, sig_oid, md) = ec_params(algorithm)?;
+    let (_, _, md) = ec_params(algorithm)?;
+    build_csr_over_info(pubkey_point, algorithm, common_name, |info_der| {
+        sign_digest(&md(info_der))
+    })
+}
+
+/// [`build_csr`] for a signer that hashes for itself: `sign_info` is handed
+/// the DER-encoded CertificationRequestInfo, not its digest, and returns the
+/// DER ECDSA signature over it (ECDSA-SHA256 for P-256, ECDSA-SHA384 for
+/// P-384). An SSH agent is such a signer (RFC 5656 §3.1.2: it hashes the
+/// message with the curve's digest before signing), which is how a key the
+/// holder agent serves (FDR 0007 phase (iii)) requests its certificate.
+pub fn build_csr_over_info(
+    pubkey_point: &[u8],
+    algorithm: PivAlgorithm,
+    common_name: &str,
+    sign_info: impl FnOnce(&[u8]) -> Result<Vec<u8>, PivError>,
+) -> Result<Vec<u8>, PivError> {
+    let (curve_oid, sig_oid, _) = ec_params(algorithm)?;
     let spki = ec_spki(pubkey_point, curve_oid)?;
 
     let sig_alg = AlgorithmIdentifierOwned {
@@ -134,8 +152,7 @@ pub fn build_csr(
     };
 
     let info_der = info.to_der().map_err(der_err)?;
-    let digest = md(&info_der);
-    let sig_der = sign_digest(&digest)?;
+    let sig_der = sign_info(&info_der)?;
 
     let csr = CertReq {
         info,
@@ -272,6 +289,35 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(cn.data().as_utf8().unwrap().to_string(), "piggy-test");
+    }
+
+    /// A signer that hashes for itself (an SSH agent) gets the DER
+    /// CertificationRequestInfo and the CSR it yields verifies.
+    #[test]
+    fn csr_over_info_verifies_with_a_self_hashing_signer() {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = EcKey::generate(&group).unwrap();
+        let mut ctx = BigNumContext::new().unwrap();
+        let point = key
+            .public_key()
+            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+            .unwrap();
+
+        let seen_len = std::cell::Cell::new(0usize);
+        let key_for_sign = key.clone();
+        let csr_der =
+            build_csr_over_info(&point, PivAlgorithm::EcP256, "piggy-ca-test", |info_der| {
+                seen_len.set(info_der.len());
+                let digest = hash(MessageDigest::sha256(), info_der).unwrap();
+                let sig = EcdsaSig::sign(&digest, &key_for_sign).unwrap();
+                Ok(sig.to_der().unwrap())
+            })
+            .unwrap();
+        assert!(seen_len.get() > 32, "the signer saw the info, not a digest");
+
+        let req = openssl::x509::X509Req::from_der(&csr_der).unwrap();
+        let pkey = req.public_key().unwrap();
+        assert!(req.verify(&pkey).unwrap(), "CSR signature verifies");
     }
 
     #[test]

@@ -747,6 +747,37 @@ pub fn agent_sign_with_key(
     })
 }
 
+/// Sign `message` with the agent-served ECDSA key whose public key blob is
+/// `public_key` and return the signature as DER (`SEQUENCE { r, s }`): the
+/// form X.509 and PKCS#10 carry. The agent hashes `message` itself with the
+/// curve's digest (SHA-256 for P-256), so this is a signer for
+/// `piggy_piv::cert_builder::build_csr_over_info` and the FDR 0007 builders'
+/// TBS bytes (FDR 0007 phase (iii), a holder-held key). A non-ECDSA key is
+/// refused: the holder mints Ed25519 too, but X.509 here is EC only.
+pub fn agent_sign_ecdsa_der(
+    socket: &Path,
+    public_key: &[u8],
+    message: &[u8],
+) -> Result<Vec<u8>, AgentSignError> {
+    let encoded = agent_sign_with_key(socket, public_key, message)?;
+    let mut reader = crate::ssh_wire::Reader::new(&encoded);
+    let (algorithm, blob) = match (reader.string(), reader.string()) {
+        (Some(algorithm), Some(blob)) if reader.is_empty() => (algorithm, blob),
+        _ => {
+            return Err(AgentSignError::Refused(
+                "agent returned a malformed signature encoding".into(),
+            ));
+        }
+    };
+    let algorithm = String::from_utf8_lossy(algorithm);
+    if !algorithm.starts_with("ecdsa-sha2-nistp") {
+        return Err(AgentSignError::Refused(format!(
+            "agent returned a {algorithm} signature; an X.509 request needs an ECDSA P-256 key"
+        )));
+    }
+    crate::ecdsa_sig::ssh_ecdsa_blob_to_der(blob).map_err(AgentSignError::Refused)
+}
+
 /// Field width (bytes) for an agent-served ECDSA identity's curve: P-256 → 32,
 /// P-384 → 48. Errors for any non-ECDSA or unsupported-curve key.
 fn ecdsa_field_len(pubkey: &KeyData) -> Result<usize, String> {

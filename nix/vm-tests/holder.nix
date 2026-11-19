@@ -19,6 +19,7 @@
   piggy,
   fibbyHolder,
   holderModule,
+  caModule,
   prelude,
   # `VAR=value ` words for the session commands: the askpass discipline
   # without PIGGY_TEST_FIB_PIN (a minted key must sign with no PIN).
@@ -45,7 +46,10 @@ let
 in
 {
   nodes.machine = {
-    imports = [ holderModule ];
+    imports = [
+      holderModule
+      caModule
+    ];
     services.piggy-holder = {
       enable = true;
       package = piggy;
@@ -54,10 +58,21 @@ in
       clientGroup = "users";
       scopePollInterval = 1;
     };
+    # FDR 0007 phase (iii-a): the issuance unit mints its own intermediate
+    # key from inside its cgroup and writes the request.
+    services.piggy-ca = {
+      enable = true;
+      package = piggy;
+    };
+    # Started by the last subtest, not at boot, so the session subtests
+    # see only their own keys in the listing.
+    systemd.services.piggy-ca.wantedBy = lib.mkForce [ ];
     users.users.sess = {
       isNormalUser = true;
       extraGroups = [ "users" ];
     };
+    # The request is checked with openssl in the guest.
+    environment.systemPackages = [ pkgs.openssl ];
     systemd.tmpfiles.rules = [ "d ${work} 0777 root root -" ];
   };
 
@@ -152,5 +167,34 @@ in
         assert "unknown-scope" in out, out
         listing = machine.succeed(f"SSH_AUTH_SOCK={SOCK} ssh-add -L 2>&1 || true")
         assert "holder:" not in listing, listing
+
+    with subtest("the issuance unit mints its own intermediate key from inside its cgroup and writes a verifying request"):
+        machine.succeed("systemctl start piggy-ca.service")
+        wait_for_units(["piggy-ca.service"])
+        machine.wait_for_file("/var/lib/piggy-ca/intermediate.csr", timeout=120)
+        key1 = machine.succeed("cat /var/lib/piggy-ca/intermediate.pub").strip()
+        assert key1.startswith("ecdsa-sha2-nistp256 "), key1
+        out = machine.succeed("openssl req -in /var/lib/piggy-ca/intermediate.csr -noout -verify -subject")
+        assert "verify OK" in out and "piggy-ca-intermediate" in out, out
+        # The key's binding is the unit's own cgroup: the holder log names it.
+        expect_in_journal("piggy-holder", "system.slice/piggy-ca.service")
+        # A session (another cgroup) can neither sign with it nor retire it.
+        machine.succeed("cp /var/lib/piggy-ca/intermediate.pub " + WORK + "/int.pub")
+        out = machine.fail(as_sess("fdr6d-ca-sibling", "piggy holder retire int.pub 2>&1"))
+        assert "not-bound-scope" in out, out
+
+    with subtest("a restart of the issuance unit mints a new key; the old one is gone"):
+        machine.succeed("systemctl restart piggy-ca.service")
+        # The restarted unit retires the old key, mints, and writes the
+        # files; wait for a public key that is not the old one.
+        machine.wait_until_succeeds(
+            f"test -s /var/lib/piggy-ca/intermediate.csr && grep -q ecdsa-sha2-nistp256 /var/lib/piggy-ca/intermediate.pub && ! grep -qF '{key1.split()[1]}' /var/lib/piggy-ca/intermediate.pub",
+            timeout=120,
+        )
+        key2 = machine.succeed("cat /var/lib/piggy-ca/intermediate.pub").strip()
+        assert key2 != key1, (key1, key2)
+        listing = machine.succeed(f"SSH_AUTH_SOCK={SOCK} ssh-add -L")
+        assert key1.split()[1] not in listing, listing
+        assert key2.split()[1] in listing, listing
   '';
 }
