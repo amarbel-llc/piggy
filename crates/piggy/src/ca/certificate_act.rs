@@ -62,6 +62,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CertifiedAs {
     Root,
+    // Constructed by `sign` and `issue` (#391 slice (d)), which land after
+    // this seam; the tests exercise it meanwhile.
+    #[allow(dead_code)]
     Link,
 }
 
@@ -233,7 +236,7 @@ pub(crate) fn preflight(
     let key = signer.operator_act_key()?;
     let points = probe_ecdsa_points(&socket, PROBE_TIMEOUT)
         .map_err(|e| unavailable(format!("the agent at {}: {e}", socket.display())))?;
-    if !points.iter().any(|p| *p == key.point) {
+    if !points.contains(&key.point) {
         return Err(unavailable(format!(
             "the agent at {} does not list card {}'s slot-9C key; is that card the one the agent serves?",
             socket.display(),
@@ -310,7 +313,7 @@ pub(crate) fn plan(
     let subject_key = Id::new(
         Some(PurposeId::PiggyPrincipalPubV1),
         FormatId::SshEcdsaNistp256Pub,
-        compressed_p256(&facts.pubkey_point).map_err(|e| refuse(e))?,
+        compressed_p256(&facts.pubkey_point).map_err(&refuse)?,
     )
     .map_err(|e| refuse(e.to_string()))?
     .to_wire();
@@ -417,7 +420,6 @@ mod tests {
     }
 
     fn soft_key(seed: u8) -> SoftKey {
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
         let sk = p256::ecdsa::SigningKey::from_slice(&[seed; 32]).unwrap();
         let point = sk
             .verifying_key()
@@ -539,7 +541,7 @@ mod tests {
         // the description line beside the first prompt's words.
         let (record, hex) = certificate_record(&der);
         let records: Vec<String> = act.values("records").map(parsed_bytes).collect();
-        assert_eq!(records, [record.clone()]);
+        assert_eq!(records, [record.as_str()]);
         assert!(record.starts_with("piggy-record-digest-v1@sha256-"));
         assert_eq!(hex, hex::encode(Sha256::digest(&der)));
         let description = act.description().unwrap();
