@@ -144,12 +144,46 @@ impl CardSigner {
 
     /// Prove the key is the card's own before anything is signed with it:
     /// a fresh attestation signed by the card's F9 certificate, F9 chained
-    /// to the embedded Yubico root, the attested key equal to the slot's,
-    /// PIN always and touch always. Any failing check is "issuer key
-    /// unavailable", naming the checks that failed.
-    pub(crate) fn verify_on_card(&self) -> Result<(), Failure> {
+    /// to `root_pem` (the profile's `attestation_root`; `None` is the
+    /// embedded Yubico root), the attested key equal to the slot's, PIN
+    /// always and touch always. Any failing check is "issuer key
+    /// unavailable", naming the checks that failed. A root other than the
+    /// embedded one is announced on stderr with its subject and SHA-256
+    /// fingerprint, so the operator sees which root judged the key.
+    pub(crate) fn verify_on_card(&self, root_pem: Option<&[u8]>) -> Result<(), Failure> {
         let unavailable = failure(Exit::IssuerUnavailable);
         let slot = self.slot;
+        if let Some(pem) = root_pem {
+            let root = openssl::x509::X509::from_pem(pem)
+                .map_err(|e| failure(Exit::Profile)(format!("attestation_root: {e}")))?;
+            let fingerprint = root
+                .digest(openssl::hash::MessageDigest::sha256())
+                .map(|d| {
+                    d.iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(":")
+                })
+                .unwrap_or_else(|e| format!("(digest failed: {e})"));
+            let subject = root
+                .subject_name()
+                .entries()
+                .map(|e| {
+                    format!(
+                        "{}={}",
+                        e.object().nid().short_name().unwrap_or("?"),
+                        e.data()
+                            .as_utf8()
+                            .map(|s| s.to_string())
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "piggy ca: the attestation root is the profile's attestation_root, not the embedded Yubico root: subject {subject}, sha256 {fingerprint}"
+            );
+        }
         let attestation_der = self.token.yk_attest(slot).map_err(|e| {
             unavailable(format!(
                 "the card will not attest slot {slot:02X} ({e}); only a key generated on the card signs certificates"
@@ -169,7 +203,7 @@ impl CardSigner {
             attestation_der: &attestation_der,
             f9_der: &f9_der,
             slot_point: Some(&self.point),
-            root_pem: None,
+            root_pem,
             saved_pem: None,
             expect_pin: Some(PinPolicy::Always),
             expect_touch: Some(TouchPolicy::Always),

@@ -147,9 +147,11 @@ pub(crate) fn execute(args: RootCertArgs) -> Result<(), Failure> {
     openssl::rand::rand_bytes(&mut random)
         .map_err(|e| failure(Exit::Refused)(format!("random serial: {e}")))?;
     let plan = plan_root(&profile, now, random)?;
+    // The profile's half is checked whole before the card is touched.
+    let attestation_root = super::attestation_root_pem(&profile.issuer)?;
 
     let mut signer = CardSigner::open(&profile.issuer)?;
-    signer.verify_on_card()?;
+    signer.verify_on_card(attestation_root.as_deref())?;
     let describing = plan.describe();
     eprintln!(
         "piggy ca root-cert: card {} slot {:02X} signs {describing}; one PIN prompt, then a touch",

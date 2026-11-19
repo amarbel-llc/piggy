@@ -746,7 +746,18 @@ commands:
 	[issuer]
 	slot = "82"                   # the card's CA slot (a root is always 82)
 	guid = "0123456789ABCDEF0123456789ABCDEF"
+	# attestation_root = "/etc/piggy/attestation-root.pem"
 	```
+
+	*attestation_root*, optional and absolute, is the PEM certificate the
+	card's attestation chain must reach for the slot's key to count as the
+	card's own; absent, the embedded Yubico PIV root judges. A production
+	profile leaves it out; a virtual card's test lane points it at that
+	card's own F9 certificate (as *piggy tool attest-verify --root* does).
+	When it is set, *root-cert* says so on its own stderr line with the
+	root's subject and SHA-256 fingerprint. A path that is relative,
+	missing or not a certificate is the profile's fault (exit *3*); the
+	embedded root is never substituted for a root that could not be read.
 
 	Exit status, one table for every *ca* verb so a renewal timer reads
 	one meaning per code: *0* done; *1* refused for any other reason (on

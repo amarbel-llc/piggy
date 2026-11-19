@@ -95,6 +95,29 @@ function an_unknown_or_unreadable_profile_is_exit_3_naming_the_path { # @test
     echo "the unknown field and the path are not named: $output" >&2; return 1; }
 }
 
+function an_attestation_root_that_cannot_be_read_is_the_profiles_fault { # @test
+  # The field sits under [issuer], the profile's last table, so it is
+  # appended.
+  _root_profile relative ''
+  printf 'attestation_root = "f9.pem"\n' >>"$CONFIG/ca-profiles/relative.toml"
+  _root_cert --profile relative
+  _assert_refusal 3 "a relative attestation_root"
+  [[ $output == *"absolute"* ]] || { echo "the refusal does not say absolute: $output" >&2; return 1; }
+
+  _root_profile missing ''
+  printf 'attestation_root = "%s/nonexistent.pem"\n' "$WORKDIR" >>"$CONFIG/ca-profiles/missing.toml"
+  _root_cert --profile missing
+  _assert_refusal 3 "a missing attestation_root file"
+  [[ $output == *"$WORKDIR/nonexistent.pem"* ]] || { echo "the path is not named: $output" >&2; return 1; }
+
+  _root_profile notpem ''
+  echo hello >"$WORKDIR/not.pem"
+  printf 'attestation_root = "%s/not.pem"\n' "$WORKDIR" >>"$CONFIG/ca-profiles/notpem.toml"
+  _root_cert --profile notpem
+  _assert_refusal 3 "an attestation_root that is not a certificate"
+  [[ $output == *"not a PEM certificate"* ]] || { echo "the refusal does not say why: $output" >&2; return 1; }
+}
+
 function only_a_root_profile_is_certified { # @test
   cat >"$CONFIG/ca-profiles/leaf.toml" <<EOF
 kind = "leaf"

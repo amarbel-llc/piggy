@@ -55,6 +55,12 @@ pub struct Issuer {
     /// A holder key, by its public key (not offered until phase (iii)).
     #[serde(default)]
     pub holder_key: Option<String>,
+    /// The PEM certificate the card's attestation chain must reach for the
+    /// slot's key to count as the card's own, as an absolute path; absent,
+    /// the embedded Yubico PIV root. A virtual card's lane points it at
+    /// that card's own F9 certificate; a production profile leaves it out.
+    #[serde(default)]
+    pub attestation_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +196,13 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
         && issuer.slot.as_deref().map(str::to_ascii_lowercase) != Some("82".into())
     {
         return bad("a root is signed by the CA slot 82");
+    }
+    if let Some(root) = &issuer.attestation_root {
+        if !Path::new(root).is_absolute() {
+            return bad(format!(
+                "attestation_root {root:?} must be an absolute path (absent means the embedded Yubico root)"
+            ));
+        }
     }
 
     let key_types = match spec.key_types {
@@ -347,6 +360,21 @@ mod tests {
     #[test]
     fn a_zero_lifetime_is_refused() {
         assert!(parse(&leaf("").replace("720", "0")).is_err());
+    }
+
+    #[test]
+    fn the_attestation_root_is_optional_and_absolute() {
+        assert_eq!(parse(&leaf("")).unwrap().issuer.attestation_root, None);
+        let with = leaf("").replace(
+            "slot = \"82\"",
+            "slot = \"82\"\nattestation_root = \"/etc/piggy/f9.pem\"",
+        );
+        assert_eq!(
+            parse(&with).unwrap().issuer.attestation_root.as_deref(),
+            Some("/etc/piggy/f9.pem")
+        );
+        let relative = with.replace("/etc/piggy/f9.pem", "f9.pem");
+        assert!(parse(&relative).unwrap_err().0.contains("absolute"));
     }
 
     #[test]

@@ -290,6 +290,19 @@ the EKU), and the **operator** fills the issuer fields at install time
 (a card slot and GUID, or a holder key by public key). The profile is
 the only source of the issuer: `root-cert` takes no slot flag.
 
+*Profile fields as built (phase (ii), 2026-11-19; piggy(1) is the
+reference):* `kind`, `common_name`, `names`, `lifetime_hours`,
+`not_before_skew_minutes` (default 5; the design owner's ruling that the
+skew is a profile field, not a flag), `key_types`; under `[issuer]`,
+`slot` and `guid`, and the optional `attestation_root`, an absolute path
+to the PEM certificate the card's attestation chain must reach before
+the slot's key counts as the card's own (absent: the embedded Yubico PIV
+root; a virtual card's lane names its own F9 certificate; `root-cert`
+announces a non-embedded root with its subject and fingerprint; a path
+that is relative, missing or not a certificate is exit 3, never a silent
+fallback). The file is `ca-profiles/NAME.toml` under `PIGGY_CONFIG_HOME`,
+else `$XDG_CONFIG_HOME/piggy`, else `~/.config/piggy`.
+
 `issue` and `sign`:
 
 1. parse the CSR and require an EC P-256 or P-384 key and a valid

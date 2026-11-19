@@ -75,14 +75,30 @@ function attested_9c_with_a_weaker_pin_policy_is_refused { # @test
 # RFC 0012 §2.4 item 5 (the sixth amendment): policy alone does not qualify
 # a slot. 9A generated with the 9C policy attests PIN always and touch
 # always, passes the first four checks, and is refused on the slot its
-# attestation names; so is the CA key in slot 82, which fibby does not
-# model (the unit tests over `operator_act::refuse_attestation_not_for_slot_9c`
-# cover it).
+# attestation names.
 function attested_slot_other_than_9c_is_refused_whatever_its_policy { # @test
   spawn_operator_card
   _add_key 9a --replace --pin-policy always --touch-policy always
   spawn_card_agent
   _assert_refused_policy 9A "slot 9A: the attestation names slot 9A, not 9C"
+}
+
+# The slot the amendment was written for: FDR 0007's CA key in the retired
+# slot 82, enrolled PIN always and touch always exactly as 9C is, listed as
+# an identity by the agent, and refused before any prompt (fibby holds the
+# retired slots since piggy#399; `card add-key` does not take them, so the
+# key is generated through `piggy tool`).
+function the_ca_key_in_slot_82_is_refused_before_any_prompt { # @test
+  spawn_operator_card
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" tool -K default -P "$OPERATOR_ACT_PIN" \
+    -a eccp256 -i always -t always generate 82 >/dev/null 2>"$WORKDIR/generate-82.err" || {
+    cat "$WORKDIR/generate-82.err" >&2
+    operator_act_fail "piggy tool generate 82 failed"
+  }
+  spawn_card_agent
+  SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -L | grep -q " PIV_slot_82 " ||
+    operator_act_fail "the agent does not list the slot-82 key"
+  _assert_refused_policy 82 "slot 82: the attestation names slot 82, not 9C"
 }
 
 # The policy is not remembered: the same agent serves 9C, the key is replaced

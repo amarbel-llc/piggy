@@ -132,6 +132,26 @@ pub(crate) fn load_profile(name: &str) -> Result<piggy::ca_profile::Profile, Fai
         .map_err(|e| refuse(format!("profile {name} ({}): {e}", path.display())))
 }
 
+/// The root the profile's `attestation_root` names, read and checked to be
+/// a PEM certificate (exit 3, the profile's, when it is missing or not
+/// one: a root that cannot be read never falls back to the embedded one),
+/// or `None` for the embedded Yubico root.
+pub(crate) fn attestation_root_pem(
+    issuer: &piggy::ca_profile::Issuer,
+) -> Result<Option<Vec<u8>>, Failure> {
+    let Some(path) = &issuer.attestation_root else {
+        return Ok(None);
+    };
+    let refuse = failure(Exit::Profile);
+    let pem = std::fs::read(path).map_err(|e| refuse(format!("attestation_root {path}: {e}")))?;
+    openssl::x509::X509::from_pem(&pem).map_err(|e| {
+        refuse(format!(
+            "attestation_root {path} is not a PEM certificate: {e}"
+        ))
+    })?;
+    Ok(Some(pem))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +216,44 @@ mod tests {
             "an empty variable is unset"
         );
         assert_eq!(config_home_from(None, None, None), None);
+    }
+
+    #[test]
+    fn an_attestation_root_that_cannot_be_read_is_the_profiles_fault() {
+        let issuer = |root: Option<&str>| piggy::ca_profile::Issuer {
+            slot: Some("82".into()),
+            guid: Some("0123456789abcdef0123456789abcdef".into()),
+            holder_key: None,
+            attestation_root: root.map(str::to_owned),
+        };
+        assert_eq!(attestation_root_pem(&issuer(None)).unwrap(), None);
+        let missing = attestation_root_pem(&issuer(Some("/nonexistent/f9.pem"))).unwrap_err();
+        assert_eq!(missing.exit, Exit::Profile);
+        assert!(
+            missing.message.contains("/nonexistent/f9.pem"),
+            "{}",
+            missing.message
+        );
+
+        let dir = std::env::temp_dir().join(format!("piggy-ca-root-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let not_pem = dir.join("not.pem");
+        std::fs::write(&not_pem, b"hello").unwrap();
+        let bad = attestation_root_pem(&issuer(Some(not_pem.to_str().unwrap()))).unwrap_err();
+        assert_eq!(bad.exit, Exit::Profile);
+        assert!(
+            bad.message.contains("not a PEM certificate"),
+            "{}",
+            bad.message
+        );
+        let good = dir.join("root.pem");
+        std::fs::write(&good, piggy::cmd::tool::YUBICO_PIV_ROOT_CA_PEM).unwrap();
+        assert!(
+            attestation_root_pem(&issuer(Some(good.to_str().unwrap())))
+                .unwrap()
+                .is_some()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
