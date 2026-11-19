@@ -21,11 +21,6 @@ use piggy_piv::x509_profile::{self, CertValidity, MIN_SERIAL_BYTES};
 
 use crate::ca_profile::{Kind, Profile};
 
-/// `notBefore` is set this far before now, so a verifier whose clock
-/// runs a little behind still accepts the certificate (FDR 0007's skew
-/// lever; the pilot's working value).
-pub const NOT_BEFORE_SKEW: Duration = Duration::from_secs(5 * 60);
-
 /// One issuance per profile per this window (FDR 0007: a runaway timer
 /// cannot mint a leaf stream).
 pub const RATE_WINDOW: Duration = Duration::from_secs(10 * 60);
@@ -196,7 +191,9 @@ pub fn issue(
     .map_err(Refusal::Csr)?;
 
     let validity = CertValidity {
-        not_before: inputs.now.saturating_sub(NOT_BEFORE_SKEW),
+        not_before: inputs
+            .now
+            .saturating_sub(Duration::from_secs(profile.not_before_skew_minutes * 60)),
         not_after: inputs.now + Duration::from_secs(profile.lifetime_hours * 3600),
     };
 

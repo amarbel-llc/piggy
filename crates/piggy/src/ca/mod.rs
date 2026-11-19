@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 
 mod card_signer;
 mod csr;
+mod issuance;
 mod root_cert;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +26,10 @@ pub(crate) enum Exit {
     Refused = 1,
     Usage = 2,
     Profile = 3,
+    Csr = 4,
+    Names = 5,
     IssuerUnavailable = 6,
+    RateLimited = 7,
 }
 
 #[derive(Debug)]
@@ -60,6 +64,13 @@ enum CaCommand {
     /// on stdout. The slot is not written: `piggy tool write-cert` does
     /// that.
     RootCert(root_cert::RootCertArgs),
+    /// An intermediate certificate for the PKCS#10 request on stdin, signed
+    /// by the card-held root an intermediate profile names; PEM on stdout.
+    Sign(issuance::IssuanceArgs),
+    /// A leaf certificate for the PKCS#10 request on stdin, under a leaf
+    /// profile's name constraints; PEM on stdout. One per profile per ten
+    /// minutes.
+    Issue(issuance::IssuanceArgs),
 }
 
 pub fn run(argv: &[String]) -> i32 {
@@ -73,6 +84,8 @@ pub fn run(argv: &[String]) -> i32 {
     let result = match args.cmd {
         CaCommand::Csr(args) => csr::execute(args),
         CaCommand::RootCert(args) => root_cert::execute(args),
+        CaCommand::Sign(args) => issuance::execute(piggy::ca_issue::Verb::Sign, args),
+        CaCommand::Issue(args) => issuance::execute(piggy::ca_issue::Verb::Issue, args),
     };
     match result {
         Ok(()) => 0,
@@ -196,7 +209,10 @@ mod tests {
         assert_eq!(Exit::Refused as i32, 1);
         assert_eq!(Exit::Usage as i32, 2);
         assert_eq!(Exit::Profile as i32, 3);
+        assert_eq!(Exit::Csr as i32, 4);
+        assert_eq!(Exit::Names as i32, 5);
         assert_eq!(Exit::IssuerUnavailable as i32, 6);
+        assert_eq!(Exit::RateLimited as i32, 7);
     }
 
     #[test]

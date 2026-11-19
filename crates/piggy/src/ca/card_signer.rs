@@ -36,6 +36,9 @@ pub(crate) struct CardSigner {
     slot: u8,
     algorithm: PivAlgorithm,
     point: Vec<u8>,
+    /// The certificate the slot holds, when it holds one: the issuer
+    /// certificate `sign` and `issue` build under.
+    cert_der: Option<Vec<u8>>,
     /// Set by [`Self::sign_digest`] when the card refused, so the verb can
     /// tell a declined PIN (exit 6) from a build failure (exit 1) after
     /// the builder has folded the error into a `PivError`.
@@ -85,6 +88,7 @@ impl CardSigner {
         // `sign` and `issue` will also want the slot's certificate (the
         // issuer certificate they build under); `root-cert` needs the key
         // alone.
+        let mut cert_der = None;
         let (algorithm, point) = match token.read_slot(slot) {
             Ok(held) => {
                 let point = piggy_piv::cert::ec_sec1_point(held.cert_der()).map_err(|e| {
@@ -92,6 +96,7 @@ impl CardSigner {
                         "slot {slot:02X} holds a certificate whose key is not EC: {e}"
                     ))
                 })?;
+                cert_der = Some(held.cert_der().to_vec());
                 (held.algorithm(), point)
             }
             Err(_) => {
@@ -120,7 +125,20 @@ impl CardSigner {
             slot,
             algorithm,
             point,
+            cert_der,
             sign_failure: None,
+        })
+    }
+
+    /// The certificate the slot holds, DER: the issuer certificate for
+    /// `sign` and `issue`. A slot with none (a root not yet written back
+    /// with `piggy tool write-cert`) cannot issue: exit 6.
+    pub(crate) fn cert_der(&self) -> Result<&[u8], Failure> {
+        self.cert_der.as_deref().ok_or_else(|| {
+            failure(Exit::IssuerUnavailable)(format!(
+                "slot {:02X} holds no certificate: write the root back with `piggy tool write-cert {:02x}` first",
+                self.slot, self.slot
+            ))
         })
     }
 
