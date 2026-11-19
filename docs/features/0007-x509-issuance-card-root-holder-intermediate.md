@@ -760,6 +760,24 @@ that exists on every host without piggy.
   recorded as a `piggy-certificate-v1` act (RFC 0012 §3.2). Residual
   risk: "nothing was signed" stays the operator's belief, mitigated by
   the new root's name constraints.
+  **First act, done 2026-11-19 (operator's account, relayed by the
+  coordinator; the card was not touched by this record's author):** the
+  placeholder was saved as the rollback; `attest 82` was re-read (same
+  key, PIN always, touch always); the pilot root was signed at 09:43:53Z
+  with slot 82 through OpenSSL, the pkcs11 provider and libykcs11, not
+  through `piggy ca root-cert` (#391 is not built): 180 days, CN
+  `circus-pigtrough-github-root-2026-11`, pathlen 1, permitted DNS
+  `github.com` only, all IP ranges excluded; it was written with `piggy
+  tool -K default write-cert 82`, so the management key is still the
+  factory default (rotation is designed for the next sitting); the card's
+  certificate and the signed file have the same DER sha256,
+  `20a9af00b700d8abe47fdcda82a9a59bd0beb52e589dc14310b7f970223cb095`,
+  the key is unchanged and subject equals issuer. **Not done:** the
+  `piggy-certificate-v1` act on 9C for this root (RFC 0012 §3.2), which
+  needs phase (ii)'s verb and is not improvised. Gaps found in the run,
+  filed: #395 (attestation compare), #396 (`piggy tool` management key
+  from store or argv), #397 (attestation verification for slots 82 to
+  95).
 - **Ed25519 X.509.** Not pursued while nix's acceptance is untested.
 
 ## More Information
