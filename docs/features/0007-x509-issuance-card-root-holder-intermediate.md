@@ -215,7 +215,7 @@ that cannot collide with 9A (SSH authentication), 9C (operator acts) or
 **Slot 82 as it stands on the operator's card (2026-11-18, relayed by
 the coordinator, circus/eager-holly; recorded here by piggy/lucid-larch
 for the hung design-owner session).** The slot's attestation was
-VERIFIED on the host twerk against the Yubico root: the chain is the
+VERIFIED on the operator's card host against the Yubico root: the chain is the
 leaf `YubiKey PIV Attestation 82`, then this card's F9 certificate, then
 `Yubico PIV Root CA Serial 263751`; the attested key is slot 82's key
 (`ecdsa-sha2-nistp256`, P-256); the attested policy is PIN always and
