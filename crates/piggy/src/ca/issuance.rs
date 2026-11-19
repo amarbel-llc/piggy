@@ -187,6 +187,8 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
     let csr_algorithm = piggy_piv::csr_check::parse_csr(&csr_der)
         .map_err(|e| refused(Refusal::Csr(e)))?
         .algorithm;
+    // A P-384 request gets no act: refused with no card touched.
+    certificate_act::check_certified_key(csr_algorithm)?;
     // The act's path is judged before the card is looked for: a taken path
     // or a missing directory is refused with nothing else touched.
     let act_out = certificate_act::act_out_path(args.out.as_deref(), args.act_out.clone())?;
