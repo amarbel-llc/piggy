@@ -375,6 +375,20 @@ impl PivToken {
         Ok(crate::pinfo::parse_pinfo(&data))
     }
 
+    /// The YubicoPIV admin data object's flags byte (`5FFF00`, see
+    /// [`crate::pinfo::ADMIN_DATA_TAG`]), readable without a PIN: `Ok(None)`
+    /// when the object exists without flags, `Err(PivError::Apdu { sw:
+    /// 0x6A82 })` when the card has none (never written by Yubico's tooling,
+    /// or not a YubiKey).
+    pub fn read_admin_flags(&self) -> Result<Option<u8>, PivError> {
+        let apdu = Apdu::get_data(crate::pinfo::ADMIN_DATA_TAG);
+        let (data, sw) = self.transmit(&apdu)?;
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+        Ok(crate::pinfo::parse_admin_flags(&data))
+    }
+
     /// The card's CHUID fields for the `list` port (signed flag, cardholder
     /// UUID, FASC-N, expiry), parsed from the response retained at connect.
     /// Returns the default (all-`None`, unsigned) for an uninitialized card.

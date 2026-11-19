@@ -72,6 +72,15 @@ impl RotateCard for TokenCard {
     }
 
     fn pin_protection(&mut self) -> PinProtection {
+        // Yubico's tooling records the mode in the admin data object, which
+        // needs no PIN: a set flag answers before any key is tried. A clear or
+        // absent flag proves nothing (piggy never writes that object), so the
+        // Printed Information object is read next.
+        if let Ok(Some(flags)) = self.token.read_admin_flags() {
+            if flags & piggy_piv::pinfo::ADMIN_FLAG_PROTECTED_MGM != 0 {
+                return PinProtection::Yes;
+            }
+        }
         protection_of(self.token.read_pinfo())
     }
 

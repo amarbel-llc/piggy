@@ -73,9 +73,69 @@ pub(crate) fn parse_pinfo(response: &[u8]) -> Pinfo {
     pi
 }
 
+/// The YubicoPIV admin data object (`5FFF00`), written by Yubico's own
+/// tooling: `80 { 81 <flags> [82 <salt>] [83 <timestamp>] }`. Readable
+/// without a PIN, unlike the Printed Information object.
+pub const ADMIN_DATA_TAG: u32 = 0x5FFF00;
+
+/// Admin-data flag: the PUK is blocked.
+pub const ADMIN_FLAG_PUK_BLOCKED: u8 = 0x01;
+
+/// Admin-data flag: the management key is kept in the Printed Information
+/// object under the PIN (PIN-protected management-key mode).
+pub const ADMIN_FLAG_PROTECTED_MGM: u8 = 0x02;
+
+/// The admin data object's flags byte, or `None` when the object carries
+/// none (or is not the shape Yubico's tooling writes). Lenient, like
+/// [`parse_pinfo`].
+pub(crate) fn parse_admin_flags(response: &[u8]) -> Option<u8> {
+    let mut outer = crate::tlv::TlvReader::new(response);
+    let Ok(0x53) = outer.read_tag() else {
+        return None;
+    };
+    let body = outer.read_value().ok()?;
+    let mut r = crate::tlv::TlvReader::new(body);
+    while r.has_remaining() {
+        let (Ok(tag), Ok(val)) = (r.read_tag(), r.read_value()) else {
+            return None;
+        };
+        if tag != 0x80 {
+            continue;
+        }
+        let mut inner = crate::tlv::TlvReader::new(val);
+        while inner.has_remaining() {
+            let (Ok(t), Ok(v)) = (inner.read_tag(), inner.read_value()) else {
+                return None;
+            };
+            if t == 0x81 {
+                return v.first().copied();
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_flags_are_read_from_the_80_81_nest_and_nowhere_else() {
+        // 53 { 80 { 81 02, 83 04 <ts> } }: protected management key set.
+        let body = [0x80, 0x09, 0x81, 0x01, 0x02, 0x83, 0x04, 1, 2, 3, 4];
+        assert_eq!(parse_admin_flags(&wrap53(&body)), Some(0x02));
+        assert_eq!(
+            parse_admin_flags(&wrap53(&body)).map(|f| f & ADMIN_FLAG_PROTECTED_MGM != 0),
+            Some(true)
+        );
+        // Flags present, mode off.
+        let body = [0x80, 0x03, 0x81, 0x01, 0x01];
+        assert_eq!(parse_admin_flags(&wrap53(&body)), Some(0x01));
+        // No flags tag, an empty object, another outer tag.
+        assert_eq!(parse_admin_flags(&wrap53(&[0x80, 0x00])), None);
+        assert_eq!(parse_admin_flags(&wrap53(&[])), None);
+        assert_eq!(parse_admin_flags(&[0x54, 0x00]), None);
+    }
 
     /// Wrap a PINFO body in the `53` envelope a GET DATA response carries.
     fn wrap53(body: &[u8]) -> Vec<u8> {

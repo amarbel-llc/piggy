@@ -363,9 +363,10 @@ impl Run<'_> {
         });
     }
 
-    /// The card's PIN, asked once through the frontend (typed: a refusal is
-    /// the operator's, exit 4) and kept for the run.
-    fn pin(&mut self, why: &str, point: &str) -> Result<Zeroizing<String>, Stop> {
+    /// The card's PIN through the frontend, asked once and kept for the run
+    /// (so a wrong PIN is tried against the card once per run, at the first
+    /// read, which stops the run).
+    fn ask_pin(&mut self, why: &str) -> Result<Zeroizing<String>, FrontendError> {
         if let Some(pin) = &self.pin {
             return Ok(pin.clone());
         }
@@ -376,25 +377,27 @@ impl Run<'_> {
             slot: Some("9d".into()),
             attempts_remaining: None,
         };
-        let pin = match self.fe.request_secret(request) {
-            Ok(pin) => pin,
-            Err(FrontendError::Declined(why)) => {
-                return Err(self.stop(
-                    point,
-                    Exit::Declined,
-                    format!("the PIN prompt was declined: {why}"),
-                ));
-            }
-            Err(e) => {
-                return Err(self.stop(
-                    point,
-                    Exit::Stopped,
-                    format!("the PIN could not be asked for: {e}"),
-                ));
-            }
-        };
+        let pin = self.fe.request_secret(request)?;
         self.pin = Some(pin.clone());
         Ok(pin)
+    }
+
+    /// [`Self::ask_pin`] where a refusal is the operator's no to the
+    /// rotation (exit 4), said on `point`.
+    fn pin(&mut self, why: &str, point: &str) -> Result<Zeroizing<String>, Stop> {
+        match self.ask_pin(why) {
+            Ok(pin) => Ok(pin),
+            Err(FrontendError::Declined(why)) => Err(self.stop(
+                point,
+                Exit::Declined,
+                format!("the PIN prompt was declined: {why}"),
+            )),
+            Err(e) => Err(self.stop(
+                point,
+                Exit::Stopped,
+                format!("the PIN could not be asked for: {e}"),
+            )),
+        }
     }
 
     fn authenticates(&mut self, key: &Key, which: &str) -> Result<bool, Stop> {
@@ -420,7 +423,7 @@ impl Run<'_> {
                 return Err(self.stop(
                     &point,
                     Exit::Store,
-                    format!("{name} did not decrypt here: {e}"),
+                    format!("{name} did not decrypt here: {e} (a wrong PIN decrypts nothing and was tried once: check it; otherwise the entry is not sealed to this card)"),
                 ));
             }
         };
@@ -603,20 +606,24 @@ impl Run<'_> {
     /// The verdict when no key piggy holds authenticates: first the
     /// PIN-protected question with the PIN, when the object needed it,
     /// because for that card the key is recoverable and "factory reset" would
-    /// be the wrong word.
+    /// be the wrong word. A PIN declined here is not a no to the rotation
+    /// (there is none left to decline): the verdict stays exit 6, with the
+    /// mode not ruled out.
     fn irreversible(&mut self, tried: &[&str]) -> Stop {
         const POINT: &str = "a key piggy holds authenticates";
         let label = self.label();
         let mut caveat = String::new();
         if self.gate == PinProtection::NeedsPin {
-            match self.pin("read the card's Printed Information object (is the management key kept under the PIN?)", POINT) {
+            match self.ask_pin(
+                "read the card's Printed Information object (is the management key kept under the PIN?)",
+            ) {
                 Ok(pin) => match self.card.pin_protection_with_pin(&pin) {
                     Ok(PinProtection::Yes) => return self.pin_protected_stop(POINT),
                     Ok(PinProtection::No) => {}
                     Ok(other) => caveat = unknown_mode_caveat(&format!("{other:?}")),
                     Err(e) => caveat = unknown_mode_caveat(&e.to_string()),
                 },
-                Err(stop) => return stop,
+                Err(e) => caveat = unknown_mode_caveat(&format!("the PIN prompt answered: {e}")),
             }
         } else if !matches!(self.gate, PinProtection::No) {
             caveat = unknown_mode_caveat(&format!("{:?}", self.gate));
@@ -766,7 +773,7 @@ impl Run<'_> {
                 return Err(self.stop(
                     READ_BACK,
                     Exit::Store,
-                    format!("{seal_name} did not decrypt here: {e}; it is removed and the card is untouched"),
+                    format!("{seal_name} did not decrypt here: {e} (a wrong PIN decrypts nothing and was tried once: check it); it is removed and the card is untouched"),
                 ));
             }
         }
@@ -1433,12 +1440,16 @@ mod tests {
         assert_eq!(stop.exit, Exit::Irreversible, "{stop}");
         assert!(!stop.message.contains("could not be told"), "{stop}");
 
-        // The PIN declined at that question is the operator's no.
+        // The PIN declined at that question is not a no to any rotation: the
+        // verdict stays irreversible, with the mode not ruled out.
         let mut card = MockCard::on(&[0x77; 24]);
         card.protection = PinProtection::NeedsPin;
         let mut fe = TestFrontend::answering(&[]).declining_the_pin();
         let report = run_with(&mut card, &store, &mut fe);
-        assert_eq!(report.outcome.unwrap_err().exit, Exit::Declined);
+        let stop = report.outcome.unwrap_err();
+        assert_eq!(stop.exit, Exit::Irreversible, "{stop}");
+        assert!(stop.message.contains("could not be told"), "{stop}");
+        assert!(stop.message.contains("declined"), "{stop}");
 
         // An object that cannot be read at all: the mode stays a caveat in
         // the irreversible words, and a healthy card is not held up by it.

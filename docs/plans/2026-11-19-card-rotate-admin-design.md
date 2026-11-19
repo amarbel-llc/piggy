@@ -73,8 +73,12 @@ First rotation (no entry; the card is on the factory default key):
   piggy, not built). Such a card is keyed by a key the store never held, so
   sealing a key to the store and calling it the card's would be false. The
   object is PIN-gated on a YubiKey (`read_pinfo` answers `6982` without the
-  PIN; verified in piggy-piv), so the gate is best-effort by construction:
-  the verb reads the object without a PIN first and, when the card answers
+  PIN; verified in piggy-piv), so the gate is best-effort by construction.
+  Yubico's own tooling also records the mode as a flag in the admin data
+  object (`5FFF00`, tag `81`, bit `02`), which needs no PIN: a set flag
+  answers yes before any key is tried; a clear or absent flag proves
+  nothing, since piggy never writes that object. Next the verb reads the
+  Printed Information object without a PIN and, when the card answers
   (fibby does, PIN-free), refuses a card that keeps the key there (exit 5,
   naming the mode, piggy#198, and that the key is recoverable with the PIN
   through the card's own tooling). When the object is behind the PIN the
@@ -82,7 +86,10 @@ First rotation (no entry; the card is on the factory default key):
   frontend, only before the irreversible verdict, so a PIN-protected card
   is never told "only a factory reset remains". An object that cannot be
   read at all leaves that verdict with a caveat sentence instead of a
-  false certainty. `MockCard` rows cover every answer.
+  false certainty, and so does a PIN declined at that last question: with
+  no rotation left to decline, the verdict stays exit 6 (wrappers key on
+  it) and says the mode was not ruled out. `MockCard` rows cover every
+  answer.
 - **b. generate.** 24 random bytes on guarded pages (`piggy-guard`). The
   one copy outside them is the hex spelling the store seals, a
   `Zeroizing<String>` zeroized when dropped.
