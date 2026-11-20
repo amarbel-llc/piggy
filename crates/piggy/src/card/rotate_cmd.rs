@@ -174,7 +174,7 @@ fn print_tap(points: &[Point]) -> std::io::Result<()> {
                 (true, true) => rep.ok(&point.name)?,
                 (true, false) => rep.ok_diag(&point.name, &diags)?,
                 (false, _) => rep.not_ok_diag(&point.name, &diags)?,
-            }
+            };
         }
         rep.finish()?;
     }

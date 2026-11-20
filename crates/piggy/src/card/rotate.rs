@@ -376,6 +376,9 @@ impl Run<'_> {
             card: Some(self.cfg.card.clone()),
             slot: Some("9d".into()),
             attempts_remaining: None,
+            // The tty binding renders the kind and the card, not `prompt`;
+            // the reason reaches the operator through `detail`.
+            detail: Some(format!("to {why}")),
         };
         let pin = self.fe.request_secret(request)?;
         self.pin = Some(pin.clone());
