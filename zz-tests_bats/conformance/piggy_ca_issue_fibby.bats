@@ -213,7 +213,9 @@ _assert_certified() {
     echo "the verb did not prompt exactly once" >&2; _show; return 1; }
   [[ $(($(operator_act_prompt_count "$AGENT_LOG") - PROMPTS_BEFORE)) -eq 1 ]] || {
     echo "the card agent did not prompt exactly once" >&2; _show; return 1; }
-  grep -q '^\[piggy-test-askpass\] operator act kind: certificate$' "$AGENT_LOG" || {
+  # One banner per prompt, the root's included: this certificate's is the
+  # one after PROMPTS_BEFORE.
+  [[ $(grep -c '^\[piggy-test-askpass\] operator act kind: certificate$' "$AGENT_LOG") -eq $((PROMPTS_BEFORE + 1)) ]] || {
     echo "the act's prompt is not under the certificate banner" >&2; _show; return 1; }
   grep -q "DER sha256 $der_hex" "$AGENT_LOG" || {
     echo "the act's prompt does not show the DER's sha256" >&2; _show; return 1; }
@@ -284,7 +286,7 @@ function an_intermediate_is_signed_under_the_root_and_its_act_sealed { # @test
   _ca sign inter "$WORKDIR/inter.csr"
   [[ $status -eq 0 ]] || { echo "sign: want exit 0, got $status" >&2; _show; return 1; }
   [[ -z $output ]] || { echo "--out given, yet stdout carried: $output" >&2; return 1; }
-  [[ $stderr == *"signs a intermediate certificate under profile inter"* ]] || {
+  [[ $stderr == *"intermediate certificate under profile inter"* ]] || {
     echo "the notice does not describe the certificate" >&2; _show; return 1; }
 
   _assert_certified inter piggy:x509-ca
@@ -350,9 +352,12 @@ function a_profile_of_the_wrong_kind_is_exit_2 { # @test
   _csr inter "/CN=piggy-test intermediate"
   _ca issue inter "$WORKDIR/inter.csr"
   _assert_refusal 2 "issue with an intermediate profile" inter
-  # `root-cert` is the root's verb: sign and issue take no root profile.
-  _ca issue root "$WORKDIR/leaf.csr"
-  _assert_refusal 2 "issue with the root profile" root
+  # `root-cert` is the root's verb: sign and issue take no root profile. Its
+  # own --out: the root's PEM and act are already in $WORKDIR/root.pem*, and
+  # a taken act path is refused first (exit 1).
+  SSH_AUTH_SOCK="$AGENT_SOCK" run --separate-stderr \
+    "$PIGGY_BIN" ca issue --profile root --out "$WORKDIR/wrongroot.pem" <"$WORKDIR/leaf.csr"
+  _assert_refusal 2 "issue with the root profile" wrongroot
 }
 
 function a_request_that_is_not_a_p256_pkcs10_request_is_refused_before_any_prompt { # @test
