@@ -20,9 +20,13 @@ use clap::{Parser, Subcommand};
 mod card_signer;
 mod certificate_act;
 mod csr;
+mod holder_issuer;
 mod issuance;
 mod leaf_csr;
 mod root_cert;
+mod verify;
+
+pub(crate) use verify::certificates_in;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exit {
@@ -78,6 +82,10 @@ enum CaCommand {
     /// profile's name constraints; PEM on stdout. One per profile per ten
     /// minutes.
     Issue(issuance::IssuanceArgs),
+    /// Check a leaf under intermediates under one given root: signatures,
+    /// validity, CA constraints, the leaf's profile, name constraints; TAP
+    /// on stdout. A checker, not a gate.
+    Verify(verify::VerifyArgs),
 }
 
 pub fn run(argv: &[String]) -> i32 {
@@ -94,6 +102,7 @@ pub fn run(argv: &[String]) -> i32 {
         CaCommand::RootCert(args) => root_cert::execute(args),
         CaCommand::Sign(args) => issuance::execute(piggy::ca_issue::Verb::Sign, args),
         CaCommand::Issue(args) => issuance::execute(piggy::ca_issue::Verb::Issue, args),
+        CaCommand::Verify(args) => verify::execute(args),
     };
     match result {
         Ok(()) => 0,
@@ -102,6 +111,41 @@ pub fn run(argv: &[String]) -> i32 {
             failure.exit as i32
         }
     }
+}
+
+/// The OpenSSH public key line of an EC P-256 or P-384 SEC1 point (RFC
+/// 5656 §3.1: the key type, the curve name and the point, each
+/// length-prefixed, base64), with `comment` after it when not empty;
+/// `None` for any other algorithm.
+pub(crate) fn openssh_ecdsa_line(
+    algorithm: piggy_piv::PivAlgorithm,
+    point: &[u8],
+    comment: &str,
+) -> Option<String> {
+    use base64::Engine;
+    let (key_type, curve): (&[u8], &[u8]) = match algorithm {
+        piggy_piv::PivAlgorithm::EcP256 => (b"ecdsa-sha2-nistp256", b"nistp256"),
+        piggy_piv::PivAlgorithm::EcP384 => (b"ecdsa-sha2-nistp384", b"nistp384"),
+        _ => return None,
+    };
+    fn put(buf: &mut Vec<u8>, s: &[u8]) {
+        buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+        buf.extend_from_slice(s);
+    }
+    let mut blob = Vec::new();
+    put(&mut blob, key_type);
+    put(&mut blob, curve);
+    put(&mut blob, point);
+    let mut line = format!(
+        "{} {}",
+        std::str::from_utf8(key_type).expect("ASCII"),
+        base64::engine::general_purpose::STANDARD.encode(blob)
+    );
+    if !comment.is_empty() {
+        line.push(' ');
+        line.push_str(comment);
+    }
+    Some(line)
 }
 
 /// The agent socket every verb that signs through the agent uses.
@@ -279,6 +323,7 @@ mod tests {
             slot: Some("82".into()),
             guid: Some("0123456789abcdef0123456789abcdef".into()),
             holder_key: None,
+            issuer_cert: None,
             attestation_root: root.map(str::to_owned),
         };
         assert_eq!(attestation_root_pem(&issuer(None)).unwrap(), None);

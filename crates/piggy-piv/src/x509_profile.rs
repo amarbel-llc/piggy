@@ -176,6 +176,61 @@ pub fn build_leaf_cert(
     serial: &[u8],
     sign_digest: impl FnOnce(&[u8]) -> Result<Vec<u8>, PivError>,
 ) -> Result<Vec<u8>, PivError> {
+    let parts = leaf_parts(pubkey_point, algorithm, dns_names, issuer_cert_der)?;
+    sign_tbs_with(
+        true,
+        parts.issuer,
+        parts.subject,
+        parts.spki,
+        validity,
+        serial,
+        parts.extensions,
+        sign_digest,
+    )
+}
+
+/// [`build_leaf_cert`] for a signer that hashes for itself: `sign_tbs` is
+/// handed the DER TBSCertificate, not its digest, and returns the DER
+/// ECDSA signature over it (ECDSA-SHA256 under a P-256 issuer, ECDSA-SHA384
+/// under P-384). An SSH agent is such a signer (RFC 5656 §3.1.2), which is
+/// how a holder-held intermediate issues a leaf (FDR 0007 phase (iii-b)).
+pub fn build_leaf_cert_over_tbs(
+    pubkey_point: &[u8],
+    algorithm: PivAlgorithm,
+    dns_names: &[String],
+    issuer_cert_der: &[u8],
+    validity: CertValidity,
+    serial: &[u8],
+    sign_tbs: impl FnOnce(&[u8]) -> Result<Vec<u8>, PivError>,
+) -> Result<Vec<u8>, PivError> {
+    let parts = leaf_parts(pubkey_point, algorithm, dns_names, issuer_cert_der)?;
+    sign_tbs_with(
+        false,
+        parts.issuer,
+        parts.subject,
+        parts.spki,
+        validity,
+        serial,
+        parts.extensions,
+        sign_tbs,
+    )
+}
+
+/// What a leaf's TBSCertificate is made of, before the validity and the
+/// serial: shared by the two leaf builders.
+struct Parts {
+    issuer: Issuer,
+    subject: Name,
+    spki: SubjectPublicKeyInfoOwned,
+    extensions: Vec<Extension>,
+}
+
+fn leaf_parts(
+    pubkey_point: &[u8],
+    algorithm: PivAlgorithm,
+    dns_names: &[String],
+    issuer_cert_der: &[u8],
+) -> Result<Parts, PivError> {
     let first = dns_names
         .first()
         .ok_or_else(|| PivError::Other("a leaf needs at least one DNS name".into()))?;
@@ -203,20 +258,16 @@ pub fn build_leaf_cert(
         extension(&SubjectKeyIdentifier(octets(&ski)?), &subject)?,
         extension(&authority_key_id(&issuer.key_id)?, &subject)?,
     ];
-    let issuer_algorithm = issuer.algorithm;
-    sign_tbs(
-        Issuer {
+    Ok(Parts {
+        issuer: Issuer {
             name: issuer.name,
-            algorithm: issuer_algorithm,
+            algorithm: issuer.algorithm,
             not_after: Some(issuer.not_after),
         },
         subject,
         spki,
-        validity,
-        serial,
         extensions,
-        sign_digest,
-    )
+    })
 }
 
 /// What a certificate needs from its issuer.
@@ -330,6 +381,32 @@ fn sign_tbs(
     extensions: Vec<Extension>,
     sign_digest: impl FnOnce(&[u8]) -> Result<Vec<u8>, PivError>,
 ) -> Result<Vec<u8>, PivError> {
+    sign_tbs_with(
+        true,
+        issuer,
+        subject,
+        spki,
+        validity,
+        serial,
+        extensions,
+        sign_digest,
+    )
+}
+
+/// [`sign_tbs`], with `hashed` saying what `sign` is handed: the digest of
+/// the DER TBSCertificate (a card's prehash signer) or the DER itself (an
+/// agent, which hashes with the curve's digest for itself).
+#[allow(clippy::too_many_arguments)]
+fn sign_tbs_with(
+    hashed: bool,
+    issuer: Issuer,
+    subject: Name,
+    spki: SubjectPublicKeyInfoOwned,
+    validity: CertValidity,
+    serial: &[u8],
+    extensions: Vec<Extension>,
+    sign: impl FnOnce(&[u8]) -> Result<Vec<u8>, PivError>,
+) -> Result<Vec<u8>, PivError> {
     let (sig_oid, digest) = signature_params(issuer.algorithm)?;
     let sig_alg = AlgorithmIdentifierOwned {
         oid: sig_oid,
@@ -361,7 +438,11 @@ fn sign_tbs(
         extensions: Some(extensions),
     };
     let tbs_der = tbs.to_der().map_err(der_err)?;
-    let sig_der = sign_digest(&digest(&tbs_der))?;
+    let sig_der = if hashed {
+        sign(&digest(&tbs_der))?
+    } else {
+        sign(&tbs_der)?
+    };
     Certificate {
         tbs_certificate: tbs,
         signature_algorithm: sig_alg,
@@ -761,6 +842,47 @@ mod tests {
         ] {
             assert!(t.contains(want), "missing {want:?} in\n{t}");
         }
+    }
+
+    /// The holder's way: the signer is handed the TBSCertificate and hashes
+    /// it itself, as an SSH agent does; the certificate is the same shape
+    /// and verifies under the root through the intermediate.
+    #[test]
+    fn a_leaf_signed_over_its_tbs_by_a_self_hashing_signer_verifies() {
+        use openssl::hash::{MessageDigest, hash};
+        let root_key = Key::new(PivAlgorithm::EcP256);
+        let root_der = root(&root_key, &["github.com"]);
+        let int_key = Key::new(PivAlgorithm::EcP256);
+        let int_der = build_intermediate_cert(
+            &int_key.point(),
+            int_key.algorithm,
+            "piggy-test intermediate",
+            &names(&["github.com"]),
+            &root_der,
+            validity(7),
+            &[0x11; 16],
+            root_key.signer(),
+        )
+        .unwrap();
+        let leaf_key = Key::new(PivAlgorithm::EcP256);
+        let leaf_der = build_leaf_cert_over_tbs(
+            &leaf_key.point(),
+            leaf_key.algorithm,
+            &names(&["api.github.com"]),
+            &int_der,
+            validity(1),
+            &[0x22; 16],
+            |tbs_der| {
+                let digest = hash(MessageDigest::sha256(), tbs_der).unwrap();
+                Ok(EcdsaSig::sign(&digest, &int_key.ec)
+                    .unwrap()
+                    .to_der()
+                    .unwrap())
+            },
+        )
+        .unwrap();
+        verifies(&root_der, &[&int_der], &leaf_der).unwrap();
+        assert!(text(&leaf_der).contains("ecdsa-with-SHA256"));
     }
 
     /// The pilot: the root signs the leaf directly (pathlen 1 allows it).

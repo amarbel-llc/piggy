@@ -181,7 +181,15 @@ fn ec_key_of(spki: &SubjectPublicKeyInfoOwned) -> Result<(PivAlgorithm, Vec<u8>)
     Ok((algorithm, point))
 }
 
-fn verifies(algorithm: PivAlgorithm, point: &[u8], message: &[u8], sig_der: &[u8]) -> bool {
+/// Whether `sig_der` (DER ECDSA) over `message` verifies with the P-256 or
+/// P-384 key at `point`, hashing with the curve's digest. Shared with the
+/// chain check (`x509_verify`).
+pub(crate) fn verifies(
+    algorithm: PivAlgorithm,
+    point: &[u8],
+    message: &[u8],
+    sig_der: &[u8],
+) -> bool {
     use p256::ecdsa::signature::Verifier as _;
     match algorithm {
         PivAlgorithm::EcP256 => {

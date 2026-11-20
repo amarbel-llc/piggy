@@ -276,6 +276,10 @@ function a_leaf_is_issued_under_the_root_and_its_act_sealed { # @test
   # and the profile's whole name set, whatever the request asked.
   run openssl verify -CAfile "$WORKDIR/root.pem" "$WORKDIR/leaf.pem"
   [[ $status -eq 0 ]] || { echo "openssl verify: $output" >&2; return 1; }
+  # piggy's own checker agrees, with the key file as the expected key.
+  run "$PIGGY_BIN" ca verify --root "$WORKDIR/root.pem" --key "$WORKDIR/leaf.key" "$WORKDIR/leaf.pem"
+  [[ $status -eq 0 && $output == "TAP version 14"* && $output != *"not ok"* ]] || {
+    echo "piggy ca verify: $status: $output" >&2; return 1; }
   [[ $(openssl x509 -in "$WORKDIR/leaf.pem" -noout -pubkey) == "$(openssl req -in "$WORKDIR/leaf.csr" -noout -pubkey)" ]] || {
     echo "the leaf's key is not the request's key" >&2; return 1; }
   [[ $(openssl x509 -in "$WORKDIR/leaf.pem" -noout -pubkey) == "$(openssl pkey -in "$WORKDIR/leaf.key" -pubout 2>/dev/null)" ]] || {
@@ -375,6 +379,25 @@ function a_profile_of_the_wrong_kind_is_exit_3 { # @test
   # _assert_refusal names its stamp after the --out stem, which is not the
   # profile here: check the stamp the root profile would arm.
   [[ ! -e $STATE/rate/root ]] || { echo "issue with the root profile armed the rate limit" >&2; return 1; }
+}
+
+function a_profile_naming_outside_the_roots_constraints_is_exit_3_before_the_request_is_read { # @test
+  _root_in_slot_82
+  # The root permits github.com and api.github.com; this profile names more.
+  cat >"$CONFIG/ca-profiles/wide.toml" <<EOF
+kind = "leaf"
+names = ["github.com", "evil.example"]
+lifetime_hours = 720
+[issuer]
+slot = "82"
+guid = "$GUID"
+attestation_root = "$WORKDIR/f9.pem"
+EOF
+  # No request at all: the profile is refused before stdin is read.
+  _ca issue wide /dev/null
+  _assert_refusal 3 "a profile naming outside the issuer's constraints" wide
+  [[ $stderr == *"name constraints do not admit"* && $stderr == *"evil.example"* ]] || {
+    echo "the refusal does not name the constraint and the name: $stderr" >&2; return 1; }
 }
 
 function a_request_that_is_not_a_p256_pkcs10_request_is_refused_before_any_prompt { # @test

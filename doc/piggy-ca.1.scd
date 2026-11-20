@@ -10,7 +10,8 @@ piggy-ca - X.509 issuance: a card-held root, a holder-held intermediate, name-co
 *piggy ca leaf-csr* *--key-out* _FILE_ *--cn* _NAME_ [*--out* _FILE_]++
 *piggy ca root-cert* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
 *piggy ca sign* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
-*piggy ca issue* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]
+*piggy ca issue* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
+*piggy ca verify* *--root* _FILE_ [*--untrusted* _FILE_]... [*--key* _FILE_] [*--at* _UNIX_] _LEAF_
 
 # DESCRIPTION
 
@@ -29,13 +30,24 @@ feed them.
 	has the card-held root certify it.
 
 *issue*
-	A leaf for one of the permitted names, signed by the card-held root
-	the leaf profile names, one at a time, from a request.
+	A leaf for the permitted names, from a request, one at a time: signed
+	by the card-held root the leaf profile names (the pilot), or by the
+	holder-held intermediate a leaf profile names with *holder_key* and
+	*issuer_cert* under *[issuer]* (no card, no PIN, no act; the chain the
+	proxy serves comes out, the leaf then the intermediate).
 
 *leaf-csr*
 	The leaf's own key and request, made on the host that serves the leaf
 	with no agent, no holder and no card. The key file never leaves that
 	host; only the request goes to *issue*.
+
+*verify*
+	The checker: a leaf under its intermediates under the root, every
+	rule a verifier applies (signatures, validity, the CA constraints and
+	pathlen, the leaf's profile, the name constraints down the path), as
+	TAP. It gates nothing: issuance never calls it, and a chain it
+	refuses was still issued. *piggy cert show* prints one certificate's
+	fields, checking nothing.
 
 The verbs' flags, the certificate fields and the profile file are in
 *piggy*(1) (the *ca* entries). This page is how they fit together.
@@ -65,6 +77,22 @@ card gone, the agent refusing) means the card's signature is dropped and
 nothing is written. A P-384 key gets no act (RFC 0013 names only P-256),
 so a P-384 root or request is refused before any prompt.
 
+## The holder issues leaves
+
+Once the intermediate is signed, a leaf profile may name the holder key
+instead of a card slot: *holder_key* is the intermediate's OpenSSH public
+key line (what *piggy holder mint --type p256* printed and *piggy ca csr*
+requested for), *issuer_cert* the absolute path of its card-signed
+certificate. *issue* then signs through the holder agent on
+*PIGGY_AUTH_SOCK*, else *SSH_AUTH_SOCK*, by an ordinary sign request from
+inside the key's scope: no card, no PIN, no touch, and no certificate act
+(the card's act on the intermediate stands; the audit line carries no
+*act=*). The agent must report itself a holder (*agent-mode@piggy*) and
+list the key, or the issuer is unavailable (exit 6): a plain ssh-agent
+never issues. The leaf's *notAfter* is capped by the intermediate's. Only
+a leaf profile may name a holder: a root and an intermediate are the
+card's, and *sign* stays on the card.
+
 ## Profiles
 
 The policy is a profile, _ca-profiles/NAME.toml_ under *PIGGY_CONFIG_HOME*
@@ -93,13 +121,19 @@ One table for every verb, so a renewal timer reads one meaning per code.
 *1*	refused for any other reason (on stderr), including a certificate
 	written but not recorded
 *2*	usage
-*3*	the profile is unknown, unreadable or not of the verb's kind
+*3*	the profile is unknown, unreadable, not of the verb's kind, or names
+	what its issuer's name constraints do not admit (checked against the
+	issuer's certificate before the request is read)
 *4*	the request is malformed or its key type refused
 *5*	the request's names are outside the profile
 *6*	the issuer key is unavailable: the card is not attached, the slot holds
 	no attestable key or no certificate to issue under, the key is not
 	proven the card's, the PIN was refused, or no agent serves the 9C key
 *7*	rate limited
+
+*verify* has no profile and no issuer, so its table is the rows that
+apply: *0* every check passed, *1* a check failed, *2* usage, *4* a file
+that is unreadable or not a certificate.
 
 # ENVIRONMENT
 
@@ -120,7 +154,8 @@ piggy tool write-cert 82 < root.pem
 piggy ca sign --profile shithub-intermediate --out int.pem < int.csr
 piggy ca leaf-csr --key-out leaf.key --cn github.com --out leaf.csr   # on the leaf's host
 piggy ca issue --profile shithub-leaf --out leaf.pem < leaf.csr
-openssl verify -CAfile root.pem -untrusted int.pem leaf.pem
+piggy ca verify --root root.pem --untrusted int.pem --key leaf.key leaf.pem
+piggy cert show leaf.pem
 ```
 
 # SEE ALSO

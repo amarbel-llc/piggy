@@ -97,27 +97,9 @@ pub(crate) fn make(cn: &str) -> Result<LeafRequest, String> {
     Ok(LeafRequest {
         key_pem,
         csr_der,
-        public_line: openssh_line(&point),
+        public_line: super::openssh_ecdsa_line(PivAlgorithm::EcP256, &point, PUBLIC_LINE_COMMENT)
+            .expect("P-256 has an OpenSSH form"),
     })
-}
-
-/// The OpenSSH public key line of a P-256 SEC1 point (RFC 5656 §3.1):
-/// `ecdsa-sha2-nistp256`, the curve name and the point, each
-/// length-prefixed, base64.
-fn openssh_line(point: &[u8]) -> String {
-    use base64::Engine;
-    fn put(buf: &mut Vec<u8>, s: &[u8]) {
-        buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
-        buf.extend_from_slice(s);
-    }
-    let mut blob = Vec::new();
-    put(&mut blob, b"ecdsa-sha2-nistp256");
-    put(&mut blob, b"nistp256");
-    put(&mut blob, point);
-    format!(
-        "ecdsa-sha2-nistp256 {} {PUBLIC_LINE_COMMENT}",
-        base64::engine::general_purpose::STANDARD.encode(blob)
-    )
 }
 
 /// Create `path` fresh with mode 0600 and write the key into it. A file
@@ -137,7 +119,15 @@ pub(crate) fn write_key(path: &Path, pem: &[u8]) -> Result<(), String> {
         })?;
     file.write_all(pem)
         .and_then(|()| file.sync_all())
-        .map_err(|e| format!("write {}: {e}", path.display()))
+        .map_err(|e| {
+            // The file is this call's own (created just above): a half
+            // written key must not stay behind.
+            let removed = match std::fs::remove_file(path) {
+                Ok(()) => "the file was removed".to_string(),
+                Err(r) => format!("the file was NOT removed ({r}): remove it by hand"),
+            };
+            format!("write {}: {e}; {removed}", path.display())
+        })
 }
 
 pub(crate) fn execute(args: LeafCsrArgs) -> Result<(), Failure> {

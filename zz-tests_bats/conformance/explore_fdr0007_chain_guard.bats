@@ -76,6 +76,7 @@ case "\$1 \$2" in
     while [[ \$# -gt 0 ]]; do [[ \$1 == --out ]] && { printf 'pem\n' >"\$2"; printf 'act\n' >"\$2.act"; }; shift; done
     echo "piggy-ca issued" >>"\$PIGGY_CA_STATE/audit" ;;
   "act canon") case "\$3" in *int.pem.act) echo "- right = piggy:x509-ca" ;; *) echo "- right = piggy:x509-leaf" ;; esac ;;
+  "cert show") case "\$3" in *int.pem) echo "basic-constraints:  critical CA:TRUE pathlen:0" ;; *) echo "dns-names:          github.com, api.github.com"; echo "basic-constraints:  critical CA:FALSE" ;; esac ;;
   *) exit 0 ;;
 esac
 EOF
@@ -161,7 +162,7 @@ function a_good_run_writes_the_profiles_and_drives_sign_then_issue_in_order { # 
   [[ $leaf != *common_name* ]] || { echo "a leaf profile has no common_name" >&2; return 1; }
   # The calls, in order: the two reads, sign, its act checks, issue, its act checks, the read-back.
   local calls
-  calls=$(grep -E '^piggy ' "$WORK/calls" | awk '{print $2, $3}' | tr '\n' ';')
+  calls=$(grep -E '^piggy (tool|ca|act) ' "$WORK/calls" | awk '{print $2, $3}' | tr '\n' ';')
   [[ $calls == "tool cert;tool attest-verify;ca sign;act verify;act canon;ca issue;act verify;act canon;tool cert;"* ]] || {
     echo "unexpected call order: $calls" >&2; return 1; }
   [[ $output == *"ok "*"- ca sign:"* && $output == *"ok "*"- ca issue:"* && $output == *"two audit lines"* ]] || {
@@ -175,6 +176,9 @@ function the_holder_half_dry_run_prints_its_steps_and_calls_nothing { # @test
   _holder "piggy-test int" github.com "$WORK/out"
   [[ $status -eq 0 && $output == *"dry-run"* && $output == *"holder mint --scope piggy-ca-intermediate-v1"* && $output == *"ca leaf-csr"* ]] || {
     echo "want a dry-run listing, got $status: $output" >&2; return 1; }
-  [[ ! -e $WORK/calls ]] || { echo "a tool was called in a dry-run: $(cat "$WORK/calls")" >&2; return 1; }
+  # The header's version reads are the only calls a dry-run may make.
+  if [[ -e $WORK/calls ]] && grep -vqE '^(piggy|fibby) --version' "$WORK/calls"; then
+    echo "a tool was called in a dry-run: $(cat "$WORK/calls")" >&2; return 1
+  fi
   [[ ! -e $WORK/out ]] || { echo "a dry-run made the output directory" >&2; return 1; }
 }

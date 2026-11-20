@@ -42,6 +42,7 @@
 //! `install-service`, …) stay reachable via `piggy pivy agent`.
 
 mod ca;
+mod cert_cli;
 mod copy_move;
 mod crypt;
 mod edit;
@@ -184,10 +185,18 @@ enum Command {
         rest: Vec<String>,
     },
 
-    /// X.509 issuance (FDR 0007): `csr` for a holder-held intermediate
-    /// key. `ca` owns its argv parsing.
+    /// X.509 issuance (FDR 0007): `csr`, `leaf-csr`, `root-cert`, `sign`,
+    /// `issue`, `verify`. `ca` owns its argv parsing.
     #[command(name = "ca", disable_help_flag = true)]
     Ca {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+
+    /// Read X.509 certificates back as text (FDR 0007): `show FILE`.
+    /// `cert` owns its argv parsing.
+    #[command(name = "cert", disable_help_flag = true)]
+    Cert {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
@@ -941,6 +950,8 @@ fn main() {
         Command::Holder { rest } => std::process::exit(holder_cli::run(&rest)),
 
         Command::Ca { rest } => std::process::exit(ca::run(&rest)),
+
+        Command::Cert { rest } => std::process::exit(cert_cli::run(&rest)),
 
         Command::Act { rest } => std::process::exit(piggy::act::cli::run(&rest)),
 

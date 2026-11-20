@@ -25,7 +25,10 @@ piggy - PIV smart-card backed password store and agent
 *piggy ca leaf-csr* *--key-out* _FILE_ *--cn* _NAME_ [*--out* _FILE_]++
 *piggy ca root-cert* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
 *piggy ca sign* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
-*piggy ca issue* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]
+*piggy ca issue* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
+*piggy ca verify* *--root* _FILE_ [*--untrusted* _FILE_]... [*--key* _FILE_] [*--at* _UNIX_] _LEAF_
+
+*piggy cert show* _FILE_
 
 *piggy act canon* [_FILE_]
 
@@ -816,8 +819,11 @@ commands:
 
 	Exit status, one table for every *ca* verb so a renewal timer reads
 	one meaning per code: *0* done; *1* refused for any other reason (on
-	stderr); *2* usage; *3* the profile is unknown, unreadable or not of
-	the verb's kind (the message names the path tried); *4* the request
+	stderr); *2* usage; *3* the profile is unknown, unreadable, not of
+	the verb's kind (the message names the path tried), or names what the
+	issuer certificate's name constraints do not admit (checked against
+	the slot's certificate, a public read, before the request is read);
+	*4* the request
 	is malformed or its key type refused; *5* the request's names are
 	outside the profile; *6* the issuer key is unavailable (the card is
 	not attached, the slot holds no attestable key, its key is not proven
@@ -854,7 +860,23 @@ commands:
 	preflight before the first prompt, *--act-out* as there, the act
 	written before the PEM, and nothing written if the act is not sealed.
 	A P-384 request gets no act, so it is refused before any prompt (exit
-	*1*; RFC 0013 names only P-256).
+	*1*; RFC 0013 names only P-256). Before the request is read, the
+	profile's names are checked against the issuer certificate's name
+	constraints (a public read of the slot): a profile that names what its
+	issuer may not certify is exit *3*.
+
+	A leaf profile may name the holder-held intermediate instead of a card
+	slot (FDR 0007 phase (iii-b)): *[issuer] holder_key* is its OpenSSH
+	public key line (as *piggy holder mint --type p256* printed it) and
+	*issuer_cert* the absolute path of its card-signed certificate. *issue*
+	then signs through the holder agent on *PIGGY_AUTH_SOCK*, else
+	*SSH_AUTH_SOCK*: no card, no PIN, no touch, no act (*--act-out* is
+	refused; the audit line carries no _act=_). The agent must report
+	itself a holder (*agent-mode@piggy*) and list the key, else the issuer
+	is unavailable (exit *6*); the leaf's _notAfter_ is capped by the
+	intermediate's; the output is the leaf followed by the intermediate,
+	the chain a proxy serves. Only a leaf profile may name a holder; *sign*
+	stays on the card.
 
 	Each profile issues at most once in ten minutes (exit *7*). The
 	stamp, and one audit line per certificate (profile, serial,
@@ -869,8 +891,45 @@ commands:
 	```
 	piggy ca sign --profile shithub-intermediate --out int.pem < int.csr
 	piggy ca issue --profile shithub-leaf --out leaf.pem < leaf.csr
-	openssl verify -CAfile root.pem -untrusted int.pem leaf.pem
+	piggy ca verify --root root.pem --untrusted int.pem leaf.pem
 	```
+
+*ca verify* *--root* _FILE_ [*--untrusted* _FILE_]... [*--key* _FILE_] [*--at* _UNIX_] _LEAF_
+	Check a leaf certificate under zero or more intermediates under the
+	one root given (the only trust anchor; no system store is read) and
+	print the result as TAP-14, one point per check: a path from the leaf
+	to the root by issuer name and key identifier; every signature with
+	its issuer's key (ECDSA P-256 or P-384); every certificate valid at
+	*--at* (Unix seconds; default now); every CA with a critical
+	*basicConstraints CA:TRUE*, *keyCertSign* and its *pathlen* honoured;
+	the leaf not a CA, with *digitalSignature*, *serverAuth* and a DNS
+	*subjectAltName*; the name constraints of every CA on the path
+	applied to the leaf's DNS names and its CN (RFC 5280: a DNS subtree
+	admits the name and every name under it; an excluded IP subtree
+	refuses an IP name); no unknown critical extension anywhere; and,
+	with *--key*, the leaf's key equal to the key in _FILE_ (an OpenSSH
+	public key line, a PEM public or private key, or a PKCS#10 request).
+	Files are PEM (a file may hold several certificates: _LEAF_'s first
+	is the leaf and the rest count as untrusted) or DER. A checker, not
+	a gate: issuance never calls it.
+
+	Exit status: *0* every check passed; *1* a check failed (the TAP says
+	which); *2* usage; *4* a file is unreadable or not a certificate.
+
+	```
+	piggy ca verify --root root.pem --untrusted int.pem --key leaf.key leaf.pem
+	```
+
+*cert show* _FILE_
+	Print a certificate's fields as text: subject, issuer, serial,
+	notBefore and notAfter, the key (EC P-256 or P-384, as an OpenSSH
+	line), basicConstraints, keyUsage, extendedKeyUsage, the DNS and IP
+	names, the permitted and excluded name-constraint subtrees, the
+	subject and authority key identifiers, any unknown critical
+	extension, and the SHA-256 of the DER (the digest a certificate act's
+	description carries). PEM (every certificate in the file) or DER.
+	Nothing is checked; *ca verify* is the checker. Exit *0*; *2* usage;
+	*4* unreadable or not a certificate.
 
 *act canon* [_FILE_]
 	Read a _piggy-act-v1_ document (piggy RFC 0013; _FILE_, or stdin when

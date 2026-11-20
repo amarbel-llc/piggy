@@ -143,7 +143,7 @@ fn exit_of(code: ExitCode) -> Exit {
     }
 }
 
-fn refused(refusal: Refusal) -> Failure {
+pub(crate) fn refused(refusal: Refusal) -> Failure {
     Failure {
         exit: exit_of(refusal.exit_code()),
         message: refusal.to_string(),
@@ -176,7 +176,26 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
     let stamp = state.join("rate").join(&args.profile);
     let last = read_stamp(&stamp).map_err(failure(Exit::Refused))?;
     ca_issue::check_rate(last, now).map_err(refused)?;
+    if profile.issuer.holder_key.is_some() {
+        // A leaf under the holder-held intermediate (phase (iii-b)): no
+        // card, no act; the profile admits a holder issuer on a leaf only.
+        return super::holder_issuer::execute(&args, &profile, now, &state, &stamp);
+    }
     let attestation_root = super::attestation_root_pem(&profile.issuer)?;
+    // The act's path is judged before the card is looked for: a taken path
+    // or a missing directory is refused with nothing else touched.
+    let act_out = certificate_act::act_out_path(args.out.as_deref(), args.act_out.clone())?;
+    certificate_act::precheck(&act_out, args.out.as_deref())?;
+    let subject = profile.principal_for(&args.profile);
+
+    // The issuer's certificate is a public read of the slot (no PIN, no
+    // touch), made before the request is read: a profile that names what
+    // its issuer's name constraints do not admit is refused (exit 3) with
+    // nothing read from stdin and no prompt.
+    let mut signer = CardSigner::open(&profile.issuer)?;
+    signer.verify_on_card(attestation_root.as_deref())?;
+    let issuer_cert = signer.cert_der()?.to_vec();
+    ca_issue::check_issuer_admits(&profile, &issuer_cert).map_err(refused)?;
 
     let mut input = Vec::new();
     std::io::stdin()
@@ -196,17 +215,8 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
     let csr_algorithm = piggy_piv::csr_check::parse_csr(&csr_der)
         .map_err(|e| refused(Refusal::Csr(e)))?
         .algorithm;
-    // A P-384 request gets no act: refused with no card touched.
+    // A P-384 request gets no act: refused before any prompt.
     certificate_act::check_certified_key(csr_algorithm)?;
-    // The act's path is judged before the card is looked for: a taken path
-    // or a missing directory is refused with nothing else touched.
-    let act_out = certificate_act::act_out_path(args.out.as_deref(), args.act_out.clone())?;
-    certificate_act::precheck(&act_out, args.out.as_deref())?;
-    let subject = profile.principal_for(&args.profile);
-
-    let mut signer = CardSigner::open(&profile.issuer)?;
-    signer.verify_on_card(attestation_root.as_deref())?;
-    let issuer_cert = signer.cert_der()?.to_vec();
     // Everything the act needs from the card and the agent is settled
     // before the first PIN prompt, so a missing agent never costs a card
     // signature.

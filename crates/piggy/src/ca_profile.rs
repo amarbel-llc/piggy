@@ -52,9 +52,17 @@ pub struct Issuer {
     /// The card's GUID, 32 hex digits.
     #[serde(default)]
     pub guid: Option<String>,
-    /// A holder key, by its public key (not offered until phase (iii)).
+    /// A holder key, by its OpenSSH public key line (`ecdsa-sha2-nistp256`,
+    /// as `piggy holder mint --type p256` printed it): the holder-held
+    /// intermediate that issues leaves through the holder agent (FDR 0007
+    /// phase (iii-b)). Only a leaf profile may name one.
     #[serde(default)]
     pub holder_key: Option<String>,
+    /// With `holder_key`: the intermediate's certificate (PEM) the holder key
+    /// signs under, as an absolute path (the holder serves the key, not its
+    /// certificate; the issuance unit keeps it at `intermediateCertFile`).
+    #[serde(default)]
+    pub issuer_cert: Option<String>,
     /// The PEM certificate the card's attestation chain must reach for the
     /// slot's key to count as the card's own, as an absolute path; absent,
     /// the embedded Yubico PIV root. A virtual card's lane points it at
@@ -199,9 +207,33 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
         (Some(slot), Some(guid), None) => {
             check_slot(slot)?;
             check_guid(guid)?;
+            if issuer.issuer_cert.is_some() {
+                return bad(
+                    "issuer_cert belongs to a holder issuer; a card issuer's certificate is the slot's own",
+                );
+            }
         }
-        (None, None, Some(_)) => {
-            return bad("holder_key issuers are not offered yet; use slot and guid");
+        (None, None, Some(key)) => {
+            check_holder_key(key)?;
+            match &issuer.issuer_cert {
+                Some(path) if Path::new(path).is_absolute() => {}
+                Some(path) => return bad(format!("issuer_cert {path:?} must be an absolute path")),
+                None => {
+                    return bad(
+                        "a holder issuer needs issuer_cert: the intermediate's certificate the holder key signs under",
+                    );
+                }
+            }
+            if issuer.attestation_root.is_some() {
+                return bad(
+                    "attestation_root is a card issuer's; a holder key is proven by its holder",
+                );
+            }
+            if spec.kind != Kind::Leaf {
+                return bad(
+                    "a holder key issues leaves only (kind = \"leaf\"); a root or an intermediate is signed on the card",
+                );
+            }
         }
         _ => return bad("[issuer] needs slot and guid together, or holder_key alone"),
     }
@@ -279,6 +311,21 @@ pub fn check_dns_name(name: &str) -> Result<(), ProfileError> {
         ));
     }
     Ok(())
+}
+
+/// A holder key is an OpenSSH `ecdsa-sha2-nistp256` public key line, the
+/// intermediate's (FDR 0007 issues P-256 intermediates only).
+fn check_holder_key(key: &str) -> Result<(), ProfileError> {
+    use ssh_key::public::{EcdsaPublicKey, KeyData};
+    let parsed = ssh_key::PublicKey::from_openssh(key.trim())
+        .map_err(|e| ProfileError(format!("holder_key is not an OpenSSH public key line: {e}")))?;
+    match parsed.key_data() {
+        KeyData::Ecdsa(EcdsaPublicKey::NistP256(_)) => Ok(()),
+        other => bad(format!(
+            "holder_key is {}; the holder's intermediate is an ecdsa-sha2-nistp256 key",
+            other.algorithm()
+        )),
+    }
 }
 
 fn check_slot(slot: &str) -> Result<(), ProfileError> {
@@ -384,11 +431,90 @@ mod tests {
         assert!(parse(&leaf("").replace(GUID, "abc")).is_err());
         let no_guid = leaf("").replace(&format!("guid = \"{GUID}\"\n"), "");
         assert!(parse(&no_guid).is_err());
-        let holder = leaf("").replace(
-            &format!("slot = \"82\"\nguid = \"{GUID}\"\n"),
-            "holder_key = \"ecdsa-sha2-nistp256 AAAA\"\n",
+    }
+
+    /// An OpenSSH `ecdsa-sha2-nistp256` line over a point of the given tag
+    /// and 64 bytes: the line parses; the curve is not checked by the parser.
+    fn holder_line(tag: u8) -> String {
+        use base64::Engine;
+        fn put(buf: &mut Vec<u8>, s: &[u8]) {
+            buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+            buf.extend_from_slice(s);
+        }
+        let mut point = vec![0x04];
+        point.extend_from_slice(&[tag; 64]);
+        let mut blob = Vec::new();
+        put(&mut blob, b"ecdsa-sha2-nistp256");
+        put(&mut blob, b"nistp256");
+        put(&mut blob, &point);
+        format!(
+            "ecdsa-sha2-nistp256 {} holder:piggy-ca-intermediate-v1",
+            base64::engine::general_purpose::STANDARD.encode(blob)
+        )
+    }
+
+    fn holder_leaf(extra: &str) -> String {
+        format!(
+            "kind = \"leaf\"\nnames = [\"github.com\"]\nlifetime_hours = 720\n[issuer]\nholder_key = \"{}\"\n{extra}",
+            holder_line(7)
+        )
+    }
+
+    #[test]
+    fn a_holder_issuer_is_a_p256_line_with_the_intermediates_certificate_on_a_leaf_profile() {
+        let p = parse(&holder_leaf(
+            "issuer_cert = \"/var/lib/piggy-ca/intermediate.pem\"\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            p.issuer.holder_key.as_deref(),
+            Some(holder_line(7).as_str())
         );
-        assert!(parse(&holder).unwrap_err().0.contains("not offered"));
+        assert_eq!(
+            p.issuer.issuer_cert.as_deref(),
+            Some("/var/lib/piggy-ca/intermediate.pem")
+        );
+        assert!(p.issuer.slot.is_none() && p.issuer.guid.is_none());
+
+        let no_cert = parse(&holder_leaf("")).unwrap_err();
+        assert!(no_cert.0.contains("issuer_cert"), "{no_cert}");
+        let relative = parse(&holder_leaf("issuer_cert = \"intermediate.pem\"\n")).unwrap_err();
+        assert!(relative.0.contains("absolute"), "{relative}");
+        let with_root = parse(&holder_leaf(
+            "issuer_cert = \"/i.pem\"\nattestation_root = \"/f9.pem\"\n",
+        ))
+        .unwrap_err();
+        assert!(with_root.0.contains("attestation_root"), "{with_root}");
+        let not_a_line = parse(
+            &holder_leaf("issuer_cert = \"/i.pem\"\n")
+                .replace(&holder_line(7), "ecdsa-sha2-nistp256 AAAA"),
+        )
+        .unwrap_err();
+        assert!(
+            not_a_line.0.contains("OpenSSH public key line"),
+            "{not_a_line}"
+        );
+        let ed = parse(&holder_leaf("issuer_cert = \"/i.pem\"\n").replace(
+            &holder_line(7),
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA h",
+        ))
+        .unwrap_err();
+        assert!(ed.0.contains("ssh-ed25519"), "{ed}");
+        // Only a leaf profile: an intermediate or a root is the card's.
+        let inter = format!(
+            "kind = \"intermediate\"\ncommon_name = \"x\"\nnames = [\"github.com\"]\nlifetime_hours = 24\n[issuer]\nholder_key = \"{}\"\nissuer_cert = \"/i.pem\"\n",
+            holder_line(7)
+        );
+        assert!(parse(&inter).unwrap_err().0.contains("leaves only"));
+        // issuer_cert is the holder's field.
+        let card_with_cert =
+            leaf("").replace("slot = \"82\"", "slot = \"82\"\nissuer_cert = \"/i.pem\"");
+        assert!(
+            parse(&card_with_cert)
+                .unwrap_err()
+                .0
+                .contains("holder issuer")
+        );
     }
 
     #[test]

@@ -415,7 +415,22 @@ re-mint after a restart), `(key retired)`, with the remedy as a `hint`
 diagnostic; `intermediate expired` and `not yet valid` are failures of
 their own, distinct from a missing one. "Served" is checked only against
 the holder itself (the probed agent reports holder mode), never guessed.
-Not built: `issue` with the holder key (phase (iii-b), after (ii)).
+**Phase (iii-b) as built (2026-11-20, the operator's chain priority).**
+`piggy ca issue` with a holder issuer: a leaf profile's `[issuer]
+holder_key` (the intermediate's OpenSSH line) and `issuer_cert` (its
+card-signed certificate, an absolute path); the leaf is signed through
+the holder agent's ordinary sign path over the TBSCertificate (the agent
+hashes for itself; `x509_profile::build_leaf_cert_over_tbs`,
+`ca_issue::Signer::Tbs`), after the agent reports holder mode and lists
+the key (fail closed: a plain ssh-agent never issues, exit 6); no card,
+no PIN, no act (step 6: `act=` absent); the output is the leaf then the
+intermediate (step 7); `notAfter` capped by the intermediate's; only a
+leaf profile may name a holder, and `sign` stays on the card. Beside it,
+the same day: `piggy ca leaf-csr` (the card-free leaf key file and
+request for a host with no holder), `piggy ca verify` and `piggy cert
+show` (the chain checked in piggy, name constraints included; a checker,
+not a gate), and the issue-time check of a profile's names against the
+issuer's name constraints (exit 3, before the request is read).
 
 **Operator approval, 2026-11-17.** The operator approved this record as
 proposed and had the four phase issues filed (the numbers above). Phase
