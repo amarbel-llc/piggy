@@ -878,7 +878,11 @@ mod tests {
     const KEY_A: &str = "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7";
     const KEY_B: &str = "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7";
     const ENTRY: &str = "piv/0123456789ABCDEF0123456789ABCDEF/management-key";
-    const PIN: &str = "123456";
+    // `no_key_anywhere` looks for this as a substring of everything the
+    // rotation showed or wrote, so it must not occur inside the fixture GUID
+    // (`123456` does), the serial, the key hex or a bech32 recipient (whose
+    // data part never carries a `1`).
+    const PIN: &str = "918273";
 
     /// A card whose management key is `current`; the switches stand in for
     /// a card that misbehaves at one step.
