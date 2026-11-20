@@ -18,6 +18,7 @@ use std::time::Duration;
 use piggy_piv::PivError;
 use piggy_piv::csr_check::{self, CsrRefusal};
 use piggy_piv::x509_profile::{self, CertValidity, MIN_SERIAL_BYTES};
+use piggy_piv::{PivAlgorithm, x509_verify};
 
 use crate::ca_profile::{Kind, Profile};
 
@@ -86,6 +87,9 @@ pub enum Refusal {
     /// The profile names what the issuer certificate's name constraints do
     /// not admit: the profile is at fault, not the request (exit 3).
     NamesOutsideIssuer(String),
+    /// The profile's holder key is not the key of the issuer certificate it
+    /// names (exit 3).
+    IssuerKeyMismatch(String),
     /// The issuer's key could not sign (card absent, PIN or touch refused).
     IssuerUnavailable(String),
     /// Anything else: a serial that is too short, an issuer certificate
@@ -98,7 +102,9 @@ impl Refusal {
         match self {
             // The profile is not the verb's: exit 3, as `root-cert` answers
             // a profile that is not a root (FDR 0007 exit table).
-            Self::WrongKind { .. } | Self::NamesOutsideIssuer(_) => ExitCode::ProfileUnknown,
+            Self::WrongKind { .. } | Self::NamesOutsideIssuer(_) | Self::IssuerKeyMismatch(_) => {
+                ExitCode::ProfileUnknown
+            }
             Self::Csr(CsrRefusal::Names(_)) => ExitCode::NamesOutsideProfile,
             Self::Csr(_) | Self::KeyTypeNotInProfile => ExitCode::CsrMalformed,
             Self::RateLimited { .. } => ExitCode::RateLimited,
@@ -123,6 +129,12 @@ impl std::fmt::Display for Refusal {
                 f,
                 "the profile names what its issuer's name constraints do not admit: {why}"
             ),
+            Self::IssuerKeyMismatch(why) => {
+                write!(
+                    f,
+                    "the profile's holder_key and issuer_cert disagree: {why}"
+                )
+            }
             Self::KeyTypeNotInProfile => f.write_str("the profile does not accept this key type"),
             Self::RateLimited { retry_after } => write!(
                 f,
@@ -278,14 +290,54 @@ pub fn issue_with(inputs: &Inputs<'_>, signer: Signer<'_>) -> Result<Issued, Ref
         )),
     };
     match built {
-        Ok(cert_der) => Ok(Issued {
-            cert_der,
-            requested_not_after: validity.not_after,
-        }),
+        // The signer's answer is checked against the issuer certificate's
+        // key before anything is written: a card's key was proven the
+        // certificate's on the card, a holder's was not, and either way a
+        // certificate that does not verify under its issuer is never out.
+        Ok(cert_der) => match x509_verify::signature_verifies(&cert_der, inputs.issuer_cert_der) {
+            Ok(true) => Ok(Issued {
+                cert_der,
+                requested_not_after: validity.not_after,
+            }),
+            Ok(false) => Err(Refusal::Other(
+                "the signature the issuer's key returned does not verify under the issuer certificate; nothing is written"
+                    .into(),
+            )),
+            Err(e) => Err(Refusal::Other(format!(
+                "the signed certificate does not read back: {e}"
+            ))),
+        },
         Err(_) if signer_failed.get() => Err(Refusal::IssuerUnavailable(
             signer_error.take().unwrap_or_default(),
         )),
         Err(e) => Err(Refusal::Other(e.to_string())),
+    }
+}
+
+/// Whether the holder key a profile names (its SEC1 P-256 point) is the
+/// subject key of the issuer certificate it names: a stale `issuer_cert`
+/// (the holder re-minted on a restart and the file names the old key) or a
+/// wrong one would otherwise yield leaves no verifier accepts. Refused as
+/// the profile's fault, exit 3, naming both keys.
+pub fn check_holder_key_is_the_issuers(
+    holder_point: &[u8],
+    issuer_cert_der: &[u8],
+) -> Result<(), Refusal> {
+    let key = x509_verify::subject_key(issuer_cert_der)
+        .map_err(|e| Refusal::Other(format!("the issuer certificate: {e}")))?;
+    match key {
+        Some((PivAlgorithm::EcP256, point)) if point == holder_point => Ok(()),
+        Some((PivAlgorithm::EcP256, point)) => Err(Refusal::IssuerKeyMismatch(format!(
+            "holder_key's point ends {} but issuer_cert's key ends {}: the certificate is not this key's (a holder that restarted minted a new key; sign its new request)",
+            hex::encode(&holder_point[holder_point.len().saturating_sub(4)..]),
+            hex::encode(&point[point.len().saturating_sub(4)..])
+        ))),
+        Some((other, _)) => Err(Refusal::IssuerKeyMismatch(format!(
+            "issuer_cert's key is {other:?}; a holder intermediate is P-256"
+        ))),
+        None => Err(Refusal::IssuerKeyMismatch(
+            "issuer_cert's key is not EC P-256 or P-384".into(),
+        )),
     }
 }
 
@@ -585,6 +637,61 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.exit_code(), ExitCode::Other);
         assert!(err.to_string().contains("signed on the card"), "{err}");
+    }
+
+    /// The holder path's two ties: the profile's key must be the issuer
+    /// certificate's (exit 3, before any agent), and whatever the signer
+    /// returns must verify under that certificate (exit 1, nothing out).
+    #[test]
+    fn a_holder_key_that_is_not_the_issuers_is_the_profiles_fault_and_a_bad_signature_is_refused() {
+        let issuer = pair();
+        let root_der = root(&["github.com".to_string()], &issuer);
+        assert_eq!(
+            check_holder_key_is_the_issuers(&issuer.point, &root_der),
+            Ok(())
+        );
+        let other = pair();
+        let err = check_holder_key_is_the_issuers(&other.point, &root_der).unwrap_err();
+        assert_eq!(err.exit_code(), ExitCode::ProfileUnknown);
+        assert!(
+            err.to_string().contains("holder_key's point ends")
+                && err.to_string().contains("restarted"),
+            "{err}"
+        );
+        assert!(matches!(
+            check_holder_key_is_the_issuers(&issuer.point, b"junk"),
+            Err(Refusal::Other(_))
+        ));
+
+        // A signer that answers, but not with the issuer's signature: the
+        // garbage, and a valid signature by another key.
+        let profile = leaf_profile();
+        let leaf_key = pair();
+        let csr_der = csr("github.com", &leaf_key);
+        let inputs = Inputs {
+            verb: Verb::Issue,
+            profile: &profile,
+            csr_der: &csr_der,
+            issuer_cert_der: &root_der,
+            now: NOW,
+            serial: &SERIAL,
+        };
+        let garbage =
+            issue_with(&inputs, Signer::Tbs(Box::new(|_| Ok(vec![1, 2, 3])))).unwrap_err();
+        assert_eq!(garbage.exit_code(), ExitCode::Other);
+        assert!(
+            garbage.to_string().contains("does not read back")
+                || garbage.to_string().contains("does not verify"),
+            "{garbage}"
+        );
+        let wrong_key = issue(&inputs, sign_with(&other.key)).unwrap_err();
+        assert_eq!(wrong_key.exit_code(), ExitCode::Other);
+        assert!(
+            wrong_key
+                .to_string()
+                .contains("does not verify under the issuer certificate"),
+            "{wrong_key}"
+        );
     }
 
     #[test]

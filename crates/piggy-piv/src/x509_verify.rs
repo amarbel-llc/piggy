@@ -241,11 +241,33 @@ pub fn dns_in_subtree(name: &str, base: &str) -> bool {
     if base.is_empty() {
         return true;
     }
-    if let Some(suffix) = base.strip_prefix('.') {
-        return name.len() > suffix.len() && name.ends_with(&base[..]) && !suffix.is_empty()
-            || name.ends_with(&base[..]);
+    if base.starts_with('.') {
+        return name.ends_with(&base[..]);
     }
     name == base || name.ends_with(&format!(".{base}"))
+}
+
+/// Whether `cert_der`'s signature verifies under `issuer_der`'s key, with
+/// the signature algorithm the issuer's curve calls for: what an issuing
+/// verb asks of a certificate it just had signed, before it writes it,
+/// when the signer was not proven the issuer's key on a card.
+pub fn signature_verifies(cert_der: &[u8], issuer_der: &[u8]) -> Result<bool, ParseError> {
+    let cert = parse("certificate", cert_der)?;
+    let issuer = parse("issuer", issuer_der)?;
+    Ok(match (&issuer.key, &cert.signature) {
+        (Some((algorithm, point)), Some(sig)) => {
+            signature_oid_for(*algorithm) == Some(cert.sig_alg)
+                && cert.sig_alg == cert.tbs_sig_alg
+                && csr_check::verifies(*algorithm, point, &cert.tbs_der, sig)
+        }
+        _ => false,
+    })
+}
+
+/// The subject key of `cert_der` when it is EC P-256 or P-384: the
+/// algorithm and the SEC1 uncompressed point.
+pub fn subject_key(cert_der: &[u8]) -> Result<Option<(PivAlgorithm, Vec<u8>)>, ParseError> {
+    Ok(parse("certificate", cert_der)?.key)
 }
 
 /// The DNS bases of the subtrees in `trees`.

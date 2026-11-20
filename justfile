@@ -1365,6 +1365,31 @@ test-bats-conformance-ca-issue-fibby:
       BATS_TEST_TIMEOUT=180 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_ca_issue_fibby.bats
 
+# FDR 0007 phase (iii-b), piggy#392: the whole chain on virtual cards with
+# the holder issuing the leaf. fibby #1 is the operator's card (root-cert
+# in slot 82, 9C for the acts, a card agent), fibby #2 a holder bound to
+# the test's cgroup: holder mint + `ca csr`, the card's `ca sign` under a
+# one-hour intermediate profile, `ca leaf-csr`, then `ca issue` with a
+# holder profile through the holder: no PIN, no act, leaf + intermediate
+# out, notAfter the intermediate's, `ca verify` and openssl agreeing.
+# Refused, nothing written: a non-holder agent or no agent (6), an
+# unserved key (6), --act-out (2), `sign` with the holder profile (3), a
+# profile naming outside the intermediate's constraints (3).
+#
+# run the fibby-backed holder-issued leaf bats gate (`piggy ca issue` through the holder)
+[group('post-build')]
+[linux]
+test-bats-conformance-ca-issue-holder-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=240 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_ca_issue_holder_fibby.bats
+
 # FDR 0007 phase (iii-a), piggy#392: `piggy ca csr` for a holder-held
 # intermediate key. A holder agent over fibby with the intermediate scope
 # as a fixed cgroup (the test's own, standing in for the issuance unit),

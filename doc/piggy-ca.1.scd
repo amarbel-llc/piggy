@@ -135,6 +135,12 @@ One table for every verb, so a renewal timer reads one meaning per code.
 apply: *0* every check passed, *1* a check failed, *2* usage, *4* a file
 that is unreadable or not a certificate.
 
+Order: *sign* and *issue* read the issuer's certificate (the slot's, a
+public read; the holder's *issuer_cert*) before the request on stdin, so
+with the card absent a malformed request answers *6*, not *4*; and
+whatever the issuer's key returns is checked under that certificate
+before anything is written (a signature that does not verify is *1*).
+
 # ENVIRONMENT
 
 *PIGGY_CONFIG_HOME*, *XDG_CONFIG_HOME*

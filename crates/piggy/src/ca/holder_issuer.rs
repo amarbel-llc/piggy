@@ -86,6 +86,20 @@ pub(crate) fn execute(
     let blob = key
         .to_bytes()
         .map_err(|e| failure(Exit::Profile)(format!("holder_key: {e}")))?;
+    // The profile's key must be the issuer certificate's own: a stale
+    // issuer_cert after the holder re-minted is the normal way to get this
+    // wrong, and it is refused before the agent is asked anything.
+    ca_issue::check_holder_key_is_the_issuers(&point, &issuer_cert).map_err(refused)?;
+    // The PEM's directory is checked before the agent too, as the card
+    // path checks the act's: an unwritable --out must not spend a signature.
+    if let Some(dir) = args.out.as_deref().and_then(Path::parent) {
+        if !dir.as_os_str().is_empty() && !dir.is_dir() {
+            return Err(failure(Exit::Refused)(format!(
+                "--out: {} is not a directory",
+                dir.display()
+            )));
+        }
+    }
 
     let socket = super::agent_socket().map_err(failure(Exit::IssuerUnavailable))?;
     let unavailable = failure(Exit::IssuerUnavailable);
