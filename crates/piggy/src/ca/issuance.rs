@@ -158,6 +158,15 @@ fn now() -> Result<Duration, Failure> {
 
 pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
     let profile = super::load_profile(&args.profile)?;
+    // The profile's kind is the verb's before the clock, the state, stdin
+    // or the card: a wrong-kind profile is the profile's fault (exit 3),
+    // as `root-cert` answers a profile that is not a root.
+    if profile.kind != verb.kind() {
+        return Err(refused(Refusal::WrongKind {
+            verb,
+            profile: profile.kind,
+        }));
+    }
     let now = now()?;
     let state = state_dir().ok_or_else(|| {
         failure(Exit::Refused)(
@@ -203,11 +212,8 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
     // signature.
     let operator = certificate_act::preflight(&signer, csr_algorithm, act_out)?;
     let describing = format!(
-        "a {} certificate under profile {} for {} (serial {})",
-        match verb {
-            Verb::Sign => "intermediate",
-            Verb::Issue => "leaf",
-        },
+        "{} certificate under profile {} for {} (serial {})",
+        verb.article_kind(),
         args.profile,
         profile.names.join(", "),
         hex::encode(random)
@@ -274,6 +280,7 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
         &random,
         &record_digest(&issued.cert_der),
         &record_digest(&csr_der),
+        Some(act_digest.as_str()),
         issued.requested_not_after,
     );
     let recorded =
@@ -385,6 +392,17 @@ mod tests {
             Exit::RateLimited
         );
         assert_eq!(exit_of(Refusal::KeyTypeNotInProfile.exit_code()), Exit::Csr);
+        assert_eq!(
+            exit_of(
+                Refusal::WrongKind {
+                    verb: Verb::Sign,
+                    profile: piggy::ca_profile::Kind::Leaf
+                }
+                .exit_code()
+            ),
+            Exit::Profile,
+            "a profile of another kind is the profile's fault, as root-cert's"
+        );
         assert_eq!(
             exit_of(Refusal::IssuerUnavailable(String::new()).exit_code()),
             Exit::IssuerUnavailable

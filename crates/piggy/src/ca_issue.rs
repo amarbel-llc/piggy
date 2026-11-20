@@ -33,10 +33,20 @@ pub enum Verb {
 }
 
 impl Verb {
-    fn kind(self) -> Kind {
+    pub fn kind(self) -> Kind {
         match self {
             Self::Sign => Kind::Intermediate,
             Self::Issue => Kind::Leaf,
+        }
+    }
+
+    /// The kind this verb issues, with its article: "an intermediate", "a
+    /// leaf" (the words the PIN prompt, the notice and the act's
+    /// description carry).
+    pub fn article_kind(self) -> &'static str {
+        match self {
+            Self::Sign => "an intermediate",
+            Self::Issue => "a leaf",
         }
     }
 
@@ -83,7 +93,9 @@ pub enum Refusal {
 impl Refusal {
     pub fn exit_code(&self) -> ExitCode {
         match self {
-            Self::WrongKind { .. } => ExitCode::Usage,
+            // The profile is not the verb's: exit 3, as `root-cert` answers
+            // a profile that is not a root (FDR 0007 exit table).
+            Self::WrongKind { .. } => ExitCode::ProfileUnknown,
             Self::Csr(CsrRefusal::Names(_)) => ExitCode::NamesOutsideProfile,
             Self::Csr(_) | Self::KeyTypeNotInProfile => ExitCode::CsrMalformed,
             Self::RateLimited { .. } => ExitCode::RateLimited,
@@ -98,9 +110,10 @@ impl std::fmt::Display for Refusal {
         match self {
             Self::WrongKind { verb, profile } => write!(
                 f,
-                "`piggy ca {}` issues a {:?} certificate; this profile is {profile:?}",
+                "`piggy ca {}` issues {} certificate; this profile is {}",
                 verb.word(),
-                verb.kind()
+                verb.article_kind(),
+                format!("{profile:?}").to_lowercase()
             ),
             Self::Csr(why) => write!(f, "{why}"),
             Self::KeyTypeNotInProfile => f.write_str("the profile does not accept this key type"),
@@ -250,10 +263,14 @@ pub fn audit_line(
     serial: &[u8],
     cert_digest: &str,
     csr_digest: &str,
+    act_digest: Option<&str>,
     not_after: Duration,
 ) -> String {
+    // The authorizing act's digest (a markl id, never its contents), left
+    // out, not empty, when there is no act.
+    let act = act_digest.map(|d| format!(" act={d}")).unwrap_or_default();
     format!(
-        "piggy-ca issued profile={profile_name} serial={} cert={cert_digest} csr={csr_digest} not_after={}",
+        "piggy-ca issued profile={profile_name} serial={} cert={cert_digest} csr={csr_digest}{act} not_after={}",
         hex::encode(serial),
         not_after.as_secs()
     )
@@ -424,7 +441,11 @@ mod tests {
 
         let good = csr("github.com", &key);
         let r = refused(base(Verb::Sign, &leaf, &good));
-        assert_eq!(r.exit_code(), ExitCode::Usage);
+        assert_eq!(r.exit_code(), ExitCode::ProfileUnknown);
+        assert_eq!(
+            r.to_string(),
+            "`piggy ca sign` issues an intermediate certificate; this profile is leaf"
+        );
 
         let mut p384_only = leaf.clone();
         p384_only.key_types = vec![crate::ca_profile::KeyType::P384];
@@ -522,12 +543,26 @@ mod tests {
             &[0xab, 0xcd],
             "blake2b256-aa",
             "blake2b256-bb",
+            None,
             Duration::from_secs(1_802_592_000),
         );
         assert_eq!(
             line,
-            "piggy-ca issued profile=shithub-github serial=abcd cert=blake2b256-aa csr=blake2b256-bb not_after=1802592000"
+            "piggy-ca issued profile=shithub-github serial=abcd cert=blake2b256-aa csr=blake2b256-bb not_after=1802592000",
+            "no act: the field is absent, not empty"
         );
         assert!(!line.contains('\n'));
+        let with_act = audit_line(
+            "shithub-github",
+            &[0xab, 0xcd],
+            "blake2b256-aa",
+            "blake2b256-bb",
+            Some("blake2b256-cc"),
+            Duration::from_secs(1_802_592_000),
+        );
+        assert_eq!(
+            with_act,
+            "piggy-ca issued profile=shithub-github serial=abcd cert=blake2b256-aa csr=blake2b256-bb act=blake2b256-cc not_after=1802592000"
+        );
     }
 }

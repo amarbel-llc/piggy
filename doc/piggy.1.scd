@@ -791,9 +791,8 @@ commands:
 
 	Exit status, one table for every *ca* verb so a renewal timer reads
 	one meaning per code: *0* done; *1* refused for any other reason (on
-	stderr); *2* usage, including a profile of the wrong kind for *sign*
-	or *issue*; *3* the profile is unknown or unreadable, or not a root
-	profile for *root-cert* (the message names the path tried); *4* the request
+	stderr); *2* usage; *3* the profile is unknown, unreadable or not of
+	the verb's kind (the message names the path tried); *4* the request
 	is malformed or its key type refused; *5* the request's names are
 	outside the profile; *6* the issuer key is unavailable (the card is
 	not attached, the slot holds no attestable key, its key is not proven
@@ -834,7 +833,7 @@ commands:
 
 	Each profile issues at most once in ten minutes (exit *7*). The
 	stamp, and one audit line per certificate (profile, serial,
-	certificate and request digests, _notAfter_), are kept in
+	certificate, request and act digests, _notAfter_), are kept in
 	*PIGGY_CA_STATE*, else _$XDG_STATE_HOME/piggy/ca_, else
 	_~/.local/state/piggy/ca_; the stamp is armed only after the act and
 	the certificate are written, so a refused or failed run does not block

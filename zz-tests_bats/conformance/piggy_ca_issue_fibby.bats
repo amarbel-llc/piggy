@@ -19,7 +19,7 @@
 #
 # Refused with nothing written, no certificate on stdout and no PIN prompt
 # by the verb or the card agent: an unknown profile (exit 3); a profile of
-# the wrong kind for the verb (exit 2, the usage code `ca_issue` gives it);
+# the wrong kind for the verb (exit 3, the profile's fault, as root-cert's);
 # a request that is empty, not PKCS#10 or holds an Ed25519 key (exit 4); a
 # request naming something outside the profile (exit 5); a P-384 request
 # (exit 1: RFC 0013 §2 names P-256 subject keys only); an act path that is
@@ -244,7 +244,8 @@ _assert_certified() {
   [[ $(cat "$STATE/rate/$profile") =~ ^[0-9]+$ ]] || {
     echo "the rate-limit stamp is not a number: $(cat "$STATE/rate/$profile")" >&2; return 1; }
   [[ $(wc -l <"$STATE/audit") -eq 1 ]] || { echo "want one audit line:" >&2; cat "$STATE/audit" >&2; return 1; }
-  for want in "piggy-ca issued profile=$profile " "cert=piggy-record-digest-v1@blake2b256-" "csr=piggy-record-digest-v1@blake2b256-"; do
+  # The act's own digest rides the line (a markl id, never its contents).
+  for want in "piggy-ca issued profile=$profile " "cert=piggy-record-digest-v1@blake2b256-" "csr=piggy-record-digest-v1@blake2b256-" " act="; do
     [[ $(cat "$STATE/audit") == *"$want"* ]] || { echo "the audit line lacks '$want':" >&2; cat "$STATE/audit" >&2; return 1; }
   done
 }
@@ -341,23 +342,24 @@ function an_unknown_profile_is_exit_3 { # @test
     echo "the path tried is not named: $stderr" >&2; return 1; }
 }
 
-function a_profile_of_the_wrong_kind_is_exit_2 { # @test
+function a_profile_of_the_wrong_kind_is_exit_3 { # @test
   _root_in_slot_82
   _leaf_profile
   _inter_profile
   _csr leaf /CN=github.com
   _ca sign leaf "$WORKDIR/leaf.csr"
-  _assert_refusal 2 "sign with a leaf profile" leaf
-  [[ $stderr == *"issues a"* ]] || { echo "the refusal does not name the kind: $stderr" >&2; return 1; }
+  _assert_refusal 3 "sign with a leaf profile" leaf
+  [[ $stderr == *"issues an intermediate certificate; this profile is leaf"* ]] || {
+    echo "the refusal does not name the kinds: $stderr" >&2; return 1; }
   _csr inter "/CN=piggy-test intermediate"
   _ca issue inter "$WORKDIR/inter.csr"
-  _assert_refusal 2 "issue with an intermediate profile" inter
+  _assert_refusal 3 "issue with an intermediate profile" inter
   # `root-cert` is the root's verb: sign and issue take no root profile. Its
   # own --out: the root's PEM and act are already in $WORKDIR/root.pem*, and
   # a taken act path is refused first (exit 1).
   SSH_AUTH_SOCK="$AGENT_SOCK" run --separate-stderr \
     "$PIGGY_BIN" ca issue --profile root --out "$WORKDIR/wrongroot.pem" <"$WORKDIR/leaf.csr"
-  _assert_refusal 2 "issue with the root profile" wrongroot
+  _assert_refusal 3 "issue with the root profile" wrongroot
 }
 
 function a_request_that_is_not_a_p256_pkcs10_request_is_refused_before_any_prompt { # @test
