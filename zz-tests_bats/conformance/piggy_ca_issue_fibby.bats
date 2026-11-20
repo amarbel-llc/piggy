@@ -245,9 +245,16 @@ _assert_certified() {
     echo "the rate-limit stamp is not a number: $(cat "$STATE/rate/$profile")" >&2; return 1; }
   [[ $(wc -l <"$STATE/audit") -eq 1 ]] || { echo "want one audit line:" >&2; cat "$STATE/audit" >&2; return 1; }
   # The act's own digest rides the line (a markl id, never its contents).
-  for want in "piggy-ca issued profile=$profile " "cert=piggy-record-digest-v1@blake2b256-" "csr=piggy-record-digest-v1@blake2b256-" " act="; do
+  for want in "piggy-ca issued profile=$profile " "cert=piggy-record-digest-v1@blake2b256-" "csr=piggy-record-digest-v1@blake2b256-" " act=piggy-record-digest-v1@blake2b256-"; do
     [[ $(cat "$STATE/audit") == *"$want"* ]] || { echo "the audit line lacks '$want':" >&2; cat "$STATE/audit" >&2; return 1; }
   done
+  # ... and it is the one `piggy act digest` prints for the act beside the
+  # certificate (RFC 0013 §3.5).
+  local act_id
+  act_id=$("$PIGGY_BIN" act digest "$WORKDIR/$profile.pem.act") || {
+    echo "act digest of the written act failed" >&2; return 1; }
+  [[ $(cat "$STATE/audit") == *" act=$act_id "* ]] || {
+    echo "the audit line's act= is not '$act_id':" >&2; cat "$STATE/audit" >&2; return 1; }
 }
 
 function a_leaf_is_issued_under_the_root_and_its_act_sealed { # @test
@@ -360,6 +367,9 @@ function a_profile_of_the_wrong_kind_is_exit_3 { # @test
   SSH_AUTH_SOCK="$AGENT_SOCK" run --separate-stderr \
     "$PIGGY_BIN" ca issue --profile root --out "$WORKDIR/wrongroot.pem" <"$WORKDIR/leaf.csr"
   _assert_refusal 3 "issue with the root profile" wrongroot
+  # _assert_refusal names its stamp after the --out stem, which is not the
+  # profile here: check the stamp the root profile would arm.
+  [[ ! -e $STATE/rate/root ]] || { echo "issue with the root profile armed the rate limit" >&2; return 1; }
 }
 
 function a_request_that_is_not_a_p256_pkcs10_request_is_refused_before_any_prompt { # @test
