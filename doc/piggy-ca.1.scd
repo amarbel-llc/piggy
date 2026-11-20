@@ -7,6 +7,7 @@ piggy-ca - X.509 issuance: a card-held root, a holder-held intermediate, name-co
 # SYNOPSIS
 
 *piggy ca csr* *--key* _FILE_ [*--cn* _NAME_] [*--out* _FILE_]++
+*piggy ca leaf-csr* *--key-out* _FILE_ *--cn* _NAME_ [*--out* _FILE_]++
 *piggy ca root-cert* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
 *piggy ca sign* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
 *piggy ca issue* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]
@@ -14,7 +15,8 @@ piggy-ca - X.509 issuance: a card-held root, a holder-held intermediate, name-co
 # DESCRIPTION
 
 *piggy ca* is the issuance side of FDR 0007: three certificates in a chain,
-each issued by the verb that fits its place in it.
+each issued by the verb that fits its place in it, and the requests that
+feed them.
 
 *root-cert*
 	The self-signed root, over the key in the card's CA slot (82). It
@@ -29,6 +31,11 @@ each issued by the verb that fits its place in it.
 *issue*
 	A leaf for one of the permitted names, signed by the card-held root
 	the leaf profile names, one at a time, from a request.
+
+*leaf-csr*
+	The leaf's own key and request, made on the host that serves the leaf
+	with no agent, no holder and no card. The key file never leaves that
+	host; only the request goes to *issue*.
 
 The verbs' flags, the certificate fields and the profile file are in
 *piggy*(1) (the *ca* entries). This page is how they fit together.
@@ -111,6 +118,7 @@ One table for every verb, so a renewal timer reads one meaning per code.
 piggy ca root-cert --profile shithub --out root.pem   # and root.pem.act
 piggy tool write-cert 82 < root.pem
 piggy ca sign --profile shithub-intermediate --out int.pem < int.csr
+piggy ca leaf-csr --key-out leaf.key --cn github.com --out leaf.csr   # on the leaf's host
 piggy ca issue --profile shithub-leaf --out leaf.pem < leaf.csr
 openssl verify -CAfile root.pem -untrusted int.pem leaf.pem
 ```

@@ -22,6 +22,7 @@ piggy - PIV smart-card backed password store and agent
 *piggy holder retire* [_FILE_]
 
 *piggy ca csr* *--key* _FILE_ [*--cn* _NAME_] [*--out* _FILE_]++
+*piggy ca leaf-csr* *--key-out* _FILE_ *--cn* _NAME_ [*--out* _FILE_]++
 *piggy ca root-cert* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
 *piggy ca sign* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]++
 *piggy ca issue* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]
@@ -698,6 +699,30 @@ commands:
 	The NixOS module *services.piggy-ca* runs this at every start of its
 	unit, from inside the unit's cgroup, after minting the unit's own key
 	(piggy-agent(1) HOLDER MODE).
+
+*ca leaf-csr* *--key-out* _FILE_ *--cn* _NAME_ [*--out* _FILE_]
+	Make a leaf's key and its PKCS#10 request in one step, with no agent,
+	no holder and no card: the host that serves a leaf makes its own key,
+	and the key never leaves it (FDR 0007). A fresh P-256 key is written
+	to _FILE_ as PKCS#8 PEM with mode 0600, created fresh: a file that
+	exists is refused and left alone. The request (PEM, to *--out* or
+	stdout) carries the one *CN* (*--cn*, a plain DNS name the leaf
+	profile permits; the leaf is issued with the profile's whole name
+	set) and no SAN or requested extension, is signed by the new key, and
+	is read back through the check *piggy ca issue* makes before anything
+	is written. When the request cannot be written after the key was, the
+	key this run created is removed and the message says so. The key's
+	public half is printed on stderr as an OpenSSH line, to compare with
+	the issued leaf later.
+
+	Exit status as for every *ca* verb: *1* refused (the key file exists,
+	or a file could not be written); *2* usage (*--cn* is not a plain DNS
+	name).
+
+	```
+	piggy ca leaf-csr --key-out leaf.key --cn github.com --out leaf.csr
+	piggy ca issue --profile shithub-leaf --out leaf.pem < leaf.csr
+	```
 
 *ca root-cert* *--profile* _NAME_ [*--out* _FILE_] [*--act-out* _FILE_]
 	Write the self-signed root certificate (PEM) of the card-held

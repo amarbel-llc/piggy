@@ -261,7 +261,11 @@ impl Profile {
     }
 }
 
-fn check_dns_name(name: &str) -> Result<(), ProfileError> {
+/// Whether `name` is a plain DNS name: no wildcard, no empty or malformed
+/// label, at most 253 bytes. The rule a profile's `names` are held to, and
+/// the one `piggy ca leaf-csr` holds its CN to, so a request it makes is
+/// one a profile can name.
+pub fn check_dns_name(name: &str) -> Result<(), ProfileError> {
     let label_ok = |l: &str| {
         !l.is_empty()
             && l.len() <= 63

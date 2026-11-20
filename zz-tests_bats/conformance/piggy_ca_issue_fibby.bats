@@ -260,7 +260,10 @@ _assert_certified() {
 function a_leaf_is_issued_under_the_root_and_its_act_sealed { # @test
   _root_in_slot_82
   _leaf_profile
-  _csr leaf /CN=github.com
+  # The request is `piggy ca leaf-csr`'s (no agent, no card): the chain's
+  # leaf end made by piggy, its key file the one openssl reads back below.
+  run "$PIGGY_BIN" ca leaf-csr --key-out "$WORKDIR/leaf.key" --cn github.com --out "$WORKDIR/leaf.csr"
+  [[ $status -eq 0 ]] || { echo "leaf-csr: want exit 0, got $status: $output" >&2; return 1; }
   _ca issue leaf "$WORKDIR/leaf.csr"
   [[ $status -eq 0 ]] || { echo "issue: want exit 0, got $status" >&2; _show; return 1; }
   [[ -z $output ]] || { echo "--out given, yet stdout carried: $output" >&2; return 1; }
@@ -275,6 +278,8 @@ function a_leaf_is_issued_under_the_root_and_its_act_sealed { # @test
   [[ $status -eq 0 ]] || { echo "openssl verify: $output" >&2; return 1; }
   [[ $(openssl x509 -in "$WORKDIR/leaf.pem" -noout -pubkey) == "$(openssl req -in "$WORKDIR/leaf.csr" -noout -pubkey)" ]] || {
     echo "the leaf's key is not the request's key" >&2; return 1; }
+  [[ $(openssl x509 -in "$WORKDIR/leaf.pem" -noout -pubkey) == "$(openssl pkey -in "$WORKDIR/leaf.key" -pubout 2>/dev/null)" ]] || {
+    echo "the leaf's key is not the key file leaf-csr wrote" >&2; return 1; }
   local text want
   text=$(openssl x509 -in "$WORKDIR/leaf.pem" -noout -text)
   for want in "DNS:github.com" "DNS:api.github.com"; do

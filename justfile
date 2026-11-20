@@ -1284,6 +1284,21 @@ test-bats-conformance-root-cert-guard:
     PIGGY_JUSTFILE="$PWD/justfile" BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/explore_fdr0007_root_cert_guard.bats
 
+# FDR 0007: the guards of `explore-fdr0007-chain-holder` and
+# `explore-fdr0007-chain-card` with fake tools on PATH and no card: the
+# card half refuses without CARD=real, a bad GUID, a missing request or no
+# agent socket before any call, bails out on a failed S0 read before the
+# Enter prompt, and on a good run writes the two profiles and drives sign,
+# issue, the act checks and the read-back in order; the holder half's
+# dry-run calls nothing. Shell and just only, no nix build.
+#
+# run the explore-fdr0007-chain guard bats (fake tools, no card)
+[group('post-build')]
+[linux]
+test-bats-conformance-chain-guard:
+    PIGGY_JUSTFILE="$PWD/justfile" BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/explore_fdr0007_chain_guard.bats
+
 # FDR 0007 phase (ii), piggy#391: `piggy ca root-cert` off the card: the
 # profile is the only input and every refusal answers from the `ca` exit
 # table (2 usage, 3 profile, 6 issuer card absent), with nothing on stdout
@@ -1370,6 +1385,25 @@ test-bats-conformance-ca-csr-fibby:
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_ca_csr_fibby.bats
+
+# FDR 0007: `piggy ca leaf-csr`, the card-free leaf key and request for a
+# host with no holder and no card: a fresh P-256 key file (PKCS#8 PEM,
+# 0600, never written over) and the one-CN PKCS#10 request, openssl the
+# oracle for the self-signature and the key equality. Refused with nothing
+# written: a key file that exists (1), a CN that is not a plain DNS name
+# (2); a request that cannot be written takes the new key with it.
+#
+# run the `piggy ca leaf-csr` bats gate (no card)
+[group('post-build')]
+[linux]
+test-bats-conformance-ca-leaf-csr:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIGGY="$piggy_out/bin/piggy" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_ca_leaf_csr.bats
 
 # piggy#299: a sealed pigpen document opens through the real Rust `piggy
 # agent` over fibby's slot 9D, driven by the Go surface a consumer uses
@@ -5561,6 +5595,239 @@ explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_P
     echo "# ROLLBACK (the key is never changed by write-cert):"
     echo "#   piggy tool -K <management-key> write-cert $slot < $out/slot$slot-placeholder.pem"
     echo "# Then root.pem travels to circus by reviewed commit; nix's curl trusts it per process through NIX_SSL_CERT_FILE."
+    ((fails == 0))
+
+# FDR 0007, the chain test (operator priority 2026-11-20): the card-free
+# half. A holder (fibby + `piggy agent --holder`) bound to this shell's own
+# cgroup mints the intermediate key and signs its request with `piggy ca
+# csr`; the leaf's key file and request come from `piggy ca leaf-csr` (a
+# piggy without that verb mints a second holder key and uses `ca csr`).
+# No card, no PIN, no touch. The holder is stopped at the end, so the
+# intermediate key dies with it: this proves the signing path; the
+# production key is services.piggy-ca's. RUN=dry (default) prints the
+# steps, RUN=go runs them. OUT holds int.pub, int.csr, leaf.key (0600),
+# leaf.csr and the logs; int.csr and leaf.csr go to the card half.
+# UNRUN against a real holder at the time of writing (the holder flags are
+# the ca-csr lane's, minus its staged cgroup root).
+#   CN_INT   the intermediate profile's CN (the card half's INT_CN must equal it)
+#   CN_LEAF  the leaf request's CN: one of the leaf profile's names
+#   OUT      the output directory (default: a new one under $PWD)
+#
+# stage the FDR 0007 chain test's card-free half: the holder-minted intermediate request and the leaf key and request (no card)
+[group('explore')]
+[linux]
+explore-fdr0007-chain-holder CN_INT="circus-pigtrough-github-intermediate" CN_LEAF="github.com" OUT="" RUN="dry":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cn_int={{ quote(CN_INT) }} cn_leaf={{ quote(CN_LEAF) }} out={{ quote(OUT) }} run={{ quote(RUN) }}
+    for tool in piggy fibby; do
+      command -v "$tool" >/dev/null || { echo "$tool is not on PATH" >&2; exit 2; }
+    done
+    [[ -n $out ]] || out="$PWD/fdr0007-chain-$(date -u +%Y%m%dT%H%M%SZ)"
+    if [[ $run != go ]]; then
+      cat <<EOF
+    dry-run: explore-fdr0007-chain-holder would run, with no card, no PIN and no touch:
+      1. fibby (virtual, yk5.7) and a holder agent bound to this shell's own cgroup; sockets under a short /tmp dir, logs in $out
+      2. piggy holder mint --scope piggy-ca-intermediate-v1 --type p256 > $out/int.pub
+      3. piggy ca csr --key $out/int.pub --cn $cn_int --out $out/int.csr           (signed through the holder)
+      4. piggy ca leaf-csr --key-out $out/leaf.key --cn $cn_leaf --out $out/leaf.csr   (a piggy without leaf-csr: a second holder key and ca csr)
+      5. stop the holder (the intermediate key dies with it); int.csr and leaf.csr go to explore-fdr0007-chain-card
+    Run it: just explore-fdr0007-chain-holder '$cn_int' '$cn_leaf' '$out' go
+    EOF
+      exit 0
+    fi
+    mkdir -p "$out"
+    chmod 700 "$out"
+    own=$(sed -n 's/^0:://p' /proc/self/cgroup | head -n1)
+    [[ -n $own ]] || { echo "no cgroup v2 line in /proc/self/cgroup: the holder cannot bind a scope here" >&2; exit 1; }
+    # AF_UNIX sun_path is 108 bytes: the sockets live under a short /tmp dir.
+    sockdir=$(mktemp -d /tmp/fc.XXXXXX)
+    pcsc="$sockdir/pcscd.comm" ctl="$sockdir/ctl.sock" agent="$sockdir/a.sock"
+    fibby_pid= agent_pid=
+    stop() {
+      [[ -n $agent_pid ]] && kill "$agent_pid" 2>/dev/null || true
+      [[ -n $fibby_pid ]] && kill "$fibby_pid" 2>/dev/null || true
+      wait 2>/dev/null || true
+      rm -rf "$sockdir"
+    }
+    trap stop EXIT
+    wait_sock() {
+      local i
+      for i in $(seq 1 100); do [[ -S $1 ]] && return 0; sleep 0.1; done
+      echo "$1 never appeared; see $out/fibby.log and $out/holder.log" >&2
+      return 1
+    }
+    FIBBY_LOG=wire fibby --socket "$pcsc" --backend virtual --model yk5.7 --control-socket "$ctl" >"$out/fibby.log" 2>&1 &
+    fibby_pid=$!
+    wait_sock "$pcsc"
+    wait_sock "$ctl"
+    # Only minted cards live in this holder: the default virtual card goes.
+    fibby ctl --socket "$ctl" destroy "Virtual PCD piggy fibby 00 00" >/dev/null
+    PCSCLITE_CSOCK_NAME="$pcsc" piggy agent --holder --holder-fibby-ctl "$ctl" \
+      --scope "piggy-ca-intermediate-v1=cgroup:$own" --scope "piggy-ca-leaf-v1=cgroup:$own" \
+      --scope-poll-interval 1 -a "$agent" >"$out/holder.log" 2>&1 &
+    agent_pid=$!
+    wait_sock "$agent"
+    export SSH_AUTH_SOCK="$agent"
+    unset PIGGY_AUTH_SOCK
+    n=0 fails=0
+    check() { # check DESCRIPTION COMMAND...; a failing check's output is printed as diagnostics
+      n=$((n + 1))
+      if "${@:2}" >"$out/check.out" 2>&1; then
+        echo "ok $n - $1"
+      else
+        echo "not ok $n - $1"
+        sed 's/^/#   /' "$out/check.out"
+        fails=$((fails + 1))
+      fi
+    }
+    echo "TAP version 14"
+    check "the intermediate key is minted in the holder ($out/int.pub)" bash -c "piggy holder mint --scope piggy-ca-intermediate-v1 --type p256 > '$out/int.pub'"
+    check "the intermediate request is signed through the holder ($out/int.csr)" piggy ca csr --key "$out/int.pub" --cn "$cn_int" --out "$out/int.csr"
+    if piggy ca leaf-csr --help >/dev/null 2>&1; then
+      check "the leaf key and request are made by piggy ca leaf-csr ($out/leaf.key 0600, $out/leaf.csr)" piggy ca leaf-csr --key-out "$out/leaf.key" --cn "$cn_leaf" --out "$out/leaf.csr"
+    else
+      echo "# this piggy has no 'ca leaf-csr': the leaf key is a second holder key, and dies with the holder"
+      check "the leaf key is minted in the holder ($out/leaf.pub)" bash -c "piggy holder mint --scope piggy-ca-leaf-v1 --type p256 > '$out/leaf.pub'"
+      check "the leaf request is signed through the holder ($out/leaf.csr)" piggy ca csr --key "$out/leaf.pub" --cn "$cn_leaf" --out "$out/leaf.csr"
+    fi
+    echo "1..$n"
+    echo "# intermediate public key: $(cat "$out/int.pub" 2>/dev/null || echo none)"
+    echo "# NEXT, on the host with the card: just explore-fdr0007-chain-card <card GUID> $out/int.csr $out/leaf.csr '$cn_int' ... CARD=real"
+    echo "# The holder stops now and the intermediate key dies with it: this run proves the signing path; the production key is services.piggy-ca's."
+    ((fails == 0))
+
+# FDR 0007, the chain test: the card half, at the card, with the operator's
+# own piggy agent (the one serving slot 9C) on SSH_AUTH_SOCK. S0 reads the
+# pilot root from slot 82 and proves its key on-card (no PIN); S2 `piggy ca
+# sign` certifies the holder's intermediate request under the root (PIN +
+# touch twice: the certificate, then its act on 9C); S4' `piggy ca issue`
+# signs a leaf under the root directly (PIN + touch twice again: the
+# operator's interim ruling of 2026-11-20 until the holder issues leaves,
+# piggy#392); then the read-back: the acts through `piggy act`, the chain
+# through openssl until `piggy ca verify` exists. Scratch config and state
+# under OUT; nothing is deployed and the card is never written (slot 82 is
+# read back unchanged at the end). CARD=real is required; without it the
+# steps are printed. UNRUN against a real card at the time of writing.
+#   GUID       the card's GUID (32 hex), as `piggy tool -j list` prints it
+#   INT_CSR    the intermediate request from explore-fdr0007-chain-holder
+#   LEAF_CSR   the leaf request from the same (or any one-CN P-256 request)
+#   INT_CN     the intermediate profile's CN: must equal the request's
+#   NAMES      the permitted DNS names, comma-separated (the pilot root
+#              permits github.com, which covers every name under it)
+#   INT_HOURS, LEAF_HOURS  lifetimes (FDR 0007 levers: days for the
+#              intermediate, about 30 days for the interim leaf)
+#   OUT        the output directory (default: a new one under $PWD)
+#
+# stage the FDR 0007 chain test's card half: root read-back, ca sign of the intermediate, ca issue of a leaf, read-back (never writes the card)
+[group('explore')]
+[linux]
+explore-fdr0007-chain-card GUID INT_CSR LEAF_CSR INT_CN="circus-pigtrough-github-intermediate" NAMES="github.com,api.github.com,codeload.github.com" INT_HOURS="168" LEAF_HOURS="720" OUT="" CARD="virtual":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    guid={{ quote(GUID) }} int_csr={{ quote(INT_CSR) }} leaf_csr={{ quote(LEAF_CSR) }} int_cn={{ quote(INT_CN) }}
+    names={{ quote(NAMES) }} int_hours={{ quote(INT_HOURS) }} leaf_hours={{ quote(LEAF_HOURS) }} out={{ quote(OUT) }} card={{ quote(CARD) }} slot=82
+    if [[ $card != real ]]; then
+      cat <<EOF >&2
+    explore-fdr0007-chain-card: this signs with the OPERATOR'S CARD (slot $slot): PIN + touch twice for the intermediate, twice for the leaf.
+    It would run, in order (scratch config and state under OUT; nothing deployed; the card is never written):
+      S0   piggy tool cert $slot > root.pem; piggy tool attest-verify $slot                 (no PIN)
+      S2   piggy ca sign  --profile int  --out int.pem  < $int_csr    (PIN + touch: the certificate, then its act on 9C)
+      S4'  piggy ca issue --profile leaf --out leaf.pem < $leaf_csr   (PIN + touch: the certificate, then its act on 9C)
+      read-back: piggy act verify and canon on both acts; openssl verify of int.pem and leaf.pem under root.pem; slot $slot unchanged
+    Run it as: just explore-fdr0007-chain-card $guid '$int_csr' '$leaf_csr' '$int_cn' '$names' $int_hours $leaf_hours '' real
+    EOF
+      exit 2
+    fi
+    [[ $guid =~ ^[0-9A-Fa-f]{32}$ ]] || { echo "GUID must be 32 hex digits, got '$guid'" >&2; exit 2; }
+    [[ -f $int_csr ]] || { echo "INT_CSR '$int_csr' is not a file" >&2; exit 2; }
+    [[ -f $leaf_csr ]] || { echo "LEAF_CSR '$leaf_csr' is not a file" >&2; exit 2; }
+    [[ -n ${SSH_AUTH_SOCK:-}${PIGGY_AUTH_SOCK:-} ]] || { echo "SSH_AUTH_SOCK is not set: the certificate acts are sealed through the operator's piggy agent (slot 9C)" >&2; exit 2; }
+    command -v piggy >/dev/null || { echo "piggy is not on PATH" >&2; exit 2; }
+    [[ -n $out ]] || out="$PWD/fdr0007-chain-card-$(date -u +%Y%m%dT%H%M%SZ)"
+    mkdir -p "$out/config/ca-profiles" "$out/state"
+    chmod 700 "$out"
+    export PIGGY_CONFIG_HOME="$out/config" PIGGY_CA_STATE="$out/state"
+    toml_names=$(printf '"%s", ' ${names//,/ })
+    toml_names="[${toml_names%, }]"
+    cat >"$out/config/ca-profiles/int.toml" <<EOF
+    kind = "intermediate"
+    common_name = "$int_cn"
+    names = $toml_names
+    key_types = ["p256"]
+    lifetime_hours = $int_hours
+    [issuer]
+    slot = "82"
+    guid = "$guid"
+    EOF
+    cat >"$out/config/ca-profiles/leaf.toml" <<EOF
+    kind = "leaf"
+    names = $toml_names
+    key_types = ["p256"]
+    lifetime_hours = $leaf_hours
+    [issuer]
+    slot = "82"
+    guid = "$guid"
+    EOF
+    n=0 fails=0
+    check() { # check DESCRIPTION COMMAND...; a failing check's output is printed as diagnostics
+      n=$((n + 1))
+      if "${@:2}" >"$out/check.out" 2>&1; then
+        echo "ok $n - $1"
+      else
+        echo "not ok $n - $1"
+        sed 's/^/#   /' "$out/check.out"
+        fails=$((fails + 1))
+      fi
+    }
+    echo "TAP version 14"
+    echo "# S0. card reads (no PIN, no touch): the pilot root and its key proven on-card"
+    check "slot $slot certificate (the pilot root) saved ($out/root.pem)" bash -c "piggy tool cert $slot > '$out/root.pem'"
+    check "slot $slot key attested as this card's (piggy tool attest-verify)" piggy tool attest-verify "$slot"
+    if command -v openssl >/dev/null; then
+      openssl x509 -in "$out/root.pem" -noout -subject -enddate 2>/dev/null | sed 's/^/#   /' || true
+    fi
+    if ((fails > 0)); then
+      echo "Bail out! a card read failed: the card is not asked to sign"
+      exit 1
+    fi
+    echo "# S2. the intermediate under the root (2 PIN + 2 touch): the verb asks for the PIN and a touch for the certificate, then the agent asks for the PIN and a touch for its act (under the certificate banner)."
+    read -r -p "# Press Enter to run piggy ca sign (2 PIN + 2 touch), or Ctrl-C to stop: " _
+    if piggy ca sign --profile int --out "$out/int.pem" <"$int_csr"; then
+      echo "ok $((n += 1)) - ca sign: $out/int.pem and $out/int.pem.act"
+    else
+      echo "not ok $((n += 1)) - ca sign failed (exit $?); nothing was written to the card"
+      echo "1..$n"
+      exit 1
+    fi
+    check "the intermediate's act seal verifies (piggy act verify --seal-only)" piggy act verify --seal-only "$out/int.pem.act"
+    check "the intermediate's act is a piggy:x509-ca link (piggy act canon)" bash -c "piggy act canon '$out/int.pem.act' | grep -q -- '- right = piggy:x509-ca'"
+    echo "# S4'. a leaf under the root directly (2 PIN + 2 touch; the interim until the holder issues leaves, piggy#392)."
+    read -r -p "# Press Enter to run piggy ca issue (2 PIN + 2 touch), or Ctrl-C to stop: " _
+    if piggy ca issue --profile leaf --out "$out/leaf.pem" <"$leaf_csr"; then
+      echo "ok $((n += 1)) - ca issue: $out/leaf.pem and $out/leaf.pem.act"
+    else
+      echo "not ok $((n += 1)) - ca issue failed (exit $?); the intermediate above stands; nothing was written to the card"
+      echo "1..$n"
+      exit 1
+    fi
+    check "the leaf's act seal verifies (piggy act verify --seal-only)" piggy act verify --seal-only "$out/leaf.pem.act"
+    check "the leaf's act is a piggy:x509-leaf link (piggy act canon)" bash -c "piggy act canon '$out/leaf.pem.act' | grep -q -- '- right = piggy:x509-leaf'"
+    check "two audit lines, one per certificate ($out/state/audit)" bash -c "[[ \$(wc -l < '$out/state/audit') -eq 2 ]]"
+    check "slot $slot still serves the same root: the card was not written" bash -c "cmp -s <(piggy tool cert $slot) '$out/root.pem'"
+    if command -v openssl >/dev/null; then
+      echo "# read-back through openssl (interim: piggy ca verify is not built yet)"
+      check "int.pem verifies under root.pem" openssl verify -CAfile "$out/root.pem" "$out/int.pem"
+      check "leaf.pem verifies under root.pem" openssl verify -CAfile "$out/root.pem" "$out/leaf.pem"
+      check "int.pem is a CA with pathlen 0" bash -c "openssl x509 -in '$out/int.pem' -noout -text | grep -q 'CA:TRUE, pathlen:0'"
+      check "leaf.pem names every permitted name and is not a CA" bash -c "t=\$(openssl x509 -in '$out/leaf.pem' -noout -text); for name in ${names//,/ }; do grep -q \"DNS:\$name\" <<<\"\$t\" || exit 1; done; grep -q 'CA:FALSE' <<<\"\$t\""
+      check "int.pem's key is the request's" bash -c "cmp -s <(openssl x509 -in '$out/int.pem' -noout -pubkey) <(openssl req -in '$int_csr' -noout -pubkey)"
+      check "leaf.pem's key is the request's" bash -c "cmp -s <(openssl x509 -in '$out/leaf.pem' -noout -pubkey) <(openssl req -in '$leaf_csr' -noout -pubkey)"
+    else
+      echo "# openssl is not on PATH: the chain read-back is skipped (piggy ca verify is not built yet)"
+    fi
+    echo "1..$n"
+    echo "# outputs in $out: root.pem int.pem int.pem.act leaf.pem leaf.pem.act state/audit. Nothing deployed; nothing written to the card."
     ((fails == 0))
 
 # The X.509 key identifiers of an SSH public key (FDR 0007): what an

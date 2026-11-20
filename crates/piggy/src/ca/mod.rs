@@ -2,7 +2,8 @@
 //! verb, `csr`, the certificate request for a holder-held intermediate
 //! key; phase (ii) adds `root-cert` (here), `sign` and `issue` for a
 //! card-held issuer beside it (each verb its own module, so they land
-//! without conflict).
+//! without conflict); `leaf-csr` is the card-free leaf key and request
+//! for a host with no holder.
 //!
 //! Exit codes, one table for every verb (FDR 0007 "The issuance verbs"), so
 //! a renewal timer reads one meaning per code: 0 done; 1 refused for any
@@ -20,6 +21,7 @@ mod card_signer;
 mod certificate_act;
 mod csr;
 mod issuance;
+mod leaf_csr;
 mod root_cert;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +62,10 @@ enum CaCommand {
     /// intermediate key minted with `piggy holder mint --type p256`),
     /// signed through the agent; PEM on stdout.
     Csr(csr::CsrArgs),
+    /// A fresh software P-256 leaf key (PKCS#8 PEM, 0600, never written
+    /// over) and its PKCS#10 request for one CN, with no agent, no holder
+    /// and no card; the request PEM on stdout.
+    LeafCsr(leaf_csr::LeafCsrArgs),
     /// The self-signed root certificate of the card-held CA key a root
     /// profile names, signed on the local card after one PIN prompt; PEM
     /// on stdout. The slot is not written: `piggy tool write-cert` does
@@ -84,6 +90,7 @@ pub fn run(argv: &[String]) -> i32 {
     };
     let result = match args.cmd {
         CaCommand::Csr(args) => csr::execute(args),
+        CaCommand::LeafCsr(args) => leaf_csr::execute(args),
         CaCommand::RootCert(args) => root_cert::execute(args),
         CaCommand::Sign(args) => issuance::execute(piggy::ca_issue::Verb::Sign, args),
         CaCommand::Issue(args) => issuance::execute(piggy::ca_issue::Verb::Issue, args),
@@ -201,6 +208,36 @@ mod tests {
                 assert_eq!(args.profile, "shithub");
                 assert!(args.out.is_none());
                 assert!(args.act_out.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn leaf_csr_needs_a_key_path_and_a_cn() {
+        assert!(CaCli::try_parse_from(["piggy ca", "leaf-csr"]).is_err());
+        assert!(
+            CaCli::try_parse_from(["piggy ca", "leaf-csr", "--cn", "github.com"]).is_err(),
+            "--key-out is required"
+        );
+        assert!(
+            CaCli::try_parse_from(["piggy ca", "leaf-csr", "--key-out", "leaf.key"]).is_err(),
+            "--cn is required: a leaf CN is never defaulted"
+        );
+        let cli = CaCli::try_parse_from([
+            "piggy ca",
+            "leaf-csr",
+            "--key-out",
+            "leaf.key",
+            "--cn",
+            "github.com",
+        ])
+        .unwrap();
+        match cli.cmd {
+            CaCommand::LeafCsr(args) => {
+                assert_eq!(args.key_out.to_string_lossy(), "leaf.key");
+                assert_eq!(args.cn, "github.com");
+                assert!(args.out.is_none());
             }
             other => panic!("{other:?}"),
         }
