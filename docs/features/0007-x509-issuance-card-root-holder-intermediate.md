@@ -321,7 +321,10 @@ else `$XDG_CONFIG_HOME/piggy`, else `~/.config/piggy`.
    host (PIN, then touch), a holder key through the holder agent's
    socket;
 6. record one audit line per issuance: profile, serial, the issued
-   certificate's and the CSR's digests as markl-ids, and `notAfter`; to
+   certificate's and the CSR's digests as markl-ids, the authorizing
+   act's digest as a markl-id when an act authorized the issuance
+   (absent otherwise, never empty; the act's contents are not logged),
+   and `notAfter`; to
    the journal under systemd, otherwise to an append-only file in
    piggy's state directory;
 7. print the issued certificate, followed by the issuer's certificate
@@ -329,8 +332,9 @@ else `$XDG_CONFIG_HOME/piggy`, else `~/.config/piggy`.
    never the root. In the pilot the output is the leaf alone.
 
 Refusals are answers, each with its own exit code so a renewal timer can
-tell them apart (working values): 2 usage; 3 profile unknown or
-unreadable; 4 CSR malformed or key type refused; 5 names outside the
+tell them apart (working values): 2 usage; 3 profile unknown,
+unreadable, or of the wrong kind for the verb (`root-cert`, `sign` and
+`issue` alike); 4 CSR malformed or key type refused; 5 names outside the
 profile; 6 issuer key unavailable (card absent, holder has no
 intermediate); 7 rate limited (state: one timestamp file per profile in
 piggy's state directory); 1 other. A refusal issues nothing.
