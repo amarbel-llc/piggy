@@ -6,7 +6,6 @@
 //! rotation and prints its account as TAP-14 on stdout. Nothing secret ever
 //! reaches stdout, stderr or a notification.
 
-use std::io::Write;
 use std::path::Path;
 
 use piggy_piv::apdu::alg::TDEA_3KEY;
@@ -159,24 +158,17 @@ fn complete(fe: &mut dyn Frontend, report: &Report) {
 /// The account as TAP-14, plain and deterministic (as `piggy health
 /// --format tap`), so a wrapper reads a plan and `ok`/`not ok` lines.
 fn print_tap(points: &[Point]) -> std::io::Result<()> {
-    let mut out = std::io::stdout().lock();
-    {
-        let mut rep =
-            tap_dancer::Reporter::Tap(tap_dancer::TapWriterBuilder::new(&mut out).build()?);
-        rep.plan_ahead(points.len())?;
-        for point in points {
-            let diags: Vec<(&str, serde_json::Value)> = point
+    let shown: Vec<crate::tap_print::Point<'_>> = points
+        .iter()
+        .map(|point| crate::tap_print::Point {
+            name: &point.name,
+            ok: point.ok,
+            diags: point
                 .diags
                 .iter()
                 .map(|(k, v)| (k.as_str(), serde_json::Value::String(v.clone())))
-                .collect();
-            match (point.ok, diags.is_empty()) {
-                (true, true) => rep.ok(&point.name)?,
-                (true, false) => rep.ok_diag(&point.name, &diags)?,
-                (false, _) => rep.not_ok_diag(&point.name, &diags)?,
-            };
-        }
-        rep.finish()?;
-    }
-    out.flush()
+                .collect(),
+        })
+        .collect();
+    crate::tap_print::print_tap(&shown)
 }

@@ -216,8 +216,7 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
         (None, None, Some(key)) => {
             check_holder_key(key)?;
             match &issuer.issuer_cert {
-                Some(path) if Path::new(path).is_absolute() => {}
-                Some(path) => return bad(format!("issuer_cert {path:?} must be an absolute path")),
+                Some(path) => check_absolute("issuer_cert", path)?,
                 None => {
                     return bad(
                         "a holder issuer needs issuer_cert: the intermediate's certificate the holder key signs under",
@@ -238,16 +237,15 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
         _ => return bad("[issuer] needs slot and guid together, or holder_key alone"),
     }
     if spec.kind == Kind::Root
-        && issuer.slot.as_deref().map(str::to_ascii_lowercase) != Some("82".into())
+        && !issuer
+            .slot
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("82"))
     {
         return bad("a root is signed by the CA slot 82");
     }
     if let Some(root) = &issuer.attestation_root {
-        if !Path::new(root).is_absolute() {
-            return bad(format!(
-                "attestation_root {root:?} must be an absolute path (absent means the embedded Yubico root)"
-            ));
-        }
+        check_absolute("attestation_root", root)?;
     }
 
     let key_types = match spec.key_types {
@@ -311,6 +309,17 @@ pub fn check_dns_name(name: &str) -> Result<(), ProfileError> {
         ));
     }
     Ok(())
+}
+
+/// A profile's file paths are absolute, so a profile reads the same from
+/// any working directory (a relative `attestation_root` would also mean
+/// "the embedded root" by accident when missing).
+fn check_absolute(field: &str, path: &str) -> Result<(), ProfileError> {
+    if Path::new(path).is_absolute() {
+        Ok(())
+    } else {
+        bad(format!("{field} {path:?} must be an absolute path"))
+    }
 }
 
 /// A holder key is an OpenSSH `ecdsa-sha2-nistp256` public key line, the

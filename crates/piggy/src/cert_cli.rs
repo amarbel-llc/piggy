@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use piggy_piv::x509_verify::{self, Description};
 
-use crate::ca::openssh_ecdsa_line;
+use piggy::ecdsa_sig::openssh_ecdsa_line;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -57,19 +57,19 @@ pub(crate) fn render(d: &Description) -> String {
     put("serial:", d.serial_hex.clone());
     put("not-before:", d.not_before.clone());
     put("not-after:", d.not_after.clone());
+    let curve = match &d.key {
+        Some((piggy_piv::PivAlgorithm::EcP256, _)) => Some("EC P-256"),
+        Some((piggy_piv::PivAlgorithm::EcP384, _)) => Some("EC P-384"),
+        _ => None,
+    };
     put(
         "key:",
-        match &d.key {
-            Some((algorithm, point)) => format!(
-                "{} {}",
-                match algorithm {
-                    piggy_piv::PivAlgorithm::EcP256 => "EC P-256",
-                    piggy_piv::PivAlgorithm::EcP384 => "EC P-384",
-                    other => return format!("{other:?}"),
-                },
-                openssh_ecdsa_line(*algorithm, point, "").unwrap_or_default()
+        match (curve, &d.key) {
+            (Some(curve), Some((_, point))) => format!(
+                "{curve} {}",
+                openssh_ecdsa_line(point, "").unwrap_or_default()
             ),
-            None => "not an EC P-256 or P-384 key".to_string(),
+            _ => "not an EC P-256 or P-384 key".to_string(),
         },
     );
     if let Some((critical, ca, pathlen)) = d.basic_constraints {

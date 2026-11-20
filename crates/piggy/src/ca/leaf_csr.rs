@@ -97,13 +97,32 @@ pub(crate) fn make(cn: &str) -> Result<LeafRequest, String> {
     Ok(LeafRequest {
         key_pem,
         csr_der,
-        public_line: super::openssh_ecdsa_line(PivAlgorithm::EcP256, &point, PUBLIC_LINE_COMMENT)
+        public_line: super::openssh_ecdsa_line(&point, PUBLIC_LINE_COMMENT)
             .expect("P-256 has an OpenSSH form"),
     })
 }
 
 /// Create `path` fresh with mode 0600 and write the key into it. A file
 /// that exists is an error and is not touched.
+fn exists_refusal(path: &Path) -> String {
+    format!(
+        "{} exists; this verb never writes over a key (remove it, or name another file)",
+        path.display()
+    )
+}
+
+/// Remove the key file this run created (never one that was there: the
+/// O_EXCL create refused those), and say whether that worked.
+fn remove_created(path: &Path) -> String {
+    match std::fs::remove_file(path) {
+        Ok(()) => format!("the key {} this run created was removed", path.display()),
+        Err(e) => format!(
+            "the key {} this run created was NOT removed ({e}): remove it by hand",
+            path.display()
+        ),
+    }
+}
+
 pub(crate) fn write_key(path: &Path, pem: &[u8]) -> Result<(), String> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -111,23 +130,13 @@ pub(crate) fn write_key(path: &Path, pem: &[u8]) -> Result<(), String> {
         .mode(0o600)
         .open(path)
         .map_err(|e| match e.kind() {
-            std::io::ErrorKind::AlreadyExists => format!(
-                "{} exists; this verb never writes over a key (remove it, or name another file)",
-                path.display()
-            ),
+            std::io::ErrorKind::AlreadyExists => exists_refusal(path),
             _ => format!("create {}: {e}", path.display()),
         })?;
     file.write_all(pem)
         .and_then(|()| file.sync_all())
-        .map_err(|e| {
-            // The file is this call's own (created just above): a half
-            // written key must not stay behind.
-            let removed = match std::fs::remove_file(path) {
-                Ok(()) => "the file was removed".to_string(),
-                Err(r) => format!("the file was NOT removed ({r}): remove it by hand"),
-            };
-            format!("write {}: {e}; {removed}", path.display())
-        })
+        // A half written key must not stay behind.
+        .map_err(|e| format!("write {}: {e}; {}", path.display(), remove_created(path)))
 }
 
 pub(crate) fn execute(args: LeafCsrArgs) -> Result<(), Failure> {
@@ -136,39 +145,18 @@ pub(crate) fn execute(args: LeafCsrArgs) -> Result<(), Failure> {
     // Judged before any key is drawn, so a taken path costs nothing; the
     // O_EXCL create below is the guard that holds under a race.
     if args.key_out.exists() {
-        return Err(failure(Exit::Refused)(format!(
-            "{} exists; this verb never writes over a key (remove it, or name another file)",
-            args.key_out.display()
-        )));
+        return Err(failure(Exit::Refused)(exists_refusal(&args.key_out)));
     }
     let made = make(&args.cn).map_err(failure(Exit::Refused))?;
     write_key(&args.key_out, &made.key_pem).map_err(failure(Exit::Refused))?;
 
     let pem = pem_certificate_request(&made.csr_der);
-    let written = match &args.out {
-        Some(path) => {
-            std::fs::write(path, pem).map_err(|e| format!("write {}: {e}", path.display()))
-        }
-        None => {
-            let mut stdout = std::io::stdout().lock();
-            stdout
-                .write_all(pem.as_bytes())
-                .and_then(|()| stdout.flush())
-                .map_err(|e| format!("write stdout: {e}"))
-        }
-    };
-    if let Err(why) = written {
-        // The key this run created goes with its failed request; a key
-        // that was there before is never reached (the create above refused
-        // it).
-        let key = args.key_out.display();
-        let removed = match std::fs::remove_file(&args.key_out) {
-            Ok(()) => format!("the key {key} this run created was removed"),
-            Err(e) => {
-                format!("the key {key} this run created was NOT removed ({e}): remove it by hand")
-            }
-        };
-        return Err(failure(Exit::Refused)(format!("{why}; {removed}")));
+    if let Err(why) = super::write_to_out(args.out.as_deref(), pem.as_bytes()) {
+        // The key this run created goes with its failed request.
+        return Err(failure(Exit::Refused)(format!(
+            "{why}; {}",
+            remove_created(&args.key_out)
+        )));
     }
     eprintln!(
         "piggy ca leaf-csr: P-256 key written to {} (0600); request for CN={} signed by it; public key: {}",

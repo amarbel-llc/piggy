@@ -14,6 +14,22 @@
 //! are plain `String` so the module stays decoupled from any caller's error
 //! type (the agent maps them into `ssh_agent_lib::error::AgentError`).
 
+/// The OpenSSH public key line of an EC P-256 or P-384 SEC1 uncompressed
+/// point (the curve read from the point's length), with `comment` after
+/// it when not empty: what `piggy ca leaf-csr` prints for its key and
+/// `piggy cert show` for a certificate's. The encoding is `ssh_key`'s, so
+/// it is byte-identical to what `piggy tool generate` prints.
+pub fn openssh_ecdsa_line(point: &[u8], comment: &str) -> Result<String, String> {
+    let ecdsa = ssh_key::public::EcdsaPublicKey::from_sec1_bytes(point)
+        .map_err(|e| format!("not an EC P-256 or P-384 point: {e}"))?;
+    let mut key = ssh_key::PublicKey::from(ssh_key::public::KeyData::Ecdsa(ecdsa));
+    if !comment.is_empty() {
+        key.set_comment(comment);
+    }
+    key.to_openssh()
+        .map_err(|e| format!("render the OpenSSH line: {e}"))
+}
+
 /// Decode a DER-encoded ECDSA signature into `(r, s)` as big-endian byte
 /// vectors (each as encoded in the DER INTEGER, i.e. possibly with a leading
 /// `0x00` sign byte and possibly shorter than the field width).

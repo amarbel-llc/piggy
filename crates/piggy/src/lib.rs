@@ -34,3 +34,4 @@ pub mod operator_act;
 pub mod sign_core;
 pub mod ssh_wire;
 pub mod stats;
+pub mod tap_print;

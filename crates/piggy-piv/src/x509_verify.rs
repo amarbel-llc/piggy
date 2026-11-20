@@ -95,6 +95,8 @@ pub struct Expect<'a> {
 struct Parsed {
     label: String,
     subject: String,
+    issuer: String,
+    serial_hex: String,
     subject_der: Vec<u8>,
     issuer_der: Vec<u8>,
     common_name: Option<String>,
@@ -127,6 +129,8 @@ fn parse(label: &str, der: &[u8]) -> Result<Parsed, ParseError> {
     let mut parsed = Parsed {
         label: label.to_string(),
         subject: tbs.subject.to_string(),
+        issuer: tbs.issuer.to_string(),
+        serial_hex: hex::encode(tbs.serial_number.as_bytes()),
         subject_der: tbs.subject.to_der().map_err(|e| fail(e.to_string()))?,
         issuer_der: tbs.issuer.to_der().map_err(|e| fail(e.to_string()))?,
         common_name: common_name_of(&tbs.subject),
@@ -235,16 +239,29 @@ fn common_name_of(name: &x509_cert::name::Name) -> Option<String> {
 /// Whether `name` is under the DNS subtree `base` (RFC 5280 §4.2.1.10): the
 /// name itself or any name with more labels on the left; a base that
 /// starts with a dot admits any name ending in it. ASCII case-insensitive.
-pub fn dns_in_subtree(name: &str, base: &str) -> bool {
+fn dns_in_subtree(name: &str, base: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let base = base.to_ascii_lowercase();
     if base.is_empty() {
         return true;
     }
     if base.starts_with('.') {
-        return name.ends_with(&base[..]);
+        return name.ends_with(base.as_str());
     }
     name == base || name.ends_with(&format!(".{base}"))
+}
+
+/// Whether `cert` carries `issuer`'s signature: the algorithm the issuer's
+/// curve calls for, named the same in both places, and the ECDSA check.
+fn signed_by(cert: &Parsed, issuer: &Parsed) -> bool {
+    match (&issuer.key, &cert.signature) {
+        (Some((algorithm, point)), Some(sig)) => {
+            signature_oid_for(*algorithm) == Some(cert.sig_alg)
+                && cert.sig_alg == cert.tbs_sig_alg
+                && csr_check::verifies(*algorithm, point, &cert.tbs_der, sig)
+        }
+        _ => false,
+    }
 }
 
 /// Whether `cert_der`'s signature verifies under `issuer_der`'s key, with
@@ -252,16 +269,10 @@ pub fn dns_in_subtree(name: &str, base: &str) -> bool {
 /// verb asks of a certificate it just had signed, before it writes it,
 /// when the signer was not proven the issuer's key on a card.
 pub fn signature_verifies(cert_der: &[u8], issuer_der: &[u8]) -> Result<bool, ParseError> {
-    let cert = parse("certificate", cert_der)?;
-    let issuer = parse("issuer", issuer_der)?;
-    Ok(match (&issuer.key, &cert.signature) {
-        (Some((algorithm, point)), Some(sig)) => {
-            signature_oid_for(*algorithm) == Some(cert.sig_alg)
-                && cert.sig_alg == cert.tbs_sig_alg
-                && csr_check::verifies(*algorithm, point, &cert.tbs_der, sig)
-        }
-        _ => false,
-    })
+    Ok(signed_by(
+        &parse("certificate", cert_der)?,
+        &parse("issuer", issuer_der)?,
+    ))
 }
 
 /// The subject key of `cert_der` when it is EC P-256 or P-384: the
@@ -282,6 +293,34 @@ fn dns_bases(trees: &Option<Vec<GeneralSubtree>>) -> Vec<String> {
         .collect()
 }
 
+/// The IP subtrees (address then mask) in `trees`.
+fn ip_bases(trees: &Option<Vec<GeneralSubtree>>) -> Vec<Vec<u8>> {
+    trees
+        .iter()
+        .flatten()
+        .filter_map(|t| match &t.base {
+            GeneralName::IpAddress(ip) => Some(ip.as_bytes().to_vec()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Why `name` is refused by DNS subtrees: not under any permitted one
+/// (when there are any), or inside an excluded one. Empty when admitted.
+fn dns_violations(name: &str, permitted: &[String], excluded: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    if !permitted.is_empty() && !permitted.iter().any(|b| dns_in_subtree(name, b)) {
+        out.push(format!(
+            "{name} is not under a permitted DNS subtree (permitted: {})",
+            permitted.join(", ")
+        ));
+    }
+    if let Some(b) = excluded.iter().find(|b| dns_in_subtree(name, b)) {
+        out.push(format!("{name} is in the excluded DNS subtree {b}"));
+    }
+    out
+}
+
 /// The DNS `names` that `issuer_der`'s name constraints refuse, each with
 /// its reason; empty when every name is admitted or the issuer carries no
 /// constraints. What `piggy ca sign` and `issue` ask of a profile before
@@ -297,25 +336,16 @@ pub fn dns_names_refused_by(
     };
     let permitted = dns_bases(&nc.permitted_subtrees);
     let excluded = dns_bases(&nc.excluded_subtrees);
-    let mut refused = Vec::new();
-    for name in names {
-        if !permitted.is_empty() && !permitted.iter().any(|b| dns_in_subtree(name, b)) {
-            refused.push(format!(
-                "{name} is not under a permitted DNS subtree (permitted: {})",
-                permitted.join(", ")
-            ));
-        }
-        if let Some(b) = excluded.iter().find(|b| dns_in_subtree(name, b)) {
-            refused.push(format!("{name} is in the excluded DNS subtree {b}"));
-        }
-    }
-    Ok(refused)
+    Ok(names
+        .iter()
+        .flat_map(|name| dns_violations(name, &permitted, &excluded))
+        .collect())
 }
 
 /// Whether the address `ip` (4 or 16 bytes) is in the IP subtree
 /// `subtree` (address then mask, 8 or 32 bytes). Mismatched families are
 /// not in.
-pub fn ip_in_subtree(ip: &[u8], subtree: &[u8]) -> bool {
+fn ip_in_subtree(ip: &[u8], subtree: &[u8]) -> bool {
     if subtree.len() != ip.len() * 2 || !(ip.len() == 4 || ip.len() == 16) {
         return false;
     }
@@ -438,15 +468,9 @@ pub fn verify_chain(
 
     let last = path.len() - 1;
     for (i, cert) in path.iter().enumerate() {
-        let issuer = &path[if i == last { last } else { i + 1 }];
-        let ok = match (&issuer.key, &cert.signature) {
-            (Some((algorithm, point)), Some(sig)) => {
-                signature_oid_for(*algorithm) == Some(cert.sig_alg)
-                    && cert.sig_alg == cert.tbs_sig_alg
-                    && csr_check::verifies(*algorithm, point, &cert.tbs_der, sig)
-            }
-            _ => false,
-        };
+        // The root signs itself.
+        let issuer = &path[(i + 1).min(last)];
+        let ok = signed_by(cert, issuer);
         let detail = match &issuer.key {
             Some((algorithm, _)) => {
                 format!("{algorithm:?} key of {}, {}", issuer.label, cert.sig_alg)
@@ -597,32 +621,14 @@ pub fn verify_chain(
         let Some(nc) = &ca.name_constraints else {
             continue;
         };
-        let ip_of = |trees: &Option<Vec<GeneralSubtree>>| -> Vec<Vec<u8>> {
-            trees
-                .iter()
-                .flatten()
-                .filter_map(|t| match &t.base {
-                    GeneralName::IpAddress(ip) => Some(ip.as_bytes().to_vec()),
-                    _ => None,
-                })
-                .collect()
-        };
         let permitted_dns = dns_bases(&nc.permitted_subtrees);
         let excluded_dns = dns_bases(&nc.excluded_subtrees);
-        let permitted_ip = ip_of(&nc.permitted_subtrees);
-        let excluded_ip = ip_of(&nc.excluded_subtrees);
-        let mut failures = Vec::new();
-        for name in &constrained {
-            if !permitted_dns.is_empty() && !permitted_dns.iter().any(|b| dns_in_subtree(name, b)) {
-                failures.push(format!(
-                    "{name} is not under a permitted DNS subtree (permitted: {})",
-                    permitted_dns.join(", ")
-                ));
-            }
-            if let Some(b) = excluded_dns.iter().find(|b| dns_in_subtree(name, b)) {
-                failures.push(format!("{name} is in the excluded DNS subtree {b}"));
-            }
-        }
+        let permitted_ip = ip_bases(&nc.permitted_subtrees);
+        let excluded_ip = ip_bases(&nc.excluded_subtrees);
+        let mut failures: Vec<String> = constrained
+            .iter()
+            .flat_map(|name| dns_violations(name, &permitted_dns, &excluded_dns))
+            .collect();
         for ip in &ip_names {
             let shown = ip
                 .iter()
@@ -736,10 +742,6 @@ fn subtree_text(tree: &GeneralSubtree) -> String {
 /// Read a certificate back as text.
 pub fn describe(der: &[u8]) -> Result<Description, ParseError> {
     use sha2::Digest as _;
-    let cert = Certificate::from_der(der).map_err(|e| ParseError {
-        which: "certificate".into(),
-        why: format!("not a DER certificate: {e}"),
-    })?;
     let p = parse("certificate", der)?;
     let key_usage = p
         .key_usage
@@ -809,9 +811,9 @@ pub fn describe(der: &[u8]) -> Result<Description, ParseError> {
     };
     Ok(Description {
         subject: p.subject,
-        issuer: cert.tbs_certificate.issuer.to_string(),
+        issuer: p.issuer,
         self_issued: p.subject_der == p.issuer_der,
-        serial_hex: hex::encode(cert.tbs_certificate.serial_number.as_bytes()),
+        serial_hex: p.serial_hex,
         not_before: iso(p.not_before),
         not_after: iso(p.not_after),
         key: p.key,

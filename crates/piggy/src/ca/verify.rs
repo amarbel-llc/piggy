@@ -7,7 +7,6 @@
 //! table's malformed-input row; verify has no profile, so 3 is not used).
 //! The given root is the only trust anchor; no system store is consulted.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -122,26 +121,20 @@ fn now() -> Result<Duration, Failure> {
 /// The report as TAP-14 on stdout: one point per check, its detail as a
 /// diagnostic.
 pub(crate) fn print_tap(report: &Report) -> std::io::Result<()> {
-    let mut out = std::io::stdout().lock();
-    {
-        let mut rep =
-            tap_dancer::Reporter::Tap(tap_dancer::TapWriterBuilder::new(&mut out).build()?);
-        rep.plan_ahead(report.checks.len())?;
-        for check in &report.checks {
-            let diags: Vec<(&str, serde_json::Value)> = check
+    let points: Vec<piggy::tap_print::Point<'_>> = report
+        .checks
+        .iter()
+        .map(|check| piggy::tap_print::Point {
+            name: &check.name,
+            ok: check.ok,
+            diags: check
                 .detail
                 .iter()
                 .map(|d| ("detail", serde_json::Value::String(d.clone())))
-                .collect();
-            match (check.ok, diags.is_empty()) {
-                (true, true) => rep.ok(&check.name)?,
-                (true, false) => rep.ok_diag(&check.name, &diags)?,
-                (false, _) => rep.not_ok_diag(&check.name, &diags)?,
-            };
-        }
-        rep.finish()?;
-    }
-    out.flush()
+                .collect(),
+        })
+        .collect();
+    piggy::tap_print::print_tap(&points)
 }
 
 pub(crate) fn execute(args: VerifyArgs) -> Result<(), Failure> {
@@ -307,8 +300,7 @@ mod tests {
         let line = dir.join("k.pub");
         std::fs::write(
             &line,
-            super::super::openssh_ecdsa_line(piggy_piv::PivAlgorithm::EcP256, &want, "test")
-                .unwrap(),
+            super::super::openssh_ecdsa_line(&want, "test").unwrap(),
         )
         .unwrap();
         assert_eq!(key_point_in(&line).unwrap(), want);

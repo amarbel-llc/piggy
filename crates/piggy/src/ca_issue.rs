@@ -84,12 +84,11 @@ pub enum Refusal {
     KeyTypeNotInProfile,
     /// The profile was used less than [`RATE_WINDOW`] ago.
     RateLimited { retry_after: Duration },
-    /// The profile names what the issuer certificate's name constraints do
-    /// not admit: the profile is at fault, not the request (exit 3).
-    NamesOutsideIssuer(String),
-    /// The profile's holder key is not the key of the issuer certificate it
-    /// names (exit 3).
-    IssuerKeyMismatch(String),
+    /// The profile disagrees with the issuer certificate it names: it names
+    /// what the certificate's name constraints do not admit, or its holder
+    /// key is not the certificate's key. The profile is at fault, not the
+    /// request (exit 3).
+    IssuerMismatch(String),
     /// The issuer's key could not sign (card absent, PIN or touch refused).
     IssuerUnavailable(String),
     /// Anything else: a serial that is too short, an issuer certificate
@@ -102,9 +101,7 @@ impl Refusal {
         match self {
             // The profile is not the verb's: exit 3, as `root-cert` answers
             // a profile that is not a root (FDR 0007 exit table).
-            Self::WrongKind { .. } | Self::NamesOutsideIssuer(_) | Self::IssuerKeyMismatch(_) => {
-                ExitCode::ProfileUnknown
-            }
+            Self::WrongKind { .. } | Self::IssuerMismatch(_) => ExitCode::ProfileUnknown,
             Self::Csr(CsrRefusal::Names(_)) => ExitCode::NamesOutsideProfile,
             Self::Csr(_) | Self::KeyTypeNotInProfile => ExitCode::CsrMalformed,
             Self::RateLimited { .. } => ExitCode::RateLimited,
@@ -125,15 +122,8 @@ impl std::fmt::Display for Refusal {
                 format!("{profile:?}").to_lowercase()
             ),
             Self::Csr(why) => write!(f, "{why}"),
-            Self::NamesOutsideIssuer(why) => write!(
-                f,
-                "the profile names what its issuer's name constraints do not admit: {why}"
-            ),
-            Self::IssuerKeyMismatch(why) => {
-                write!(
-                    f,
-                    "the profile's holder_key and issuer_cert disagree: {why}"
-                )
+            Self::IssuerMismatch(why) => {
+                write!(f, "the profile and its issuer certificate disagree: {why}")
             }
             Self::KeyTypeNotInProfile => f.write_str("the profile does not accept this key type"),
             Self::RateLimited { retry_after } => write!(
@@ -325,17 +315,18 @@ pub fn check_holder_key_is_the_issuers(
 ) -> Result<(), Refusal> {
     let key = x509_verify::subject_key(issuer_cert_der)
         .map_err(|e| Refusal::Other(format!("the issuer certificate: {e}")))?;
+    let tail = |point: &[u8]| hex::encode(&point[point.len().saturating_sub(4)..]);
     match key {
         Some((PivAlgorithm::EcP256, point)) if point == holder_point => Ok(()),
-        Some((PivAlgorithm::EcP256, point)) => Err(Refusal::IssuerKeyMismatch(format!(
+        Some((PivAlgorithm::EcP256, point)) => Err(Refusal::IssuerMismatch(format!(
             "holder_key's point ends {} but issuer_cert's key ends {}: the certificate is not this key's (a holder that restarted minted a new key; sign its new request)",
-            hex::encode(&holder_point[holder_point.len().saturating_sub(4)..]),
-            hex::encode(&point[point.len().saturating_sub(4)..])
+            tail(holder_point),
+            tail(&point)
         ))),
-        Some((other, _)) => Err(Refusal::IssuerKeyMismatch(format!(
+        Some((other, _)) => Err(Refusal::IssuerMismatch(format!(
             "issuer_cert's key is {other:?}; a holder intermediate is P-256"
         ))),
-        None => Err(Refusal::IssuerKeyMismatch(
+        None => Err(Refusal::IssuerMismatch(
             "issuer_cert's key is not EC P-256 or P-384".into(),
         )),
     }
@@ -354,7 +345,10 @@ pub fn check_issuer_admits(profile: &Profile, issuer_cert_der: &[u8]) -> Result<
     if refused.is_empty() {
         Ok(())
     } else {
-        Err(Refusal::NamesOutsideIssuer(refused.join("; ")))
+        Err(Refusal::IssuerMismatch(format!(
+            "the profile names what the issuer's name constraints do not admit: {}",
+            refused.join("; ")
+        )))
     }
 }
 
@@ -723,7 +717,7 @@ mod tests {
         inter.names = vec!["example.org".into()];
         assert!(matches!(
             check_issuer_admits(&inter, &root_der),
-            Err(Refusal::NamesOutsideIssuer(_))
+            Err(Refusal::IssuerMismatch(_))
         ));
         assert!(matches!(
             check_issuer_admits(&wide, b"junk"),

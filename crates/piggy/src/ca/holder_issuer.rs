@@ -15,12 +15,12 @@
 //! as one file or to stdout; the rate limit and the audit line are the
 //! card path's.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
 use piggy::agent_client::{agent_sign_ecdsa_der, probe_agent_mode, probe_ecdsa_points};
-use piggy::ca_issue::{self, Inputs, Signer, Verb};
+use piggy::ca_issue::{self, Inputs, Refusal, Signer, Verb};
 use piggy::ca_profile::Profile;
 use piggy_piv::PivError;
 use ssh_key::public::{EcdsaPublicKey, KeyData};
@@ -35,6 +35,7 @@ use super::{Exit, Failure, failure};
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn execute(
+    verb: Verb,
     args: &IssuanceArgs,
     profile: &Profile,
     now: Duration,
@@ -42,7 +43,15 @@ pub(crate) fn execute(
     stamp: &Path,
 ) -> Result<(), Failure> {
     // The profile admitted a holder issuer on a leaf only (ca_profile), and
-    // the verb's kind check ran before this: only `issue` arrives here.
+    // the caller's kind check refuses `sign` with a leaf profile before
+    // this; the refusal is repeated here so the holder path never depends
+    // on that order: a holder key issues leaves, nothing else.
+    if verb != Verb::Issue {
+        return Err(refused(Refusal::WrongKind {
+            verb,
+            profile: profile.kind,
+        }));
+    }
     if args.act_out.is_some() {
         return Err(failure(Exit::Usage)(
             "--act-out: a leaf the holder issues leaves no certificate act (the intermediate's stands)"
@@ -101,8 +110,8 @@ pub(crate) fn execute(
         }
     }
 
-    let socket = super::agent_socket().map_err(failure(Exit::IssuerUnavailable))?;
     let unavailable = failure(Exit::IssuerUnavailable);
+    let socket = super::agent_socket().map_err(&unavailable)?;
     let mode = probe_agent_mode(&socket, PROBE_TIMEOUT).map_err(|e| {
         unavailable(format!(
             "the agent at {} did not report itself (agent-mode@piggy: {e}); a holder issues leaves, nothing else",
@@ -165,17 +174,7 @@ pub(crate) fn execute(
     // The chain the proxy serves: the leaf, then its issuer; never the root.
     let mut pem = pem_certificate(&issued.cert_der);
     pem.push_str(&pem_certificate(&issuer_cert));
-    match &args.out {
-        Some(path) => std::fs::write(path, &pem)
-            .map_err(|e| failure(Exit::Refused)(format!("write {}: {e}", path.display())))?,
-        None => {
-            let mut stdout = std::io::stdout().lock();
-            stdout
-                .write_all(pem.as_bytes())
-                .and_then(|()| stdout.flush())
-                .map_err(|e| failure(Exit::Refused)(format!("write stdout: {e}")))?;
-        }
-    }
+    super::write_to_out(args.out.as_deref(), pem.as_bytes()).map_err(failure(Exit::Refused))?;
 
     let line = ca_issue::audit_line(
         &args.profile,

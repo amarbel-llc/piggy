@@ -113,39 +113,24 @@ pub fn run(argv: &[String]) -> i32 {
     }
 }
 
-/// The OpenSSH public key line of an EC P-256 or P-384 SEC1 point (RFC
-/// 5656 §3.1: the key type, the curve name and the point, each
-/// length-prefixed, base64), with `comment` after it when not empty;
-/// `None` for any other algorithm.
-pub(crate) fn openssh_ecdsa_line(
-    algorithm: piggy_piv::PivAlgorithm,
-    point: &[u8],
-    comment: &str,
-) -> Option<String> {
-    use base64::Engine;
-    let (key_type, curve): (&[u8], &[u8]) = match algorithm {
-        piggy_piv::PivAlgorithm::EcP256 => (b"ecdsa-sha2-nistp256", b"nistp256"),
-        piggy_piv::PivAlgorithm::EcP384 => (b"ecdsa-sha2-nistp384", b"nistp384"),
-        _ => return None,
-    };
-    fn put(buf: &mut Vec<u8>, s: &[u8]) {
-        buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
-        buf.extend_from_slice(s);
+pub(crate) use piggy::ecdsa_sig::openssh_ecdsa_line;
+
+/// Write `bytes` to the file `out` names, or to stdout when there is none:
+/// how every verb here emits its PEM.
+pub(crate) fn write_to_out(out: Option<&std::path::Path>, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    match out {
+        Some(path) => {
+            std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+        }
+        None => {
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(bytes)
+                .and_then(|()| stdout.flush())
+                .map_err(|e| format!("write stdout: {e}"))
+        }
     }
-    let mut blob = Vec::new();
-    put(&mut blob, key_type);
-    put(&mut blob, curve);
-    put(&mut blob, point);
-    let mut line = format!(
-        "{} {}",
-        std::str::from_utf8(key_type).expect("ASCII"),
-        base64::engine::general_purpose::STANDARD.encode(blob)
-    );
-    if !comment.is_empty() {
-        line.push(' ');
-        line.push_str(comment);
-    }
-    Some(line)
 }
 
 /// The agent socket every verb that signs through the agent uses.

@@ -179,7 +179,7 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
     if profile.issuer.holder_key.is_some() {
         // A leaf under the holder-held intermediate (phase (iii-b)): no
         // card, no act; the profile admits a holder issuer on a leaf only.
-        return super::holder_issuer::execute(&args, &profile, now, &state, &stamp);
+        return super::holder_issuer::execute(verb, &args, &profile, now, &state, &stamp);
     }
     let attestation_root = super::attestation_root_pem(&profile.issuer)?;
     // The act's path is judged before the card is looked for: a taken path
