@@ -392,7 +392,7 @@ _test-optional-linux-only: test-bats-conformance-fibby-pivy-agent-smoke
 _test-optional-linux-only:
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-ca-root-cert test-bats-conformance-ca-root-cert-fibby test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-ca-csr-fibby test-bats-conformance-root-cert-guard test-bats-conformance-tool-admin-store-fibby test-bats-conformance-tool-attest-verify-fibby test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
+_test-conformance-linux-only: test-bats-conformance-ca-root-cert test-bats-conformance-ca-root-cert-fibby test-bats-conformance-ca-issue-fibby test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-ca-csr-fibby test-bats-conformance-root-cert-guard test-bats-conformance-tool-admin-store-fibby test-bats-conformance-tool-attest-verify-fibby test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -1304,6 +1304,30 @@ test-bats-conformance-ca-root-cert-fibby:
       PIGGY_BIN="$piggy_out/bin/piggy" \
       BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_ca_root_cert_fibby.bats
+
+# FDR 0007 phase (ii), piggy#391, over fibby's slot 82 (piggy#399): the root
+# `piggy ca root-cert` makes is written back, then `piggy ca issue` signs a
+# leaf and `piggy ca sign` an intermediate under it, each with its
+# piggy-certificate-v1 act sealed by the card's 9C through a card agent
+# (RFC 0012 §3.2); openssl checks the chain, `piggy act` the act, and the
+# rate-limit stamp and audit line are read back. Refused before any prompt,
+# nothing written: an unknown profile (3), a profile of the wrong kind (2),
+# an empty, junk or Ed25519 request (4), names outside the profile (5), a
+# P-384 request (1), a taken act path (1), a second run in the window (7).
+#
+# run the fibby-backed `piggy ca sign` and `piggy ca issue` bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-ca-issue-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=180 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_ca_issue_fibby.bats
 
 # FDR 0007 phase (iii-a), piggy#392: `piggy ca csr` for a holder-held
 # intermediate key. A holder agent over fibby with the intermediate scope

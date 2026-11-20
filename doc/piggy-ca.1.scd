@@ -84,8 +84,9 @@ One table for every verb, so a renewal timer reads one meaning per code.
 *0*	done
 *1*	refused for any other reason (on stderr), including a certificate
 	written but not recorded
-*2*	usage
-*3*	the profile is unknown, unreadable or not of the verb's kind
+*2*	usage, including a profile of the wrong kind for *sign* or *issue*
+*3*	the profile is unknown or unreadable, or not a root profile for
+	*root-cert*
 *4*	the request is malformed or its key type refused
 *5*	the request's names are outside the profile
 *6*	the issuer key is unavailable: the card is not attached, the slot holds

@@ -791,8 +791,9 @@ commands:
 
 	Exit status, one table for every *ca* verb so a renewal timer reads
 	one meaning per code: *0* done; *1* refused for any other reason (on
-	stderr); *2* usage; *3* the profile is unknown, unreadable or not of
-	the verb's kind (the message names the path tried); *4* the request
+	stderr); *2* usage, including a profile of the wrong kind for *sign*
+	or *issue*; *3* the profile is unknown or unreadable, or not a root
+	profile for *root-cert* (the message names the path tried); *4* the request
 	is malformed or its key type refused; *5* the request's names are
 	outside the profile; *6* the issuer key is unavailable (the card is
 	not attached, the slot holds no attestable key, its key is not proven
