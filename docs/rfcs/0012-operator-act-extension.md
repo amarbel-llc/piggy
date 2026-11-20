@@ -468,15 +468,17 @@ read through RFC 0013:
 - `subject-key` is the certified public key, spelled as RFC 0013 §2
   requires (`ssh_ecdsa_nistp256_pub`: the key is P-256, the only X.509
   key type FDR 0007 issues). `subject` is the principal the profile names
-  for the certificate.
+  for the certificate: the profile's `principal` field when set, else
+  `piggy:ca:<profile name>`. Either spelling MUST be a bare word (RFC 0013
+  §2: no spaces, quotes or commas).
 - `records` MUST contain one `piggy-record-digest-v1` markl-id (§4) naming
   the issued certificate: the digest of its DER encoding, `sha256` or
   `blake2b256`. A verifier that holds the certificate recomputes the
   digest and MUST fail if it differs. The id is opaque to the chain rules,
   as every `records` entry is (RFC 0013 §2).
-- `right` names what the certified key may do. Working names, to be
-  settled with phase (ii): `piggy:x509-ca` for a certificate with the CA
-  basic constraint and `piggy:x509-leaf` otherwise. The profile's name
+- `right` names what the certified key may do. The names are
+  `piggy:x509-ca` for a certificate with the CA basic constraint and
+  `piggy:x509-leaf` otherwise. The profile's name
   constraints are carried by the certificate, not restated here.
 - `assurance` is `piggy:hardware`; `issuer` is `operator`.
 

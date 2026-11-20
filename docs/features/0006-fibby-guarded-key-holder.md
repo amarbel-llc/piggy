@@ -347,6 +347,16 @@ Card provisioning changes to make 9C usable:
 papi's enrollment flow is papi's; these are the piggy primitives it
 calls.
 
+**Rotating the management key.** `piggy card rotate-admin` replaces a
+card's management key and keeps the store's sealed copy in step: the new
+key is sealed into a pending entry, the card is changed, and one
+`rename(2)` promotes the entry, so a crash leaves either the old or the
+new key recoverable. The operator confirms by typing the word `seal`,
+carried by `ConfirmRequest.word` (an amendment to RFC 0006 §2.4), and the
+verb's exit codes tell a declined run, a card refusal and an
+irreversible state apart. The design is
+`docs/plans/2026-11-19-card-rotate-admin-design.md`.
+
 **What the signed subject is.** piggy treats the text given to
 `operator-act@piggy`, and the data given to any ordinary sign request,
 as opaque bytes chosen by the caller. It never assumes the subject is a

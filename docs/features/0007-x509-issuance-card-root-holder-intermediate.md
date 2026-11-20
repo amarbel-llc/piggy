@@ -293,7 +293,9 @@ the only source of the issuer: `root-cert` takes no slot flag.
 *Profile fields as built (phase (ii), 2026-11-19; piggy(1) is the
 reference):* `kind`, `common_name`, `names`, `lifetime_hours`,
 `not_before_skew_minutes` (default 5; the design owner's ruling that the
-skew is a profile field, not a flag), `key_types`; under `[issuer]`,
+skew is a profile field, not a flag), `key_types`, and the optional
+`principal`, the `subject` of the profile's certificate acts (RFC 0012
+§3.2; a bare word, default `piggy:ca:<profile name>`); under `[issuer]`,
 `slot` and `guid`, and the optional `attestation_root`, an absolute path
 to the PEM certificate the card's attestation chain must reach before
 the slot's key counts as the card's own (absent: the embedded Yubico PIV
