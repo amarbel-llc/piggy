@@ -179,7 +179,7 @@ function a_key_generated_in_slot_82_signs_its_root_and_seals_its_act { # @test
   [[ $stderr == *"the attestation root is the profile's attestation_root, not the embedded Yubico root: subject "* ]] || {
     echo "no override line on stderr" >&2; _show; return 1; }
   [[ $stderr == *"sha256 $fp"* ]] || { echo "the override line does not carry $fp" >&2; _show; return 1; }
-  [[ $stderr == *"slot 82 signs the root certificate CN=piggy-test fibby root"* ]] || {
+  [[ $stderr == *"slot 82 signs the root CN=piggy-test fibby root (CA, pathlen 1)"* ]] || {
     echo "the notice does not describe the certificate" >&2; _show; return 1; }
 
   # Two PINs: root-cert's for the certificate, the agent's for the act,

@@ -267,7 +267,7 @@ function a_leaf_is_issued_under_the_root_and_its_act_sealed { # @test
   _ca issue leaf "$WORKDIR/leaf.csr"
   [[ $status -eq 0 ]] || { echo "issue: want exit 0, got $status" >&2; _show; return 1; }
   [[ -z $output ]] || { echo "--out given, yet stdout carried: $output" >&2; return 1; }
-  [[ $stderr == *"signs a leaf certificate under profile leaf"* ]] || {
+  [[ $stderr == *"signs a leaf (TLS server) for "*"(profile leaf, serial "* ]] || {
     echo "the notice does not describe the certificate" >&2; _show; return 1; }
 
   _assert_certified leaf piggy:x509-leaf
@@ -303,7 +303,7 @@ function an_intermediate_is_signed_under_the_root_and_its_act_sealed { # @test
   _ca sign inter "$WORKDIR/inter.csr"
   [[ $status -eq 0 ]] || { echo "sign: want exit 0, got $status" >&2; _show; return 1; }
   [[ -z $output ]] || { echo "--out given, yet stdout carried: $output" >&2; return 1; }
-  [[ $stderr == *"intermediate certificate under profile inter"* ]] || {
+  [[ $stderr == *"signs an intermediate (CA, pathlen 0) for "*"(profile inter, serial "* ]] || {
     echo "the notice does not describe the certificate" >&2; _show; return 1; }
 
   _assert_certified inter piggy:x509-ca

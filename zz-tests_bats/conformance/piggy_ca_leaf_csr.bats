@@ -62,6 +62,8 @@ _show() {
 # the same key.
 _assert_made() {
   local key="$1" csr="$2" cn="$3"
+  # Later `run`s overwrite $stderr; keep this verb's.
+  local stderr="$stderr"
   [[ $stderr != *"[piggy-test-askpass]"* ]] || { echo "a PIN prompt was reached" >&2; _show; return 1; }
   [[ $(stat -c %a "$key") == 600 ]] || { echo "key mode $(stat -c %a "$key"), want 600" >&2; return 1; }
   [[ $(head -n1 "$key") == "-----BEGIN PRIVATE KEY-----" ]] || { echo "the key is not PKCS#8 PEM:" >&2; head -n1 "$key" >&2; return 1; }

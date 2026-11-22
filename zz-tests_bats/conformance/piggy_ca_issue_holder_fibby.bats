@@ -167,7 +167,8 @@ EOF
 _intermediate() {
   SSH_AUTH_SOCK="$HOLDER_AGENT_SOCK" run "$PIGGY_BIN" holder mint --scope piggy-ca-intermediate-v1 --type p256
   [[ $status -eq 0 && $output == ecdsa-sha2-nistp256* ]] || { echo "mint failed ($status): $output" >&2; _show; return 1; }
-  INT_PUB="$output"
+  # `run` folds stderr into $output: the key is its first line.
+  INT_PUB="${output%%$'\n'*}"
   printf '%s\n' "$INT_PUB" >"$WORKDIR/int.pub"
   SSH_AUTH_SOCK="$HOLDER_AGENT_SOCK" run "$PIGGY_BIN" ca csr --key "$WORKDIR/int.pub" --cn "piggy-test intermediate" --out "$WORKDIR/int.csr"
   [[ $status -eq 0 ]] || { echo "csr failed ($status): $output" >&2; _show; return 1; }
@@ -281,12 +282,14 @@ function a_non_holder_agent_an_unserved_key_act_out_and_sign_are_refused { # @te
   # No agent at all: exit 6 too.
   _issue_via /nonexistent hleaf "$WORKDIR/leaf.csr"
   _assert_refusal 6 "no agent" hleaf
-  # A P-256 key the holder does not serve.
+  # A holder_key that is not the issuer certificate's own key (a holder that
+  # restarted minted a new one): the profile disagrees with itself, exit 3,
+  # before the holder is asked anything.
   ssh-keygen -t ecdsa -b 256 -N "" -q -f "$WORKDIR/soft" -C soft
   _holder_profile unserved '"github.com"' "$(cat "$WORKDIR/soft.pub")"
   _issue_via "$HOLDER_AGENT_SOCK" unserved "$WORKDIR/leaf.csr"
-  _assert_refusal 6 "a key the holder does not serve" unserved
-  [[ $stderr == *"does not serve"* ]] || { echo "the refusal does not say why: $stderr" >&2; return 1; }
+  _assert_refusal 3 "a holder_key that is not the certificate's" unserved
+  [[ $stderr == *"disagree"*"not this key's"* ]] || { echo "the refusal does not say why: $stderr" >&2; return 1; }
   # --act-out: a holder leaf has no act.
   _issue_via "$HOLDER_AGENT_SOCK" hleaf "$WORKDIR/leaf.csr" --act-out "$WORKDIR/no.act"
   _assert_refusal 2 "--act-out" hleaf
