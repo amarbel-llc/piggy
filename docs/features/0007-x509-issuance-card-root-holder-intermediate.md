@@ -604,6 +604,21 @@ real card and in fibby alike (fibby holds a key in any retired slot, piggy#399).
   changed by this: whether they too should never be cached, against the
   operator's wish for a single PIN entry, is deferred and tracked as its own
   issue.
+- **A CA key must be attested PIN always and touch always.** Added the same
+  day after the Fable review of c7dd0561: the agent reads the key's
+  attestation on every request and signs nothing with a CA slot's key that is
+  not attested for it with PIN always and touch always (an imported key, or
+  one generated laxer, signs nothing and raises no prompt); the dialog is
+  shown whatever the agent believes of the key's PIN policy; `piggy tool
+  generate` on 82 or 83 with no policy generates always and always. No CA
+  key performs ECDH on any path (`PinSession::ecdh_derive`). The dialog's
+  text is bounded and plain by refusal: strict charsets and counts, a known
+  list of options and extensions each at most once, well-formed certified
+  keys, a certificate not already over, and a CA key that is the signing key.
+  The certificate dialog's askpass must acknowledge a nonce
+  (`piggy-askpass-ack`) or its PIN is not used, and a front relays
+  certificate-shaped data only to an upstream that advertises
+  `ssh-ca-gate@piggy`.
 - **Fibby is production software.** The operator wants fibby to be capable of
   everything piggy does that is used regularly, and part of the first real
   run; slot 83 works on it today. Persistence of a fibby card's keys across a

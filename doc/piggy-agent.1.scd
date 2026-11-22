@@ -358,10 +358,25 @@ serial, the validity (UTC) and lifetime, the critical options (a
 and timed like an operator act's text. The PIN is asked for every certificate
 (see PIN MEMORY); the card's touch, if the slot demands it, is the card's.
 
+The card is asked, on every request, to attest the key: a CA slot's key
+signs only if the attestation is for it and states PIN always and touch
+always (see *piggy-piv-slots*(7)). The certificate's text reaches the dialog
+as *PIGGY_ASKPASS_CONTEXT*, which only a program that understands the kind
+shows, so the agent also gives the prompt a nonce in *PIGGY_ASKPASS_NONCE*
+and uses the PIN only if the program prints *piggy-askpass-ack* _nonce_ on
+the line after it (_contrib/piggy-askpass.sh_ and the test helper do); any
+other *SSH_ASKPASS* is refused for this kind, so a certificate is never
+signed behind a prompt that did not show it. (Operator acts have the same
+weakness and are not yet covered.)
+
 A request for a key an upstream holds is relayed unchanged (see UPSTREAM
 PROXYING): the checks and the dialog are the card agent's own, on its host. A
-proxy-only front does none of them, and an upstream that is not a piggy card
-agent offers none either.
+front cannot tell which slot an upstream key is in, so it relays data that is
+shaped like a certificate (an OpenSSH certificate or a DER TBSCertificate) only
+to an upstream that advertises the extension *ssh-ca-gate@piggy* in its answer
+to *query*, which a card agent of this version does for every key it holds;
+an older piggy agent, or any other ssh-agent, is refused before the data
+leaves the front.
 
 # HOLDER MODE
 

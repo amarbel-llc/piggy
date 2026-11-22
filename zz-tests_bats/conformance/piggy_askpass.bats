@@ -1140,6 +1140,25 @@ helper_option() {
   fi
 }
 
+# The Fable review of c7dd0561, finding 5: the agent hands a prompt of this
+# kind a nonce, and uses the PIN only if the program prints it back after the
+# PIN, so a generic askpass cannot stand in for the dialog that shows the
+# certificate. Without the nonce (any other caller) the output is the PIN alone.
+@test "an_ssh_certificate_prompt_acknowledges_the_agents_nonce_after_the_pin" {
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=ssh-certificate PIGGY_ASKPASS_NONCE=0123abcd
+  assert_success
+  assert_output $'123456\npiggy-askpass-ack 0123abcd'
+
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=ssh-certificate
+  assert_success
+  assert_output "123456"
+
+  # A routine prompt has no kind, so it acknowledges nothing, nonce or not.
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_NONCE=0123abcd
+  assert_success
+  assert_output "123456"
+}
+
 @test "an_ssh_certificate_is_refused_on_zenity_before_any_dialog" {
   run_askpass_against_logging_zenity_stub PIGGY_ASKPASS_KIND=ssh-certificate
   assert_failure 3

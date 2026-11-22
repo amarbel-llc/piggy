@@ -2084,11 +2084,13 @@ fn cmd_generate(inv: &Invocation, sealer: &dyn ManagementKeySealer) -> i32 {
         eprintln!("piggy tool {op}: failed to authenticate with current admin key: {e}");
         return 1;
     }
+    let (pin_policy, touch_policy) =
+        effective_generate_policy(slot_id, inv.pin_policy, inv.touch_policy);
     let point = match session.generate_key(
         slot_id,
         alg_byte,
-        inv.pin_policy.generate_tag_byte(),
-        inv.touch_policy.generate_tag_byte(),
+        pin_policy.generate_tag_byte(),
+        touch_policy.generate_tag_byte(),
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -2130,6 +2132,34 @@ fn cmd_generate(inv: &Invocation, sealer: &dyn ManagementKeySealer) -> i32 {
             1
         }
     }
+}
+
+/// The PIN and touch policy a `generate` asks the card for: what the
+/// operator named, except that a certificate authority's slot (82, 83) left at
+/// the card's default (PIN once, touch never on a YubiKey, which the agent
+/// would refuse to sign with) is generated PIN always and touch always. A
+/// policy named explicitly is kept, so a deliberately weaker key can still be
+/// made, and is refused when it is asked to sign.
+fn effective_generate_policy(
+    slot_id: u8,
+    pin: PinPolicy,
+    touch: TouchPolicy,
+) -> (PinPolicy, TouchPolicy) {
+    if piggy_piv::slot::ca_kind(slot_id).is_none() {
+        return (pin, touch);
+    }
+    (
+        if pin == PinPolicy::Default {
+            PinPolicy::Always
+        } else {
+            pin
+        },
+        if touch == TouchPolicy::Default {
+            TouchPolicy::Always
+        } else {
+            touch
+        },
+    )
 }
 
 /// A key just generated in `slot` as an OpenSSH public-key line, from its
@@ -3504,6 +3534,17 @@ mod tests {
         let inv = parse(&argv(&["-a", "eccp256", "generate", "9c"])).unwrap();
         assert_eq!(inv.pin_policy, super::PinPolicy::Default);
         assert_eq!(inv.touch_policy, super::TouchPolicy::Default);
+        // A CA slot generated without a policy is generated always/always.
+        use super::{PinPolicy as P, TouchPolicy as T, effective_generate_policy as eff};
+        for ca in [0x82u8, 0x83] {
+            assert_eq!(eff(ca, P::Default, T::Default), (P::Always, T::Always));
+            assert_eq!(eff(ca, P::Default, T::Never), (P::Always, T::Never));
+            assert_eq!(eff(ca, P::Once, T::Default), (P::Once, T::Always));
+        }
+        // Every other slot is the card's default, and a named policy is kept.
+        for other in [0x9Au8, 0x9C, 0x9D, 0x84] {
+            assert_eq!(eff(other, P::Default, T::Default), (P::Default, T::Default));
+        }
         assert!(
             parse(&argv(&[
                 "-a",

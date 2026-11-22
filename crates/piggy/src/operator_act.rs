@@ -398,6 +398,25 @@ pub fn refuse_operator_act_signed_data(data: &[u8]) -> Result<(), String> {
     }
 }
 
+/// The `query` extension name an agent advertises when it applies the CA slot
+/// rules (this module's [`gate_data_for_slot`]) to every sign request it
+/// serves. A front that relays a certificate-shaped request asks the upstream
+/// that holds the key for it first: an upstream that does not advertise it is
+/// never sent such data (the Fable review of c7dd0561, finding 9).
+pub const SSH_CA_GATE_EXT: &str = "ssh-ca-gate@piggy";
+
+/// The outer shape of a DER TBSCertificate, for the agent's tests.
+#[cfg(test)]
+pub(crate) fn tbs_certificate_shaped_for_tests() -> Vec<u8> {
+    let mut body = vec![0xA0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01];
+    for _ in 0..5 {
+        body.extend_from_slice(&[0x30, 0x00]);
+    }
+    let mut out = vec![0x30, body.len() as u8];
+    out.extend_from_slice(&body);
+    out
+}
+
 /// What a sign request may be, once it has passed the slot gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotData {

@@ -616,11 +616,23 @@ impl<'tok> PinSession<'tok> {
     /// Perform ECDH key agreement with the slot's private key, inside this
     /// session's transaction. `slot` is read before `verify_pin`, and the
     /// PIN-policy semantics are those of [`Self::sign_prehash`].
+    ///
+    /// A certificate authority's slot ([`crate::slot::ca_kind`]) is refused
+    /// first, here, where every caller of key agreement passes (the agent's
+    /// ECDH extensions, `piggy tool ecdh`, `pass show-batch`, the agentless
+    /// oracle, the age and pigpen plugins): such a key certifies and does
+    /// nothing else, so none of them needs a gate of its own.
     pub fn ecdh_derive(
         &mut self,
         slot: &PivSlot,
         peer_ec_point: &[u8],
     ) -> Result<Vec<u8>, PivError> {
+        if crate::slot::ca_kind(slot.id()).is_some() {
+            return Err(PivError::Other(format!(
+                "slot {:02X} holds a certificate authority's key, which never performs key agreement",
+                slot.id()
+            )));
+        }
         validate_ec_point(slot.algorithm(), peer_ec_point)?;
         self.general_authenticate(
             slot.algorithm().to_byte(),

@@ -608,6 +608,28 @@ impl PiggyAgent {
                 if self.upstreams.is_empty() {
                     return Err(e);
                 }
+                // A front cannot tell which slot an upstream key is in, so it
+                // asks instead whether the upstream that holds the key applies
+                // the CA slot rules at all (it advertises `ssh-ca-gate@piggy`)
+                // before it relays data that is shaped like a certificate:
+                // an older piggy agent or a plain ssh-agent never sees it.
+                if piggy_piv::ssh_cert::looks_like_ssh_certificate(&request.data)
+                    || piggy_piv::x509_profile::looks_like_tbs_certificate(&request.data)
+                {
+                    let gated = self
+                        .upstreams
+                        .holder_advertises(&request.pubkey, crate::operator_act::SSH_CA_GATE_EXT)
+                        .await;
+                    if !gated {
+                        return Err(AgentError::Other(
+                            format!(
+                                "refusing to relay certificate-shaped data: the agent that holds the key does not advertise {}, so it may sign a certificate with a key that is not a certificate authority's slot",
+                                crate::operator_act::SSH_CA_GATE_EXT
+                            )
+                            .into(),
+                        ));
+                    }
+                }
                 return self.upstreams.sign(request).await;
             }
         };
@@ -642,6 +664,18 @@ impl PiggyAgent {
         // Prepare data for signing (independent of the card session).
         let sign_data = prepare_sign_data(key.algorithm, &request.data, request.flags)?;
 
+        // A CA slot signs only a key attested PIN always and touch always,
+        // read from the card now, and raises its dialog whatever the
+        // agent's own view of the key's PIN policy (an attested `never`
+        // would otherwise skip the prompt that shows what is certified).
+        let is_ca = piggy_piv::slot::is_ca_slot(key.slot_id);
+        if is_ca {
+            let _card_guard = self.card_lock.lock().await;
+            let token = reconnect_to_token(&key.guid)?;
+            check_ca_slot_attestation(&token, key.slot_id, &key.public_key)
+                .map_err(|refusal| AgentError::Other(refusal.into()))?;
+        }
+
         // A certificate is signed behind its own dialog, which says what it
         // certifies; a CA slot's PIN is asked every time and never cached.
         let how = match &slot_data {
@@ -655,7 +689,7 @@ impl PiggyAgent {
                 "sign",
                 &key.guid,
                 key.slot_id,
-                key.needs_pin(),
+                key.needs_pin() || is_ca,
                 &how,
                 |session, slot| {
                     session
@@ -734,6 +768,10 @@ impl PiggyAgent {
                 // upstream does, which the union below takes care of.
                 if !self.proxy_only {
                     supported.push(crate::operator_act::EXTENSION.to_string());
+                    // This agent applies the CA slot rules to every sign
+                    // request for a key it holds; a front asks before it
+                    // relays certificate-shaped data.
+                    supported.push(crate::operator_act::SSH_CA_GATE_EXT.to_string());
                 }
                 // FDR 0006 phase (d): only a holder mints and retires.
                 if self.holder.is_some() {
@@ -1076,6 +1114,40 @@ fn check_operator_act_attestation(
     if !chains {
         return Err(format!(
             "slot {slot:02X}: the attestation is not signed by the card's attestation certificate"
+        ));
+    }
+    Ok(())
+}
+
+/// The slot gate of a certificate authority's key (slots 82 and 83), read from
+/// the card on every request, never from what was configured or cached: the
+/// attestation must be for the very key asked to sign and state PIN always and
+/// touch always (the Fable review of c7dd0561, finding 1: a CA key generated
+/// with PIN policy `never` signed with no dialog at all). A key the card will
+/// not attest (an imported one) is refused. `Err` is the refusal to report.
+fn check_ca_slot_attestation(
+    token: &piggy_piv::PivToken,
+    slot: u8,
+    requested: &KeyData,
+) -> Result<(), String> {
+    let attestation = token.yk_attest(slot).map_err(|e| {
+        format!(
+            "slot {slot:02X}: the card did not attest the key ({e}); a certificate authority's key must be generated on the card"
+        )
+    })?;
+    let (pin, touch) = piggy_piv::attest::parse_policy(&attestation)
+        .map_err(|e| format!("slot {slot:02X}: the attestation states no policy ({e})"))?;
+    let policy = piggy_piv::KeyPolicy { pin, touch };
+    if !policy.serves_certificate_authority() {
+        return Err(format!(
+            "slot {slot:02X}: {policy}; a certificate authority's key must be attested PIN always and touch always"
+        ));
+    }
+    let (_, attested_key) = piggy_piv::cert::extract_public_key(&attestation)
+        .map_err(|e| format!("slot {slot:02X}: unreadable attestation ({e})"))?;
+    if attested_key.key_data() != requested {
+        return Err(format!(
+            "slot {slot:02X}: the attestation is for a different key"
         ));
     }
     Ok(())
@@ -3714,6 +3786,75 @@ mod tests {
             seen_before,
             "the upstream was asked to sign operator-act data"
         );
+    }
+
+    /// A front does not know which slot an upstream key is in (the comment
+    /// is the upstream's own word), so what it can know is whether the
+    /// upstream that holds the key applies the CA slot rules at all: only an
+    /// upstream that advertises `ssh-ca-gate@piggy` is asked to sign data
+    /// that is shaped like a certificate (the Fable review of c7dd0561,
+    /// finding 9); an older piggy agent, or any other ssh-agent, never sees
+    /// it, so enforcement no longer depends on that upstream's version.
+    #[tokio::test]
+    async fn certificate_shaped_data_is_relayed_only_to_an_upstream_that_advertises_the_gate() {
+        // Data that starts as an OpenSSH certificate does: a string that is a
+        // certificate key type. A DER TBSCertificate is the X.509 shape.
+        let mut ssh_cert_shaped = Vec::new();
+        let ty = b"ssh-ed25519-cert-v01@openssh.com";
+        ssh_cert_shaped.extend_from_slice(&(ty.len() as u32).to_be_bytes());
+        ssh_cert_shaped.extend_from_slice(ty);
+        ssh_cert_shaped.extend_from_slice(&[0u8; 8]);
+        let tbs_shaped = crate::operator_act::tbs_certificate_shaped_for_tests();
+
+        for (label, data) in [("ssh", ssh_cert_shaped), ("x509", tbs_shaped)] {
+            // An upstream with no gate: refused, and never asked.
+            let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+                0x77,
+                "old-agent-key",
+            )]);
+            let events = stub.events.clone();
+            let path = upstream_stub::spawn_stub(&format!("cert-gate-old-{label}"), stub);
+            let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+            agent.request_identities().await.unwrap();
+            let seen_before = events.lock().unwrap().len();
+            let err = agent
+                .sign(SignRequest {
+                    pubkey: ed25519_key_data(0x77),
+                    data: data.clone(),
+                    flags: 0,
+                })
+                .await
+                .unwrap_err();
+            assert_agent_error_other_eq(&err, "does not advertise ssh-ca-gate@piggy");
+            assert!(
+                !events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .skip(seen_before)
+                    .any(|e| e.starts_with("sign")),
+                "{label}: the upstream was asked to sign certificate-shaped data"
+            );
+
+            // One that advertises it is asked, and its answer is relayed.
+            let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+                0x77,
+                "gated-card-key",
+            )])
+            .with_extensions(&[crate::operator_act::SSH_CA_GATE_EXT]);
+            let path = upstream_stub::spawn_stub(&format!("cert-gate-new-{label}"), stub);
+            let mut agent = PiggyAgent::new(Vec::new()).with_upstream_pool(pool_for(path));
+            agent.request_identities().await.unwrap();
+            let sig = agent
+                .sign(SignRequest {
+                    pubkey: ed25519_key_data(0x77),
+                    data,
+                    flags: 0,
+                })
+                .await
+                .unwrap();
+            assert_eq!(sig, upstream_stub::canned_signature(), "{label}");
+        }
     }
 
     /// A proxy does not judge what it forwards: a request this build would

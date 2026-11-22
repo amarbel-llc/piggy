@@ -77,6 +77,12 @@ if [[ -n ${PIGGY_TEST_FIB_PIN:-} ]]; then
   # No trailing newline manipulation: ssh-add and pivy-box both trim the
   # first line via strcspn / similar. A plain echo is the simplest.
   printf '%s\n' "$PIGGY_TEST_FIB_PIN"
+  # Like contrib/piggy-askpass.sh: when the agent put a nonce in the
+  # environment for a kind it will not use without acknowledgement, say that
+  # this program understood the kind (a test helper that knows the kinds).
+  if [[ -n ${PIGGY_ASKPASS_NONCE:-} && -n ${PIGGY_ASKPASS_KIND:-} ]]; then
+    printf 'piggy-askpass-ack %s\n' "$PIGGY_ASKPASS_NONCE"
+  fi
   exit 0
 fi
 

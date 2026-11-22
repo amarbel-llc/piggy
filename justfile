@@ -2485,6 +2485,55 @@ explore-ssh-cert-proof USER_PUB DIR:
       -f the_delegation_proof \
       zz-tests_bats/conformance/piggy_ssh_cert_fibby.bats
 
+# Render the SSH certificate dialog (contrib/piggy-askpass.sh through
+# piggy-askpass-gtk) headless on an Xvfb screen to PNGs in DIR: a typical
+# certificate and the worst case the parser admits (8 principals, two 256-byte
+# option values, every extension). The dialog is shown with the context the
+# agent would give it; the text is made up. Needs nixpkgs' xvfb-run and
+# imagemagick, fetched with `nix shell`.
+#
+# render the SSH certificate dialog to PNGs headless
+[group('explore')]
+[linux]
+explore-ssh-cert-dialog-png DIR=".tmp/dialog-png":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ DIR }}"
+    out="$(cd "{{ DIR }}" && pwd)"
+    gtk=$(nix build .#piggy-askpass-gtk --no-link --print-out-paths)
+    typical=$'card 191755CF slot 83, the SSH certificate authority\nOpenSSH user certificate\nKey id: grant-1\nPrincipal: deploy-site\nPrincipal: restart-service\nCertified key: SHA256:VwTKavMZsIyhTV79SVgMR6phfKlJuiLfnyx6IPIaSdQ\nSigned by CA: SHA256:CyrC9JjEcSecv/WY2LVyRJsUBbRYx1XMVgJC5INNvM0\nSerial: 0\nValid: 2026-11-22T22:07:00Z to 2026-11-23T00:08:37Z\nLifetime: 2h 1m 37s\nCritical option: force-command: "/usr/bin/true"\nExtensions: permit-pty, permit-user-rc'
+    long=$(printf 'y%.0s' $(seq 1 256))
+    worst=$'card 191755CF slot 83, the SSH certificate authority\nOpenSSH user certificate\nKey id: grant-with-a-key-id-of-the-longest-length-allowed-by-the-parser-64b\n'
+    for p in a b c d e f g h; do worst+="Principal: principal-$p"$'\n'; done
+    worst+=$'Certified key: SHA256:VwTKavMZsIyhTV79SVgMR6phfKlJuiLfnyx6IPIaSdQ\nSigned by CA: SHA256:CyrC9JjEcSecv/WY2LVyRJsUBbRYx1XMVgJC5INNvM0\nSerial: 18446744073709551615\nValid: 2026-11-22T22:07:00Z to 2026-11-23T22:12:00Z\nLifetime: 1d 5m\n'
+    worst+="Critical option: force-command: \"$long\""$'\n'
+    worst+="Critical option: source-address: \"$long\""$'\n'
+    worst+=$'Critical option: verify-required\nExtensions: permit-X11-forwarding, permit-agent-forwarding, permit-port-forwarding, permit-pty, permit-user-rc'
+    helper="$out/.render-one.sh"
+    cat >"$helper" <<'RENDER'
+    #!/usr/bin/env bash
+    # args: GTK_BIN BODY_FILE PNG
+    set -euo pipefail
+    export GSK_RENDERER=cairo GDK_BACKEND=x11
+    "$1" --title "piggy SSH CA: CERTIFICATE" --ok-label "Issue SSH certificate" --timeout 30 \
+      --band "✍  SSH CERTIFICATE — certifying a key for logins" \
+      --band-background "#0e7490" --band-foreground "#ffffff" <"$2" >/dev/null 2>&1 &
+    pid=$!
+    sleep 5
+    import -window root "$3"
+    kill "$pid" 2>/dev/null || true
+    RENDER
+    chmod +x "$helper"
+    for name in typical worst; do
+      ctx="${!name}"
+      PIGGY_ASKPASS_KIND=ssh-certificate PIGGY_ASKPASS_CONTEXT="$ctx" PIGGY_ASKPASS_DRY_RUN=1 \
+        bash contrib/piggy-askpass.sh "Enter PIN for token 191755CF to sign this SSH certificate" \
+        2>"$out/$name.body" >/dev/null || true
+      nix shell nixpkgs#xvfb-run nixpkgs#imagemagick -c \
+        xvfb-run -a -s "-screen 0 1280x1400x24" "$helper" "$gtk/bin/piggy-askpass-gtk" "$out/$name.body" "$out/ssh-certificate-$name.png"
+    done
+    ls -l "$out"
+
 # Syntax-check (bash -n) and shellcheck FILES, which may sit outside the
 # tree; shellcheck is skipped with a note when
 # the devshell has none.

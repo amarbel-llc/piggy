@@ -204,6 +204,14 @@ impl KeyPolicy {
         self == Self::OPERATOR_ACT
     }
 
+    /// Whether a key may be a certificate authority's (slots 82 and 83): the
+    /// same bar as an operator act, PIN always and touch always, read from
+    /// the attestation, so a certificate is never signed by a key that a
+    /// cached PIN or no touch could use.
+    pub fn serves_certificate_authority(self) -> bool {
+        self == Self::OPERATOR_ACT
+    }
+
     /// The PIN policy the card applies to `slot`: the configured one, or
     /// for `default` the PIV spec default (9C always, 9E never, else once).
     pub fn effective_pin(self, slot: u8) -> PinPolicy {

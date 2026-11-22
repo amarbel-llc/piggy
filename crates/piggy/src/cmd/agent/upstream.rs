@@ -583,6 +583,38 @@ impl UpstreamPool {
         Some(answer.await)
     }
 
+    /// Whether the upstream that holds `pubkey` advertises the extension
+    /// `name` in its answer to `query`. False when no upstream holds the key,
+    /// when it cannot be reached or does not answer, and when its answer does
+    /// not list the name: a front only trusts what it was told, now.
+    pub async fn holder_advertises(&self, pubkey: &KeyData, name: &str) -> bool {
+        let mut idx = self.known_keys.lock().await.get(pubkey).copied();
+        if idx.is_none() {
+            self.list_identities().await;
+            idx = self.known_keys.lock().await.get(pubkey).copied();
+        }
+        let Some(idx) = idx else {
+            return false;
+        };
+        let upstream = self.upstreams[idx].clone();
+        let query = Extension {
+            name: "query".into(),
+            details: Vec::new().into(),
+        };
+        match self.extension_on(&upstream, query).await {
+            // A piggy card agent answers with flat length-prefixed names, the
+            // shape pivy's parser expects; other agents wrap them in one
+            // string. The shared decoder reads both (the lane that signs a
+            // certificate through a front found `parse_message` read only
+            // the wrapped one).
+            Ok(Some(response)) => {
+                crate::agent_client::decode_query_response(response.details.as_ref())
+                    .is_ok_and(|names| names.iter().any(|e| e == name))
+            }
+            _ => false,
+        }
+    }
+
     /// Union of the extension names the upstreams advertise, gathered by
     /// forwarding the client's `query` request to each. Per-upstream
     /// degrade: an unreachable upstream or an unparseable response just

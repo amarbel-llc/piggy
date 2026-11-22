@@ -879,7 +879,7 @@ fn guid_prefix_match(comment_guid: &str, hint: &str) -> bool {
 /// this decoder sees only the name list regardless of which agent
 /// answered. The C parser consumes the same echo itself before its
 /// dual-encoding switch.
-fn decode_query_response(details: &[u8]) -> Result<Vec<String>, String> {
+pub(crate) fn decode_query_response(details: &[u8]) -> Result<Vec<String>, String> {
     if details.len() >= 4 {
         let blob_len =
             u32::from_be_bytes([details[0], details[1], details[2], details[3]]) as usize;

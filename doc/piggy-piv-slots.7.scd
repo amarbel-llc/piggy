@@ -151,6 +151,18 @@ example:
 piggy tool -K @store -a eccp256 -i always -t always generate 83
 ```
 
+*piggy tool generate* on slot 82 or 83 with no *-i* or *-t* generates PIN
+always and touch always (the card's own default, PIN once and touch never,
+is not one the agent signs with). The agent reads the key's ATTESTATION on
+every request and signs nothing with a CA slot's key that the card does not
+attest as generated on it with PIN always and touch always: an imported key,
+or one generated with a laxer policy, is refused before any prompt, and a
+CA slot's dialog is shown whatever the agent otherwise believes of the key's
+PIN policy.
+
+No CA slot's key ever performs key agreement (ECDH), on any path: the
+refusal is in the one place every ECDH goes through.
+
 What the kinds refuse:
 
 - Slot 82 (X.509) signs no DER TBSCertificate through the agent or *piggy tool
@@ -160,9 +172,22 @@ What the kinds refuse:
   certificate, as *ssh-keygen -U -s* sends it to an agent: no TBSCertificate,
   no sshsig in any namespace, no SSH login challenge, no other bytes. A host
   certificate, a certificate that names no principal (it would be valid for
-  every user), one with no end, and one valid for more than 24 hours (plus
-  five minutes for *ssh-keygen*'s back-dating) are refused before any prompt.
-  *piggy tool sign* signs nothing with slot 83.
+  every user), one with no end, one already over, one that starts more than
+  five minutes from now, and one valid for more than 24 hours (plus five
+  minutes for *ssh-keygen*'s back-dating) are refused before any prompt, and
+  so is one that names a CA key other than the key asked to sign it.
+  Everything the dialog shows is bounded and plain by refusal, not by
+  escaping: a key id of at most 64 bytes and at most 8 principals of at most
+  64, of ASCII letters and digits and the characters . \_ @ : + - only;
+  critical options only *force-command* and
+  *source-address* (a printable-ASCII value of at most 256 bytes) and
+  *verify-required*, and extensions only the five "permit" ones
+  (X11-forwarding, agent-forwarding, port-forwarding, pty, user-rc), each at
+  most once (*no-touch-required* and every unknown option are refused); a
+  certified key that is not a well-formed ed25519, ECDSA (P-256, P-384,
+  P-521), RSA (2048 to 8192 bits) or security-key key, and a nonce that is not
+  32 bytes. *piggy tool sign*, *piggy sign-bytes* and *piggy tool req-cert*
+  sign nothing with slot 83.
 - Every other slot refuses an OpenSSH certificate.
 
 The PIN of slots 82 and 83 is asked every time and never cached by the

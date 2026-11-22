@@ -44,24 +44,14 @@ pub enum SshCertRefusal {
         "{what} holds a control or formatting character, which the dialog could not show truthfully"
     )]
     Undisplayable { what: &'static str },
-}
-
-/// Whether `s` can be shown in a dialog or on a terminal as what it is: no
-/// control character (a newline, a carriage return or an escape sequence
-/// could fake another line of the dialog), no zero-width or bidirectional
-/// formatting character (it could reorder or hide what is read).
-fn displayable(s: &str) -> bool {
-    !s.chars().any(|c| {
-        c.is_control()
-            || matches!(
-                c,
-                '\u{00AD}'
-                    | '\u{200B}'..='\u{200F}'
-                    | '\u{2028}'..='\u{202E}'
-                    | '\u{2060}'..='\u{2069}'
-                    | '\u{FEFF}'
-            )
-    })
+    #[error("more than {max} {what}")]
+    TooMany { what: &'static str, max: usize },
+    #[error("{name:?} is not an option this CA signs")]
+    UnknownOption { name: String },
+    #[error("{name:?} appears twice")]
+    DuplicateOption { name: String },
+    #[error("the certificate ended {secs} seconds ago")]
+    Expired { secs: u64 },
 }
 
 /// One critical option or extension: its name and its data, shown as text
@@ -207,37 +197,139 @@ fn string_of(bytes: &[u8]) -> Vec<u8> {
     v
 }
 
-/// The packed `name, data` pairs of the critical options or the extensions.
+/// The longest key id or principal, in bytes (the Fable review, 2026-11-22).
+const MAX_NAME: usize = 64;
+/// The most principals a certificate this CA signs may name.
+const MAX_PRINCIPALS: usize = 8;
+/// The longest option value, in bytes.
+const MAX_OPTION_VALUE: usize = 256;
+
+/// A key id or principal: 1 to [`MAX_NAME`] bytes of `[A-Za-z0-9._@:+-]` and
+/// nothing else. Plain ASCII by refusal, so no invisible, reordering,
+/// look-alike or separator character can make the dialog say something
+/// the certificate does not.
+fn plain_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_NAME
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'@' | b':' | b'+' | b'-')
+        })
+}
+
+/// An option value: printable ASCII (space to tilde), at most
+/// [`MAX_OPTION_VALUE`] bytes.
+fn plain_text(s: &str) -> bool {
+    s.len() <= MAX_OPTION_VALUE && s.bytes().all(|b| (0x20..=0x7e).contains(&b))
+}
+
+/// What an option or extension carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Carries {
+    Flag,
+    Value,
+}
+
+/// The critical options this CA signs: these three and no other.
+const CRITICAL_OPTIONS: [(&str, Carries); 3] = [
+    ("force-command", Carries::Value),
+    ("source-address", Carries::Value),
+    ("verify-required", Carries::Flag),
+];
+
+/// The extensions this CA signs. `no-touch-required`, which waives a
+/// security key's touch, is deliberately not among them.
+const EXTENSIONS: [(&str, Carries); 5] = [
+    ("permit-X11-forwarding", Carries::Flag),
+    ("permit-agent-forwarding", Carries::Flag),
+    ("permit-port-forwarding", Carries::Flag),
+    ("permit-pty", Carries::Flag),
+    ("permit-user-rc", Carries::Flag),
+];
+
+/// The packed `name, data` pairs of the critical options or the extensions:
+/// only the `known` ones, each once, a flag with no data and a value option
+/// with one printable-ASCII string.
 fn named_data(
     packed: &[u8],
     what: &str,
+    known: &[(&str, Carries)],
     undisplayable: &'static str,
 ) -> Result<Vec<NamedData>, SshCertRefusal> {
     let bad = SshCertRefusal::NotACertificate;
+    let undisplayable = SshCertRefusal::Undisplayable {
+        what: undisplayable,
+    };
     let mut r = Reader::new(packed);
-    let mut out = Vec::new();
+    let mut out: Vec<NamedData> = Vec::new();
     while !r.done() {
         let name = r.text(&format!("{what} name")).map_err(bad)?.to_owned();
-        let data = r.string(&format!("{what} {name} data")).map_err(bad)?;
-        // The data is itself one string for options with an argument
-        // (force-command, source-address) and empty for flags.
-        let value = if data.is_empty() {
-            None
-        } else {
-            let mut inner = Reader::new(data);
-            match inner.text("option value") {
-                Ok(s) if inner.done() => Some(s.to_owned()),
-                _ => Some(format!("({} bytes)", data.len())),
+        let data = r.string(&format!("{what} data")).map_err(bad)?;
+        if !plain_text(&name) {
+            return Err(undisplayable);
+        }
+        let Some((_, carries)) = known.iter().find(|(known_name, _)| *known_name == name) else {
+            return Err(SshCertRefusal::UnknownOption { name });
+        };
+        if out.iter().any(|d| d.name == name) {
+            return Err(SshCertRefusal::DuplicateOption { name });
+        }
+        // The data is itself one string for an option with a value and empty
+        // for a flag.
+        let value = match carries {
+            Carries::Flag if data.is_empty() => None,
+            Carries::Flag => return Err(undisplayable),
+            Carries::Value => {
+                let mut inner = Reader::new(data);
+                match inner.text("option value") {
+                    Ok(s) if inner.done() && !s.is_empty() && plain_text(s) => Some(s.to_owned()),
+                    _ => return Err(undisplayable),
+                }
             }
         };
-        if !displayable(&name) || value.as_deref().is_some_and(|v| !displayable(v)) {
-            return Err(SshCertRefusal::Undisplayable {
-                what: undisplayable,
-            });
-        }
         out.push(NamedData { name, value });
     }
     Ok(out)
+}
+
+/// The certified key's fields checked for what they claim to be (finding 8 of
+/// the Fable review): a key of the stated type and a sane size. Anything
+/// else is not a key a certificate should name.
+fn check_key_fields(base: &str, fields: &[&[u8]]) -> Result<(), String> {
+    let printable = |b: &[u8]| {
+        !b.is_empty() && b.len() <= MAX_NAME && b.iter().all(|c| (0x20..=0x7e).contains(c))
+    };
+    let curve = |name: &str, point_len: usize| -> Result<(), String> {
+        if fields[0] != name.as_bytes() {
+            return Err(format!("the curve name is not {name}"));
+        }
+        if fields[1].len() != point_len || fields[1].first() != Some(&4) {
+            return Err(format!(
+                "the {name} point is not {point_len} uncompressed bytes"
+            ));
+        }
+        Ok(())
+    };
+    match base {
+        "ssh-ed25519" if fields[0].len() == 32 => Ok(()),
+        "ssh-ed25519" => Err("an ed25519 key is 32 bytes".into()),
+        "ecdsa-sha2-nistp256" => curve("nistp256", 65),
+        "ecdsa-sha2-nistp384" => curve("nistp384", 97),
+        "ecdsa-sha2-nistp521" => curve("nistp521", 133),
+        "ssh-rsa" => {
+            let strip = |b: &[u8]| b.iter().skip_while(|c| **c == 0).count();
+            let (e, n) = (strip(fields[0]), strip(fields[1]));
+            if !(1..=8).contains(&e) {
+                return Err("the RSA exponent is not 1 to 8 bytes".into());
+            }
+            if !(256..=1024).contains(&n) {
+                return Err("the RSA modulus is not 2048 to 8192 bits".into());
+            }
+            Ok(())
+        }
+        "sk-ssh-ed25519@openssh.com" if fields[0].len() == 32 && printable(fields[1]) => Ok(()),
+        "sk-ecdsa-sha2-nistp256@openssh.com" if printable(fields[2]) => curve("nistp256", 65),
+        _ => Err(format!("a {base} key with fields that are not one")),
+    }
 }
 
 /// Read the data an agent is asked to sign for `ssh-keygen -U -s`: a user
@@ -251,13 +343,19 @@ pub fn parse_unsigned_certificate(data: &[u8]) -> Result<SshCertTbs, SshCertRefu
         .to_owned();
     let n_fields = key_field_strings(&base)
         .ok_or_else(|| bad(format!("a {base} key is not one this CA certifies")))?;
-    let _nonce = r.string("nonce").map_err(bad)?;
-
-    // The certified key's fields, kept verbatim for its fingerprint.
-    let key_start = r.pos;
-    for i in 0..n_fields {
-        r.string(&format!("key field {}", i + 1)).map_err(bad)?;
+    let nonce = r.string("nonce").map_err(bad)?;
+    if nonce.len() != 32 {
+        return Err(bad(format!("the nonce is {} bytes, not 32", nonce.len())));
     }
+
+    // The certified key's fields, kept verbatim for its fingerprint and
+    // checked for what they claim to be.
+    let key_start = r.pos;
+    let mut fields: Vec<&[u8]> = Vec::with_capacity(n_fields);
+    for i in 0..n_fields {
+        fields.push(r.string(&format!("key field {}", i + 1)).map_err(bad)?);
+    }
+    check_key_fields(&base, &fields).map_err(bad)?;
     let key_fields = &data[key_start..r.pos];
     let mut subject_blob = string_of(base.as_bytes());
     subject_blob.extend_from_slice(key_fields);
@@ -265,7 +363,7 @@ pub fn parse_unsigned_certificate(data: &[u8]) -> Result<SshCertTbs, SshCertRefu
     let serial = r.u64("serial").map_err(bad)?;
     let cert_type = r.u32("certificate type").map_err(bad)?;
     let key_id = r.text("key id").map_err(bad)?.to_owned();
-    if !displayable(&key_id) {
+    if !plain_name(&key_id) {
         return Err(SshCertRefusal::Undisplayable { what: "the key id" });
     }
     let principals_packed = r.string("principals").map_err(bad)?;
@@ -299,9 +397,15 @@ pub fn parse_unsigned_certificate(data: &[u8]) -> Result<SshCertTbs, SshCertRefu
         if p.is_empty() {
             return Err(bad("an empty principal".into()));
         }
-        if !displayable(p) {
+        if !plain_name(p) {
             return Err(SshCertRefusal::Undisplayable {
                 what: "a principal",
+            });
+        }
+        if principals.len() == MAX_PRINCIPALS {
+            return Err(SshCertRefusal::TooMany {
+                what: "principals",
+                max: MAX_PRINCIPALS,
             });
         }
         principals.push(p.to_owned());
@@ -326,8 +430,13 @@ pub fn parse_unsigned_certificate(data: &[u8]) -> Result<SshCertTbs, SshCertRefu
         principals,
         valid_after,
         valid_before,
-        critical_options: named_data(critical_packed, "critical option", "a critical option")?,
-        extensions: named_data(extensions_packed, "extension", "an extension")?,
+        critical_options: named_data(
+            critical_packed,
+            "critical option",
+            &CRITICAL_OPTIONS,
+            "a critical option",
+        )?,
+        extensions: named_data(extensions_packed, "extension", &EXTENSIONS, "an extension")?,
     })
 }
 
@@ -364,16 +473,29 @@ impl SshCertTbs {
                 allowance: BACKDATE_ALLOWANCE_SECS,
             });
         }
+        // Not already over: `now` must be inside [valid_after - allowance,
+        // valid_before).
+        if now >= self.valid_before {
+            return Err(SshCertRefusal::Expired {
+                secs: now - self.valid_before,
+            });
+        }
         Ok(())
     }
 
-    /// The text the PIN dialog shows (plain lines, no control characters
-    /// beyond newline): what this signature would certify.
+    /// The text the PIN dialog shows: what this signature would certify.
+    /// Plain ASCII lines (the parser admits nothing else), each principal and
+    /// each critical option on a line of its own and each value in quotes, so
+    /// no field can read as another line or another option. Its height is
+    /// bounded by the parser's limits: at most 24 rendered lines at the
+    /// dialog's width, however hostile the certificate.
     pub fn describe(&self) -> String {
         let mut s = String::new();
         s.push_str("OpenSSH user certificate\n");
         s.push_str(&format!("Key id: {}\n", self.key_id));
-        s.push_str(&format!("Principals: {}\n", self.principals.join(", ")));
+        for principal in &self.principals {
+            s.push_str(&format!("Principal: {principal}\n"));
+        }
         s.push_str(&format!("Certified key: {}\n", self.subject_fingerprint));
         s.push_str(&format!("Signed by CA: {}\n", self.ca_fingerprint));
         s.push_str(&format!("Serial: {}\n", self.serial));
@@ -385,27 +507,28 @@ impl SshCertTbs {
         if let Some(secs) = self.lifetime_secs() {
             s.push_str(&format!("Lifetime: {}\n", show_span(secs)));
         }
-        s.push_str("Critical options: ");
-        s.push_str(&show_named(&self.critical_options, "(none)"));
-        s.push('\n');
+        if self.critical_options.is_empty() {
+            s.push_str("Critical options: none\n");
+        }
+        for option in &self.critical_options {
+            match &option.value {
+                Some(v) => s.push_str(&format!(
+                    "Critical option: {}: \"{}\"\n",
+                    option.name,
+                    v.replace('\\', "\\\\").replace('"', "\\\"")
+                )),
+                None => s.push_str(&format!("Critical option: {}\n", option.name)),
+            }
+        }
         s.push_str("Extensions: ");
-        s.push_str(&show_named(&self.extensions, "(none)"));
+        if self.extensions.is_empty() {
+            s.push_str("none");
+        } else {
+            let names: Vec<&str> = self.extensions.iter().map(|e| e.name.as_str()).collect();
+            s.push_str(&names.join(", "));
+        }
         s
     }
-}
-
-fn show_named(items: &[NamedData], none: &str) -> String {
-    if items.is_empty() {
-        return none.to_owned();
-    }
-    items
-        .iter()
-        .map(|d| match &d.value {
-            Some(v) => format!("{}={}", d.name, v),
-            None => d.name.clone(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// A UTC time as `2026-11-22T19:02:00Z`; `0` and `u64::MAX` as the words.
@@ -496,6 +619,7 @@ mod tests {
 
     struct Cert {
         key_type: &'static str,
+        nonce: Vec<u8>,
         fields: Vec<Vec<u8>>,
         serial: u64,
         cert_type: u32,
@@ -513,6 +637,7 @@ mod tests {
         fn user() -> Cert {
             Cert {
                 key_type: "ssh-ed25519-cert-v01@openssh.com",
+                nonce: vec![1u8; 32],
                 fields: vec![vec![7u8; 32]],
                 serial: 5,
                 cert_type: 1,
@@ -530,7 +655,7 @@ mod tests {
         fn unsigned(&self) -> Vec<u8> {
             let mut d = Vec::new();
             put_string(&mut d, self.key_type.as_bytes());
-            put_string(&mut d, &[1u8; 32]);
+            put_string(&mut d, &self.nonce);
             for f in &self.fields {
                 put_string(&mut d, f);
             }
@@ -675,7 +800,11 @@ mod tests {
             ),
             (
                 "ssh-rsa-cert-v01@openssh.com",
-                vec![vec![1, 0, 1], vec![0, 0xc0, 1, 2, 3]],
+                vec![vec![1, 0, 1], {
+                    let mut n = vec![0u8, 0xc0];
+                    n.extend(vec![0x55u8; 255]);
+                    n
+                }],
             ),
             (
                 "sk-ssh-ed25519-cert-v01@openssh.com",
@@ -871,16 +1000,317 @@ mod tests {
                 "{text:?}"
             );
         }
-        // Ordinary non-ASCII text is fine.
-        let mut cert = Cert::user();
-        cert.principals = vec!["déploiement", "运维"];
-        assert!(parse_unsigned_certificate(&cert.unsigned()).is_ok());
+        // Nor is non-ASCII text shown: ASCII by refusal (finding 3), so no
+        // look-alike, invisible or reordering character gets through.
+        for text in ["déploiement", "运维", "a\u{a0}b", "a\u{2800}b", "a\u{61c}b"] {
+            let mut cert = Cert::user();
+            cert.principals = vec![text];
+            assert_eq!(
+                parse_unsigned_certificate(&cert.unsigned()).unwrap_err(),
+                SshCertRefusal::Undisplayable {
+                    what: "a principal"
+                },
+                "{text:?}"
+            );
+        }
     }
 
     #[test]
     fn the_ca_key_the_certificate_names_is_kept_whole() {
         let tbs = parse_unsigned_certificate(&Cert::user().unsigned()).unwrap();
         assert_eq!(tbs.ca_key_blob, ca_blob(9));
+    }
+
+    // The Fable review of c7dd0561 (findings 2, 3, 6, 7, 8): the text the dialog
+    // shows is bounded and plain by construction, only known options pass,
+    // an expired certificate is not signed, and the certified key is a key.
+
+    fn refused(cert: &Cert) -> SshCertRefusal {
+        parse_unsigned_certificate(&cert.unsigned()).unwrap_err()
+    }
+
+    #[test]
+    fn the_key_id_and_principals_are_short_plain_ascii() {
+        let long = Box::leak("a".repeat(65).into_boxed_str());
+        let ok64 = Box::leak("a".repeat(64).into_boxed_str());
+        for bad in [
+            long,
+            "two words",
+            "a,b",
+            "caf\u{e9}",
+            "a\"b",
+            "a=b",
+            "x/y",
+            "*",
+            "",
+        ] {
+            let mut cert = Cert::user();
+            cert.key_id = bad;
+            assert!(
+                matches!(
+                    refused(&cert),
+                    SshCertRefusal::Undisplayable { .. } | SshCertRefusal::NotACertificate(_)
+                ),
+                "key id {bad:?}"
+            );
+            let mut cert = Cert::user();
+            cert.principals = vec![bad];
+            assert!(
+                matches!(
+                    refused(&cert),
+                    SshCertRefusal::Undisplayable { .. } | SshCertRefusal::NotACertificate(_)
+                ),
+                "principal {bad:?}"
+            );
+        }
+        let mut cert = Cert::user();
+        cert.key_id = ok64;
+        cert.principals = vec![ok64, "user.name_1+x@host:2-b"];
+        assert!(parse_unsigned_certificate(&cert.unsigned()).is_ok());
+    }
+
+    #[test]
+    fn at_most_eight_principals() {
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+        let mut cert = Cert::user();
+        cert.principals = names[..8].to_vec();
+        assert!(parse_unsigned_certificate(&cert.unsigned()).is_ok());
+        cert.principals = names.to_vec();
+        assert!(matches!(
+            refused(&cert),
+            SshCertRefusal::TooMany {
+                what: "principals",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn only_known_options_and_extensions_once_each() {
+        let ok_options = [
+            ("force-command", Some("/usr/bin/true")),
+            ("source-address", Some("10.0.0.0/8,192.168.1.1")),
+            ("verify-required", None),
+        ];
+        let mut cert = Cert::user();
+        cert.critical = packed(&ok_options);
+        cert.extensions = packed(&[
+            ("permit-X11-forwarding", None),
+            ("permit-agent-forwarding", None),
+            ("permit-port-forwarding", None),
+            ("permit-pty", None),
+            ("permit-user-rc", None),
+        ]);
+        assert!(parse_unsigned_certificate(&cert.unsigned()).is_ok());
+
+        // An option this CA does not know, a duplicate, and the one extension
+        // that waives the security key's touch.
+        for critical in [
+            packed(&[("tunnel", Some("x"))]),
+            packed(&[("force-command", Some("a")), ("force-command", Some("b"))]),
+        ] {
+            let mut cert = Cert::user();
+            cert.critical = critical;
+            assert!(
+                matches!(
+                    refused(&cert),
+                    SshCertRefusal::UnknownOption { .. } | SshCertRefusal::DuplicateOption { .. }
+                ),
+                "{:?}",
+                refused(&cert)
+            );
+        }
+        for extensions in [
+            packed(&[("no-touch-required", None)]),
+            packed(&[("login@example.com", Some("x"))]),
+            packed(&[("permit-pty", None), ("permit-pty", None)]),
+        ] {
+            let mut cert = Cert::user();
+            cert.extensions = extensions;
+            assert!(
+                matches!(
+                    refused(&cert),
+                    SshCertRefusal::UnknownOption { .. } | SshCertRefusal::DuplicateOption { .. }
+                ),
+                "{:?}",
+                refused(&cert)
+            );
+        }
+    }
+
+    #[test]
+    fn option_values_are_short_printable_ascii_and_never_opaque() {
+        for value in ["caf\u{e9}", "tab\there", "a\u{7f}b"] {
+            let mut cert = Cert::user();
+            cert.critical = packed(&[("force-command", Some(value))]);
+            assert!(
+                matches!(refused(&cert), SshCertRefusal::Undisplayable { .. }),
+                "{value:?}"
+            );
+        }
+        // Longer than a line the dialog could show whole.
+        let long = "x".repeat(257);
+        let mut cert = Cert::user();
+        cert.critical = packed(&[("force-command", Some(&long))]);
+        assert!(matches!(
+            refused(&cert),
+            SshCertRefusal::Undisplayable { .. }
+        ));
+        // Data that is not one UTF-8 string is refused, not summarised as a
+        // byte count.
+        let mut data = Vec::new();
+        put_string(&mut data, b"force-command");
+        put_string(&mut data, &[0xff, 0xfe, 0xfd]);
+        let mut cert = Cert::user();
+        cert.critical = data;
+        assert!(
+            matches!(refused(&cert), SshCertRefusal::Undisplayable { .. }),
+            "{:?}",
+            refused(&cert)
+        );
+        // A flag carrying data, and an option that needs a value without one.
+        let mut cert = Cert::user();
+        cert.critical = packed(&[("verify-required", Some("x"))]);
+        assert!(matches!(
+            refused(&cert),
+            SshCertRefusal::Undisplayable { .. }
+        ));
+        let mut cert = Cert::user();
+        cert.critical = packed(&[("force-command", None)]);
+        assert!(matches!(
+            refused(&cert),
+            SshCertRefusal::Undisplayable { .. }
+        ));
+    }
+
+    #[test]
+    fn the_dialog_cannot_be_made_to_read_as_other_lines_or_grow_without_bound() {
+        // A value that spells another option, and a long worst case.
+        let mut cert = Cert::user();
+        cert.critical = packed(&[("force-command", Some("/bin/true, source-address=10.0.0.1"))]);
+        let text = parse_unsigned_certificate(&cert.unsigned())
+            .unwrap()
+            .describe();
+        let option_lines: Vec<&str> = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with("source-address"))
+            .collect();
+        assert!(option_lines.is_empty(), "{text}");
+        assert!(
+            text.contains("force-command: \"/bin/true, source-address=10.0.0.1\""),
+            "{text}"
+        );
+
+        // The worst case that parses: its dialog fits 24 rendered lines
+        // (the operator-act dialog's old limit), whatever the certificate says.
+        let mut cert = Cert::user();
+        cert.principals = ["a"; 8].to_vec();
+        let value = "y".repeat(256);
+        cert.critical = packed(&[
+            ("force-command", Some(&value)),
+            ("source-address", Some(&value)),
+            ("verify-required", None),
+        ]);
+        cert.extensions = packed(&[
+            ("permit-X11-forwarding", None),
+            ("permit-agent-forwarding", None),
+            ("permit-port-forwarding", None),
+            ("permit-pty", None),
+            ("permit-user-rc", None),
+        ]);
+        let text = parse_unsigned_certificate(&cert.unsigned())
+            .unwrap()
+            .describe();
+        let rendered: usize = text
+            .lines()
+            .map(|l| 1 + l.chars().count().saturating_sub(1) / 100)
+            .sum();
+        assert!(rendered <= 24, "{rendered} rendered lines:\n{text}");
+        // One line per principal.
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.starts_with("Principal: "))
+                .count(),
+            8,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_expired_certificate_is_refused_and_so_is_one_not_yet_valid() {
+        let mut cert = Cert::user();
+        let after = cert.after;
+        cert.before = after + 3_600;
+        let tbs = parse_unsigned_certificate(&cert.unsigned()).unwrap();
+        // Inside the window.
+        assert!(tbs.check_validity(MAX_LIFETIME_SECS, after + 60).is_ok());
+        // At and after the end.
+        assert!(matches!(
+            tbs.check_validity(MAX_LIFETIME_SECS, after + 3_600),
+            Err(SshCertRefusal::Expired { .. })
+        ));
+        assert!(matches!(
+            tbs.check_validity(MAX_LIFETIME_SECS, after + 86_400),
+            Err(SshCertRefusal::Expired { .. })
+        ));
+    }
+
+    #[test]
+    fn the_certified_key_must_be_a_key_of_its_type_and_the_nonce_32_bytes() {
+        let mut cert = Cert::user();
+        cert.nonce = vec![1u8; 31];
+        assert!(matches!(refused(&cert), SshCertRefusal::NotACertificate(_)));
+        cert.nonce = Vec::new();
+        assert!(matches!(refused(&cert), SshCertRefusal::NotACertificate(_)));
+
+        let mut cert = Cert::user();
+        cert.fields = vec![vec![7u8; 31]];
+        assert!(
+            matches!(refused(&cert), SshCertRefusal::NotACertificate(_)),
+            "short ed25519"
+        );
+
+        let mut cert = Cert::user();
+        cert.key_type = "ecdsa-sha2-nistp256-cert-v01@openssh.com";
+        let mut point = vec![4u8; 65];
+        cert.fields = vec![b"nistp256".to_vec(), point.clone()];
+        assert!(parse_unsigned_certificate(&cert.unsigned()).is_ok());
+        cert.fields = vec![b"nistp384".to_vec(), point.clone()];
+        assert!(
+            matches!(refused(&cert), SshCertRefusal::NotACertificate(_)),
+            "curve mismatch"
+        );
+        cert.fields = vec![b"nistp256".to_vec(), vec![4u8; 64]];
+        assert!(
+            matches!(refused(&cert), SshCertRefusal::NotACertificate(_)),
+            "short point"
+        );
+        point[0] = 2;
+        cert.fields = vec![b"nistp256".to_vec(), point];
+        assert!(
+            matches!(refused(&cert), SshCertRefusal::NotACertificate(_)),
+            "compressed point"
+        );
+
+        let mut cert = Cert::user();
+        cert.key_type = "ssh-rsa-cert-v01@openssh.com";
+        let n = {
+            let mut n = vec![0u8, 0xc0];
+            n.extend(vec![0x55u8; 255]);
+            n
+        };
+        cert.fields = vec![vec![1, 0, 1], n];
+        assert!(parse_unsigned_certificate(&cert.unsigned()).is_ok());
+        cert.fields = vec![vec![1, 0, 1], vec![0, 0xc0, 1, 2, 3]];
+        assert!(
+            matches!(refused(&cert), SshCertRefusal::NotACertificate(_)),
+            "tiny RSA modulus"
+        );
+        cert.fields = vec![vec![0u8; 9], vec![0xc0u8; 256]];
+        assert!(
+            matches!(refused(&cert), SshCertRefusal::NotACertificate(_)),
+            "huge exponent"
+        );
     }
 
     #[test]
@@ -891,13 +1321,14 @@ mod tests {
         for want in [
             "OpenSSH user certificate",
             "Key id: grant-1",
-            "Principals: deploy-site, restart-service",
+            "Principal: deploy-site\n",
+            "Principal: restart-service",
             "Certified key: SHA256:",
             "Signed by CA: SHA256:",
             "Serial: 5",
             "Valid: 2026-11-18T11:06:40Z to 2026-11-18T13:06:40Z",
             "Lifetime: 2h",
-            "Critical options: force-command=/usr/bin/true",
+            "Critical option: force-command: \"/usr/bin/true\"",
             "Extensions: permit-pty",
         ] {
             assert!(text.contains(want), "{want:?} not in:\n{text}");

@@ -107,8 +107,8 @@ function slot_83_signs_a_certificate_behind_a_dialog_that_says_what_it_certifies
   [[ $(_prompts) -eq 1 ]] || { echo "want one prompt, got $(_prompts)" >&2; _show; return 1; }
   grep -q '^\[piggy-test-askpass\] operator act kind: ssh-certificate' "$AGENT_LOG" || {
     echo "the prompt was not of kind ssh-certificate" >&2; _show; return 1; }
-  for want in "OpenSSH user certificate" "Key id: grant-1" "Principals: deploy-site, restart-service" \
-    "Certified key: SHA256:" "Signed by CA: SHA256:" "force-command=/usr/bin/true" "slot 83"; do
+  for want in "OpenSSH user certificate" "Key id: grant-1" "Principal: deploy-site" "Principal: restart-service" \
+    "Certified key: SHA256:" "Signed by CA: SHA256:" 'Critical option: force-command: "/usr/bin/true"' "slot 83"; do
     grep -qF -- "$want" "$AGENT_LOG" || { echo "the dialog context lacks: $want" >&2; _show; return 1; }
   done
 
@@ -204,6 +204,56 @@ function slot_82_refuses_an_openssh_certificate_and_slot_83_refuses_everything_e
   # login challenge is) go through: ssh-keygen -Y check is the sshsig above;
   # the agent's refusal of the rest is the unit tests' (gate_data_for_slot).
   [[ $(_prompts) -eq 0 ]] || { echo "a refusal raised $(_prompts) prompt(s)" >&2; _show; return 1; }
+}
+
+# The Fable review of c7dd0561, finding 1: a CA slot signs only a key whose
+# ATTESTED policy is PIN always and touch always, and raises its dialog
+# whatever the agent's own idea of the key's PIN policy. A key generated with
+# a laxer policy (the card's default is PIN once, touch never) signs nothing
+# and raises no prompt: before the fix, `never` signed with no dialog at all.
+function a_ca_key_not_attested_pin_always_and_touch_always_signs_nothing { # @test
+  local slot policy pin touch
+  for slot in 83 82; do
+    for policy in "never never" "once never" "always never" "once always" "never always"; do
+      read -r pin touch <<<"$policy"
+      "$PIGGY_BIN" tool -K default -P "$OPERATOR_ACT_PIN" -a eccp256 -i "$pin" -t "$touch" generate "$slot" >/dev/null || {
+        echo "generate $slot ($policy) failed" >&2; return 1; }
+      kill "$AGENT_PID" 2>/dev/null || true
+      wait "$AGENT_PID" 2>/dev/null || true
+      rm -f "$AGENT_SOCK"
+      spawn_card_agent
+      SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -L | grep " PIV_slot_$slot" >"$WORKDIR/weak.pub"
+      [[ -s $WORKDIR/weak.pub ]] || { echo "the agent does not offer the new slot-$slot key" >&2; return 1; }
+      rm -f "$WORKDIR/user-cert.pub" "$WORKDIR/m.sig"
+      if [[ $slot == 83 ]]; then
+        _certify "$WORKDIR/weak.pub" -I weak -n a -V +1h
+        [[ $status -ne 0 && ! -e $WORKDIR/user-cert.pub ]] || {
+          echo "slot 83 ($policy) signed a certificate" >&2; _show; return 1; }
+      else
+        printf 'hello\n' >"$WORKDIR/m"
+        SSH_AUTH_SOCK="$AGENT_SOCK" run ssh-keygen -q -Y sign -f "$WORKDIR/weak.pub" -n file "$WORKDIR/m"
+        [[ $status -ne 0 && ! -e $WORKDIR/m.sig ]] || {
+          echo "slot 82 ($policy) signed" >&2; _show; return 1; }
+      fi
+      [[ $(_prompts) -eq 0 ]] || { echo "slot $slot ($policy): a refusal raised $(_prompts) prompt(s)" >&2; _show; return 1; }
+    done
+  done
+}
+
+# Finding 5: the certificate's content is shown only by an askpass that
+# understands the kind. A generic askpass (a PIN and nothing else) is not
+# believed: nothing is signed with its PIN.
+function a_generic_askpass_cannot_stand_in_for_the_certificate_dialog { # @test
+  printf '#!/bin/sh\nprintf "%%s\\n" "$PIGGY_TEST_FIB_PIN"\n' >"$WORKDIR/generic-askpass.sh"
+  chmod +x "$WORKDIR/generic-askpass.sh"
+  kill "$AGENT_PID" 2>/dev/null || true
+  wait "$AGENT_PID" 2>/dev/null || true
+  rm -f "$AGENT_SOCK"
+  SSH_ASKPASS="$WORKDIR/generic-askpass.sh" spawn_card_agent
+  _certify "$WORKDIR/ca83.pub" -I generic -n a -V +1h
+  [[ $status -ne 0 && ! -e $WORKDIR/user-cert.pub ]] || {
+    echo "a certificate was signed behind a generic askpass" >&2; _show; return 1; }
+  grep -q "did not acknowledge" "$AGENT_LOG" || { echo "the agent did not say why" >&2; _show; return 1; }
 }
 
 # A proxy-only front over the card agent (a forwarded card agent, FDR 0001):

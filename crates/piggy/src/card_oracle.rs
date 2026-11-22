@@ -459,6 +459,20 @@ pub fn run_askpass_of_kind(
         Some(kind) => cmd.env("PIGGY_ASKPASS_KIND", kind),
         None => cmd.env_remove("PIGGY_ASKPASS_KIND"),
     };
+    // A kind whose content only a program that understands it can show must
+    // be acknowledged (see `ACKNOWLEDGED_KINDS`): the program gets a nonce for
+    // this one prompt and must print it back after the PIN.
+    let nonce = if kind.is_some_and(|k| ACKNOWLEDGED_KINDS.contains(&k)) {
+        let mut raw = [0u8; 16];
+        openssl::rand::rand_bytes(&mut raw)
+            .map_err(|e| OracleError::Other(format!("random nonce: {e}")))?;
+        let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        cmd.env("PIGGY_ASKPASS_NONCE", &hex);
+        Some(hex)
+    } else {
+        cmd.env_remove("PIGGY_ASKPASS_NONCE");
+        None
+    };
     let mut child = cmd.spawn().map_err(|e| {
         OracleError::Other(format!("spawn askpass {}: {e}", askpass.to_string_lossy()))
     })?;
@@ -480,12 +494,40 @@ pub fn run_askpass_of_kind(
     if !status.success() {
         return Err(OracleError::Other(format!("askpass exited with {status}")));
     }
+    if let Some(nonce) = nonce {
+        // The PIN, then `piggy-askpass-ack <nonce>`, and nothing else: the
+        // PIN is only the first line, and a program that did not say it
+        // understood the kind is not believed to have shown what it carries.
+        let mut lines = buf.lines();
+        let pin = lines.next().unwrap_or("").to_owned();
+        let ack = lines.next();
+        let rest_empty = lines.all(str::is_empty);
+        let acknowledged = ack == Some(format!("piggy-askpass-ack {nonce}").as_str()) && rest_empty;
+        if !acknowledged {
+            return Err(OracleError::Other(
+                "the askpass program did not acknowledge the dialog kind (piggy-askpass-ack): it may not have shown what is being signed, so its answer is not used".into(),
+            ));
+        }
+        let mut pin = Zeroizing::new(pin);
+        trim_line_end_in_place(&mut pin);
+        if pin.is_empty() {
+            return Err(OracleError::Other("askpass returned empty PIN".into()));
+        }
+        return Ok(pin);
+    }
     trim_line_end_in_place(&mut buf);
     if buf.is_empty() {
         return Err(OracleError::Other("askpass returned empty PIN".into()));
     }
     Ok(buf)
 }
+
+/// The `PIGGY_ASKPASS_KIND` values whose PIN is used only when the askpass
+/// program acknowledges them: the content of an OpenSSH certificate lives only
+/// in `PIGGY_ASKPASS_CONTEXT`, and the prompt line any other program shows
+/// says nothing of it. (Operator acts have the same weakness and are not yet
+/// covered; extending this list is the change.)
+const ACKNOWLEDGED_KINDS: &[&str] = &["ssh-certificate"];
 
 /// The program that shows the operator a desktop notice, called as
 /// `notifier TITLE MESSAGE`: `$PIGGY_ASKPASS_NOTIFIER`, else
@@ -728,6 +770,65 @@ mod tests {
 
         if let Some(v) = prev {
             std::env::set_var("SSH_ASKPASS", v);
+        }
+        match prev_require {
+            Some(v) => std::env::set_var("SSH_ASKPASS_REQUIRE", v),
+            None => std::env::remove_var("SSH_ASKPASS_REQUIRE"),
+        }
+    }
+
+    /// The Fable review of c7dd0561, finding 5: a certificate's content is in
+    /// `PIGGY_ASKPASS_CONTEXT`, which only an askpass that understands the
+    /// kind shows. Another askpass shows the generic prompt line, and the agent
+    /// would sign what the operator never saw. For that kind the PIN is used
+    /// only if the program says it understood: after the PIN it prints
+    /// `piggy-askpass-ack <nonce>`, the nonce the agent put in
+    /// `PIGGY_ASKPASS_NONCE` for this one prompt.
+    #[test]
+    fn a_certificate_dialog_is_used_only_when_the_askpass_acknowledges_the_kind() {
+        let _guard = env_lock();
+        let dir = TempDir::new();
+        let generic = write_executable(&dir.0, "generic.sh", "#!/bin/sh\necho 654321\n");
+        let acking = write_executable(
+            &dir.0,
+            "acking.sh",
+            "#!/bin/sh\necho 654321\necho \"piggy-askpass-ack $PIGGY_ASKPASS_NONCE\"\n",
+        );
+        let wrong = write_executable(
+            &dir.0,
+            "wrong.sh",
+            "#!/bin/sh\necho 654321\necho \"piggy-askpass-ack 0000\"\n",
+        );
+
+        let prev = std::env::var_os("SSH_ASKPASS");
+        let prev_require = std::env::var_os("SSH_ASKPASS_REQUIRE");
+        std::env::set_var("SSH_ASKPASS_REQUIRE", "force");
+
+        let ask = |program: &std::path::Path, kind: &str| {
+            std::env::set_var("SSH_ASKPASS", program);
+            run_askpass_of_kind("p", Some("ctx"), Some(kind))
+        };
+        // The certificate kind: only the acknowledging program is believed.
+        let err = ask(&generic, "ssh-certificate").expect_err("a generic askpass was believed");
+        assert!(format!("{err}").contains("acknowledge"), "{err}");
+        let err = ask(&wrong, "ssh-certificate").expect_err("a wrong acknowledgement was believed");
+        assert!(format!("{err}").contains("acknowledge"), "{err}");
+        let pin = ask(&acking, "ssh-certificate").expect("an acknowledged prompt works");
+        assert_eq!(pin.as_str(), "654321", "the PIN is the first line alone");
+        // Any other kind is as before: no acknowledgement is asked for.
+        assert_eq!(ask(&generic, "quote").unwrap().as_str(), "654321");
+        assert_eq!(
+            run_askpass_of_kind("p", None, None)
+                .map(|p| p.to_string())
+                .ok(),
+            Some("654321".to_string()),
+            "{:?}",
+            "a routine prompt still reads the generic askpass"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("SSH_ASKPASS", v),
+            None => std::env::remove_var("SSH_ASKPASS"),
         }
         match prev_require {
             Some(v) => std::env::set_var("SSH_ASKPASS_REQUIRE", v),

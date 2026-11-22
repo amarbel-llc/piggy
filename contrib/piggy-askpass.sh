@@ -303,6 +303,17 @@ hold_tty_input() {
   stty "$saved" <&3
 }
 
+# Print the PIN, and, when the agent gave this prompt a nonce for a kind it
+# will not use without proof the kind was understood
+# (PIGGY_ASKPASS_NONCE, kind ssh-certificate), say so after it: this program
+# rendered the kind's dialog, not a generic one.
+emit_pin() {
+  printf '%s\n' "$1"
+  if [[ -n ${PIGGY_ASKPASS_NONCE:-} && -n $kind ]]; then
+    printf 'piggy-askpass-ack %s\n' "$PIGGY_ASKPASS_NONCE"
+  fi
+}
+
 # Dry-run: emit the rendered context to stderr and exit. No PIN read.
 # Used by the bats test in zz-tests_bats/conformance/piggy_askpass.bats.
 if [[ ${PIGGY_ASKPASS_DRY_RUN:-} == "1" ]]; then
@@ -343,7 +354,7 @@ if [[ $require != force ]] && [[ -e /dev/tty ]] && (: >/dev/tty) 2>/dev/null; th
     fi
   fi
   exec 3<&- 4>&-
-  printf '%s\n' "$pin"
+  emit_pin "$pin"
   exit 0
 fi
 
@@ -556,7 +567,7 @@ if gtk_dialogs_enabled || command -v zenity >/dev/null 2>&1; then
   fi
   if pin="$("$dialog" 2>>"$log_path")"; then
     printf '%s exit=0\n' "$dialog" >>"$log_path"
-    printf '%s\n' "$pin"
+    emit_pin "$pin"
     exit 0
   else
     rc=$?
