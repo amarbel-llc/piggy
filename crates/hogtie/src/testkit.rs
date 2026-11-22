@@ -9,6 +9,9 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The host name tests configure hogtie with.
+pub const HOST: &str = "h1";
+
 pub struct Kit {
     dir: PrivateDir,
     pub ssh_keygen: PathBuf,
@@ -115,7 +118,19 @@ impl Kit {
             .unwrap()
     }
 
-    /// A fresh ed25519 key and a certificate for it signed by this kit's CA.
+    /// A grant for `actions` on [`HOST`]: [`Kit::cert`] with each principal
+    /// written `<HOST>:<action>`.
+    pub fn grant(&self, key_id: &str, actions: &[&str], validity: &str, extra: &[&str]) -> PathBuf {
+        let pinned: Vec<String> = actions
+            .iter()
+            .map(|a| crate::message::principal(HOST, a))
+            .collect();
+        let pinned: Vec<&str> = pinned.iter().map(String::as_str).collect();
+        self.cert(key_id, &pinned, validity, extra)
+    }
+
+    /// A fresh ed25519 key and a certificate for it signed by this kit's CA,
+    /// its principals exactly as given.
     /// `validity` is ssh-keygen's `-V`; `extra` goes before the key path
     /// (`-h` for a host certificate, `-O ...`). Returns the `-cert.pub` path.
     pub fn cert(

@@ -7,7 +7,8 @@
 //! 3. the nonce has not expired;
 //! 4. the configuration is root-owned, unwritable by others, and parses;
 //! 5. the action is declared;
-//! 6. the message rebuilt from (nonce, caller uid, action, args) encodes;
+//! 6. the message rebuilt from (host, nonce, caller uid, action, args)
+//!    encodes;
 //! 7. the grant passes hogtie's own checks (`grant.rs`);
 //! 8. ssh-keygen and the action's program are root-owned files writable by
 //!    no one else;
@@ -17,14 +18,15 @@
 //! The decision and its audit record are returned; `main` appends the
 //! record and only then executes.
 
-use crate::audit::Record;
+use crate::audit::{self, Record};
 use crate::config::Config;
 use crate::grant::{GrantPolicy, check_grant};
-use crate::message::Request;
+use crate::message::{MAX_ARG_LEN, MAX_ARGS, Request, principal};
 use crate::nonce::NonceStore;
 use crate::paths::Paths;
 use crate::response::{Response, nonce_hex};
 use crate::sshwire::Sshsig;
+use crate::util::Clock;
 use crate::verify::{Verifier, VerifyError};
 use std::path::PathBuf;
 
@@ -73,17 +75,33 @@ pub fn decide(
     response: &str,
     action: &str,
     args: &[String],
-    now: u64,
+    clock: Clock,
 ) -> Decision {
+    // Anyone the sudo rule admits can call this with no grant at all: what a
+    // refusal records is bounded before anything else (review finding 2).
     let mut record = Record {
-        time: now,
+        time: clock.wall,
         outcome: "refused",
         caller_uid: Some(caller_uid),
-        action: Some(action.to_string()),
-        args: args.to_vec(),
+        action: Some(audit::bounded(action)),
+        args: audit::bounded_args(args),
         ..Default::default()
     };
-    let run = steps(paths, caller_uid, response, action, args, now, &mut record);
+    let run = if args.len() > MAX_ARGS || args.iter().any(|a| a.len() > MAX_ARG_LEN) {
+        Err(refused(format!(
+            "at most {MAX_ARGS} arguments of at most {MAX_ARG_LEN} bytes each"
+        )))
+    } else {
+        steps(
+            paths,
+            caller_uid,
+            response,
+            action,
+            args,
+            clock,
+            &mut record,
+        )
+    };
     match &run {
         Ok(r) => {
             record.outcome = "started";
@@ -105,14 +123,16 @@ fn steps(
     response: &str,
     action: &str,
     args: &[String],
-    now: u64,
+    clock: Clock,
     record: &mut Record,
 ) -> Result<Run, Refusal> {
     use crate::nonce::ClaimError;
+    let now = clock.wall;
     let response = Response::parse(response).map_err(refused)?;
     record.nonce = Some(nonce_hex(&response.nonce));
+    // A nonce's life is on the boot clock, which nobody can set back.
     let entry = NonceStore::new(paths.nonces())
-        .claim(caller_uid, &response.nonce, now)
+        .claim(caller_uid, &response.nonce, clock.boot)
         .map_err(|e| match &e {
             ClaimError::Expired(en) => {
                 record.asked_by = Some(en.clone());
@@ -129,6 +149,7 @@ fn steps(
         .get(action)
         .ok_or_else(|| refused(format!("action {action:?} is not declared on this host")))?;
     let message = Request {
+        host: config.host.clone(),
         nonce: response.nonce,
         uid: caller_uid,
         action: action.to_string(),
@@ -143,6 +164,7 @@ fn steps(
         action,
         now,
         &GrantPolicy {
+            host: &config.host,
             ca_blobs: &ca_blobs,
             max_span_seconds: config.max_grant_seconds,
         },
@@ -161,7 +183,7 @@ fn steps(
         cas: &config.cas,
         scratch: &paths.scratch(),
     }
-    .verify(&message, &sig, action)
+    .verify(&message, &sig, &principal(&config.host, action))
     .map_err(|e| match e {
         VerifyError::Io(_) => broken(&e),
         VerifyError::Refused(_) => refused(&e),
@@ -201,9 +223,10 @@ mod tests {
             std::fs::create_dir_all(paths.config.parent().unwrap()).unwrap();
             Paths::ensure_private_dir(&paths.nonces()).unwrap();
             let config = format!(
-                "ssh_keygen = \"{}\"\nca_keys = [\"{}\"]\nmax_grant_seconds = 86400\n\
+                "host = \"{}\"\nssh_keygen = \"{}\"\nca_keys = [\"{}\"]\nmax_grant_seconds = 86400\n\
                  [action.say]\nprogram = \"{}\"\nargv = [\"{{word}}\"]\nenv = {{ LANG = \"C\" }}\n\
                  param = [{{ name = \"word\", kind = \"choice\", values = [\"hello\", \"bye\"] }}]\n",
+                crate::testkit::HOST,
                 kit.ssh_keygen.display(),
                 kit.ca_line(),
                 crate::testkit::trusted_copy(kit.dir(), "echo").display(),
@@ -231,7 +254,8 @@ mod tests {
                 .0
         }
 
-        /// A response for (nonce, uid, action, args) signed with `cert`.
+        /// A response for (this host, nonce, uid, action, args) signed with
+        /// `cert`.
         fn respond(
             &self,
             cert: &std::path::Path,
@@ -240,7 +264,21 @@ mod tests {
             action: &str,
             args: &[&str],
         ) -> String {
+            self.respond_for(crate::testkit::HOST, cert, nonce, uid, action, args)
+        }
+
+        /// The same, with the message signed for `host`.
+        fn respond_for(
+            &self,
+            host: &str,
+            cert: &std::path::Path,
+            nonce: crate::message::Nonce,
+            uid: u32,
+            action: &str,
+            args: &[&str],
+        ) -> String {
             let msg = Request {
+                host: host.into(),
                 nonce,
                 uid,
                 action: action.into(),
@@ -255,10 +293,111 @@ mod tests {
             .format()
         }
 
+        /// `exec` with both clocks at `now`.
         fn exec(&self, response: &str, action: &str, args: &[&str], now: u64) -> Decision {
-            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-            decide(&self.paths, self.uid, response, action, &args, now)
+            self.exec_at(
+                response,
+                action,
+                args,
+                Clock {
+                    wall: now,
+                    boot: now,
+                },
+            )
         }
+
+        fn exec_at(&self, response: &str, action: &str, args: &[&str], clock: Clock) -> Decision {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            decide(&self.paths, self.uid, response, action, &args, clock)
+        }
+
+        fn set_host(&self, host: &str) {
+            let old = std::fs::read_to_string(&self.paths.config).unwrap();
+            let new = old.replacen(
+                &format!("host = \"{}\"", crate::testkit::HOST),
+                &format!("host = \"{host}\""),
+                1,
+            );
+            assert_ne!(old, new);
+            crate::testkit::write_trusted(&self.paths.config, &new);
+        }
+    }
+
+    #[test]
+    fn a_grant_for_this_host_is_refused_on_another() {
+        let h = Host::new();
+        h.set_host("h2");
+        let now = crate::util::now();
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
+        let r = h.respond_for(
+            "h2",
+            &cert,
+            h.nonce_for(h.uid, now),
+            h.uid,
+            "say",
+            &["hello"],
+        );
+        assert_eq!(
+            refusal(&h.exec(&r, "say", &["hello"], now)),
+            "grant names \"h1:say\", for another host"
+        );
+    }
+
+    #[test]
+    fn a_message_signed_for_another_host_is_refused() {
+        // A grant for both hosts; the caller signed for h2 and replays on h1.
+        let h = Host::new();
+        let now = crate::util::now();
+        let cert = h.kit.cert("a", &["h1:say", "h2:say"], "+1h", &[]);
+        let r = h.respond_for(
+            "h2",
+            &cert,
+            h.nonce_for(h.uid, now),
+            h.uid,
+            "say",
+            &["hello"],
+        );
+        assert!(refusal(&h.exec(&r, "say", &["hello"], now)).contains("signature refused"));
+    }
+
+    #[test]
+    fn an_unpinned_grant_is_refused() {
+        let h = Host::new();
+        let now = crate::util::now();
+        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
+        assert!(refusal(&h.exec(&r, "say", &["hello"], now)).contains("with no host"));
+    }
+
+    #[test]
+    fn a_huge_refused_request_is_recorded_bounded() {
+        let h = Host::new();
+        let big = "x".repeat(1 << 20);
+        let many: Vec<&str> = std::iter::repeat_n(big.as_str(), 64).collect();
+        let d = h.exec("garbage", &"a".repeat(1 << 20), &many, crate::util::now());
+        assert!(d.run.is_err());
+        let line = d.record.to_json();
+        assert!(line.len() < 64 * 1024, "the line is {} bytes", line.len());
+    }
+
+    #[test]
+    fn a_nonce_lives_on_the_boot_clock_not_the_wall_clock() {
+        let h = Host::new();
+        let now = crate::util::now();
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
+        let n = h.nonce_for(h.uid, 1_000);
+        let r = h.respond(&cert, n, h.uid, "say", &["hello"]);
+        // The wall clock is fine (now) but 31 boot seconds have passed.
+        let d = h.exec_at(
+            &r,
+            "say",
+            &["hello"],
+            Clock {
+                wall: now,
+                boot: 1_031,
+            },
+        );
+        assert_eq!(refusal(&d), "nonce has expired");
     }
 
     fn refusal(d: &Decision) -> &str {
@@ -273,7 +412,7 @@ mod tests {
     fn a_forged_signature_is_not_recorded_as_the_copied_grant() {
         let h = Host::new();
         let now = crate::util::now();
-        let alice = h.kit.cert("alice", &["say"], "+1h", &[]);
+        let alice = h.kit.grant("alice", &["say"], "+1h", &[]);
         let n = h.nonce_for(h.uid, now);
         let mut sig = h.kit.sign_plain(b"anything");
         sig.public_key = h.kit.sign(&alice, b"anything").public_key;
@@ -291,7 +430,7 @@ mod tests {
     fn hogtie_own_failures_are_marked_internal_not_refused() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
         std::fs::remove_file(&h.paths.config).unwrap();
         let d = h.exec(&r, "say", &["hello"], now);
@@ -309,7 +448,7 @@ mod tests {
     fn a_granted_action_runs_and_is_recorded() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("agent-1", &["say"], "+1h", &[]);
+        let cert = h.kit.grant("agent-1", &["say"], "+1h", &[]);
         let n = h.nonce_for(h.uid, now);
         let d = h.exec(
             &h.respond(&cert, n, h.uid, "say", &["hello"]),
@@ -329,7 +468,7 @@ mod tests {
     fn a_replayed_response_is_refused() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
         assert!(h.exec(&r, "say", &["hello"], now).run.is_ok());
         let again = h.exec(&r, "say", &["hello"], now);
@@ -344,7 +483,7 @@ mod tests {
     fn a_refused_attempt_burns_the_nonce() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
         assert!(
             h.exec(&r, "say", &["bye"], now).run.is_err(),
@@ -357,7 +496,7 @@ mod tests {
     fn arguments_other_than_the_signed_ones_are_refused() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
         assert!(refusal(&h.exec(&r, "say", &["bye"], now)).contains("signature refused"));
     }
@@ -366,7 +505,7 @@ mod tests {
     fn an_expired_grant_is_refused() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["say"], "20200101:20200102", &[]);
+        let cert = h.kit.grant("a", &["say"], "20200101:20200102", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
         assert_eq!(
             refusal(&h.exec(&r, "say", &["hello"], now)),
@@ -378,7 +517,7 @@ mod tests {
     fn an_expired_nonce_is_refused() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
         let r = h.respond(
             &cert,
             h.nonce_for(h.uid, now - 31),
@@ -396,7 +535,7 @@ mod tests {
     fn an_action_the_grant_does_not_name_is_refused() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["other"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["other"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
         assert_eq!(
             refusal(&h.exec(&r, "say", &["hello"], now)),
@@ -408,7 +547,7 @@ mod tests {
     fn an_undeclared_action_is_refused_even_when_granted() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["shutdown"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["shutdown"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "shutdown", &[]);
         assert!(refusal(&h.exec(&r, "shutdown", &[], now)).contains("not declared"));
     }
@@ -417,7 +556,7 @@ mod tests {
     fn a_nonce_asked_by_another_account_is_refused() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
         let other = h.uid + 1;
         let n = h.nonce_for(other, now);
         // Signed honestly for this account, and for the other: both refused.
@@ -431,7 +570,7 @@ mod tests {
     fn a_signature_naming_another_account_is_refused() {
         let h = Host::new();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid + 1, "say", &["hello"]);
         assert!(refusal(&h.exec(&r, "say", &["hello"], now)).contains("signature refused"));
     }
@@ -440,10 +579,11 @@ mod tests {
     fn a_copied_grant_used_with_another_key_is_refused() {
         let h = Host::new();
         let now = crate::util::now();
-        let alice = h.kit.cert("alice", &["say"], "+1h", &[]);
-        let mallory = h.kit.cert("mallory", &["other"], "+1h", &[]);
+        let alice = h.kit.grant("alice", &["say"], "+1h", &[]);
+        let mallory = h.kit.grant("mallory", &["other"], "+1h", &[]);
         let n = h.nonce_for(h.uid, now);
         let msg = Request {
+            host: crate::testkit::HOST.into(),
             nonce: n,
             uid: h.uid,
             action: "say".into(),
@@ -497,7 +637,7 @@ mod tests {
         assert_ne!(text, old, "the program line was replaced");
         crate::testkit::write_trusted(&h.paths.config, &text);
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
         let d = h.exec(&r, "say", &["hello"], now);
         assert_eq!(
@@ -515,7 +655,7 @@ mod tests {
         let h = Host::new();
         std::fs::set_permissions(&h.paths.config, std::fs::Permissions::from_mode(0o666)).unwrap();
         let now = crate::util::now();
-        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
         assert!(refusal(&h.exec(&r, "say", &["hello"], now)).contains("writable by no one else"));
     }

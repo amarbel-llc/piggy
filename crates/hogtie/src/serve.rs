@@ -6,7 +6,7 @@
 //! the window between accept and that open remains), and answers:
 //!
 //! ```text
-//! ok <nonce hex> <expiry, unix seconds>
+//! ok <nonce hex> <seconds it has left>
 //! refused <reason>
 //! ```
 //!
@@ -87,7 +87,9 @@ pub fn answer(stream: &mut UnixStream, store: &NonceStore, now: u64) -> io::Resu
     let line = match asker_of(stream) {
         Err(e) => format!("refused cannot read the caller: {e}\n"),
         Ok(asker) => match store.issue(&asker, now) {
-            Ok((nonce, expires)) => format!("ok {} {expires}\n", nonce_hex(&nonce)),
+            Ok((nonce, expires)) => {
+                format!("ok {} {}\n", nonce_hex(&nonce), expires.saturating_sub(now))
+            }
             Err(e) => format!("refused {e}\n"),
         },
     };
@@ -105,7 +107,8 @@ pub fn serve(listener: &UnixListener, store: &NonceStore) -> io::Result<()> {
                 continue;
             }
         };
-        let now = crate::util::now();
+        // Nonce life is on the boot clock (util::boot_now): exec reads it.
+        let now = crate::util::boot_now();
         if now >= last_sweep + crate::nonce::TTL_SECONDS {
             if let Err(e) = store.sweep(now) {
                 eprintln!("hogtie serve: sweep: {e}");
@@ -176,7 +179,7 @@ mod tests {
         answer(&mut conn, &store, 1000).unwrap();
         drop(conn);
         let (hex, expires) = client.join().unwrap().unwrap();
-        assert_eq!(expires, 1030);
+        assert_eq!(expires, 30, "the seconds it has left");
         // SAFETY: getuid cannot fail.
         let uid = unsafe { libc::getuid() };
         let nonce = crate::response::parse_nonce_hex(&hex).unwrap();

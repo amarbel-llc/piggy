@@ -25,6 +25,41 @@ pub struct Record {
     pub argv: Vec<String>,
 }
 
+/// The most of any one caller-given string a line records.
+pub const RECORD_STRING_MAX: usize = 256;
+/// The most caller-given arguments a line records.
+pub const RECORD_ARGS_MAX: usize = 32;
+
+/// `s` cut to [`RECORD_STRING_MAX`] bytes (at a character boundary), with a
+/// marker saying how long it was.
+pub fn bounded(s: &str) -> String {
+    if s.len() <= RECORD_STRING_MAX {
+        return s.to_string();
+    }
+    let mut end = RECORD_STRING_MAX;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[{} bytes]", &s[..end], s.len())
+}
+
+/// At most [`RECORD_ARGS_MAX`] arguments, each [`bounded`], and a marker
+/// for the rest: a refusal by someone with no grant cannot fill the log.
+pub fn bounded_args(args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = args
+        .iter()
+        .take(RECORD_ARGS_MAX)
+        .map(|a| bounded(a))
+        .collect();
+    if args.len() > RECORD_ARGS_MAX {
+        out.push(format!(
+            "...[{} more arguments]",
+            args.len() - RECORD_ARGS_MAX
+        ));
+    }
+    out
+}
+
 fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -107,6 +142,20 @@ pub fn append(path: &Path, record: &Record) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_strings_are_bounded() {
+        assert_eq!(bounded("short"), "short");
+        let b = bounded(&"x".repeat(100_000));
+        assert!(b.len() < RECORD_STRING_MAX + 32, "{}", b.len());
+        assert!(b.ends_with("...[100000 bytes]"));
+        let multibyte = "é".repeat(200); // 400 bytes, a boundary at 256
+        assert!(bounded(&multibyte).starts_with(&"é".repeat(128)));
+        let args = vec!["y".repeat(5000); 1000];
+        let a = bounded_args(&args);
+        assert_eq!(a.len(), RECORD_ARGS_MAX + 1);
+        assert_eq!(a.last().unwrap(), "...[968 more arguments]");
+    }
 
     #[test]
     fn strings_are_escaped() {

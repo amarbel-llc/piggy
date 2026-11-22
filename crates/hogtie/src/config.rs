@@ -5,7 +5,8 @@
 //! whole file (fail closed: no action runs from a file hogtie doubts).
 //!
 //! ```toml
-//! ssh_keygen = "/nix/store/...-openssh/bin/ssh-keygen"
+//! host = "flic"
+//! ssh_keygen ="/nix/store/...-openssh/bin/ssh-keygen"
 //! ca_keys = ["ecdsa-sha2-nistp256 AAAA..."]
 //! max_grant_seconds = 2592000
 //!
@@ -16,22 +17,24 @@
 //! param = [{ name = "repo", kind = "choice", values = ["/srv/backup/a"] }]
 //! ```
 //!
+//! `host` is this host's name, as grants name it (`<host>:<action>`).
 //! Parameters are positional and all required. Kinds: `choice` (one of
-//! `values`), `pattern` (characters from `chars`, a class such as
-//! `a-z0-9._-`, at most `max_len`, never starting with `-`), `path` (an
-//! absolute path under `under`, passed on as its real path, which must
-//! still be under `under`). A `{name}` in argv must be a whole element.
+//! `values`) and `pattern` (characters from `chars`, a class such as
+//! `a-z0-9._-` with no `/`, at most `max_len`, never starting with `-`,
+//! never only dots). There is no `path` kind in stage 1: declare paths as a
+//! `choice`. A `{name}` in argv must be a whole element.
 
-use crate::message::is_action_name;
+use crate::message::{is_action_name, is_host_name};
 use crate::verify::CaKey;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    host: String,
     ssh_keygen: String,
     ca_keys: Vec<String>,
     max_grant_seconds: u64,
@@ -63,6 +66,8 @@ struct RawParam {
 }
 
 pub struct Config {
+    /// This host's name, as grants name it (`<host>:<action>`).
+    pub host: String,
     pub ssh_keygen: PathBuf,
     pub cas: Vec<CaKey>,
     pub max_grant_seconds: u64,
@@ -93,12 +98,21 @@ pub struct Param {
 pub enum ParamKind {
     Choice(Vec<String>),
     Pattern { chars: CharClass, max_len: usize },
-    Path { under: PathBuf },
 }
 
 /// A set of printable ASCII characters, parsed from `a-z0-9._-` style text.
+/// A range `x-y` is only lowercase to lowercase, uppercase to uppercase or
+/// digit to digit; any other `x-y` (such as `+-.`, which is the range `+`
+/// to `.`) is refused as ambiguous: a literal `-` goes first or last. `/` is
+/// refused outright: a value is never a path (finding 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharClass([bool; 128]);
+
+fn same_kind(lo: u8, hi: u8) -> bool {
+    (lo.is_ascii_lowercase() && hi.is_ascii_lowercase())
+        || (lo.is_ascii_uppercase() && hi.is_ascii_uppercase())
+        || (lo.is_ascii_digit() && hi.is_ascii_digit())
+}
 
 impl CharClass {
     pub fn parse(spec: &str) -> Result<Self, String> {
@@ -111,11 +125,21 @@ impl CharClass {
                 "character class holds byte {c:#04x}: printable ASCII only, no space"
             ));
         }
+        if b.contains(&b'/') {
+            return Err("a character class may not hold '/': a value is never a path".into());
+        }
         let mut set = [false; 128];
         let mut i = 0;
         while i < b.len() {
             if i + 2 < b.len() && b[i + 1] == b'-' {
                 let (lo, hi) = (b[i], b[i + 2]);
+                if !same_kind(lo, hi) {
+                    return Err(format!(
+                        "{}-{} is an ambiguous range: ranges are a-z, A-Z or 0-9 pieces; \
+                         put a literal '-' first or last",
+                        lo as char, hi as char
+                    ));
+                }
                 if lo > hi {
                     return Err(format!(
                         "range {}-{} runs backwards",
@@ -185,6 +209,12 @@ fn is_param_name(n: &str) -> bool {
 impl Config {
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(text).map_err(|e| ConfigError(e.to_string()))?;
+        if !is_host_name(&raw.host) {
+            return err(format!(
+                "host name {:?} is not [a-z0-9][a-z0-9-]{{0,62}}",
+                raw.host
+            ));
+        }
         if !is_plain_absolute(&raw.ssh_keygen) {
             return err(format!(
                 "ssh_keygen {:?} is not a plain absolute path",
@@ -214,6 +244,7 @@ impl Config {
             actions.insert(name, action);
         }
         Ok(Self {
+            host: raw.host,
             ssh_keygen: PathBuf::from(raw.ssh_keygen),
             cas,
             max_grant_seconds: raw.max_grant_seconds,
@@ -273,19 +304,13 @@ impl Param {
                 ParamKind::Pattern { chars, max_len }
             }
             "path" => {
-                unused("values", p.values.is_some())?;
-                unused("chars", p.chars.is_some())?;
-                unused("max_len", p.max_len.is_some())?;
-                let under = p.under.clone().unwrap_or_default();
-                if !is_plain_absolute(&under) {
-                    return err(format!(
-                        "parameter {}: under {under:?} is not a plain absolute path (and not /)",
-                        p.name
-                    ));
-                }
-                ParamKind::Path {
-                    under: PathBuf::from(under),
-                }
+                // A path checked and then used by name can be swapped under
+                // the check by anyone who can write a directory on its way.
+                return err(format!(
+                    "parameter {}: the `path` kind is not in stage 1 (a path checked then used \
+                     can be swapped under it); declare the paths as a `choice`",
+                    p.name
+                ));
             }
             other => return err(format!("parameter {}: unknown kind {other:?}", p.name)),
         };
@@ -358,8 +383,7 @@ impl Action {
     }
 
     /// The argv to run (program first), the caller's `args` checked
-    /// against the declared parameters. A path is resolved here and passed
-    /// on resolved.
+    /// against the declared parameters.
     pub fn build(&self, args: &[String]) -> Result<Vec<String>, String> {
         if args.len() != self.params.len() {
             return Err(format!(
@@ -383,10 +407,6 @@ impl Action {
         }
         Ok(out)
     }
-}
-
-fn is_under(path: &Path, dir: &Path) -> bool {
-    path.starts_with(dir) && path != dir
 }
 
 fn check_value(p: &Param, v: &str) -> Result<String, String> {
@@ -413,27 +433,6 @@ fn check_value(p: &Param, v: &str) -> Result<String, String> {
                 None => Ok(v.to_string()),
             }
         }
-        ParamKind::Path { under } => {
-            if !is_plain_absolute(v) || !is_under(Path::new(v), under) {
-                return Err(format!(
-                    "{v:?} is not a plain absolute path under {}",
-                    under.display()
-                ));
-            }
-            let real_under =
-                std::fs::canonicalize(under).map_err(|e| format!("{}: {e}", under.display()))?;
-            let real = std::fs::canonicalize(v).map_err(|e| format!("{v}: {e}"))?;
-            if !is_under(&real, &real_under) {
-                return Err(format!(
-                    "{v:?} resolves to {}, outside {}",
-                    real.display(),
-                    real_under.display()
-                ));
-            }
-            real.into_os_string()
-                .into_string()
-                .map_err(|_| "the resolved path is not UTF-8".to_string())
-        }
     }
 }
 
@@ -446,7 +445,7 @@ mod tests {
 
     fn conf(actions: &str) -> String {
         format!(
-            "ssh_keygen = \"/usr/bin/ssh-keygen\"\nca_keys = [\"{CA}\"]\nmax_grant_seconds = 86400\n{actions}"
+            "host = \"h1\"\nssh_keygen = \"/usr/bin/ssh-keygen\"\nca_keys = [\"{CA}\"]\nmax_grant_seconds = 86400\n{actions}"
         )
     }
 
@@ -517,45 +516,34 @@ param = [
     }
 
     #[test]
-    fn a_path_parameter_stays_under_its_directory() {
-        let dir = crate::util::PrivateDir::new(&std::env::temp_dir(), "hogtie-cfg").unwrap();
-        let base = dir.path();
-        std::fs::create_dir(base.join("repos")).unwrap();
-        std::fs::create_dir(base.join("repos/a")).unwrap();
-        std::fs::create_dir(base.join("secret")).unwrap();
-        std::os::unix::fs::symlink(base.join("secret"), base.join("repos/link")).unwrap();
-        let c = parse(&format!(
-            "[action.ls]\nprogram = \"/bin/ls\"\nargv = [\"{{p}}\"]\nparam = [{{ name = \"p\", kind = \"path\", under = \"{}/repos\" }}]\n",
-            base.display()
-        ))
-        .unwrap();
-        let a = &c.actions["ls"];
-        let ok = format!("{}/repos/a", base.display());
-        let real = std::fs::canonicalize(&ok).unwrap();
-        assert_eq!(a.build(&[ok]).unwrap()[1], real.to_str().unwrap());
-        for (v, needle) in [
-            (
-                format!("{}/repos/../secret", base.display()),
-                "not a plain absolute path",
-            ),
-            (
-                format!("{}/repos/./a", base.display()),
-                "not a plain absolute path",
-            ),
-            (
-                format!("{}/repos", base.display()),
-                "not a plain absolute path under",
-            ),
-            (
-                format!("{}/secret", base.display()),
-                "not a plain absolute path under",
-            ),
-            ("repos/a".to_string(), "not a plain absolute path"),
-            (format!("{}/repos/link", base.display()), "outside"),
-            (format!("{}/repos/missing", base.display()), "No such file"),
+    fn the_path_kind_is_not_in_stage_1() {
+        // A path checked and then used by name can be swapped under the
+        // check (review finding 1): the kind is refused at load.
+        refused(
+            "[action.ls]\nprogram = \"/bin/ls\"\nargv = [\"{p}\"]\nparam = [{ name = \"p\", kind = \"path\", under = \"/srv\" }]\n",
+            "not in stage 1",
+        );
+    }
+
+    #[test]
+    fn a_class_with_a_slash_or_an_ambiguous_range_is_refused() {
+        for (chars, needle) in [
+            ("a-z/", "'/'"),
+            ("a-z0-9._/-", "'/'"),
+            ("+-.", "ambiguous"),
+            ("%-_", "ambiguous"),
+            ("a-Z", "ambiguous"),
+            ("0-z", "ambiguous"),
         ] {
-            let e = a.build(std::slice::from_ref(&v)).unwrap_err();
-            assert!(e.contains(needle), "{v}: {e}");
+            refused(
+                &format!(
+                    "[action.x]\nprogram = \"/bin/x\"\nargv = [\"{{r}}\"]\nparam = [{{ name = \"r\", kind = \"pattern\", chars = \"{chars}\", max_len = 3 }}]\n"
+                ),
+                needle,
+            );
+        }
+        for ok in ["a-z0-9._-", "A-Z", "0-9", "a-c", "-a", "a-", "._-"] {
+            assert!(CharClass::parse(ok).is_ok(), "{ok}");
         }
     }
 
@@ -612,10 +600,6 @@ param = [
             "backwards",
         );
         refused(
-            "[action.x]\nprogram = \"/bin/x\"\nargv = [\"{r}\"]\nparam = [{ name = \"r\", kind = \"path\", under = \"/\" }]\n",
-            "not a plain absolute path",
-        );
-        refused(
             "[action.x]\nprogram = \"/bin/x\"\nenv = { path = \"/bin\" }\n",
             "env",
         );
@@ -633,30 +617,72 @@ param = [
                 .map(|ConfigError(e)| e)
                 .unwrap_or_default()
         };
+        let h = "host = \"h1\"\n";
         assert!(
-            c("ssh_keygen = \"ssh-keygen\"\nca_keys = []\nmax_grant_seconds = 1\n")
-                .contains("plain absolute")
-        );
-        assert!(
-            c("ssh_keygen = \"/k\"\nca_keys = []\nmax_grant_seconds = 1\n")
-                .contains("ca_keys is empty")
+            c(&format!(
+                "{h}ssh_keygen = \"ssh-keygen\"\nca_keys = []\nmax_grant_seconds = 1\n"
+            ))
+            .contains("plain absolute")
         );
         assert!(
             c(&format!(
-                "ssh_keygen = \"/k\"\nca_keys = [\"{CA}\"]\nmax_grant_seconds = 0\n"
+                "{h}ssh_keygen = \"/k\"\nca_keys = []\nmax_grant_seconds = 1\n"
+            ))
+            .contains("ca_keys is empty")
+        );
+        assert!(
+            c(&format!(
+                "{h}ssh_keygen = \"/k\"\nca_keys = [\"{CA}\"]\nmax_grant_seconds = 0\n"
             ))
             .contains("is 0")
         );
         assert!(
-            c(&format!("ssh_keygen = \"/k\"\nca_keys = [\"{CA}\"]\n"))
+            c(&format!("{h}ssh_keygen = \"/k\"\nca_keys = [\"{CA}\"]\n"))
                 .contains("max_grant_seconds")
         );
         assert!(
             c(&format!(
-                "ssh_keygen = \"/k\"\nca_keys = [\"{CA}\"]\nmax_grant_seconds = 1\nextra = 1\n"
+                "{h}ssh_keygen = \"/k\"\nca_keys = [\"{CA}\"]\nmax_grant_seconds = 1\nextra = 1\n"
             ))
             .contains("unknown field")
         );
+    }
+
+    #[test]
+    fn the_host_name_is_required_and_checked() {
+        let rest = format!("ssh_keygen = \"/k\"\nca_keys = [\"{CA}\"]\nmax_grant_seconds = 1\n");
+        let e = |s: String| {
+            Config::parse(&s)
+                .err()
+                .map(|ConfigError(e)| e)
+                .unwrap_or_default()
+        };
+        assert!(e(rest.clone()).contains("host"), "missing host");
+        for bad in ["", "Flic", "a:b", "a.example", "*"] {
+            assert!(
+                e(format!("host = \"{bad}\"\n{rest}")).contains("host name"),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            Config::parse(&format!("host = \"flic\"\n{rest}"))
+                .unwrap()
+                .host,
+            "flic"
+        );
+    }
+
+    #[test]
+    fn a_rsa_or_dsa_ca_is_refused() {
+        // ssh-rsa may verify with SHA-1; hogtie pins the CA to EC types.
+        let rsa = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQC7";
+        let e = Config::parse(&format!(
+            "host = \"h1\"\nssh_keygen = \"/k\"\nca_keys = [\"{rsa}\"]\nmax_grant_seconds = 1\n"
+        ))
+        .err()
+        .map(|ConfigError(e)| e)
+        .unwrap_or_default();
+        assert!(e.contains("ssh-ed25519 or ecdsa"), "{e}");
     }
 
     #[test]

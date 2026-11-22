@@ -35,6 +35,40 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Seconds since boot, CLOCK_BOOTTIME: it counts suspend and cannot be
+/// set, so a clock set backwards does not lengthen a nonce's life. The
+/// nonce store is in /run, which a reboot empties, so boot seconds never
+/// cross a boot.
+pub fn boot_now() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes one timespec into `ts`.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
+    if rc != 0 {
+        return 0;
+    }
+    ts.tv_sec as u64
+}
+
+/// The two clocks a decision reads: wall time for grants (a certificate's
+/// validity is wall time by definition) and boot time for nonce life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clock {
+    pub wall: u64,
+    pub boot: u64,
+}
+
+impl Clock {
+    pub fn now() -> Self {
+        Self {
+            wall: now(),
+            boot: boot_now(),
+        }
+    }
+}
+
 /// A fresh directory, mode 0700, under `parent`, removed when dropped.
 pub struct PrivateDir(PathBuf);
 

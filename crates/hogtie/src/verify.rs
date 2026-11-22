@@ -53,6 +53,19 @@ impl CaKey {
         if key_type.contains("-cert-") {
             return Err("a CA key must be a plain key, not a certificate".into());
         }
+        // ssh-rsa may verify with SHA-1 and DSA is broken: pin the CA to EC
+        // types (the card's slot is P-256; tests use ecdsa too).
+        const CA_TYPES: [&str; 4] = [
+            "ssh-ed25519",
+            "ecdsa-sha2-nistp256",
+            "ecdsa-sha2-nistp384",
+            "ecdsa-sha2-nistp521",
+        ];
+        if !CA_TYPES.contains(&key_type.as_str()) {
+            return Err(format!(
+                "CA key type {key_type:?}: must be ssh-ed25519 or ecdsa-sha2-nistp256/384/521"
+            ));
+        }
         Ok(Self {
             key_type,
             base64: b64,
@@ -93,7 +106,8 @@ pub struct Verifier<'a> {
 }
 
 impl Verifier<'_> {
-    pub fn verify(&self, message: &[u8], sig: &Sshsig, action: &str) -> Result<(), VerifyError> {
+    /// Verify `sig` over `message` for `principal` (`<host>:<action>`).
+    pub fn verify(&self, message: &[u8], sig: &Sshsig, principal: &str) -> Result<(), VerifyError> {
         let io = |e: std::io::Error| VerifyError::Io(e.to_string());
         if self.cas.is_empty() {
             return Err(VerifyError::Io("no CA is configured".into()));
@@ -111,7 +125,7 @@ impl Verifier<'_> {
                 "-f",
                 "allowed_signers",
                 "-I",
-                action,
+                principal,
                 "-n",
                 NAMESPACE,
                 "-s",
@@ -131,7 +145,7 @@ impl Verifier<'_> {
         }
         let out = child.wait_with_output().map_err(io)?;
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let good = format!("Good \"{NAMESPACE}\" signature for {action} with ");
+        let good = format!("Good \"{NAMESPACE}\" signature for {principal} with ");
         if out.status.success() && stdout.starts_with(&good) {
             return Ok(());
         }
@@ -164,16 +178,16 @@ mod tests {
     #[test]
     fn a_good_signature_by_a_granted_key_passes() {
         let kit = Kit::new();
-        let sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"the message");
-        assert_eq!(verify(&kit, b"the message", &sig, "a"), Ok(()));
+        let sig = kit.sign(&kit.grant("alice", &["a"], "+1h", &[]), b"the message");
+        assert_eq!(verify(&kit, b"the message", &sig, "h1:a"), Ok(()));
     }
 
     #[test]
     fn another_message_is_refused() {
         let kit = Kit::new();
-        let sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"the message");
+        let sig = kit.sign(&kit.grant("alice", &["a"], "+1h", &[]), b"the message");
         assert!(matches!(
-            verify(&kit, b"another message", &sig, "a"),
+            verify(&kit, b"another message", &sig, "h1:a"),
             Err(VerifyError::Refused(_))
         ));
     }
@@ -181,8 +195,8 @@ mod tests {
     #[test]
     fn an_expired_grant_is_refused_by_ssh_keygen_too() {
         let kit = Kit::new();
-        let sig = kit.sign(&kit.cert("alice", &["a"], "20200101:20200102", &[]), b"m");
-        match verify(&kit, b"m", &sig, "a") {
+        let sig = kit.sign(&kit.grant("alice", &["a"], "20200101:20200102", &[]), b"m");
+        match verify(&kit, b"m", &sig, "h1:a") {
             Err(VerifyError::Refused(e)) => assert!(e.contains("expired"), "{e}"),
             other => panic!("{other:?}"),
         }
@@ -191,9 +205,19 @@ mod tests {
     #[test]
     fn an_action_the_grant_does_not_name_is_refused_by_ssh_keygen_too() {
         let kit = Kit::new();
-        let sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"m");
+        let sig = kit.sign(&kit.grant("alice", &["a"], "+1h", &[]), b"m");
         assert!(matches!(
-            verify(&kit, b"m", &sig, "b"),
+            verify(&kit, b"m", &sig, "h1:b"),
+            Err(VerifyError::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn a_grant_for_this_host_is_refused_by_ssh_keygen_for_another() {
+        let kit = Kit::new();
+        let sig = kit.sign(&kit.grant("alice", &["a"], "+1h", &[]), b"m");
+        assert!(matches!(
+            verify(&kit, b"m", &sig, "h2:a"),
             Err(VerifyError::Refused(_))
         ));
     }
@@ -203,12 +227,12 @@ mod tests {
         // Bob signs with his own granted key, then swaps Alice's certificate
         // into the sshsig: the signature no longer matches the certified key.
         let kit = Kit::new();
-        let alice = kit.cert("alice", &["a"], "+1h", &[]);
-        let bob = kit.cert("bob", &["a"], "+1h", &[]);
+        let alice = kit.grant("alice", &["a"], "+1h", &[]);
+        let bob = kit.grant("bob", &["a"], "+1h", &[]);
         let mut sig = kit.sign(&bob, b"m");
         sig.public_key = kit.sign(&alice, b"m").public_key;
         assert!(matches!(
-            verify(&kit, b"m", &sig, "a"),
+            verify(&kit, b"m", &sig, "h1:a"),
             Err(VerifyError::Refused(_))
         ));
     }
@@ -217,9 +241,9 @@ mod tests {
     fn another_ca_is_refused_by_ssh_keygen_too() {
         let kit = Kit::new();
         let other = Kit::new();
-        let sig = other.sign(&other.cert("alice", &["a"], "+1h", &[]), b"m");
+        let sig = other.sign(&other.grant("alice", &["a"], "+1h", &[]), b"m");
         assert!(matches!(
-            verify(&kit, b"m", &sig, "a"),
+            verify(&kit, b"m", &sig, "h1:a"),
             Err(VerifyError::Refused(_))
         ));
     }
@@ -237,14 +261,14 @@ mod tests {
         std::fs::set_permissions(&spy, std::fs::Permissions::from_mode(0o755)).unwrap();
         // SAFETY: a variable no other test reads; set before the spawn.
         unsafe { std::env::set_var("HOGTIE_SPY_SENTINEL", "leaked") };
-        let sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"m");
+        let sig = kit.sign(&kit.grant("alice", &["a"], "+1h", &[]), b"m");
         let cas = [CaKey::parse(&kit.ca_line()).unwrap()];
         let r = Verifier {
             ssh_keygen: &spy,
             cas: &cas,
             scratch: kit.dir(),
         }
-        .verify(b"m", &sig, "a");
+        .verify(b"m", &sig, "h1:a");
         assert!(matches!(r, Err(VerifyError::Refused(_))), "{r:?}");
         let env = std::fs::read_to_string(kit.dir().join("spy-keygen.env")).unwrap();
         assert!(
@@ -261,7 +285,7 @@ mod tests {
                 "-f",
                 "allowed_signers",
                 "-I",
-                "a",
+                "h1:a",
                 "-n",
                 "hogtie-v1",
                 "-s",
@@ -282,14 +306,14 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&spy, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"m");
+        let sig = kit.sign(&kit.grant("alice", &["a"], "+1h", &[]), b"m");
         let cas = [CaKey::parse(&kit.ca_line()).unwrap()];
         let r = Verifier {
             ssh_keygen: &spy,
             cas: &cas,
             scratch: kit.dir(),
         }
-        .verify(b"m", &sig, "a");
+        .verify(b"m", &sig, "h1:a");
         assert!(matches!(r, Err(VerifyError::Refused(_))), "{r:?}");
     }
 

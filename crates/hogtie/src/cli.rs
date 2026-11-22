@@ -16,7 +16,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage:
   hogtie nonce [--socket PATH]             ask for a nonce (prints it)
-  hogtie message NONCE ACTION [ARGS...]    print the bytes to sign
+  hogtie message HOST NONCE ACTION [ARGS...]  print the bytes to sign
   hogtie response NONCE SIGFILE            print the response word
   sudo hogtie exec RESPONSE ACTION [ARGS...]
   hogtie serve                             run the nonce socket (root)
@@ -75,7 +75,7 @@ fn nonce(rest: &[String]) -> ExitCode {
 }
 
 fn message(rest: &[String]) -> ExitCode {
-    let [nonce, action, args @ ..] = rest else {
+    let [host, nonce, action, args @ ..] = rest else {
         return usage();
     };
     let Some(nonce) = parse_nonce_hex(nonce) else {
@@ -84,6 +84,7 @@ fn message(rest: &[String]) -> ExitCode {
     // SAFETY: getuid cannot fail.
     let uid = unsafe { libc::getuid() };
     match (Request {
+        host: host.clone(),
         nonce,
         uid,
         action: action.clone(),
@@ -128,14 +129,15 @@ fn exec(rest: &[String]) -> ExitCode {
     if let Err(e) = paths.check_running_as_root() {
         return fail(3, e);
     }
-    let now = crate::util::now();
+    let clock = crate::util::Clock::now();
+    let now = clock.wall;
     // sudo sets SUDO_UID to the invoking account; without it there is no
     // account to bind the nonce to.
     let decision = match std::env::var("SUDO_UID")
         .ok()
         .and_then(|u| u.parse::<u32>().ok())
     {
-        Some(caller_uid) => decide(&paths, caller_uid, response, action, args, now),
+        Some(caller_uid) => decide(&paths, caller_uid, response, action, args, clock),
         None => Decision {
             run: Err(Refusal {
                 reason: "SUDO_UID is not set; run hogtie exec through sudo".into(),
@@ -145,8 +147,8 @@ fn exec(rest: &[String]) -> ExitCode {
                 time: now,
                 outcome: "refused",
                 reason: Some("SUDO_UID is not set".into()),
-                action: Some(action.clone()),
-                args: args.to_vec(),
+                action: Some(audit::bounded(action)),
+                args: audit::bounded_args(args),
                 ..Default::default()
             },
         },
@@ -161,13 +163,14 @@ fn exec(rest: &[String]) -> ExitCode {
         Err(r) if r.internal => return fail(3, format!("cannot decide: {}", r.reason)),
         Err(r) => return fail(1, format!("refused: {}", r.reason)),
     };
-    let err = std::process::Command::new(&run.program)
-        .arg0(&run.argv[0])
+    let mut cmd = std::process::Command::new(&run.program);
+    cmd.arg0(&run.argv[0])
         .args(&run.argv[1..])
         .env_clear()
         .envs(run.env.iter().map(|(k, v)| (k, v)))
-        .current_dir("/")
-        .exec();
+        .current_dir("/");
+    crate::child::prepare(&mut cmd);
+    let err = cmd.exec();
     // exec returned: the `started` line stands corrected by this one.
     let reason = format!("{}: {err}", run.program.display());
     let failed = audit::Record {

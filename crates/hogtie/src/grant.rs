@@ -12,11 +12,14 @@
 //! - any critical option at all;
 //! - a principal holding a pattern character (`*?!,`), even though 10.5
 //!   matches principals literally: older OpenSSH did not;
-//! - an action not exactly among the principals;
+//! - a grant not pinned to this host: the principal must be exactly
+//!   `<host>:<action>`, the host being this host's configured name; a bare
+//!   `<action>` (unpinned) and another host's `<other>:<action>` are refused
+//!   with their own reasons;
 //! - a certificate outside its validity at `now`, or whose validity span is
 //!   longer than the configured maximum.
 
-use crate::message::NAMESPACE;
+use crate::message::{NAMESPACE, principal};
 use crate::sshwire::{Certificate, SSH2_CERT_TYPE_USER, Sshsig, WireError};
 use std::fmt;
 
@@ -30,9 +33,16 @@ pub enum GrantError {
     CriticalOption(String),
     PatternPrincipal(String),
     ActionNotGranted(String),
+    /// The grant names the action with no host.
+    Unpinned(String),
+    /// The grant names the action for another host (the principal given).
+    OtherHost(String),
     NotYetValid,
     Expired,
-    SpanTooLong { span: u64, max: u64 },
+    SpanTooLong {
+        span: u64,
+        max: u64,
+    },
 }
 
 impl fmt::Display for GrantError {
@@ -52,6 +62,13 @@ impl fmt::Display for GrantError {
                 write!(f, "grant principal {p:?} holds a pattern character")
             }
             GrantError::ActionNotGranted(a) => write!(f, "grant does not name action {a:?}"),
+            GrantError::Unpinned(a) => {
+                write!(
+                    f,
+                    "grant names {a:?} with no host; a principal must be <host>:<action>"
+                )
+            }
+            GrantError::OtherHost(p) => write!(f, "grant names {p:?}, for another host"),
             GrantError::NotYetValid => f.write_str("grant is not yet valid"),
             GrantError::Expired => f.write_str("grant has expired"),
             GrantError::SpanTooLong { span, max } => {
@@ -75,6 +92,8 @@ pub struct Grant {
 }
 
 pub struct GrantPolicy<'a> {
+    /// This host's configured name.
+    pub host: &'a str,
     /// The configured CA public key blobs.
     pub ca_blobs: &'a [Vec<u8>],
     pub max_span_seconds: u64,
@@ -110,7 +129,18 @@ pub fn check_grant(
     {
         return Err(GrantError::PatternPrincipal(p.clone()));
     }
-    if !cert.principals.iter().any(|p| p == action) {
+    let wanted = principal(policy.host, action);
+    if !cert.principals.contains(&wanted) {
+        if cert.principals.iter().any(|p| p == action) {
+            return Err(GrantError::Unpinned(action.to_string()));
+        }
+        let elsewhere = cert
+            .principals
+            .iter()
+            .find(|p| p.split_once(':').is_some_and(|(_, a)| a == action));
+        if let Some(p) = elsewhere {
+            return Err(GrantError::OtherHost(p.clone()));
+        }
         return Err(GrantError::ActionNotGranted(action.to_string()));
     }
     if now < cert.valid_after {
@@ -153,6 +183,7 @@ mod tests {
             action,
             now,
             &GrantPolicy {
+                host: crate::testkit::HOST,
                 ca_blobs: &cas,
                 max_span_seconds: max,
             },
@@ -162,17 +193,44 @@ mod tests {
     #[test]
     fn a_grant_naming_the_action_passes_and_is_read() {
         let kit = Kit::new();
-        let cert = kit.cert("alice", &["restic-snapshots", "circus-status"], "+1h", &[]);
+        let cert = kit.grant("alice", &["restic-snapshots", "circus-status"], "+1h", &[]);
         let sig = kit.sign(&cert, b"m");
         let g = check(&kit, &sig, "circus-status", crate::util::now()).unwrap();
         assert_eq!(g.key_id, "alice");
-        assert_eq!(g.principals, ["restic-snapshots", "circus-status"]);
+        assert_eq!(g.principals, ["h1:restic-snapshots", "h1:circus-status"]);
+    }
+
+    #[test]
+    fn a_grant_for_another_host_is_refused() {
+        let kit = Kit::new();
+        let sig = kit.sign(&kit.cert("alice", &["h2:a"], "+1h", &[]), b"m");
+        assert_eq!(
+            check(&kit, &sig, "a", crate::util::now()),
+            Err(GrantError::OtherHost("h2:a".into()))
+        );
+    }
+
+    #[test]
+    fn an_unpinned_grant_is_refused() {
+        let kit = Kit::new();
+        let sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"m");
+        assert_eq!(
+            check(&kit, &sig, "a", crate::util::now()),
+            Err(GrantError::Unpinned("a".into()))
+        );
+    }
+
+    #[test]
+    fn a_grant_for_several_hosts_works_on_each_named_one() {
+        let kit = Kit::new();
+        let sig = kit.sign(&kit.cert("alice", &["h2:a", "h1:a"], "+1h", &[]), b"m");
+        assert!(check(&kit, &sig, "a", crate::util::now()).is_ok());
     }
 
     #[test]
     fn an_action_the_grant_does_not_name_is_refused() {
         let kit = Kit::new();
-        let sig = kit.sign(&kit.cert("alice", &["restic-snapshots"], "+1h", &[]), b"m");
+        let sig = kit.sign(&kit.grant("alice", &["restic-snapshots"], "+1h", &[]), b"m");
         assert_eq!(
             check(&kit, &sig, "restic", crate::util::now()),
             Err(GrantError::ActionNotGranted("restic".into()))
@@ -182,7 +240,7 @@ mod tests {
     #[test]
     fn an_expired_grant_is_refused() {
         let kit = Kit::new();
-        let sig = kit.sign(&kit.cert("alice", &["a"], "20200101:20200102", &[]), b"m");
+        let sig = kit.sign(&kit.grant("alice", &["a"], "20200101:20200102", &[]), b"m");
         assert_eq!(
             check(&kit, &sig, "a", crate::util::now()),
             Err(GrantError::Expired)
@@ -192,7 +250,7 @@ mod tests {
     #[test]
     fn a_future_grant_is_refused() {
         let kit = Kit::new();
-        let sig = kit.sign(&kit.cert("alice", &["a"], "+1d:+2d", &[]), b"m");
+        let sig = kit.sign(&kit.grant("alice", &["a"], "+1d:+2d", &[]), b"m");
         assert_eq!(
             check(&kit, &sig, "a", crate::util::now()),
             Err(GrantError::NotYetValid)
@@ -216,7 +274,7 @@ mod tests {
     fn a_critical_option_is_refused() {
         let kit = Kit::new();
         let sig = kit.sign(
-            &kit.cert("alice", &["a"], "+1h", &["-O", "force-command=/bin/true"]),
+            &kit.grant("alice", &["a"], "+1h", &["-O", "force-command=/bin/true"]),
             b"m",
         );
         assert_eq!(
@@ -228,7 +286,7 @@ mod tests {
     #[test]
     fn a_host_certificate_is_refused() {
         let kit = Kit::new();
-        let sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &["-h"]), b"m");
+        let sig = kit.sign(&kit.grant("alice", &["a"], "+1h", &["-h"]), b"m");
         assert_eq!(
             check(&kit, &sig, "a", crate::util::now()),
             Err(GrantError::NotAUserCertificate)
@@ -239,7 +297,7 @@ mod tests {
     fn another_ca_is_refused() {
         let kit = Kit::new();
         let other = Kit::new();
-        let sig = other.sign(&other.cert("alice", &["a"], "+1h", &[]), b"m");
+        let sig = other.sign(&other.grant("alice", &["a"], "+1h", &[]), b"m");
         assert_eq!(
             check(&kit, &sig, "a", crate::util::now()),
             Err(GrantError::UnknownCa)
@@ -249,7 +307,7 @@ mod tests {
     #[test]
     fn a_span_over_the_maximum_is_refused() {
         let kit = Kit::new();
-        let sig = kit.sign(&kit.cert("alice", &["a"], "-1d:+31d", &[]), b"m");
+        let sig = kit.sign(&kit.grant("alice", &["a"], "-1d:+31d", &[]), b"m");
         assert!(matches!(
             check(&kit, &sig, "a", crate::util::now()),
             Err(GrantError::SpanTooLong { max, .. }) if max == 30 * DAY
@@ -262,7 +320,7 @@ mod tests {
         let start = 1_577_836_800; // 2020-01-01T00:00:00Z
         let now = start + 15 * DAY;
         let exact = kit.sign(
-            &kit.cert("alice", &["a"], "20200101000000Z:20200131000000Z", &[]),
+            &kit.grant("alice", &["a"], "20200101000000Z:20200131000000Z", &[]),
             b"m",
         );
         assert!(
@@ -271,7 +329,7 @@ mod tests {
             check(&kit, &exact, "a", now)
         );
         let over = kit.sign(
-            &kit.cert("alice", &["a"], "20200101000000Z:20200131000001Z", &[]),
+            &kit.grant("alice", &["a"], "20200101000000Z:20200131000001Z", &[]),
             b"m",
         );
         assert!(matches!(
@@ -297,7 +355,7 @@ mod tests {
     #[test]
     fn an_unknown_hash_is_refused() {
         let kit = Kit::new();
-        let mut sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"m");
+        let mut sig = kit.sign(&kit.grant("alice", &["a"], "+1h", &[]), b"m");
         sig.hash_algorithm = "md5".into();
         assert_eq!(
             check(&kit, &sig, "a", crate::util::now()),
@@ -318,7 +376,7 @@ mod tests {
     #[test]
     fn another_namespace_is_refused() {
         let kit = Kit::new();
-        let mut sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"m");
+        let mut sig = kit.sign(&kit.grant("alice", &["a"], "+1h", &[]), b"m");
         sig.namespace = "file".into();
         assert_eq!(
             check(&kit, &sig, "a", crate::util::now()),

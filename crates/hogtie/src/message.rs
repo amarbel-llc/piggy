@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! string "hogtie-v1-exec"
+//! string host         (the host's configured name, [a-z0-9][a-z0-9-]{0,62})
 //! string nonce        (32 bytes)
 //! uint32 uid
 //! string action       ([a-z0-9][a-z0-9-]{0,62})
@@ -34,6 +35,8 @@ pub type Nonce = [u8; NONCE_LEN];
 /// One request to run one action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
+    /// The host the request is for: a grant is pinned to hosts.
+    pub host: String,
     pub nonce: Nonce,
     pub uid: u32,
     pub action: String,
@@ -44,6 +47,8 @@ pub struct Request {
 pub enum MessageError {
     /// The action name is outside `[a-z0-9][a-z0-9-]{0,62}`.
     BadAction(String),
+    /// The host name is outside `[a-z0-9][a-z0-9-]{0,62}`.
+    BadHost(String),
     TooManyArgs(usize),
     /// Argument `index` is too long or holds a NUL.
     BadArg(usize),
@@ -64,6 +69,9 @@ impl fmt::Display for MessageError {
         match self {
             MessageError::BadAction(a) => {
                 write!(f, "action name {a:?} is not [a-z0-9][a-z0-9-]{{0,62}}")
+            }
+            MessageError::BadHost(h) => {
+                write!(f, "host name {h:?} is not [a-z0-9][a-z0-9-]{{0,62}}")
             }
             MessageError::TooManyArgs(n) => write!(f, "{n} arguments, at most {MAX_ARGS}"),
             MessageError::BadArg(i) => write!(
@@ -91,9 +99,23 @@ pub fn is_action_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 
+/// A host name has an action name's shape: no `:`, so a principal
+/// `<host>:<action>` splits one way only.
+pub fn is_host_name(name: &str) -> bool {
+    is_action_name(name)
+}
+
+/// The principal a grant must hold for `action` on `host`.
+pub fn principal(host: &str, action: &str) -> String {
+    format!("{host}:{action}")
+}
+
 impl Request {
     /// Check every field against the limits the encoding promises.
     pub fn check(&self) -> Result<(), MessageError> {
+        if !is_host_name(&self.host) {
+            return Err(MessageError::BadHost(self.host.clone()));
+        }
         if !is_action_name(&self.action) {
             return Err(MessageError::BadAction(self.action.clone()));
         }
@@ -114,6 +136,7 @@ impl Request {
         self.check()?;
         let mut out = Vec::new();
         put_string(&mut out, DOMAIN.as_bytes());
+        put_string(&mut out, self.host.as_bytes());
         put_string(&mut out, &self.nonce);
         out.extend_from_slice(&self.uid.to_be_bytes());
         put_string(&mut out, self.action.as_bytes());
@@ -131,6 +154,7 @@ impl Request {
         if r.string()? != DOMAIN.as_bytes() {
             return Err(MessageError::BadDomain);
         }
+        let host = utf8(r.string()?)?;
         let nonce: Nonce = r.string()?.try_into().map_err(|_| MessageError::BadNonce)?;
         let uid = r.u32()?;
         let action = utf8(r.string()?)?;
@@ -144,6 +168,7 @@ impl Request {
         }
         r.end()?;
         let req = Request {
+            host,
             nonce,
             uid,
             action,
@@ -187,6 +212,7 @@ mod tests {
             *b = i as u8;
         }
         Request {
+            host: "host-a".into(),
             nonce,
             uid: 1000,
             action: "restic-snapshots".into(),
@@ -195,6 +221,7 @@ mod tests {
     }
 
     const VECTOR_A: &str = "0000000e686f677469652d76312d65786563
+        00000006686f73742d61
         00000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
         000003e8
         000000107265737469632d736e617073686f7473
@@ -203,6 +230,7 @@ mod tests {
 
     fn vector_b() -> Request {
         Request {
+            host: "host-b".into(),
             nonce: [0xff; 32],
             uid: 1001,
             action: "circus-status".into(),
@@ -211,6 +239,7 @@ mod tests {
     }
 
     const VECTOR_B: &str = "0000000e686f677469652d76312d65786563
+        00000006686f73742d62
         00000020ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
         000003e9
         0000000d636972637573 2d737461747573
@@ -251,8 +280,30 @@ mod tests {
     fn a_short_nonce_is_refused() {
         let mut b = Vec::new();
         put_string(&mut b, DOMAIN.as_bytes());
+        put_string(&mut b, b"host-a");
         put_string(&mut b, &[0u8; 31]);
         assert_eq!(Request::decode(&b), Err(MessageError::BadNonce));
+    }
+
+    #[test]
+    fn bad_host_names_are_refused() {
+        for h in ["", "Flic", "a:b", "a.b", "-x", "*"] {
+            let r = Request {
+                host: h.into(),
+                ..vector_b()
+            };
+            assert_eq!(r.encode(), Err(MessageError::BadHost(h.into())), "{h:?}");
+        }
+    }
+
+    #[test]
+    fn the_same_request_for_another_host_encodes_differently() {
+        let a = vector_b();
+        let b = Request {
+            host: "host-c".into(),
+            ..vector_b()
+        };
+        assert_ne!(a.encode().unwrap(), b.encode().unwrap());
     }
 
     #[test]
@@ -308,6 +359,7 @@ mod tests {
     fn decode_refuses_what_encode_refuses() {
         let mut b = Vec::new();
         put_string(&mut b, DOMAIN.as_bytes());
+        put_string(&mut b, b"host-a");
         put_string(&mut b, &[0u8; 32]);
         b.extend_from_slice(&0u32.to_be_bytes());
         put_string(&mut b, b"Bad");

@@ -11,6 +11,7 @@
 #![cfg(target_os = "linux")]
 
 pub mod audit;
+pub mod child;
 pub mod cli;
 pub mod config;
 pub mod exec;

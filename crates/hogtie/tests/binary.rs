@@ -13,6 +13,12 @@ use std::time::Duration;
 
 const HOGTIE: &str = env!("CARGO_BIN_EXE_hogtie");
 
+/// The `state` action's shell: its umask, its open-file limit, its open
+/// descriptors and its ignored and blocked signals (builtins only: the
+/// action has no PATH; no braces: the registry refuses them in argv).
+const STATE_SCRIPT: &str = "umask; ulimit -n; for f in /proc/self/fd/*; do echo $f; done; \
+     while read -r k v; do case $k in SigIgn:|SigBlk:) echo $k $v;; esac; done < /proc/self/status";
+
 struct Server(Child);
 
 impl Drop for Server {
@@ -44,18 +50,21 @@ impl Host {
         let not_exec = root.path().join("etc/not-executable");
         write_trusted(&not_exec, "#!/bin/sh\n");
         let config = format!(
-            "ssh_keygen = \"{}\"\nca_keys = [\"{}\"]\nmax_grant_seconds = 86400\n\
+            "host = \"h1\"\nssh_keygen = \"{}\"\nca_keys = [\"{}\"]\nmax_grant_seconds = 86400\n\
              [action.say]\nprogram = \"{}\"\nargv = [\"{{word}}\"]\n\
              param = [{{ name = \"word\", kind = \"choice\", values = [\"hello\"] }}]\n\
              [action.show-env]\nprogram = \"{}\"\nenv = {{ LANG = \"C\" }}\n\
              [action.where]\nprogram = \"{}\"\n\
-             [action.broken]\nprogram = \"{}\"\n",
+             [action.broken]\nprogram = \"{}\"\n\
+             [action.state]\nprogram = \"{}\"\nargv = [\"-c\", \"{}\"]\n",
             kit.ssh_keygen.display(),
             kit.ca_line(),
             trusted_copy(kit.dir(), "echo").display(),
             trusted_copy(kit.dir(), "env").display(),
             trusted_copy(kit.dir(), "pwd").display(),
             not_exec.display(),
+            trusted_copy(kit.dir(), "sh").display(),
+            STATE_SCRIPT,
         );
         write_trusted(&root.path().join("etc/hogtie.toml"), &config);
         let server = Server(
@@ -115,7 +124,7 @@ impl Host {
             String::from_utf8_lossy(&out.stderr)
         );
         let nonce = String::from_utf8(out.stdout).unwrap().trim().to_string();
-        let mut args = vec!["message", nonce.as_str()];
+        let mut args = vec!["message", hogtie::testkit::HOST, nonce.as_str()];
         args.extend_from_slice(action);
         let msg = self.hogtie(&args);
         assert!(msg.status.success());
@@ -154,7 +163,7 @@ fn stderr(o: &Output) -> String {
 #[test]
 fn a_granted_action_runs_once_and_both_uses_are_audited() {
     let h = Host::new();
-    let cert = h.kit.cert("agent-7", &["say"], "+1h", &[]);
+    let cert = h.kit.grant("agent-7", &["say"], "+1h", &[]);
     let r = h.respond(&cert, &["say", "hello"]);
     let out = h.sudo_exec(&r, &["say", "hello"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -183,7 +192,7 @@ fn a_granted_action_runs_once_and_both_uses_are_audited() {
 #[test]
 fn the_action_gets_only_the_declared_environment_and_runs_in_root() {
     let h = Host::new();
-    let cert = h.kit.cert("a", &["show-env", "where"], "+1h", &[]);
+    let cert = h.kit.grant("a", &["show-env", "where"], "+1h", &[]);
     let out = h.sudo_exec(&h.respond(&cert, &["show-env"]), &["show-env"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "LANG=C\n");
@@ -194,7 +203,7 @@ fn the_action_gets_only_the_declared_environment_and_runs_in_root() {
 #[test]
 fn an_expired_grant_is_refused_and_audited() {
     let h = Host::new();
-    let cert = h.kit.cert("old", &["say"], "20200101:20200102", &[]);
+    let cert = h.kit.grant("old", &["say"], "20200101:20200102", &[]);
     let out = h.sudo_exec(&h.respond(&cert, &["say", "hello"]), &["say", "hello"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
@@ -215,9 +224,73 @@ fn exec_without_sudo_uid_is_refused_and_audited() {
 }
 
 #[test]
+fn the_action_does_not_inherit_the_callers_process_state() {
+    use std::os::unix::process::CommandExt as _;
+    let h = Host::new();
+    let cert = h.kit.grant("a", &["state"], "+1h", &[]);
+    let r = h.respond(&cert, &["state"]);
+    let mut cmd = Command::new(HOGTIE);
+    cmd.args(["exec", &r, "state"])
+        .env("HOGTIE_TEST_ROOT", h.root.path())
+        .env("SUDO_UID", Host::uid());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::umask(0o077);
+            let mut lim = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim);
+            lim.rlim_cur = 64;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+            libc::signal(libc::SIGINT, libc::SIG_IGN);
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGUSR1);
+            libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            libc::dup2(2, 9); // a descriptor without close-on-exec
+            Ok(())
+        });
+    }
+    let out = cmd.output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "0022", "umask: {text}");
+    assert_ne!(lines[1], "64", "the open-file limit was inherited: {text}");
+    assert!(
+        !text.contains("/proc/self/fd/9"),
+        "fd 9 was inherited: {text}"
+    );
+    // The shell may ignore signals of its own (bash ignores SIGQUIT here):
+    // check the ones the caller set.
+    let mask = |key: &str| {
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with(key))
+            .unwrap_or_else(|| panic!("{key}: {text}"));
+        u64::from_str_radix(line.split_whitespace().nth(1).unwrap(), 16).unwrap()
+    };
+    let bit = |sig: i32| 1u64 << (sig - 1);
+    let ign = mask("SigIgn:");
+    assert_eq!(
+        ign & (bit(libc::SIGINT) | bit(libc::SIGTERM)),
+        0,
+        "an ignored signal was inherited: {text}"
+    );
+    assert_eq!(
+        mask("SigBlk:") & bit(libc::SIGUSR1),
+        0,
+        "a blocked signal was inherited: {text}"
+    );
+}
+
+#[test]
 fn a_failed_exec_is_audited_as_failed_and_exits_3() {
     let h = Host::new();
-    let cert = h.kit.cert("a", &["broken"], "+1h", &[]);
+    let cert = h.kit.grant("a", &["broken"], "+1h", &[]);
     let out = h.sudo_exec(&h.respond(&cert, &["broken"]), &["broken"]);
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     let log = h.audit();
@@ -231,7 +304,7 @@ fn an_audit_log_that_cannot_be_written_refuses_and_runs_nothing() {
     let h = Host::new();
     // The log directory's place is taken by a file: no audit line can land.
     std::fs::write(h.root.path().join("log"), "").unwrap();
-    let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+    let cert = h.kit.grant("a", &["say"], "+1h", &[]);
     let out = h.sudo_exec(&h.respond(&cert, &["say", "hello"]), &["say", "hello"]);
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     assert!(out.stdout.is_empty(), "the action ran: {:?}", out.stdout);
@@ -241,7 +314,7 @@ fn an_audit_log_that_cannot_be_written_refuses_and_runs_nothing() {
 #[test]
 fn a_missing_configuration_is_hogtie_own_failure_exit_3() {
     let h = Host::new();
-    let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+    let cert = h.kit.grant("a", &["say"], "+1h", &[]);
     let r = h.respond(&cert, &["say", "hello"]);
     std::fs::remove_file(h.root.path().join("etc/hogtie.toml")).unwrap();
     let out = h.sudo_exec(&r, &["say", "hello"]);
@@ -257,7 +330,7 @@ fn usage_errors_exit_2() {
         &["exec"][..],
         &["exec", "r"][..],
         &["bogus"][..],
-        &["message", "zz", "a"][..],
+        &["message", "h1", "zz", "a"][..],
     ] {
         assert_eq!(h.hogtie(args).status.code(), Some(2), "{args:?}");
     }
