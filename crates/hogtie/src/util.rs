@@ -38,8 +38,9 @@ pub fn now() -> u64 {
 /// Seconds since boot, CLOCK_BOOTTIME: it counts suspend and cannot be
 /// set, so a clock set backwards does not lengthen a nonce's life. The
 /// nonce store is in /run, which a reboot empties, so boot seconds never
-/// cross a boot.
-pub fn boot_now() -> u64 {
+/// cross a boot. An error if the clock cannot be read: a zero here would
+/// make every nonce look fresh (review N5).
+pub fn boot_now() -> io::Result<u64> {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -47,9 +48,9 @@ pub fn boot_now() -> u64 {
     // SAFETY: clock_gettime writes one timespec into `ts`.
     let rc = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
     if rc != 0 {
-        return 0;
+        return Err(io::Error::last_os_error());
     }
-    ts.tv_sec as u64
+    Ok(ts.tv_sec as u64)
 }
 
 /// The two clocks a decision reads: wall time for grants (a certificate's
@@ -61,11 +62,11 @@ pub struct Clock {
 }
 
 impl Clock {
-    pub fn now() -> Self {
-        Self {
+    pub fn now() -> io::Result<Self> {
+        Ok(Self {
             wall: now(),
-            boot: boot_now(),
-        }
+            boot: boot_now()?,
+        })
     }
 }
 

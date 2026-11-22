@@ -17,7 +17,7 @@ const HOGTIE: &str = env!("CARGO_BIN_EXE_hogtie");
 /// descriptors and its ignored and blocked signals (builtins only: the
 /// action has no PATH; no braces: the registry refuses them in argv).
 const STATE_SCRIPT: &str = "umask; ulimit -n; for f in /proc/self/fd/*; do echo $f; done; \
-     while read -r k v; do case $k in SigIgn:|SigBlk:) echo $k $v;; esac; done < /proc/self/status";
+     while read -r k v; do case $k in SigIgn:|SigBlk:|Cpus_allowed_list:) echo $k $v;; esac; done < /proc/self/status";
 
 struct Server(Child);
 
@@ -234,6 +234,61 @@ fn exec_without_sudo_uid_is_refused_and_audited() {
 }
 
 #[test]
+fn a_flood_of_refusals_is_counted_not_logged() {
+    let h = Host::new();
+    for _ in 0..30 {
+        let out = h.sudo_exec("garbage", &["say", "hello"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    }
+    let log = h.audit();
+    assert_eq!(
+        log.len(),
+        21,
+        "20 refusals and the one that says the rest are not logged"
+    );
+    assert!(log[20].contains("counted, not logged"), "{}", log[20]);
+}
+
+#[test]
+fn a_small_file_size_limit_does_not_cut_the_audit_line() {
+    // The caller lowers RLIMIT_FSIZE (soft) below what the line needs:
+    // hogtie must not die of SIGXFSZ or write half a line. (sudo's own
+    // handling of limits is not reproduced here: this runs hogtie directly.)
+    use std::os::unix::process::CommandExt as _;
+    let h = Host::new();
+    let cert = h.kit.grant("a", &["say"], "+1h", &[]);
+    let r = h.respond(&cert, &["say", "hello"]);
+    let mut cmd = Command::new(HOGTIE);
+    cmd.args(["exec", &r, "say", "hello"])
+        .env("HOGTIE_TEST_ROOT", h.root.path())
+        .env("SUDO_UID", Host::uid());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            let mut lim = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            libc::getrlimit(libc::RLIMIT_FSIZE, &mut lim);
+            lim.rlim_cur = 64;
+            libc::setrlimit(libc::RLIMIT_FSIZE, &lim);
+            Ok(())
+        });
+    }
+    let out = cmd.output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{} {:?}",
+        stderr(&out),
+        out.status
+    );
+    let text = std::fs::read_to_string(h.root.path().join("log/audit.log")).unwrap();
+    assert!(text.ends_with('\n'), "a partial line: {text:?}");
+    assert_eq!(text.lines().count(), 1);
+}
+
+#[test]
 fn the_nonce_is_issued_and_claimed_on_the_boot_clock() {
     let h = Host::new();
     let cert = h.kit.grant("a", &["say"], "+1h", &[]);
@@ -247,7 +302,7 @@ fn the_nonce_is_issued_and_claimed_on_the_boot_clock() {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| panic!("no issued time: {line}"));
     assert!(
-        issued <= hogtie::util::boot_now(),
+        issued <= hogtie::util::boot_now().unwrap(),
         "issued {issued} is not a boot-clock time"
     );
 }
@@ -280,6 +335,9 @@ fn the_action_does_not_inherit_the_callers_process_state() {
             libc::sigaddset(&mut set, libc::SIGUSR1);
             libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
             libc::dup2(2, 9); // a descriptor without close-on-exec
+            let mut one: libc::cpu_set_t = std::mem::zeroed();
+            libc::CPU_SET(0, &mut one);
+            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &one);
             Ok(())
         });
     }
@@ -288,7 +346,32 @@ fn the_action_does_not_inherit_the_callers_process_state() {
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], "0022", "umask: {text}");
-    assert_ne!(lines[1], "64", "the open-file limit was inherited: {text}");
+    // The declared default (soft 1024), or the test's own hard limit when
+    // that is lower and the test cannot raise it.
+    let mut own = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes one rlimit.
+    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut own) };
+    assert_eq!(
+        lines[1],
+        own.rlim_max.min(1024).to_string(),
+        "the open-file limit: {text}"
+    );
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    if cpus > 1 {
+        let allowed = lines
+            .iter()
+            .find(|l| l.starts_with("Cpus_allowed_list:"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert_ne!(
+            *allowed, "Cpus_allowed_list: 0",
+            "the CPU affinity was inherited: {text}"
+        );
+    }
     assert!(
         !text.contains("/proc/self/fd/9"),
         "fd 9 was inherited: {text}"

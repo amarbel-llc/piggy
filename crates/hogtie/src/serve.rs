@@ -110,7 +110,14 @@ pub fn serve(listener: &UnixListener, store: &NonceStore, scratch: &Path) -> io:
             }
         };
         // Nonce life is on the boot clock (util::boot_now): exec reads it.
-        let now = crate::util::boot_now();
+        let now = match crate::util::boot_now() {
+            Ok(t) => t,
+            Err(e) => {
+                let _ =
+                    stream.write_all(format!("refused cannot read the clock: {e}\n").as_bytes());
+                continue;
+            }
+        };
         if now >= last_sweep + crate::nonce::TTL_SECONDS {
             if let Err(e) = store.sweep(now) {
                 eprintln!("hogtie serve: sweep: {e}");

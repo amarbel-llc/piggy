@@ -87,7 +87,13 @@ pub fn decide(
         args: audit::bounded_args(args),
         ..Default::default()
     };
-    let run = if args.len() > MAX_ARGS || args.iter().any(|a| a.len() > MAX_ARG_LEN) {
+    // The action must be a config key's shape before anything else, and is
+    // never echoed when it is not (review N1).
+    let run = if !crate::message::is_action_name(action) {
+        Err(refused(
+            "the action given is not an action name ([a-z0-9][a-z0-9-]{0,62})",
+        ))
+    } else if args.len() > MAX_ARGS || args.iter().any(|a| a.len() > MAX_ARG_LEN) {
         Err(refused(format!(
             "at most {MAX_ARGS} arguments of at most {MAX_ARG_LEN} bytes each"
         )))
@@ -130,6 +136,9 @@ fn steps(
     let now = clock.wall;
     let response = Response::parse(response).map_err(refused)?;
     record.nonce = Some(nonce_hex(&response.nonce));
+    // The store exec reads is checked as the socket checks it (review note).
+    crate::paths::check_dir(&paths.run, 0o711).map_err(broken)?;
+    crate::paths::check_dir(&paths.nonces(), 0o700).map_err(broken)?;
     // A nonce's life is on the boot clock, which nobody can set back.
     let entry = NonceStore::new(paths.nonces())
         .claim(caller_uid, &response.nonce, clock.boot)
@@ -391,6 +400,57 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_action_name_is_refused_first_and_not_echoed() {
+        let h = Host::new();
+        let now = crate::util::now();
+        let action = "\u{1}".repeat(128 * 1024);
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
+        let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
+        let d = h.exec(&r, &action, &[], now);
+        let reason = refusal(&d).to_string();
+        assert!(
+            reason.len() < 200,
+            "the reason echoes the caller: {} bytes",
+            reason.len()
+        );
+        assert!(reason.contains("not an action name"), "{reason}");
+        // Refused before the nonce is claimed: it is still usable.
+        assert!(h.exec(&r, "say", &["hello"], now).run.is_ok());
+    }
+
+    #[test]
+    fn every_refusal_line_fits_the_cap() {
+        // Caller bytes reach reasons through a forged certificate too: a
+        // pattern principal is echoed. The line still fits.
+        let h = Host::new();
+        let now = crate::util::now();
+        let long = format!("*{}", "x".repeat(8000));
+        let cert = h.kit.cert("a", &[&long], "+1h", &[]);
+        let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
+        let d = h.exec(&r, "say", &["hello"], now);
+        assert!(refusal(&d).contains("pattern character"), "{}", refusal(&d));
+        let line = d.record.to_json();
+        assert!(line.len() <= crate::audit::LINE_MAX, "{} bytes", line.len());
+    }
+
+    #[test]
+    fn exec_checks_the_nonce_store_it_reads() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let h = Host::new();
+        let now = crate::util::now();
+        let cert = h.kit.grant("a", &["say"], "+1h", &[]);
+        let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
+        std::fs::set_permissions(h.paths.nonces(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let d = h.exec(&r, "say", &["hello"], now);
+        assert!(d.run.as_ref().is_err_and(|e| e.internal), "{:?}", d.run);
+        assert!(
+            refusal(&d).contains("no permission beyond"),
+            "{}",
+            refusal(&d)
+        );
+    }
+
+    #[test]
     fn a_huge_refused_request_is_recorded_bounded() {
         let h = Host::new();
         let big = "x".repeat(1 << 20);
@@ -640,7 +700,7 @@ mod tests {
             sshsig: vec![],
         }
         .format();
-        assert!(refusal(&h.exec(&r, "Bad Action", &[], now)).contains("not declared"));
+        assert!(refusal(&h.exec(&r, "Bad Action", &[], now)).contains("not an action name"));
     }
 
     #[test]

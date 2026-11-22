@@ -33,6 +33,9 @@ fn fail(code: u8, msg: impl std::fmt::Display) -> ExitCode {
 }
 
 pub fn main() -> ExitCode {
+    // Before any file is opened: the caller's file size limit must not cut
+    // hogtie's own writes, nor its SIGXFSZ kill it (review N2).
+    crate::child::shield_self();
     let args: Vec<String> = match std::env::args_os()
         .skip(1)
         .map(|a| a.into_string())
@@ -129,14 +132,19 @@ fn exec(rest: &[String]) -> ExitCode {
     if let Err(e) = paths.check_running_as_root() {
         return fail(3, e);
     }
-    let clock = crate::util::Clock::now();
+    // A clock that cannot be read refuses: a zero boot time would make
+    // every nonce look fresh (review N5).
+    let clock = match crate::util::Clock::now() {
+        Ok(c) => c,
+        Err(e) => return fail(3, format!("cannot read the clock: {e}")),
+    };
     let now = clock.wall;
     // sudo sets SUDO_UID to the invoking account; without it there is no
     // account to bind the nonce to.
-    let decision = match std::env::var("SUDO_UID")
+    let caller = std::env::var("SUDO_UID")
         .ok()
-        .and_then(|u| u.parse::<u32>().ok())
-    {
+        .and_then(|u| u.parse::<u32>().ok());
+    let mut decision = match caller {
         Some(caller_uid) => decide(&paths, caller_uid, response, action, args, clock),
         None => Decision {
             run: Err(Refusal {
@@ -153,9 +161,26 @@ fn exec(rest: &[String]) -> ExitCode {
             },
         },
     };
-    if let Err(e) = Paths::ensure_private_dir(&paths.log)
-        .and_then(|()| audit::append(&paths.audit_log(), &decision.record))
-    {
+    // Refusals past an account's budget are counted, not logged (finding 2).
+    // A budget that cannot be read logs in full.
+    let logged = decision.record.outcome != "refused"
+        || match Paths::ensure_private_dir(&paths.refusals())
+            .and_then(|()| audit::admit_refusal(&paths.refusals(), caller, clock.boot))
+        {
+            Ok(audit::Admit::Quiet) => false,
+            Ok(admit) => {
+                decision.record.note = admit.note();
+                true
+            }
+            Err(_) => true,
+        };
+    let written = if logged {
+        Paths::ensure_private_dir(&paths.log)
+            .and_then(|()| audit::append(&paths.audit_log(), &decision.record))
+    } else {
+        Ok(())
+    };
+    if let Err(e) = written {
         return fail(3, format!("refused: cannot write the audit log: {e}"));
     }
     let run = match decision.run {
@@ -196,9 +221,18 @@ fn serve_socket() -> ExitCode {
         (paths.run.clone(), 0o711),
         (paths.nonces(), 0o700),
         (paths.scratch(), 0o700),
+        (paths.refusals(), 0o700),
     ] {
         if let Err(e) = crate::paths::ensure_dir(&dir, mode) {
             return fail(3, format!("{}: {e}", dir.display()));
+        }
+    }
+    // Nonces must not survive a reboot (their life is on the boot clock):
+    // the store must be in memory. Not checked under the test harness,
+    // whose directories are on whatever the test's temp is.
+    if paths.root_uid == 0 {
+        if let Err(e) = crate::paths::check_tmpfs(&paths.run) {
+            return fail(3, e);
         }
     }
     let listener = match serve::bind(&paths.socket()) {

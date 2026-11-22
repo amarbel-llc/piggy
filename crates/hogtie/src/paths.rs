@@ -60,6 +60,11 @@ impl Paths {
         self.run.join("nonce.sock")
     }
 
+    /// Each account's refusal budget (audit::admit_refusal).
+    pub fn refusals(&self) -> PathBuf {
+        self.run.join("refusals")
+    }
+
     pub fn audit_log(&self) -> PathBuf {
         self.log.join("audit.log")
     }
@@ -120,12 +125,42 @@ impl Paths {
 /// (not a symlink), owned by this process's euid (root in production), and
 /// granting no permission beyond `mode`.
 pub fn ensure_dir(path: &Path, mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => return std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e),
     }
+    check_dir(path, mode)
+}
+
+/// Refuse unless `path` is on a tmpfs (emptied by a reboot).
+pub fn check_tmpfs(path: &Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt as _;
+    const TMPFS_MAGIC: i64 = 0x0102_1994;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("{}: a NUL in the path", path.display()))?;
+    // SAFETY: statfs writes one struct into `st`.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return Err(format!(
+            "{}: {}",
+            path.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    if st.f_type as i64 != TMPFS_MAGIC {
+        return Err(format!(
+            "{} is not on a tmpfs: nonces must not survive a reboot",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Check, without making it, that `path` is what [`ensure_dir`] makes.
+pub fn check_dir(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
     let meta = std::fs::symlink_metadata(path)?;
     // SAFETY: geteuid cannot fail.
     let euid = unsafe { libc::geteuid() };

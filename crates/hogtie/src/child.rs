@@ -1,83 +1,134 @@
 //! The process state an action starts with, set rather than inherited from
-//! whoever ran sudo (review finding 4): umask 022, every signal at its
-//! default disposition and none blocked, no descriptor but 0, 1 and 2, and
-//! the resource limits of pid 1 (what a service would get), or, where those
-//! cannot be read (not root), every soft limit raised to its hard limit, so
-//! a caller cannot shrink a root action's limits (a small RLIMIT_FSIZE could
-//! truncate a file it writes). The environment and the working directory are
-//! set by the caller of [`prepare`].
+//! whoever ran sudo (review findings 4, N3, N4, N6): umask 022; every signal
+//! at its default disposition and none blocked; no descriptor but 0, 1 and
+//! 2; the fixed resource limits of [`LIMITS`]; nice 0, the default
+//! scheduler, every CPU, oom_score_adj 0 and the default I/O priority. The
+//! environment and the working directory are set by the caller of
+//! [`prepare`].
+//!
+//! As root (production) every one of these must succeed or the exec fails.
+//! Not as root (the test harness only), a reset that needs privilege the
+//! test lacks (EPERM) is skipped, and a limit the test cannot raise to its
+//! value gets the highest the test may give it.
+//!
+//! Left as inherited, deliberately: the controlling terminal, the session
+//! and process group, the cgroup, namespaces, the seccomp filter and the
+//! no_new_privs bit (sudo's to give; hogtie runs the action in sudo's place).
 
 use std::io;
 use std::process::Command;
 
-const RESOURCES: [libc::__rlimit_resource_t; 16] = [
-    libc::RLIMIT_CPU,
-    libc::RLIMIT_FSIZE,
-    libc::RLIMIT_DATA,
-    libc::RLIMIT_STACK,
-    libc::RLIMIT_CORE,
-    libc::RLIMIT_RSS,
-    libc::RLIMIT_NPROC,
-    libc::RLIMIT_NOFILE,
-    libc::RLIMIT_MEMLOCK,
-    libc::RLIMIT_AS,
-    libc::RLIMIT_LOCKS,
-    libc::RLIMIT_SIGPENDING,
-    libc::RLIMIT_MSGQUEUE,
-    libc::RLIMIT_NICE,
-    libc::RLIMIT_RTPRIO,
-    libc::RLIMIT_RTTIME,
+const INF: libc::rlim_t = libc::RLIM_INFINITY;
+const MIB: libc::rlim_t = 1024 * 1024;
+
+/// The limits an action gets: the kernel's defaults for root, with
+/// systemd's open-file soft and hard limits (1024 / 524288).
+pub const LIMITS: [(libc::__rlimit_resource_t, libc::rlim_t, libc::rlim_t); 16] = [
+    (libc::RLIMIT_CPU, INF, INF),
+    (libc::RLIMIT_FSIZE, INF, INF),
+    (libc::RLIMIT_DATA, INF, INF),
+    (libc::RLIMIT_STACK, 8 * MIB, INF),
+    (libc::RLIMIT_CORE, 0, INF),
+    (libc::RLIMIT_RSS, INF, INF),
+    (libc::RLIMIT_NPROC, INF, INF),
+    (libc::RLIMIT_NOFILE, 1024, 524_288),
+    (libc::RLIMIT_MEMLOCK, 8 * MIB, 8 * MIB),
+    (libc::RLIMIT_AS, INF, INF),
+    (libc::RLIMIT_LOCKS, INF, INF),
+    (libc::RLIMIT_SIGPENDING, INF, INF),
+    (libc::RLIMIT_MSGQUEUE, 819_200, 819_200),
+    (libc::RLIMIT_NICE, 0, 0),
+    (libc::RLIMIT_RTPRIO, 0, 0),
+    (libc::RLIMIT_RTTIME, INF, INF),
 ];
 
-/// The limits the action gets, computed before exec (reading pid 1's is
-/// not async-signal-safe work for a pre_exec hook).
-fn target_limits() -> Vec<(libc::__rlimit_resource_t, libc::rlimit)> {
-    RESOURCES
-        .iter()
-        .map(|&r| {
-            let mut init = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            // SAFETY: prlimit with a null new limit only writes `init`.
-            let from_init = unsafe { libc::prlimit(1, r, std::ptr::null(), &mut init) } == 0;
-            if from_init {
-                return (r, init);
-            }
-            let mut own = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            // SAFETY: getrlimit writes one rlimit.
-            unsafe { libc::getrlimit(r, &mut own) };
-            (
-                r,
-                libc::rlimit {
-                    rlim_cur: own.rlim_max,
-                    rlim_max: own.rlim_max,
-                },
-            )
-        })
-        .collect()
+fn is_root() -> bool {
+    // SAFETY: geteuid cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Run `f`; an error fails, except EPERM when not `strict`.
+fn required(strict: bool, ok: bool) -> io::Result<()> {
+    if ok {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    if !strict && e.raw_os_error() == Some(libc::EPERM) {
+        return Ok(());
+    }
+    Err(e)
+}
+
+/// Set `r` to (cur, max); not as root, fall back to the most the process
+/// may give itself.
+///
+/// # Safety
+/// Calls getrlimit/setrlimit only.
+unsafe fn set_limit(
+    strict: bool,
+    r: libc::__rlimit_resource_t,
+    cur: libc::rlim_t,
+    max: libc::rlim_t,
+) -> io::Result<()> {
+    let want = libc::rlimit {
+        rlim_cur: cur,
+        rlim_max: max,
+    };
+    if unsafe { libc::setrlimit(r, &want) } == 0 {
+        return Ok(());
+    }
+    if strict {
+        return Err(io::Error::last_os_error());
+    }
+    let mut own = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(r, &mut own) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fallback = libc::rlimit {
+        rlim_cur: cur.min(own.rlim_max),
+        rlim_max: own.rlim_max.min(max),
+    };
+    if unsafe { libc::setrlimit(r, &fallback) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// hogtie's own process, before it opens any file (review N2): the caller's
+/// RLIMIT_FSIZE must not cut the audit line, nor its SIGXFSZ kill hogtie
+/// mid-write. A write past the limit then fails with EFBIG, which the audit
+/// append turns into a refusal.
+pub fn shield_self() {
+    // SAFETY: setrlimit/getrlimit/signal on this process.
+    unsafe {
+        let _ = set_limit(false, libc::RLIMIT_FSIZE, INF, INF);
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+    }
 }
 
 /// Arrange for `cmd`'s exec to start from the state above. Fails closed: if
 /// any of it cannot be set, the exec fails and hogtie reports it.
 pub fn prepare(cmd: &mut Command) {
     use std::os::unix::process::CommandExt as _;
-    let limits = target_limits();
-    // SAFETY: the hook makes only async-signal-safe calls (umask,
-    // sigaction, sigprocmask, setrlimit, close_range, close) and touches
-    // only `limits`, allocated before the hook runs.
+    let strict = is_root();
+    // SAFETY: `exec` does not fork, so the hook runs in hogtie's own
+    // process just before execve; it still makes only plain system calls.
     unsafe {
         cmd.pre_exec(move || {
             libc::umask(0o022);
             let mut dfl: libc::sigaction = std::mem::zeroed();
             dfl.sa_sigaction = libc::SIG_DFL;
+            // 32 up to SIGRTMIN are reserved by the C library.
+            let reserved = 32..libc::SIGRTMIN();
             for sig in 1..=libc::SIGRTMAX() {
-                if sig != libc::SIGKILL && sig != libc::SIGSTOP {
-                    // Some numbers are reserved by libc and refuse: harmless.
-                    libc::sigaction(sig, &dfl, std::ptr::null_mut());
+                if sig == libc::SIGKILL || sig == libc::SIGSTOP || reserved.contains(&sig) {
+                    continue;
+                }
+                if libc::sigaction(sig, &dfl, std::ptr::null_mut()) != 0 {
+                    return Err(io::Error::last_os_error());
                 }
             }
             let mut none: libc::sigset_t = std::mem::zeroed();
@@ -85,16 +136,42 @@ pub fn prepare(cmd: &mut Command) {
             if libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut()) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            for (r, lim) in &limits {
-                if libc::setrlimit(*r, lim) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
+            for (r, cur, max) in LIMITS {
+                set_limit(strict, r, cur, max)?;
             }
+            required(strict, libc::setpriority(libc::PRIO_PROCESS, 0, 0) == 0)?;
+            let param = libc::sched_param { sched_priority: 0 };
+            required(
+                strict,
+                libc::sched_setscheduler(0, libc::SCHED_OTHER, &param) == 0,
+            )?;
+            let mut all: libc::cpu_set_t = std::mem::zeroed();
+            for cpu in 0..libc::CPU_SETSIZE as usize {
+                libc::CPU_SET(cpu, &mut all);
+            }
+            required(
+                strict,
+                libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &all) == 0,
+            )?;
+            let fd = libc::open(
+                c"/proc/self/oom_score_adj".as_ptr(),
+                libc::O_WRONLY | libc::O_CLOEXEC,
+            );
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let wrote = libc::write(fd, b"0\n".as_ptr().cast(), 2) == 2;
+            let err = io::Error::last_os_error();
+            libc::close(fd);
+            if !wrote && (strict || err.raw_os_error() != Some(libc::EACCES)) {
+                return Err(err);
+            }
+            // IOPRIO_WHO_PROCESS (1), this process (0), class none: the default.
+            required(strict, libc::syscall(libc::SYS_ioprio_set, 1, 0, 0) == 0)?;
+            // Last: every descriptor above 2. No fallback (review N4): a
+            // kernel without close_range refuses.
             if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) != 0 {
-                // An older kernel: close them one by one.
-                for fd in 3..65_536 {
-                    libc::close(fd);
-                }
+                return Err(io::Error::last_os_error());
             }
             Ok(())
         });
