@@ -17,6 +17,7 @@
 //! the nonce it holds, the account sudo names and the argv it was given, and
 //! verifies the signature over that.
 
+use crate::sshwire::{Reader, WireError, put_string};
 use std::fmt;
 
 /// The domain tag, the first field of every message.
@@ -141,9 +142,7 @@ impl Request {
         for _ in 0..nargs {
             args.push(utf8(r.string()?)?);
         }
-        if !r.0.is_empty() {
-            return Err(MessageError::TrailingBytes);
-        }
+        r.end()?;
         let req = Request {
             nonce,
             uid,
@@ -159,32 +158,14 @@ fn utf8(b: &[u8]) -> Result<String, MessageError> {
     String::from_utf8(b.to_vec()).map_err(|_| MessageError::NotUtf8)
 }
 
-fn put_string(out: &mut Vec<u8>, s: &[u8]) {
-    out.extend_from_slice(&(s.len() as u32).to_be_bytes());
-    out.extend_from_slice(s);
-}
-
-struct Reader<'a>(&'a [u8]);
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], MessageError> {
-        if self.0.len() < n {
-            return Err(MessageError::Truncated);
+impl From<WireError> for MessageError {
+    fn from(e: WireError) -> Self {
+        match e {
+            WireError::TrailingBytes => MessageError::TrailingBytes,
+            WireError::NotUtf8 => MessageError::NotUtf8,
+            // The reader's only other failure here is running out of bytes.
+            _ => MessageError::Truncated,
         }
-        let (head, rest) = self.0.split_at(n);
-        self.0 = rest;
-        Ok(head)
-    }
-
-    fn u32(&mut self) -> Result<u32, MessageError> {
-        Ok(u32::from_be_bytes(
-            self.take(4)?.try_into().expect("4 bytes"),
-        ))
-    }
-
-    fn string(&mut self) -> Result<&'a [u8], MessageError> {
-        let n = self.u32()? as usize;
-        self.take(n)
     }
 }
 

@@ -37,7 +37,7 @@ impl fmt::Display for ResponseError {
 }
 
 pub fn nonce_hex(nonce: &Nonce) -> String {
-    nonce.iter().map(|b| format!("{b:02x}")).collect()
+    crate::util::hex(nonce)
 }
 
 pub fn parse_nonce_hex(s: &str) -> Option<Nonce> {

@@ -184,8 +184,9 @@ Parameters are positional and all required; their kinds:
 *pattern*
 	Characters from *chars*, a class of printable ASCII such as
 	*a-z0-9.\_-* (ranges and single characters; a *-* first or last is
-	literal), at most *max_len* bytes, and never starting with *-*, so
-	no value is read as an option. Not a regular expression.
+	literal), at most *max_len* bytes, never starting with *-*, so no
+	value is read as an option, and never only dots (*.* and *..*).
+	Not a regular expression.
 
 *path*
 	An absolute path under *under* with no *.*, *..* or empty
@@ -197,19 +198,25 @@ There are no free-form arguments.
 
 # AUDIT
 
-Every *exec*, run or refused, appends one JSON line to
-*/var/log/hogtie/audit.log* (root, 0600, synced): the time, the outcome
-and reason, the caller's uid, the action and arguments, the nonce, who
-asked for it (pid, cgroup, unit, when), the grant (key id, serial,
-principals, validity) and the argv run. A line that cannot be written
-refuses the action. The action's exit status is not recorded: hogtie
-becomes the action.
+Every *exec* appends one JSON line to */var/log/hogtie/audit.log* (root,
+0600, synced): the time, the outcome and reason, the caller's uid, the
+action and arguments, the nonce, who asked for it (pid, cgroup, unit,
+when), the grant (key id, serial, principals, validity: only once
+ssh-keygen has accepted the signature, so a copied certificate in a
+forged signature is not logged as its owner's) and the argv. The outcome
+is *started* (written just before the exec), *refused* (the caller's
+request), *error* (hogtie's own failure) or, on a second line after a
+*started* one whose exec returned, *exec-failed*. A line that cannot be
+written refuses the action. The action's exit status is not recorded:
+hogtie becomes the action.
 
 # EXIT STATUS
 
 *0* success (for *exec*, hogtie becomes the action, so its status is
 the action's); *1* refused; *2* usage; *3* hogtie's own failure (not
-root, configuration, audit log, socket).
+root, configuration, a program that is not root's, the nonce store, the
+scratch directory, running ssh-keygen, the audit log, the socket, an
+exec that returned).
 
 # FILES
 

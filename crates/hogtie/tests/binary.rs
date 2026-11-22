@@ -5,23 +5,13 @@
 //! the declared environment, and every use lands in the audit log.
 #![cfg(target_os = "linux")]
 
-use hogtie::testkit::Kit;
+use hogtie::testkit::{Kit, on_path, write_trusted};
 use hogtie::util::PrivateDir;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::time::Duration;
 
 const HOGTIE: &str = env!("CARGO_BIN_EXE_hogtie");
-
-fn on_path(name: &str) -> String {
-    let path = std::env::var_os("PATH").unwrap();
-    std::env::split_paths(&path)
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| panic!("{name} on PATH"))
-        .to_string_lossy()
-        .into_owned()
-}
 
 struct Server(Child);
 
@@ -50,19 +40,24 @@ impl Host {
         };
         let root = PrivateDir::new(&parent, "hgt").unwrap();
         std::fs::create_dir(root.path().join("etc")).unwrap();
+        // A trusted file that is not executable: exec(2) refuses it.
+        let not_exec = root.path().join("etc/not-executable");
+        write_trusted(&not_exec, "#!/bin/sh\n");
         let config = format!(
             "ssh_keygen = \"{}\"\nca_keys = [\"{}\"]\nmax_grant_seconds = 86400\n\
              [action.say]\nprogram = \"{}\"\nargv = [\"{{word}}\"]\n\
              param = [{{ name = \"word\", kind = \"choice\", values = [\"hello\"] }}]\n\
              [action.show-env]\nprogram = \"{}\"\nenv = {{ LANG = \"C\" }}\n\
-             [action.where]\nprogram = \"{}\"\n",
+             [action.where]\nprogram = \"{}\"\n\
+             [action.broken]\nprogram = \"{}\"\n",
             kit.ssh_keygen.display(),
             kit.ca_line(),
             on_path("echo"),
             on_path("env"),
             on_path("pwd"),
+            not_exec.display(),
         );
-        std::fs::write(root.path().join("etc/hogtie.toml"), config).unwrap();
+        write_trusted(&root.path().join("etc/hogtie.toml"), &config);
         let server = Server(
             Command::new(HOGTIE)
                 .arg("serve")
@@ -174,7 +169,7 @@ fn a_granted_action_runs_once_and_both_uses_are_audited() {
     let log = h.audit();
     assert_eq!(log.len(), 2, "{log:?}");
     assert!(
-        log[0].contains("\"outcome\":\"ran\"") && log[0].contains("\"key_id\":\"agent-7\""),
+        log[0].contains("\"outcome\":\"started\"") && log[0].contains("\"key_id\":\"agent-7\""),
         "{}",
         log[0]
     );
@@ -217,6 +212,29 @@ fn exec_without_sudo_uid_is_refused_and_audited() {
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("SUDO_UID"), "{}", stderr(&out));
     assert!(h.audit()[0].contains("SUDO_UID is not set"));
+}
+
+#[test]
+fn a_failed_exec_is_audited_as_failed_and_exits_3() {
+    let h = Host::new();
+    let cert = h.kit.cert("a", &["broken"], "+1h", &[]);
+    let out = h.sudo_exec(&h.respond(&cert, &["broken"]), &["broken"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let log = h.audit();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(log[0].contains("\"outcome\":\"started\""), "{}", log[0]);
+    assert!(log[1].contains("\"outcome\":\"exec-failed\""), "{}", log[1]);
+}
+
+#[test]
+fn a_missing_configuration_is_hogtie_own_failure_exit_3() {
+    let h = Host::new();
+    let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+    let r = h.respond(&cert, &["say", "hello"]);
+    std::fs::remove_file(h.root.path().join("etc/hogtie.toml")).unwrap();
+    let out = h.sudo_exec(&r, &["say", "hello"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(h.audit()[0].contains("\"outcome\":\"error\""));
 }
 
 #[test]

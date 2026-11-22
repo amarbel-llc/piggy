@@ -15,13 +15,23 @@ pub struct Kit {
     counter: Cell<u32>,
 }
 
-/// `ssh-keygen` from PATH.
-pub fn find_ssh_keygen() -> PathBuf {
+/// The absolute path of `name` on PATH.
+pub fn on_path(name: &str) -> String {
     let path = std::env::var_os("PATH").expect("PATH is set");
     std::env::split_paths(&path)
-        .map(|d| d.join("ssh-keygen"))
+        .map(|d| d.join(name))
         .find(|p| p.is_file())
-        .expect("ssh-keygen on PATH (openssh)")
+        .unwrap_or_else(|| panic!("{name} on PATH"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Write a configuration file mode 0644 whatever the umask, so hogtie's
+/// "writable by no one else" check sees what production would.
+pub fn write_trusted(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
 }
 
 fn run(cmd: &mut Command) {
@@ -39,7 +49,7 @@ impl Kit {
         let dir = PrivateDir::new(&std::env::temp_dir(), "hogtie-kit").expect("kit dir");
         let kit = Self {
             dir,
-            ssh_keygen: find_ssh_keygen(),
+            ssh_keygen: PathBuf::from(on_path("ssh-keygen")),
             counter: Cell::new(0),
         };
         kit.keygen(&["-t", "ecdsa", "-b", "256", "-f", "ca", "-C", "ca"]);
@@ -110,17 +120,14 @@ impl Kit {
         self.dir().join(format!("{key}-cert.pub"))
     }
 
-    /// `ssh-keygen -Y sign -f CERT -n hogtie-v1` over `msg`.
-    pub fn sign(&self, cert: &Path, msg: &[u8]) -> Sshsig {
-        self.sign_with(cert, msg)
-    }
-
     /// A signature by a plain key with no certificate.
     pub fn sign_plain(&self, msg: &[u8]) -> Sshsig {
-        self.sign_with(&self.dir().join("plain"), msg)
+        self.sign(&self.dir().join("plain"), msg)
     }
 
-    fn sign_with(&self, key: &Path, msg: &[u8]) -> Sshsig {
+    /// `ssh-keygen -Y sign -f KEY -n hogtie-v1` over `msg`; `key` is a
+    /// `-cert.pub` (the sshsig embeds the certificate) or a private key.
+    pub fn sign(&self, key: &Path, msg: &[u8]) -> Sshsig {
         let n = self.counter.get() + 1;
         self.counter.set(n);
         let file = self.dir().join(format!("msg{n}"));

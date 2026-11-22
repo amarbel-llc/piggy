@@ -122,12 +122,13 @@ impl Verifier<'_> {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| VerifyError::Io(format!("{}: {e}", self.ssh_keygen.display())))?;
-        child
-            .stdin
-            .take()
-            .expect("piped stdin")
-            .write_all(message)
-            .map_err(io)?;
+        // ssh-keygen may exit before reading the message (it refused the
+        // signature first): a broken pipe here is its refusal, reported
+        // below with its own words, not hogtie's failure.
+        match child.stdin.take().expect("piped stdin").write_all(message) {
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(io(e)),
+            _ => {}
+        }
         let out = child.wait_with_output().map_err(io)?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let good = format!("Good \"{NAMESPACE}\" signature for {action} with ");

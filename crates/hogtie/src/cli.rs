@@ -3,7 +3,7 @@
 //! hogtie's own failure (configuration, audit log, socket).
 
 use crate::audit;
-use crate::exec::{Decision, decide};
+use crate::exec::{Decision, Refusal, decide};
 use crate::message::Request;
 use crate::nonce::NonceStore;
 use crate::paths::Paths;
@@ -137,7 +137,10 @@ fn exec(rest: &[String]) -> ExitCode {
     {
         Some(caller_uid) => decide(&paths, caller_uid, response, action, args, now),
         None => Decision {
-            run: Err("SUDO_UID is not set; run hogtie exec through sudo".into()),
+            run: Err(Refusal {
+                reason: "SUDO_UID is not set; run hogtie exec through sudo".into(),
+                internal: false,
+            }),
             record: audit::Record {
                 time: now,
                 outcome: "refused",
@@ -155,7 +158,8 @@ fn exec(rest: &[String]) -> ExitCode {
     }
     let run = match decision.run {
         Ok(run) => run,
-        Err(reason) => return fail(1, format!("refused: {reason}")),
+        Err(r) if r.internal => return fail(3, format!("cannot decide: {}", r.reason)),
+        Err(r) => return fail(1, format!("refused: {}", r.reason)),
     };
     let err = std::process::Command::new(&run.program)
         .arg0(&run.argv[0])
@@ -164,7 +168,18 @@ fn exec(rest: &[String]) -> ExitCode {
         .envs(run.env.iter().map(|(k, v)| (k, v)))
         .current_dir("/")
         .exec();
-    fail(3, format!("{}: {err}", run.program.display()))
+    // exec returned: the `started` line stands corrected by this one.
+    let reason = format!("{}: {err}", run.program.display());
+    let failed = audit::Record {
+        time: crate::util::now(),
+        outcome: "exec-failed",
+        reason: Some(reason.clone()),
+        ..decision.record
+    };
+    if let Err(e) = audit::append(&paths.audit_log(), &failed) {
+        eprintln!("hogtie: cannot write the audit log: {e}");
+    }
+    fail(3, reason)
 }
 
 fn serve_socket() -> ExitCode {

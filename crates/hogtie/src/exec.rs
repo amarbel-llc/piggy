@@ -25,7 +25,7 @@ use crate::nonce::NonceStore;
 use crate::paths::Paths;
 use crate::response::{Response, nonce_hex};
 use crate::sshwire::Sshsig;
-use crate::verify::Verifier;
+use crate::verify::{Verifier, VerifyError};
 use std::path::PathBuf;
 
 /// What to run.
@@ -38,9 +38,32 @@ pub struct Run {
     pub env: Vec<(String, String)>,
 }
 
+/// Why nothing runs. `internal` marks hogtie's own failure (its
+/// configuration, its store, its scratch directory, running ssh-keygen):
+/// exit 3 and outcome `error`, not the caller's refusal (exit 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub reason: String,
+    pub internal: bool,
+}
+
+fn refused(reason: impl ToString) -> Refusal {
+    Refusal {
+        reason: reason.to_string(),
+        internal: false,
+    }
+}
+
+fn broken(reason: impl ToString) -> Refusal {
+    Refusal {
+        reason: reason.to_string(),
+        internal: true,
+    }
+}
+
 #[derive(Debug)]
 pub struct Decision {
-    pub run: Result<Run, String>,
+    pub run: Result<Run, Refusal>,
     pub record: Record,
 }
 
@@ -63,10 +86,15 @@ pub fn decide(
     let run = steps(paths, caller_uid, response, action, args, now, &mut record);
     match &run {
         Ok(r) => {
-            record.outcome = "ran";
+            record.outcome = "started";
             record.argv = r.argv.clone();
         }
-        Err(e) => record.reason = Some(e.clone()),
+        Err(e) => {
+            if e.internal {
+                record.outcome = "error";
+            }
+            record.reason = Some(e.reason.clone());
+        }
     }
     Decision { run, record }
 }
@@ -79,23 +107,27 @@ fn steps(
     args: &[String],
     now: u64,
     record: &mut Record,
-) -> Result<Run, String> {
-    let response = Response::parse(response).map_err(|e| e.to_string())?;
+) -> Result<Run, Refusal> {
+    use crate::nonce::ClaimError;
+    let response = Response::parse(response).map_err(refused)?;
     record.nonce = Some(nonce_hex(&response.nonce));
     let entry = NonceStore::new(paths.nonces())
         .claim(caller_uid, &response.nonce, now)
-        .map_err(|e| {
-            if let crate::nonce::ClaimError::Expired(en) = &e {
+        .map_err(|e| match &e {
+            ClaimError::Expired(en) => {
                 record.asked_by = Some(en.clone());
+                refused(&e)
             }
-            e.to_string()
+            ClaimError::Unknown => refused(&e),
+            ClaimError::Corrupt | ClaimError::Io(_) => broken(&e),
         })?;
     record.asked_by = Some(entry);
-    let config = Config::parse(&paths.read_trusted(&paths.config)?).map_err(|e| e.to_string())?;
+    let config =
+        Config::parse(&paths.read_trusted(&paths.config).map_err(broken)?).map_err(broken)?;
     let declared = config
         .actions
         .get(action)
-        .ok_or_else(|| format!("action {action:?} is not declared on this host"))?;
+        .ok_or_else(|| refused(format!("action {action:?} is not declared on this host")))?;
     let message = Request {
         nonce: response.nonce,
         uid: caller_uid,
@@ -103,8 +135,8 @@ fn steps(
         args: args.to_vec(),
     }
     .encode()
-    .map_err(|e| e.to_string())?;
-    let sig = Sshsig::parse(&response.sshsig).map_err(|e| format!("signature: {e}"))?;
+    .map_err(refused)?;
+    let sig = Sshsig::parse(&response.sshsig).map_err(|e| refused(format!("signature: {e}")))?;
     let ca_blobs: Vec<Vec<u8>> = config.cas.iter().map(|c| c.blob.clone()).collect();
     let grant = check_grant(
         &sig,
@@ -115,19 +147,29 @@ fn steps(
             max_span_seconds: config.max_grant_seconds,
         },
     )
-    .map_err(|e| e.to_string())?;
-    record.grant = Some(grant);
-    paths.check_trusted_program(&config.ssh_keygen)?;
-    paths.check_trusted_program(&declared.program)?;
-    Paths::ensure_private_dir(&paths.scratch()).map_err(|e| format!("scratch directory: {e}"))?;
+    .map_err(refused)?;
+    paths
+        .check_trusted_program(&config.ssh_keygen)
+        .map_err(broken)?;
+    paths
+        .check_trusted_program(&declared.program)
+        .map_err(broken)?;
+    Paths::ensure_private_dir(&paths.scratch())
+        .map_err(|e| broken(format!("scratch directory: {e}")))?;
     Verifier {
         ssh_keygen: &config.ssh_keygen,
         cas: &config.cas,
         scratch: &paths.scratch(),
     }
     .verify(&message, &sig, action)
-    .map_err(|e| e.to_string())?;
-    let argv = declared.build(args)?;
+    .map_err(|e| match e {
+        VerifyError::Io(_) => broken(&e),
+        VerifyError::Refused(_) => refused(&e),
+    })?;
+    // Only a grant whose key made this signature is recorded as used: a
+    // copied certificate in a forged sshsig is not logged as its owner's.
+    record.grant = Some(grant);
+    let argv = declared.build(args).map_err(refused)?;
     Ok(Run {
         program: declared.program.clone(),
         argv,
@@ -149,15 +191,7 @@ mod tests {
         uid: u32,
     }
 
-    fn on_path(name: &str) -> String {
-        let path = std::env::var_os("PATH").unwrap();
-        std::env::split_paths(&path)
-            .map(|d| d.join(name))
-            .find(|p| p.is_file())
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
-    }
+    use crate::testkit::on_path;
 
     impl Host {
         fn new() -> Self {
@@ -176,7 +210,7 @@ mod tests {
                 kit.ca_line(),
                 on_path("echo"),
             );
-            std::fs::write(&paths.config, config).unwrap();
+            crate::testkit::write_trusted(&paths.config, &config);
             Self {
                 kit,
                 _root: root,
@@ -230,7 +264,47 @@ mod tests {
     }
 
     fn refusal(d: &Decision) -> &str {
-        d.run.as_ref().err().map(String::as_str).unwrap_or("ran")
+        d.run
+            .as_ref()
+            .err()
+            .map(|r| r.reason.as_str())
+            .unwrap_or("ran")
+    }
+
+    #[test]
+    fn a_forged_signature_is_not_recorded_as_the_copied_grant() {
+        let h = Host::new();
+        let now = crate::util::now();
+        let alice = h.kit.cert("alice", &["say"], "+1h", &[]);
+        let n = h.nonce_for(h.uid, now);
+        let mut sig = h.kit.sign_plain(b"anything");
+        sig.public_key = h.kit.sign(&alice, b"anything").public_key;
+        let r = Response {
+            nonce: n,
+            sshsig: sig.encode(),
+        }
+        .format();
+        let d = h.exec(&r, "say", &["hello"], now);
+        assert!(refusal(&d).contains("signature refused"), "{}", refusal(&d));
+        assert_eq!(d.record.grant, None);
+    }
+
+    #[test]
+    fn hogtie_own_failures_are_marked_internal_not_refused() {
+        let h = Host::new();
+        let now = crate::util::now();
+        let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+        let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
+        std::fs::remove_file(&h.paths.config).unwrap();
+        let d = h.exec(&r, "say", &["hello"], now);
+        assert!(d.run.as_ref().unwrap_err().internal);
+        assert_eq!(d.record.outcome, "error");
+        let replay = h.exec(&r, "say", &["hello"], now);
+        assert!(
+            !replay.run.unwrap_err().internal,
+            "a replay is the caller's"
+        );
+        assert_eq!(replay.record.outcome, "refused");
     }
 
     #[test]
@@ -248,7 +322,7 @@ mod tests {
         let run = d.run.unwrap();
         assert_eq!(run.argv[1..], ["hello"]);
         assert_eq!(run.env, [("LANG".to_string(), "C".to_string())]);
-        assert_eq!(d.record.outcome, "ran");
+        assert_eq!(d.record.outcome, "started");
         assert_eq!(d.record.grant.unwrap().key_id, "agent-1");
         assert_eq!(d.record.asked_by.unwrap().asker.unit(), Some("agent.scope"));
     }
@@ -422,7 +496,7 @@ mod tests {
             &format!("program = \"{}\"", on_path("echo")),
             &format!("program = \"{}\"", prog.display()),
         );
-        std::fs::write(&h.paths.config, text).unwrap();
+        crate::testkit::write_trusted(&h.paths.config, &text);
         let now = crate::util::now();
         let cert = h.kit.cert("a", &["say"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);

@@ -405,6 +405,9 @@ fn check_value(p: &Param, v: &str) -> Result<String, String> {
             if v.starts_with('-') {
                 return Err("a value may not start with '-'".into());
             }
+            if v.bytes().all(|c| c == b'.') {
+                return Err("a value may not be only dots ('.' and '..' name directories)".into());
+            }
             match v.chars().find(|c| !chars.contains(*c)) {
                 Some(c) => Err(format!("character {c:?} is outside the declared class")),
                 None => Ok(v.to_string()),
@@ -498,6 +501,8 @@ param = [
         for (args, needle) in [
             (vec!["/srv/c", "x"], "not one of the declared choices"),
             (vec!["/srv/a", "-rf"], "may not start with '-'"),
+            (vec!["/srv/a", "."], "only dots"),
+            (vec!["/srv/a", ".."], "only dots"),
             (vec!["/srv/a", "a b"], "outside the declared class"),
             (vec!["/srv/a", "A"], "outside the declared class"),
             (vec!["/srv/a", ""], "length 0"),

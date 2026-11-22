@@ -10,7 +10,9 @@ use std::path::Path;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Record {
     pub time: u64,
-    /// `ran` or `refused`.
+    /// `started` (written just before the exec), `refused` (the caller's
+    /// request), `error` (hogtie's own failure), or `exec-failed` (a second
+    /// line after a `started` one whose exec returned).
     pub outcome: &'static str,
     pub reason: Option<String>,
     pub caller_uid: Option<u32>,
@@ -137,7 +139,7 @@ mod tests {
         let p = d.path().join("audit.log");
         let r = Record {
             time: 1,
-            outcome: "ran",
+            outcome: "started",
             ..Default::default()
         };
         append(&p, &r).unwrap();

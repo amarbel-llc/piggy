@@ -165,22 +165,36 @@ impl NonceStore {
         }
     }
 
-    /// Remove `dir`'s expired nonces and any leftover claim file; return how
-    /// many unexpired ones remain.
+    /// Remove `dir`'s expired nonces, and claim files a crashed `exec` left
+    /// (only once their nonce is a further TTL past expiry, so a claim in
+    /// flight is never pulled from under its `exec`); return how many
+    /// unexpired, unclaimed nonces remain.
     fn sweep_account(dir: &Path, uid: u32, now: u64) -> io::Result<usize> {
         let mut live = 0;
         for e in std::fs::read_dir(dir)? {
             let e = e?;
             let name = e.file_name();
             let name = name.to_string_lossy();
-            let keep = is_nonce_name(&name)
-                && std::fs::read_to_string(e.path())
+            let expires = || {
+                std::fs::read_to_string(e.path())
                     .ok()
                     .and_then(|t| Entry::decode(uid, &t))
-                    .is_some_and(|en| now < en.expires);
-            if keep {
+                    .map(|en| en.expires)
+            };
+            let (keep, counts) = match name.strip_prefix(".claim-") {
+                Some(hex) if is_nonce_name(hex) => {
+                    (expires().is_some_and(|x| now < x + TTL_SECONDS), false)
+                }
+                _ if is_nonce_name(&name) => {
+                    let k = expires().is_some_and(|x| now < x);
+                    (k, k)
+                }
+                _ => (false, false),
+            };
+            if counts {
                 live += 1;
-            } else {
+            }
+            if !keep {
                 let _ = std::fs::remove_file(e.path());
             }
         }
@@ -334,6 +348,20 @@ mod tests {
         s.sweep(135).unwrap();
         assert!(!d.path().join("1000").join(nonce_hex(&old)).exists());
         assert!(d.path().join("1000").join(nonce_hex(&new)).exists());
+    }
+
+    #[test]
+    fn a_sweep_leaves_a_claim_in_flight_alone() {
+        let (d, s) = store();
+        let (n, _) = s.issue(&asker(1000), 100).unwrap();
+        let dir = d.path().join("1000");
+        let claim = dir.join(format!(".claim-{}", nonce_hex(&n)));
+        std::fs::rename(dir.join(nonce_hex(&n)), &claim).unwrap();
+        s.issue(&asker(1000), 110).unwrap();
+        s.sweep(140).unwrap();
+        assert!(claim.exists(), "a claim within a TTL of its expiry is kept");
+        s.sweep(160).unwrap();
+        assert!(!claim.exists(), "a crashed exec's claim is removed later");
     }
 
     #[test]
