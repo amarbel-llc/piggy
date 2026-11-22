@@ -579,7 +579,11 @@ commands:
 	*sign-bytes* refuses a message that is sshsig signed data under an
 	operator-act namespace (see *operator-sign*): such a signature is made
 	only where its text is shown first. *piggy tool sign* and the agent's
-	ordinary sign request refuse the same bytes.
+	ordinary sign request refuse the same bytes. It also refuses an
+	OpenSSH certificate (data as *ssh-keygen -U -s* sends it): only the SSH
+	certificate authority in slot 83 signs one, through the agent
+	(*piggy-piv-slots*(7), CERTIFICATE AUTHORITY SLOTS); *piggy tool sign*
+	signs nothing with slot 83, and *piggy tool req-cert* refuses it.
 
 *operator-sign* *--namespace* _NAMESPACE_ [*--slot* _9c_|_9a_] [*--guid* _GUID_] [*--hash* _sha512_|_sha256_]
 	Sign the text read from stdin as an operator act (RFC 0012) and write
