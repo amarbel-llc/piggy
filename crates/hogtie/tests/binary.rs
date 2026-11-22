@@ -227,6 +227,18 @@ fn a_failed_exec_is_audited_as_failed_and_exits_3() {
 }
 
 #[test]
+fn an_audit_log_that_cannot_be_written_refuses_and_runs_nothing() {
+    let h = Host::new();
+    // The log directory's place is taken by a file: no audit line can land.
+    std::fs::write(h.root.path().join("log"), "").unwrap();
+    let cert = h.kit.cert("a", &["say"], "+1h", &[]);
+    let out = h.sudo_exec(&h.respond(&cert, &["say", "hello"]), &["say", "hello"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(out.stdout.is_empty(), "the action ran: {:?}", out.stdout);
+    assert!(stderr(&out).contains("audit log"), "{}", stderr(&out));
+}
+
+#[test]
 fn a_missing_configuration_is_hogtie_own_failure_exit_3() {
     let h = Host::new();
     let cert = h.kit.cert("a", &["say"], "+1h", &[]);

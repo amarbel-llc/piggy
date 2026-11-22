@@ -82,6 +82,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_nonce_of_any_other_length_is_refused() {
+        for n in [0, 63, 65, 128] {
+            assert_eq!(parse_nonce_hex(&"a".repeat(n)), None, "{n} digits");
+            assert_eq!(
+                Response::parse(&format!("v1.{}.AAAA", "a".repeat(n))),
+                Err(ResponseError::BadNonce),
+                "{n} digits"
+            );
+        }
+        assert!(parse_nonce_hex(&"a".repeat(64)).is_some());
+    }
+
+    #[test]
     fn a_response_round_trips() {
         let r = Response {
             nonce: [7; 32],

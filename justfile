@@ -1917,6 +1917,56 @@ test-rust *ARGS:
 test-rust-hogtie *ARGS:
     cargo test -p hogtie --features test-harness {{ARGS}}
 
+# Mutation pass over hogtie's refusals: apply each mutant in
+# crates/hogtie/testdata/mutants.tsv (a literal one-place edit) to a scratch
+# copy of the crate and run every hogtie test; each mutant must turn a test
+# red. Prints TAP; a SURVIVED mutant is an untested refusal, a STALE one no
+# longer matches the source, NOCOMPILE is a mutant that needs rewriting.
+#
+# break each hogtie refusal on purpose and check a test goes red
+[group('explore')]
+explore-hogtie-mutants:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    src=crates/hogtie
+    work=$(mktemp -d "$PWD/.tmp/hogtie-mutants.XXXXXX")
+    export CARGO_TARGET_DIR="$PWD/target/hogtie-mutants"
+    nl=$'\n'
+    n=0 killed=0 survived=() stale=() nocompile=()
+    while IFS=$'\t' read -r id file from to; do
+      [[ -z $id || $id == \#* ]] && continue
+      n=$((n + 1))
+      from=${from//\\n/$nl} to=${to//\\n/$nl}
+      rm -rf "$work/hogtie"
+      cp -r "$src" "$work/hogtie"
+      printf '\n[workspace]\n' >>"$work/hogtie/Cargo.toml"
+      cp Cargo.lock "$work/hogtie/Cargo.lock"
+      f="$work/hogtie/$file"
+      text=$(<"$f")
+      rest=${text//"$from"/}
+      count=$(((${#text} - ${#rest}) / ${#from}))
+      if [[ $count != 1 ]]; then
+        echo "not ok $n - $id # STALE: $count matches"
+        stale+=("$id")
+        continue
+      fi
+      printf '%s\n' "${text/"$from"/"$to"}" >"$f"
+      log="$work/$id.log"
+      if (cd "$work/hogtie" && cargo test --offline -q --features test-harness) >"$log" 2>&1; then
+        echo "not ok $n - $id # SURVIVED"
+        survived+=("$id")
+      elif grep -q '^error\[E\|^error: could not compile' "$log"; then
+        echo "not ok $n - $id # NOCOMPILE (see $log)"
+        nocompile+=("$id")
+      else
+        echo "ok $n - $id killed"
+        killed=$((killed + 1))
+      fi
+    done <"$src/testdata/mutants.tsv"
+    echo "1..$n"
+    echo "# $n mutants: $killed killed; survived: ${survived[*]:-none}; stale: ${stale[*]:-none}; nocompile: ${nocompile[*]:-none}"
+    [[ ${#survived[@]} == 0 && ${#stale[@]} == 0 && ${#nocompile[@]} == 0 ]]
+
 # Flake hunt (piggy#344): build fibby's loopback test once, then run it RUNS
 # times and count the failures. Exits non-zero if any run failed.
 #

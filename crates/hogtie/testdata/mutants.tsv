@@ -1,0 +1,60 @@
+# hogtie's refusals, each broken on purpose: id, file (under crates/hogtie),
+# from, to; tab-separated; "\n" in from/to is a newline. `from` must occur
+# exactly once in the file (else the mutant is STALE). `just
+# explore-hogtie-mutants` applies each to a scratch copy and runs every
+# hogtie test: each must turn a test red (KILLED).
+nonce-not-burnt	src/nonce.rs	match std::fs::rename(dir.join(&hex), &claimed) {	match std::fs::copy(dir.join(&hex), &claimed).map(|_| ()) {
+nonce-expiry-ignored	src/nonce.rs	if now >= entry.expires {	if now >= entry.expires + 1000 {
+nonce-account-shared	src/nonce.rs	self.dir.join(uid.to_string())	self.dir.join("shared")
+nonce-cap-off-by-one	src/nonce.rs	>= CAP_PER_ACCOUNT {	>= CAP_PER_ACCOUNT + 1 {
+nonce-cgroup-unsanitized	src/nonce.rs	.map(|c| if c.is_control() { '?' } else { c })	.map(|c| c)
+nonce-duplicate-key-accepted	src/nonce.rs	if !slot_was_empty {	if false {
+serve-uid-not-peer	src/serve.rs	    Ok(Asker {\n        uid,	    Ok(Asker {\n        uid: uid + 1,
+message-trailing-accepted	src/message.rs	r.end()?;	let _ = 0;
+message-leading-dash-action	src/message.rs	&& b[0] != b'-'	&& true
+message-nul-accepted	src/message.rs	 || a.as_bytes().contains(&0)	
+message-domain-unchecked	src/message.rs	if r.string()? != DOMAIN.as_bytes() {	if r.string()?.is_empty() {
+response-long-nonce	src/response.rs	if b.len() != NONCE_LEN * 2	if b.len() < NONCE_LEN * 2
+grant-namespace-unchecked	src/grant.rs	if sig.namespace != NAMESPACE {	if false {
+grant-hash-unchecked	src/grant.rs	if sig.hash_algorithm != "sha512" && sig.hash_algorithm != "sha256" {	if false {
+grant-host-cert	src/grant.rs	if cert.cert_type != SSH2_CERT_TYPE_USER {	if false {
+grant-any-ca	src/grant.rs	if !policy.ca_blobs.contains(&cert.signature_key) {	if false {
+grant-critical-option	src/grant.rs	if let Some((name, _)) = cert.critical_options.first() {	if let Some((name, _)) = None::<&(String, Vec<u8>)> {
+grant-star-allowed	src/grant.rs	p.contains(['*', '?', '!', ','])	p.contains(['?', '!', ','])
+grant-comma-allowed	src/grant.rs	p.contains(['*', '?', '!', ','])	p.contains(['*', '?', '!'])
+grant-principal-prefix	src/grant.rs	.any(|p| p == action)	.any(|p| p.starts_with(action))
+grant-future-accepted	src/grant.rs	if now < cert.valid_after {	if false {
+grant-expired-accepted	src/grant.rs	if now >= cert.valid_before {	if false {
+grant-span-plus-one	src/grant.rs	if span > policy.max_span_seconds {	if span > policy.max_span_seconds + 1 {
+grant-span-inclusive	src/grant.rs	if span > policy.max_span_seconds {	if span >= policy.max_span_seconds {
+verify-verify-time-option	src/verify.rs	            .env_clear()	            .env_clear()\n            .arg("-Overify-time=20200101")
+verify-env-inherited	src/verify.rs	            .env_clear()	            .env_remove("HOGTIE_NOTHING")
+verify-message-not-sent	src/verify.rs	.write_all(message)	.write_all(b"")
+verify-principal-not-the-action	src/verify.rs	                action,\n                "-n",	                "*",\n                "-n",
+exec-undeclared-falls-through	src/exec.rs	        .get(action)	        .get(action).or_else(|| config.actions.values().next())
+verify-exit-only	src/verify.rs	if out.status.success() && stdout.starts_with(&good) {	if out.status.success() {
+config-unknown-top-key	src/config.rs	#[serde(deny_unknown_fields)]\nstruct RawConfig {	struct RawConfig {
+config-unknown-action-key	src/config.rs	#[serde(deny_unknown_fields)]\nstruct RawAction {	struct RawAction {
+config-partial-placeholder	src/config.rs	None if item.contains(['{', '}']) => {	None if false => {
+config-param-used-twice	src/config.rs	position(|n| *n != 1)	position(|n| *n == 0)
+config-fewer-args	src/config.rs	if args.len() != self.params.len() {	if args.len() > self.params.len() {
+config-any-choice	src/config.rs	if values.iter().any(|c| c == v) {	if true {
+config-pattern-too-long	src/config.rs	if v.is_empty() || v.len() > *max_len {	if v.is_empty() {
+config-pattern-dash	src/config.rs	if v.starts_with('-') {	if false {
+config-pattern-dots	src/config.rs	if v.bytes().all(|c| c == b'.') {	if false {
+config-pattern-class	src/config.rs	match v.chars().find(|c| !chars.contains(*c)) {	match None::<char> {
+config-path-lexical	src/config.rs	if !is_plain_absolute(v) || !is_under(Path::new(v), under) {	if !is_under(Path::new(v), under) {
+config-path-symlink	src/config.rs	if !is_under(&real, &real_under) {	if false {
+paths-config-any-owner	src/paths.rs	if meta.uid() != self.root_uid || meta.mode() & 0o022 != 0 {	if meta.mode() & 0o022 != 0 {
+paths-config-writable	src/paths.rs	if meta.uid() != self.root_uid || meta.mode() & 0o022 != 0 {	if meta.uid() != self.root_uid {
+paths-program-writable	src/paths.rs	if !meta.is_file() || !owner_ok || meta.mode() & 0o022 != 0 {	if !meta.is_file() || !owner_ok {
+paths-program-directory	src/paths.rs	if !meta.is_file() || !owner_ok || meta.mode() & 0o022 != 0 {	if !owner_ok || meta.mode() & 0o022 != 0 {
+paths-program-any-owner	src/paths.rs	let owner_ok = meta.uid() == 0 || meta.uid() == self.root_uid;	let owner_ok = true;
+paths-any-euid	src/paths.rs	if euid != self.root_uid {	if false {
+exec-claim-root-account	src/exec.rs	.claim(caller_uid, &response.nonce, now)	.claim(0, &response.nonce, now)
+exec-message-uid-fixed	src/exec.rs	        uid: caller_uid,	        uid: 0,
+exec-program-untrusted	src/exec.rs	        .check_trusted_program(&declared.program)	        .check_trusted_program(&config.ssh_keygen)
+cli-no-sudo-uid-default	src/cli.rs	let decision = match std::env::var("SUDO_UID")	let decision = match std::env::var("SUDO_UID").or_else(|_| Ok::<_, std::env::VarError>("0".into()))
+cli-audit-failure-ignored	src/cli.rs	        return fail(3, format!("refused: cannot write the audit log: {e}"));	        eprintln!("{e}");
+cli-action-env-inherited	src/cli.rs	        .env_clear()	        .env_remove("HOGTIE_NOTHING")
+cli-action-cwd-kept	src/cli.rs	        .current_dir("/")	        .current_dir(".")

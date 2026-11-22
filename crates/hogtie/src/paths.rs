@@ -123,3 +123,75 @@ impl Paths {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::PrivateDir;
+
+    fn me() -> u32 {
+        // SAFETY: geteuid cannot fail.
+        unsafe { libc::geteuid() }
+    }
+
+    /// Paths whose "root" is someone other than this test (and not 0).
+    fn someone_else(dir: &Path) -> Paths {
+        Paths::under(dir, me() + 1)
+    }
+
+    #[test]
+    fn a_file_owned_by_someone_other_than_root_is_not_trusted() {
+        let d = PrivateDir::new(&std::env::temp_dir(), "hogtie-paths").unwrap();
+        let f = d.path().join("hogtie.toml");
+        crate::testkit::write_trusted(&f, "x");
+        assert!(Paths::under(d.path(), me()).read_trusted(&f).is_ok());
+        assert!(
+            someone_else(d.path())
+                .read_trusted(&f)
+                .unwrap_err()
+                .contains("owned by uid")
+        );
+    }
+
+    #[test]
+    fn a_program_owned_by_someone_other_than_root_or_a_directory_is_not_trusted() {
+        let d = PrivateDir::new(&std::env::temp_dir(), "hogtie-paths").unwrap();
+        let f = d.path().join("prog");
+        crate::testkit::write_trusted(&f, "x");
+        assert!(
+            Paths::under(d.path(), me())
+                .check_trusted_program(&f)
+                .is_ok()
+        );
+        assert!(someone_else(d.path()).check_trusted_program(&f).is_err());
+        assert!(
+            Paths::under(d.path(), me())
+                .check_trusted_program(d.path())
+                .is_err(),
+            "a directory"
+        );
+        let store = std::path::PathBuf::from(crate::testkit::on_path("sh"));
+        if std::fs::metadata(&store)
+            .map(|m| std::os::unix::fs::MetadataExt::uid(&m))
+            .ok()
+            == Some(0)
+        {
+            assert!(
+                someone_else(d.path()).check_trusted_program(&store).is_ok(),
+                "root's own program"
+            );
+        }
+    }
+
+    #[test]
+    fn running_as_another_uid_is_refused() {
+        let d = PrivateDir::new(&std::env::temp_dir(), "hogtie-paths").unwrap();
+        assert!(Paths::under(d.path(), me()).check_running_as_root().is_ok());
+        assert!(
+            someone_else(d.path())
+                .check_running_as_root()
+                .unwrap_err()
+                .contains("must run as uid")
+        );
+    }
+}

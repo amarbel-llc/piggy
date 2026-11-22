@@ -257,6 +257,55 @@ mod tests {
     }
 
     #[test]
+    fn a_span_of_exactly_the_maximum_passes_and_one_second_more_does_not() {
+        let kit = Kit::new();
+        let start = 1_577_836_800; // 2020-01-01T00:00:00Z
+        let now = start + 15 * DAY;
+        let exact = kit.sign(
+            &kit.cert("alice", &["a"], "20200101000000Z:20200131000000Z", &[]),
+            b"m",
+        );
+        assert!(
+            check(&kit, &exact, "a", now).is_ok(),
+            "{:?}",
+            check(&kit, &exact, "a", now)
+        );
+        let over = kit.sign(
+            &kit.cert("alice", &["a"], "20200101000000Z:20200131000001Z", &[]),
+            b"m",
+        );
+        assert!(matches!(
+            check(&kit, &over, "a", now),
+            Err(GrantError::SpanTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn a_comma_in_a_principal_is_refused() {
+        // ssh-keygen -n splits on commas, so patch one into the parsed
+        // certificate: the check runs before any signature is believed.
+        let kit = Kit::new();
+        let mut sig = kit.sign(&kit.cert("alice", &["a.b"], "+1h", &[]), b"m");
+        let at = sig.public_key.windows(3).position(|w| w == b"a.b").unwrap();
+        sig.public_key[at + 1] = b',';
+        assert_eq!(
+            check(&kit, &sig, "a", crate::util::now()),
+            Err(GrantError::PatternPrincipal("a,b".into()))
+        );
+    }
+
+    #[test]
+    fn an_unknown_hash_is_refused() {
+        let kit = Kit::new();
+        let mut sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"m");
+        sig.hash_algorithm = "md5".into();
+        assert_eq!(
+            check(&kit, &sig, "a", crate::util::now()),
+            Err(GrantError::UnknownHash("md5".into()))
+        );
+    }
+
+    #[test]
     fn a_plain_key_signature_is_refused() {
         let kit = Kit::new();
         let sig = kit.sign_plain(b"m");

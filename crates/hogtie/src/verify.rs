@@ -225,6 +225,75 @@ mod tests {
     }
 
     #[test]
+    fn ssh_keygen_runs_with_an_empty_environment_and_exactly_these_arguments() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let kit = Kit::new();
+        let spy = kit.dir().join("spy-keygen");
+        let script = format!(
+            "#!/bin/sh\n{} > \"$0.env\"\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > \"$0.args\"\nexit 1\n",
+            crate::testkit::on_path("env")
+        );
+        std::fs::write(&spy, script).unwrap();
+        std::fs::set_permissions(&spy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: a variable no other test reads; set before the spawn.
+        unsafe { std::env::set_var("HOGTIE_SPY_SENTINEL", "leaked") };
+        let sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"m");
+        let cas = [CaKey::parse(&kit.ca_line()).unwrap()];
+        let r = Verifier {
+            ssh_keygen: &spy,
+            cas: &cas,
+            scratch: kit.dir(),
+        }
+        .verify(b"m", &sig, "a");
+        assert!(matches!(r, Err(VerifyError::Refused(_))), "{r:?}");
+        let env = std::fs::read_to_string(kit.dir().join("spy-keygen.env")).unwrap();
+        assert!(
+            !env.contains("HOGTIE_SPY_SENTINEL"),
+            "the environment leaked: {env}"
+        );
+        assert!(!env.contains("PATH="), "the environment leaked: {env}");
+        let args = std::fs::read_to_string(kit.dir().join("spy-keygen.args")).unwrap();
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            [
+                "-Y",
+                "verify",
+                "-f",
+                "allowed_signers",
+                "-I",
+                "a",
+                "-n",
+                "hogtie-v1",
+                "-s",
+                "sig"
+            ],
+            "no -O option, nothing else"
+        );
+    }
+
+    #[test]
+    fn a_zero_exit_without_the_good_line_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let kit = Kit::new();
+        let spy = kit.dir().join("quiet-keygen");
+        std::fs::write(
+            &spy,
+            "#!/bin/sh\necho 'Good \"hogtie-v1\" signature for other with x'\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&spy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sig = kit.sign(&kit.cert("alice", &["a"], "+1h", &[]), b"m");
+        let cas = [CaKey::parse(&kit.ca_line()).unwrap()];
+        let r = Verifier {
+            ssh_keygen: &spy,
+            cas: &cas,
+            scratch: kit.dir(),
+        }
+        .verify(b"m", &sig, "a");
+        assert!(matches!(r, Err(VerifyError::Refused(_))), "{r:?}");
+    }
+
+    #[test]
     fn a_ca_key_line_is_checked() {
         let kit = Kit::new();
         assert!(CaKey::parse(&kit.ca_line()).is_ok());
