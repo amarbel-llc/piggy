@@ -127,6 +127,14 @@ certificates and refuses each flag. *just explore-fdr0006-c* stages the
 phase's hand pass; with _NO_SHELL=1_ in the environment it runs unattended,
 skipping the closing shell and exiting 0 only when every check is ok.
 
+hogtie(8) has the same split. Its binary tests (the socket, *exec* and
+the audit log, signing with stock *ssh-keygen* and a software CA) need
+the cargo feature _test-harness_, which plain *just test-rust* leaves
+off: *just test-rust-hogtie* runs them, and so does *nix build .#hogtie*
+(in *build-nix*), whose installed binary is built without it.
+*just lint-hogtie*, part of *just lint* on Linux, proves that binary
+holds no _HOGTIE_TEST_ROOT_ and still insists on uid 0.
+
 The holder agent mode of phase (d) (*piggy agent --holder*, piggy-agent(1)
 HOLDER MODE) is gated by *just test-bats-conformance-holder-mint-fibby*
 over the test double: the lane stages a cgroup tree in a temporary
