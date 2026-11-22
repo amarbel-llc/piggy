@@ -586,7 +586,15 @@ mod tests {
     #[test]
     fn the_askpass_mirror_matches_the_script_and_the_dialog() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let script = std::fs::read_to_string(root.join("contrib/piggy-askpass.sh")).unwrap();
+        // The nix build's source holds this crate alone; the check runs
+        // wherever the whole tree is (`just test-rust`, the worktree).
+        let (Ok(script), Ok(dialog)) = (
+            std::fs::read_to_string(root.join("contrib/piggy-askpass.sh")),
+            std::fs::read_to_string(root.join("crates/piggy-askpass-gtk/src/dialog.rs")),
+        ) else {
+            eprintln!("skipped: the script and the dialog are not in this source tree");
+            return;
+        };
         for class in [
             DisplayClass::Quote,
             DisplayClass::Escalation,
@@ -601,8 +609,6 @@ mod tests {
             !script.contains("operator_act_max_lines="),
             "the script has a height limit again; the mirror and piggy#400's record need it"
         );
-        let dialog =
-            std::fs::read_to_string(root.join("crates/piggy-askpass-gtk/src/dialog.rs")).unwrap();
         assert!(dialog.contains(&format!(
             "const TEXT_WIDTH_CHARS: i32 = {ASKPASS_WRAP_COLUMNS};"
         )));
