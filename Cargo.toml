@@ -5,6 +5,7 @@ members = [
     "crates/card-frontend-server",
     "crates/fibby",
     "crates/fibby-wait-ready",
+    "crates/hogtie",
     "crates/manage-client",
     "crates/operator-act-probe",
     "crates/piggy",

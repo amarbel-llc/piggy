@@ -2330,6 +2330,45 @@ explore-darwin-fibby-csock: build-rust
     echo "=== fibby wire log (did the framework client ever connect?) ==="
     cat "$log"
 
+# What does `ssh-keygen -Y verify` do, against a `cert-authority`
+# allowed-signers line, with the grant certificates hogtie must refuse: an
+# expired one, one not yet valid, wildcard principals, a critical option, a
+# host certificate? Software keys only; prints every answer, asserts none.
+# Feeds hogtie's list of in-process refusals (piggy/rich-oak, hogtie stage 1).
+#
+# probe ssh-keygen -Y verify against expired, future, wildcard, critical-option and host certificates
+[group('explore')]
+explore-hogtie-sshsig-grant-edges:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    d=$(mktemp -d "$PWD/.tmp/hogtie-edges.XXXXXX")
+    cd "$d"
+    ssh-keygen -q -t ecdsa -b 256 -N '' -f ca -C ca
+    printf '* cert-authority,namespaces="hogtie-v1" %s\n' "$(cut -d' ' -f1,2 ca.pub)" >allowed
+    printf 'nonce action args\n' >msg
+    probe() { # NAME PRINCIPAL CERT-FLAGS...
+      local name=$1 principal=$2; shift 2
+      ssh-keygen -q -t ed25519 -N '' -f "$name" -C "$name"
+      ssh-keygen -q -s ca -I "$name" "$@" "$name.pub" || { echo "=== $name: cert NOT issued"; return; }
+      cp msg "$name.msg"
+      ssh-keygen -Y sign -f "$name-cert.pub" -n hogtie-v1 "$name.msg" 2>/dev/null
+      echo "=== $name (verify -I $principal):"
+      ssh-keygen -L -f "$name-cert.pub" | grep -E 'Type|Valid|Principals|Critical' -A1 | sed 's/^/    /'
+      ssh-keygen -Y verify -f allowed -I "$principal" -n hogtie-v1 -s "$name.msg.sig" <"$name.msg" 2>&1 | sed 's/^/    /'
+      echo "    exit ${PIPESTATUS[0]}"
+    }
+    probe valid       deploy-site      -n deploy-site -V +1h
+    probe expired     deploy-site      -n deploy-site -V 20200101:20200102
+    probe future      deploy-site      -n deploy-site -V +1d:+2d
+    probe star        anything-at-all  -n '*' -V +1h
+    probe prefixglob  restic-snapshots -n 'restic-*' -V +1h
+    probe question    deploy-sitf      -n 'deploy-sit?' -V +1h
+    probe critical    deploy-site      -n deploy-site -V +1h -O force-command=/bin/true
+    probe hostcert    deploy-site      -n deploy-site -V +1h -h
+    echo "=== expired, with -Overify-time inside its window:"
+    ssh-keygen -Y verify -f allowed -I deploy-site -n hogtie-v1 -Overify-time=20200101120000 -s expired.msg.sig <expired.msg 2>&1 | sed 's/^/    /'
+    echo "=== ssh-keygen version:"; ssh -V 2>&1
+
 # Generic driver for exploratory bats files. Each file brings up whatever
 # infrastructure it needs in setup_file() / teardown_file(). We pass
 # --no-sandbox because explore tests often need to talk to pcscd (Unix

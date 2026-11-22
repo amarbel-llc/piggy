@@ -1,0 +1,23 @@
+[package]
+name = "hogtie"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "The root door for agent sessions: one action, one nonce, one signature from a key an operator-signed OpenSSH certificate names"
+# hogtie is in the trusted base of every host it runs on, so it depends on no
+# other piggy crate: the signature is verified by exec-ing ssh-keygen, and the
+# certificate is parsed here only to read it and to refuse more (hogtie(8)).
+# Keep the dependency list this short.
+
+[features]
+# Relocates /etc/hogtie, /run/hogtie and /var/log/hogtie under
+# $HOGTIE_TEST_ROOT and drops the euid-0 check, for the binary tests. Off by
+# default; the shipped binary is built without it, and `just lint-hogtie`
+# checks that.
+test-harness = []
+
+[dependencies]
+base64 = "0.22"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.8", default-features = false, features = ["parse"] }
