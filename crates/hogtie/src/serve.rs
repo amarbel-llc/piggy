@@ -81,11 +81,45 @@ pub fn asker_of(stream: &UnixStream) -> io::Result<Asker> {
     })
 }
 
+/// Nonces one account may be issued per [`ISSUE_WINDOW`] boot seconds
+/// (review R1): the outstanding cap alone lets an account ask for, use and
+/// ask again without end, one audit line each.
+pub const ISSUE_BUDGET: u64 = 60;
+pub const ISSUE_WINDOW: u64 = 60;
+
+/// Each account's issue count in the current window, kept by the socket
+/// (one process, one connection at a time, so no lock).
+#[derive(Default)]
+pub struct IssueBudget(std::collections::HashMap<u32, (u64, u64)>);
+
+impl IssueBudget {
+    /// Count one issue to `uid` at `now`; false past the budget.
+    pub fn take(&mut self, uid: u32, now: u64) -> bool {
+        let (start, count) = self.0.entry(uid).or_insert((now, 0));
+        if now >= start.saturating_add(ISSUE_WINDOW) || now < *start {
+            (*start, *count) = (now, 0);
+        }
+        if *count >= ISSUE_BUDGET {
+            return false;
+        }
+        *count += 1;
+        true
+    }
+}
+
 /// Answer one connection.
-pub fn answer(stream: &mut UnixStream, store: &NonceStore, now: u64) -> io::Result<()> {
+pub fn answer(
+    stream: &mut UnixStream,
+    store: &NonceStore,
+    budget: &mut IssueBudget,
+    now: u64,
+) -> io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(1)))?;
     let line = match asker_of(stream) {
         Err(e) => format!("refused cannot read the caller: {e}\n"),
+        Ok(asker) if !budget.take(asker.uid, now) => {
+            format!("refused this account was issued {ISSUE_BUDGET} nonces this minute\n")
+        }
         Ok(asker) => match store.issue(&asker, now) {
             Ok((nonce, expires)) => {
                 format!("ok {} {}\n", nonce_hex(&nonce), expires.saturating_sub(now))
@@ -97,7 +131,13 @@ pub fn answer(stream: &mut UnixStream, store: &NonceStore, now: u64) -> io::Resu
 }
 
 /// Serve forever (until the listener fails).
-pub fn serve(listener: &UnixListener, store: &NonceStore, scratch: &Path) -> io::Result<()> {
+pub fn serve(
+    listener: &UnixListener,
+    store: &NonceStore,
+    paths: &crate::paths::Paths,
+) -> io::Result<()> {
+    let scratch = paths.scratch();
+    let mut budget = IssueBudget::default();
     let mut last_sweep = 0;
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -122,12 +162,21 @@ pub fn serve(listener: &UnixListener, store: &NonceStore, scratch: &Path) -> io:
             if let Err(e) = store.sweep(now) {
                 eprintln!("hogtie serve: sweep: {e}");
             }
-            if let Err(e) = crate::verify::sweep_scratch(scratch, crate::verify::SCRATCH_MAX_AGE) {
+            if let Err(e) = crate::verify::sweep_scratch(&scratch, crate::verify::SCRATCH_MAX_AGE) {
                 eprintln!("hogtie serve: scratch sweep: {e}");
+            }
+            let flushed = crate::audit::flush_summaries(
+                &paths.refusals(),
+                &paths.audit_log(),
+                now,
+                crate::util::now(),
+            );
+            if let Err(e) = flushed {
+                eprintln!("hogtie serve: refusal summaries: {e}");
             }
             last_sweep = now;
         }
-        if let Err(e) = answer(&mut stream, store, now) {
+        if let Err(e) = answer(&mut stream, store, &mut budget, now) {
             eprintln!("hogtie serve: answer: {e}");
         }
     }
@@ -188,7 +237,7 @@ mod tests {
             move || ask(&sock).unwrap()
         });
         let (mut conn, _) = listener.accept().unwrap();
-        answer(&mut conn, &store, 1000).unwrap();
+        answer(&mut conn, &store, &mut IssueBudget::default(), 1000).unwrap();
         drop(conn);
         let (hex, expires) = client.join().unwrap().unwrap();
         assert_eq!(expires, 30, "the seconds it has left");
@@ -201,11 +250,46 @@ mod tests {
     }
 
     #[test]
+    fn nonce_issue_is_rate_limited_per_account() {
+        let mut b = IssueBudget::default();
+        for _ in 0..ISSUE_BUDGET {
+            assert!(b.take(1000, 100));
+        }
+        assert!(!b.take(1000, 100), "past the budget");
+        assert!(b.take(1001, 100), "per account");
+        assert!(b.take(1000, 100 + ISSUE_WINDOW), "the next window");
+    }
+
+    #[test]
+    fn the_socket_refuses_an_account_past_its_issue_budget() {
+        let d = PrivateDir::new(&std::env::temp_dir(), "hogtie-sock").unwrap();
+        let store = NonceStore::new(d.path());
+        let sock = d.path().join("s");
+        let listener = bind(&sock).unwrap();
+        // SAFETY: getuid cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let mut budget = IssueBudget::default();
+        for _ in 0..ISSUE_BUDGET {
+            assert!(budget.take(uid, 1000));
+        }
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            move || ask(&sock).unwrap()
+        });
+        let (mut conn, _) = listener.accept().unwrap();
+        answer(&mut conn, &store, &mut budget, 1000).unwrap();
+        drop(conn);
+        let refusal = client.join().unwrap().unwrap_err();
+        assert!(refusal.contains("nonces this minute"), "{refusal}");
+    }
+
+    #[test]
     fn the_socket_refuses_past_the_cap() {
         let d = PrivateDir::new(&std::env::temp_dir(), "hogtie-sock").unwrap();
         let store = NonceStore::new(d.path());
         let sock = d.path().join("s");
         let listener = bind(&sock).unwrap();
+        let mut budget = IssueBudget::default();
         let mut last = None;
         for _ in 0..=crate::nonce::CAP_PER_ACCOUNT {
             let client = std::thread::spawn({
@@ -213,7 +297,7 @@ mod tests {
                 move || ask(&sock).unwrap()
             });
             let (mut conn, _) = listener.accept().unwrap();
-            answer(&mut conn, &store, 1000).unwrap();
+            answer(&mut conn, &store, &mut budget, 1000).unwrap();
             drop(conn);
             last = Some(client.join().unwrap());
         }

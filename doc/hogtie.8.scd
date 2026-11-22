@@ -97,10 +97,15 @@ attempt, whether that attempt runs or is refused.
 	deliberately: the controlling terminal, the session and process group,
 	the cgroup, namespaces, the seccomp filter and the no_new_privs bit.
 
-	hogtie's own process raises its file size limit and ignores SIGXFSZ
-	before it opens any file, so the caller's limits cannot cut the audit
-	line; a write that still fails part way is cut back off and refuses.
-	A clock that cannot be read refuses.
+	Before it opens any file, hogtie sets its own resource limits to the
+	same fixed table, so a caller cannot make it run out of descriptors,
+	memory or file size and so cause an error; ignores SIGXFSZ (a write
+	past the file size limit fails instead); and ignores SIGTSTP, SIGTTIN
+	and SIGTTOU, so a caller cannot stop it through sudo's signal
+	relaying. A line the file size limit would cut is refused before it is
+	written. From the *started* line to execve every signal that can be
+	blocked is; the action starts with none blocked. A clock that cannot be
+	read refuses.
 
 	The response travels on the command line, where other processes of
 	the same account can read it while hogtie runs. That is accepted:
@@ -114,7 +119,9 @@ attempt, whether that attempt runs or is refused.
 	is on a tmpfs (a reboot must empty the nonce store), binds
 	*/run/hogtie/nonce.sock* (0666, replacing whatever is there) and
 	serves one connection at a time. The client sends nothing; it reads
-	one line, *ok* _nonce_ _seconds-left_ or *refused* _reason_. The
+	one line, *ok* _nonce_ _seconds-left_ or *refused* _reason_. An
+	account may be issued at most 60 nonces a minute and hold at most 32
+	unused. The
 	caller's uid and pid come from the kernel (*SO_PEERCRED*), its cgroup
 	from */proc/*_pid_*/cgroup*, read through a descriptor on
 	*/proc/*_pid_ so a recycled pid is not followed (the window between
@@ -122,7 +129,9 @@ attempt, whether that attempt runs or is refused.
 	*.service* or *.scope*) are recorded, not enforced: a grant cannot
 	name a unit in stage 1. Every 30 seconds it sweeps expired nonces,
 	account directories left empty and scratch directories older than 5
-	minutes; one unreadable account does not stop the sweep.
+	minutes, and writes one *summary* line for every account whose minute
+	has closed with refusals that were not logged; one unreadable account
+	does not stop the sweep.
 
 # SIGNED MESSAGE
 
@@ -242,27 +251,37 @@ arguments.
 # AUDIT
 
 Every *exec* appends one JSON line to */var/log/hogtie/audit.log* (root,
-0600, locked, synced), never longer than 4096 bytes: every string that
-can carry caller bytes is cut to 256 bytes and lists to 32 items, with
-markers for the rest, and a record still too long is written short, with
-*"truncated":true*. A line holds the time, the outcome and reason, the
-caller's uid, the action and arguments,
-the nonce, who asked for it (pid, cgroup, unit, and when, on the boot
-clock), the grant (key id, serial, principals, validity: only once
-ssh-keygen has accepted the signature, so a copied certificate in a
-forged signature is not logged as its owner's) and the argv. The outcome
-is *started* (written just before the exec), *refused* (the caller's
-request), *error* (hogtie's own failure) or, on a second line after a
-*started* one whose exec returned, *exec-failed*. A line that cannot be
-written refuses the action. The action's exit status is not recorded:
-hogtie becomes the action.
+0600, synced), never longer than 4096 bytes. It takes no lock (a stopped
+lock holder would block every account): it is one *write*(2) of the whole
+line on a file opened *O_APPEND*, and what is relied on is Linux's
+behaviour, not POSIX's: a write to a regular file holds the inode lock
+for its whole length, so two lines never interleave (POSIX promises only
+that each write starts at the end). A line holds the time, the outcome
+and reason, the caller's uid, the action and arguments (for a run, the
+argv that ran, once), the nonce, who asked for it (pid, cgroup, unit, and
+when, on the boot clock), the grant (key id, serial, principals, validity:
+only once ssh-keygen has accepted the signature, so a copied certificate
+in a forged signature is not logged as its owner's) and a note. The
+outcome is *started* (written just before the exec), *refused* (the
+caller's request), *error* (hogtie's own failure), *exec-failed* (a second
+line after a *started* one whose exec returned) or *summary* (the budget,
+below). A *started* line is always whole: a run whose line would not fit
+is refused. Any other line too long is cut: every string to 256 bytes and
+every list to 32 items, with markers, or, still too long, to a short
+record marked *"truncated":true*. A line that cannot be written whole
+refuses the action. The action's exit status is not recorded: hogtie
+becomes the action.
 
-Anyone the sudo rule admits can be refused at will, so refusals are
-budgeted per account: 20 per minute (on the boot clock) are logged in
-full; the 21st line says the rest are counted, not logged; the first line
-of the next minute says how many were not. The counts are kept in
-*/run/hogtie/refusals*, locked; a count that cannot be read logs in full.
-Runs and hogtie's own errors are always logged.
+Anyone the sudo rule admits can be refused at will, so refusals and
+errors alike are budgeted per account: 20 per minute (on the boot clock)
+are logged in full and the 21st line says the rest are counted, not
+logged. Past the budget, for the rest of the minute, the account gets one
+fixed answer (*over the refusal budget*, exit 1) and its request is not
+evaluated at all, so no two requests can be told apart; the count is
+written as a *summary* line by the first of the next minute's lines or by
+*serve*'s sweep, whichever comes first. The counts are kept in
+*/run/hogtie/refusals*, one file per account, locked for at most a second;
+a count that cannot be read logs in full. Runs are always logged.
 
 # DEPLOYMENT
 
@@ -271,6 +290,36 @@ The sudo rule must name the *exec* verb, so that sudo admits
 the socket path, and the rule must not let a caller do that. All
 directories hogtie uses are made with an exact mode, or, when they exist,
 must be real directories owned by root with no permission beyond it.
+
+What sudo does with the caller's state, from sudo(8) and sudoers(5)
+(1.9.17; read, not tested under a real sudo):
+
+- Resource limits: sudo sets the target user's limits through the
+  system's mechanism (on Linux, *pam_limits*); where there is none, the
+  command runs with the invoking user's limits, except the core size,
+  which sudo sets to 0. *rlimit_\** options in sudoers override this.
+  hogtie does not rely on either: it sets its own limits and the action's.
+- Signals: sudo relays the signals it receives to the command, SIGINT and
+  SIGQUIT only when the command runs in a new pty or a user process sent
+  them; SIGSTOP and SIGKILL are not relayed. The caller owns the sudo
+  process, so it can have SIGTSTP relayed to hogtie: hogtie ignores it.
+  The command runs as root, so the caller should not be able to signal it
+  directly (the kernel requires the sender to share the target's real or
+  saved uid); not tested.
+- *use_pty* runs the command in a new pty when sudo has a terminal, and
+  then relays SIGINT and SIGQUIT too. hogtie does not need a terminal.
+
+The rule this calls for, for the next sprint's module (_agents_ and the
+path are placeholders):
+
+```
+Defaults!/run/current-system/sw/bin/hogtie env_reset, !use_pty
+%agents ALL=(root) NOPASSWD: /run/current-system/sw/bin/hogtie exec *
+```
+
+*env_reset* is sudo's default and is named for the record; hogtie clears
+the environment itself. *!use_pty* keeps SIGINT and SIGQUIT from being
+relayed for keyboard interrupts; nothing in hogtie depends on it.
 
 # EXIT STATUS
 

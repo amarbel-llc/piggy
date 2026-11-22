@@ -2527,6 +2527,23 @@ explore-hogtie-sshsig-grant-edges:
     ssh-keygen -Y verify -f allowed -I deploy-site -n hogtie-v1 -Overify-time=20200101120000 -s expired.msg.sig <expired.msg 2>&1 | sed 's/^/    /'
     echo "=== ssh-keygen version:"; ssh -V 2>&1
 
+# What sudo itself documents about the state a command inherits: resource
+# limits (rlimit_* in sudoers(5)), signal relaying, use_pty. Prints the
+# matching passages of nixpkgs' sudo(8) and sudoers(5); for hogtie(8)
+# DEPLOYMENT (piggy/rich-oak, hogtie stage 1).
+#
+# grep sudo(8) and sudoers(5) for rlimits, signal relaying and use_pty
+[group('explore')]
+explore-sudo-inheritance:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    man=$(nix build --no-link --print-out-paths nixpkgs#sudo.man)
+    for page in man8/sudo.8.gz man5/sudoers.5.gz; do
+      echo "=== $page"
+      zcat "$man/share/man/$page" | sed 's/\\f[BIRP]//g; s/\\-/-/g' |
+        grep -n -i -B2 -A8 -E 'relay|rlimit_|^\.It use_pty|resource limit|SIGTSTP|SIGSTOP' | head -400
+    done
+
 # Generic driver for exploratory bats files. Each file brings up whatever
 # infrastructure it needs in setup_file() / teardown_file(). We pass
 # --no-sandbox because explore tests often need to talk to pcscd (Unix

@@ -97,15 +97,48 @@ unsafe fn set_limit(
     Ok(())
 }
 
-/// hogtie's own process, before it opens any file (review N2): the caller's
-/// RLIMIT_FSIZE must not cut the audit line, nor its SIGXFSZ kill hogtie
-/// mid-write. A write past the limit then fails with EFBIG, which the audit
-/// append turns into a refusal.
-pub fn shield_self() {
-    // SAFETY: setrlimit/getrlimit/signal on this process.
+/// hogtie's own process, first thing in `main` (review N2, R1, R2): every
+/// limit to the [`LIMITS`] table, so the caller cannot make hogtie run out
+/// of descriptors, memory or file size and so cause an `error` or cut the
+/// audit line; SIGXFSZ ignored (a write past the limit fails with EFBIG
+/// instead); and the job-control signals SIGTSTP, SIGTTIN and SIGTTOU
+/// ignored, so a caller cannot stop hogtie through sudo's relaying.
+/// SIGSTOP cannot be ignored: sudo does not relay it, and the caller (not
+/// root) cannot send it to a process sudo runs as root. All of it is reset
+/// for the action by [`prepare`].
+pub fn shield_self() -> io::Result<()> {
+    let strict = is_root();
+    for (r, cur, max) in LIMITS {
+        // SAFETY: getrlimit/setrlimit on this process.
+        unsafe { set_limit(strict, r, cur, max)? };
+    }
+    for sig in [libc::SIGXFSZ, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
+        // SAFETY: setting a signal's disposition to ignored.
+        if unsafe { libc::signal(sig, libc::SIG_IGN) } == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Block every signal that can be blocked (review R5); [`prepare`]'s hook
+/// empties the mask just before execve.
+pub fn block_signals() {
+    // SAFETY: sigprocmask with a full set on this thread.
     unsafe {
-        let _ = set_limit(false, libc::RLIMIT_FSIZE, INF, INF);
-        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+        let mut all: libc::sigset_t = std::mem::zeroed();
+        libc::sigfillset(&mut all);
+        libc::sigprocmask(libc::SIG_BLOCK, &all, std::ptr::null_mut());
+    }
+}
+
+/// Undo [`block_signals`] (an exec that returned).
+pub fn unblock_signals() {
+    // SAFETY: sigprocmask with an empty set on this thread.
+    unsafe {
+        let mut none: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut none);
+        libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
     }
 }
 

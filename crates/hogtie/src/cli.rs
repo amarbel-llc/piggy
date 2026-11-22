@@ -33,9 +33,14 @@ fn fail(code: u8, msg: impl std::fmt::Display) -> ExitCode {
 }
 
 pub fn main() -> ExitCode {
-    // Before any file is opened: the caller's file size limit must not cut
-    // hogtie's own writes, nor its SIGXFSZ kill it (review N2).
-    crate::child::shield_self();
+    // Before any file is opened: the caller's limits and job-control
+    // signals must not cut, starve or stop hogtie's own work (N2, R1, R2).
+    if let Err(e) = crate::child::shield_self() {
+        return fail(
+            3,
+            format!("cannot reset hogtie's own limits and signals: {e}"),
+        );
+    }
     let args: Vec<String> = match std::env::args_os()
         .skip(1)
         .map(|a| a.into_string())
@@ -144,6 +149,15 @@ fn exec(rest: &[String]) -> ExitCode {
     let caller = std::env::var("SUDO_UID")
         .ok()
         .and_then(|u| u.parse::<u32>().ok());
+    // Past its budget an account gets one fixed answer and the request is
+    // not evaluated at all: no reason to tell one request from another
+    // (review R3). Counted, not logged; the socket's sweep writes the count.
+    let budget = paths.refusals();
+    let over = Paths::ensure_private_dir(&budget).is_ok()
+        && audit::over_budget(&budget, caller, clock.boot).unwrap_or(false);
+    if over {
+        return fail(1, "refused: over the refusal budget; try again in a minute");
+    }
     let mut decision = match caller {
         Some(caller_uid) => decide(&paths, caller_uid, response, action, args, clock),
         None => Decision {
@@ -161,12 +175,11 @@ fn exec(rest: &[String]) -> ExitCode {
             },
         },
     };
-    // Refusals past an account's budget are counted, not logged (finding 2).
-    // A budget that cannot be read logs in full.
-    let logged = decision.record.outcome != "refused"
-        || match Paths::ensure_private_dir(&paths.refusals())
-            .and_then(|()| audit::admit_refusal(&paths.refusals(), caller, clock.boot))
-        {
+    // Every outcome a caller can cause but a run, refusals and hogtie's own
+    // errors alike (review R1), counts against the account's budget; past it
+    // they are counted, not logged. A budget that cannot be read logs in full.
+    let logged = decision.record.outcome == "started"
+        || match audit::admit_refusal(&budget, caller, clock.boot) {
             Ok(audit::Admit::Quiet) => false,
             Ok(admit) => {
                 decision.record.note = admit.note();
@@ -174,6 +187,12 @@ fn exec(rest: &[String]) -> ExitCode {
             }
             Err(_) => true,
         };
+    // From the `started` line to execve nothing may interrupt: every signal
+    // that can be is blocked; prepare's hook empties the mask just before
+    // execve (review R5). SIGKILL still can: then no exec-failed line.
+    if decision.run.is_ok() {
+        crate::child::block_signals();
+    }
     let written = if logged {
         Paths::ensure_private_dir(&paths.log)
             .and_then(|()| audit::append(&paths.audit_log(), &decision.record))
@@ -207,6 +226,7 @@ fn exec(rest: &[String]) -> ExitCode {
     if let Err(e) = audit::append(&paths.audit_log(), &failed) {
         eprintln!("hogtie: cannot write the audit log: {e}");
     }
+    crate::child::unblock_signals();
     fail(3, reason)
 }
 
@@ -239,11 +259,7 @@ fn serve_socket() -> ExitCode {
         Ok(l) => l,
         Err(e) => return fail(3, format!("{}: {e}", paths.socket().display())),
     };
-    match serve::serve(
-        &listener,
-        &NonceStore::new(paths.nonces()),
-        &paths.scratch(),
-    ) {
+    match serve::serve(&listener, &NonceStore::new(paths.nonces()), &paths) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(3, e),
     }

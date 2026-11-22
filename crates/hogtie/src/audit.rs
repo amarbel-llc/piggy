@@ -60,37 +60,79 @@ impl Admit {
     }
 }
 
+/// How long hogtie waits for an account's budget file lock before it gives
+/// up (review R2): the lock is per account, so a stopped holder can only
+/// delay its own account, and not for long.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One account's budget file: `<window start> <count> <quiet>`, locked
+/// while it is open.
+struct Budget {
+    file: std::fs::File,
+    start: u64,
+    count: u64,
+    quiet: u64,
+}
+
+impl Budget {
+    fn open(path: &Path) -> io::Result<Self> {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        // SAFETY: flock on a descriptor this function owns; released on close.
+        while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EWOULDBLOCK) || std::time::Instant::now() > deadline {
+                return Err(e);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut text = String::new();
+        file.read_to_string(&mut text)?;
+        let mut fields = text
+            .split_whitespace()
+            .map(|s| s.parse::<u64>().unwrap_or(0));
+        Ok(Self {
+            file,
+            start: fields.next().unwrap_or(0),
+            count: fields.next().unwrap_or(0),
+            quiet: fields.next().unwrap_or(0),
+        })
+    }
+
+    fn window_closed(&self, now: u64) -> bool {
+        now >= self.start.saturating_add(REFUSAL_WINDOW) || now < self.start
+    }
+
+    fn save(&mut self) -> io::Result<()> {
+        use std::io::Seek as _;
+        self.file.set_len(0)?;
+        self.file.rewind()?;
+        let line = format!("{} {} {}\n", self.start, self.count, self.quiet);
+        self.file.write_all(line.as_bytes())
+    }
+}
+
+fn budget_path(dir: &Path, uid: Option<u32>) -> std::path::PathBuf {
+    dir.join(uid.map_or_else(|| "none".to_string(), |u| u.to_string()))
+}
+
 /// Decide whether this refusal by `uid` (`None`: no SUDO_UID) is logged,
 /// at boot-clock second `now`, keeping each account's count in a root-only
 /// file under `dir`, locked while it is read and written.
 pub fn admit_refusal(dir: &Path, uid: Option<u32>, now: u64) -> io::Result<Admit> {
-    use std::io::{Read as _, Seek as _};
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let name = uid.map_or_else(|| "none".to_string(), |u| u.to_string());
-    let mut f = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(dir.join(name))?;
-    // SAFETY: flock on a descriptor this function owns; released on close.
-    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut text = String::new();
-    f.read_to_string(&mut text)?;
-    let mut fields = text
-        .split_whitespace()
-        .map(|s| s.parse::<u64>().unwrap_or(0));
-    let (mut start, mut count, mut quiet) = (
-        fields.next().unwrap_or(0),
-        fields.next().unwrap_or(0),
-        fields.next().unwrap_or(0),
-    );
+    let mut b = Budget::open(&budget_path(dir, uid))?;
+    let (mut start, mut count, mut quiet) = (b.start, b.count, b.quiet);
     let mut summary = None;
-    if now >= start.saturating_add(REFUSAL_WINDOW) || now < start {
+    if b.window_closed(now) {
         if quiet > 0 {
             summary = Some(quiet);
         }
@@ -106,10 +148,50 @@ pub fn admit_refusal(dir: &Path, uid: Option<u32>, now: u64) -> io::Result<Admit
             Admit::Quiet
         }
     };
-    f.set_len(0)?;
-    f.rewind()?;
-    f.write_all(format!("{start} {count} {quiet}\n").as_bytes())?;
+    (b.start, b.count, b.quiet) = (start, count, quiet);
+    b.save()?;
     Ok(admit)
+}
+
+/// Whether `uid` has spent its budget in the current window (review R3).
+/// If it has, the request is not evaluated at all: it is counted here and
+/// answered with one fixed refusal, so no answer can be told from another.
+pub fn over_budget(dir: &Path, uid: Option<u32>, now: u64) -> io::Result<bool> {
+    let mut b = Budget::open(&budget_path(dir, uid))?;
+    if b.window_closed(now) || b.count <= REFUSAL_BUDGET {
+        return Ok(false);
+    }
+    b.quiet += 1;
+    b.save()?;
+    Ok(true)
+}
+
+/// For every account whose window has closed with refusals not logged,
+/// append one `summary` line saying how many, and clear the count, so the
+/// counts reach the log even if that account never asks again (review R3).
+/// The socket's periodic sweep calls this.
+pub fn flush_summaries(dir: &Path, log: &Path, now: u64, wall: u64) -> io::Result<()> {
+    for e in std::fs::read_dir(dir)? {
+        let Ok(e) = e else { continue };
+        let Ok(mut b) = Budget::open(&e.path()) else {
+            continue;
+        };
+        if b.quiet == 0 || !b.window_closed(now) {
+            continue;
+        }
+        let caller_uid = e.file_name().to_str().and_then(|s| s.parse().ok());
+        let record = Record {
+            time: wall,
+            outcome: "summary",
+            caller_uid,
+            note: Admit::LogWithSummary(b.quiet).note(),
+            ..Default::default()
+        };
+        append(log, &record)?;
+        b.quiet = 0;
+        b.save()?;
+    }
+    Ok(())
 }
 
 /// No audit line is longer than this, whatever the caller sends: a record
@@ -186,32 +268,74 @@ fn bs(s: &str) -> String {
 }
 
 impl Record {
-    /// The JSON line, at most [`LINE_MAX`] bytes: every caller-derived
-    /// string is bounded, and a record still too long is written short.
+    /// The JSON line, at most [`LINE_MAX`] bytes: whole if it fits; else
+    /// with every caller-derived string bounded; else short, marked
+    /// `"truncated":true`.
     pub fn to_json(&self) -> String {
-        let full = self.render_full();
+        if self.fits_whole() {
+            return self.render(false);
+        }
+        let full = self.render(true);
         if full.len() <= LINE_MAX {
             return full;
         }
         self.render_short()
     }
 
-    fn render_full(&self) -> String {
+    /// Whether the line holds every field whole (review R4: a `started`
+    /// line must, or the run is refused).
+    pub fn fits_whole(&self) -> bool {
+        // The caller's bytes alone, unescaped, are a lower bound on the
+        // whole line: past the cap, do not render megabytes to find out.
+        if self.raw_bytes() > LINE_MAX {
+            return false;
+        }
+        self.render(false).len() <= LINE_MAX
+    }
+
+    fn raw_bytes(&self) -> usize {
+        let strs = |v: &[String]| v.iter().map(String::len).sum::<usize>();
+        let opt_len = |o: &Option<String>| o.as_ref().map_or(0, String::len);
+        opt_len(&self.reason)
+            + opt_len(&self.action)
+            + opt_len(&self.nonce)
+            + opt_len(&self.note)
+            + strs(&self.args)
+            + strs(&self.argv)
+            + self
+                .asked_by
+                .as_ref()
+                .map_or(0, |e| e.asker.cgroup.as_ref().map_or(0, String::len))
+            + self
+                .grant
+                .as_ref()
+                .map_or(0, |g| g.key_id.len() + strs(&g.principals))
+    }
+
+    fn render(&self, bound: bool) -> String {
+        let s = |x: &str| if bound { bs(x) } else { esc(x) };
+        let l = |x: &[String]| {
+            if bound {
+                list(&bounded_args(x))
+            } else {
+                list(x)
+            }
+        };
         let asked = opt(&self.asked_by, |e| {
             format!(
                 "{{\"pid\":{},\"cgroup\":{},\"unit\":{},\"issued\":{}}}",
                 e.asker.pid,
-                opt(&e.asker.cgroup, |c| bs(c)),
-                opt(&e.asker.unit().map(str::to_string), |u| bs(u)),
+                opt(&e.asker.cgroup, |c| s(c)),
+                opt(&e.asker.unit().map(str::to_string), |u| s(u)),
                 e.issued
             )
         });
         let grant = opt(&self.grant, |g| {
             format!(
                 "{{\"key_id\":{},\"serial\":{},\"principals\":{},\"valid_after\":{},\"valid_before\":{}}}",
-                bs(&g.key_id),
+                s(&g.key_id),
                 g.serial,
-                list(&bounded_args(&g.principals)),
+                l(&g.principals),
                 g.valid_after,
                 g.valid_before
             )
@@ -220,15 +344,15 @@ impl Record {
             "{{\"time\":{},\"outcome\":{},\"reason\":{},\"caller_uid\":{},\"action\":{},\"args\":{},\"nonce\":{},\"asked_by\":{},\"grant\":{},\"argv\":{},\"note\":{}}}",
             self.time,
             esc(self.outcome),
-            opt(&self.reason, |r| bs(r)),
+            opt(&self.reason, |r| s(r)),
             opt(&self.caller_uid, |u| u.to_string()),
-            opt(&self.action, |a| bs(a)),
-            list(&bounded_args(&self.args)),
-            opt(&self.nonce, |n| bs(n)),
+            opt(&self.action, |a| s(a)),
+            l(&self.args),
+            opt(&self.nonce, |n| s(n)),
             asked,
             grant,
-            list(&bounded_args(&self.argv)),
-            opt(&self.note, |n| bs(n)),
+            l(&self.argv),
+            opt(&self.note, |n| s(n)),
         )
     }
 
@@ -255,11 +379,16 @@ impl Record {
     }
 }
 
-/// Append `record`'s line, locked against other writers. A short write (a
-/// full disk, a file size limit) is cut back off, so the log never holds a
-/// partial line, and is returned as an error: the caller refuses.
+/// Append `record`'s line with no lock (review R2: a stopped holder of a
+/// lock would block every account): one `write` of the whole line, at most
+/// [`LINE_MAX`] + 1 bytes, on a file opened `O_APPEND`. The guarantee relied
+/// on is Linux's, not POSIX's: a write to a regular file holds the inode
+/// lock for its whole length, so two hogtie lines never interleave (POSIX
+/// promises only that each write starts at the end). A line the file size
+/// limit would cut is refused before anything is written; a write that is
+/// still short (a full disk) is ended with a newline if it can be, so the
+/// next line starts clean, and refuses.
 pub fn append(path: &Path, record: &Record) -> io::Result<()> {
-    use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut line = record.to_json();
     if line.len() > LINE_MAX {
@@ -271,16 +400,29 @@ pub fn append(path: &Path, record: &Record) -> io::Result<()> {
         .create(true)
         .mode(0o600)
         .open(path)?;
-    // SAFETY: flock on a descriptor this function owns; released on close.
-    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes one rlimit.
+    if unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut lim) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    let before = f.metadata()?.len();
-    if let Err(e) = f.write_all(line.as_bytes()).and_then(|()| f.sync_all()) {
-        let _ = f.set_len(before);
-        return Err(e);
+    let size = f.metadata()?.len();
+    if lim.rlim_cur != libc::RLIM_INFINITY && size + line.len() as u64 > lim.rlim_cur {
+        return Err(io::Error::other(
+            "the audit line would pass the file size limit",
+        ));
     }
-    Ok(())
+    let n = f.write(line.as_bytes())?;
+    if n != line.len() {
+        let _ = f.write(b"\n");
+        return Err(io::Error::other(format!(
+            "short write to the audit log ({n} of {} bytes)",
+            line.len()
+        )));
+    }
+    f.sync_all()
 }
 
 #[cfg(test)]
@@ -348,6 +490,56 @@ mod tests {
             admit_refusal(d.path(), Some(1000), 100 + REFUSAL_WINDOW).unwrap(),
             Admit::LogWithSummary(4),
             "the next window says how many were not logged"
+        );
+    }
+
+    #[test]
+    fn past_the_budget_an_account_is_over_until_the_window_closes() {
+        let d = crate::util::PrivateDir::new(&std::env::temp_dir(), "hogtie-budget").unwrap();
+        for _ in 0..=REFUSAL_BUDGET {
+            assert!(!over_budget(d.path(), Some(1000), 100).unwrap());
+            admit_refusal(d.path(), Some(1000), 100).unwrap();
+        }
+        assert!(over_budget(d.path(), Some(1000), 100).unwrap());
+        assert!(
+            !over_budget(d.path(), Some(1001), 100).unwrap(),
+            "per account"
+        );
+        assert!(!over_budget(d.path(), Some(1000), 100 + REFUSAL_WINDOW).unwrap());
+    }
+
+    #[test]
+    fn the_sweep_writes_the_count_of_unlogged_refusals_when_the_window_closes() {
+        let d = crate::util::PrivateDir::new(&std::env::temp_dir(), "hogtie-budget").unwrap();
+        let log = d.path().join("audit.log");
+        let dir = d.path().join("refusals");
+        std::fs::create_dir(&dir).unwrap();
+        for _ in 0..=REFUSAL_BUDGET {
+            admit_refusal(&dir, Some(1000), 100).unwrap();
+        }
+        for _ in 0..4 {
+            assert!(over_budget(&dir, Some(1000), 100).unwrap());
+        }
+        flush_summaries(&dir, &log, 130, 5000).unwrap();
+        assert!(!log.exists(), "the window is still open");
+        flush_summaries(&dir, &log, 100 + REFUSAL_WINDOW, 5000).unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(
+            text.contains("\"outcome\":\"summary\"") && text.contains("4 refusals"),
+            "{text}"
+        );
+        assert!(text.contains("\"caller_uid\":1000"), "{text}");
+        flush_summaries(&dir, &log, 100 + 2 * REFUSAL_WINDOW, 5000).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().lines().count(),
+            1,
+            "written once"
+        );
+        assert_eq!(
+            admit_refusal(&dir, Some(1000), 100 + 2 * REFUSAL_WINDOW).unwrap(),
+            Admit::Log,
+            "already reported"
         );
     }
 

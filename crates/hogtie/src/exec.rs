@@ -108,11 +108,27 @@ pub fn decide(
             &mut record,
         )
     };
-    match &run {
+    // A run's line records what ran (argv, once) and must hold it whole: a
+    // run whose line would be cut is refused instead (review R4).
+    let run = match run {
         Ok(r) => {
-            record.outcome = "started";
-            record.argv = r.argv.clone();
+            let mut started = record.clone();
+            started.outcome = "started";
+            started.args = Vec::new();
+            started.argv = r.argv.clone();
+            if started.fits_whole() {
+                record = started;
+                Ok(r)
+            } else {
+                Err(refused(
+                    "the record of this run would not fit the audit line whole",
+                ))
+            }
         }
+        Err(e) => Err(e),
+    };
+    match &run {
+        Ok(_) => {}
         Err(e) => {
             if e.internal {
                 record.outcome = "error";
@@ -236,10 +252,13 @@ mod tests {
             let config = format!(
                 "host = \"{}\"\nssh_keygen = \"{}\"\nca_keys = [\"{}\"]\nmax_grant_seconds = 86400\n\
                  [action.say]\nprogram = \"{}\"\nargv = [\"{{word}}\"]\nenv = {{ LANG = \"C\" }}\n\
-                 param = [{{ name = \"word\", kind = \"choice\", values = [\"hello\", \"bye\"] }}]\n",
+                 param = [{{ name = \"word\", kind = \"choice\", values = [\"hello\", \"bye\"] }}]\n\
+                 [action.long]\nprogram = \"{}\"\nargv = [\"{{w}}\"]\n\
+                 param = [{{ name = \"w\", kind = \"pattern\", chars = \"a-z\", max_len = 4096 }}]\n",
                 crate::testkit::HOST,
                 kit.ssh_keygen.display(),
                 kit.ca_line(),
+                crate::testkit::trusted_copy(kit.dir(), "echo").display(),
                 crate::testkit::trusted_copy(kit.dir(), "echo").display(),
             );
             crate::testkit::write_trusted(&paths.config, &config);
@@ -397,6 +416,38 @@ mod tests {
         let cert = h.kit.cert("a", &["say"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
         assert!(refusal(&h.exec(&r, "say", &["hello"], now)).contains("with no host"));
+    }
+
+    #[test]
+    fn a_started_line_holds_what_ran_whole_and_once() {
+        let h = Host::new();
+        let now = crate::util::now();
+        let word = "q".repeat(300);
+        let cert = h.kit.grant("a", &["long"], "+1h", &[]);
+        let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "long", &[&word]);
+        let d = h.exec(&r, "long", &[&word], now);
+        assert!(d.run.is_ok(), "{:?}", d.run);
+        let line = d.record.to_json();
+        assert_eq!(
+            line.matches(word.as_str()).count(),
+            1,
+            "once, whole: {line}"
+        );
+        assert!(
+            !line.contains("truncated") && !line.contains("bytes]"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_record_would_not_fit_is_refused() {
+        let h = Host::new();
+        let now = crate::util::now();
+        let word = "q".repeat(4000);
+        let cert = h.kit.grant("a", &["long"], "+1h", &[]);
+        let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "long", &[&word]);
+        let d = h.exec(&r, "long", &[&word], now);
+        assert!(refusal(&d).contains("would not fit"), "{}", refusal(&d));
     }
 
     #[test]
