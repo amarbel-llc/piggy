@@ -2501,13 +2501,13 @@ explore-ssh-cert-dialog-png DIR=".tmp/dialog-png":
     mkdir -p "{{ DIR }}"
     out="$(cd "{{ DIR }}" && pwd)"
     gtk=$(nix build .#piggy-askpass-gtk --no-link --print-out-paths)
-    typical=$'card 191755CF slot 83, the SSH certificate authority\nOpenSSH user certificate\nKey id: grant-1\nPrincipal: deploy-site\nPrincipal: restart-service\nCertified key: SHA256:VwTKavMZsIyhTV79SVgMR6phfKlJuiLfnyx6IPIaSdQ\nSigned by CA: SHA256:CyrC9JjEcSecv/WY2LVyRJsUBbRYx1XMVgJC5INNvM0\nSerial: 0\nValid: 2026-11-22T22:07:00Z to 2026-11-23T00:08:37Z\nLifetime: 2h 1m 37s\nCritical option: force-command: "/usr/bin/true"\nExtensions: permit-pty, permit-user-rc'
-    long=$(printf 'y%.0s' $(seq 1 256))
+    typical=$'card 191755CF slot 83, the SSH certificate authority\nOpenSSH user certificate\nKey id: grant-1\nPrincipal: deploy-site\nPrincipal: restart-service\nCertified key: SHA256:VwTKavMZsIyhTV79SVgMR6phfKlJuiLfnyx6IPIaSdQ\nSigned by CA: SHA256:CyrC9JjEcSecv/WY2LVyRJsUBbRYx1XMVgJC5INNvM0\nSerial: 0\nValid: 2026-11-22T22:07:00Z to 2026-11-23T00:08:37Z\nLifetime: 2h 1m 37s\nCritical option: force-command:\n  "/usr/bin/true"\nExtensions: permit-pty, permit-user-rc'
+    long=$(printf 'W%.0s' $(seq 1 80))
     worst=$'card 191755CF slot 83, the SSH certificate authority\nOpenSSH user certificate\nKey id: grant-with-a-key-id-of-the-longest-length-allowed-by-the-parser-64b\n'
     for p in a b c d e f g h; do worst+="Principal: principal-$p"$'\n'; done
     worst+=$'Certified key: SHA256:VwTKavMZsIyhTV79SVgMR6phfKlJuiLfnyx6IPIaSdQ\nSigned by CA: SHA256:CyrC9JjEcSecv/WY2LVyRJsUBbRYx1XMVgJC5INNvM0\nSerial: 18446744073709551615\nValid: 2026-11-22T22:07:00Z to 2026-11-23T22:12:00Z\nLifetime: 1d 5m\n'
-    worst+="Critical option: force-command: \"$long\""$'\n'
-    worst+="Critical option: source-address: \"$long\""$'\n'
+    worst+="Critical option: force-command:"$'\n'"  \"$long\""$'\n'
+    worst+="Critical option: source-address:"$'\n'"  \"$long\""$'\n'
     worst+=$'Critical option: verify-required\nExtensions: permit-X11-forwarding, permit-agent-forwarding, permit-port-forwarding, permit-pty, permit-user-rc'
     helper="$out/.render-one.sh"
     cat >"$helper" <<'RENDER'

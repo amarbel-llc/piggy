@@ -160,8 +160,15 @@ or one generated with a laxer policy, is refused before any prompt, and a
 CA slot's dialog is shown whatever the agent otherwise believes of the key's
 PIN policy.
 
-No CA slot's key ever performs key agreement (ECDH), on any path: the
-refusal is in the one place every ECDH goes through.
+The attestation must also be signed by the card's own attestation
+certificate (slot F9), exactly as for an operator act, and the whole check is
+made twice: before the prompt, and again after the card is reconnected, inside
+the signing session and before the PIN is verified, against the key the
+request named, so a card swapped while the dialog was open cannot pass.
+
+No CA slot's key ever performs key agreement (ECDH), on any path: it is
+refused before any PIN prompt or card access, in the one place every card
+operation goes through.
 
 What the kinds refuse:
 
@@ -178,15 +185,20 @@ What the kinds refuse:
   so is one that names a CA key other than the key asked to sign it.
   Everything the dialog shows is bounded and plain by refusal, not by
   escaping: a key id of at most 64 bytes and at most 8 principals of at most
-  64, of ASCII letters and digits and the characters . \_ @ : + - only;
+  64, of ASCII letters and digits and the characters . \_ @ : + - only, none
+  starting with a dash and none being "." or "..";
   critical options only *force-command* and
-  *source-address* (a printable-ASCII value of at most 256 bytes) and
+  *source-address* (a value of at most 80 printable-ASCII bytes with no
+  quote, no backslash, single spaces between words only and none at either
+  end, shown on a line of its own in quotes) and
   *verify-required*, and extensions only the five "permit" ones
   (X11-forwarding, agent-forwarding, port-forwarding, pty, user-rc), each at
   most once (*no-touch-required* and every unknown option are refused); a
   certified key that is not a well-formed ed25519, ECDSA (P-256, P-384,
-  P-521), RSA (2048 to 8192 bits) or security-key key, and a nonce that is not
-  32 bytes. *piggy tool sign*, *piggy sign-bytes* and *piggy tool req-cert*
+  P-521), RSA (2048 to 8192 bits) or security-key key, a nonce that is not
+  32 bytes, a key type that is not exactly one of OpenSSH's certificate
+  names, and any certificate whose dialog the parser computes would take more
+  than 24 lines at the dialog's 100-column wrap. *piggy tool sign*, *piggy sign-bytes* and *piggy tool req-cert*
   sign nothing with slot 83.
 - Every other slot refuses an OpenSSH certificate.
 

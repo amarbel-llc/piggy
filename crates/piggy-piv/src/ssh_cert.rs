@@ -52,6 +52,8 @@ pub enum SshCertRefusal {
     DuplicateOption { name: String },
     #[error("the certificate ended {secs} seconds ago")]
     Expired { secs: u64 },
+    #[error("the dialog for this certificate would take {lines} lines, over the {max} it may")]
+    TooTall { lines: usize, max: usize },
 }
 
 /// One critical option or extension: its name and its data, shown as text
@@ -149,6 +151,11 @@ fn key_field_strings(base: &str) -> Option<usize> {
 /// The base key type of a certificate key type, when it is one.
 fn base_key_type(cert_key_type: &str) -> Option<&str> {
     let stem = cert_key_type.strip_suffix(CERT_SUFFIX)?;
+    // Exactly the names OpenSSH spells: a stem with an `@` in it (for example
+    // `sk-ssh-ed25519@openssh.com-cert-v01@openssh.com`) is not one.
+    if stem.contains('@') {
+        return None;
+    }
     // `sk-ssh-ed25519-cert-v01@openssh.com` is spelled this way in OpenSSH.
     match stem {
         "sk-ssh-ed25519" => Some("sk-ssh-ed25519@openssh.com"),
@@ -201,25 +208,47 @@ fn string_of(bytes: &[u8]) -> Vec<u8> {
 const MAX_NAME: usize = 64;
 /// The most principals a certificate this CA signs may name.
 const MAX_PRINCIPALS: usize = 8;
-/// The longest option value, in bytes.
-const MAX_OPTION_VALUE: usize = 256;
+/// The longest option value, in bytes: it is shown on a line of its own, in
+/// quotes and indented, which fits the dialog's 100-column wrap.
+const MAX_OPTION_VALUE: usize = 80;
+/// The column the dialog wraps its text at (`piggy-askpass-gtk`'s
+/// `TEXT_WIDTH_CHARS`).
+const DIALOG_COLUMNS: usize = 100;
+/// The most rendered lines a certificate's dialog may take.
+pub const MAX_RENDERED_LINES: usize = 24;
 
 /// A key id or principal: 1 to [`MAX_NAME`] bytes of `[A-Za-z0-9._@:+-]` and
-/// nothing else. Plain ASCII by refusal, so no invisible, reordering,
-/// look-alike or separator character can make the dialog say something
-/// the certificate does not.
+/// nothing else, not starting with `-` and not `.` or `..`. Plain ASCII by
+/// refusal, so no invisible, reordering, look-alike or separator character can
+/// make the dialog say something the certificate does not, and no name reads
+/// as an ssh option or a path component.
 fn plain_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_NAME
+        && !s.starts_with('-')
+        && s != "."
+        && s != ".."
         && s.bytes().all(|b| {
             b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'@' | b':' | b'+' | b'-')
         })
 }
 
-/// An option value: printable ASCII (space to tilde), at most
-/// [`MAX_OPTION_VALUE`] bytes.
+/// An option or extension name as sent: printable ASCII, short.
 fn plain_text(s: &str) -> bool {
-    s.len() <= MAX_OPTION_VALUE && s.bytes().all(|b| (0x20..=0x7e).contains(&b))
+    s.len() <= MAX_NAME && s.bytes().all(|b| (0x20..=0x7e).contains(&b))
+}
+
+/// An option value: printable ASCII without `"` or `\` (so nothing is
+/// escaped and a quote cannot end the quoted text early), single spaces
+/// between words only (so padding cannot push text to a wrapped line's
+/// start), at most [`MAX_OPTION_VALUE`] bytes.
+fn plain_value(s: &str) -> bool {
+    s.len() <= MAX_OPTION_VALUE
+        && !s.starts_with(' ')
+        && !s.ends_with(' ')
+        && !s.contains("  ")
+        && s.bytes()
+            .all(|b| (0x20..=0x7e).contains(&b) && b != b'"' && b != b'\\')
 }
 
 /// What an option or extension carries.
@@ -281,7 +310,7 @@ fn named_data(
             Carries::Value => {
                 let mut inner = Reader::new(data);
                 match inner.text("option value") {
-                    Ok(s) if inner.done() && !s.is_empty() && plain_text(s) => Some(s.to_owned()),
+                    Ok(s) if inner.done() && !s.is_empty() && plain_value(s) => Some(s.to_owned()),
                     _ => return Err(undisplayable),
                 }
             }
@@ -420,7 +449,7 @@ pub fn parse_unsigned_certificate(data: &[u8]) -> Result<SshCertTbs, SshCertRefu
     let mut ca = Reader::new(ca_blob);
     ca.text("CA key type").map_err(bad)?;
 
-    Ok(SshCertTbs {
+    let tbs = SshCertTbs {
         cert_key_type,
         subject_fingerprint: fingerprint(&subject_blob),
         ca_fingerprint: fingerprint(ca_blob),
@@ -437,10 +466,35 @@ pub fn parse_unsigned_certificate(data: &[u8]) -> Result<SshCertTbs, SshCertRefu
             "a critical option",
         )?,
         extensions: named_data(extensions_packed, "extension", &EXTENSIONS, "an extension")?,
-    })
+    };
+    tbs.check_fits_the_dialog()?;
+    Ok(tbs)
 }
 
 impl SshCertTbs {
+    /// How many lines the dialog's text takes at the dialog's wrap column.
+    pub fn rendered_lines(&self) -> usize {
+        self.describe()
+            .lines()
+            .map(|l| 1 + l.chars().count().saturating_sub(1) / DIALOG_COLUMNS)
+            .sum()
+    }
+
+    /// Refuse a certificate whose dialog would take more than
+    /// [`MAX_RENDERED_LINES`]: the bound is computed here, whatever the field
+    /// limits are, so a limit changed later cannot silently push the PIN field
+    /// off the screen.
+    pub fn check_fits_the_dialog(&self) -> Result<(), SshCertRefusal> {
+        let lines = self.rendered_lines();
+        if lines > MAX_RENDERED_LINES {
+            return Err(SshCertRefusal::TooTall {
+                lines,
+                max: MAX_RENDERED_LINES,
+            });
+        }
+        Ok(())
+    }
+
     /// `valid_before - valid_after`, when the certificate has an end.
     pub fn lifetime_secs(&self) -> Option<u64> {
         if self.valid_before == FOREVER {
@@ -512,11 +566,10 @@ impl SshCertTbs {
         }
         for option in &self.critical_options {
             match &option.value {
-                Some(v) => s.push_str(&format!(
-                    "Critical option: {}: \"{}\"\n",
-                    option.name,
-                    v.replace('\\', "\\\\").replace('"', "\\\"")
-                )),
+                // The value on a line of its own, indented and in quotes: the
+                // parser admits no quote, backslash or padding in it, so no
+                // line of the dialog can start with text the certificate chose.
+                Some(v) => s.push_str(&format!("Critical option: {}:\n  \"{v}\"\n", option.name)),
                 None => s.push_str(&format!("Critical option: {}\n", option.name)),
             }
         }
@@ -1183,9 +1236,86 @@ mod tests {
         ));
     }
 
+    // The second Fable review (L1): a value is short enough for one dialog line
+    // and cannot be padded or quoted into looking like another field.
+    #[test]
+    fn an_option_value_is_one_short_plain_run_with_no_quote_or_backslash() {
+        let eighty = "x".repeat(80);
+        let mut cert = Cert::user();
+        cert.critical = packed(&[("force-command", Some(&eighty))]);
+        assert!(parse_unsigned_certificate(&cert.unsigned()).is_ok());
+        for value in [
+            "x".repeat(81),
+            "a  b".to_string(),
+            " lead".to_string(),
+            "trail ".to_string(),
+            "say \"hi\"".to_string(),
+            "back\\slash".to_string(),
+        ] {
+            let mut cert = Cert::user();
+            cert.critical = packed(&[("force-command", Some(&value))]);
+            assert!(
+                matches!(refused(&cert), SshCertRefusal::Undisplayable { .. }),
+                "{value:?}"
+            );
+        }
+        // One space between words stays (a command with an argument).
+        let mut cert = Cert::user();
+        cert.critical = packed(&[("force-command", Some("/usr/bin/true --flag"))]);
+        assert!(parse_unsigned_certificate(&cert.unsigned()).is_ok());
+    }
+
+    // L-extra: a name that could be read as an ssh option or a path component.
+    #[test]
+    fn a_name_cannot_start_with_a_dash_or_be_dot_or_dotdot() {
+        for bad in ["-oProxyCommand", "-", ".", ".."] {
+            let mut cert = Cert::user();
+            cert.key_id = bad;
+            assert!(
+                matches!(refused(&cert), SshCertRefusal::Undisplayable { .. }),
+                "key id {bad:?}"
+            );
+            let mut cert = Cert::user();
+            cert.principals = vec![bad];
+            assert!(
+                matches!(refused(&cert), SshCertRefusal::Undisplayable { .. }),
+                "principal {bad:?}"
+            );
+        }
+        // Dots and dashes inside a name are fine.
+        let mut cert = Cert::user();
+        cert.principals = vec!["a-b", "a.b", "..a", "a.."];
+        assert!(parse_unsigned_certificate(&cert.unsigned()).is_ok());
+    }
+
+    // L7: the certificate key type is exactly one OpenSSH spells.
+    #[test]
+    fn the_certificate_key_type_is_exactly_an_openssh_name() {
+        let mut cert = Cert::user();
+        cert.key_type = "sk-ssh-ed25519@openssh.com-cert-v01@openssh.com";
+        assert!(matches!(refused(&cert), SshCertRefusal::NotACertificate(_)));
+    }
+
+    // L2: the rendering bound is computed by the parser, not asserted by a test.
+    #[test]
+    fn a_certificate_whose_dialog_would_be_too_tall_is_refused() {
+        let mut tbs = parse_unsigned_certificate(&Cert::user().unsigned()).unwrap();
+        assert!(tbs.rendered_lines() <= MAX_RENDERED_LINES);
+        tbs.critical_options = vec![NamedData {
+            name: "force-command".into(),
+            value: Some("z".repeat(4_000)),
+        }];
+        assert!(tbs.rendered_lines() > MAX_RENDERED_LINES);
+        assert!(matches!(
+            tbs.check_fits_the_dialog(),
+            Err(SshCertRefusal::TooTall { .. })
+        ));
+    }
+
     #[test]
     fn the_dialog_cannot_be_made_to_read_as_other_lines_or_grow_without_bound() {
-        // A value that spells another option, and a long worst case.
+        // A value that spells another option: it is on a line of its own, in
+        // quotes, indented, so no line of the dialog starts with it.
         let mut cert = Cert::user();
         cert.critical = packed(&[("force-command", Some("/bin/true, source-address=10.0.0.1"))]);
         let text = parse_unsigned_certificate(&cert.unsigned())
@@ -1197,15 +1327,21 @@ mod tests {
             .collect();
         assert!(option_lines.is_empty(), "{text}");
         assert!(
-            text.contains("force-command: \"/bin/true, source-address=10.0.0.1\""),
+            text.contains(
+                "Critical option: force-command:\n  \"/bin/true, source-address=10.0.0.1\"\n"
+            ),
             "{text}"
         );
 
-        // The worst case that parses: its dialog fits 24 rendered lines
-        // (the operator-act dialog's old limit), whatever the certificate says.
+        // The worst case that parses (8 principals of 64, the longest key id,
+        // both values at the limit made of the widest characters, every
+        // option and extension): its dialog fits 24 rendered lines.
         let mut cert = Cert::user();
-        cert.principals = ["a"; 8].to_vec();
-        let value = "y".repeat(256);
+        let name = "w".repeat(64);
+        let name: &'static str = Box::leak(name.into_boxed_str());
+        cert.key_id = name;
+        cert.principals = [name; 8].to_vec();
+        let value = "W".repeat(80);
         cert.critical = packed(&[
             ("force-command", Some(&value)),
             ("source-address", Some(&value)),
@@ -1328,7 +1464,7 @@ mod tests {
             "Serial: 5",
             "Valid: 2026-11-18T11:06:40Z to 2026-11-18T13:06:40Z",
             "Lifetime: 2h",
-            "Critical option: force-command: \"/usr/bin/true\"",
+            "Critical option: force-command:\n  \"/usr/bin/true\"",
             "Extensions: permit-pty",
         ] {
             assert!(text.contains(want), "{want:?} not in:\n{text}");

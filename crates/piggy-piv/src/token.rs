@@ -786,6 +786,16 @@ fn attestation_cert_der(data: Vec<u8>) -> Vec<u8> {
 }
 
 impl PinSession<'_> {
+    /// The card's attestation certificate for a slot's key, read inside the
+    /// session. Needs no PIN.
+    pub fn attestation(&self, slot_id: u8) -> Result<Vec<u8>, PivError> {
+        let (data, sw) = self.transmit(&Apdu::yk_attest(slot_id))?;
+        if !sw.is_success() {
+            return Err(PivError::Apdu { sw: sw.as_u16() });
+        }
+        Ok(attestation_cert_der(data))
+    }
+
     /// A slot's PIN and touch policy as its attestation states them, read
     /// inside the session (so right after a GENERATE in the same session).
     /// Needs no PIN. Fails on a card that cannot attest the slot's key: see

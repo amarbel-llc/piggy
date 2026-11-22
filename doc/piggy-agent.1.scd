@@ -376,7 +376,11 @@ shaped like a certificate (an OpenSSH certificate or a DER TBSCertificate) only
 to an upstream that advertises the extension *ssh-ca-gate@piggy* in its answer
 to *query*, which a card agent of this version does for every key it holds;
 an older piggy agent, or any other ssh-agent, is refused before the data
-leaves the front.
+leaves the front. The supported topology is a front directly over the card
+agent that holds the key, one hop: a front never repeats an upstream's
+advertisement of the extension in its own answer, so a second front in the
+chain finds it unadvertised and refuses. (An older proxy between a front and a
+card agent does repeat it, and is not covered.)
 
 # HOLDER MODE
 

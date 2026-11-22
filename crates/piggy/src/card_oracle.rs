@@ -499,7 +499,9 @@ pub fn run_askpass_of_kind(
         // PIN is only the first line, and a program that did not say it
         // understood the kind is not believed to have shown what it carries.
         let mut lines = buf.lines();
-        let pin = lines.next().unwrap_or("").to_owned();
+        // Zeroized from the moment it is copied, so the refusal below drops it
+        // wiped too.
+        let mut pin = Zeroizing::new(lines.next().unwrap_or("").to_owned());
         let ack = lines.next();
         let rest_empty = lines.all(str::is_empty);
         let acknowledged = ack == Some(format!("piggy-askpass-ack {nonce}").as_str()) && rest_empty;
@@ -508,7 +510,6 @@ pub fn run_askpass_of_kind(
                 "the askpass program did not acknowledge the dialog kind (piggy-askpass-ack): it may not have shown what is being signed, so its answer is not used".into(),
             ));
         }
-        let mut pin = Zeroizing::new(pin);
         trim_line_end_in_place(&mut pin);
         if pin.is_empty() {
             return Err(OracleError::Other("askpass returned empty PIN".into()));

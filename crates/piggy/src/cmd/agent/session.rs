@@ -162,6 +162,11 @@ struct PinPrompt {
     prompt: Option<String>,
     /// Asked every time, read from and written to no cache.
     uncached: bool,
+    /// The key a CA slot's signature is for. The attestation check is made
+    /// again against it after the card is reconnected, before the PIN is
+    /// verified, so a card swapped between the first check and the signature
+    /// cannot pass.
+    ca_key: Option<KeyData>,
 }
 
 /// `PIGGY_ASKPASS_KIND` of the dialog that shows an OpenSSH certificate
@@ -176,6 +181,13 @@ impl PinPrompt {
             uncached: piggy_piv::slot::is_ca_slot(slot_id),
             ..Self::default()
         }
+    }
+
+    /// This prompt's signature is for `key`: a CA slot's attestation is
+    /// checked against it again inside the signing card session.
+    fn expecting_key(mut self, key: &KeyData) -> Self {
+        self.ca_key = Some(key.clone());
+        self
     }
 
     /// The prompt for signing `tbs` with the SSH CA of `guid`'s card: the
@@ -194,6 +206,7 @@ impl PinPrompt {
                 guid.short_id()
             )),
             uncached: true,
+            ca_key: None,
         }
     }
 }
@@ -411,6 +424,24 @@ impl PiggyAgent {
             &piggy_piv::PivSlot,
         ) -> Result<T, AgentError>,
     ) -> Result<T, AgentError> {
+        // A CA slot's key signs and does nothing else, and only for a key the
+        // request says it expects: both refused here, before any prompt or
+        // card access (the second Fable review, L4).
+        let is_ca = piggy_piv::slot::is_ca_slot(slot_id);
+        if is_ca && op != "sign" {
+            return Err(AgentError::Other(
+                format!(
+                    "slot {slot_id:02X} holds a certificate authority's key, which never performs key agreement"
+                )
+                .into(),
+            ));
+        }
+        if is_ca && how.ca_key.is_none() {
+            return Err(AgentError::Other(
+                format!("slot {slot_id:02X}: the request names no key to check the card against")
+                    .into(),
+            ));
+        }
         let mut attempt = 0u32;
         loop {
             let acquired = if needs_pin {
@@ -427,6 +458,21 @@ impl PiggyAgent {
             let slot = session
                 .read_slot(slot_id)
                 .map_err(|e| AgentError::Other(e.to_string().into()))?;
+
+            // The card may have changed since the check before the prompt (the
+            // lock is dropped for it, the card reconnected by GUID): check
+            // the attestation again, here, before the PIN is verified, so
+            // nothing sits between the VERIFY and the signature (piggy#325).
+            if let (true, Some(expected)) = (is_ca, &how.ca_key) {
+                let attestation = session
+                    .attestation(slot_id)
+                    .map_err(|e| AgentError::Other(e.to_string().into()))?;
+                let f9 = session
+                    .read_slot(0xF9)
+                    .map_err(|e| AgentError::Other(e.to_string().into()))?;
+                judge_ca_attestation(&attestation, f9.cert_der(), slot_id, expected)
+                    .map_err(|refusal| AgentError::Other(refusal.into()))?;
+            }
 
             if let Some(acq) = &acquired {
                 // A prompted PIN is unguarded and stays usable at 1 retry;
@@ -683,7 +729,8 @@ impl PiggyAgent {
                 PinPrompt::certifying(&key.guid, key.slot_id, tbs)
             }
             crate::operator_act::SlotData::Ordinary => PinPrompt::for_slot(key.slot_id),
-        };
+        }
+        .expecting_key(&key.public_key);
         let sig_bytes = self
             .on_verified_card(
                 "sign",
@@ -788,6 +835,14 @@ impl PiggyAgent {
                 if !self.upstreams.is_empty() {
                     supported.push(super::upstream::UPSTREAM_STATUS_EXT.to_string());
                     for name in self.upstreams.query_extension_names(&extension).await {
+                        // The gate advertisement is about the agent that holds
+                        // the key, not a relayable fact: a front never repeats
+                        // an upstream's, so a chain of fronts is refused at the
+                        // second hop (supported: front -> holder, one hop; the
+                        // second Fable review, L6).
+                        if name == crate::operator_act::SSH_CA_GATE_EXT {
+                            continue;
+                        }
                         if !supported.contains(&name) {
                             supported.push(name);
                         }
@@ -1135,7 +1190,23 @@ fn check_ca_slot_attestation(
             "slot {slot:02X}: the card did not attest the key ({e}); a certificate authority's key must be generated on the card"
         )
     })?;
-    let (pin, touch) = piggy_piv::attest::parse_policy(&attestation)
+    let f9 = token
+        .read_slot(0xF9)
+        .map_err(|e| format!("slot {slot:02X}: no card attestation certificate ({e})"))?;
+    judge_ca_attestation(&attestation, f9.cert_der(), slot, requested)
+}
+
+/// The judgement of a CA slot's attestation, shared by the check before the
+/// prompt and the repeat inside the signing session: it is for `requested`,
+/// states PIN always and touch always, and is signed by the card's F9
+/// certificate (an attestation anyone could have made proves nothing).
+fn judge_ca_attestation(
+    attestation: &[u8],
+    f9_cert: &[u8],
+    slot: u8,
+    requested: &KeyData,
+) -> Result<(), String> {
+    let (pin, touch) = piggy_piv::attest::parse_policy(attestation)
         .map_err(|e| format!("slot {slot:02X}: the attestation states no policy ({e})"))?;
     let policy = piggy_piv::KeyPolicy { pin, touch };
     if !policy.serves_certificate_authority() {
@@ -1143,11 +1214,18 @@ fn check_ca_slot_attestation(
             "slot {slot:02X}: {policy}; a certificate authority's key must be attested PIN always and touch always"
         ));
     }
-    let (_, attested_key) = piggy_piv::cert::extract_public_key(&attestation)
+    let (_, attested_key) = piggy_piv::cert::extract_public_key(attestation)
         .map_err(|e| format!("slot {slot:02X}: unreadable attestation ({e})"))?;
     if attested_key.key_data() != requested {
         return Err(format!(
             "slot {slot:02X}: the attestation is for a different key"
+        ));
+    }
+    let chains = piggy_piv::attest::attestation_signed_by(attestation, f9_cert)
+        .map_err(|e| format!("slot {slot:02X}: attestation chain unreadable ({e})"))?;
+    if !chains {
+        return Err(format!(
+            "slot {slot:02X}: the attestation is not signed by the card's attestation certificate"
         ));
     }
     Ok(())
@@ -3056,6 +3134,33 @@ mod tests {
         );
     }
 
+    /// A front does not pass on an upstream's `ssh-ca-gate@piggy`: only the
+    /// agent that holds the key can promise to apply the CA slot rules, so a
+    /// front behind a front finds the gate unadvertised and refuses
+    /// certificate-shaped data (supported topology: front to holder, one hop).
+    #[tokio::test]
+    async fn a_front_does_not_repeat_an_upstreams_ca_gate_advertisement() {
+        let stub = upstream_stub::StubUpstream::new(vec![])
+            .with_extensions(&[crate::operator_act::SSH_CA_GATE_EXT, "special@example"]);
+        let path = upstream_stub::spawn_stub("sess-gate-chain", stub);
+        let mut agent = PiggyAgent::new(Vec::new())
+            .with_proxy_only(true)
+            .with_upstream_pool(pool_for(path));
+        let resp = agent
+            .extension(ext_request("query"))
+            .await
+            .unwrap()
+            .expect("query response");
+        let names = decode_flat_query_names(&resp.details.clone().into_bytes());
+        assert!(names.iter().any(|n| n == "special@example"), "{names:?}");
+        assert!(
+            !names
+                .iter()
+                .any(|n| n == crate::operator_act::SSH_CA_GATE_EXT),
+            "{names:?}"
+        );
+    }
+
     #[tokio::test]
     async fn unknown_extension_forwarded_to_upstream() {
         let stub = upstream_stub::StubUpstream::new(vec![]).with_extensions(&["special@example"]);
@@ -3855,6 +3960,53 @@ mod tests {
                 .unwrap();
             assert_eq!(sig, upstream_stub::canned_signature(), "{label}");
         }
+    }
+
+    /// The second Fable review, L4: a CA slot's key agreement is refused
+    /// before the PIN is asked for (a prompt for an operation that was never
+    /// going to happen is a phishing prompt) and before the card is touched:
+    /// with no askpass configured a request that got as far as the prompt
+    /// would fail with a different message.
+    #[tokio::test]
+    async fn a_ca_slot_never_prompts_for_an_operation_other_than_signing() {
+        let agent = PiggyAgent::new(Vec::new());
+        for (op, slot) in [("ecdh", 0x83u8), ("ecdh", 0x82), ("ecdh-rebox", 0x83)] {
+            let err = agent
+                .on_verified_card::<()>(
+                    op,
+                    &sample_guid(),
+                    slot,
+                    true,
+                    &PinPrompt::for_slot(slot),
+                    |_, _| Ok(()),
+                )
+                .await
+                .expect_err("a CA slot must refuse key agreement");
+            assert!(
+                err.to_string().contains("never performs key agreement"),
+                "{op} {slot:02X}: {err}"
+            );
+        }
+    }
+
+    /// A signing request on a CA slot that does not say which key it expects
+    /// is refused: the key comparison after the card is reconnected cannot be
+    /// skipped by leaving it out.
+    #[tokio::test]
+    async fn a_ca_slot_signs_only_for_the_key_it_was_checked_against() {
+        let agent = PiggyAgent::new(Vec::new());
+        let err = agent
+            .on_verified_card::<()>(
+                "sign",
+                &sample_guid(),
+                0x83,
+                true,
+                &PinPrompt::for_slot(0x83),
+                |_, _| Ok(()),
+            )
+            .await
+            .expect_err("no expected key");
+        assert!(err.to_string().contains("names no key"), "{err}");
     }
 
     /// A proxy does not judge what it forwards: a request this build would
