@@ -217,10 +217,39 @@ fn an_expired_grant_is_refused_and_audited() {
 #[test]
 fn exec_without_sudo_uid_is_refused_and_audited() {
     let h = Host::new();
-    let out = h.hogtie(&["exec", "v1.x.y", "say", "hello"]);
+    // Big arguments too: what this refusal records is bounded (finding 2).
+    let big = "x".repeat(100_000);
+    let mut args = vec!["exec", "v1.x.y", "say"];
+    args.extend(std::iter::repeat_n(big.as_str(), 10));
+    let out = h.hogtie(&args);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("SUDO_UID"), "{}", stderr(&out));
-    assert!(h.audit()[0].contains("SUDO_UID is not set"));
+    let log = h.audit();
+    assert!(log[0].contains("SUDO_UID is not set"));
+    assert!(
+        log[0].len() < 16 * 1024,
+        "the line is {} bytes",
+        log[0].len()
+    );
+}
+
+#[test]
+fn the_nonce_is_issued_and_claimed_on_the_boot_clock() {
+    let h = Host::new();
+    let cert = h.kit.grant("a", &["say"], "+1h", &[]);
+    let out = h.sudo_exec(&h.respond(&cert, &["say", "hello"]), &["say", "hello"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let line = &h.audit()[0];
+    let issued: u64 = line
+        .split("\"issued\":")
+        .nth(1)
+        .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no issued time: {line}"));
+    assert!(
+        issued <= hogtie::util::boot_now(),
+        "issued {issued} is not a boot-clock time"
+    );
 }
 
 #[test]

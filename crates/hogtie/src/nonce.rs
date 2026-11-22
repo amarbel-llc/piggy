@@ -156,13 +156,9 @@ impl NonceStore {
     }
 
     fn ensure_account_dir(&self, uid: u32) -> io::Result<PathBuf> {
-        use std::os::unix::fs::DirBuilderExt as _;
         let d = self.account_dir(uid);
-        match std::fs::DirBuilder::new().mode(0o700).create(&d) {
-            Ok(()) => Ok(d),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(d),
-            Err(e) => Err(e),
-        }
+        crate::paths::ensure_dir(&d, 0o700)?;
+        Ok(d)
     }
 
     /// Remove `dir`'s expired nonces, and claim files a crashed `exec` left
@@ -201,15 +197,34 @@ impl NonceStore {
         Ok(live)
     }
 
-    /// Sweep every account's expired nonces (the socket does it now and then).
+    /// Sweep every account's expired nonces (the socket does it now and
+    /// then), and remove account directories left empty (review finding 6).
+    /// One unreadable account does not stop the others (finding 8): the
+    /// first error is returned once all have been tried.
     pub fn sweep(&self, now: u64) -> io::Result<()> {
-        for e in std::fs::read_dir(&self.dir)? {
-            let e = e?;
-            if let Some(uid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) {
-                Self::sweep_account(&e.path(), uid, now)?;
+        let mut first_error = None;
+        // In uid order, so the sweep is the same every time.
+        let mut accounts: Vec<(u32, PathBuf)> = std::fs::read_dir(&self.dir)?
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let uid = e.file_name().to_str()?.parse::<u32>().ok()?;
+                Some((uid, e.path()))
+            })
+            .collect();
+        accounts.sort();
+        for (uid, path) in accounts {
+            match Self::sweep_account(&path, uid, now) {
+                // Not remove_dir_all: a nonce issued meanwhile keeps it.
+                Ok(0) => {
+                    let _ = std::fs::remove_dir(&path);
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    first_error.get_or_insert(err);
+                }
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Issue a nonce to `asker`. Callers must not issue concurrently for one
@@ -348,6 +363,37 @@ mod tests {
         s.sweep(135).unwrap();
         assert!(!d.path().join("1000").join(nonce_hex(&old)).exists());
         assert!(d.path().join("1000").join(nonce_hex(&new)).exists());
+    }
+
+    #[test]
+    fn a_sweep_keeps_going_past_an_unreadable_account_and_drops_empty_ones() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (d, s) = store();
+        s.issue(&asker(1000), 100).unwrap();
+        s.issue(&asker(1001), 100).unwrap();
+        let locked = d.path().join("1000");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let swept = s.sweep(200);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(swept.is_err(), "the unreadable account is reported");
+        assert!(
+            !d.path().join("1001").exists(),
+            "1001 was swept, and its empty directory removed"
+        );
+    }
+
+    #[test]
+    fn an_account_directory_open_to_others_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (d, s) = store();
+        std::fs::create_dir(d.path().join("1000")).unwrap();
+        std::fs::set_permissions(
+            d.path().join("1000"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        let e = s.issue(&asker(1000), 100).unwrap_err().to_string();
+        assert!(e.contains("no permission beyond 700"), "{e}");
     }
 
     #[test]

@@ -75,6 +75,22 @@ pub fn trusted_copy(dir: &Path, name: &str) -> PathBuf {
     to
 }
 
+/// Write an executable script at `path`, mode 0755. Its bytes go to a
+/// side file first and a `cp` child writes the executable, for the reason
+/// [`trusted_copy`] gives (ETXTBSY).
+pub fn write_script(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let side = path.with_extension("src");
+    std::fs::write(&side, text).unwrap();
+    let st = Command::new(on_path("cp"))
+        .arg(&side)
+        .arg(path)
+        .status()
+        .expect("run cp");
+    assert!(st.success());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 impl Kit {
     pub fn new() -> Self {
         let dir = PrivateDir::new(&std::env::temp_dir(), "hogtie-kit").expect("kit dir");

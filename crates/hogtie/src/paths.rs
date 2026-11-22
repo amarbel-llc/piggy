@@ -109,25 +109,59 @@ impl Paths {
         Ok(())
     }
 
-    /// Create a root-only directory if it is missing.
+    /// A root-only directory (mode 0700), made if missing, checked if not.
     pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
-        use std::os::unix::fs::DirBuilderExt as _;
-        match std::fs::DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(path)
-        {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-            Err(e) => Err(e),
-        }
+        ensure_dir(path, 0o700)
     }
+}
+
+/// Make `path` a directory with exactly `mode`, or, if something is already
+/// there, check it rather than trust it (review finding 7): a real directory
+/// (not a symlink), owned by this process's euid (root in production), and
+/// granting no permission beyond `mode`.
+pub fn ensure_dir(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => return std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(path)?;
+    // SAFETY: geteuid cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    if !meta.is_dir() || meta.uid() != euid || meta.mode() & 0o777 & !mode != 0 {
+        return Err(io::Error::other(format!(
+            "{} must be a directory owned by uid {euid} with no permission beyond {mode:o}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::util::PrivateDir;
+
+    #[test]
+    fn an_existing_directory_is_checked_not_trusted() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = PrivateDir::new(&std::env::temp_dir(), "hogtie-dirs").unwrap();
+        let fresh = d.path().join("fresh");
+        assert!(ensure_dir(&fresh, 0o700).is_ok());
+        assert!(ensure_dir(&fresh, 0o700).is_ok(), "existing and right");
+        let open = d.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(ensure_dir(&open, 0o700).is_err(), "open to others");
+        assert!(ensure_dir(&open, 0o711).is_err(), "writable by others");
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&fresh, &link).unwrap();
+        assert!(ensure_dir(&link, 0o700).is_err(), "a symlink");
+        let file = d.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(ensure_dir(&file, 0o700).is_err(), "a file");
+    }
 
     fn me() -> u32 {
         // SAFETY: geteuid cannot fail.

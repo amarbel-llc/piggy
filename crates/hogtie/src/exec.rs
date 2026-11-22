@@ -182,6 +182,7 @@ fn steps(
         ssh_keygen: &config.ssh_keygen,
         cas: &config.cas,
         scratch: &paths.scratch(),
+        timeout: crate::verify::VERIFY_TIMEOUT,
     }
     .verify(&message, &sig, &principal(&config.host, action))
     .map_err(|e| match e {
@@ -221,6 +222,7 @@ mod tests {
             let uid = unsafe { libc::getuid() };
             let paths = Paths::under(root.path(), uid);
             std::fs::create_dir_all(paths.config.parent().unwrap()).unwrap();
+            crate::paths::ensure_dir(&paths.run, 0o711).unwrap();
             Paths::ensure_private_dir(&paths.nonces()).unwrap();
             let config = format!(
                 "host = \"{}\"\nssh_keygen = \"{}\"\nca_keys = [\"{}\"]\nmax_grant_seconds = 86400\n\
@@ -351,6 +353,25 @@ mod tests {
         let cert = h.kit.cert("a", &["h1:say", "h2:say"], "+1h", &[]);
         let r = h.respond_for(
             "h2",
+            &cert,
+            h.nonce_for(h.uid, now),
+            h.uid,
+            "say",
+            &["hello"],
+        );
+        assert!(refusal(&h.exec(&r, "say", &["hello"], now)).contains("signature refused"));
+    }
+
+    #[test]
+    fn a_message_signed_for_the_wrong_host_is_refused_with_a_grant_for_this_one() {
+        // This host is h2 and the grant names h2:say, but the caller signed a
+        // message for h1: hogtie rebuilds the message with its own host.
+        let h = Host::new();
+        h.set_host("h2");
+        let now = crate::util::now();
+        let cert = h.kit.cert("a", &["h2:say"], "+1h", &[]);
+        let r = h.respond_for(
+            "h1",
             &cert,
             h.nonce_for(h.uid, now),
             h.uid,

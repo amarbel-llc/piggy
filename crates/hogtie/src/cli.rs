@@ -186,26 +186,30 @@ fn exec(rest: &[String]) -> ExitCode {
 }
 
 fn serve_socket() -> ExitCode {
-    use std::os::unix::fs::PermissionsExt as _;
     let paths = Paths::for_this_binary();
     if let Err(e) = paths.check_running_as_root() {
         return fail(3, e);
     }
-    for dir in [&paths.run, &paths.nonces()] {
-        if let Err(e) = Paths::ensure_private_dir(dir) {
+    // The runtime directory's contents are root-only; the socket in it must
+    // still be reachable, so the directory itself has search permission.
+    for (dir, mode) in [
+        (paths.run.clone(), 0o711),
+        (paths.nonces(), 0o700),
+        (paths.scratch(), 0o700),
+    ] {
+        if let Err(e) = crate::paths::ensure_dir(&dir, mode) {
             return fail(3, format!("{}: {e}", dir.display()));
         }
-    }
-    // The runtime directory's contents are root-only; the socket in it must
-    // still be reachable, so the directory itself gets search permission.
-    if let Err(e) = std::fs::set_permissions(&paths.run, std::fs::Permissions::from_mode(0o711)) {
-        return fail(3, format!("{}: {e}", paths.run.display()));
     }
     let listener = match serve::bind(&paths.socket()) {
         Ok(l) => l,
         Err(e) => return fail(3, format!("{}: {e}", paths.socket().display())),
     };
-    match serve::serve(&listener, &NonceStore::new(paths.nonces())) {
+    match serve::serve(
+        &listener,
+        &NonceStore::new(paths.nonces()),
+        &paths.scratch(),
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(3, e),
     }

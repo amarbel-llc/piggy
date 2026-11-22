@@ -97,13 +97,15 @@ pub fn answer(stream: &mut UnixStream, store: &NonceStore, now: u64) -> io::Resu
 }
 
 /// Serve forever (until the listener fails).
-pub fn serve(listener: &UnixListener, store: &NonceStore) -> io::Result<()> {
+pub fn serve(listener: &UnixListener, store: &NonceStore, scratch: &Path) -> io::Result<()> {
     let mut last_sweep = 0;
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(s) => s,
             Err(e) => {
+                // Out of descriptors, say: back off rather than spin.
                 eprintln!("hogtie serve: accept: {e}");
+                std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
         };
@@ -112,6 +114,9 @@ pub fn serve(listener: &UnixListener, store: &NonceStore) -> io::Result<()> {
         if now >= last_sweep + crate::nonce::TTL_SECONDS {
             if let Err(e) = store.sweep(now) {
                 eprintln!("hogtie serve: sweep: {e}");
+            }
+            if let Err(e) = crate::verify::sweep_scratch(scratch, crate::verify::SCRATCH_MAX_AGE) {
+                eprintln!("hogtie serve: scratch sweep: {e}");
             }
             last_sweep = now;
         }
