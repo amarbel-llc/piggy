@@ -289,6 +289,43 @@ fn a_small_file_size_limit_does_not_cut_the_audit_line() {
 }
 
 #[test]
+fn a_hard_file_size_limit_refuses_without_a_partial_line() {
+    // The caller lowers the HARD limit too, which hogtie (not root here)
+    // cannot raise: the write fails part way, the partial line is cut
+    // back off, and nothing runs.
+    use std::os::unix::process::CommandExt as _;
+    let h = Host::new();
+    let cert = h.kit.grant("a", &["say"], "+1h", &[]);
+    let r = h.respond(&cert, &["say", "hello"]);
+    let mut cmd = Command::new(HOGTIE);
+    cmd.args(["exec", &r, "say", "hello"])
+        .env("HOGTIE_TEST_ROOT", h.root.path())
+        .env("SUDO_UID", Host::uid());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            let lim = libc::rlimit {
+                rlim_cur: 64,
+                rlim_max: 64,
+            };
+            libc::setrlimit(libc::RLIMIT_FSIZE, &lim);
+            Ok(())
+        });
+    }
+    let out = cmd.output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{} {:?}",
+        stderr(&out),
+        out.status
+    );
+    assert!(out.stdout.is_empty(), "the action ran");
+    let text = std::fs::read_to_string(h.root.path().join("log/audit.log")).unwrap_or_default();
+    assert_eq!(text, "", "a partial line was left");
+}
+
+#[test]
 fn the_nonce_is_issued_and_claimed_on_the_boot_clock() {
     let h = Host::new();
     let cert = h.kit.grant("a", &["say"], "+1h", &[]);

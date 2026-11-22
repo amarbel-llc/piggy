@@ -155,8 +155,8 @@ fn exec(rest: &[String]) -> ExitCode {
                 time: now,
                 outcome: "refused",
                 reason: Some("SUDO_UID is not set".into()),
-                action: Some(audit::bounded(action)),
-                args: audit::bounded_args(args),
+                action: Some(action.clone()),
+                args: args.to_vec(),
                 ..Default::default()
             },
         },

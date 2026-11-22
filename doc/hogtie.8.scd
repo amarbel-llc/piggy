@@ -70,9 +70,11 @@ attempt, whether that attempt runs or is refused.
 *exec* _RESPONSE_ _ACTION_ [_ARG_...]
 	Run through *sudo*. hogtie takes the caller's account from
 	*SUDO_UID*, refuses without it, and refuses unless it runs as root.
-	More than 32 arguments, or one longer than 4096 bytes, is refused
-	first. Then, in order, failing closed at the first refusal: the
-	response parses; the nonce is claimed from the caller's own account
+	An _ACTION_ that is not an action name (it is never echoed), more
+	than 32 arguments, or one longer than 4096 bytes, is refused first.
+	Then, in order, failing closed at the first refusal: the response
+	parses; */run/hogtie* and its nonce store are root's directories with
+	the modes *serve* gives them; the nonce is claimed from the caller's own account
 	directory (from here on it is used up); it has not expired; the
 	configuration is owned by root, writable by no one else, and parses;
 	the action is declared; the message rebuilt from this host's
@@ -88,9 +90,17 @@ attempt, whether that attempt runs or is refused.
 	The action starts with the declared environment and nothing else, in
 	*/*, with umask 022, every signal at its default disposition and none
 	blocked, no descriptor but standard input, output and error (which are
-	the caller's), and the resource limits of pid 1 (what a service gets);
-	where those cannot be read, every soft limit is raised to its hard
-	limit. Nothing of the caller's process state is inherited.
+	the caller's), fixed resource limits (the kernel's defaults for root,
+	with open files 1024 soft and 524288 hard), nice 0, the default
+	scheduler, every CPU, oom_score_adj 0 and the default I/O priority.
+	Any of these that cannot be set refuses the exec. Left as inherited,
+	deliberately: the controlling terminal, the session and process group,
+	the cgroup, namespaces, the seccomp filter and the no_new_privs bit.
+
+	hogtie's own process raises its file size limit and ignores SIGXFSZ
+	before it opens any file, so the caller's limits cannot cut the audit
+	line; a write that still fails part way is cut back off and refuses.
+	A clock that cannot be read refuses.
 
 	The response travels on the command line, where other processes of
 	the same account can read it while hogtie runs. That is accepted:
@@ -99,7 +109,9 @@ attempt, whether that attempt runs or is refused.
 
 *serve*
 	Run the nonce socket, as root. It makes */run/hogtie* (mode 0711),
-	*/run/hogtie/nonces* and */run/hogtie/scratch* (0700), binds
+	*/run/hogtie/nonces*, */run/hogtie/scratch* and
+	*/run/hogtie/refusals* (0700), refuses to start unless */run/hogtie*
+	is on a tmpfs (a reboot must empty the nonce store), binds
 	*/run/hogtie/nonce.sock* (0666, replacing whatever is there) and
 	serves one connection at a time. The client sends nothing; it reads
 	one line, *ok* _nonce_ _seconds-left_ or *refused* _reason_. The
@@ -230,9 +242,11 @@ arguments.
 # AUDIT
 
 Every *exec* appends one JSON line to */var/log/hogtie/audit.log* (root,
-0600, synced): the time, the outcome and reason, the caller's uid, the
-action and arguments (each at most 256 bytes and at most 32 of them, with
-markers for the rest, since anyone the sudo rule admits can be refused),
+0600, locked, synced), never longer than 4096 bytes: every string that
+can carry caller bytes is cut to 256 bytes and lists to 32 items, with
+markers for the rest, and a record still too long is written short, with
+*"truncated":true*. A line holds the time, the outcome and reason, the
+caller's uid, the action and arguments,
 the nonce, who asked for it (pid, cgroup, unit, and when, on the boot
 clock), the grant (key id, serial, principals, validity: only once
 ssh-keygen has accepted the signature, so a copied certificate in a
@@ -241,7 +255,14 @@ is *started* (written just before the exec), *refused* (the caller's
 request), *error* (hogtie's own failure) or, on a second line after a
 *started* one whose exec returned, *exec-failed*. A line that cannot be
 written refuses the action. The action's exit status is not recorded:
-hogtie becomes the action. Refusals are not rate limited.
+hogtie becomes the action.
+
+Anyone the sudo rule admits can be refused at will, so refusals are
+budgeted per account: 20 per minute (on the boot clock) are logged in
+full; the 21st line says the rest are counted, not logged; the first line
+of the next minute says how many were not. The counts are kept in
+*/run/hogtie/refusals*, locked; a count that cannot be read logs in full.
+Runs and hogtie's own errors are always logged.
 
 # DEPLOYMENT
 
@@ -282,8 +303,8 @@ The NixOS module (the socket unit, the sudo rule, the configuration from
 the host's declaration), revocation of a grant before it expires, an
 in-process verifier, recording the action's exit status, binding the
 grant to an account or the caller's unit, a *path* kind that cannot be
-swapped (*openat2* *RESOLVE_BENEATH* under a held descriptor), and rate
-limiting refusals are not built. Linux only.
+swapped (*openat2* *RESOLVE_BENEATH* under a held descriptor) are not
+built. Linux only; a kernel without *close_range*(2) refuses every exec.
 
 # SEE ALSO
 

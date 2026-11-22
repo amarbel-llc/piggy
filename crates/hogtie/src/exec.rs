@@ -18,7 +18,7 @@
 //! The decision and its audit record are returned; `main` appends the
 //! record and only then executes.
 
-use crate::audit::{self, Record};
+use crate::audit::Record;
 use crate::config::Config;
 use crate::grant::{GrantPolicy, check_grant};
 use crate::message::{MAX_ARG_LEN, MAX_ARGS, Request, principal};
@@ -77,14 +77,14 @@ pub fn decide(
     args: &[String],
     clock: Clock,
 ) -> Decision {
-    // Anyone the sudo rule admits can call this with no grant at all: what a
-    // refusal records is bounded before anything else (review finding 2).
+    // Anyone the sudo rule admits can call this with no grant at all: the
+    // record is bounded where it is written (Record::to_json, LINE_MAX).
     let mut record = Record {
         time: clock.wall,
         outcome: "refused",
         caller_uid: Some(caller_uid),
-        action: Some(audit::bounded(action)),
-        args: audit::bounded_args(args),
+        action: Some(action.to_string()),
+        args: args.to_vec(),
         ..Default::default()
     };
     // The action must be a config key's shape before anything else, and is

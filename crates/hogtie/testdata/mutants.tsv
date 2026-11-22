@@ -12,7 +12,18 @@ nonce-duplicate-key-accepted	src/nonce.rs	if !slot_was_empty {	if false {
 nonce-sweep-stops-at-error	src/nonce.rs	first_error.get_or_insert(err);	return Err(err);
 nonce-empty-accounts-kept	src/nonce.rs	let _ = std::fs::remove_dir(&path);	let _ = &path;
 serve-uid-not-peer	src/serve.rs	    Ok(Asker {\n        uid,	    Ok(Asker {\n        uid: uid + 1,
-serve-wall-clock	src/serve.rs	let now = crate::util::boot_now();	let now = crate::util::now();
+serve-wall-clock	src/serve.rs	let now = match crate::util::boot_now() {	let now = match Ok::<u64, std::io::Error>(crate::util::now()) {
+exec-bad-action-not-first	src/exec.rs	    let run = if !crate::message::is_action_name(action) {	    let run = if false {
+exec-store-unchecked	src/exec.rs	crate::paths::check_dir(&paths.nonces(), 0o700).map_err(broken)?;	let _ = 0;
+audit-no-line-cap	src/audit.rs	if full.len() <= LINE_MAX {	if true {
+audit-no-budget	src/audit.rs	(None, c) if c <= REFUSAL_BUDGET => Admit::Log,	(None, _) => Admit::Log,
+audit-summary-lost	src/audit.rs	summary = Some(quiet);	let _ = quiet;
+audit-partial-line-kept	src/audit.rs	let _ = f.set_len(before);	let _ = before;
+cli-budget-ignored	src/cli.rs	Ok(audit::Admit::Quiet) => false,	Ok(audit::Admit::Quiet) => true,
+child-sigxfsz-default	src/child.rs	libc::signal(libc::SIGXFSZ, libc::SIG_IGN);	libc::signal(libc::SIGXFSZ, libc::SIG_DFL);
+child-fsize-not-raised	src/child.rs	let _ = set_limit(false, libc::RLIMIT_FSIZE, INF, INF);	let _ = 0;
+child-nofile-not-default	src/child.rs	(libc::RLIMIT_NOFILE, 1024, 524_288),	(libc::RLIMIT_NOFILE, 524_288, 524_288),
+child-affinity-kept	src/child.rs	libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &all) == 0,	true,
 message-trailing-accepted	src/message.rs	r.end()?;	let _ = 0;
 message-leading-dash-action	src/message.rs	&& b[0] != b'-'	&& true
 message-nul-accepted	src/message.rs	 || a.as_bytes().contains(&0)	
@@ -42,7 +53,6 @@ verify-no-timeout	src/verify.rs	if Instant::now() >= deadline {	if false {
 verify-any-ca-type	src/verify.rs	if !CA_TYPES.contains(&key_type.as_str()) {	if false {
 verify-scratch-sweeps-new	src/verify.rs	if old && e.file_name()	if e.file_name()
 exec-undeclared-falls-through	src/exec.rs	        .get(action)	        .get(action).or_else(|| config.actions.values().next())
-exec-args-recorded-whole	src/exec.rs	        args: audit::bounded_args(args),	        args: args.to_vec(),
 exec-host-from-caller	src/exec.rs	        host: config.host.clone(),	        host: "h1".into(),
 exec-nonce-wall-clock	src/exec.rs	.claim(caller_uid, &response.nonce, clock.boot)	.claim(caller_uid, &response.nonce, clock.wall)
 exec-claim-root-account	src/exec.rs	.claim(caller_uid, &response.nonce, clock.boot)	.claim(0, &response.nonce, clock.boot)
@@ -68,14 +78,13 @@ paths-program-directory	src/paths.rs	if !meta.is_file() || !owner_ok || meta.mod
 paths-program-any-owner	src/paths.rs	let owner_ok = meta.uid() == 0 || meta.uid() == self.root_uid;	let owner_ok = true;
 paths-any-euid	src/paths.rs	if euid != self.root_uid {	if false {
 paths-dir-any-mode	src/paths.rs	if !meta.is_dir() || meta.uid() != euid || meta.mode() & 0o777 & !mode != 0 {	if !meta.is_dir() || meta.uid() != euid {
-cli-no-sudo-uid-default	src/cli.rs	let decision = match std::env::var("SUDO_UID")	let decision = match std::env::var("SUDO_UID").or_else(|_| Ok::<_, std::env::VarError>("0".into()))
-cli-no-sudo-uid-args-whole	src/cli.rs	                args: audit::bounded_args(args),	                args: args.to_vec(),
+cli-no-sudo-uid-default	src/cli.rs	let caller = std::env::var("SUDO_UID")	let caller = std::env::var("SUDO_UID").or_else(|_| Ok::<_, std::env::VarError>("0".into()))
 cli-audit-failure-ignored	src/cli.rs	        return fail(3, format!("refused: cannot write the audit log: {e}"));	        eprintln!("{e}");
 cli-action-env-inherited	src/cli.rs	        .env_clear()	        .env_remove("HOGTIE_NOTHING")
 cli-action-cwd-kept	src/cli.rs	        .current_dir("/")	        .current_dir(".")
 cli-action-state-inherited	src/cli.rs	    crate::child::prepare(&mut cmd);	    let _ = &mut cmd;
 child-umask-kept	src/child.rs	libc::umask(0o022);	libc::umask(0o077);
-child-signals-kept	src/child.rs	libc::sigaction(sig, &dfl, std::ptr::null_mut());	let _ = (sig, &dfl);
+child-signals-kept	src/child.rs	if libc::sigaction(sig, &dfl, std::ptr::null_mut()) != 0 {	if false && libc::sigaction(sig, &dfl, std::ptr::null_mut()) != 0 {
 child-mask-kept	src/child.rs	if libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut()) != 0 {	if false {
-child-limits-kept	src/child.rs	if libc::setrlimit(*r, lim) != 0 {	if false && libc::setrlimit(*r, lim) != 0 {
+child-limits-kept	src/child.rs	set_limit(strict, r, cur, max)?;	let _ = (strict, r, cur, max);
 child-fds-kept	src/child.rs	if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) != 0 {	if false {
