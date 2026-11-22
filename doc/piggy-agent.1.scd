@@ -465,15 +465,13 @@ that fades in and out, and for 2 seconds after they stop, counted down over
 the clock; the dialog gives up (exit 5) when the clock runs out, and in any
 case 5 minutes after it opened, however much input it has had.
 Pressing Return to confirm leaves the clock as it is. The helper
-refuses a class it does not know. The dialog that takes the PIN must show
-the act's whole text, and neither PIN dialog scrolls, so the helper
-refuses an act whose rendered prompt is taller than 24 lines (a line longer
-than 100 characters counting as the lines it wraps to; the dialog wraps
-there, so a markl-id takes one line) before any dialog
-opens; it never elides the text. The refusal exits 3 with its reason on
-standard output, naming the limit, and the agent reports the act
-_cancelled_ with that reason, so the caller can shorten the text. A tty
-prompt has no such limit. On a tty, the helper's and the agent's own, an
+refuses a class it does not know. The dialog that takes the PIN shows
+the act's whole text, wrapped at 100 characters (so a markl-id takes one
+line), never cut; it does not scroll, and since 2026-11-21 it has no height
+limit either (the operator's ruling, piggy#400: the earlier limit of 24
+rendered lines refused every _piggy-act-v1_ card act, whose required fields
+alone render to more; the one-screen rule is waived for acts until the
+re-examination that issue tracks). On a tty, the helper's and the agent's own, an
 operator act holds input the same 2 seconds (RFC 0012 §2.6): the text is
 shown with echo off, a countdown line runs, and everything typed meanwhile,
 a partial line included, is discarded before the PIN line appears. Any askpass may refuse the same way: exit 3 with

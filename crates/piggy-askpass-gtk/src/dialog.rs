@@ -619,8 +619,8 @@ fn key_action(is_escape: bool, held: bool) -> KeyAction {
 }
 
 /// The width the act's text wraps at, in characters: wide enough for a
-/// fully qualified markl-id (92) on one line, and the width the script's
-/// height limit (`operator_act_wrap_columns`) assumes.
+/// fully qualified markl-id (92) on one line, and the width the agent's
+/// rendered-height record (`operator_act::ASKPASS_WRAP_COLUMNS`) assumes.
 const TEXT_WIDTH_CHARS: i32 = 100;
 
 /// The bech32 alphabet a markl-id's body is written in (RFC 0011).

@@ -164,6 +164,12 @@ impl CardSigner {
         self.token.guid().short_id()
     }
 
+    /// The issuer as the prompts, the notices and the certificate act's
+    /// description name it: `card <short GUID> slot <hex>`.
+    pub(crate) fn describe_issuer(&self) -> String {
+        format!("card {} slot {:02X}", self.card_label(), self.slot)
+    }
+
     /// The card's operator-act key, slot 9C's: the key that seals the
     /// `piggy-certificate-v1` act over what this card's CA slot signs (RFC
     /// 0012 §3.2). Read from the slot's certificate, and its attested policy

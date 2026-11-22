@@ -221,17 +221,12 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
     // before the first PIN prompt, so a missing agent never costs a card
     // signature.
     let operator = certificate_act::preflight(&signer, csr_algorithm, act_out)?;
-    let describing = format!(
-        "{} certificate under profile {} for {} (serial {})",
-        verb.article_kind(),
-        args.profile,
-        profile.names.join(", "),
-        hex::encode(random)
-    );
+    let issuer = signer.describe_issuer();
+    let describing = certificate_act::describe_issued(verb, &profile.names);
     eprintln!(
-        "piggy ca: card {} slot {:02X} signs {describing}; two PIN prompts and touches: the certificate's, then the certificate act's (slot 9C, through the agent)",
-        signer.card_label(),
-        signer.slot()
+        "piggy ca: {issuer} signs {describing} (profile {}, serial {}); two PIN prompts and touches: the certificate's, then the certificate act's (slot 9C, through the agent)",
+        args.profile,
+        hex::encode(random)
     );
 
     let inputs = Inputs {
@@ -261,6 +256,7 @@ pub(crate) fn execute(verb: Verb, args: IssuanceArgs) -> Result<(), Failure> {
         CertifiedAs::Link,
         &operator.key,
         now.as_secs(),
+        &issuer,
         &describing,
     )?;
     let act_digest = certificate_act::seal_and_write(&act, &operator)?;

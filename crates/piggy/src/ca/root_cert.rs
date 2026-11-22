@@ -60,14 +60,14 @@ pub(crate) struct RootPlan {
 }
 
 impl RootPlan {
-    /// One line naming the certificate, for the PIN prompt and the notice.
+    /// What the certificate is, for the PIN prompt, the notice and the act's
+    /// description: its CN, what it may sign and the names it permits. The
+    /// validity is the act's `not-after`; the serial is on the terminal.
     pub(crate) fn describe(&self) -> String {
         format!(
-            "the root certificate CN={} for {} (valid {} days, serial {})",
+            "the root CN={} (CA, pathlen 1) for {}",
             self.common_name,
             self.permitted_dns.join(", "),
-            (self.validity.not_after.as_secs() - self.validity.not_before.as_secs()) / 86_400,
-            hex::encode(&self.serial)
         )
     }
 }
@@ -173,11 +173,12 @@ pub(crate) fn execute(args: RootCertArgs) -> Result<(), Failure> {
     // before the first PIN prompt, so a missing agent never costs a card
     // signature.
     let operator = certificate_act::preflight(&signer, signer.algorithm(), act_out)?;
+    let issuer = signer.describe_issuer();
     let describing = plan.describe();
     eprintln!(
-        "piggy ca root-cert: card {} slot {:02X} signs {describing}; two PIN prompts and touches: the certificate's, then the certificate act's (slot 9C, through the agent)",
-        signer.card_label(),
-        signer.slot()
+        "piggy ca root-cert: {issuer} signs {describing} (valid {} days, serial {}); two PIN prompts and touches: the certificate's, then the certificate act's (slot 9C, through the agent)",
+        (plan.validity.not_after.as_secs() - plan.validity.not_before.as_secs()) / 86_400,
+        hex::encode(&plan.serial)
     );
     let point = signer.pubkey_point().to_vec();
     let algorithm = signer.algorithm();
@@ -200,6 +201,7 @@ pub(crate) fn execute(args: RootCertArgs) -> Result<(), Failure> {
         CertifiedAs::Root,
         &operator.key,
         now.as_secs(),
+        &issuer,
         &describing,
     )?;
     let act_digest = certificate_act::seal_and_write(&act, &operator)?;
@@ -270,9 +272,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(skewed.validity.not_before, NOW);
-        assert!(plan.describe().contains("CN=shithub root"));
-        assert!(plan.describe().contains("github.com, api.github.com"));
-        assert!(plan.describe().contains("3650 days"));
+        assert_eq!(
+            plan.describe(),
+            "the root CN=shithub root (CA, pathlen 1) for github.com, api.github.com"
+        );
     }
 
     #[test]

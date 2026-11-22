@@ -423,8 +423,8 @@ pub fn run_askpass(prompt: &str, context: Option<&str>) -> Result<Zeroizing<Stri
 
 /// The askpass exit status that means "refused, and here is why": the
 /// reason is on its stdout instead of a PIN, for the caller to act on.
-/// `contrib/piggy-askpass.sh` uses it for an operator act too tall for its
-/// PIN dialog (piggy#322).
+/// `contrib/piggy-askpass.sh` uses it for an operator act it has no dialog
+/// for (zenity cannot hold input, RFC 0012 §2.6; piggy#322).
 pub const ASKPASS_EXIT_REFUSED_WITH_REASON: i32 = 3;
 
 /// [`run_askpass`] for a prompt that is not a routine PIN prompt. `kind` is

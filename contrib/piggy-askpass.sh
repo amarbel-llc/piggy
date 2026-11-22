@@ -107,17 +107,12 @@
 # itself (hold_tty_input), is the only other place one is shown.
 #
 # The text is shown whole, on the dialog that takes the PIN, or the prompt
-# fails (RFC 0012 §2.6); an unknown class fails too. A zenity PIN dialog
-# does not scroll, so an act whose rendered prompt is taller than
-# $operator_act_max_lines lines (a line longer than
-# $operator_act_wrap_columns characters counting as the lines it wraps to)
-# is refused before any dialog opens: the helper exits
-# $exit_refused_with_reason and prints why on stdout, naming the limit, and
-# the agent reports the act cancelled with that reason so the caller can
-# shorten the text (piggy#322). A tty has no such limit. Reading a text
-# takes longer than typing a PIN, so the zenity timeout defaults to 120
-# seconds for these. With PIGGY_ASKPASS_KIND unset nothing here applies and
-# the prompt is the routine one.
+# fails (RFC 0012 §2.6); an unknown class fails too. The text is never cut,
+# and since 2026-11-21 never refused for its height either (see the note at
+# the old limit's site below). Reading a text takes longer than typing a
+# PIN, so the zenity timeout defaults to 120 seconds for these. With
+# PIGGY_ASKPASS_KIND unset nothing here applies and the prompt is the
+# routine one.
 #
 # Diagnostic log: zenity's stderr and a per-invocation header are
 # appended to $XDG_LOG_HOME/piggy/askpass.log (default
@@ -134,14 +129,20 @@ require="${SSH_ASKPASS_REQUIRE:-}"
 # The word an escalation makes the operator type, on top of the PIN.
 escalation_word="ESCALATE"
 
-# The tallest operator-act prompt a zenity PIN dialog shows, in lines of the
-# rendered prompt (banner, parent, context and prompt), a line longer than
-# the wrap width counting as the lines it wraps to. The prompt's own lines
-# take about nine of them, leaving about fifteen for the act's text. Chosen
-# so the PIN field and its button stay on a laptop screen; anything taller
-# is refused, never elided (RFC 0012 §2.6, piggy#322).
-operator_act_max_lines=24
-operator_act_wrap_columns=100
+# No height limit on an operator act's text (the operator's ruling of
+# 2026-11-21, piggy#400). Until then an act whose rendered prompt was taller
+# than 24 lines (a line longer than the dialog's 100 columns counting as the
+# lines it wraps to) was refused here before any dialog opened (piggy#322),
+# so that the PIN field and its button stayed on one laptop screen; but a
+# `piggy-act-v1` card act's required fields alone render to more than that
+# with the nine lines this prompt adds, so the limit refused every
+# certificate act. The limit is dropped, not raised: principle 36 (an
+# approval prompt fits one screen) is waived for acts until the
+# re-examination piggy#400 tracks; the dialog still shows the whole text,
+# never cut or hidden, and piggy's own acts keep their description short.
+# `piggy::operator_act::askpass_rendered_lines` measures a text the way the
+# limit counted, and the certificate acts' heights are on record in its
+# tests.
 
 # The exit status of a prompt refused for a reason the caller can act on,
 # with that reason on stdout instead of a PIN. The agent passes the reason
@@ -475,17 +476,6 @@ gtk_dialogs_enabled() {
   [[ ${PIGGY_ASKPASS_GTK:-1} != 0 ]] && command -v piggy-askpass-gtk >/dev/null 2>&1
 }
 
-# How many lines $body takes in a PIN dialog: each line, plus one more for
-# every $operator_act_wrap_columns characters it runs past the first. Counted
-# in bash: the script's hard dependencies stay zenity and coreutils' basics.
-rendered_body_lines() {
-  local line lines=0
-  while IFS= read -r line; do
-    lines=$((lines + 1 + (${#line} > 0 ? (${#line} - 1) / operator_act_wrap_columns : 0)))
-  done <<<"$body"
-  printf '%d' "$lines"
-}
-
 # Render target 2: zenity. We don't gate on $DISPLAY/$WAYLAND_DISPLAY —
 # macOS zenity reaches the Aqua session without either var being set,
 # and launchd-spawned agents (pivy-agent) reach this script with a
@@ -521,16 +511,9 @@ if gtk_dialogs_enabled || command -v zenity >/dev/null 2>&1; then
   # statement, `$?` is 0 regardless. Only the `else` branch preserves
   # cmd's unmodified exit code.
   #
-  # An operator act too tall for the PIN dialog is refused before anything
-  # is shown, so no notice announces a dialog that never opens.
+  # An operator act is refused before anything is shown, so no notice
+  # announces a dialog that never opens.
   if [[ -n $kind ]]; then
-    body_lines="$(rendered_body_lines)"
-    if ((body_lines > operator_act_max_lines)); then
-      printf 'refused: too tall (%s lines > %s)\n' "$body_lines" "$operator_act_max_lines" >>"$log_path"
-      printf 'the operator-act text is too tall for the PIN dialog: it renders to %s lines, and this askpass shows at most %s (lines over %s characters count as the lines they wrap to); shorten the text\n' \
-        "$body_lines" "$operator_act_max_lines" "$operator_act_wrap_columns"
-      exit "$exit_refused_with_reason"
-    fi
     # RFC 0012 §2.6: an operator act is shown only where input can be
     # held, and zenity's dialogs cannot hold it.
     if ! gtk_dialogs_enabled; then

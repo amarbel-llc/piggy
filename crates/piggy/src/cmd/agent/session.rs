@@ -1072,7 +1072,7 @@ impl PiggyAgent {
         // PIN-always, and the prompt is where the operator reads the text.
         let card = key.guid.short_id();
         let context = act::prompt_context(class, &card, key.slot_id, &request.namespace, text);
-        let prompt = format!("PIN for card {card} to sign this operator act");
+        let prompt = act::pin_prompt(&card);
         let kind = class.as_str();
         let prompted = {
             let _prompt_guard = self.prompt_lock.lock().await;

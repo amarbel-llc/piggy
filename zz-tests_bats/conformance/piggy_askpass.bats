@@ -904,15 +904,16 @@ TRICKY_TEXT='grant <b>bold</b> & more; id ecdsa_p256_sig; path a\nb'
   done
 }
 
-# -------- tall operator-act texts: refused (RFC 0012 §2.6, piggy#322) --------
+# -------- tall operator-act texts: shown whole, never refused for height --------
 #
-# A PIN dialog does not scroll, and the dialog that takes the PIN must show
-# the whole text. An operator act whose rendered prompt is taller than the
-# script's operator_act_max_lines (24, long lines counting as the lines they
-# wrap to at 100 characters) is refused before any dialog opens: exit 3, the
-# reason on stdout naming the limit. A routine prompt is never refused for
-# its height. These run the real script against a stub, so what is pinned
-# is the zenity argv and the exit, not what a real dialog draws.
+# The dialog that takes the PIN must show the whole text (RFC 0012 §2.6).
+# Until 2026-11-21 an act whose rendered prompt was taller than 24 lines was
+# refused before any dialog opened (piggy#322); the operator dropped that
+# limit (piggy#400: it refused every piggy-act-v1 card act), so a tall act
+# reaches the GTK helper whole, and without the helper it is refused for
+# the zenity dialog, never for its height. These run the real script
+# against stubs, so what is pinned is which dialog runs and what it is
+# handed, not what a real dialog draws.
 
 # Like run_askpass_against_zenity_stub, but the stub logs every call (its
 # argv to ZENITY_CALLS after a `--- zenity call` marker) and always answers
@@ -948,13 +949,17 @@ zenity_call_count() {
   fi
 }
 
-# Thirty lines of act text, the last one full of what zenity would mangle.
+# Forty lines of act text, taller than the old limit ever allowed, two of
+# them longer than the dialog's 100 columns, the last one full of what
+# zenity would mangle.
 tall_act_text() {
-  printf 'grant line %d\n' $(seq 1 30)
+  printf 'grant line %d\n' $(seq 1 38)
+  printf 'piggy-principal_pub-v1@ssh_ecdsa_nistp256_pub-%s\n' "$(printf 'q%.0s' $(seq 1 60))"
+  printf 'the line that wraps: %s\n' "$(printf 'x%.0s' $(seq 1 120))"
   printf '%s' "$TRICKY_TEXT"
 }
 
-@test "tall_operator_act_text_is_refused_before_any_dialog_with_the_limit_named" {
+@test "tall_operator_act_text_without_the_gtk_helper_is_refused_for_the_dialog_not_its_height" {
   local class
   for class in quote certificate escalation approval revocation; do
     run_askpass_against_logging_zenity_stub \
@@ -962,21 +967,10 @@ tall_act_text() {
 
     assert_failure 3
     refute_output --partial "123456"
-    assert_output --partial "too tall for the PIN dialog"
-    assert_output --partial "at most 24"
+    assert_output --partial "cannot hold input"
+    refute_output --partial "too tall"
     assert_equal "$(zenity_call_count)" 0
   done
-}
-
-@test "one_long_line_counts_as_the_lines_it_wraps_to" {
-  local long_line
-  long_line="$(printf 'x%.0s' $(seq 1 2000))"
-  run_askpass_against_logging_zenity_stub \
-    PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="grant: $long_line"
-
-  assert_failure 3
-  assert_output --partial "too tall for the PIN dialog"
-  assert_equal "$(zenity_call_count)" 0
 }
 
 @test "tall_routine_prompt_is_never_refused_for_its_height" {
@@ -1192,24 +1186,20 @@ helper_option() {
   [[ ! -e $HELPER_ARGV ]]
 }
 
-# piggy#332: the dialog wraps at 100 columns so a markl-id (92 characters)
-# takes one line; fifteen 90-character lines fit (at 80 columns each would
-# count twice and the act would be refused).
-@test "lines_up_to_one_hundred_columns_count_once" {
-  local text line
-  line="$(printf 'x%.0s' $(seq 1 90))"
-  text="$(for _ in $(seq 1 15); do printf '%s\n' "$line"; done)"
-  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="$text"
+# No height limit (piggy#400): a tall act, long lines included, reaches the
+# GTK helper whole and the PIN comes back.
+@test "a_tall_operator_act_is_handed_whole_to_the_gtk_helper" {
+  local class
+  for class in quote certificate escalation; do
+    run_askpass_against_gtk_helper_stub 0 \
+      PIGGY_ASKPASS_KIND="$class" PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
 
-  assert_success
-  assert_output "123456"
-}
-
-@test "tall_operator_act_text_is_refused_before_the_gtk_helper_opens" {
-  run_askpass_against_gtk_helper_stub 0 \
-    PIGGY_ASKPASS_KIND=quote PIGGY_ASKPASS_CONTEXT="$(tall_act_text)"
-
-  assert_failure 3
-  assert_output --partial "too tall for the PIN dialog"
-  [[ ! -e $HELPER_ARGV ]]
+    assert_success
+    assert_output "123456"
+    assert_equal "$(zenity_call_count)" 0
+    assert_equal "$(grep -c 'grant line ' "$HELPER_STDIN")" 38
+    grep -qF 'ssh_ecdsa_nistp256_pub-qqqq' "$HELPER_STDIN"
+    grep -qF 'the line that wraps: xxxx' "$HELPER_STDIN"
+    grep -qF -- "$TRICKY_TEXT" "$HELPER_STDIN"
+  done
 }

@@ -21,9 +21,14 @@
 //! profile: `subject-key` from the SPKI, `right` from basicConstraints
 //! (`piggy:x509-ca` for a CA, `piggy:x509-leaf` otherwise), `not-after`
 //! from `notAfter`, `records` from the DER's SHA-256. The description line
-//! repeats the words the first prompt showed and adds the DER's SHA-256 in
-//! hex, so the operator reads the same certificate twice and can check the
-//! hex against `openssl x509 -outform DER | sha256sum`.
+//! carries what the fields do not: the issuer (card and slot), what the
+//! certificate is (its kind, CA or leaf, the pathlen, the names), as the
+//! first prompt said it, and the DER's SHA-256 in hex, to check against
+//! `openssl x509 -outform DER | sha256sum`. It is kept short on purpose:
+//! the askpass dialog shows the whole act without scrolling, the act's
+//! required fields are most of its height, and the description is the one
+//! free line; the test `every_certificate_act_height_is_on_record` measures
+//! each act over the real dialog body (piggy#400).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -39,6 +44,7 @@ use piggy::act::seal::{DigestFormat, act_digest, public_key_blob};
 use piggy::act::verify::timestamp;
 use piggy::act::{Act, parse};
 use piggy::agent_client::{probe_ecdsa_points, probe_extensions};
+use piggy::ca_issue::Verb;
 use piggy::card::slot_policy::{OperatorActBlocker, operator_act_verdict};
 use piggy::operator_act::EXTENSION;
 
@@ -298,18 +304,31 @@ pub(crate) fn certificate_record(der: &[u8]) -> (String, String) {
     (id.to_wire(), hex::encode(digest))
 }
 
+/// What `sign` or `issue` certifies, for the first prompt, the notice and
+/// the act's description: the kind with what it may do, and the profile's
+/// names. The profile's name and the serial are on the terminal only.
+pub(crate) fn describe_issued(verb: Verb, names: &[String]) -> String {
+    let what = match verb {
+        Verb::Sign => "an intermediate (CA, pathlen 0)",
+        Verb::Issue => "a leaf (TLS server)",
+    };
+    format!("{what} for {}", names.join(", "))
+}
+
 /// Build the unsealed act for the signed certificate `cert_der`, every
 /// field from the certificate; `subject` is the profile's principal,
-/// `describing` the words the first prompt showed, `now` the Unix time of
-/// signing. A certificate that is not what `kind` says (a `root` over a
-/// certificate that is not a self-signed CA, a `link` over one that is
-/// self-signed) is refused, as is an act RFC 0013 would refuse.
+/// `issuer` the card and slot that signed (`card <id> slot <hex>`),
+/// `describing` the words the first prompt showed after "signs", `now` the
+/// Unix time of signing. A certificate that is not what `kind` says (a
+/// `root` over a certificate that is not a self-signed CA, a `link` over
+/// one that is self-signed) is refused, as is an act RFC 0013 would refuse.
 pub(crate) fn plan(
     cert_der: &[u8],
     subject: &str,
     kind: CertifiedAs,
     operator: &OperatorKey,
     now: u64,
+    issuer: &str,
     describing: &str,
 ) -> Result<Act, Failure> {
     let refuse = failure(Exit::Refused);
@@ -328,7 +347,7 @@ pub(crate) fn plan(
     let (record, hex) = certificate_record(cert_der);
     let key = &operator.id;
     let doc = format!(
-        "---\n# {describing}; DER sha256 {hex}\n- kind = {kind}\n- producer = {PRODUCER}\n\
+        "---\n# {issuer} signs {describing}; DER sha256 {hex}\n- kind = {kind}\n- producer = {PRODUCER}\n\
          - subject = {subject}\n- subject-key = {subject_key}\n- issuer = operator\n\
          - issuer-key = {key}\n- right = {right}\n- records = {record}\n\
          - not-after = {not_after}\n- issued-at = {issued_at}\n- assurance = piggy:hardware\n\
@@ -419,6 +438,10 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
     const GUID: &str = "0123456789abcdef0123456789abcdef";
+    const ISSUER: &str = "card 01234567 slot 82";
+    /// The pilot's names (FDR 0007): the longest list an act's description
+    /// has had to carry.
+    const PILOT_NAMES: [&str; 3] = ["github.com", "api.github.com", "codeload.github.com"];
 
     /// A software P-256 key standing in for a card slot.
     struct SoftKey {
@@ -508,6 +531,7 @@ mod tests {
             CertifiedAs::Root,
             &operator,
             NOW,
+            ISSUER,
             &describing,
         )
         .unwrap();
@@ -581,6 +605,7 @@ mod tests {
             CertifiedAs::Root,
             &operator,
             NOW,
+            ISSUER,
             &describing,
         )
         .unwrap();
@@ -652,6 +677,7 @@ mod tests {
             CertifiedAs::Link,
             &operator,
             NOW,
+            ISSUER,
             "the leaf",
         )
         .unwrap();
@@ -666,6 +692,7 @@ mod tests {
             CertifiedAs::Root,
             &operator,
             NOW,
+            ISSUER,
             "x",
         )
         .unwrap_err();
@@ -676,6 +703,7 @@ mod tests {
             CertifiedAs::Link,
             &operator,
             NOW,
+            ISSUER,
             "x",
         )
         .unwrap_err();
@@ -727,6 +755,148 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(errored.exit, Exit::IssuerUnavailable);
+    }
+
+    /// The height of every certificate act piggy builds, measured over the
+    /// real askpass dialog body (banner, Parent, Context header, the
+    /// canonical text, the PIN prompt) at the dialog's wrap width: a record
+    /// for the re-examination of the dialog's height limit (dropped
+    /// 2026-11-21, piggy#400), not a limit. The acts are built as the verbs
+    /// build them, over the pilot's names and CNs; the three have the same
+    /// fields, differing in kind, right and the description only. Update
+    /// the numbers when the act's shape changes, on purpose.
+    #[test]
+    fn every_certificate_act_height_is_on_record() {
+        use piggy::operator_act::{DisplayClass, askpass_body, askpass_rendered_lines};
+        use piggy_piv::x509_profile::build_intermediate_cert;
+
+        let names: Vec<String> = PILOT_NAMES.iter().map(|n| n.to_string()).collect();
+        let ca = soft_key(9);
+        let holder = soft_key(10);
+        let leaf = soft_key(11);
+        let operator = OperatorKey::from_p256_point(&soft_key(12).point).unwrap();
+        let issuer = "card 55C3439D slot 82";
+        let validity = CertValidity {
+            not_before: Duration::from_secs(NOW - 300),
+            not_after: Duration::from_secs(NOW + 168 * 3600),
+        };
+
+        let root_profile = piggy::ca_profile::parse(&format!(
+            "kind = \"root\"\ncommon_name = \"circus-pigtrough-github-root-2026-11\"\nnames = [\"github.com\", \"api.github.com\", \"codeload.github.com\"]\nlifetime_hours = 87600\n[issuer]\nslot = \"82\"\nguid = \"{GUID}\"\n"
+        ))
+        .unwrap();
+        let root_plan = plan_root(
+            &root_profile,
+            Duration::from_secs(NOW),
+            [0x42; SERIAL_BYTES],
+        )
+        .unwrap();
+        let root_der =
+            issue_root(&root_plan, &ca.point, PivAlgorithm::EcP256, sign_der(&ca)).unwrap();
+        let int_der = build_intermediate_cert(
+            &holder.point,
+            PivAlgorithm::EcP256,
+            "circus-pigtrough-github-intermediate",
+            &names,
+            &root_der,
+            validity,
+            &[0x66; 16],
+            sign_der(&ca),
+        )
+        .unwrap();
+        let leaf_der = build_leaf_cert(
+            &leaf.point,
+            PivAlgorithm::EcP256,
+            &names,
+            &root_der,
+            validity,
+            &[0x67; 16],
+            sign_der(&ca),
+        )
+        .unwrap();
+
+        let int_describing = describe_issued(Verb::Sign, &names);
+        assert_eq!(
+            int_describing,
+            "an intermediate (CA, pathlen 0) for github.com, api.github.com, codeload.github.com"
+        );
+        assert_eq!(
+            describe_issued(Verb::Issue, &names[..1]),
+            "a leaf (TLS server) for github.com"
+        );
+        let acts = [
+            ("root", &root_der, CertifiedAs::Root, root_plan.describe()),
+            ("intermediate", &int_der, CertifiedAs::Link, int_describing),
+            (
+                "leaf",
+                &leaf_der,
+                CertifiedAs::Link,
+                describe_issued(Verb::Issue, &names),
+            ),
+        ]
+        .map(|(label, der, kind, describing)| {
+            let act = plan(
+                der,
+                "piggy:ca:pilot",
+                kind,
+                &operator,
+                NOW,
+                issuer,
+                &describing,
+            )
+            .unwrap();
+            // The description: the issuer, the first prompt's words, the hex.
+            let (_, hex) = certificate_record(der);
+            assert_eq!(
+                act.description().unwrap(),
+                format!("{issuer} signs {describing}; DER sha256 {hex}")
+            );
+            (label, act)
+        });
+
+        let field_names = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter_map(|l| l.strip_prefix("- "))
+                .map(|f| f.split(" = ").next().unwrap().to_owned())
+                .collect()
+        };
+        let texts = acts.map(|(label, act)| (label, String::from_utf8(act.canonical()).unwrap()));
+        for (_, text) in &texts[1..] {
+            assert_eq!(
+                field_names(text),
+                field_names(&texts[0].1),
+                "the same fields"
+            );
+        }
+
+        let heights = texts.map(|(label, text)| {
+            let lines = askpass_rendered_lines(
+                DisplayClass::Certificate,
+                "55C3439D",
+                0x9C,
+                NAMESPACE,
+                &text,
+            );
+            (label, lines, text)
+        });
+        let bodies: Vec<String> = heights
+            .iter()
+            .map(|(label, _, text)| {
+                format!(
+                    "--- {label}:\n{}",
+                    askpass_body(DisplayClass::Certificate, "55C3439D", 0x9C, NAMESPACE, text)
+                )
+            })
+            .collect();
+        // The record (piggy#400): the fields take 17 lines, three of them
+        // wrap (subject-key, issuer-key, key), the framing takes 9, and the
+        // description 2 (3 for the root, whose CN is in it).
+        assert_eq!(
+            heights.map(|(label, lines, _)| (label, lines)),
+            [("root", 32), ("intermediate", 31), ("leaf", 31)],
+            "the certificate acts' heights changed; a record, not a limit: update it if the change is meant. The dialog bodies:\n{}",
+            bodies.join("\n")
+        );
     }
 
     #[test]
@@ -811,7 +981,16 @@ mod tests {
         )
         .unwrap();
         let operator = OperatorKey::from_p256_point(&soft_key(9).point).unwrap();
-        let err = plan(&der, "piggy:ca:x", CertifiedAs::Root, &operator, NOW, "x").unwrap_err();
+        let err = plan(
+            &der,
+            "piggy:ca:x",
+            CertifiedAs::Root,
+            &operator,
+            NOW,
+            ISSUER,
+            "x",
+        )
+        .unwrap_err();
         assert_eq!(err.exit, Exit::Refused);
     }
 
@@ -826,6 +1005,7 @@ mod tests {
             CertifiedAs::Root,
             &operator,
             NOW,
+            ISSUER,
             &describing,
         )
         .unwrap_err();

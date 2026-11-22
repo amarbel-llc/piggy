@@ -498,6 +498,75 @@ pub fn prompt_context(
     )
 }
 
+/// The agent's PIN prompt for an operator act, the last line of the askpass
+/// dialog's body.
+pub fn pin_prompt(card: &str) -> String {
+    format!("PIN for card {card} to sign this operator act")
+}
+
+/// The width the askpass dialog wraps an act's text at, in characters:
+/// piggy-askpass-gtk's `TEXT_WIDTH_CHARS`, wide enough for a fully
+/// qualified markl-id on one line. The dialog has no height limit (the
+/// operator's ruling of 2026-11-21, piggy#400: the one it had, 24 rendered
+/// lines, refused every `piggy-act-v1` card act, whose required fields alone
+/// render to more); [`askpass_rendered_lines`] measures a text at this width
+/// so the heights are on record for the re-examination.
+pub const ASKPASS_WRAP_COLUMNS: usize = 100;
+
+impl DisplayClass {
+    /// The banner `contrib/piggy-askpass.sh` puts over this class's text,
+    /// the dialog body's first line.
+    pub fn askpass_banner(self) -> &'static str {
+        match self {
+            Self::Quote => "=== OPERATOR ACT: QUOTE — you are signing words already on record ===",
+            Self::Escalation => "!!! OPERATOR ACT: ESCALATION — you are GRANTING AUTHORITY !!!",
+            Self::Certificate => "=== OPERATOR ACT: CERTIFICATE — you are certifying a key ===",
+            Self::Approval => {
+                "=== OPERATOR ACT: APPROVAL — you are approving a decision; this grants no right ==="
+            }
+            Self::Revocation => {
+                "=== OPERATOR ACT: REVOCATION — you are cancelling earlier acts ==="
+            }
+        }
+    }
+}
+
+/// The dialog body `contrib/piggy-askpass.sh` renders for an operator act
+/// (its `render_context`): the class banner, the `Parent:` line (stood in
+/// for here; it never wraps), the `Context:` line opening
+/// [`prompt_context`] and that context's remaining lines, then a blank line
+/// and the agent's [`pin_prompt`].
+pub fn askpass_body(
+    class: DisplayClass,
+    card: &str,
+    slot: u8,
+    namespace: &str,
+    text: &str,
+) -> String {
+    format!(
+        "{}\nParent: piggy (PID 1)\nContext: {}\n\n{}",
+        class.askpass_banner(),
+        prompt_context(class, card, slot, namespace, text),
+        pin_prompt(card)
+    )
+}
+
+/// How many lines [`askpass_body`] takes on the dialog: each line, plus one
+/// more for every [`ASKPASS_WRAP_COLUMNS`] characters it runs past the
+/// first (the count the script's height limit used, kept as the measure).
+pub fn askpass_rendered_lines(
+    class: DisplayClass,
+    card: &str,
+    slot: u8,
+    namespace: &str,
+    text: &str,
+) -> usize {
+    askpass_body(class, card, slot, namespace, text)
+        .lines()
+        .map(|line| 1 + line.chars().count().saturating_sub(1) / ASKPASS_WRAP_COLUMNS)
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,6 +578,70 @@ mod tests {
             hash_algorithm: "sha256".into(),
             text: b"grant session \"swift-elder\" the right spinclass:force for 24h\n".to_vec(),
         }
+    }
+
+    /// The askpass body mirrors `contrib/piggy-askpass.sh`'s `render_context`
+    /// and the dialog's wrap width mirrors piggy-askpass-gtk's: held equal
+    /// to the sources here, since the Rust side only measures.
+    #[test]
+    fn the_askpass_mirror_matches_the_script_and_the_dialog() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let script = std::fs::read_to_string(root.join("contrib/piggy-askpass.sh")).unwrap();
+        for class in [
+            DisplayClass::Quote,
+            DisplayClass::Escalation,
+            DisplayClass::Certificate,
+            DisplayClass::Approval,
+            DisplayClass::Revocation,
+        ] {
+            let line = format!("class_banner=\"{}\"", class.askpass_banner());
+            assert!(script.contains(&line), "the script lacks {line}");
+        }
+        assert!(
+            !script.contains("operator_act_max_lines="),
+            "the script has a height limit again; the mirror and piggy#400's record need it"
+        );
+        let dialog =
+            std::fs::read_to_string(root.join("crates/piggy-askpass-gtk/src/dialog.rs")).unwrap();
+        assert!(dialog.contains(&format!(
+            "const TEXT_WIDTH_CHARS: i32 = {ASKPASS_WRAP_COLUMNS};"
+        )));
+    }
+
+    /// Counted as the script's `rendered_body_lines` counted: every line
+    /// once, a line over the wrap width once more per width, blank lines
+    /// included, and the two blank lines the script leaves between a text
+    /// that ends in a newline and the PIN prompt.
+    #[test]
+    fn the_askpass_height_counts_wrapped_and_blank_lines() {
+        let card = "55C3439D";
+        let one = "x".repeat(ASKPASS_WRAP_COLUMNS);
+        let two = "x".repeat(ASKPASS_WRAP_COLUMNS + 1);
+        // banner, Parent, "Context: operator act: quote", card, namespace,
+        // blank, the text's lines, blank, prompt.
+        let framing = 8;
+        let text = format!("{one}\n{two}\n\nlast");
+        assert_eq!(
+            askpass_rendered_lines(DisplayClass::Quote, card, 0x9C, "piggy-quote-v1", &text),
+            framing + 1 + 2 + 1 + 1
+        );
+        // A trailing newline on the text costs one more line, as it does
+        // on the dialog.
+        assert_eq!(
+            askpass_rendered_lines(DisplayClass::Quote, card, 0x9C, "piggy-quote-v1", "a\n"),
+            framing + 2
+        );
+        let body = askpass_body(
+            DisplayClass::Certificate,
+            card,
+            0x9C,
+            "piggy-certificate-v1",
+            "t\n",
+        );
+        assert_eq!(
+            body,
+            "=== OPERATOR ACT: CERTIFICATE — you are certifying a key ===\nParent: piggy (PID 1)\nContext: operator act: certificate\ncard 55C3439D, slot 9C\nnamespace piggy-certificate-v1\n\nt\n\n\nPIN for card 55C3439D to sign this operator act"
+        );
     }
 
     #[test]

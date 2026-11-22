@@ -183,9 +183,12 @@ pub struct Issued {
 /// (iii-b)) is handed the TBSCertificate and hashes it itself. Either runs
 /// last and at most once.
 pub enum Signer<'a> {
-    Digest(Box<dyn FnOnce(&[u8]) -> Result<Vec<u8>, PivError> + 'a>),
-    Tbs(Box<dyn FnOnce(&[u8]) -> Result<Vec<u8>, PivError> + 'a>),
+    Digest(SignFn<'a>),
+    Tbs(SignFn<'a>),
 }
+
+/// One signing call: bytes in, the DER signature out.
+type SignFn<'a> = Box<dyn FnOnce(&[u8]) -> Result<Vec<u8>, PivError> + 'a>;
 
 /// Steps 1 to 4 of the verbs: check the request against the profile, then
 /// build the certificate and have `sign_digest` sign it. `sign_digest`
