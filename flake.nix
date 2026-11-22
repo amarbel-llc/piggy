@@ -416,6 +416,8 @@
                 # that nix sandboxes can't provide. Match pivy's flake, which skips
                 # checks on darwin for the same reason (no system pcscd under CI).
                 doCheck = !pkgs.stdenv.hostPlatform.isDarwin;
+                # hogtie's unit tests sign with stock ssh-keygen (a software CA).
+                nativeCheckInputs = [ pkgs.openssh ];
 
                 meta = with pkgs.lib; {
                   description = "Piggy rust workspace (piggy CLI + piggy-piv library)";
