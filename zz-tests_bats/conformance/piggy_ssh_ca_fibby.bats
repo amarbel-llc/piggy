@@ -47,6 +47,8 @@ setup() {
   FIBBY_LOG="$WORKDIR/fibby.log"
   AGENT_SOCK="$WORKDIR/a.sock"
   AGENT_LOG="$WORKDIR/agent.log"
+  FRONT_SOCK="$WORKDIR/front.sock"
+  FRONT_LOG="$WORKDIR/front.log"
   FIBBY_PID=
   AGENT_PID=
   FRONT_PID=
@@ -202,4 +204,61 @@ function slot_82_refuses_an_openssh_certificate_and_slot_83_refuses_everything_e
   # login challenge is) go through: ssh-keygen -Y check is the sshsig above;
   # the agent's refusal of the rest is the unit tests' (gate_data_for_slot).
   [[ $(_prompts) -eq 0 ]] || { echo "a refusal raised $(_prompts) prompt(s)" >&2; _show; return 1; }
+}
+
+# A proxy-only front over the card agent (a forwarded card agent, FDR 0001):
+# the front has no card, no PIN and its askpass would answer if asked, so any
+# prompt there would be counted in its own log; the checks and the dialog are
+# the card agent's, on its host.
+_certify_via_front() {
+  local ca="$1"
+  shift
+  run --separate-stderr env SSH_AUTH_SOCK="$FRONT_SOCK" ssh-keygen -q -U -s "$ca" "$@" "$WORKDIR/user.pub"
+}
+
+function through_a_proxy_only_front_the_certificate_is_signed_behind_the_card_agents_dialog { # @test
+  spawn_proxy_front
+  # The front lists the card agent's keys, slot 83's included.
+  SSH_AUTH_SOCK="$FRONT_SOCK" ssh-add -L | grep -q " PIV_slot_83" || {
+    echo "the front does not list slot 83" >&2; cat "$FRONT_LOG" >&2; return 1; }
+  _certify_via_front "$WORKDIR/ca83.pub" -I fwd-1 -n deploy-site -V +2h -O force-command=/usr/bin/true
+  [[ $status -eq 0 ]] || { echo "ssh-keygen through the front failed" >&2; _show; cat "$FRONT_LOG" >&2; return 1; }
+  [[ -s $WORKDIR/user-cert.pub ]]
+  # The dialog was the card agent's, of the certificate's kind, with the
+  # context; the front raised no prompt of its own.
+  grep -q '^\[piggy-test-askpass\] operator act kind: ssh-certificate' "$AGENT_LOG" || {
+    echo "the card agent showed no ssh-certificate dialog" >&2; _show; return 1; }
+  grep -qF "Key id: fwd-1" "$AGENT_LOG" || { echo "the dialog context lacks the key id" >&2; _show; return 1; }
+  [[ $(grep -c '^\[piggy-test-askpass\]' "$FRONT_LOG" || true) -eq 0 ]] || {
+    echo "the proxy-only front raised a prompt" >&2; cat "$FRONT_LOG" >&2; return 1; }
+  # And it is a real CA signature.
+  printf 'nonce action\n' >"$WORKDIR/msg"
+  ssh-keygen -q -Y sign -f "$WORKDIR/user-cert.pub" -n hogtie-v1 "$WORKDIR/msg" 2>/dev/null
+  printf '* cert-authority,namespaces="hogtie-v1" %s\n' "$(cut -d' ' -f1,2 "$WORKDIR/ca83.pub")" >"$WORKDIR/allowed"
+  run ssh-keygen -Y verify -f "$WORKDIR/allowed" -I deploy-site -n hogtie-v1 -s "$WORKDIR/msg.sig" <"$WORKDIR/msg"
+  [[ $status -eq 0 ]] || { echo "the forwarded certificate does not verify: $output" >&2; return 1; }
+}
+
+function through_a_proxy_only_front_the_card_agents_refusals_hold_and_no_prompt_is_raised { # @test
+  spawn_proxy_front
+  _certify_via_front "$WORKDIR/ca83.pub" -I long -n a -V +25h
+  [[ $status -ne 0 && ! -e $WORKDIR/user-cert.pub ]] || { echo "a 25-hour certificate was signed through the front" >&2; _show; return 1; }
+  _certify_via_front "$WORKDIR/ca83.pub" -h -I host -n example.org -V +1h
+  [[ $status -ne 0 && ! -e $WORKDIR/user-cert.pub ]] || { echo "a host certificate was signed through the front" >&2; _show; return 1; }
+  _certify_via_front "$WORKDIR/ca82.pub" -I wrong-ca -n a -V +1h
+  [[ $status -ne 0 && ! -e $WORKDIR/user-cert.pub ]] || { echo "slot 82 signed an OpenSSH certificate through the front" >&2; _show; return 1; }
+  printf 'hello\n' >"$WORKDIR/m"
+  SSH_AUTH_SOCK="$FRONT_SOCK" run ssh-keygen -q -Y sign -f "$WORKDIR/ca83.pub" -n file "$WORKDIR/m"
+  [[ $status -ne 0 && ! -e $WORKDIR/m.sig ]] || { echo "slot 83 signed an sshsig through the front" >&2; return 1; }
+  [[ $(_prompts) -eq 0 ]] || { echo "a refusal raised $(_prompts) prompt(s) at the card agent" >&2; _show; return 1; }
+  [[ $(grep -c '^\[piggy-test-askpass\]' "$FRONT_LOG" || true) -eq 0 ]] || { echo "the front raised a prompt" >&2; return 1; }
+}
+
+function a_plain_9a_signature_through_a_proxy_only_front_works_with_the_pin_asked_on_the_card_side { # @test
+  spawn_proxy_front
+  printf 'one\n' >"$WORKDIR/m1"
+  SSH_AUTH_SOCK="$FRONT_SOCK" ssh-keygen -q -Y sign -f "$WORKDIR/k9a.pub" -n file "$WORKDIR/m1" 2>"$WORKDIR/sign.err"
+  [[ -s $WORKDIR/m1.sig ]] || { echo "9A did not sign through the front:" >&2; cat "$WORKDIR/sign.err" >&2; _show; cat "$FRONT_LOG" >&2; return 1; }
+  [[ $(_prompts) -eq 1 ]] || { echo "want the one PIN prompt at the card agent, got $(_prompts)" >&2; _show; return 1; }
+  [[ $(grep -c '^\[piggy-test-askpass\]' "$FRONT_LOG" || true) -eq 0 ]] || { echo "the front prompted" >&2; return 1; }
 }
