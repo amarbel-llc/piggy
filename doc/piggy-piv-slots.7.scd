@@ -126,6 +126,52 @@ piggy reads and writes the retired slots as ordinary key slots:
 - *piggy pass recipients list-available* treats 82h-95h, like 9D, as
   recipient-eligible; see *piggy*(1).
 
+# CERTIFICATE AUTHORITY SLOTS
+
+Two retired slots hold a certificate authority's key. Each is a
+*kind*, and each kind may certify one thing only; the card agent
+(*piggy-agent*(1)), *piggy tool sign* and *piggy ca* all read the kind from
+one place and refuse the wrong request before the card is touched or a
+prompt is shown.
+
+[[ *Slot*
+:[ *Name*
+:[ *Certifies*
+|  82
+:  retired-1
+:  X.509 certificates, through *piggy ca* only (FDR 0007)
+|  83
+:  retired-2
+:  OpenSSH user certificates, through the agent (*ssh-keygen -U -s*)
+
+A CA key is generated on the card with PIN always and touch always, for
+example:
+
+```
+piggy tool -K @store -a eccp256 -i always -t always generate 83
+```
+
+What the kinds refuse:
+
+- Slot 82 (X.509) signs no DER TBSCertificate through the agent or *piggy tool
+  sign* (a certificate is signed only through *piggy ca*, which says what it
+  is certifying), and no OpenSSH certificate.
+- Slot 83 (SSH certificate) signs only an unsigned OpenSSH *user*
+  certificate, as *ssh-keygen -U -s* sends it to an agent: no TBSCertificate,
+  no sshsig in any namespace, no SSH login challenge, no other bytes. A host
+  certificate, a certificate that names no principal (it would be valid for
+  every user), one with no end, and one valid for more than 24 hours (plus
+  five minutes for *ssh-keygen*'s back-dating) are refused before any prompt.
+  *piggy tool sign* signs nothing with slot 83.
+- Every other slot refuses an OpenSSH certificate.
+
+The PIN of slots 82 and 83 is asked every time and never cached by the
+agent; the PIN of every other slot, 9C and 9D included, is cached as before.
+A certificate is signed behind a PIN dialog of kind *ssh-certificate* (see
+*piggy-agent*(1), SSH CERTIFICATE AUTHORITY) that shows the certificate's key
+id, principals, certified key, CA key, validity, critical options and
+extensions.
+
 # PORTABILITY CONSIDERATIONS
 
 The "all 20 are fully available for use" guarantee is *Yubico's*. A

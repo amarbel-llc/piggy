@@ -205,6 +205,21 @@ class_revocation() {
   class_band_foreground="#ffffff"
 }
 
+# Not an operator act: the SSH certificate authority (slot 83) is about to
+# sign an OpenSSH user certificate that `ssh-keygen -U -s` asked the agent
+# for. The context is the certificate's own summary (key id, principals, the
+# certified key, validity, critical options), so what the PIN authorizes is
+# on the dialog. It is held and shown like an operator act's text (the input
+# hold, the whole text, no height limit), and worded unlike a certificate act.
+class_ssh_certificate() {
+  class_banner="=== SSH CERTIFICATE AUTHORITY — you are certifying an SSH key for logins ==="
+  class_title="piggy SSH CA: CERTIFICATE"
+  class_ok_label="Issue SSH certificate"
+  class_band="✍  SSH CERTIFICATE — certifying a key for logins"
+  class_band_background="#0e7490"
+  class_band_foreground="#ffffff"
+}
+
 class_banner=""
 class_title="piggy PIV PIN"
 class_ok_label=""
@@ -216,6 +231,10 @@ case "$kind" in
   "") ;;
   quote | escalation | certificate | approval | revocation)
     "class_$kind"
+    default_timeout=120
+    ;;
+  ssh-certificate)
+    class_ssh_certificate
     default_timeout=120
     ;;
   *)
@@ -372,7 +391,9 @@ fire_heads_up() {
   local notifier title body
   notifier="$(resolve_notifier)" || return 0
   title="piggy-agent: PIN required"
-  if [[ -n $kind ]]; then
+  if [[ $kind == ssh-certificate ]]; then
+    title="piggy-agent: an SSH certificate awaits your PIN"
+  elif [[ -n $kind ]]; then
     title="piggy-agent: operator act ($kind) awaits your PIN"
   fi
   body="${prompt} (${parent_comm} PID ${parent_pid})"

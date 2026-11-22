@@ -339,7 +339,12 @@ fn check_holder_key(key: &str) -> Result<(), ProfileError> {
 
 fn check_slot(slot: &str) -> Result<(), ProfileError> {
     match u8::from_str_radix(slot, 16) {
-        Ok(id) if slot.len() == 2 && piggy_piv::slot::is_ca_slot(id) => Ok(()),
+        Ok(id)
+            if slot.len() == 2
+                && piggy_piv::slot::ca_kind(id) == Some(piggy_piv::slot::CaKind::X509) =>
+        {
+            Ok(())
+        }
         _ => bad(format!("slot {slot:?} is not a CA slot (82)")),
     }
 }

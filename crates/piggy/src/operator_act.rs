@@ -398,23 +398,100 @@ pub fn refuse_operator_act_signed_data(data: &[u8]) -> Result<(), String> {
     }
 }
 
-/// The gate for keys in a CA slot (RFC 0012 §2.7 as amended for FDR 0007
-/// phase (ii)): the card agent's sign request and `piggy tool sign` refuse
-/// data that has the shape of a DER TBSCertificate, because an ordinary
-/// sign request shows the operator a routine PIN prompt with nothing of the
-/// certificate on it. `piggy ca` reaches the card by its own route and
-/// never passes through here. `Err` is the refusal to report; any other
-/// slot, and any other data, passes.
-pub fn refuse_tbs_certificate_on_ca_slot(data: &[u8], slot_id: u8) -> Result<(), String> {
-    if piggy_piv::slot::is_ca_slot(slot_id)
-        && piggy_piv::x509_profile::looks_like_tbs_certificate(data)
-    {
+/// What a sign request may be, once it has passed the slot gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotData {
+    /// Ordinary data for an ordinary slot.
+    Ordinary,
+    /// An unsigned OpenSSH user certificate, for the SSH CA slot.
+    SshCertificate(Box<piggy_piv::ssh_cert::SshCertTbs>),
+}
+
+/// The slot gate for every ordinary signing surface (RFC 0012 §2.7 as
+/// amended for FDR 0007 phase (ii) and the SSH CA slot, 2026-11-22): what
+/// each slot may be asked to sign depends on its kind
+/// ([`piggy_piv::slot::ca_kind`]).
+///
+/// - The X.509 CA slot (82) refuses a DER TBSCertificate (a certificate is
+///   signed only through `piggy ca`, which says what it is certifying) and
+///   an OpenSSH certificate.
+/// - The SSH CA slot (83) signs ONLY a parsed, unsigned OpenSSH user
+///   certificate: no TBSCertificate, no sshsig, no login challenge, no
+///   other bytes.
+/// - Every other slot refuses an OpenSSH certificate: a key that is not the
+///   SSH CA never certifies.
+///
+/// `piggy ca` reaches the card by its own route and never passes through
+/// here. `Err` is the refusal to report.
+pub fn gate_data_for_slot(data: &[u8], slot_id: u8) -> Result<SlotData, String> {
+    use piggy_piv::slot::{CaKind, ca_kind};
+    use piggy_piv::ssh_cert::parse_unsigned_certificate;
+    match ca_kind(slot_id) {
+        Some(CaKind::SshCertificate) => match parse_unsigned_certificate(data) {
+            Ok(tbs) => Ok(SlotData::SshCertificate(Box::new(tbs))),
+            Err(why) => Err(format!(
+                "refusing to sign with the SSH certificate authority in slot {slot_id:02x}: \
+                 it signs only an unsigned OpenSSH user certificate, and this is not one ({why})"
+            )),
+        },
+        Some(CaKind::X509) => {
+            if piggy_piv::x509_profile::looks_like_tbs_certificate(data) {
+                return Err(format!(
+                    "refusing to sign a TBSCertificate with the CA key in slot {slot_id:02x} here: \
+                     a certificate is signed only through `piggy ca`, which says what it is certifying"
+                ));
+            }
+            refuse_ssh_certificate_shape(data, slot_id)?;
+            Ok(SlotData::Ordinary)
+        }
+        None => {
+            refuse_ssh_certificate_shape(data, slot_id)?;
+            Ok(SlotData::Ordinary)
+        }
+    }
+}
+
+/// The certificate is signed by the key it names as its CA: the CA key the
+/// certificate carries must be, byte for byte, the key about to sign it.
+/// Otherwise the dialog's "Signed by CA" line would be a value the requester
+/// chose, and the signature could never verify as the certificate says.
+pub fn refuse_certificate_naming_another_ca(
+    tbs: &piggy_piv::ssh_cert::SshCertTbs,
+    signing_key_blob: &[u8],
+) -> Result<(), String> {
+    if tbs.ca_key_blob == signing_key_blob {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing to certify {}: the certificate names a different CA key ({}) than the one asked to sign it",
+            tbs.key_id, tbs.ca_fingerprint
+        ))
+    }
+}
+
+fn refuse_ssh_certificate_shape(data: &[u8], slot_id: u8) -> Result<(), String> {
+    if piggy_piv::ssh_cert::looks_like_ssh_certificate(data) {
         return Err(format!(
-            "refusing to sign a TBSCertificate with the CA key in slot {slot_id:02x} here: \
-             a certificate is signed only through `piggy ca`, which says what it is certifying"
+            "refusing to sign an OpenSSH certificate with the key in slot {slot_id:02x}: \
+             only the SSH certificate authority in slot 83 signs those"
         ));
     }
     Ok(())
+}
+
+/// [`gate_data_for_slot`] for a surface that never signs a certificate
+/// (`piggy tool sign`): the SSH CA slot refuses everything here, because a
+/// certificate is signed through the agent, whose PIN dialog says what it
+/// certifies.
+pub fn refuse_data_for_slot(data: &[u8], slot_id: u8) -> Result<(), String> {
+    if piggy_piv::slot::ca_kind(slot_id) == Some(piggy_piv::slot::CaKind::SshCertificate) {
+        return Err(format!(
+            "refusing to sign here with the SSH certificate authority in slot {slot_id:02x}: \
+             an OpenSSH certificate is signed through the agent (ssh-keygen -U -s), whose PIN \
+             dialog says what it certifies"
+        ));
+    }
+    gate_data_for_slot(data, slot_id).map(|_| ())
 }
 
 /// The slot gate of RFC 0012 §2.4 item 5 (the sixth amendment): an operator
@@ -712,30 +789,124 @@ mod tests {
         out
     }
 
+    fn ssh_string(out: &mut Vec<u8>, bytes: &[u8]) {
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(bytes);
+    }
+
+    /// An unsigned OpenSSH user certificate for an ed25519 key, valid
+    /// `lifetime` seconds, for principal `deploy`.
+    fn ssh_cert_unsigned(lifetime: u64) -> Vec<u8> {
+        let mut d = Vec::new();
+        ssh_string(&mut d, b"ssh-ed25519-cert-v01@openssh.com");
+        ssh_string(&mut d, &[1u8; 32]);
+        ssh_string(&mut d, &[7u8; 32]);
+        d.extend_from_slice(&0u64.to_be_bytes());
+        d.extend_from_slice(&1u32.to_be_bytes());
+        ssh_string(&mut d, b"grant-1");
+        let mut principals = Vec::new();
+        ssh_string(&mut principals, b"deploy");
+        ssh_string(&mut d, &principals);
+        d.extend_from_slice(&1_795_000_000u64.to_be_bytes());
+        d.extend_from_slice(&(1_795_000_000u64 + lifetime).to_be_bytes());
+        ssh_string(&mut d, b"");
+        ssh_string(&mut d, b"");
+        ssh_string(&mut d, b"");
+        let mut ca = Vec::new();
+        ssh_string(&mut ca, b"ssh-ed25519");
+        ssh_string(&mut ca, &[9u8; 32]);
+        ssh_string(&mut d, &ca);
+        d
+    }
+
     #[test]
-    fn a_tbs_certificate_is_refused_on_a_ca_slot_only() {
+    fn a_tbs_certificate_is_refused_on_both_ca_slots_and_passes_elsewhere() {
         let tbs = tbs_shaped();
-        let refusal = refuse_tbs_certificate_on_ca_slot(&tbs, 0x82).unwrap_err();
+        let refusal = gate_data_for_slot(&tbs, 0x82).unwrap_err();
         assert!(refusal.contains("TBSCertificate"), "{refusal}");
         assert!(refusal.contains("slot 82"), "{refusal}");
+        // The SSH CA signs only an OpenSSH certificate: a TBS is refused too.
+        let refusal = gate_data_for_slot(&tbs, 0x83).unwrap_err();
+        assert!(refusal.contains("slot 83"), "{refusal}");
+        assert!(refusal.contains("not one"), "{refusal}");
         // 9A signs SSH challenges, 9C operator acts, 9D does not sign: not
         // CA slots, so the same bytes pass there.
-        for slot in [0x9A, 0x9C, 0x9D, 0x9E, 0x83] {
-            assert!(
-                refuse_tbs_certificate_on_ca_slot(&tbs, slot).is_ok(),
+        for slot in [0x9A, 0x9C, 0x9D, 0x9E, 0x84] {
+            assert_eq!(
+                gate_data_for_slot(&tbs, slot),
+                Ok(SlotData::Ordinary),
                 "slot {slot:02X}"
             );
         }
     }
 
     #[test]
-    fn other_bytes_pass_on_a_ca_slot() {
+    fn other_bytes_pass_on_the_x509_ca_slot_and_are_refused_on_the_ssh_one() {
         for data in [&b""[..], b"hello", b"SSHSIG", &tbs_shaped()[1..]] {
-            assert!(
-                refuse_tbs_certificate_on_ca_slot(data, 0x82).is_ok(),
+            assert_eq!(
+                gate_data_for_slot(data, 0x82),
+                Ok(SlotData::Ordinary),
                 "{data:?}"
             );
+            // Slot 83 signs nothing but an OpenSSH certificate: no sshsig, no
+            // login challenge, no other bytes.
+            assert!(gate_data_for_slot(data, 0x83).is_err(), "{data:?}");
         }
+    }
+
+    #[test]
+    fn the_ssh_ca_slot_signs_a_parsed_certificate_and_every_other_slot_refuses_it() {
+        let cert = ssh_cert_unsigned(3_600);
+        match gate_data_for_slot(&cert, 0x83) {
+            Ok(SlotData::SshCertificate(tbs)) => {
+                assert_eq!(tbs.key_id, "grant-1");
+                assert_eq!(tbs.principals, ["deploy"]);
+            }
+            other => panic!("slot 83 should sign it: {other:?}"),
+        }
+        for slot in [0x82, 0x9A, 0x9C, 0x9D, 0x9E, 0x84, 0x95] {
+            let refusal = gate_data_for_slot(&cert, slot).unwrap_err();
+            assert!(
+                refusal.contains("only the SSH certificate authority in slot 83"),
+                "slot {slot:02X}: {refusal}"
+            );
+        }
+        // A host certificate, or one with no principal, is not signed even
+        // by slot 83.
+        let mut host = ssh_cert_unsigned(3_600);
+        let type_at = 4 + 32 + 4 + 32 + 4 + 32 + 8; // key type, nonce, key, serial
+        host[type_at..type_at + 4].copy_from_slice(&2u32.to_be_bytes());
+        assert!(gate_data_for_slot(&host, 0x83).is_err());
+    }
+
+    #[test]
+    fn a_certificate_must_name_the_key_that_signs_it() {
+        let cert = ssh_cert_unsigned(3_600);
+        let tbs = match gate_data_for_slot(&cert, 0x83) {
+            Ok(SlotData::SshCertificate(tbs)) => tbs,
+            other => panic!("{other:?}"),
+        };
+        // The certificate names the ed25519 key of nine-bytes; that key signs.
+        let mut ca = Vec::new();
+        ssh_string(&mut ca, b"ssh-ed25519");
+        ssh_string(&mut ca, &[9u8; 32]);
+        assert_eq!(refuse_certificate_naming_another_ca(&tbs, &ca), Ok(()));
+        // Any other key asked to sign it is refused, the named one reported.
+        let mut other = Vec::new();
+        ssh_string(&mut other, b"ssh-ed25519");
+        ssh_string(&mut other, &[8u8; 32]);
+        let refusal = refuse_certificate_naming_another_ca(&tbs, &other).unwrap_err();
+        assert!(refusal.contains("a different CA key"), "{refusal}");
+        assert!(refusal.contains(&tbs.ca_fingerprint), "{refusal}");
+    }
+
+    #[test]
+    fn tool_sign_refuses_everything_on_the_ssh_ca_slot() {
+        assert!(refuse_data_for_slot(&ssh_cert_unsigned(3_600), 0x83).is_err());
+        assert!(refuse_data_for_slot(b"hello", 0x83).is_err());
+        assert!(refuse_data_for_slot(b"hello", 0x9A).is_ok());
+        assert!(refuse_data_for_slot(&ssh_cert_unsigned(3_600), 0x9A).is_err());
+        assert!(refuse_data_for_slot(&tbs_shaped(), 0x82).is_err());
     }
 
     /// A self-signed certificate with subject `CN=<cn>`: the shape of a

@@ -1109,6 +1109,45 @@ helper_option() {
   refute_output --partial "CERTIFICATE"
 }
 
+# The SSH certificate authority's dialog (slot 83): not an operator act, and
+# it must read as neither a certificate act nor an escalation.
+@test "an_ssh_certificate_banner_says_it_certifies_a_key_for_logins" {
+  PIGGY_ASKPASS_KIND=ssh-certificate PIGGY_ASKPASS_CONTEXT=$'card 191755CF slot 83\nKey id: grant-1' \
+    run "$ASKPASS" "Enter PIV PIN"
+  assert_success
+  assert_output --partial "SSH CERTIFICATE AUTHORITY — you are certifying an SSH key for logins"
+  assert_output --partial "Key id: grant-1"
+  refute_output --partial "OPERATOR ACT"
+  refute_output --partial "GRANTING AUTHORITY"
+}
+
+@test "an_ssh_certificate_uses_the_gtk_helper_with_its_own_words_and_never_zenity" {
+  run_askpass_against_gtk_helper_stub 0 PIGGY_ASKPASS_KIND=ssh-certificate
+  assert_success
+  assert_output "123456"
+  assert_equal "$(zenity_call_count)" 0
+  assert_equal "$(helper_option --title)" "piggy SSH CA: CERTIFICATE"
+  assert_equal "$(helper_option --ok-label)" "Issue SSH certificate"
+  assert_equal "$(helper_option --timeout)" 120
+  if grep -qxF -- --confirm-word "$HELPER_ARGV"; then
+    echo "an SSH certificate asked for the escalation's typed word"
+    return 1
+  fi
+  if grep -qiE -- 'OPERATOR ACT|ESCALAT' "$HELPER_ARGV"; then
+    echo "an SSH certificate's dialog reused an operator act's words; got:"
+    cat "$HELPER_ARGV"
+    return 1
+  fi
+}
+
+@test "an_ssh_certificate_is_refused_on_zenity_before_any_dialog" {
+  run_askpass_against_logging_zenity_stub PIGGY_ASKPASS_KIND=ssh-certificate
+  assert_failure 3
+  refute_output --partial "123456"
+  assert_output --partial "cannot hold input"
+  assert_equal "$(zenity_call_count)" 0
+}
+
 @test "an_approval_banner_says_it_grants_no_right" {
   PIGGY_ASKPASS_KIND=approval run "$ASKPASS" "Enter PIV PIN"
   assert_success

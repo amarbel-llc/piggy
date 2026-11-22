@@ -329,6 +329,40 @@ unchanged. A *--proxy-only* front does only that: it never shows the text and
 never prompts. The prompt appears on the host where the card is, which is
 what lets *piggy operator-sign* work over a forwarded agent.
 
+# SSH CERTIFICATE AUTHORITY
+
+The key in slot 83 (*piggy-piv-slots*(7)) is a certificate authority for
+OpenSSH user certificates, and the agent serves it as an ordinary SSH
+identity, so *ssh-keygen -U -s* signs with it with no other client:
+
+```
+SSH_AUTH_SOCK=... ssh-keygen -U -s ca83.pub -I grant-1 -n deploy-site -V +2h user.pub
+```
+
+*ssh-keygen* sends the agent the certificate with everything but its
+signature; the agent reads it (its own parser, not OpenSSH's) and signs it
+only if it is an unsigned user certificate. Before the card is touched or a
+prompt is shown it refuses: data that is not such a certificate (an sshsig, a
+login challenge, a TBSCertificate, anything else), a host certificate, a
+certificate with no principal, with no end, or valid for more than 24 hours
+(the built-in limit, plus five minutes for *ssh-keygen*'s one-minute
+back-dating). An OpenSSH certificate sent to any other slot is refused too.
+
+The PIN dialog is of kind _ssh-certificate_ (*PIGGY_ASKPASS_KIND*): its own
+banner, title ("piggy SSH CA: CERTIFICATE"), band and button ("Issue SSH
+certificate"), distinct from every operator act's, and its context is what the
+signature certifies, in the order it is read: the card and slot, the key id,
+the principals, the certified key's SHA256 fingerprint, the CA key's, the
+serial, the validity (UTC) and lifetime, the critical options (a
+*force-command* with its command) and the extensions. It is held, shown whole
+and timed like an operator act's text. The PIN is asked for every certificate
+(see PIN MEMORY); the card's touch, if the slot demands it, is the card's.
+
+A request for a key an upstream holds is relayed unchanged (see UPSTREAM
+PROXYING): the checks and the dialog are the card agent's own, on its host. A
+proxy-only front does none of them, and an upstream that is not a piggy card
+agent offers none either.
+
 # HOLDER MODE
 
 With *--holder* (FDR 0006 phase (d), piggy#383) the agent is a *key
@@ -482,7 +516,11 @@ a non-interactive helper; see *piggy-testing*(7).
 
 A PIN that verified on a card, or that *ssh-add -X* offered, stays cached
 for that card until the card leaves, *ssh-add -x* clears it, or the agent
-exits. Each cached PIN is held on pages of its own (FDR 0006 phase (b)):
+exits. The exception is the certificate authority slots, 82 and 83
+(*piggy-piv-slots*(7)): their PIN is asked every time and is neither taken
+from the cache nor put in it, so a PIN-always key is asked for per signature
+by the operator, not only by the card; what 82 and 83 prompt never changes
+what is cached for the card's other slots, 9C and 9D included. Each cached PIN is held on pages of its own (FDR 0006 phase (b)):
 between two inaccessible guard pages, locked against swap, and unreadable
 except while one VERIFY copies it out; its pages are zeroed when it is
 forgotten. At start the agent makes itself non-dumpable and sets its core

@@ -1381,8 +1381,10 @@ fn cmd_sign(inv: &Invocation) -> i32 {
         eprintln!("piggy tool sign: {refusal}");
         return 1;
     }
-    // FDR 0007 phase (ii): nor does it sign a certificate with a CA key.
-    if let Err(refusal) = crate::operator_act::refuse_tbs_certificate_on_ca_slot(&input, slot_id) {
+    // FDR 0007 phase (ii): nor does it sign a certificate with a CA key, and
+    // the SSH CA slot (83) signs nothing here: its certificates go through
+    // the agent, whose PIN dialog says what they certify.
+    if let Err(refusal) = crate::operator_act::refuse_data_for_slot(&input, slot_id) {
         eprintln!("piggy tool sign: {refusal}");
         return 1;
     }
@@ -1443,6 +1445,15 @@ fn cmd_req_cert(inv: &Invocation) -> i32 {
         Ok(s) => s,
         Err(code) => return code,
     };
+    // The SSH certificate authority signs OpenSSH certificates and nothing
+    // else; a certificate request is not one.
+    if piggy_piv::slot::ca_kind(slot_id) == Some(piggy_piv::slot::CaKind::SshCertificate) {
+        eprintln!(
+            "piggy tool {op}: slot {slot_id:02X} is the SSH certificate authority: it signs \
+             OpenSSH certificates (ssh-keygen -U -s) and nothing else, not a certificate request"
+        );
+        return 1;
+    }
     let mut token = match select_token(inv.guid.as_deref()) {
         Ok(t) => t,
         Err(msg) => {

@@ -150,12 +150,31 @@ pub fn is_valid_piv_slot(slot_id: u8) -> bool {
     slot_to_cert_tag(slot_id).is_some()
 }
 
-/// The slots that hold a certificate authority's key (FDR 0007: slot 82,
-/// `retired-1`, ruled 2026-11-08). 9A signs SSH challenges, 9C operator
-/// acts, and 9D does not sign, so none of them is a CA slot. One place to
-/// widen if another retired slot ever becomes one.
+/// What a certificate authority's slot certifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaKind {
+    /// X.509 certificates (FDR 0007: slot 82, `retired-1`, ruled 2026-11-08).
+    X509,
+    /// OpenSSH user certificates (slot 83, `retired-2`, ruled 2026-11-22).
+    SshCertificate,
+}
+
+/// The kind of CA a slot is, `None` for any slot that is not one. 9A signs
+/// SSH challenges, 9C operator acts, and 9D does not sign, so none of them
+/// is a CA slot. The one place to widen if another retired slot ever
+/// becomes one; every check that needs "which slot may certify what" asks
+/// here.
+pub fn ca_kind(slot_id: u8) -> Option<CaKind> {
+    match slot_id {
+        0x82 => Some(CaKind::X509),
+        0x83 => Some(CaKind::SshCertificate),
+        _ => None,
+    }
+}
+
+/// Whether a slot holds any certificate authority's key.
 pub fn is_ca_slot(slot_id: u8) -> bool {
-    slot_id == 0x82
+    ca_kind(slot_id).is_some()
 }
 
 /// Standard PIV slots to probe for certificates

@@ -136,12 +136,66 @@ pub struct PiggyAgent {
 struct AcquiredPin {
     pin: Zeroizing<String>,
     fresh: bool,
+    /// False for a PIN of a CA slot (82, 83): asked every time and never put
+    /// in the cache, whatever its on-card verify said.
+    cacheable: bool,
     /// True only for the speculative `ssh-add -X` offer (piggy#245). A
     /// prompted PIN and an offered PIN are both `fresh`, but only the
     /// offer is guarded against driving a low-retry card toward lockout —
     /// a prompted PIN is the user deliberately trying THIS card and must
     /// stay usable even at one retry.
     offered: bool,
+}
+
+/// How a request's PIN prompt is shaped and whether its answer may be
+/// cached. An ordinary slot's prompt is the routine one and its PIN is
+/// cached after the card accepts it; a CA slot's (82, 83) is asked every
+/// time and never cached, the operator's ruling of 2026-11-22 ("82 and 83
+/// should never be cached"; 9C and 9D are NOT changed by it).
+#[derive(Debug, Clone, Default)]
+struct PinPrompt {
+    /// `PIGGY_ASKPASS_KIND`, when the dialog is not the routine one.
+    kind: Option<&'static str>,
+    /// `PIGGY_ASKPASS_CONTEXT`, replacing the request label.
+    context: Option<String>,
+    /// The prompt line, replacing "Enter PIN for token ...".
+    prompt: Option<String>,
+    /// Asked every time, read from and written to no cache.
+    uncached: bool,
+}
+
+/// `PIGGY_ASKPASS_KIND` of the dialog that shows an OpenSSH certificate
+/// about to be signed (contrib/piggy-askpass.sh's `class_ssh_certificate`).
+pub const ASKPASS_KIND_SSH_CERTIFICATE: &str = "ssh-certificate";
+
+impl PinPrompt {
+    /// The prompt a request on `slot_id` gets by default: routine and cached,
+    /// except on a CA slot, where it is routine and uncached.
+    fn for_slot(slot_id: u8) -> Self {
+        Self {
+            uncached: piggy_piv::slot::is_ca_slot(slot_id),
+            ..Self::default()
+        }
+    }
+
+    /// The prompt for signing `tbs` with the SSH CA of `guid`'s card: the
+    /// certificate's dialog, showing what it certifies, never cached.
+    fn certifying(guid: &Guid, slot_id: u8, tbs: &piggy_piv::ssh_cert::SshCertTbs) -> Self {
+        Self {
+            kind: Some(ASKPASS_KIND_SSH_CERTIFICATE),
+            context: Some(format!(
+                "card {} slot {:02X}, the SSH certificate authority\n{}",
+                guid.short_id(),
+                slot_id,
+                tbs.describe()
+            )),
+            prompt: Some(format!(
+                "Enter PIN for token {} to sign this SSH certificate",
+                guid.short_id()
+            )),
+            uncached: true,
+        }
+    }
 }
 
 impl PiggyAgent {
@@ -240,7 +294,15 @@ impl PiggyAgent {
     /// `fresh` flag tells the caller to cache the PIN only after an on-card
     /// verify succeeds (so a wrong prompted PIN is never cached). `op` is a
     /// short request label propagated as `PIGGY_ASKPASS_CONTEXT`.
-    async fn ensure_pin(&self, op: &str, guid: &Guid) -> Result<AcquiredPin, AgentError> {
+    ///
+    /// An `uncached` [`PinPrompt`] (a CA slot) skips the cache both ways:
+    /// the prompt is raised every time, and its answer is never kept.
+    async fn ensure_pin(
+        &self,
+        op: &str,
+        guid: &Guid,
+        how: &PinPrompt,
+    ) -> Result<AcquiredPin, AgentError> {
         // piggy#177: the cache is per-card. A hit verified on THIS card is
         // trusted (fresh: false); the `ssh-add -X` offer has not verified
         // anywhere yet, so it rides the fresh=true path — cached for this
@@ -250,23 +312,35 @@ impl PiggyAgent {
             cache.lookup(guid).map(|(pin, source)| AcquiredPin {
                 pin,
                 fresh: source == PinSource::Offered,
+                cacheable: true,
                 offered: source == PinSource::Offered,
             })
         };
-        if let Some(acq) = from_cache(&*self.pins.lock().await) {
-            return Ok(acq);
+        if !how.uncached {
+            if let Some(acq) = from_cache(&*self.pins.lock().await) {
+                return Ok(acq);
+            }
         }
         // No cached PIN; serialize prompts and re-check (another request may
         // have just prompted and cached one while we waited).
         let _prompt_guard = self.prompt_lock.lock().await;
-        if let Some(acq) = from_cache(&*self.pins.lock().await) {
-            return Ok(acq);
+        if !how.uncached {
+            if let Some(acq) = from_cache(&*self.pins.lock().await) {
+                return Ok(acq);
+            }
         }
-        let prompt = format!("Enter PIN for token {}", guid.short_id());
-        let context = format!("piggy-agent:{op}:{}", guid.short_id());
+        let prompt = how
+            .prompt
+            .clone()
+            .unwrap_or_else(|| format!("Enter PIN for token {}", guid.short_id()));
+        let context = how
+            .context
+            .clone()
+            .unwrap_or_else(|| format!("piggy-agent:{op}:{}", guid.short_id()));
+        let kind = how.kind;
         let prompt_start = std::time::Instant::now();
         let result = tokio::task::spawn_blocking(move || {
-            crate::card_oracle::run_askpass(&prompt, Some(&context))
+            crate::card_oracle::run_askpass_of_kind(&prompt, Some(&context), kind)
         })
         .await
         .map_err(|e| AgentError::Other(format!("askpass task: {e}").into()))
@@ -281,14 +355,16 @@ impl PiggyAgent {
         Ok(AcquiredPin {
             pin: result?,
             fresh: true,
+            cacheable: !how.uncached,
             offered: false,
         })
     }
 
     /// Cache a freshly-prompted (or freshly-promoted `ssh-add -X`) PIN for
-    /// `guid` after its on-card verify succeeded.
+    /// `guid` after its on-card verify succeeded. A CA slot's PIN is never
+    /// cached.
     async fn cache_pin(&self, guid: &Guid, acquired: &AcquiredPin) {
-        if acquired.fresh {
+        if acquired.fresh && acquired.cacheable {
             self.pins
                 .lock()
                 .await
@@ -329,6 +405,7 @@ impl PiggyAgent {
         guid: &Guid,
         slot_id: u8,
         needs_pin: bool,
+        how: &PinPrompt,
         mut card_op: impl FnMut(
             &mut piggy_piv::PinSession<'_>,
             &piggy_piv::PivSlot,
@@ -337,7 +414,7 @@ impl PiggyAgent {
         let mut attempt = 0u32;
         loop {
             let acquired = if needs_pin {
-                Some(self.ensure_pin(op, guid).await?)
+                Some(self.ensure_pin(op, guid, how).await?)
             } else {
                 None
             };
@@ -362,7 +439,12 @@ impl PiggyAgent {
                     Ok(()) => self.cache_pin(guid, acq).await,
                     Err(PivError::PinIncorrect { .. }) if attempt < PIN_RETRY_LIMIT => {
                         attempt += 1;
-                        self.forget_pin(guid).await;
+                        // An uncached prompt never used the cache: a wrong
+                        // PIN typed for a CA slot says nothing about the
+                        // PIN cached for the card's other slots.
+                        if !how.uncached {
+                            self.forget_pin(guid).await;
+                        }
                         continue;
                     }
                     Err(e) => return Err(AgentError::Other(e.to_string().into())),
@@ -530,21 +612,51 @@ impl PiggyAgent {
             }
         };
 
-        // FDR 0007 phase (ii): a CA key signs certificates only through
-        // `piggy ca`; the same bytes here would be a certificate signed
-        // behind a routine PIN prompt.
-        crate::operator_act::refuse_tbs_certificate_on_ca_slot(&request.data, key.slot_id)
+        // FDR 0007 phase (ii) and the SSH CA slot: what each slot may be
+        // asked to sign depends on its kind. The X.509 CA signs certificates
+        // only through `piggy ca`; the SSH CA signs ONLY a parsed unsigned
+        // OpenSSH user certificate; no other slot signs a certificate. All of
+        // it is refused before the card is touched or a prompt is raised.
+        let slot_data = crate::operator_act::gate_data_for_slot(&request.data, key.slot_id)
             .map_err(|refusal| AgentError::Other(refusal.into()))?;
+        if let crate::operator_act::SlotData::SshCertificate(tbs) = &slot_data {
+            // The certificate must name the very key that signs it, and be
+            // short-lived from now: an end, at most the limit long, starting
+            // now (not years ahead).
+            let signer = PublicKey::new(key.public_key.clone(), "")
+                .to_bytes()
+                .map_err(|e| AgentError::Other(format!("the slot's key: {e}").into()))?;
+            crate::operator_act::refuse_certificate_naming_another_ca(tbs, &signer)
+                .map_err(|refusal| AgentError::Other(refusal.into()))?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            tbs.check_validity(piggy_piv::ssh_cert::MAX_LIFETIME_SECS, now)
+                .map_err(|refusal| {
+                    AgentError::Other(
+                        format!("refusing to certify {}: {refusal}", tbs.key_id).into(),
+                    )
+                })?;
+        }
 
         // Prepare data for signing (independent of the card session).
         let sign_data = prepare_sign_data(key.algorithm, &request.data, request.flags)?;
 
+        // A certificate is signed behind its own dialog, which says what it
+        // certifies; a CA slot's PIN is asked every time and never cached.
+        let how = match &slot_data {
+            crate::operator_act::SlotData::SshCertificate(tbs) => {
+                PinPrompt::certifying(&key.guid, key.slot_id, tbs)
+            }
+            crate::operator_act::SlotData::Ordinary => PinPrompt::for_slot(key.slot_id),
+        };
         let sig_bytes = self
             .on_verified_card(
                 "sign",
                 &key.guid,
                 key.slot_id,
                 key.needs_pin(),
+                &how,
                 |session, slot| {
                     session
                         .sign_prehash(slot, &sign_data)
@@ -1433,6 +1545,7 @@ impl PiggyAgent {
                 &key.guid,
                 key.slot_id,
                 key.needs_pin(),
+                &PinPrompt::for_slot(key.slot_id),
                 |session, slot| {
                     session
                         .ecdh_derive(slot, &ec_point)
@@ -1566,6 +1679,7 @@ impl PiggyAgent {
                 &key.guid,
                 box_slot,
                 needs_pin,
+                &PinPrompt::for_slot(box_slot),
                 |session, slot| {
                     session
                         .ecdh_derive(slot, &ec_point)
@@ -3821,14 +3935,20 @@ mod tests {
 
         // ssh-add -X: both cards are offered the PIN, as fresh.
         agent.pin_handle().lock().await.offer("offer-pin");
-        let acq_a = agent.ensure_pin("test", &card_a).await.unwrap();
+        let acq_a = agent
+            .ensure_pin("test", &card_a, &PinPrompt::default())
+            .await
+            .unwrap();
         assert!(acq_a.fresh, "offer must ride the cache-after-verify path");
         assert_eq!(acq_a.pin.as_str(), "offer-pin");
 
         // Card A verifies it: promoted to A's verified PIN; subsequent
         // lookups are trusted (not fresh).
         agent.cache_pin(&card_a, &acq_a).await;
-        let again_a = agent.ensure_pin("test", &card_a).await.unwrap();
+        let again_a = agent
+            .ensure_pin("test", &card_a, &PinPrompt::default())
+            .await
+            .unwrap();
         assert!(!again_a.fresh, "verified PIN must not be re-cached");
 
         // Card B rejects the offer: it is not offered again to B…

@@ -565,6 +565,57 @@ each, under the host's gate rules.
   stay GPL-2.0-or-later; `flake.nix` `meta.license` and `README.md:50`
   made consistent; the issue's "not legal advice" label kept.
 
+## Amendment 2026-11-22: slot 83, the SSH certificate authority
+
+Ruled by the operator, relayed by the coordinator (circus/eager-holly) the
+same day, for the delegation sprint. It extends decision 1 (the pilot CA
+slot): the card holds **two** certificate authorities, one per kind, and a
+kind certifies one thing only.
+
+| Slot | Kind | Certifies |
+|---|---|---|
+| 82 (`retired-1`) | X.509 | X.509 certificates, through `piggy ca` only |
+| 83 (`retired-2`) | SSH certificate | OpenSSH user certificates, through the agent (`ssh-keygen -U -s`) |
+
+Both are keys generated on the card with PIN always and touch always, on a
+real card and in fibby alike (fibby holds a key in any retired slot, piggy#399).
+
+- **The agent refuses the wrong kind, per slot, before the card is touched or
+  a prompt shown.** Slot 82 refuses a TBSCertificate through the agent and
+  `piggy tool sign` (as before) and an OpenSSH certificate; slot 83 signs
+  only a parsed, unsigned OpenSSH user certificate and refuses a
+  TBSCertificate, an sshsig, a login challenge and any other bytes; every
+  other slot refuses an OpenSSH certificate. One function
+  (`piggy_piv::slot::ca_kind`) says which slot is which kind.
+- **A certificate-aware prompt is required.** Signing an OpenSSH certificate
+  raises a PIN dialog of its own kind, `ssh-certificate`, whose context is
+  what the signature certifies: key id, principals, the certified key's and the
+  CA key's fingerprints, serial, validity and lifetime, critical options (a
+  `force-command` with its command) and extensions. It is not an operator act
+  and shares no wording with one.
+- **Lifetimes are variable up to a limit.** The limit is 24 hours, built in
+  (`MAX_LIFETIME_SECS`) for now and configurable later, plus five minutes
+  for `ssh-keygen`'s one-minute back-dating; a longer certificate, one with
+  no end, a host certificate and one with no principal (valid for every
+  user) are refused before any prompt. Slot 83 certifies user certificates
+  only; widening to host certificates is a later ruling.
+- **82 and 83 are never cached.** The agent asks for their PIN every time and
+  neither reads it from nor writes it to the PIN cache. 9C and 9D are NOT
+  changed by this: whether they too should never be cached, against the
+  operator's wish for a single PIN entry, is deferred and tracked as its own
+  issue.
+- **Fibby is production software.** The operator wants fibby to be capable of
+  everything piggy does that is used regularly, and part of the first real
+  run; slot 83 works on it today. Persistence of a fibby card's keys across a
+  restart is not part of this amendment (a restarted fibby has an empty slot
+  83).
+
+Record of what was checked: `ssh-keygen -U -s` against an agent over fibby's
+slot 83 signed a certificate that `ssh-keygen -L` reads and that OpenSSH's
+`-Y verify` accepts against a `cert-authority` line; the lane
+`test-bats-conformance-ssh-ca-fibby` pins it, and the parser's tests use a
+certificate `ssh-keygen` made.
+
 ## Why sshsig? Acts as hyphence trees with markl-ids (options)
 
 The operator asked (2026-11-08, not ruled): "why does this need to be

@@ -83,6 +83,10 @@ pub fn sign_message<F: Frontend + ?Sized>(
     // Before any card or agent is asked: an operator act is signed only
     // where its text is shown first (RFC 0012 §2.7).
     crate::operator_act::refuse_operator_act_signed_data(message).map_err(SignError::Failed)?;
+    // Nor does any slot but the SSH certificate authority sign an OpenSSH
+    // certificate, and this surface (a card here or an agent's) signs
+    // nothing for that one.
+    crate::operator_act::refuse_data_for_slot(message, slot_id).map_err(SignError::Failed)?;
 
     // Card-first: use a locally-attached PIV card when one is reachable. On
     // ANY card-selection failure (PCSC unavailable, no card, no GUID match)
