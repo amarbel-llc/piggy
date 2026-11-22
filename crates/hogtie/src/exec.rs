@@ -191,8 +191,6 @@ mod tests {
         uid: u32,
     }
 
-    use crate::testkit::on_path;
-
     impl Host {
         fn new() -> Self {
             let kit = Kit::new();
@@ -208,7 +206,7 @@ mod tests {
                  param = [{{ name = \"word\", kind = \"choice\", values = [\"hello\", \"bye\"] }}]\n",
                 kit.ssh_keygen.display(),
                 kit.ca_line(),
-                on_path("echo"),
+                crate::testkit::trusted_copy(kit.dir(), "echo").display(),
             );
             crate::testkit::write_trusted(&paths.config, &config);
             Self {
@@ -488,23 +486,26 @@ mod tests {
     fn a_program_writable_by_others_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
         let h = Host::new();
-        let prog = h.paths.config.parent().unwrap().join("prog");
-        std::fs::copy(on_path("echo"), &prog).unwrap();
+        let prog = crate::testkit::trusted_copy(h.paths.config.parent().unwrap(), "echo");
         std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o757)).unwrap();
-        let text = std::fs::read_to_string(&h.paths.config).unwrap();
-        let text = text.replace(
-            &format!("program = \"{}\"", on_path("echo")),
+        let echo = crate::testkit::trusted_copy(h.kit.dir(), "echo");
+        let old = std::fs::read_to_string(&h.paths.config).unwrap();
+        let text = old.replace(
+            &format!("program = \"{}\"", echo.display()),
             &format!("program = \"{}\"", prog.display()),
         );
+        assert_ne!(text, old, "the program line was replaced");
         crate::testkit::write_trusted(&h.paths.config, &text);
         let now = crate::util::now();
         let cert = h.kit.cert("a", &["say"], "+1h", &[]);
         let r = h.respond(&cert, h.nonce_for(h.uid, now), h.uid, "say", &["hello"]);
         let d = h.exec(&r, "say", &["hello"], now);
-        assert!(
-            refusal(&d).contains("writable by no one else"),
-            "{}",
-            refusal(&d)
+        assert_eq!(
+            refusal(&d),
+            format!(
+                "{} must be a file owned by root and writable by no one else",
+                prog.display()
+            )
         );
     }
 

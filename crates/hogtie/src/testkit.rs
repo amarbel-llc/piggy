@@ -44,12 +44,41 @@ fn run(cmd: &mut Command) {
     );
 }
 
+/// A copy of `name` from PATH in `dir`, mode 0755, owned by the test: what
+/// hogtie's "owned by root" check accepts under the test harness however a
+/// build sandbox maps the store's owner (piggy-rs shows it as not root).
+///
+/// The copy is written by a `cp` child, not by this process: a file this
+/// multi-threaded test process held open for writing could be inherited by
+/// another thread's fork, and exec of the copy would fail with ETXTBSY.
+pub fn trusted_copy(dir: &Path, name: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    // Kept under its own name: coreutils is one binary that dispatches on
+    // argv[0], so `bin-echo` would not be echo.
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let to = bin.join(name);
+    if !to.exists() {
+        let tmp = bin.join(format!(".{name}.{}", std::process::id()));
+        let st = Command::new(on_path("cp"))
+            .arg(on_path(name))
+            .arg(&tmp)
+            .status()
+            .expect("run cp");
+        assert!(st.success(), "cp {name}");
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&tmp, &to).unwrap();
+    }
+    to
+}
+
 impl Kit {
     pub fn new() -> Self {
         let dir = PrivateDir::new(&std::env::temp_dir(), "hogtie-kit").expect("kit dir");
+        let ssh_keygen = trusted_copy(dir.path(), "ssh-keygen");
         let kit = Self {
             dir,
-            ssh_keygen: PathBuf::from(on_path("ssh-keygen")),
+            ssh_keygen,
             counter: Cell::new(0),
         };
         kit.keygen(&["-t", "ecdsa", "-b", "256", "-f", "ca", "-C", "ca"]);

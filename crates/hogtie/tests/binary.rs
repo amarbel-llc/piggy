@@ -5,7 +5,7 @@
 //! the declared environment, and every use lands in the audit log.
 #![cfg(target_os = "linux")]
 
-use hogtie::testkit::{Kit, on_path, write_trusted};
+use hogtie::testkit::{Kit, trusted_copy, write_trusted};
 use hogtie::util::PrivateDir;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
@@ -52,9 +52,9 @@ impl Host {
              [action.broken]\nprogram = \"{}\"\n",
             kit.ssh_keygen.display(),
             kit.ca_line(),
-            on_path("echo"),
-            on_path("env"),
-            on_path("pwd"),
+            trusted_copy(kit.dir(), "echo").display(),
+            trusted_copy(kit.dir(), "env").display(),
+            trusted_copy(kit.dir(), "pwd").display(),
             not_exec.display(),
         );
         write_trusted(&root.path().join("etc/hogtie.toml"), &config);
