@@ -1341,6 +1341,28 @@ test-bats-conformance-ca-root-cert-fibby:
       BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
       zz-tests_bats/conformance/piggy_ca_root_cert_fibby.bats
 
+# The SSH certificate authority, slot 83, over fibby and a card agent (lane 1
+# of the delegation sprint): `ssh-keygen -U -s` signs an OpenSSH user
+# certificate behind a PIN dialog of kind ssh-certificate that says what it
+# certifies; the signature verifies against a cert-authority line; slot 83's
+# PIN is asked every time while 9A's stays cached; a lifetime over 24 hours,
+# no end, a host certificate and no principal are refused before any prompt;
+# slot 82 refuses an OpenSSH certificate and slot 83 an sshsig.
+#
+# run the fibby-backed SSH certificate authority (slot 83) bats gate
+[group('post-build')]
+[linux]
+test-bats-conformance-ssh-ca-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_ssh_ca_fibby.bats
+
 # FDR 0007 phase (ii), piggy#391, over fibby's slot 82 (piggy#399): the root
 # `piggy ca root-cert` makes is written back, then `piggy ca issue` signs a
 # leaf and `piggy ca sign` an intermediate under it, each with its
@@ -2319,6 +2341,107 @@ explore-darwin-fibby-csock: build-rust
 [group('explore')]
 explore-bats *FILES: build-rust
   BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
+
+# Delegation proof (no code under test): a P-256 key generated in fibby's
+# slot 83 (PIN always, touch always) signs a forced-command OpenSSH user
+# certificate through a card `piggy agent` and `ssh-keygen -U -s`; the lane
+# prints ssh-keygen's answer, `ssh-keygen -L` of the certificate and the
+# prompt the agent raised, as the code stands. No card, no host.
+#
+# run the fibby slot-83 SSH-certificate proof and print what it saw
+[group('explore')]
+[linux]
+explore-ssh-cert-fibby:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      PROOF_OUT="${PROOF_OUT:-$PWD/.tmp/ssh-cert-proof.txt}" \
+      BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/piggy_ssh_cert_fibby.bats
+
+# The delegation proof's certificates: a fresh fibby with a slot-83 CA signs
+# three user certificates for USER_PUB (a public line) into DIR (public
+# material only: the CA line, the certificates, their `ssh-keygen -L` and
+# the prompts); fibby is torn down with the run, so the CA private key dies.
+#
+# sign the delegation proof's three certificates for USER_PUB into DIR
+[group('explore')]
+[linux]
+explore-ssh-cert-proof USER_PUB DIR:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fibby_out=$(nix build .#fibby --no-link --print-out-paths)
+    piggy_out=$(nix build .#default --no-link --print-out-paths)
+    PIGGY="$piggy_out/bin/piggy" \
+      FIBBY_BIN="$fibby_out/bin/fibby" \
+      PIGGY_BIN="$piggy_out/bin/piggy" \
+      PROOF_USER_PUB={{ quote(USER_PUB) }} PROOF_DIR={{ quote(DIR) }} \
+      BATS_TEST_TIMEOUT=120 bats --no-sandbox --tap \
+      -f the_delegation_proof \
+      zz-tests_bats/conformance/piggy_ssh_cert_fibby.bats
+
+# Syntax-check (bash -n) and shellcheck FILES, which may sit outside the
+# tree; shellcheck is skipped with a note when
+# the devshell has none.
+#
+# bash -n and shellcheck the given shell scripts
+[group('debug')]
+debug-shell-script *FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for f in {{ FILES }}; do
+      bash -n "$f"
+      echo "bash -n ok: $f"
+      if command -v shellcheck >/dev/null 2>&1; then
+        shellcheck -s bash "$f"
+        echo "shellcheck ok: $f"
+      else
+        echo "shellcheck not in the devshell: $f unchecked"
+      fi
+    done
+
+# Does `ssh-keygen -Y verify` accept an sshsig made by a user key that holds
+# an OpenSSH user certificate, against a `cert-authority` allowed-signers
+# line, and what does it say about the certificate's principals? Software
+# keys only (no card, no agent, no network); prints every step's answer.
+#
+# probe sshsig-by-certified-key verification with cert-authority allowed-signers
+[group('explore')]
+explore-sshsig-cert-verify:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    d=$(mktemp -d "$PWD/.tmp/sshsigcert.XXXXXX")
+    cd "$d"
+    ssh-keygen -q -t ecdsa -b 256 -N '' -f ca -C ca
+    ssh-keygen -q -t ed25519 -N '' -f user -C user
+    ssh-keygen -q -s ca -I grant-1 -n deploy-site,restart-service -V +1h user.pub
+    echo "--- the grant:"; ssh-keygen -L -f user-cert.pub
+    printf 'nonce-123 deploy-site arg=x\n' >msg
+    echo "--- sign with the key that has a certificate next to it (-Y sign -f user):"
+    ssh-keygen -Y sign -f user -n hogtie-v1 msg; echo "exit $?"
+    echo "--- sign naming the certificate (-Y sign -f user-cert.pub):"
+    cp msg msg2
+    ssh-keygen -Y sign -f user-cert.pub -n hogtie-v1 msg2; echo "exit $?"
+    for s in msg.sig msg2.sig; do
+      [[ -f $s ]] || continue
+      echo "--- $s: public key inside the signature:"
+      sed '1d;$d' "$s" | base64 -d | head -c 120 | strings | head -3
+      printf '* cert-authority,namespaces="hogtie-v1" %s\n' "$(cut -d' ' -f1,2 ca.pub)" >allowed
+      echo "--- verify $s with a cert-authority line (principal deploy-site):"
+      ssh-keygen -Y verify -f allowed -I deploy-site -n hogtie-v1 -s "$s" <"${s%.sig}"; echo "exit $?"
+      echo "--- verify $s, principal NOT in the grant (shutdown-host):"
+      ssh-keygen -Y verify -f allowed -I shutdown-host -n hogtie-v1 -s "$s" <"${s%.sig}"; echo "exit $?"
+      echo "--- find-principals for $s:"
+      ssh-keygen -Y find-principals -f allowed -s "$s"; echo "exit $?"
+    done
+    echo "--- verify with the WRONG CA line:"
+    ssh-keygen -q -t ecdsa -b 256 -N '' -f ca2 -C ca2
+    printf '* cert-authority,namespaces="hogtie-v1" %s\n' "$(cut -d' ' -f1,2 ca2.pub)" >allowed2
+    ssh-keygen -Y verify -f allowed2 -I deploy-site -n hogtie-v1 -s msg.sig <msg; echo "exit $?"
 
 # Run the Go conformance binary against a freshly-started piggy agent and
 # print per-test PASS/FAIL/SKIP lines. Useful for eyeballing which subtests
