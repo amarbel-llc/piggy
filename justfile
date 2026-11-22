@@ -2,7 +2,7 @@
 default: lint build test
 
 [group('pre-build')]
-lint: lint-fmt lint-rust lint-piggy-piv-portable lint-worktree lint-closure-no-pivy lint-fibby-holder lint-pigtrough-stack-isolated
+lint: lint-fmt lint-rust lint-piggy-piv-portable lint-worktree lint-closure-no-pivy lint-fibby-holder lint-pigtrough-stack-isolated _lint-hogtie-linux-only
 
 # --- build ---
 
@@ -37,6 +37,9 @@ build-nix:
     # And pigtrough (FDR 0009): its own narrow package, not a dep of
     # `.#default`; building it also runs its tests in the sandbox.
     nix build .#pigtrough --no-link --show-trace
+    # And hogtie(8): its own narrow package; building it also runs every
+    # hogtie test, the binary tests included, in the sandbox.
+    {{ if os() == "linux" { "nix build .#hogtie --no-link --show-trace" } else { "true" } }}
 
 # Cargo-build the workspace; on Linux with no ARGS, also build fibby with
 # --features hardware-proxy so pcsc-sys's link-time pkg-config runs at the gate.
@@ -1905,6 +1908,15 @@ debug-stale-bats-procs KILL="0":
 test-rust *ARGS:
     cargo test {{ARGS}}
 
+# hogtie's whole suite, the binary tests included (they need the
+# `test-harness` feature, so plain `test-rust` skips them); the merge gate
+# runs the same suite inside `nix build .#hogtie`.
+#
+# run every hogtie test, the binary tests with the test harness, forwarding ARGS
+[group('post-build')]
+test-rust-hogtie *ARGS:
+    cargo test -p hogtie --features test-harness {{ARGS}}
+
 # Flake hunt (piggy#344): build fibby's loopback test once, then run it RUNS
 # times and count the failures. Exits non-zero if any run failed.
 #
@@ -3031,6 +3043,31 @@ lint-fibby-holder:
     set -euo pipefail
     system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
     nix build ".#checks.${system}.lint-fibby-holder" --no-link --print-build-logs
+
+# hogtie(8)'s shipped binary carries no test harness: HOGTIE_TEST_ROOT is not
+# in it, and with that variable set it still insists on uid 0
+# (checks.lint-hogtie).
+#
+# assert the shipped hogtie binary carries no test harness
+[group('pre-build')]
+lint-hogtie:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
+    nix build ".#checks.${system}.lint-hogtie" --no-link --print-build-logs
+
+# clippy hogtie with the test harness on, which the workspace pass leaves off
+# (so its binary tests and the test kit are linted too)
+[group('pre-build')]
+lint-rust-hogtie:
+    cargo clippy -p hogtie --all-targets --features test-harness -- -D warnings
+
+# hogtie is Linux only (SO_PEERCRED, /proc, getrandom).
+[linux]
+_lint-hogtie-linux-only: lint-hogtie lint-rust-hogtie
+
+[macos]
+_lint-hogtie-linux-only:
 
 # piggy#337: `piggy-piv --no-default-features` is the portable core pigsty
 # links on Android and wasm. It must compile (clippy-clean), and its

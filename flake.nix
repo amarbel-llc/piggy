@@ -583,6 +583,66 @@
             };
           };
 
+          # hogtie(8), the root door for agent sessions: its own narrow
+          # package, because it is in the trusted base of every host it runs
+          # on and links no other piggy crate. The installed binary is built
+          # WITHOUT the `test-harness` feature (checks.lint-hogtie proves it);
+          # the tests, which need it, run with it in the sandbox, signing
+          # with stock ssh-keygen and a software CA.
+          hogtie = pkgs.rustPlatform.buildRustPackage {
+            pname = "hogtie";
+            version = "0.1.0";
+
+            src = pkgs.lib.cleanSourceWith {
+              src = ./.;
+              filter =
+                name: type:
+                let
+                  rel = pkgs.lib.removePrefix (toString ./. + "/") (toString name);
+                  base = baseNameOf rel;
+                in
+                base == "Cargo.toml"
+                || base == "Cargo.lock"
+                || base == "version.env"
+                || rel == "doc"
+                || rel == "doc/hogtie.8.scd"
+                || pkgs.lib.hasPrefix "crates" rel;
+            };
+
+            cargoLock = sharedCargoLock;
+            cargoBuildFlags = [
+              "-p"
+              "hogtie"
+            ];
+            # hogtie(8) ships with the binary: a host may run hogtie without
+            # piggy (the piggy package renders it too, with every doc/*.scd).
+            nativeBuildInputs = [ pkgs.scdoc ];
+            postInstall = ''
+              mkdir -p $out/share/man/man8
+              scdoc < doc/hogtie.8.scd > $out/share/man/man8/hogtie.8
+            '';
+            cargoTestFlags = [
+              "-p"
+              "hogtie"
+              "--features"
+              "test-harness"
+            ];
+            nativeCheckInputs = [
+              pkgs.openssh
+              pkgs.coreutils
+            ];
+            # The tests use unix sockets under TMPDIR, /proc and ssh-keygen.
+            doCheck = pkgs.stdenv.hostPlatform.isLinux;
+
+            meta = with pkgs.lib; {
+              description = "The root door for agent sessions: one action per nonce, granted by an OpenSSH certificate";
+              homepage = "https://code.linenisgreat.com/piggy";
+              license = licenses.mpl20;
+              mainProgram = "hogtie";
+              platforms = platforms.linux;
+            };
+          };
+
           # Wrapped `piggy` binary: rust dispatch + bash passwordstore + pivy
           # fallback, bundled as a single symlink-joined package. A function
           # of the Rust workspace derivation so the coverage variant
@@ -1009,6 +1069,9 @@
           // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
             # The GTK operator-act dialog piggy-askpass.sh prefers on Linux.
             piggy-askpass-gtk = piggy-askpass-gtk;
+            # hogtie(8), stage 1: the nonce socket and `sudo hogtie exec`
+            # (Linux only: SO_PEERCRED, /proc, getrandom).
+            inherit hogtie;
           };
 
           checks = {
@@ -1101,6 +1164,30 @@
                 echo "ok: the fibby holder build carries no test-double surface"
                 touch "$out"
               '';
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            # hogtie's shipped binary must not carry the test harness: no
+            # HOGTIE_TEST_ROOT in it, and with that variable set it still
+            # insists on uid 0 (the sandbox builder is not root). Driven
+            # from `just lint-hogtie`.
+            lint-hogtie = pkgs.runCommand "lint-hogtie" { } ''
+              set -euo pipefail
+              bin=${hogtie}/bin/hogtie
+              if grep -aqF HOGTIE_TEST_ROOT "$bin"; then
+                echo "FAIL: the shipped hogtie binary contains HOGTIE_TEST_ROOT" >&2
+                exit 1
+              fi
+              mkdir -p root/etc
+              rc=0
+              HOGTIE_TEST_ROOT=$PWD/root SUDO_UID=1 "$bin" exec v1.x.y act >out 2>&1 || rc=$?
+              if [[ $rc != 3 ]] || ! grep -qF 'must run as uid 0' out; then
+                echo "FAIL: the shipped hogtie did not insist on uid 0 (exit $rc):" >&2
+                cat out >&2
+                exit 1
+              fi
+              echo "ok: the shipped hogtie binary carries no test harness"
+              touch "$out"
+            '';
           }
           // vmTests;
 

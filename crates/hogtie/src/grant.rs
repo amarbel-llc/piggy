@@ -97,7 +97,7 @@ pub fn check_grant(
     if cert.cert_type != SSH2_CERT_TYPE_USER {
         return Err(GrantError::NotAUserCertificate);
     }
-    if !policy.ca_blobs.iter().any(|ca| *ca == cert.signature_key) {
+    if !policy.ca_blobs.contains(&cert.signature_key) {
         return Err(GrantError::UnknownCa);
     }
     if let Some((name, _)) = cert.critical_options.first() {

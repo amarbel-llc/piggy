@@ -21,3 +21,7 @@ base64 = "0.22"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+
+[[test]]
+name = "binary"
+required-features = ["test-harness"]

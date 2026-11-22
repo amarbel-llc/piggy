@@ -549,7 +549,7 @@ param = [
             (format!("{}/repos/link", base.display()), "outside"),
             (format!("{}/repos/missing", base.display()), "No such file"),
         ] {
-            let e = a.build(&[v.clone()]).unwrap_err();
+            let e = a.build(std::slice::from_ref(&v)).unwrap_err();
             assert!(e.contains(needle), "{v}: {e}");
         }
     }
