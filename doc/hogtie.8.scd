@@ -364,7 +364,8 @@ SIGQUIT to it directly and it shares the caller's terminal.
 *serve* tells systemd it is ready: when *NOTIFY_SOCKET* is set (a path,
 or an abstract name with a leading *@*), it sends *READY=1* there once
 every directory check has passed and the socket is bound, and sends
-nothing when it refuses to start (exit 3); a failed send is exit 3 too.
+nothing when it refuses to start (exit 3); a failed send is exit 3 too,
+and the send never waits (one that would fails the start).
 It removes *NOTIFY_SOCKET* from its environment first. So the unit is
 *Type=notify* with *NotifyAccess=main*, and a refused start fails it.
 

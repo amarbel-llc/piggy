@@ -142,7 +142,13 @@ pub fn notify_ready(addr: &std::ffi::OsStr) -> io::Result<()> {
         Some(name) => SocketAddr::from_abstract_name(name)?,
         None => SocketAddr::from_pathname(Path::new(addr))?,
     };
-    let n = UnixDatagram::unbound()?.send_to_addr(b"READY=1", &to)?;
+    // Non-blocking, so the send can never wait: a would-block (EAGAIN)
+    // fails the start rather than leaving the socket bound and unserved.
+    // Not shown by a test: on this kernel another sender filling the
+    // receiver did not make a fresh socket's send wait.
+    let sock = UnixDatagram::unbound()?;
+    sock.set_nonblocking(true)?;
+    let n = sock.send_to_addr(b"READY=1", &to)?;
     if n != 7 {
         return Err(io::Error::other("a short write to NOTIFY_SOCKET"));
     }
