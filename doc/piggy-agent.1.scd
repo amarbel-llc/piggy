@@ -79,7 +79,10 @@ two agents cannot silently fight over one path.
 	*--upstream*.
 
 *--agent-timeout* _SECONDS_
-	Per-upstream request timeout for connect, list and sign (default 5).
+	Per-upstream request timeout for connect and list (default 5). A sign is
+	not bound by it: it goes to the one upstream that holds the key and may
+	sit behind a PIN dialog and a touch, so it is waited for up to 300
+	seconds (a certificate through a front used to fail after 5).
 
 *--upstream-grace* _SECONDS_
 	How long a listing that finds every upstream unreachable keeps

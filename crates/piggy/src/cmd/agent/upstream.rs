@@ -54,6 +54,13 @@ pub const DEFAULT_OUTAGE_GRACE: Duration = Duration::from_secs(3);
 /// The longest pause between redials inside the outage grace.
 const MAX_REDIAL_BACKOFF: Duration = Duration::from_secs(1);
 
+/// How long a proxy waits for the agent that holds a key to answer a sign.
+/// A sign can sit behind a PIN dialog and a touch (a certificate always
+/// does), so `--agent-timeout`'s probe-sized default (5 s) does not apply;
+/// it is the same bound an operator act gets. A sign goes to the one
+/// upstream that holds the key, so a long wait delays no other upstream.
+pub const SIGN_UPSTREAM_WAIT: Duration = Duration::from_secs(300);
+
 /// One upstream's health as self-reported by the agent (the
 /// [`UPSTREAM_STATUS_EXT`] payload element).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -179,6 +186,9 @@ pub fn parse_upstream_specs(specs: &[String]) -> Result<Vec<Upstream>, String> {
 pub struct UpstreamPool {
     upstreams: Vec<Upstream>,
     timeout: Duration,
+    /// How long a sign is waited for: a PIN dialog and a touch are a person's
+    /// time, not a probe's.
+    sign_wait: Duration,
     /// How long a listing that finds every upstream down redials before
     /// it reports the outage.
     outage_grace: Duration,
@@ -225,12 +235,19 @@ impl UpstreamPool {
         Self {
             upstreams,
             timeout,
+            sign_wait: SIGN_UPSTREAM_WAIT,
             outage_grace: DEFAULT_OUTAGE_GRACE,
             states: Arc::new(std::sync::Mutex::new(states)),
             known_keys: Arc::new(Mutex::new(HashMap::new())),
             add_new_keys_to: None,
             connections: Arc::new(Semaphore::new(limit)),
         }
+    }
+
+    /// How long a sign is waited for (default [`SIGN_UPSTREAM_WAIT`]).
+    pub fn with_sign_wait(mut self, wait: Duration) -> Self {
+        self.sign_wait = wait;
+        self
     }
 
     /// How long a listing that finds every upstream down redials before it
@@ -517,7 +534,7 @@ impl UpstreamPool {
             self.record(upstream, false);
             (e, true)
         })?;
-        match timeout(self.timeout, client.sign(request)).await {
+        match timeout(self.sign_wait, client.sign(request)).await {
             Ok(Ok(signature)) => {
                 self.record(upstream, true);
                 Ok(signature)
@@ -857,6 +874,11 @@ pub(super) mod test_support {
         pub hang_identities: bool,
         /// Answer every sign with SSH_AGENT_FAILURE.
         pub refuse_sign: bool,
+        /// Answer a sign only after this long: a human at a PIN prompt and a
+        /// touch.
+        pub sign_delay: Option<Duration>,
+        /// Never answer a sign.
+        pub hang_sign: bool,
         /// A proxying agent: answers `request_identities` by listing this
         /// pool, as piggy's own agent does. Pointed at the stub's own
         /// socket it is the cycle piggy#326 guards against.
@@ -872,8 +894,20 @@ pub(super) mod test_support {
                 events: Arc::new(std::sync::Mutex::new(Vec::new())),
                 hang_identities: false,
                 refuse_sign: false,
+                sign_delay: None,
+                hang_sign: false,
                 relay: None,
             }
+        }
+
+        pub fn slow_sign(mut self, delay: Duration) -> Self {
+            self.sign_delay = Some(delay);
+            self
+        }
+
+        pub fn hanging_sign(mut self) -> Self {
+            self.hang_sign = true;
+            self
         }
 
         pub fn refusing_sign(mut self) -> Self {
@@ -921,6 +955,12 @@ pub(super) mod test_support {
 
         async fn sign(&mut self, _request: SignRequest) -> Result<Signature, AgentError> {
             self.record("sign".into());
+            if self.hang_sign {
+                std::future::pending::<()>().await;
+            }
+            if let Some(delay) = self.sign_delay {
+                tokio::time::sleep(delay).await;
+            }
             if self.refuse_sign {
                 return Err(AgentError::Failure);
             }
@@ -1234,6 +1274,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sig, canned_signature());
+    }
+
+    /// A sign can sit behind a PIN dialog and a touch (a certificate always
+    /// does): it is waited for as long as a person needs, not for the
+    /// pool's probe-sized timeout (the slot-83 certificate through a front,
+    /// refused after 5 s on a real card).
+    #[tokio::test]
+    async fn a_sign_waits_for_a_human_longer_than_the_pool_timeout() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xC2, "slow-key")])
+            .slow_sign(Duration::from_millis(700));
+        let path = spawn_stub("sign-slow", stub);
+        let pool = UpstreamPool::new(
+            vec![Upstream {
+                name: "stub".into(),
+                path,
+            }],
+            Duration::from_millis(250),
+        );
+        let sig = pool
+            .sign(SignRequest {
+                pubkey: upstream_identity(0xC2, "slow-key").pubkey,
+                data: b"payload".to_vec(),
+                flags: 0,
+            })
+            .await
+            .expect("the sign is waited for");
+        assert_eq!(sig, canned_signature());
+    }
+
+    /// The wait is bounded: an upstream that never answers is a timeout,
+    /// not retried (a second request would prompt again).
+    #[tokio::test]
+    async fn a_sign_that_is_never_answered_times_out_after_the_sign_wait() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xC3, "hung-key")]).hanging_sign();
+        let events = stub.events.clone();
+        let path = spawn_stub("sign-hung", stub);
+        let pool = UpstreamPool::new(
+            vec![Upstream {
+                name: "stub".into(),
+                path,
+            }],
+            Duration::from_millis(200),
+        )
+        .with_sign_wait(Duration::from_millis(600));
+        let started = std::time::Instant::now();
+        let err = pool
+            .sign(SignRequest {
+                pubkey: upstream_identity(0xC3, "hung-key").pubkey,
+                data: b"payload".to_vec(),
+                flags: 0,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("sign request timed out"), "{err}");
+        assert!(started.elapsed() >= Duration::from_millis(600));
+        let signs = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| *e == "sign")
+            .count();
+        assert_eq!(signs, 1, "a timed-out sign is not retried");
     }
 
     #[tokio::test]
