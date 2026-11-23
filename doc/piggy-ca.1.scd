@@ -2,7 +2,7 @@ piggy-ca(1)
 
 # NAME
 
-piggy-ca - X.509 issuance: a card-held root, a holder-held intermediate, name-constrained leaves
+piggy-ca - X.509 issuance: card root, holder intermediate, leaves
 
 # SYNOPSIS
 
