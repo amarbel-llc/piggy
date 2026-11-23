@@ -1291,9 +1291,14 @@ mod tests {
     // L7: the certificate key type is exactly one OpenSSH spells.
     #[test]
     fn the_certificate_key_type_is_exactly_an_openssh_name() {
+        // Otherwise a perfectly formed security key, so only the spelling of
+        // the type is wrong.
         let mut cert = Cert::user();
         cert.key_type = "sk-ssh-ed25519@openssh.com-cert-v01@openssh.com";
+        cert.fields = vec![vec![1u8; 32], b"ssh:".to_vec()];
         assert!(matches!(refused(&cert), SshCertRefusal::NotACertificate(_)));
+        cert.key_type = "sk-ssh-ed25519-cert-v01@openssh.com";
+        assert!(parse_unsigned_certificate(&cert.unsigned()).is_ok());
     }
 
     // L2: the rendering bound is computed by the parser, not asserted by a test.

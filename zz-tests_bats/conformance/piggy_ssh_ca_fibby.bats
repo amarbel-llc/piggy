@@ -256,6 +256,30 @@ function a_generic_askpass_cannot_stand_in_for_the_certificate_dialog { # @test
   grep -q "did not acknowledge" "$AGENT_LOG" || { echo "the agent did not say why" >&2; _show; return 1; }
 }
 
+# The second Fable review: the attestation check and the signature are
+# different card sessions, with the dialog between them. A card whose slot-83
+# key is replaced (a new key, same PIN always / touch always policy) while the
+# dialog is open must not sign: the check is repeated in the signing session
+# against the key the request named. The hook runs inside the open prompt.
+function a_slot_key_replaced_while_the_dialog_is_open_signs_nothing { # @test
+  cat >"$WORKDIR/swap-hook.sh" <<HOOK
+#!/usr/bin/env bash
+"$PIGGY_BIN" tool -K default -P "$OPERATOR_ACT_PIN" -a eccp256 -i always -t always generate 83 >/dev/null
+HOOK
+  chmod +x "$WORKDIR/swap-hook.sh"
+  kill "$AGENT_PID" 2>/dev/null || true
+  wait "$AGENT_PID" 2>/dev/null || true
+  rm -f "$AGENT_SOCK"
+  PIGGY_TEST_ASKPASS_BEFORE_PIN="$WORKDIR/swap-hook.sh" spawn_card_agent
+  _certify "$WORKDIR/ca83.pub" -I swapped -n a -V +1h
+  grep -q "running PIGGY_TEST_ASKPASS_BEFORE_PIN" "$AGENT_LOG" || {
+    echo "the hook did not run inside the prompt" >&2; _show; return 1; }
+  [[ $status -ne 0 && ! -e $WORKDIR/user-cert.pub ]] || {
+    echo "a certificate was signed after the card's key was replaced" >&2; _show; return 1; }
+  grep -q "attestation is for a different key" "$AGENT_LOG" || {
+    echo "the agent did not refuse on the key comparison" >&2; _show; return 1; }
+}
+
 # A proxy-only front over the card agent (a forwarded card agent, FDR 0001):
 # the front has no card, no PIN and its askpass would answer if asked, so any
 # prompt there would be counted in its own log; the checks and the dialog are

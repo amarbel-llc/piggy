@@ -3989,6 +3989,114 @@ mod tests {
         }
     }
 
+    /// What a CA slot's attestation must say, pinned on generated chains (the
+    /// mutation pass found judge_ca_attestation covered only by the fibby
+    /// lane): always/always, for the requested key, signed by the card's F9.
+    mod ca_attestation {
+        use super::super::judge_ca_attestation;
+        use openssl::asn1::{Asn1Object, Asn1OctetString, Asn1Time};
+        use openssl::bn::BigNum;
+        use openssl::ec::{EcGroup, EcKey};
+        use openssl::hash::MessageDigest;
+        use openssl::nid::Nid;
+        use openssl::pkey::{PKey, Private};
+        use openssl::x509::{X509Builder, X509Extension, X509NameBuilder};
+
+        fn key() -> PKey<Private> {
+            let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+            PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap()
+        }
+
+        /// A certificate for `subject` signed by `issuer`, with the YubicoPIV
+        /// policy extension `[pin, touch]` when given.
+        fn cert(
+            subject: &PKey<Private>,
+            issuer: &PKey<Private>,
+            policy: Option<[u8; 2]>,
+        ) -> Vec<u8> {
+            let mut name = X509NameBuilder::new().unwrap();
+            name.append_entry_by_text("CN", "piggy-test").unwrap();
+            let name = name.build();
+            let mut b = X509Builder::new().unwrap();
+            b.set_version(2).unwrap();
+            b.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+                .unwrap();
+            b.set_subject_name(&name).unwrap();
+            b.set_issuer_name(&name).unwrap();
+            b.set_pubkey(subject).unwrap();
+            b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+                .unwrap();
+            b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+                .unwrap();
+            if let Some(policy) = policy {
+                b.append_extension(
+                    X509Extension::new_from_der(
+                        &Asn1Object::from_str("1.3.6.1.4.1.41482.3.8").unwrap(),
+                        false,
+                        &Asn1OctetString::new_from_bytes(&policy).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            b.sign(issuer, MessageDigest::sha256()).unwrap();
+            b.build().to_der().unwrap()
+        }
+
+        fn key_data_of(attestation: &[u8]) -> ssh_key::public::KeyData {
+            piggy_piv::cert::extract_public_key(attestation)
+                .unwrap()
+                .1
+                .key_data()
+                .clone()
+        }
+
+        const ALWAYS_ALWAYS: [u8; 2] = [0x03, 0x02];
+        const ONCE_NEVER: [u8; 2] = [0x02, 0x01];
+
+        #[test]
+        fn an_attestation_for_the_key_always_always_and_signed_by_the_card_passes() {
+            let (slot, f9) = (key(), key());
+            let attestation = cert(&slot, &f9, Some(ALWAYS_ALWAYS));
+            let f9_cert = cert(&f9, &f9, None);
+            let requested = key_data_of(&attestation);
+            assert_eq!(
+                judge_ca_attestation(&attestation, &f9_cert, 0x83, &requested),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn a_laxer_policy_is_refused() {
+            let (slot, f9) = (key(), key());
+            let attestation = cert(&slot, &f9, Some(ONCE_NEVER));
+            let f9_cert = cert(&f9, &f9, None);
+            let requested = key_data_of(&attestation);
+            let err = judge_ca_attestation(&attestation, &f9_cert, 0x83, &requested).unwrap_err();
+            assert!(err.contains("PIN always and touch always"), "{err}");
+        }
+
+        #[test]
+        fn an_attestation_for_another_key_is_refused() {
+            let (slot, other, f9) = (key(), key(), key());
+            let attestation = cert(&slot, &f9, Some(ALWAYS_ALWAYS));
+            let f9_cert = cert(&f9, &f9, None);
+            let requested = key_data_of(&cert(&other, &f9, None));
+            let err = judge_ca_attestation(&attestation, &f9_cert, 0x83, &requested).unwrap_err();
+            assert!(err.contains("different key"), "{err}");
+        }
+
+        #[test]
+        fn an_attestation_the_card_did_not_sign_is_refused() {
+            let (slot, f9, stranger) = (key(), key(), key());
+            let attestation = cert(&slot, &stranger, Some(ALWAYS_ALWAYS));
+            let f9_cert = cert(&f9, &f9, None);
+            let requested = key_data_of(&attestation);
+            let err = judge_ca_attestation(&attestation, &f9_cert, 0x83, &requested).unwrap_err();
+            assert!(err.contains("not signed by the card"), "{err}");
+        }
+    }
+
     /// A signing request on a CA slot that does not say which key it expects
     /// is refused: the key comparison after the card is reconnected cannot be
     /// skipped by leaving it out.

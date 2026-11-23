@@ -1,0 +1,43 @@
+# The SSH CA slot gate (lane 1), each refusal broken on purpose: id, crate
+# whose tests run, file (from the repo root), from, to; tab-separated; "<NL>" in
+# from/to is a newline (a literal backslash-n stays one; no field may be empty). `from` must occur exactly once in the file (else the
+# mutant is STALE). `just explore-ca-gate-mutants` applies each to a scratch
+# copy of the workspace and runs that crate's tests: each should turn a test
+# red (KILLED). A SURVIVED mutant is a refusal no unit test pins (some are
+# pinned only by the fibby lane, `just test-bats-conformance-ssh-ca-fibby`,
+# or by nothing: say which in the report).
+cert-principals-cap	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	const MAX_PRINCIPALS: usize = 8;	const MAX_PRINCIPALS: usize = 9;
+cert-value-cap	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	const MAX_OPTION_VALUE: usize = 80;	const MAX_OPTION_VALUE: usize = 81;
+cert-value-double-space	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	&& !s.contains("  ")	&& true
+cert-value-leading-space	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	&& !s.starts_with(' ')	&& true
+cert-value-trailing-space	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	&& !s.ends_with(' ')	&& true
+cert-value-quote	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	&& b != b'"'	&& true
+cert-value-backslash	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	&& b != b'\\')	&& true)
+cert-name-leading-dash	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	&& !s.starts_with('-')	&& true
+cert-name-dot	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	&& s != "."	&& true
+cert-name-dotdot	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	&& s != ".."	&& true
+cert-keytype-at	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if stem.contains('@') {	if false {
+cert-too-tall-limit	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if lines > MAX_RENDERED_LINES {	if lines > 1000 {
+cert-too-tall-wrap	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	1 + l.chars().count().saturating_sub(1) / DIALOG_COLUMNS	1
+cert-expired-boundary	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if now >= self.valid_before {	if now > self.valid_before {
+cert-starts-later	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if ahead > BACKDATE_ALLOWANCE_SECS {	if ahead > 10 * BACKDATE_ALLOWANCE_SECS {
+cert-too-long	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if secs > max_secs.saturating_add(BACKDATE_ALLOWANCE_SECS) {	if secs > 10 * max_secs {
+cert-value-own-line	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	"Critical option: {}:\n  \"{v}\"\n"	"Critical option: {}: \"{v}\"\n"
+cert-unknown-option	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	return Err(SshCertRefusal::UnknownOption { name });	continue;
+cert-duplicate-option	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if out.iter().any(|d| d.name == name) {	if false {
+cert-nonce-length	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if nonce.len() != 32 {	if false {
+ecdh-gate-on-ca-slots	piggy-piv	crates/piggy-piv/src/token.rs	if crate::slot::ca_kind(slot.id()).is_some() {	if false {
+agent-ecdh-before-prompt	piggy	crates/piggy/src/cmd/agent/session.rs	if is_ca && op != "sign" {	if false {
+agent-ca-key-required	piggy	crates/piggy/src/cmd/agent/session.rs	if is_ca && how.ca_key.is_none() {	if false {
+agent-ca-policy	piggy	crates/piggy/src/cmd/agent/session.rs	if !policy.serves_certificate_authority() {	if false {
+agent-ca-attested-key	piggy	crates/piggy/src/cmd/agent/session.rs	if attested_key.key_data() != requested {<NL>        return Err(format!(<NL>            "slot {slot:02X}: the attestation is for a different key"<NL>        ));<NL>    }<NL>    let chains	let _ = attested_key;<NL>    let chains
+agent-ca-f9-signature	piggy	crates/piggy/src/cmd/agent/session.rs	piggy_piv::attest::attestation_signed_by(attestation, f9_cert)	Ok::<bool, String>(true)
+agent-gate-advert-not-repeated	piggy	crates/piggy/src/cmd/agent/session.rs	if name == crate::operator_act::SSH_CA_GATE_EXT {	if false {
+agent-sign-names-its-key	piggy	crates/piggy/src/cmd/agent/session.rs	}<NL>        .expecting_key(&key.public_key);	};
+agent-repeat-check-after-reconnect	piggy	crates/piggy/src/cmd/agent/session.rs	if let (true, Some(expected)) = (is_ca, &how.ca_key) {	if let (true, Some(expected)) = (false, &how.ca_key) {
+agent-ca-pre-check	piggy	crates/piggy/src/cmd/agent/session.rs	check_ca_slot_attestation(&token, key.slot_id, &key.public_key)	Ok::<(), String>(())
+agent-ca-key-is-signer	piggy	crates/piggy/src/operator_act.rs	if tbs.ca_key_blob == signing_key_blob {	if true {
+agent-ssh-cert-on-other-slots	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::ssh_cert::looks_like_ssh_certificate(data) {	if false {
+agent-x509-slot-refuses-tbs	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::x509_profile::looks_like_tbs_certificate(data) {	if false {
+tool-sign-refuses-83	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::slot::ca_kind(slot_id) == Some(piggy_piv::slot::CaKind::SshCertificate) {	if false {
+askpass-ack-checked	piggy	crates/piggy/src/card_oracle.rs	let acknowledged = ack == Some(format!("piggy-askpass-ack {nonce}").as_str()) && rest_empty;	let acknowledged = true;

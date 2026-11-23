@@ -64,6 +64,13 @@ if [[ -n ${PIGGY_TEST_FIB_MGMT_KEY:-} && $prompt == "Enter management key"* ]]; 
 fi
 
 if [[ -n ${PIGGY_TEST_FIB_PIN:-} ]]; then
+  # A test that needs something to happen while the prompt is open (a card
+  # changing under the dialog) names an executable here; it runs before the
+  # PIN is supplied.
+  if [[ -n ${PIGGY_TEST_ASKPASS_BEFORE_PIN:-} ]]; then
+    banner "running PIGGY_TEST_ASKPASS_BEFORE_PIN while the prompt is open"
+    "$PIGGY_TEST_ASKPASS_BEFORE_PIN" >&2
+  fi
   # Surface PIGGY_ASKPASS_CONTEXT in the banner so tests can assert that a
   # caller (e.g. the Rust `piggy agent`, piggy#58) propagated request
   # context to the askpass child. Unset for callers that don't (the C

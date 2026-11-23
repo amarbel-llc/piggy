@@ -1967,6 +1967,102 @@ explore-hogtie-mutants:
     echo "# $n mutants: $killed killed; survived: ${survived[*]:-none}; stale: ${stale[*]:-none}; nocompile: ${nocompile[*]:-none}"
     [[ ${#survived[@]} == 0 && ${#stale[@]} == 0 && ${#nocompile[@]} == 0 ]]
 
+# Mutation pass over the SSH CA slot gate (lane 1): apply each mutant in
+# crates/piggy/testdata/ca-gate-mutants.tsv (a literal one-place edit) to a
+# scratch copy of the workspace and run that mutant's crate tests (lib and
+# integration, not the bats lanes); each should turn a test red. Prints TAP;
+# a SURVIVED mutant is a refusal no unit test pins (it may still be pinned by
+# the fibby lane: run that for the survivors), STALE no longer matches the
+# source, NOCOMPILE needs rewriting. Modelled on explore-hogtie-mutants.
+#
+# break each SSH CA slot refusal on purpose and check a test goes red
+[group('explore')]
+explore-ca-gate-mutants:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    tsv=crates/piggy/testdata/ca-gate-mutants.tsv
+    work=$(mktemp -d "$PWD/.tmp/ca-gate-mutants.XXXXXX")
+    export CARGO_TARGET_DIR="$PWD/target/ca-gate-mutants"
+    nl=$'\n'
+    n=0 killed=0 survived=() stale=() nocompile=()
+    while IFS=$'\t' read -r id crate file from to; do
+      [[ -z $id || $id == \#* ]] && continue
+      n=$((n + 1))
+      from=${from//<NL>/$nl} to=${to//<NL>/$nl}
+      rm -rf "$work/ws"
+      mkdir "$work/ws"
+      cp -r crates Cargo.toml Cargo.lock version.env "$work/ws/"
+      f="$work/ws/$file"
+      text=$(<"$f")
+      rest=${text//"$from"/}
+      count=$(((${#text} - ${#rest}) / ${#from}))
+      if [[ $count != 1 ]]; then
+        echo "not ok $n - $id # STALE: $count matches"
+        stale+=("$id")
+        continue
+      fi
+      printf '%s\n' "${text/"$from"/"$to"}" >"$f"
+      log="$work/$id.log"
+      if (cd "$work/ws" && cargo test --offline -q -p "$crate") >"$log" 2>&1; then
+        echo "not ok $n - $id # SURVIVED"
+        survived+=("$id")
+      elif grep -q '^error\[E\|^error: could not compile' "$log"; then
+        echo "not ok $n - $id # NOCOMPILE (see $log)"
+        nocompile+=("$id")
+      else
+        echo "ok $n - $id killed"
+        killed=$((killed + 1))
+      fi
+    done <"$tsv"
+    echo "1..$n"
+    echo "# $n mutants: $killed killed; survived: ${survived[*]:-none}; stale: ${stale[*]:-none}; nocompile: ${nocompile[*]:-none}"
+    [[ ${#survived[@]} == 0 && ${#stale[@]} == 0 && ${#nocompile[@]} == 0 ]]
+
+# The mutants explore-ca-gate-mutants leaves alive because only the fibby lane
+# can see them: apply each named mutant (ids from the same TSV) to a scratch
+# copy of the tree (no .git, target or .tmp, so nix treats it as a path
+# flake) and run the SSH CA lane there; each must turn a lane test red.
+#
+# run the fibby SSH CA lane against the named CA gate mutants
+[group('explore')]
+explore-ca-gate-lane-mutants +IDS:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    tsv=crates/piggy/testdata/ca-gate-mutants.tsv
+    nl=$'\n'
+    work=$(mktemp -d "$PWD/.tmp/ca-gate-lane-mutants.XXXXXX")
+    survived=() stale=() killed=()
+    for want in {{IDS}}; do
+      line=$(grep -P "^\Q$want\E\t" "$tsv") || { echo "no mutant $want"; stale+=("$want"); continue; }
+      IFS=$'\t' read -r id crate file from to <<<"$line"
+      from=${from//<NL>/$nl} to=${to//<NL>/$nl}
+      rm -rf "$work/tree"
+      mkdir "$work/tree"
+      tar --exclude=./.git --exclude=./target --exclude=./.tmp --exclude=./.worktrees --exclude=./.spinclass --exclude=./result -cf - . | tar -xf - -C "$work/tree"
+      f="$work/tree/$file"
+      text=$(<"$f")
+      rest=${text//"$from"/}
+      count=$(((${#text} - ${#rest}) / ${#from}))
+      if [[ $count != 1 ]]; then
+        echo "not ok - $id # STALE: $count matches"
+        stale+=("$id")
+        continue
+      fi
+      printf '%s\n' "${text/"$from"/"$to"}" >"$f"
+      # Its own git repository, so nix sees the scratch tree (not the worktree's
+      # untracked-path error) and the mutant is what gets built.
+      (cd "$work/tree" && git init -q && git add -A >/dev/null 2>&1) || { echo "not ok - $id # scratch repo failed"; stale+=("$id"); continue; }
+      if (cd "$work/tree" && just test-bats-conformance-ssh-ca-fibby) >"$work/$id.log" 2>&1; then
+        echo "not ok - $id # SURVIVED the lane"
+        survived+=("$id")
+      else
+        echo "ok - $id killed by the lane (see $work/$id.log)"
+        killed+=("$id")
+      fi
+    done
+    echo "# killed: ${killed[*]:-none}; survived: ${survived[*]:-none}; stale: ${stale[*]:-none}"
+    [[ ${#survived[@]} == 0 && ${#stale[@]} == 0 ]]
+
 # Flake hunt (piggy#344): build fibby's loopback test once, then run it RUNS
 # times and count the failures. Exits non-zero if any run failed.
 #
