@@ -5090,6 +5090,16 @@ explore-launchd-piggy-agent label="piggy-agent":
 explore-piggy-health *ARGS:
     cargo run -q -p piggy -- health -v --format tap {{ARGS}}
 
+# Print this host's piggy agent unit log for a window (read only): the front's
+# lines for a refused sign ("sign request timed out" names the upstream).
+# SINCE and UNTIL are journalctl times, e.g. "2026-11-23 12:55".
+#
+# print the user unit's journal for a time window
+[group('explore')]
+[linux]
+explore-agent-log SINCE UNTIL UNIT="piggy-agent.service":
+    journalctl --user -u {{ UNIT }} --since "{{ SINCE }}" --until "{{ UNTIL }}" --no-pager
+
 # Run the pigtrough pilot pass (docs/plans/2026-11-16-pigtrough-pilot-runbook.md)
 # start to finish with no terminal, in a throwaway runtime dir: start
 # `serve`, print each check's command and result, stop `serve`, remove the

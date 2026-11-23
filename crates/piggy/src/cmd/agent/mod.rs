@@ -84,9 +84,19 @@ pub struct AgentArgs {
     #[arg(long = "upstream", value_name = "NAME=PATH")]
     pub upstream: Vec<String>,
 
-    /// Per-upstream request timeout in seconds (connect/list/sign)
+    /// Per-upstream request timeout in seconds (connect/list)
     #[arg(long = "agent-timeout", value_name = "SECONDS", default_value_t = 5)]
     pub agent_timeout: u64,
+
+    /// Seconds a sign relayed to an upstream is waited for: it may sit
+    /// behind a PIN dialog and a touch on the card's machine. A sign that
+    /// times out is not tried on another upstream.
+    #[arg(
+        long = "sign-wait",
+        value_name = "SECONDS",
+        default_value_t = upstream::SIGN_UPSTREAM_WAIT.as_secs()
+    )]
+    pub sign_wait: u64,
 
     /// Seconds a listing that finds every --upstream unreachable keeps
     /// redialing before it answers with a failure instead of an empty key
@@ -302,7 +312,8 @@ pub fn run(full_argv: Vec<String>) -> i32 {
             "proxying upstream agents"
         );
         let pool = UpstreamPool::new(upstreams, std::time::Duration::from_secs(cli.agent_timeout))
-            .with_outage_grace(std::time::Duration::from_secs(cli.upstream_grace));
+            .with_outage_grace(std::time::Duration::from_secs(cli.upstream_grace))
+            .with_sign_wait(std::time::Duration::from_secs(cli.sign_wait));
         match cli.add_new_keys_to.as_deref() {
             Some(name) => match pool.with_add_new_keys_to(name) {
                 Ok(pool) => Some(pool),
