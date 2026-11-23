@@ -417,11 +417,16 @@ impl PiggyAgent {
     /// `guid` after its on-card verify succeeded. A CA slot's PIN is never
     /// cached.
     async fn cache_pin(&self, guid: &Guid, slot_id: u8, acquired: &AcquiredPin) {
-        if acquired.fresh && acquired.cacheable {
-            self.pins
-                .lock()
-                .await
-                .cache_verified(guid, slot_id, acquired.pin.as_str());
+        if !acquired.cacheable {
+            return;
+        }
+        let mut pins = self.pins.lock().await;
+        if acquired.fresh {
+            pins.cache_verified(guid, slot_id, acquired.pin.as_str());
+        } else {
+            // A cached PIN the card just accepted: that is a use, and only
+            // now does its idle limit restart.
+            pins.used(guid, slot_id);
         }
     }
 
@@ -515,9 +520,14 @@ impl PiggyAgent {
             }
 
             if let Some(acq) = &acquired {
-                // A prompted PIN is unguarded and stays usable at 1 retry;
-                // forget_pin records the rejected offer for this card.
-                if acq.offered && !offered_retries_ok(session.pin_retries_remaining()) {
+                // A prompted PIN is unguarded and stays usable at 1 retry. An
+                // offered PIN, and a CACHED one (which can be stale: the PIN
+                // was changed, or several requests are using it at once), are
+                // speculative: not risked on a card with too few retries left
+                // (each wrong try spends one), the person is asked instead.
+                if (acq.offered || !acq.fresh)
+                    && !offered_retries_ok(session.pin_retries_remaining())
+                {
                     self.forget_pin(guid).await;
                     continue;
                 }
@@ -3466,6 +3476,8 @@ mod tests {
             .unwrap()
             .expect("mode payload");
         let mode: AgentMode = serde_json::from_slice(&resp.details.clone().into_bytes()).unwrap();
+        let table = agent.pin_handle().lock().await.describe_policy();
+        assert!(!table.is_empty() && table.last().unwrap() == "all other slots: never");
         assert_eq!(
             mode,
             AgentMode {
@@ -3475,7 +3487,7 @@ mod tests {
                 service: None,
                 event_driven: true,
                 holder: false,
-                pin_cache: super::super::pin_policy::PinCachePolicy::compiled_in().describe(),
+                pin_cache: table,
             }
         );
 
@@ -3491,6 +3503,7 @@ mod tests {
             .unwrap()
             .expect("mode payload");
         let mode: AgentMode = serde_json::from_slice(&resp.details.clone().into_bytes()).unwrap();
+        let table = agent.pin_handle().lock().await.describe_policy();
         assert_eq!(
             mode,
             AgentMode {
@@ -3500,7 +3513,7 @@ mod tests {
                 service: Some("piggy-agent-proxy.service".into()),
                 event_driven: false,
                 holder: false,
-                pin_cache: super::super::pin_policy::PinCachePolicy::compiled_in().describe(),
+                pin_cache: table,
             }
         );
     }

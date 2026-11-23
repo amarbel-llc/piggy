@@ -40,9 +40,13 @@ agent-ca-key-is-signer	piggy	crates/piggy/src/operator_act.rs	if tbs.ca_key_blob
 agent-ssh-cert-on-other-slots	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::ssh_cert::looks_like_ssh_certificate(data) {	if false {
 agent-x509-slot-refuses-tbs	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::x509_profile::looks_like_tbs_certificate(data) {	if false {
 agent-x509-slot-refuses-other-bytes	piggy	crates/piggy/src/operator_act.rs	Err(format!(<NL>                "refusing to sign with the X.509 certificate authority	if true {<NL>                return Ok(SlotData::Ordinary);<NL>            }<NL>            Err(format!(<NL>                "refusing to sign with the X.509 certificate authority
-pins-keyed-by-slot	piggy	crates/piggy/src/cmd/agent/pins.rs	let key = (guid.clone(), slot);<NL>        if let Some(entry) = self.verified.get_mut(&key) {	let key = (guid.clone(), 0x9A);<NL>        if let Some(entry) = self.verified.get_mut(&key) {
-pins-idle-expiry	piggy	crates/piggy/src/cmd/agent/pins.rs	.is_some_and(|idle| now.saturating_duration_since(self.last_used) >= idle)	.is_some_and(|_| false)
-pins-cap-expiry	piggy	crates/piggy/src/cmd/agent/pins.rs	.is_some_and(|cap| now.saturating_duration_since(self.cached_at) >= cap)	.is_some_and(|_| false)
+pins-keyed-by-slot	piggy	crates/piggy/src/cmd/agent/pins.rs	if let Some(entry) = self.verified.get(&(guid.clone(), slot)) {	if let Some(entry) = self.verified.get(&(guid.clone(), 0x9A)) {
+pins-idle-expiry	piggy	crates/piggy/src/cmd/agent/pins.rs	self.idle.is_some_and(|idle| now.since(self.last_used) >= idle)	self.idle.is_some_and(|_| false)
+pins-cap-expiry	piggy	crates/piggy/src/cmd/agent/pins.rs	self.cap.is_some_and(|cap| now.since(self.cached_at) >= cap)	self.cap.is_some_and(|_| false)
+pins-offer-not-consumed	piggy	crates/piggy/src/cmd/agent/pins.rs	self.offered<NL>            .take()<NL>            .and_then(|p| copy_out(&p))	self.offered<NL>            .as_ref()<NL>            .and_then(copy_out)
+pins-sweep-on-lookup	piggy	crates/piggy/src/cmd/agent/pins.rs	self.sweep_at(now);<NL>        if self.policy.rule(slot) == CacheRule::Never {	if self.policy.rule(slot) == CacheRule::Never {
+pins-has-any-counts-expired	piggy	crates/piggy/src/cmd/agent/pins.rs	self.verified.values().any(|e| !e.expired(now))	!self.verified.is_empty()
+pins-store-refuses-authority	piggy	crates/piggy/src/cmd/agent/pins.rs	if super::pin_policy::is_authority_slot(slot) {<NL>            return;	if false {<NL>            return;
 pins-idle-counts-from-last-use	piggy	crates/piggy/src/cmd/agent/pins.rs	entry.last_used = now;	let _ = now;
 pins-never-slot-kept	piggy	crates/piggy/src/cmd/agent/pins.rs	CacheRule::Never => return,	CacheRule::Never => (None, None),
 pins-offer-to-never-slot	piggy	crates/piggy/src/cmd/agent/pins.rs	if self.policy.rule(slot) == CacheRule::Never {<NL>            return None;	if false {<NL>            return None;

@@ -1,7 +1,8 @@
 //! THE PIN CACHE TABLE: which slots the agent may remember a PIN for, and for
 //! how long (piggy#404). Edit this file to change it, rebuild and bump; or
-//! build with the Nix package argument `pinCachePolicy` pointing at a file of
-//! this shape. Nothing on a running host changes it.
+//! build with the Nix package argument `pinCachePolicy` (a file of the shape
+//! in `pin_cache_override.rs`, which leaves THIS table and its tests as they
+//! are). Nothing on a running host changes it.
 //!
 //! A slot is cached while it is used: `idle_secs(N)` forgets the PIN after N
 //! seconds without use; `idle_secs_cap_secs(N, M)` also forgets it M seconds

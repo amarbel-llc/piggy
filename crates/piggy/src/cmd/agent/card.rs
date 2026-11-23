@@ -229,6 +229,9 @@ async fn reconcile_once<L, V>(
     L: FnMut() -> Vec<CachedKey> + Send,
     V: FnMut(&Guid) -> Result<(), String> + Send,
 {
+    // piggy#404: every pass drops the PINs whose limits have passed, so an
+    // expired PIN does not wait in memory for its own slot to be asked for.
+    pin.lock().await.sweep();
     let Ok(_card_guard) = card_lock.try_lock() else {
         tracing::debug!("card busy with a request; skipping this reconcile pass (piggy#214)");
         return;

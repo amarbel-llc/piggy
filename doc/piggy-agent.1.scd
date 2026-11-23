@@ -550,24 +550,48 @@ A PIN that verified on a card is cached for the SLOT it was typed for, under
 that slot's rule, until its limit passes, the card leaves, *ssh-add -x*
 clears it, or the agent exits. The PIV PIN is the card's, but one typed to
 log in over ssh (9A) does not serve a decrypt (9D) or a signature (9C): the
-request on another slot asks again. A PIN that *ssh-add -X* offered is
-tried once per card and cached the same way, but only for a slot that may
-be cached. The rule for each slot is a table COMPILED INTO the agent: no
-flag, option or environment of a running host changes it. Shipped values:
-9A cached until 12 hours without use; 9C until 60 seconds without use (the
-card's touch is asked every time either way); 9D until 10 minutes without
-use and 1 hour after it was typed; every other slot never. *piggy health -v*
-prints the table the running agent has (the point "agent PIN cache
-(compiled in)") and the agent logs it at start. The certificate authority
-slots, 82 and 83 (*piggy-piv-slots*(7)), are never cached whatever the table
-says, and a table that says otherwise does not build: their PIN is asked
-every time, so a PIN-always key is asked for per signature by the
-operator, not only by the card.
+request on another slot asks again.
+
+*ssh-add -X* with a PIN does ONE thing: that PIN is handed, once, to the
+first request that has no PIN of its own on a slot that may be cached (it
+is not handed to 82, 83 or a never-cached slot, and it is not spent on
+them). Whether or not the card accepts it, it is gone after that; if the
+card accepts it, it is cached for that one slot under that slot's rule like
+any typed PIN. It does not serve a second slot, and it does not refill a
+slot whose limits have passed: after that the person is asked. *ssh-add -x*
+forgets everything, the offer included.
+
+The rule for each slot is a table COMPILED INTO the agent: no flag, option
+or environment of a running host changes it. Shipped values: 9A cached
+until 12 hours without use; 9C until 60 seconds without use (the card's
+touch is asked every time either way); 9D until 10 minutes without use and
+1 hour after it was typed; every other slot never. The card a holder minted
+keeps its own PIN (nobody types it) until the card leaves. "Without use"
+means since the card last accepted the PIN; a cached PIN the card refuses
+is dropped, and is not tried on a card with few retries left (the person is
+asked instead). Time is counted on a clock that includes suspend (Linux:
+CLOCK_BOOTTIME; macOS: CLOCK_MONOTONIC_RAW, unverified there), so a PIN
+cached before a night's sleep is not good on wake; an expired PIN is
+dropped within one presence check of the agent, not only when its slot is
+next asked for. *piggy health -v* prints the table the running agent has
+(the point "agent PIN cache (compiled in)") and the agent logs it at start.
+The certificate authority slots, 82 and 83 (*piggy-piv-slots*(7)), are never
+cached whatever the table says, and a table that says otherwise does not
+build: their PIN is asked every time, so a PIN-always key is asked for per
+signature by the operator, not only by the card.
+
+What changes in use: the first 9A, 9C and 9D use after the agent starts each
+asks for the PIN (it was once for all three); a 9C signature more than a
+minute after the last one asks again; a 9D decrypt more than 10 minutes
+after the last one, or an hour after the PIN was typed, asks again.
 
 To change a rule, edit the table in _crates/piggy/src/cmd/agent/pin_cache_table.rs_
 (one line per slot, with its limits), rebuild and bump piggy; or build with
-the Nix package argument *pinCachePolicy*, a file of the same shape:
+the Nix package argument *pinCachePolicy*, a file of the shape in
+_crates/piggy/src/cmd/agent/pin_cache_override.rs_ that replaces it (the
+shipped table and the tests of its values stay as they are):
 _piggy-rs.withPinCachePolicy ./my-table.rs_ (and give that to *mkPiggy*).
+A slot named twice, or 82 or 83 as anything but *Never*, fails the build.
 Then restart the agent. There is no run-time setting.
 
 Each cached PIN is held on pages of its own (FDR 0006 phase (b)):

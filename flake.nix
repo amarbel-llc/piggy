@@ -383,12 +383,13 @@
           };
 
           # `pinCachePolicy` (piggy#404): a file shaped like
-          # crates/piggy/src/cmd/agent/pin_cache_table.rs, compiled in INSTEAD
-          # of the checked-in table, so a fleet can build a piggy with other
-          # PIN-caching numbers without patching source (see piggy-agent(1),
-          # PIN MEMORY). The table is a build input and nothing a running host
-          # can change; a table that makes slot 82 or 83 cacheable fails the
-          # build (the const check in pin_policy.rs).
+          # crates/piggy/src/cmd/agent/pin_cache_override.rs, which REPLACES that
+          # file (the shipped table and its tests are untouched), so a fleet can
+          # build a piggy with other PIN-caching numbers without patching source
+          # (see piggy-agent(1), PIN MEMORY). The table is a build input and
+          # nothing a running host can change; a table that makes slot 82 or 83
+          # cacheable, or names a slot twice, fails the build (the const check in
+          # pin_policy.rs). Left null, nothing in the derivation changes.
           mkPiggyRs =
             {
               coverage ? false,
@@ -399,11 +400,12 @@
                 pname = if coverage then "piggy-rs-cov" else "piggy-rs";
                 version = "0.1.0";
 
-                postPatch = pkgs.lib.optionalString (pinCachePolicy != null) ''
-                  cp ${pinCachePolicy} crates/piggy/src/cmd/agent/pin_cache_table.rs
-                '';
-
-                passthru.withPinCachePolicy = file: mkPiggyRs { pinCachePolicy = file; };
+                passthru.withPinCachePolicy =
+                  file:
+                  mkPiggyRs {
+                    inherit coverage;
+                    pinCachePolicy = file;
+                  };
 
                 src = pkgs.lib.cleanSourceWith {
                   src = ./.;
@@ -445,6 +447,11 @@
                 };
               }
               // pkgs.lib.optionalAttrs coverage coverageAttrs
+              // pkgs.lib.optionalAttrs (pinCachePolicy != null) {
+                postPatch = ''
+                  cp --no-preserve=mode "${pinCachePolicy}" crates/piggy/src/cmd/agent/pin_cache_override.rs
+                '';
+              }
             );
 
           piggy-rs = mkPiggyRs { };

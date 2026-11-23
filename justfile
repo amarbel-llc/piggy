@@ -2021,6 +2021,51 @@ explore-ca-gate-mutants:
     echo "# $n mutants: $killed killed; survived: ${survived[*]:-none}; stale: ${stale[*]:-none}; nocompile: ${nocompile[*]:-none}"
     [[ ${#survived[@]} == 0 && ${#stale[@]} == 0 && ${#nocompile[@]} == 0 ]]
 
+# Build piggy-rs for real with a fleet's own PIN cache table (piggy#404, the
+# Nix package argument pinCachePolicy): a throwaway table (9A for an hour) must
+# build and pass the crate's tests, and a table that makes slot 83 cacheable,
+# or names a slot twice, must FAIL the build with the const check's message.
+# New files must be tracked (git add) for nix to see them.
+#
+# build piggy-rs with a throwaway pinCachePolicy, and with two refused ones
+[group('explore')]
+[linux]
+explore-pin-cache-override:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    mkdir -p .tmp
+    dir="$(mktemp -d "$PWD/.tmp/pin-cache-override.XXXXXX")"
+    attr() {
+      nix build --impure --no-link --print-out-paths --expr \
+        "(builtins.getFlake \"git+file://$PWD\").packages.\${builtins.currentSystem}.piggy-rs.withPinCachePolicy $1"
+    }
+    cat >"$dir/ok.rs" <<'EOF'
+    use super::CacheRule;
+    pub const PIN_CACHE_OVERRIDE: Option<&[(u8, CacheRule)]> =
+        Some(&[(0x9A, CacheRule::idle_secs(3600))]);
+    EOF
+    cat >"$dir/ca.rs" <<'EOF'
+    use super::CacheRule;
+    pub const PIN_CACHE_OVERRIDE: Option<&[(u8, CacheRule)]> =
+        Some(&[(0x83, CacheRule::idle_secs(60))]);
+    EOF
+    cat >"$dir/twice.rs" <<'EOF'
+    use super::CacheRule;
+    pub const PIN_CACHE_OVERRIDE: Option<&[(u8, CacheRule)]> =
+        Some(&[(0x9A, CacheRule::idle_secs(60)), (0x9A, CacheRule::Never)]);
+    EOF
+    echo "# the good table: must build and pass its tests"
+    attr "$dir/ok.rs" || { echo "not ok - the good table did not build"; exit 1; }
+    echo "ok - the good table builds and passes the crate's tests"
+    for bad in ca twice; do
+      if out=$(attr "$dir/$bad.rs" 2>&1); then
+        echo "not ok - the $bad table BUILT"; exit 1
+      fi
+      grep -qE "makes slot 82 or 83 cacheable|names a slot twice" <<<"$out" \
+        || { echo "not ok - the $bad table failed, but not on the check: $out"; exit 1; }
+      echo "ok - the $bad table fails the build on the const check"
+    done
+
 # The mutants explore-ca-gate-mutants leaves alive because only the fibby lane
 # can see them: apply each named mutant (ids from the same TSV) to a scratch
 # copy of the tree (no .git, target or .tmp, so nix treats it as a path
