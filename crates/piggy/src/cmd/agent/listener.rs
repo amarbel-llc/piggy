@@ -54,6 +54,14 @@ impl ListeningSocket for ResilientListener {
 /// request (FDR 0006 phase (d)); any other agent does not look.
 impl Agent<ResilientListener> for PiggyAgent {
     fn new_session(&mut self, socket: &UnixStream) -> impl Session {
+        self.session_for_connection(socket)
+    }
+}
+
+impl PiggyAgent {
+    /// The session for one accepted connection (what `new_session` returns,
+    /// as the concrete type so a test can look at it).
+    pub(super) fn session_for_connection(&self, socket: &UnixStream) -> PiggyAgent {
         // Every connection is its own: numbered here, whatever the agent is,
         // and its socket is watched for a hangup while a relayed sign waits.
         let session = self.clone().numbered().with_client_socket(socket);
@@ -80,33 +88,34 @@ const CLIENT_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 /// Resolves when the peer of `fd` has hung up. ssh-agent-lib answers one
 /// request at a time and reads nothing while a handler runs, so a client that
 /// goes away mid-request is not seen by it (shown by
-/// `the_connection_is_closed_when_a_sign_times_out`): this looks for it,
-/// without consuming a byte (MSG_PEEK), every [`CLIENT_WATCH_INTERVAL`].
+/// `the_library_does_not_cancel_a_handler_when_its_connection_closes`): this
+/// looks for it every [`CLIENT_WATCH_INTERVAL`] with `poll(2)` and no event
+/// asked for, so it reads and consumes nothing.
+///
+/// Only POLLHUP (or an error) counts, never end-of-file on the read side. On
+/// Linux a Unix stream socket reports POLLHUP when the peer has fully
+/// closed (both directions are then shut), and a client that merely did
+/// `shutdown(SHUT_WR)` after its request (socat, `nc -N`) and still waits for
+/// the answer is NOT hung up: it is not reported, and a request byte still
+/// unread does not hide a hangup either (the peek this replaces did both
+/// wrong). On macOS and the BSDs I have not verified when a Unix socket
+/// reports POLLHUP (THEORY: the same, for a full close); no test runs there.
 pub async fn peer_closed(fd: std::sync::Arc<std::os::fd::OwnedFd>) {
     use std::os::fd::AsRawFd;
     loop {
-        let mut byte = 0u8;
-        // SAFETY: a one-byte peek into a local buffer, on a descriptor this
-        // Arc keeps open for the whole call.
-        let n = unsafe {
-            libc::recv(
-                fd.as_raw_fd(),
-                std::ptr::addr_of_mut!(byte).cast(),
-                1,
-                libc::MSG_PEEK | libc::MSG_DONTWAIT,
-            )
+        let mut watched = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: 0,
+            revents: 0,
         };
-        if n == 0 {
+        // SAFETY: one pollfd in a local, a zero timeout, on a descriptor this
+        // Arc keeps open for the whole call.
+        let n = unsafe { libc::poll(&raw mut watched, 1, 0) };
+        if n > 0 && watched.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
             return;
         }
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if !matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) {
-                return;
-            }
+        if n < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return;
         }
         tokio::time::sleep(CLIENT_WATCH_INTERVAL).await;
     }
@@ -141,27 +150,52 @@ mod tests {
             still_open.is_err(),
             "a client that is merely waiting was reported gone"
         );
-        // A pending request byte is not a hangup either, and is not consumed.
-        theirs.writable().await.unwrap();
-        assert_eq!(theirs.try_write(b"x").unwrap(), 1);
-        let with_data = tokio::time::timeout(
+        // A client that sent its request and half-closed (socat, `nc -N`)
+        // still waits for the answer: not a hangup.
+        let theirs = theirs.into_std().unwrap();
+        std::io::Write::write_all(&mut &theirs, b"x").unwrap();
+        theirs.shutdown(std::net::Shutdown::Write).unwrap();
+        let half_closed = tokio::time::timeout(
             std::time::Duration::from_millis(600),
             peer_closed(watched.clone()),
         )
         .await;
-        assert!(with_data.is_err(), "pipelined data was taken for a hangup");
+        assert!(
+            half_closed.is_err(),
+            "a half-closed client that still waits was taken for a hangup"
+        );
+        // The client goes away with its request byte still unread: noticed
+        // (an unread byte used to hide the hangup), and nothing was consumed.
+        drop(theirs);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            peer_closed(watched.clone()),
+        )
+        .await
+        .expect("a hangup is noticed");
         let mut buf = [0u8; 1];
         ours.readable().await.unwrap();
         assert_eq!(
             ours.try_read(&mut buf).unwrap(),
             1,
-            "the peek consumed the byte"
+            "watching consumed the byte"
         );
-        // The client hangs up: noticed within a watch interval or two.
-        drop(theirs);
-        tokio::time::timeout(std::time::Duration::from_secs(2), peer_closed(watched))
-            .await
-            .expect("a hangup is noticed");
+    }
+
+    /// The listener's session for a connection is numbered and watches its
+    /// socket, whatever the agent is (a front included): the one-sign-at-a-time
+    /// limit rests on it.
+    #[tokio::test]
+    async fn the_session_for_an_accepted_connection_is_numbered_and_watched() {
+        let front = PiggyAgent::new(Vec::new()).with_proxy_only(true);
+        let (a, _a_peer) = tokio::net::UnixStream::pair().unwrap();
+        let (b, _b_peer) = tokio::net::UnixStream::pair().unwrap();
+        let first = front.session_for_connection(&a);
+        let second = front.session_for_connection(&b);
+        assert_ne!(first.connection_id(), 0);
+        assert_ne!(second.connection_id(), 0);
+        assert_ne!(first.connection_id(), second.connection_id());
+        assert!(first.is_watching_client());
     }
 
     #[test]

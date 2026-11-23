@@ -267,6 +267,12 @@ impl PiggyAgent {
         self
     }
 
+    /// Whether this session watches its client's socket.
+    #[cfg(test)]
+    pub fn is_watching_client(&self) -> bool {
+        self.client.is_some()
+    }
+
     /// The connection's number: 0 for a session no listener numbered.
     #[cfg(test)]
     pub fn connection_id(&self) -> u64 {
@@ -693,39 +699,28 @@ impl PiggyAgent {
                 let certificate_shaped =
                     piggy_piv::ssh_cert::looks_like_ssh_certificate(&request.data)
                         || piggy_piv::x509_profile::looks_like_tbs_certificate(&request.data);
-                if certificate_shaped {
-                    let gated = self
-                        .upstreams
-                        .holder_advertises(&request.pubkey, crate::operator_act::SSH_CA_GATE_EXT)
-                        .await;
-                    if !gated {
-                        return Err(AgentError::Other(
-                            format!(
-                                "refusing to relay certificate-shaped data: the agent that holds the key does not advertise {}, so it may sign a certificate with a key that is not a certificate authority's slot",
-                                crate::operator_act::SSH_CA_GATE_EXT
-                            )
-                            .into(),
-                        ));
-                    }
-                }
-                // The pool checks the gate again for any other upstream a
-                // connect failure re-routes the sign to.
-                let sign = self.upstreams.sign_gated(
-                    request,
-                    self.conn_id,
-                    certificate_shaped.then_some(crate::operator_act::SSH_CA_GATE_EXT),
-                );
-                // A client that hangs up while its sign waits (in the queue,
-                // or on a person) takes its place and its connection with it.
-                return match self.client.clone() {
-                    Some(fd) => tokio::select! {
-                        signed = sign => signed,
-                        () = super::listener::peer_closed(fd) => Err(AgentError::Other(
-                            "the client hung up while its sign was waiting at the card's machine".into(),
-                        )),
-                    },
-                    None => sign.await,
-                };
+                // The pool makes that check on the upstream the sign is
+                // routed to (and again for another one a connect failure
+                // re-routes it to), so a listing racing it cannot swap the
+                // route between the check and the send.
+                let hangup: Option<super::upstream::Hangup> = self.client.clone().map(|fd| {
+                    let hangup: super::upstream::Hangup = std::sync::Arc::new(move || {
+                        Box::pin(super::listener::peer_closed(fd.clone()))
+                    });
+                    hangup
+                });
+                // A client that hangs up while its sign is still QUEUED gives
+                // its place up; one whose request is already at the card's
+                // machine keeps its turn until the answer or the sign wait.
+                return self
+                    .upstreams
+                    .sign_gated(
+                        request,
+                        self.conn_id,
+                        certificate_shaped.then_some(crate::operator_act::SSH_CA_GATE_EXT),
+                        hangup.as_ref(),
+                    )
+                    .await;
             }
         };
 
@@ -3085,43 +3080,72 @@ mod tests {
             .expect("the first connection's sign is unharmed");
     }
 
-    /// Fourth read, 4: a client that hangs up while its sign waits takes its
-    /// place and its relayed sign with it (the library does not tell us).
+    /// Fifth read, M1: a client that hangs up while its sign is still QUEUED
+    /// gives its place up; one whose request is already at the card's machine
+    /// keeps its turn, so abandoned requests cannot stack up there faster than
+    /// they are answered.
     #[tokio::test]
-    async fn a_client_that_hangs_up_while_its_sign_waits_frees_the_queue() {
+    async fn a_hangup_frees_a_queued_sign_but_not_one_already_sent() {
         let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
             0x79, "card-key",
         )])
         .hanging_sign();
+        let log = stub.sign_log.clone();
         let path = upstream_stub::spawn_stub("sess-hangup", stub);
         let mut front = PiggyAgent::new(Vec::new())
             .with_proxy_only(true)
-            .with_upstream_pool(pool_for(path).with_sign_wait(std::time::Duration::from_secs(30)));
+            .with_upstream_pool(pool_for(path).with_sign_wait(std::time::Duration::from_secs(2)));
         front.request_identities().await.unwrap();
-        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
-        let mut conn = front.clone().numbered().with_client_socket(&ours);
-        let started = std::time::Instant::now();
-        let sign = tokio::spawn(async move {
-            conn.sign(SignRequest {
-                pubkey: ed25519_key_data(0x79),
-                data: b"hello".to_vec(),
-                flags: 0,
-            })
+        let request = |tag: u8| SignRequest {
+            pubkey: ed25519_key_data(0x79),
+            data: vec![tag],
+            flags: 0,
+        };
+        let (a_ours, a_theirs) = tokio::net::UnixStream::pair().unwrap();
+        let (b_ours, b_theirs) = tokio::net::UnixStream::pair().unwrap();
+        let mut a = front.session_for_connection(&a_ours);
+        let mut b = front.session_for_connection(&b_ours);
+        let a_sign = tokio::spawn(async move { a.sign(request(1)).await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let b_sign = tokio::spawn(async move { b.sign(request(2)).await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // B is queued behind A, which is at the card's machine. B hangs up:
+        // its place is given up and it was never sent.
+        drop(b_theirs);
+        let err = tokio::time::timeout(std::time::Duration::from_secs(1), b_sign)
             .await
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(
-            !sign.is_finished(),
-            "the sign is waiting on the card's machine"
-        );
-        drop(theirs);
-        let err = tokio::time::timeout(std::time::Duration::from_secs(3), sign)
-            .await
-            .expect("the hangup ends the wait")
+            .expect("a queued sign leaves when its client hangs up")
             .unwrap()
             .unwrap_err();
         assert_agent_error_other_eq(&err, "hung up");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![vec![1]],
+            "B reached the upstream"
+        );
+
+        // A hangs up AFTER its request was sent: it keeps its turn until its
+        // answer or the sign wait, and a third request does not overtake it.
+        drop(a_theirs);
+        let (c_ours, _c_theirs) = tokio::net::UnixStream::pair().unwrap();
+        let mut c = front.session_for_connection(&c_ours);
+        let c_sign = tokio::spawn(async move { c.sign(request(3)).await });
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        assert!(
+            !a_sign.is_finished(),
+            "a sent request is not dropped by a hangup"
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![vec![1]],
+            "a second request reached the card's machine before the first was answered"
+        );
+        // After A's sign wait runs out, C is sent.
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        assert!(a_sign.is_finished());
+        assert_eq!(*log.lock().unwrap(), vec![vec![1], vec![3]]);
+        c_sign.abort();
     }
 
     /// Before the listener numbers a session it is 0, which is nobody's.

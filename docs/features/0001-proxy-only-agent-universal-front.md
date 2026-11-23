@@ -196,7 +196,16 @@ on fibby, none in the proxy), and health.
   ssh-agent-lib does not drop a handler whose connection closes (the test
   `the_library_does_not_cancel_a_handler_when_its_connection_closes`): the
   card agent's PIN dialog stays up until it is answered or dismissed, and a
-  PIN entered then completes a sign nobody is waiting for.
+  PIN entered then completes a sign nobody is waiting for. For the same
+  reason a client that hangs up gives its place up only while its sign is
+  still QUEUED at the front; once its request is at the card agent the front
+  keeps the turn until the answer or `--sign-wait`, so abandoned requests
+  cannot stack up there faster than they are answered (a hung-up client is
+  seen by `poll(2)` reporting POLLHUP on a duplicate of its socket every
+  250 ms; a half-closed client that still waits is not one). **Next step, not
+  built:** the card agent's own cancel, by racing its wait for the prompt
+  lock (`ensure_pin`) against the same hangup watch on its connection, so
+  an abandoned request there takes no dialog with it.
 
 ## Tuning Levers
 
