@@ -303,9 +303,9 @@ the socket path, and the rule must not let a caller do that. All
 directories hogtie uses are made with an exact mode, or, when they exist,
 must be real directories owned by root with no permission beyond it.
 
-READ, NOT RUN: what follows is from reading sudo(8) and sudoers(5)
-(1.9.17); none of it has been tested under a real sudo. It stands until
-the NixOS module's VM test exercises it.
+What follows is from reading sudo(8) and sudoers(5) (1.9.17). Each point
+says whether circus's NixOS VM test has also seen it under a real sudo
+(SEEN) or not (READ, NOT RUN).
 
 What sudo does with the caller's state:
 
@@ -314,15 +314,29 @@ What sudo does with the caller's state:
   command runs with the invoking user's limits, except the core size,
   which sudo sets to 0. *rlimit_\** options in sudoers override this.
   hogtie does not rely on either: it sets its own limits and the action's.
+  SEEN: the action had exactly hogtie's table, also for a caller with
+  low *ulimit -f*, *-c* and *-t* (which of sudo's rules applied cannot be
+  told from that). READ, NOT RUN: *rlimit_\** overrides.
 - Signals: sudo relays the signals it receives to the command, SIGINT and
   SIGQUIT only when the command runs in a new pty or a user process sent
   them; SIGSTOP and SIGKILL are not relayed. The caller owns the sudo
   process, so it can have SIGTSTP relayed to hogtie: hogtie ignores it.
   The command runs as root, so the caller should not be able to signal it
   directly (the kernel requires the sender to share the target's real or
-  saved uid); not tested.
+  saved uid). SEEN: a SIGINT to the caller's sudo ended the root action;
+  the caller's *pkill -INT* against the running action signalled nothing
+  (refused or not matched was not told apart). READ, NOT RUN: SIGQUIT,
+  SIGSTOP, SIGKILL.
 - *use_pty* runs the command in a new pty when sudo has a terminal, and
   then relays SIGINT and SIGQUIT too. hogtie does not need a terminal.
+  SEEN: with a terminal the action had its own pts as controlling
+  terminal and stdin; without one, no terminal and its own session; its
+  output piped by the caller through sudo's pty arrived whole.
+- The action's state, SEEN: no signal pending, blocked, ignored or
+  caught; an empty environment whatever the caller set; descriptors 0, 1
+  and 2 only; cwd /; umask 022; nice 0, also for a niced caller.
+
+READ, NOT RUN: the audit log on a full disk.
 
 The rule this calls for, for the next sprint's module (_agents_ and the
 path are placeholders):
@@ -336,7 +350,8 @@ sudo matches the command by the path the caller gives it, not by what a
 symlink points to: a rule naming the binary's store path is matched only
 when the caller runs that full path, and *sudo hogtie* found through
 PATH (the profile's symlink) asks for a password (seen in the circus VM
-test). Name the path callers use.
+test). Name the path callers use. SEEN: the rule refuses *serve* and an
+account outside the rule's group.
 
 *exec \** admits nothing else: *exec* takes only the response, the action
 and its arguments, no flag, and its paths are compiled in. *env_reset* is
@@ -344,9 +359,11 @@ sudo's default and is named for the record; hogtie clears the environment
 itself. *use_pty* (sudo's default too) gives the root action its own
 session and terminal: without it the command sits in the caller's
 foreground process group, so the kernel delivers keyboard SIGINT and
-SIGQUIT to it directly and it shares the caller's terminal. Not known yet:
-whether an action whose output the caller pipes behaves the same through
-sudo's pty (the VM test should pipe one).
+SIGQUIT to it directly and it shares the caller's terminal.
+
+*serve* does not tell systemd it is ready (no *sd_notify*): with
+*Type=simple* a start that *serve* then refuses (exit 3) still reports
+success, so a unit should wait for the socket after starting it.
 
 # EXIT STATUS
 
