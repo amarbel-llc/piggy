@@ -1923,11 +1923,13 @@ test-rust-hogtie *ARGS:
 # red. Prints TAP; a SURVIVED mutant is an untested refusal, a STALE one no
 # longer matches the source, NOCOMPILE is a mutant that needs rewriting.
 #
-# break each hogtie refusal on purpose and check a test goes red
+# break each hogtie refusal on purpose and check a test goes red (ONLY: an
+# extended regex over mutant ids, to run some of them)
 [group('explore')]
-explore-hogtie-mutants:
+explore-hogtie-mutants only="":
     #!/usr/bin/env bash
     set -uo pipefail
+    only='{{ only }}'
     src=crates/hogtie
     work=$(mktemp -d "$PWD/.tmp/hogtie-mutants.XXXXXX")
     export CARGO_TARGET_DIR="$PWD/target/hogtie-mutants"
@@ -1935,6 +1937,7 @@ explore-hogtie-mutants:
     n=0 killed=0 survived=() stale=() nocompile=()
     while IFS=$'\t' read -r id file from to; do
       [[ -z $id || $id == \#* ]] && continue
+      [[ -n $only && ! $id =~ $only ]] && continue
       n=$((n + 1))
       from=${from//\\n/$nl} to=${to//\\n/$nl}
       rm -rf "$work/hogtie"

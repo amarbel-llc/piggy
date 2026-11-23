@@ -24,6 +24,11 @@ audit-fsize-unchecked	src/audit.rs	if lim.rlim_cur != libc::RLIM_INFINITY && siz
 audit-never-over-budget	src/audit.rs	if b.window_closed(now) || b.count <= REFUSAL_BUDGET {	if true {
 audit-no-summaries	src/audit.rs	append(log, &record)?;	let _ = (log, &record);
 audit-budget-lock-waits	src/audit.rs	libc::LOCK_EX | libc::LOCK_NB	libc::LOCK_EX
+cli-budget-error-open	src/cli.rs	.unwrap_or(true);	.unwrap_or(false);
+audit-corrupt-is-fresh	src/audit.rs	    if b.corrupt {\n        // Over budget for one window	    if false {\n        // Over budget for one window
+audit-owed-cleared-early	src/audit.rs	(start, count) = (now, 0);	(start, count, quiet) = (now, 0, 0);
+audit-log-follows-links	src/audit.rs	        .custom_flags(libc::O_NOFOLLOW)\n        .open(path)?;	        .open(path)?;
+serve-sweeps-only-on-connect	src/serve.rs	libc::poll(&mut pfd, 1, 1000)	libc::poll(&mut pfd, 1, -1)
 cli-over-budget-evaluated	src/cli.rs	if over {	if false {
 cli-errors-unbudgeted	src/cli.rs	let logged = decision.record.outcome == "started"	let logged = decision.record.outcome != "refused"
 serve-issue-unlimited	src/serve.rs	Ok(asker) if !budget.take(asker.uid, now) => {	Ok(asker) if false && !budget.take(asker.uid, now) => {
