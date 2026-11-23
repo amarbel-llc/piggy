@@ -119,12 +119,16 @@ impl Budget {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let mut text = String::new();
-        file.read_to_string(&mut text)?;
-        let (start, count, quiet, corrupt) = match parse_record(&text) {
+        // Bytes, not text: a file that is not UTF-8 is garbled, not an error
+        // that would keep the account over budget until root clears it.
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let text = std::str::from_utf8(&bytes).unwrap_or("");
+        let (start, count, quiet, corrupt) = match parse_record(text) {
             Some((s, c, q)) => (s, c, q, false),
-            // Created just now (or by a racing exec that has not written
-            // yet): a fresh account.
+            // Created just now: a fresh account.
+            // TODO(#406): a second exec locking the file before its creator
+            // writes it reads it as corrupt (over budget for one window).
             None if fresh => (0, 0, 0, false),
             None => (0, 0, 0, true),
         };
@@ -233,6 +237,7 @@ pub fn flush_summaries(dir: &Path, log: &Path, now: u64, wall: u64) -> io::Resul
         let Ok(mut b) = Budget::open(&e.path()) else {
             continue;
         };
+        // TODO(#406): an exec in the next window can report this same count.
         if b.corrupt || b.quiet == 0 || !b.window_closed(now) {
             continue;
         }
@@ -571,6 +576,18 @@ mod tests {
             admit_refusal(d.path(), Some(1000), 100 + REFUSAL_WINDOW).unwrap(),
             Admit::LogWithSummary(4),
             "the next window says how many were not logged"
+        );
+    }
+
+    #[test]
+    fn a_budget_file_that_is_not_text_is_over_budget_then_repaired() {
+        let d = crate::util::PrivateDir::new(&std::env::temp_dir(), "hogtie-budget").unwrap();
+        std::fs::write(d.path().join("1000"), [0xff, 0xfe, b'\n']).unwrap();
+        assert!(over_budget(d.path(), Some(1000), 100).unwrap());
+        let later = 100 + REFUSAL_WINDOW;
+        assert!(
+            !over_budget(d.path(), Some(1000), later).unwrap(),
+            "repaired"
         );
     }
 

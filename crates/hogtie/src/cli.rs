@@ -158,6 +158,7 @@ fn exec(rest: &[String]) -> ExitCode {
     let over = Paths::ensure_private_dir(&budget)
         .and_then(|()| audit::over_budget(&budget, caller, clock.boot))
         .unwrap_or(true);
+    // TODO(#406): a gate refusal from an unreadable budget leaves no line.
     if over {
         return fail(1, "refused: over the refusal budget; try again in a minute");
     }
@@ -199,6 +200,7 @@ fn exec(rest: &[String]) -> ExitCode {
                 decision.record.note = admit.note();
                 true
             }
+            // TODO(#406): logged, but not counted.
             Err(_) => true,
         };
     let written = if logged {

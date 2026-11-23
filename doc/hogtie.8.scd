@@ -367,6 +367,22 @@ software CA and stock ssh-keygen. *just explore-hogtie-mutants* breaks
 each refusal on purpose (*crates/hogtie/testdata/mutants.tsv*) and checks
 a test goes red.
 
+# KNOWN LIMITS
+
+Low findings of the last review, tracked in piggy#406:
+
+- A refusal past the budget gate whose count cannot then be saved is
+  logged but not counted.
+- Two execs racing on an account's first budget file: the second can see
+  the file before its creator writes it and count the account over budget
+  for one window.
+- A refusal at the gate because the budget cannot be read leaves no audit
+  line and no count.
+- The socket's sweep and an exec can both report the same count of
+  unlogged refusals.
+- A rewrite of the budget record cut short over an older one can read as
+  a valid mixed record; at worst a window resets early.
+
 # NOT YET
 
 The NixOS module (the socket unit, the sudo rule, the configuration from
