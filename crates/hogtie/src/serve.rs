@@ -122,6 +122,33 @@ impl IssueBudget {
     }
 }
 
+/// Take NOTIFY_SOCKET out of the environment (nothing hogtie starts may
+/// inherit it) and return it.
+pub fn take_notify_socket() -> Option<std::ffi::OsString> {
+    let v = std::env::var_os("NOTIFY_SOCKET");
+    std::env::remove_var("NOTIFY_SOCKET");
+    v.filter(|v| !v.is_empty())
+}
+
+/// Tell systemd `serve` is ready: `READY=1` as one datagram to `addr`, a
+/// path or, with a leading `@`, an abstract name (sd_notify(3)'s two
+/// forms; no libsystemd).
+pub fn notify_ready(addr: &std::ffi::OsStr) -> io::Result<()> {
+    use std::os::linux::net::SocketAddrExt as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    let bytes = addr.as_bytes();
+    let to = match bytes.strip_prefix(b"@") {
+        Some(name) => SocketAddr::from_abstract_name(name)?,
+        None => SocketAddr::from_pathname(Path::new(addr))?,
+    };
+    let n = UnixDatagram::unbound()?.send_to_addr(b"READY=1", &to)?;
+    if n != 7 {
+        return Err(io::Error::other("a short write to NOTIFY_SOCKET"));
+    }
+    Ok(())
+}
+
 /// Answer one connection.
 pub fn answer(
     stream: &mut UnixStream,

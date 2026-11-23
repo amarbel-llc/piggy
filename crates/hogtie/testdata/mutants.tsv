@@ -24,7 +24,9 @@ audit-fsize-unchecked	src/audit.rs	if lim.rlim_cur != libc::RLIM_INFINITY && siz
 audit-never-over-budget	src/audit.rs	if b.window_closed(now) || b.count <= REFUSAL_BUDGET {	if true {
 audit-no-summaries	src/audit.rs	append(log, &record)?;	let _ = (log, &record);
 audit-budget-lock-waits	src/audit.rs	libc::LOCK_EX | libc::LOCK_NB	libc::LOCK_EX
-child-eacces-fatal-for-clients	src/child.rs	Some(libc::EPERM | libc::EACCES)	Some(libc::EPERM)
+serve-never-ready	src/cli.rs	if let Some(addr) = notify {	if let Some(addr) = None::<std::ffi::OsString> {
+serve-abstract-as-path	src/serve.rs	match bytes.strip_prefix(b"@") {	match None::<&[u8]> {
+child-eacces-fatal-for-clientssrc/child.rs	Some(libc::EPERM | libc::EACCES)	Some(libc::EPERM)
 cli-budget-error-open	src/cli.rs	.unwrap_or(true);	.unwrap_or(false);
 audit-corrupt-is-fresh	src/audit.rs	    if b.corrupt {\n        // Over budget for one window	    if false {\n        // Over budget for one window
 audit-owed-cleared-early	src/audit.rs	(start, count) = (now, 0);	(start, count, quiet) = (now, 0, 0);

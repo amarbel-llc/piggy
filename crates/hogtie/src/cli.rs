@@ -248,6 +248,8 @@ fn exec(rest: &[String]) -> ExitCode {
 }
 
 fn serve_socket() -> ExitCode {
+    // Taken before anything else, so no path out of here leaves it set.
+    let notify = serve::take_notify_socket();
     let paths = Paths::for_this_binary();
     if let Err(e) = paths.check_running_as_root() {
         return fail(3, e);
@@ -276,6 +278,14 @@ fn serve_socket() -> ExitCode {
         Ok(l) => l,
         Err(e) => return fail(3, format!("{}: {e}", paths.socket().display())),
     };
+    // Ready only now: every check passed and the socket is bound. A unit
+    // of Type=notify whose start is refused above fails instead of
+    // reporting success.
+    if let Some(addr) = notify {
+        if let Err(e) = serve::notify_ready(&addr) {
+            return fail(3, format!("cannot tell systemd serve is ready: {e}"));
+        }
+    }
     match serve::serve(&listener, &NonceStore::new(paths.nonces()), &paths) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(3, e),

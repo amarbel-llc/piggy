@@ -249,6 +249,85 @@ fn a_flood_of_refusals_is_counted_not_logged() {
     assert!(log[20].contains("counted, not logged"), "{}", log[20]);
 }
 
+/// Start `hogtie serve` over `root` with NOTIFY_SOCKET=`notify`; what the
+/// notify socket `rx` received within `wait` (None: nothing), and serve.
+fn serve_notifying(
+    root: &Path,
+    notify: &std::ffi::OsStr,
+    rx: &std::os::unix::net::UnixDatagram,
+    wait: Duration,
+) -> (Option<String>, Server) {
+    let server = Server(
+        Command::new(HOGTIE)
+            .arg("serve")
+            .env("HOGTIE_TEST_ROOT", root)
+            .env("NOTIFY_SOCKET", notify)
+            .spawn()
+            .unwrap(),
+    );
+    rx.set_read_timeout(Some(wait)).unwrap();
+    let mut buf = [0u8; 256];
+    let got = rx
+        .recv(&mut buf)
+        .ok()
+        .map(|n| String::from_utf8_lossy(&buf[..n]).into_owned());
+    (got, server)
+}
+
+fn short_root() -> PrivateDir {
+    let tmp = std::env::temp_dir();
+    let parent = if tmp.as_os_str().len() < 64 {
+        tmp
+    } else {
+        PathBuf::from("/tmp")
+    };
+    PrivateDir::new(&parent, "hgt").unwrap()
+}
+
+#[test]
+fn serve_tells_a_path_notify_socket_it_is_ready_once_bound() {
+    let root = short_root();
+    let path = root.path().join("notify");
+    let rx = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+    let (got, _server) =
+        serve_notifying(root.path(), path.as_os_str(), &rx, Duration::from_secs(10));
+    assert_eq!(got.as_deref(), Some("READY=1"));
+    assert!(
+        root.path().join("run/nonce.sock").exists(),
+        "ready before the socket was bound"
+    );
+}
+
+#[test]
+fn serve_tells_an_abstract_notify_socket_it_is_ready() {
+    use std::os::linux::net::SocketAddrExt as _;
+    let root = short_root();
+    let name = format!(
+        "hogtie-test-{}-{:?}",
+        std::process::id(),
+        std::time::Instant::now()
+    );
+    let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+    let rx = std::os::unix::net::UnixDatagram::bind_addr(&addr).unwrap();
+    let notify = format!("@{name}");
+    let (got, _server) =
+        serve_notifying(root.path(), notify.as_ref(), &rx, Duration::from_secs(10));
+    assert_eq!(got.as_deref(), Some("READY=1"));
+}
+
+#[test]
+fn a_refused_serve_start_sends_nothing_and_exits_3() {
+    let root = short_root();
+    // The runtime directory's place is taken by a file: serve refuses.
+    std::fs::write(root.path().join("run"), "").unwrap();
+    let path = root.path().join("notify");
+    let rx = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+    let (got, mut server) =
+        serve_notifying(root.path(), path.as_os_str(), &rx, Duration::from_secs(3));
+    assert_eq!(got, None, "a refused start said it was ready");
+    assert_eq!(server.0.wait().unwrap().code(), Some(3));
+}
+
 #[test]
 fn a_niced_caller_can_still_ask_for_a_nonce() {
     // Found under real sudo (circus VM run): at nice 19, resetting the
