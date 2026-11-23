@@ -129,6 +129,9 @@ pub struct PiggyAgent {
     /// Who this connection's peer is, read when it was accepted. Per
     /// connection, not shared: each connection is its own clone.
     peer: super::holder::PeerStatus,
+    /// This connection's number (never 0 for an accepted one): the proxy lets
+    /// a connection have one sign pending at a time.
+    conn_id: u64,
 }
 
 /// A PIN acquired for a card op, plus whether it came from an on-demand
@@ -227,6 +230,7 @@ impl PiggyAgent {
             service_name: None,
             holder: None,
             peer: super::holder::PeerStatus::NotRead,
+            conn_id: 0,
         }
     }
 
@@ -238,7 +242,9 @@ impl PiggyAgent {
 
     /// The peer of this connection, as the listener read it.
     pub fn with_peer(mut self, peer: super::holder::PeerStatus) -> Self {
+        static NEXT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         self.peer = peer;
+        self.conn_id = NEXT_CONNECTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self
     }
 
@@ -676,7 +682,7 @@ impl PiggyAgent {
                         ));
                     }
                 }
-                return self.upstreams.sign(request).await;
+                return self.upstreams.sign_as(request, self.conn_id).await;
             }
         };
 

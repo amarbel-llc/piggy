@@ -83,13 +83,13 @@ two agents cannot silently fight over one path.
 	not bound by it: see *--sign-wait*.
 
 *--sign-wait* _SECONDS_
-	How long a sign relayed to an upstream is waited for (default 60). It
+	How long a sign relayed to an upstream is waited for (default 60, 1 to 600; in the queue, then for its answer). It
 	goes to the one upstream that holds the key and may sit behind a PIN
 	dialog and a touch on the card's machine (a certificate through a
-	front used to fail after 5 s). A sign that times out is never tried on
+	front used to fail after 5 s). Signs for one upstream go one at a time in arrival order, a connection has one pending, and only a failure to connect is retried. A sign that fails or times out is never tried on
 	another upstream that lists the key, since it may still be waiting on a
 	person there and a second request would raise a second prompt. At most
-	4 signs wait at one upstream; the rest fail at once, and a listing
+	64 signs queue at one upstream; the rest fail at once, and a listing
 	never waits behind them.
 
 *--upstream-grace* _SECONDS_

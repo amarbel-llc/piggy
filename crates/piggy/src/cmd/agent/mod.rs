@@ -94,7 +94,8 @@ pub struct AgentArgs {
     #[arg(
         long = "sign-wait",
         value_name = "SECONDS",
-        default_value_t = upstream::SIGN_UPSTREAM_WAIT.as_secs()
+        default_value_t = upstream::SIGN_UPSTREAM_WAIT.as_secs(),
+        value_parser = clap::value_parser!(u64).range(1..=600)
     )]
     pub sign_wait: u64,
 

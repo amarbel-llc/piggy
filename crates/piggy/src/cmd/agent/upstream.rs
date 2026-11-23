@@ -62,11 +62,47 @@ const MAX_REDIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// second prompt), so a long wait delays no other upstream.
 pub const SIGN_UPSTREAM_WAIT: Duration = Duration::from_secs(60);
 
-/// How many signs may wait at one upstream at once. A person answers one
-/// dialog at a time; more waiting signs are a flood (or a hung upstream),
-/// and they fail at once instead of holding the front. They have their own
-/// slots, so they never take a listing's connection.
-pub const MAX_WAITING_SIGNS_PER_UPSTREAM: usize = 4;
+/// How many signs may be queued at one upstream, the one being answered
+/// included. A person answers one dialog at a time and the signs go to the
+/// card's machine one at a time; past this many a sign fails at once instead
+/// of holding the front. The queue has its own budget, so it never takes a
+/// listing's connection.
+pub const MAX_QUEUED_SIGNS_PER_UPSTREAM: usize = 64;
+
+/// One upstream's sign queue: the lock is the turn (tokio's is first come,
+/// first served) and the semaphore the depth.
+#[derive(Debug)]
+struct SignQueue {
+    turn: Mutex<()>,
+    depth: Arc<Semaphore>,
+}
+
+impl SignQueue {
+    fn new(depth: usize) -> Self {
+        Self {
+            turn: Mutex::new(()),
+            depth: Arc::new(Semaphore::new(depth)),
+        }
+    }
+}
+
+/// A connection's claim on its one pending sign, released on drop (every
+/// path: answered, failed, timed out, cancelled).
+struct OwnerClaim {
+    owner: u64,
+    pending: Arc<std::sync::Mutex<std::collections::HashSet<u64>>>,
+}
+
+impl Drop for OwnerClaim {
+    fn drop(&mut self) {
+        if self.owner != 0 {
+            self.pending
+                .lock()
+                .expect("pending owners lock")
+                .remove(&self.owner);
+        }
+    }
+}
 
 /// One upstream's health as self-reported by the agent (the
 /// [`UPSTREAM_STATUS_EXT`] payload element).
@@ -196,9 +232,10 @@ pub struct UpstreamPool {
     /// How long a sign is waited for: a PIN dialog and a touch are a person's
     /// time, not a probe's.
     sign_wait: Duration,
-    /// Per upstream, in configured order: [`MAX_WAITING_SIGNS_PER_UPSTREAM`]
-    /// slots for signs waiting on a person; shared by every clone.
-    sign_slots: Arc<Vec<Arc<Semaphore>>>,
+    /// Per upstream, in configured order; shared by every clone.
+    sign_queues: Arc<Vec<Arc<SignQueue>>>,
+    /// The connections that have a sign pending (one each).
+    pending_owners: Arc<std::sync::Mutex<std::collections::HashSet<u64>>>,
     /// How long a listing that finds every upstream down redials before
     /// it reports the outage.
     outage_grace: Duration,
@@ -242,14 +279,15 @@ impl UpstreamPool {
 
     fn with_connection_limit(upstreams: Vec<Upstream>, timeout: Duration, limit: usize) -> Self {
         let states = vec![UpstreamState::default(); upstreams.len()];
-        let sign_slots = (0..upstreams.len())
-            .map(|_| Arc::new(Semaphore::new(MAX_WAITING_SIGNS_PER_UPSTREAM)))
+        let sign_queues = (0..upstreams.len())
+            .map(|_| Arc::new(SignQueue::new(MAX_QUEUED_SIGNS_PER_UPSTREAM)))
             .collect();
         Self {
             upstreams,
             timeout,
             sign_wait: SIGN_UPSTREAM_WAIT,
-            sign_slots: Arc::new(sign_slots),
+            sign_queues: Arc::new(sign_queues),
+            pending_owners: Arc::default(),
             outage_grace: DEFAULT_OUTAGE_GRACE,
             states: Arc::new(std::sync::Mutex::new(states)),
             known_keys: Arc::new(Mutex::new(HashMap::new())),
@@ -338,25 +376,45 @@ impl UpstreamPool {
         self.open(upstream, Some(permit)).await
     }
 
-    /// One of the upstream's few waiting-sign slots, held for the whole sign
-    /// instead of a shared connection permit, so a sign waiting on a person
-    /// never starves a listing. None free: the sign fails at once.
-    fn sign_slot(&self, upstream: &Upstream) -> Result<OwnedSemaphorePermit, AgentError> {
+    /// The sign queue of `upstream`: its signs wait here for their turn, on
+    /// their own budget, so a sign waiting on a person never takes a
+    /// listing's connection.
+    fn sign_queue(&self, upstream: &Upstream) -> Option<Arc<SignQueue>> {
         self.upstreams
             .iter()
             .position(|u| u.name == upstream.name)
-            .and_then(|i| self.sign_slots.get(i).cloned())
-            .and_then(|s| s.try_acquire_owned().ok())
-            .ok_or_else(|| {
-                AgentError::Other(
-                    format!(
-                        "upstream {}: {MAX_WAITING_SIGNS_PER_UPSTREAM} signs are already waiting \
-                         at the card; not queueing another",
-                        upstream.name
-                    )
-                    .into(),
-                )
-            })
+            .and_then(|i| self.sign_queues.get(i).cloned())
+    }
+
+    /// A connection's one pending sign. `owner` 0 is nobody's (tests, and a
+    /// caller that does not say), and is never refused.
+    fn claim_owner(&self, owner: u64) -> Result<OwnerClaim, AgentError> {
+        if owner != 0
+            && !self
+                .pending_owners
+                .lock()
+                .expect("pending owners lock")
+                .insert(owner)
+        {
+            return Err(AgentError::Other(
+                "this connection already has a sign pending at the card's machine".into(),
+            ));
+        }
+        Ok(OwnerClaim {
+            owner,
+            pending: Arc::clone(&self.pending_owners),
+        })
+    }
+
+    /// How many signs may be queued at one upstream, counting the one being
+    /// answered (default [`MAX_QUEUED_SIGNS_PER_UPSTREAM`]); more fail at once.
+    pub fn with_max_queued_signs(mut self, depth: usize) -> Self {
+        self.sign_queues = Arc::new(
+            (0..self.upstreams.len())
+                .map(|_| Arc::new(SignQueue::new(depth)))
+                .collect(),
+        );
+        self
     }
 
     async fn open(
@@ -534,6 +592,21 @@ impl UpstreamPool {
     /// (piggy#333). A refusal is the upstream's answer, and a timeout may
     /// be a human still at a prompt; neither is retried.
     pub async fn sign(&self, request: SignRequest) -> Result<Signature, AgentError> {
+        self.sign_as(request, 0).await
+    }
+
+    /// [`Self::sign`] for one client connection (`owner`, never 0 for a real
+    /// one): a connection has one sign pending at a time. Signs for one
+    /// upstream are QUEUED in arrival order and sent one at a time (a person
+    /// answers one dialog at a time, and the card agent serializes on the card
+    /// anyway), each waiting at most the sign wait in the queue and again for
+    /// its answer.
+    ///
+    /// Only a failure to CONNECT is retried: once the request may be on the
+    /// wire any failure is final for it, since the upstream may be showing the
+    /// dialog and a second send would raise a second prompt.
+    pub async fn sign_as(&self, request: SignRequest, owner: u64) -> Result<Signature, AgentError> {
+        let _claim = self.claim_owner(owner)?;
         let mut idx = self.known_keys.lock().await.get(&request.pubkey).copied();
         if idx.is_none() {
             self.list_identities().await;
@@ -565,16 +638,50 @@ impl UpstreamPool {
         }
     }
 
-    /// One sign round-trip. The flag on an error is true when the request
-    /// never got through (connect failed, the connection dropped): the
-    /// failures a redial may cure.
+    /// One sign round-trip. The flag on an error is true only when the
+    /// request provably never left (the connect failed): the one failure a
+    /// redial may cure and a re-send cannot double.
     async fn sign_on(
         &self,
         upstream: &Upstream,
         request: SignRequest,
     ) -> Result<Signature, (AgentError, bool)> {
-        // Not a failure of the upstream, and not retried: the slots are full.
-        let _slot = self.sign_slot(upstream).map_err(|e| (e, false))?;
+        // Wait in line for this upstream: a place in the queue (not the
+        // upstream's fault when none is free, and not retried), then our turn.
+        let queue = self.sign_queue(upstream);
+        let _place = queue
+            .as_ref()
+            .map(|q| q.depth.clone().try_acquire_owned())
+            .transpose()
+            .map_err(|_| {
+                (
+                    AgentError::Other(
+                        format!(
+                            "upstream {}: signs are already queued at the card's machine; not \
+                             queueing another",
+                            upstream.name
+                        )
+                        .into(),
+                    ),
+                    false,
+                )
+            })?;
+        let _turn = match &queue {
+            Some(q) => Some(timeout(self.sign_wait, q.turn.lock()).await.map_err(|_| {
+                (
+                    AgentError::Other(
+                        format!(
+                            "upstream {}: waited {} s in the queue for the card's machine",
+                            upstream.name,
+                            self.sign_wait.as_secs()
+                        )
+                        .into(),
+                    ),
+                    false,
+                )
+            })?),
+            None => None,
+        };
         let mut client = self.open(upstream, None).await.map_err(|e| {
             self.record(upstream, false);
             (e, true)
@@ -584,10 +691,10 @@ impl UpstreamPool {
                 self.record(upstream, true);
                 Ok(signature)
             }
+            // Final: the request may have been delivered (see `sign_as`).
             Ok(Err(e)) => {
-                let transport = is_transport_failure(&e);
-                self.record(upstream, !transport);
-                Err((e, transport))
+                self.record(upstream, !is_transport_failure(&e));
+                Err((e, false))
             }
             // Not retried: the upstream may still be waiting on a human (a
             // PIN or a touch), and a second request would prompt again.
@@ -930,6 +1037,10 @@ pub(super) mod test_support {
         pub sign_delay: Option<Duration>,
         /// Never answer a sign.
         pub hang_sign: bool,
+        /// Signs being answered right now, and the most there ever were at
+        /// once (shared by every connection's clone).
+        pub live_signs: Arc<std::sync::atomic::AtomicUsize>,
+        pub peak_concurrent_signs: Arc<std::sync::atomic::AtomicUsize>,
         /// A proxying agent: answers `request_identities` by listing this
         /// pool, as piggy's own agent does. Pointed at the stub's own
         /// socket it is the cycle piggy#326 guards against.
@@ -947,6 +1058,8 @@ pub(super) mod test_support {
                 refuse_sign: false,
                 sign_delay: None,
                 hang_sign: false,
+                live_signs: Arc::default(),
+                peak_concurrent_signs: Arc::default(),
                 relay: None,
             }
         }
@@ -1009,9 +1122,13 @@ pub(super) mod test_support {
             if self.hang_sign {
                 std::future::pending::<()>().await;
             }
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.live_signs.fetch_add(1, SeqCst) + 1;
+            self.peak_concurrent_signs.fetch_max(now, SeqCst);
             if let Some(delay) = self.sign_delay {
                 tokio::time::sleep(delay).await;
             }
+            self.live_signs.fetch_sub(1, SeqCst);
             if self.refuse_sign {
                 return Err(AgentError::Failure);
             }
@@ -1327,50 +1444,168 @@ mod tests {
         assert_eq!(sig, canned_signature());
     }
 
-    /// Review M1: signs waiting on a person never starve listings. A flood of
-    /// signs at one upstream is capped (the rest fail at once, naming the
-    /// cap), and a listing during the flood still goes through.
-    #[tokio::test]
-    async fn a_flood_of_waiting_signs_is_capped_and_listings_still_work() {
-        let stub = StubUpstream::new(vec![upstream_identity(0xC4, "flood-key")]).hanging_sign();
-        let path = spawn_stub("sign-flood", stub);
-        let pool = UpstreamPool::new(
+    fn sign_request(seed: u8, comment: &str) -> SignRequest {
+        SignRequest {
+            pubkey: upstream_identity(seed, comment).pubkey,
+            data: b"payload".to_vec(),
+            flags: 0,
+        }
+    }
+
+    fn one_upstream_pool(path: PathBuf, sign_wait: Duration) -> UpstreamPool {
+        UpstreamPool::new(
             vec![Upstream {
                 name: "stub".into(),
                 path,
             }],
             Duration::from_secs(2),
         )
-        .with_sign_wait(Duration::from_secs(3));
+        .with_sign_wait(sign_wait)
+    }
+
+    /// Review R2, R3: signs for one upstream are QUEUED and sent one at a
+    /// time, not refused past a small cap: five real concurrent signs (parallel
+    /// fetches) all succeed, and the person is never asked about two at once.
+    #[tokio::test]
+    async fn concurrent_signs_queue_and_reach_the_upstream_one_at_a_time() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xC4, "queue-key")])
+            .slow_sign(Duration::from_millis(120));
+        let peak = stub.peak_concurrent_signs.clone();
+        let path = spawn_stub("sign-queue", stub);
+        let pool = one_upstream_pool(path, Duration::from_secs(10));
         pool.list_identities().await;
-        let mut waiting = Vec::new();
-        for _ in 0..(MAX_WAITING_SIGNS_PER_UPSTREAM + 6) {
+        let mut signs = Vec::new();
+        for owner in 1..=5u64 {
             let pool = pool.clone();
-            waiting.push(tokio::spawn(async move {
-                pool.sign(SignRequest {
-                    pubkey: upstream_identity(0xC4, "flood-key").pubkey,
-                    data: b"payload".to_vec(),
-                    flags: 0,
-                })
-                .await
+            signs.push(tokio::spawn(async move {
+                pool.sign_as(sign_request(0xC4, "queue-key"), owner).await
             }));
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        // The listing is not behind the waiting signs.
+        for sign in signs {
+            sign.await
+                .unwrap()
+                .expect("a queued sign is sent in its turn");
+        }
+        assert_eq!(
+            peak.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "two signs were at the card's machine at once"
+        );
+    }
+
+    /// A listing is not behind signs waiting on a person.
+    #[tokio::test]
+    async fn a_listing_is_not_behind_a_waiting_sign() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xC6, "list-key")]).hanging_sign();
+        let path = spawn_stub("sign-list", stub);
+        let pool = one_upstream_pool(path, Duration::from_secs(3));
+        pool.list_identities().await;
+        let waiting = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.sign_as(sign_request(0xC6, "list-key"), 1).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
         let started = std::time::Instant::now();
-        let listed = pool.list_identities().await;
-        assert_eq!(listed.len(), 1, "a listing during the flood");
+        assert_eq!(pool.list_identities().await.len(), 1);
         assert!(started.elapsed() < Duration::from_secs(1));
-        let mut capped = 0;
-        for task in waiting {
-            let err = task.await.unwrap().unwrap_err().to_string();
-            if err.contains("already waiting") {
-                capped += 1;
-            } else {
-                assert!(err.contains("sign request timed out"), "{err}");
+        waiting.abort();
+    }
+
+    /// The queue is bounded: past its depth a sign fails at once, naming
+    /// the queue; a sign that timed out frees its place.
+    #[tokio::test]
+    async fn a_full_queue_fails_fast_and_a_timed_out_sign_frees_its_place() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xC7, "full-key")]).hanging_sign();
+        let path = spawn_stub("sign-full", stub);
+        let pool = one_upstream_pool(path, Duration::from_millis(400)).with_max_queued_signs(2);
+        pool.list_identities().await;
+        let mut signs = Vec::new();
+        for owner in 1..=4u64 {
+            let pool = pool.clone();
+            signs.push(tokio::spawn(async move {
+                pool.sign_as(sign_request(0xC7, "full-key"), owner).await
+            }));
+        }
+        let mut full = 0;
+        for sign in signs {
+            let err = sign.await.unwrap().unwrap_err().to_string();
+            if err.contains("signs are already queued") {
+                full += 1;
             }
         }
-        assert_eq!(capped, 6, "every sign past the cap fails at once");
+        assert_eq!(full, 2, "the two past the queue depth fail at once");
+        // The places are free again: the next sign is queued and times out in
+        // the ordinary way instead of being refused.
+        let err = pool
+            .sign_as(sign_request(0xC7, "full-key"), 9)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("already queued"), "{err}");
+    }
+
+    /// One connection has one sign at a time.
+    #[tokio::test]
+    async fn a_connection_has_one_sign_pending_at_a_time() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xC8, "own-key")])
+            .slow_sign(Duration::from_millis(400));
+        let path = spawn_stub("sign-owner", stub);
+        let pool = one_upstream_pool(path, Duration::from_secs(5));
+        pool.list_identities().await;
+        let first = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.sign_as(sign_request(0xC8, "own-key"), 7).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let err = pool
+            .sign_as(sign_request(0xC8, "own-key"), 7)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already has a sign pending"), "{err}");
+        first.await.unwrap().expect("the first sign is unharmed");
+        // Another connection, and the same one afterwards, are fine.
+        pool.sign_as(sign_request(0xC8, "own-key"), 8)
+            .await
+            .unwrap();
+        pool.sign_as(sign_request(0xC8, "own-key"), 7)
+            .await
+            .unwrap();
+    }
+
+    /// Review R1: once the request may be on the wire, a failure is final: a
+    /// relay that drops while the person is at the dialog must not make the
+    /// front re-send the sign (to the same or another upstream) and raise a
+    /// second prompt.
+    #[tokio::test]
+    async fn a_sign_that_may_have_been_sent_is_never_sent_again() {
+        let dropping = spawn_closing_upstream("sign-dropped");
+        let good = StubUpstream::new(vec![upstream_identity(0xC9, "sent-key")]);
+        let good_events = good.events.clone();
+        let pool = UpstreamPool::new(
+            vec![
+                Upstream {
+                    name: "dropping".into(),
+                    path: dropping,
+                },
+                Upstream {
+                    name: "good".into(),
+                    path: spawn_stub("sign-sent-good", good),
+                },
+            ],
+            Duration::from_secs(2),
+        );
+        // The key was listed on the first upstream earlier.
+        pool.known_keys
+            .lock()
+            .await
+            .insert(upstream_identity(0xC9, "sent-key").pubkey, 0);
+        let err = pool.sign_as(sign_request(0xC9, "sent-key"), 1).await;
+        assert!(err.is_err());
+        assert!(
+            !good_events.lock().unwrap().iter().any(|e| e == "sign"),
+            "the sign was sent to another upstream after it may have been delivered"
+        );
     }
 
     /// Review M2: a sign that times out is NOT sent to another upstream that
