@@ -382,7 +382,7 @@ run-nix *ARGS:
 # --- test ---
 
 [group('post-build')]
-test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-bats-conformance-x509-profile test-rust test-go test-pigpen test-nix-hm-module test-nix-hm-secrets-module _test-conformance-linux-only _test-vm-linux-only
+test: validate-grammar test-grammar-vectors test-bats-default test-bats-conformance test-bats-conformance-x509-profile test-rust test-pin-cache-table-checks test-go test-pigpen test-nix-hm-module test-nix-hm-secrets-module _test-conformance-linux-only _test-vm-linux-only
 
 [group('post-build')]
 test-optional: test-bats-file test-bats-piggy-local test-bats-conformance-protocol test-bats-conformance-pivy-agent-hardware test-bats-conformance-pivy-tool-admin-key _test-optional-linux-only
@@ -2020,6 +2020,44 @@ explore-ca-gate-mutants:
     echo "1..$n"
     echo "# $n mutants: $killed killed; survived: ${survived[*]:-none}; stale: ${stale[*]:-none}; nocompile: ${nocompile[*]:-none}"
     [[ ${#survived[@]} == 0 && ${#stale[@]} == 0 && ${#nocompile[@]} == 0 ]]
+
+# The PIN cache table's build-time checks, in the gate (piggy#404): a scratch
+# copy of the workspace is `cargo check`ed with a fleet's own table swapped in
+# (pin_cache_override.rs): a good one must compile, and one that makes slot 83
+# cacheable, one that names a slot twice, and one that is not a table at all
+# must each FAIL, the first two on the const check's own message. Cheap (check,
+# not build or test); `explore-pin-cache-override` is the same through nix and
+# the checkPhase, and slower.
+#
+# cargo check a scratch copy with good and refused PIN cache tables
+[group('test')]
+test-pin-cache-table-checks:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    mkdir -p .tmp
+    work="$(mktemp -d "$PWD/.tmp/pin-cache-checks.XXXXXX")"
+    export CARGO_TARGET_DIR="$PWD/target/pin-cache-checks"
+    cp -r crates Cargo.toml Cargo.lock version.env "$work/"
+    over="$work/crates/piggy/src/cmd/agent/pin_cache_override.rs"
+    attempt() { # BODY -> status, output in $out
+      printf 'use super::CacheRule;\npub const PIN_CACHE_OVERRIDE: Option<&[(u8, CacheRule)]> = %s;\n' "$1" >"$over"
+      out=$(cd "$work" && cargo check --offline -q -p piggy 2>&1)
+    }
+    n=0 bad=0
+    ok() { n=$((n + 1)); echo "ok $n - $1"; }
+    no() { n=$((n + 1)); bad=1; echo "not ok $n - $1"; echo "$out" | tail -n 12 | sed 's/^/# /'; }
+    attempt 'Some(&[(0x9A, CacheRule::idle_secs(3600))])' && ok "a good table compiles" || no "a good table compiles"
+    attempt 'Some(&[(0x83, CacheRule::idle_secs(60))])' \
+      && no "slot 83 cacheable is refused" \
+      || { grep -q 'makes slot 82 or 83 cacheable' <<<"$out" && ok "slot 83 cacheable fails the build on the check" || no "slot 83 cacheable fails on the check"; }
+    attempt 'Some(&[(0x9A, CacheRule::idle_secs(60)), (0x9A, CacheRule::Never)])' \
+      && no "a slot named twice is refused" \
+      || { grep -q 'names a slot twice' <<<"$out" && ok "a slot named twice fails the build on the check" || no "a slot named twice fails on the check"; }
+    attempt 'Some(&[(0x9A, 60)])' \
+      && no "a table of the wrong shape is refused" \
+      || ok "a table of the wrong shape fails the build"
+    echo "1..$n"
+    exit $bad
 
 # Build piggy-rs for real with a fleet's own PIN cache table (piggy#404, the
 # Nix package argument pinCachePolicy): a throwaway table (9A for an hour) must

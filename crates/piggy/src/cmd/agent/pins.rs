@@ -36,7 +36,7 @@ use piggy_guard::GuardedBytes;
 use piggy_piv::Guid;
 use zeroize::Zeroizing;
 
-use super::pin_policy::{CacheRule, PinCachePolicy};
+use super::pin_policy::{CacheRule, OFFER_LIFE, PinCachePolicy};
 
 /// A point on the clock the limits are measured with: time since an arbitrary
 /// point, in which SLEEP COUNTS (a PIN cached before a night's suspend is not
@@ -47,11 +47,15 @@ use super::pin_policy::{CacheRule, PinCachePolicy};
 /// macOS documents as continuing across sleep (clock_gettime(3), where
 /// CLOCK_UPTIME_RAW is the one that stops): THEORY, not verified on a Mac by
 /// this change. Other unix: CLOCK_MONOTONIC (may stop in suspend).
+///
+/// A failed clock read is a stamp of no time (`None`): anything measured from
+/// it, or against it, has run out, so nothing is cached on it and nothing is
+/// served on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Stamp(Duration);
+struct Stamp(Option<Duration>);
 
 impl Stamp {
-    pub fn now() -> Self {
+    fn now() -> Self {
         #[cfg(target_os = "linux")]
         const CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
         #[cfg(target_os = "macos")]
@@ -65,25 +69,39 @@ impl Stamp {
         // SAFETY: clock_gettime writes one timespec through a valid pointer.
         let rc = unsafe { libc::clock_gettime(CLOCK, &raw mut ts) };
         if rc != 0 {
-            // No clock: say it is far in the future so every limit has passed
-            // and nothing is served from the cache.
-            return Self(Duration::MAX / 2);
+            return Self(None);
         }
-        Self(Duration::new(
+        Self(Some(Duration::new(
             u64::try_from(ts.tv_sec).unwrap_or(0),
             u32::try_from(ts.tv_nsec).unwrap_or(0),
-        ))
+        )))
     }
 
+    /// No time at all (a failed read), for the tests.
+    #[cfg(test)]
+    fn failed() -> Self {
+        Self(None)
+    }
+
+    fn is_known(self) -> bool {
+        self.0.is_some()
+    }
+
+    /// How long from `earlier` to `self`; unknown if either is unknown, which
+    /// is as long as can be (every limit has passed).
     fn since(self, earlier: Self) -> Duration {
-        self.0.saturating_sub(earlier.0)
+        match (self.0, earlier.0) {
+            (Some(now), Some(then)) => now.saturating_sub(then),
+            _ => Duration::MAX,
+        }
     }
 }
 
+#[cfg(test)]
 impl std::ops::Add<Duration> for Stamp {
     type Output = Stamp;
     fn add(self, d: Duration) -> Stamp {
-        Stamp(self.0.saturating_add(d))
+        Stamp(self.0.map(|t| t.saturating_add(d)))
     }
 }
 
@@ -137,8 +155,9 @@ pub struct PinCache {
     /// PINs that verified on-card, keyed by the card and the slot they were
     /// typed for.
     verified: HashMap<(Guid, u8), Entry>,
-    /// The `ssh-add -X` PIN, not tied to a card until it verifies on one.
-    offered: Option<GuardedBytes>,
+    /// The `ssh-add -X` PIN and when it was offered, not tied to a card until
+    /// it verifies on one. It lives for [`OFFER_LIFE`] and is handed out once.
+    offered: Option<(GuardedBytes, Stamp)>,
     /// Cards that rejected the current `offered` PIN — don't burn another
     /// retry re-offering it there.
     offered_rejected_by: HashSet<Guid>,
@@ -189,10 +208,13 @@ impl PinCache {
     /// The PIN to try for `slot` of `guid`, if any: the one typed for this
     /// very slot (and not past its limits), else the `ssh-add -X` offer.
     ///
-    /// The offer is taken, not lent: it is handed out ONCE, to the first
-    /// request that has no PIN of its own on a slot that may be cached, and is
-    /// gone after that whether or not the card accepted it. So one `-X` PIN
-    /// serves one slot once and then the table rules, and an expired PIN is
+    /// A PIN already held for this card and slot is served whatever the table
+    /// says (only the table, the holder's own PIN, or a typed one puts one
+    /// there). The offer is taken, not lent: it is handed out ONCE, to the
+    /// first request that has no PIN of its own on a slot that may be cached,
+    /// and only within [`OFFER_LIFE`] of being made; it is gone after that
+    /// whether or not the card accepted it. So one `-X` PIN serves one slot
+    /// once and then the table rules, and a slot whose limits have passed is
     /// never silently refilled from it. A slot that is never cached gets
     /// neither.
     ///
@@ -202,26 +224,36 @@ impl PinCache {
         self.lookup_at(guid, slot, Stamp::now())
     }
 
-    pub fn lookup_at(
+    fn lookup_at(
         &mut self,
         guid: &Guid,
         slot: u8,
         now: Stamp,
     ) -> Option<(Zeroizing<String>, PinSource)> {
         self.sweep_at(now);
-        if self.policy.rule(slot) == CacheRule::Never {
-            return None;
-        }
         if let Some(entry) = self.verified.get(&(guid.clone(), slot)) {
             return copy_out(&entry.pin).map(|pin| (pin, PinSource::Verified));
         }
-        if self.offered_rejected_by.contains(guid) {
+        if self.policy.rule(slot) == CacheRule::Never || self.offered_rejected_by.contains(guid) {
             return None;
         }
+        // The sweep above already dropped an offer past its life.
         self.offered
             .take()
-            .and_then(|p| copy_out(&p))
+            .and_then(|(p, _)| copy_out(&p))
             .map(|pin| (pin, PinSource::Offered))
+    }
+
+    /// The PIN CURRENTLY cached for `slot` of `guid`, never the offer (which
+    /// it leaves alone): what a request that was handed a cached PIN earlier
+    /// asks again, under the card lock, before verifying it. If another
+    /// request found it stale in the meantime it is gone, and the caller asks
+    /// the person instead of sending a second wrong PIN to the card.
+    pub fn cached_now(&mut self, guid: &Guid, slot: u8) -> Option<Zeroizing<String>> {
+        self.sweep_at(Stamp::now());
+        self.verified
+            .get(&(guid.clone(), slot))
+            .and_then(|entry| copy_out(&entry.pin))
     }
 
     /// The card accepted the cached PIN for `slot` of `guid` just now: that is
@@ -231,32 +263,44 @@ impl PinCache {
         self.used_at(guid, slot, Stamp::now());
     }
 
-    pub fn used_at(&mut self, guid: &Guid, slot: u8, now: Stamp) {
+    fn used_at(&mut self, guid: &Guid, slot: u8, now: Stamp) {
         if let Some(entry) = self.verified.get_mut(&(guid.clone(), slot)) {
             entry.last_used = now;
         }
     }
 
     /// Drop every PIN past its idle limit or its cap, whichever slot it is
-    /// for: an expired PIN does not stay in memory until the same slot is
-    /// next asked for. Called on every lookup and by the probe loop.
+    /// for, and an offer past its life: an expired PIN does not stay in memory
+    /// until the same slot is next asked for. Called on every lookup and by
+    /// the probe loop.
     pub fn sweep(&mut self) {
         self.sweep_at(Stamp::now());
     }
 
-    pub fn sweep_at(&mut self, now: Stamp) {
+    fn sweep_at(&mut self, now: Stamp) {
         self.verified.retain(|_, entry| !entry.expired(now));
+        if self
+            .offered
+            .as_ref()
+            .is_some_and(|(_, made)| now.since(*made) >= OFFER_LIFE)
+        {
+            self.offered = None;
+        }
     }
 
     /// Record that `pin` verified on `guid` for `slot` (a prompted PIN, or the
     /// offer once the card accepted it), under the slot's rule. A slot that is
-    /// never cached records nothing.
+    /// never cached records nothing, and neither does a failed clock read:
+    /// nothing is kept that cannot be timed out.
     pub fn cache_verified(&mut self, guid: &Guid, slot: u8, pin: &str) {
         self.cache_verified_at(guid, slot, pin, Stamp::now());
     }
 
-    pub fn cache_verified_at(&mut self, guid: &Guid, slot: u8, pin: &str, now: Stamp) {
+    fn cache_verified_at(&mut self, guid: &Guid, slot: u8, pin: &str, now: Stamp) {
         self.sweep_at(now);
+        if !now.is_known() {
+            return;
+        }
         let (idle, cap) = match self.policy.rule(slot) {
             CacheRule::Never => return,
             CacheRule::For { idle, cap } => (idle, cap),
@@ -327,10 +371,15 @@ impl PinCache {
         had
     }
 
-    /// `ssh-add -X <pin>`: offer `pin` to every card that has no verified
-    /// PIN. Replaces a previous offer and forgets who rejected that one.
+    /// `ssh-add -X <pin>`: offer `pin` to the first request, within
+    /// [`OFFER_LIFE`], that has no PIN of its own on a slot that may be
+    /// cached. Replaces a previous offer and forgets who rejected that one.
     pub fn offer(&mut self, pin: &str) {
-        self.offered = guard(pin);
+        self.offer_at(pin, Stamp::now());
+    }
+
+    fn offer_at(&mut self, pin: &str, now: Stamp) {
+        self.offered = guard(pin).map(|guarded| (guarded, now));
         self.offered_rejected_by.clear();
     }
 
@@ -347,8 +396,12 @@ impl PinCache {
         self.has_any_at(Stamp::now())
     }
 
-    pub fn has_any_at(&self, now: Stamp) -> bool {
-        self.verified.values().any(|e| !e.expired(now)) || self.offered.is_some()
+    fn has_any_at(&self, now: Stamp) -> bool {
+        self.verified.values().any(|e| !e.expired(now))
+            || self
+                .offered
+                .as_ref()
+                .is_some_and(|(_, made)| now.since(*made) < OFFER_LIFE)
     }
 
     /// The table this cache runs under, one line per named slot.
@@ -370,7 +423,7 @@ impl PinCache {
     pub fn offered(&self) -> Option<String> {
         self.offered
             .as_ref()
-            .and_then(copy_out)
+            .and_then(|(p, _)| copy_out(p))
             .map(|p| p.to_string())
     }
 
@@ -380,7 +433,7 @@ impl PinCache {
         self.verified
             .values()
             .map(|e| &e.pin)
-            .chain(&self.offered)
+            .chain(self.offered.as_ref().map(|(p, _)| p))
             .map(GuardedBytes::protections)
             .collect()
     }
@@ -565,7 +618,7 @@ mod tests {
             unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut mono) },
             0
         );
-        let mono = Stamp(Duration::new(mono.tv_sec as u64, mono.tv_nsec as u32));
+        let mono = Stamp(Some(Duration::new(mono.tv_sec as u64, mono.tv_nsec as u32)));
         assert!(
             Stamp::now() >= mono,
             "BOOTTIME is never behind MONOTONIC (it also counts suspend)"
@@ -596,6 +649,85 @@ mod tests {
         assert!(c.lookup(&g(1), D).is_none(), "another slot of the same card");
         assert!(c.lookup(&g(2), A).is_none(), "another card");
         assert!(c.lookup(&g(1), A).is_none(), "the same request again");
+    }
+
+    /// Round 2, M1: an offer lives 60 s from the moment it was made. One made
+    /// while a slot was still cached does not wait, with no limit, to refill
+    /// that slot after its cap; and an old offer serves nothing.
+    #[test]
+    fn an_offer_lives_sixty_seconds_and_does_not_refill_a_slot_after_its_cap() {
+        let mut c = short_table();
+        let t0 = Stamp::now();
+        c.cache_verified_at(&g(1), D, "1111", t0);
+        c.offer_at("9999", t0);
+        // Still cached: the PIN of its own is served and the offer is left.
+        assert_eq!(
+            c.lookup_at(&g(1), D, t0 + secs(5)),
+            Some((Zeroizing::new("1111".into()), PinSource::Verified))
+        );
+        assert!(c.has_any_at(t0 + secs(59)));
+        // Past 9D's cap AND the offer's life: nothing serves 9D, the person
+        // is asked.
+        assert!(c.lookup_at(&g(1), D, t0 + secs(61)).is_none());
+        assert!(!c.has_any_at(t0 + secs(61)), "an expired offer is not 'a PIN'");
+        // An offer older than its life serves nothing, on any slot.
+        c.offer_at("8888", t0);
+        assert!(c.lookup_at(&g(2), A, t0 + secs(60)).is_none());
+        assert!(c.offered().is_none(), "dropped, not left to linger");
+        // One inside its life does.
+        c.offer_at("7777", t0);
+        assert!(c.lookup_at(&g(2), A, t0 + secs(59)).is_some());
+    }
+
+    /// Round 2, L3: what a request asks again under the card lock. A PIN another
+    /// request found stale and forgot is gone (so a second wrong PIN never
+    /// reaches the card), and the offer is not touched by asking.
+    #[test]
+    fn a_cached_pin_forgotten_meanwhile_is_gone_when_asked_for_again() {
+        let mut c = short_table();
+        c.cache_verified(&g(1), A, "1111");
+        c.offer("9999");
+        assert_eq!(c.cached_now(&g(1), A).as_deref().map(String::as_str), Some("1111"));
+        assert!(c.cached_now(&g(1), D).is_none(), "another slot's PIN is not this one's");
+        c.forget_for(&g(1)); // the request ahead of us found it wrong
+        assert!(c.cached_now(&g(1), A).is_none());
+        assert!(c.offered().is_some(), "asking never takes the offer");
+    }
+
+    /// Round 2, L2: a failed clock read caches nothing and serves nothing that
+    /// has a limit.
+    #[test]
+    fn a_failed_clock_read_caches_nothing_and_expires_what_is_limited() {
+        let mut c = short_table();
+        c.cache_verified_at(&g(1), A, "1111", Stamp::failed());
+        assert!(c.verified_for(&g(1), A).is_none(), "not cached on a failed read");
+        let t0 = Stamp::now();
+        c.cache_verified_at(&g(1), D, "2222", t0);
+        assert!(
+            c.lookup_at(&g(1), D, Stamp::failed()).is_none(),
+            "a failed read at lookup is expiry"
+        );
+        assert!(c.verified_for(&g(1), D).is_none());
+        c.offer_at("9999", t0);
+        assert!(c.lookup_at(&g(1), A, Stamp::failed()).is_none());
+    }
+
+    /// Round 2, L4: the holder's own PIN is served whatever the table says
+    /// about 9A: an override that omits 9A does not strand a minted card.
+    #[test]
+    fn the_holders_pin_is_served_even_if_the_table_omits_its_slot() {
+        let mut c = PinCache::with_policy(PinCachePolicy::for_test_table(&[(
+            D,
+            CacheRule::idle_secs(100),
+        )]));
+        c.cache_verified_unlimited(&g(1), 0x9A, "1111");
+        assert_eq!(
+            c.lookup(&g(1), 0x9A),
+            Some((Zeroizing::new("1111".into()), PinSource::Verified))
+        );
+        // A typed PIN on the omitted slot is still not cached.
+        c.cache_verified(&g(2), 0x9A, "2222");
+        assert!(c.lookup(&g(2), 0x9A).is_none());
     }
 
     /// H1: the offer promoted by one slot's verify does not refill that slot,

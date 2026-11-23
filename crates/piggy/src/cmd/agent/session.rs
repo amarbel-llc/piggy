@@ -496,6 +496,19 @@ impl PiggyAgent {
             };
 
             let _card_guard = self.card_lock.lock().await;
+            // A PIN taken from the cache was taken BEFORE this lock: another
+            // request ahead of us may have sent it to the card, found it
+            // wrong and forgotten it. Look again, here, so that only ONE
+            // stale PIN ever reaches the card; if it is gone, ask the person.
+            let current_cached: Option<Zeroizing<String>> = match &acquired {
+                Some(acq) if !acq.fresh => {
+                    match self.pins.lock().await.cached_now(guid, slot_id) {
+                        Some(pin) => Some(pin),
+                        None => continue,
+                    }
+                }
+                _ => None,
+            };
             let mut token = reconnect_to_token(guid)?;
             let mut session = token
                 .begin_pin_session()
@@ -531,7 +544,7 @@ impl PiggyAgent {
                     self.forget_pin(guid).await;
                     continue;
                 }
-                match session.verify_pin(&acq.pin) {
+                match session.verify_pin(current_cached.as_ref().unwrap_or(&acq.pin)) {
                     Ok(()) => self.cache_pin(guid, slot_id, acq).await,
                     Err(PivError::PinIncorrect { .. }) if attempt < PIN_RETRY_LIMIT => {
                         attempt += 1;

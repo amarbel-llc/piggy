@@ -96,6 +96,12 @@ fn human(d: Duration) -> String {
     }
 }
 
+/// How long an `ssh-add -X` PIN waits for the first request that may use it
+/// (it is handed out once, to one slot). Fixed, beside the table, and part of
+/// what "PIN cache (compiled in)" reports: after it the offer is gone, so an
+/// offer made while a slot was still cached cannot refill that slot later.
+pub(super) const OFFER_LIFE: Duration = Duration::from_secs(60);
+
 /// The certificate authority slots: never cached, whatever a table says.
 pub(super) const fn is_authority_slot(slot: u8) -> bool {
     slot == 0x82 || slot == 0x83
@@ -193,6 +199,10 @@ impl PinCachePolicy {
         lines.push(
             "holder-minted card (its own PIN, nobody types it): until the card leaves".into(),
         );
+        lines.push(format!(
+            "ssh-add -X offer: one request on a slot that may be cached, within {}",
+            human(OFFER_LIFE)
+        ));
         lines.push("all other slots: never".into());
         lines
     }
@@ -251,6 +261,7 @@ mod tests {
                 "9C: idle 1 min",
                 "9D: idle 10 min, cap 1 h",
                 "holder-minted card (its own PIN, nobody types it): until the card leaves",
+                "ssh-add -X offer: one request on a slot that may be cached, within 1 min",
                 "all other slots: never",
             ]
         );
