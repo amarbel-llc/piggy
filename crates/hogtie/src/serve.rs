@@ -105,6 +105,21 @@ impl IssueBudget {
         *count += 1;
         true
     }
+
+    /// Forget accounts whose window has closed (one entry per uid ever seen
+    /// would otherwise only grow).
+    pub fn prune(&mut self, now: u64) {
+        self.0
+            .retain(|_, (start, _)| now < start.saturating_add(ISSUE_WINDOW) && now >= *start);
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// Answer one connection.
@@ -130,57 +145,76 @@ pub fn answer(
     stream.write_all(line.as_bytes())
 }
 
-/// Serve forever (until the listener fails).
+/// Serve forever. The loop waits at most a second for a connection, so
+/// the sweep (expired nonces, empty accounts, old scratch, refusal
+/// summaries, the issue budget) runs every 30 seconds whether or not anyone
+/// connects (F4); the first runs at once.
 pub fn serve(
     listener: &UnixListener,
     store: &NonceStore,
     paths: &crate::paths::Paths,
 ) -> io::Result<()> {
-    let scratch = paths.scratch();
+    use std::os::fd::AsRawFd as _;
     let mut budget = IssueBudget::default();
-    let mut last_sweep = 0;
-    for stream in listener.incoming() {
-        let mut stream = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                // Out of descriptors, say: back off rather than spin.
-                eprintln!("hogtie serve: accept: {e}");
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-        };
+    let mut last_sweep: Option<u64> = None;
+    loop {
         // Nonce life is on the boot clock (util::boot_now): exec reads it.
         let now = match crate::util::boot_now() {
             Ok(t) => t,
             Err(e) => {
-                let _ =
-                    stream.write_all(format!("refused cannot read the clock: {e}\n").as_bytes());
+                eprintln!("hogtie serve: cannot read the clock: {e}");
+                std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
         };
-        if now >= last_sweep + crate::nonce::TTL_SECONDS {
-            if let Err(e) = store.sweep(now) {
-                eprintln!("hogtie serve: sweep: {e}");
-            }
-            if let Err(e) = crate::verify::sweep_scratch(&scratch, crate::verify::SCRATCH_MAX_AGE) {
-                eprintln!("hogtie serve: scratch sweep: {e}");
-            }
-            let flushed = crate::audit::flush_summaries(
-                &paths.refusals(),
-                &paths.audit_log(),
-                now,
-                crate::util::now(),
-            );
-            if let Err(e) = flushed {
-                eprintln!("hogtie serve: refusal summaries: {e}");
-            }
-            last_sweep = now;
+        if last_sweep.is_none_or(|l| now >= l + crate::nonce::TTL_SECONDS) {
+            sweep(store, paths, &mut budget, now);
+            last_sweep = Some(now);
         }
-        if let Err(e) = answer(&mut stream, store, &mut budget, now) {
-            eprintln!("hogtie serve: answer: {e}");
+        let mut pfd = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll on one descriptor this function holds.
+        if unsafe { libc::poll(&mut pfd, 1, 1000) } <= 0 {
+            continue;
+        }
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                if let Err(e) = answer(&mut stream, store, &mut budget, now) {
+                    eprintln!("hogtie serve: answer: {e}");
+                }
+            }
+            Err(e) => {
+                // Out of descriptors, say: back off rather than spin.
+                eprintln!("hogtie serve: accept: {e}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     }
-    Ok(())
+}
+
+fn sweep(store: &NonceStore, paths: &crate::paths::Paths, budget: &mut IssueBudget, now: u64) {
+    if let Err(e) = store.sweep(now) {
+        eprintln!("hogtie serve: sweep: {e}");
+    }
+    if let Err(e) = crate::verify::sweep_scratch(&paths.scratch(), crate::verify::SCRATCH_MAX_AGE) {
+        eprintln!("hogtie serve: scratch sweep: {e}");
+    }
+    // The summaries go to the log exec writes, checked as exec checks it.
+    let flushed = crate::paths::Paths::ensure_private_dir(&paths.log).and_then(|()| {
+        crate::audit::flush_summaries(
+            &paths.refusals(),
+            &paths.audit_log(),
+            now,
+            crate::util::now(),
+        )
+    });
+    if let Err(e) = flushed {
+        eprintln!("hogtie serve: refusal summaries: {e}");
+    }
+    budget.prune(now);
 }
 
 /// Bind `path` (replacing a stale socket) with mode 0666: any local account
@@ -258,6 +292,17 @@ mod tests {
         assert!(!b.take(1000, 100), "past the budget");
         assert!(b.take(1001, 100), "per account");
         assert!(b.take(1000, 100 + ISSUE_WINDOW), "the next window");
+    }
+
+    #[test]
+    fn the_issue_budget_forgets_closed_windows() {
+        let mut b = IssueBudget::default();
+        b.take(1000, 100);
+        b.take(1001, 150);
+        b.prune(165);
+        assert_eq!(b.len(), 1, "1000's window closed at 160");
+        b.prune(215);
+        assert!(b.is_empty());
     }
 
     #[test]

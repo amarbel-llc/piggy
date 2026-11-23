@@ -112,11 +112,56 @@ pub fn shield_self() -> io::Result<()> {
         // SAFETY: getrlimit/setrlimit on this process.
         unsafe { set_limit(strict, r, cur, max)? };
     }
+    // Scheduling too, for hogtie itself and not only for the action: a
+    // caller must not be able to starve hogtie (SCHED_IDLE, one CPU, nice
+    // 19) while it holds an account's budget lock (F1).
+    // SAFETY: plain system calls on this process.
+    unsafe { reset_scheduling(strict)? };
     for sig in [libc::SIGXFSZ, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
         // SAFETY: setting a signal's disposition to ignored.
         if unsafe { libc::signal(sig, libc::SIG_IGN) } == libc::SIG_ERR {
             return Err(io::Error::last_os_error());
         }
+    }
+    Ok(())
+}
+
+/// nice 0, SCHED_OTHER, every CPU, oom_score_adj 0, the default I/O
+/// priority.
+///
+/// # Safety
+/// Plain system calls on this process.
+unsafe fn reset_scheduling(strict: bool) -> io::Result<()> {
+    unsafe {
+        required(strict, libc::setpriority(libc::PRIO_PROCESS, 0, 0) == 0)?;
+        let param = libc::sched_param { sched_priority: 0 };
+        required(
+            strict,
+            libc::sched_setscheduler(0, libc::SCHED_OTHER, &param) == 0,
+        )?;
+        let mut all: libc::cpu_set_t = std::mem::zeroed();
+        for cpu in 0..libc::CPU_SETSIZE as usize {
+            libc::CPU_SET(cpu, &mut all);
+        }
+        required(
+            strict,
+            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &all) == 0,
+        )?;
+        let fd = libc::open(
+            c"/proc/self/oom_score_adj".as_ptr(),
+            libc::O_WRONLY | libc::O_CLOEXEC,
+        );
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let wrote = libc::write(fd, b"0\n".as_ptr().cast(), 2) == 2;
+        let err = io::Error::last_os_error();
+        libc::close(fd);
+        if !wrote && (strict || err.raw_os_error() != Some(libc::EACCES)) {
+            return Err(err);
+        }
+        // IOPRIO_WHO_PROCESS (1), this process (0), class none: the default.
+        required(strict, libc::syscall(libc::SYS_ioprio_set, 1, 0, 0) == 0)?;
     }
     Ok(())
 }
@@ -169,37 +214,9 @@ pub fn prepare(cmd: &mut Command) {
             if libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut()) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            // The limits are already the table's: shield_self set them for
-            // hogtie's own process, and exec keeps them.
-            required(strict, libc::setpriority(libc::PRIO_PROCESS, 0, 0) == 0)?;
-            let param = libc::sched_param { sched_priority: 0 };
-            required(
-                strict,
-                libc::sched_setscheduler(0, libc::SCHED_OTHER, &param) == 0,
-            )?;
-            let mut all: libc::cpu_set_t = std::mem::zeroed();
-            for cpu in 0..libc::CPU_SETSIZE as usize {
-                libc::CPU_SET(cpu, &mut all);
-            }
-            required(
-                strict,
-                libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &all) == 0,
-            )?;
-            let fd = libc::open(
-                c"/proc/self/oom_score_adj".as_ptr(),
-                libc::O_WRONLY | libc::O_CLOEXEC,
-            );
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let wrote = libc::write(fd, b"0\n".as_ptr().cast(), 2) == 2;
-            let err = io::Error::last_os_error();
-            libc::close(fd);
-            if !wrote && (strict || err.raw_os_error() != Some(libc::EACCES)) {
-                return Err(err);
-            }
-            // IOPRIO_WHO_PROCESS (1), this process (0), class none: the default.
-            required(strict, libc::syscall(libc::SYS_ioprio_set, 1, 0, 0) == 0)?;
+            // The limits and the scheduling are already reset: shield_self
+            // did it for hogtie's own process, and exec keeps them.
+            let _ = strict;
             // Last: every descriptor above 2. No fallback (review N4): a
             // kernel without close_range refuses.
             if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) != 0 {

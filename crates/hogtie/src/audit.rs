@@ -65,13 +65,30 @@ impl Admit {
 /// delay its own account, and not for long.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// One account's budget file: `<window start> <count> <quiet>`, locked
-/// while it is open.
+/// One account's budget file, one fixed-width record (see
+/// [`budget_record`]), locked while it is open. A file that exists but does
+/// not hold exactly one record (cut by a kill mid-write, say) is `corrupt`:
+/// it counts as over budget for one window, never as a fresh one (F2).
 struct Budget {
     file: std::fs::File,
     start: u64,
     count: u64,
     quiet: u64,
+    corrupt: bool,
+}
+
+/// The budget file's record: `<window start> <count> <quiet>`, each 20
+/// digits, so a rewrite in place is always the same length.
+pub fn budget_record(start: u64, count: u64, quiet: u64) -> String {
+    format!("{start:020} {count:020} {quiet:020}\n")
+}
+
+fn parse_record(text: &str) -> Option<(u64, u64, u64)> {
+    let line = text.strip_suffix('\n')?;
+    let mut f = line.split(' ');
+    let field = |s: Option<&str>| s.filter(|s| s.len() == 20)?.parse::<u64>().ok();
+    let r = (field(f.next())?, field(f.next())?, field(f.next())?);
+    f.next().is_none().then_some(r)
 }
 
 impl Budget {
@@ -79,13 +96,20 @@ impl Budget {
         use std::io::Read as _;
         use std::os::fd::AsRawFd as _;
         use std::os::unix::fs::OpenOptionsExt as _;
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)?;
+        let open = |create_new: bool| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(create_new)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path)
+        };
+        let (mut file, fresh) = match open(true) {
+            Ok(f) => (f, true),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => (open(false)?, false),
+            Err(e) => return Err(e),
+        };
         let deadline = std::time::Instant::now() + LOCK_WAIT;
         // SAFETY: flock on a descriptor this function owns; released on close.
         while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -97,28 +121,50 @@ impl Budget {
         }
         let mut text = String::new();
         file.read_to_string(&mut text)?;
-        let mut fields = text
-            .split_whitespace()
-            .map(|s| s.parse::<u64>().unwrap_or(0));
-        Ok(Self {
+        let (start, count, quiet, corrupt) = match parse_record(&text) {
+            Some((s, c, q)) => (s, c, q, false),
+            // Created just now (or by a racing exec that has not written
+            // yet): a fresh account.
+            None if fresh => (0, 0, 0, false),
+            None => (0, 0, 0, true),
+        };
+        let mut b = Self {
             file,
-            start: fields.next().unwrap_or(0),
-            count: fields.next().unwrap_or(0),
-            quiet: fields.next().unwrap_or(0),
-        })
+            start,
+            count,
+            quiet,
+            corrupt,
+        };
+        if fresh {
+            // Written at once, so only a write cut short can leave it empty.
+            b.save()?;
+        }
+        Ok(b)
     }
 
     fn window_closed(&self, now: u64) -> bool {
         now >= self.start.saturating_add(REFUSAL_WINDOW) || now < self.start
     }
 
+    /// Rewrite the record in place: same length every time, so no moment
+    /// leaves the file empty (F2).
     fn save(&mut self) -> io::Result<()> {
-        use std::io::Seek as _;
-        self.file.set_len(0)?;
-        self.file.rewind()?;
-        let line = format!("{} {} {}\n", self.start, self.count, self.quiet);
-        self.file.write_all(line.as_bytes())
+        use std::os::unix::fs::FileExt as _;
+        let line = budget_record(self.start, self.count, self.quiet);
+        self.file.write_all_at(line.as_bytes(), 0)?;
+        self.file.set_len(line.len() as u64)
     }
+}
+
+/// The `n` unlogged refusals a `LogWithSummary(n)` line reported are now
+/// in the log: stop owing them (F3). Called only after that line is written.
+pub fn summary_written(dir: &Path, uid: Option<u32>, n: u64) -> io::Result<()> {
+    let mut b = Budget::open(&budget_path(dir, uid))?;
+    if b.corrupt {
+        return Ok(());
+    }
+    b.quiet = b.quiet.saturating_sub(n);
+    b.save()
 }
 
 fn budget_path(dir: &Path, uid: Option<u32>) -> std::path::PathBuf {
@@ -130,13 +176,18 @@ fn budget_path(dir: &Path, uid: Option<u32>) -> std::path::PathBuf {
 /// file under `dir`, locked while it is read and written.
 pub fn admit_refusal(dir: &Path, uid: Option<u32>, now: u64) -> io::Result<Admit> {
     let mut b = Budget::open(&budget_path(dir, uid))?;
+    if b.corrupt {
+        // over_budget runs first and repairs it; if it did not, log.
+        return Ok(Admit::Log);
+    }
     let (mut start, mut count, mut quiet) = (b.start, b.count, b.quiet);
     let mut summary = None;
     if b.window_closed(now) {
         if quiet > 0 {
             summary = Some(quiet);
         }
-        (start, count, quiet) = (now, 0, 0);
+        // `quiet` stays owed until the line reporting it is written (F3).
+        (start, count) = (now, 0);
     }
     count += 1;
     let admit = match (summary, count) {
@@ -158,6 +209,12 @@ pub fn admit_refusal(dir: &Path, uid: Option<u32>, now: u64) -> io::Result<Admit
 /// answered with one fixed refusal, so no answer can be told from another.
 pub fn over_budget(dir: &Path, uid: Option<u32>, now: u64) -> io::Result<bool> {
     let mut b = Budget::open(&budget_path(dir, uid))?;
+    if b.corrupt {
+        // Over budget for one window, from now (F2).
+        (b.start, b.count, b.quiet, b.corrupt) = (now, REFUSAL_BUDGET + 1, 1, false);
+        b.save()?;
+        return Ok(true);
+    }
     if b.window_closed(now) || b.count <= REFUSAL_BUDGET {
         return Ok(false);
     }
@@ -176,7 +233,7 @@ pub fn flush_summaries(dir: &Path, log: &Path, now: u64, wall: u64) -> io::Resul
         let Ok(mut b) = Budget::open(&e.path()) else {
             continue;
         };
-        if b.quiet == 0 || !b.window_closed(now) {
+        if b.corrupt || b.quiet == 0 || !b.window_closed(now) {
             continue;
         }
         let caller_uid = e.file_name().to_str().and_then(|s| s.parse().ok());
@@ -399,7 +456,11 @@ pub fn append(path: &Path, record: &Record) -> io::Result<()> {
         .append(true)
         .create(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
+    // As root, shield_self raised the file size limit to infinity and this
+    // never refuses; it matters where the limit could not be raised (a
+    // non-root caller of hogtie, as in the test harness).
     let mut lim = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -416,13 +477,33 @@ pub fn append(path: &Path, record: &Record) -> io::Result<()> {
     }
     let n = f.write(line.as_bytes())?;
     if n != line.len() {
-        let _ = f.write(b"\n");
-        return Err(io::Error::other(format!(
-            "short write to the audit log ({n} of {} bytes)",
-            line.len()
-        )));
+        let ended = matches!(f.write(b"\n"), Ok(1));
+        let what = format!("short write to the audit log ({n} of {} bytes)", line.len());
+        if ended {
+            return Err(io::Error::other(what));
+        }
+        return Err(io::Error::other(PartialLine(what)));
     }
     f.sync_all()
+}
+
+/// A short write whose ending newline could not be written either (only a
+/// full disk or an I/O error does that): the log now ends in a partial
+/// line. `hogtie exec` exits 4 for it.
+#[derive(Debug)]
+pub struct PartialLine(pub String);
+
+impl std::fmt::Display for PartialLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}; the log ends in a partial line", self.0)
+    }
+}
+
+impl std::error::Error for PartialLine {}
+
+/// Whether `e` is a [`PartialLine`].
+pub fn is_partial_line(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|i| i.is::<PartialLine>())
 }
 
 #[cfg(test)]
@@ -490,6 +571,36 @@ mod tests {
             admit_refusal(d.path(), Some(1000), 100 + REFUSAL_WINDOW).unwrap(),
             Admit::LogWithSummary(4),
             "the next window says how many were not logged"
+        );
+    }
+
+    #[test]
+    fn an_unwritten_summary_is_reported_again() {
+        // F3: the count of unlogged refusals is cleared only once the line
+        // that carries it has been written.
+        let d = crate::util::PrivateDir::new(&std::env::temp_dir(), "hogtie-budget").unwrap();
+        for _ in 0..=REFUSAL_BUDGET {
+            admit_refusal(d.path(), Some(1000), 100).unwrap();
+        }
+        for _ in 0..3 {
+            assert!(over_budget(d.path(), Some(1000), 100).unwrap());
+        }
+        let later = 100 + REFUSAL_WINDOW;
+        assert_eq!(
+            admit_refusal(d.path(), Some(1000), later).unwrap(),
+            Admit::LogWithSummary(3)
+        );
+        // The line was not written (say hogtie was killed): still owed.
+        let again = later + REFUSAL_WINDOW;
+        assert_eq!(
+            admit_refusal(d.path(), Some(1000), again).unwrap(),
+            Admit::LogWithSummary(3)
+        );
+        summary_written(d.path(), Some(1000), 3).unwrap();
+        let after = again + REFUSAL_WINDOW;
+        assert_eq!(
+            admit_refusal(d.path(), Some(1000), after).unwrap(),
+            Admit::Log
         );
     }
 

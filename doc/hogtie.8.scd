@@ -98,14 +98,19 @@ attempt, whether that attempt runs or is refused.
 	the cgroup, namespaces, the seccomp filter and the no_new_privs bit.
 
 	Before it opens any file, hogtie sets its own resource limits to the
-	same fixed table, so a caller cannot make it run out of descriptors,
-	memory or file size and so cause an error; ignores SIGXFSZ (a write
+	same fixed table and its own scheduling (nice, scheduler, CPUs,
+	oom_score_adj, I/O priority) to the defaults above, so a caller cannot
+	make it run out of descriptors, memory or file size, or starve it while
+	it holds a lock, and so cause an error; the action inherits that state.
+	It ignores SIGXFSZ (a write
 	past the file size limit fails instead); and ignores SIGTSTP, SIGTTIN
 	and SIGTTOU, so a caller cannot stop it through sudo's signal
 	relaying. A line the file size limit would cut is refused before it is
-	written. From the *started* line to execve every signal that can be
-	blocked is; the action starts with none blocked. A clock that cannot be
-	read refuses.
+	written. From before the request is evaluated until its outcome is
+	logged, and for a run until execve, every signal that can be blocked
+	is, so a caller cannot kill hogtie through sudo after seeing how far it
+	got; the action starts with none blocked. A clock that cannot be read
+	refuses.
 
 	The response travels on the command line, where other processes of
 	the same account can read it while hogtie runs. That is accepted:
@@ -280,8 +285,12 @@ fixed answer (*over the refusal budget*, exit 1) and its request is not
 evaluated at all, so no two requests can be told apart; the count is
 written as a *summary* line by the first of the next minute's lines or by
 *serve*'s sweep, whichever comes first. The counts are kept in
-*/run/hogtie/refusals*, one file per account, locked for at most a second;
-a count that cannot be read logs in full. Runs are always logged.
+*/run/hogtie/refusals*, one fixed-width record per account, rewritten in
+place, opened without following links and locked for at most a second. A
+count that cannot be read (its lock held past that second, its file cut
+short or garbled) is over budget: the fixed answer, nothing evaluated.
+A count of unlogged refusals is cleared only once the line reporting it is
+written. Runs are always logged.
 
 # DEPLOYMENT
 
@@ -291,8 +300,11 @@ the socket path, and the rule must not let a caller do that. All
 directories hogtie uses are made with an exact mode, or, when they exist,
 must be real directories owned by root with no permission beyond it.
 
-What sudo does with the caller's state, from sudo(8) and sudoers(5)
-(1.9.17; read, not tested under a real sudo):
+READ, NOT RUN: what follows is from reading sudo(8) and sudoers(5)
+(1.9.17); none of it has been tested under a real sudo. It stands until
+the NixOS module's VM test exercises it.
+
+What sudo does with the caller's state:
 
 - Resource limits: sudo sets the target user's limits through the
   system's mechanism (on Linux, *pam_limits*); where there is none, the
@@ -313,13 +325,19 @@ The rule this calls for, for the next sprint's module (_agents_ and the
 path are placeholders):
 
 ```
-Defaults!/run/current-system/sw/bin/hogtie env_reset, !use_pty
+Defaults!/run/current-system/sw/bin/hogtie env_reset, use_pty
 %agents ALL=(root) NOPASSWD: /run/current-system/sw/bin/hogtie exec *
 ```
 
-*env_reset* is sudo's default and is named for the record; hogtie clears
-the environment itself. *!use_pty* keeps SIGINT and SIGQUIT from being
-relayed for keyboard interrupts; nothing in hogtie depends on it.
+*exec \** admits nothing else: *exec* takes only the response, the action
+and its arguments, no flag, and its paths are compiled in. *env_reset* is
+sudo's default and is named for the record; hogtie clears the environment
+itself. *use_pty* (sudo's default too) gives the root action its own
+session and terminal: without it the command sits in the caller's
+foreground process group, so the kernel delivers keyboard SIGINT and
+SIGQUIT to it directly and it shares the caller's terminal. Not known yet:
+whether an action whose output the caller pipes behaves the same through
+sudo's pty (the VM test should pipe one).
 
 # EXIT STATUS
 
@@ -327,7 +345,10 @@ relayed for keyboard interrupts; nothing in hogtie depends on it.
 the action's); *1* refused; *2* usage; *3* hogtie's own failure (not
 root, configuration, a program that is not root's, a directory that is
 not right, the nonce store, the scratch directory, running ssh-keygen or
-its timeout, the audit log, the socket, an exec that returned).
+its timeout, the audit log, the socket, an exec that returned); *4* the
+audit log now ends in a partial line (a write cut short whose ending
+newline could not be written either: only a full disk or an I/O error
+does that; the next line will start mid-line until someone repairs it).
 
 # FILES
 

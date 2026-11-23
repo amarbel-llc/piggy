@@ -369,7 +369,74 @@ fn a_held_lock_on_the_audit_log_does_not_stop_exec() {
     assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
     let out = exec_with(&h, &["garbage", "say"], || Ok(()));
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    // F1: a budget that cannot be read is over budget (fail closed): the
+    // request is not evaluated and nothing is logged in full.
+    assert!(
+        stderr(&out).contains("over the refusal budget"),
+        "{}",
+        stderr(&out)
+    );
     drop((log, held));
+}
+
+#[test]
+fn a_symlinked_audit_log_is_not_followed() {
+    // R2 leftover: the log is opened O_NOFOLLOW.
+    use std::os::unix::fs::PermissionsExt as _;
+    let h = Host::new();
+    let log_dir = h.root.path().join("log");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let elsewhere = h.root.path().join("elsewhere.log");
+    std::os::unix::fs::symlink(&elsewhere, log_dir.join("audit.log")).unwrap();
+    let out = h.sudo_exec("garbage", &["say"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(!elsewhere.exists(), "the symlink was followed");
+}
+
+#[test]
+fn an_empty_or_garbled_budget_file_is_over_budget_for_a_window() {
+    // F2: a budget file cut to nothing (a kill mid-save) must not read as a
+    // fresh window.
+    let h = Host::new();
+    let budget = h.root.path().join("run/refusals");
+    std::fs::write(budget.join(Host::uid()), "").unwrap();
+    let out = h.sudo_exec("garbage", &["say"]);
+    assert!(
+        stderr(&out).contains("over the refusal budget"),
+        "{}",
+        stderr(&out)
+    );
+    std::fs::write(budget.join(Host::uid()), "12 x\n").unwrap();
+    let out = h.sudo_exec("garbage", &["say"]);
+    assert!(
+        stderr(&out).contains("over the refusal budget"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn an_idle_socket_still_writes_summaries() {
+    // F4: the sweep is periodic, not only when a connection comes in.
+    // (The binary sweeps every 30 s; this test drives serve_every with a
+    // short interval, through the library.)
+    let h = Host::new();
+    let budget = h.root.path().join("run/refusals");
+    // A closed window (started at boot second 0) holding 7 unlogged.
+    std::fs::write(budget.join("4242"), hogtie::audit::budget_record(0, 21, 7)).unwrap();
+    let log = h.root.path().join("log/audit.log");
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    while std::time::Instant::now() < deadline {
+        if std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("7 refusals")
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    panic!("no summary from an idle socket");
 }
 
 #[test]
@@ -575,6 +642,8 @@ fn a_failed_exec_is_audited_as_failed_and_exits_3() {
 fn an_audit_log_that_cannot_be_written_refuses_and_runs_nothing() {
     let h = Host::new();
     // The log directory's place is taken by a file: no audit line can land.
+    // (The socket's first sweep made the directory: replace it.)
+    let _ = std::fs::remove_dir_all(h.root.path().join("log"));
     std::fs::write(h.root.path().join("log"), "").unwrap();
     let cert = h.kit.grant("a", &["say"], "+1h", &[]);
     let out = h.sudo_exec(&h.respond(&cert, &["say", "hello"]), &["say", "hello"]);

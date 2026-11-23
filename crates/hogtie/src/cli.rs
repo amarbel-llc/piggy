@@ -153,11 +153,20 @@ fn exec(rest: &[String]) -> ExitCode {
     // not evaluated at all: no reason to tell one request from another
     // (review R3). Counted, not logged; the socket's sweep writes the count.
     let budget = paths.refusals();
-    let over = Paths::ensure_private_dir(&budget).is_ok()
-        && audit::over_budget(&budget, caller, clock.boot).unwrap_or(false);
+    // A budget that cannot be read (its lock held past the wait, its file
+    // unreadable) is over budget: fail closed (F1).
+    let over = Paths::ensure_private_dir(&budget)
+        .and_then(|()| audit::over_budget(&budget, caller, clock.boot))
+        .unwrap_or(true);
     if over {
         return fail(1, "refused: over the refusal budget; try again in a minute");
     }
+    // From here until the outcome is recorded, and for a run until execve,
+    // nothing may interrupt hogtie: a caller killing it through sudo after
+    // seeing how far it got would leave an evaluation unaudited and
+    // uncounted (F5, R5). prepare's hook empties the mask just before
+    // execve. SIGKILL still can: it is not relayed by sudo.
+    crate::child::block_signals();
     let mut decision = match caller {
         Some(caller_uid) => decide(&paths, caller_uid, response, action, args, clock),
         None => Decision {
@@ -177,22 +186,21 @@ fn exec(rest: &[String]) -> ExitCode {
     };
     // Every outcome a caller can cause but a run, refusals and hogtie's own
     // errors alike (review R1), counts against the account's budget; past it
-    // they are counted, not logged. A budget that cannot be read logs in full.
+    // they are counted, not logged. A budget that cannot be read here (after
+    // over_budget read it) logs in full.
+    let mut owed = None;
     let logged = decision.record.outcome == "started"
         || match audit::admit_refusal(&budget, caller, clock.boot) {
             Ok(audit::Admit::Quiet) => false,
             Ok(admit) => {
+                if let audit::Admit::LogWithSummary(n) = admit {
+                    owed = Some(n);
+                }
                 decision.record.note = admit.note();
                 true
             }
             Err(_) => true,
         };
-    // From the `started` line to execve nothing may interrupt: every signal
-    // that can be is blocked; prepare's hook empties the mask just before
-    // execve (review R5). SIGKILL still can: then no exec-failed line.
-    if decision.run.is_ok() {
-        crate::child::block_signals();
-    }
     let written = if logged {
         Paths::ensure_private_dir(&paths.log)
             .and_then(|()| audit::append(&paths.audit_log(), &decision.record))
@@ -200,7 +208,14 @@ fn exec(rest: &[String]) -> ExitCode {
         Ok(())
     };
     if let Err(e) = written {
+        if audit::is_partial_line(&e) {
+            return fail(4, format!("refused: the audit log is broken: {e}"));
+        }
         return fail(3, format!("refused: cannot write the audit log: {e}"));
+    }
+    // Only now is the reported count in the log (F3).
+    if let Some(n) = owed {
+        let _ = audit::summary_written(&budget, caller, n);
     }
     let run = match decision.run {
         Ok(run) => run,
