@@ -347,6 +347,8 @@ login challenge, a TBSCertificate, anything else), a host certificate, a
 certificate with no principal, with no end, or valid for more than 24 hours
 (the built-in limit, plus five minutes for *ssh-keygen*'s one-minute
 back-dating). An OpenSSH certificate sent to any other slot is refused too.
+The X.509 CA slot (82) signs nothing through the agent: no TBSCertificate, CRL
+or other bytes, a certificate being signed only by *piggy ca*.
 
 The PIN dialog is of kind _ssh-certificate_ (*PIGGY_ASKPASS_KIND*): its own
 banner, title ("piggy SSH CA: CERTIFICATE"), band and button ("Issue SSH

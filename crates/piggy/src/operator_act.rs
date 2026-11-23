@@ -431,9 +431,10 @@ pub enum SlotData {
 /// each slot may be asked to sign depends on its kind
 /// ([`piggy_piv::slot::ca_kind`]).
 ///
-/// - The X.509 CA slot (82) refuses a DER TBSCertificate (a certificate is
-///   signed only through `piggy ca`, which says what it is certifying) and
-///   an OpenSSH certificate.
+/// - The X.509 CA slot (82) refuses everything (piggy#405): a certificate is
+///   signed only through `piggy ca`, which says what it is certifying, so no
+///   TBSCertificate, OpenSSH certificate, CRL or other bytes pass here. A CRL
+///   would be a named addition behind a dialog of its own.
 /// - The SSH CA slot (83) signs ONLY a parsed, unsigned OpenSSH user
 ///   certificate: no TBSCertificate, no sshsig, no login challenge, no
 ///   other bytes.
@@ -461,7 +462,12 @@ pub fn gate_data_for_slot(data: &[u8], slot_id: u8) -> Result<SlotData, String> 
                 ));
             }
             refuse_ssh_certificate_shape(data, slot_id)?;
-            Ok(SlotData::Ordinary)
+            // Piggy#405: not a CRL, not a blob, not a login challenge. A CRL
+            // is a later, named addition behind a dialog of its own.
+            Err(format!(
+                "refusing to sign with the X.509 certificate authority in slot {slot_id:02x} here: \
+                 it signs only a certificate made by `piggy ca`, which says what it is certifying"
+            ))
         }
         None => {
             refuse_ssh_certificate_shape(data, slot_id)?;
@@ -860,17 +866,35 @@ mod tests {
     }
 
     #[test]
-    fn other_bytes_pass_on_the_x509_ca_slot_and_are_refused_on_the_ssh_one() {
-        for data in [&b""[..], b"hello", b"SSHSIG", &tbs_shaped()[1..]] {
-            assert_eq!(
-                gate_data_for_slot(data, 0x82),
-                Ok(SlotData::Ordinary),
-                "{data:?}"
-            );
-            // Slot 83 signs nothing but an OpenSSH certificate: no sshsig, no
-            // login challenge, no other bytes.
+    fn no_other_bytes_are_signed_on_either_ca_slot() {
+        // Piggy#405: the X.509 root signs nothing here, whatever the bytes
+        // (a CRL, a blob, a sign challenge): a certificate is signed only
+        // through `piggy ca`. Slot 83 signs nothing but an OpenSSH
+        // certificate: no sshsig, no login challenge, no other bytes.
+        let mut shapes: Vec<Vec<u8>> = vec![b"".to_vec(), b"hello".to_vec(), b"SSHSIG".to_vec()];
+        shapes.push(tbs_shaped()[1..].to_vec());
+        shapes.push(vec![0x30, 0x00]);
+        for data in &shapes {
+            let refusal = gate_data_for_slot(data, 0x82).unwrap_err();
+            assert!(refusal.contains("slot 82"), "{refusal}");
+            assert!(refusal.contains("piggy ca"), "{refusal}");
             assert!(gate_data_for_slot(data, 0x83).is_err(), "{data:?}");
         }
+        // An OpenSSH certificate is slot 83's, so slot 82 refuses it too.
+        assert!(gate_data_for_slot(&ssh_cert_unsigned(3_600), 0x82).is_err());
+    }
+
+    #[test]
+    fn a_crl_shaped_blob_is_refused_on_the_x509_ca_slot_until_a_crl_path_exists() {
+        // A TBSCertList: SEQUENCE { [version INTEGER], signature AlgId,
+        // issuer Name, thisUpdate Time ... }. It must not pass as ordinary.
+        let crl = [
+            0x30, 0x1B, 0x02, 0x01, 0x01, 0x30, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D,
+            0x04, 0x03, 0x02, 0x30, 0x00, 0x17, 0x0D, b'2', b'6', b'1', b'1', b'2', b'3', b'0',
+            b'0', b'0', b'0', b'0', b'0', b'Z',
+        ];
+        assert!(gate_data_for_slot(&crl, 0x82).is_err());
+        assert!(refuse_data_for_slot(&crl, 0x82).is_err());
     }
 
     #[test]
@@ -926,6 +950,8 @@ mod tests {
         assert!(refuse_data_for_slot(b"hello", 0x9A).is_ok());
         assert!(refuse_data_for_slot(&ssh_cert_unsigned(3_600), 0x9A).is_err());
         assert!(refuse_data_for_slot(&tbs_shaped(), 0x82).is_err());
+        assert!(refuse_data_for_slot(b"hello", 0x82).is_err());
+        assert!(refuse_data_for_slot(b"", 0x82).is_err());
     }
 
     /// A self-signed certificate with subject `CN=<cn>`: the shape of a

@@ -581,8 +581,10 @@ Both are keys generated on the card with PIN always and touch always, on a
 real card and in fibby alike (fibby holds a key in any retired slot, piggy#399).
 
 - **The agent refuses the wrong kind, per slot, before the card is touched or
-  a prompt shown.** Slot 82 refuses a TBSCertificate through the agent and
-  `piggy tool sign` (as before) and an OpenSSH certificate; slot 83 signs
+  a prompt shown.** Slot 82 refuses everything through the agent and
+  `piggy tool sign` (piggy#405: a TBSCertificate, an OpenSSH certificate, a
+  CRL and any other bytes; a CRL is a later, named addition behind a dialog
+  of its own); slot 83 signs
   only a parsed, unsigned OpenSSH user certificate and refuses a
   TBSCertificate, an sshsig, a login challenge and any other bytes; every
   other slot refuses an OpenSSH certificate. One function

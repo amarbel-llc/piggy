@@ -172,9 +172,11 @@ operation goes through.
 
 What the kinds refuse:
 
-- Slot 82 (X.509) signs no DER TBSCertificate through the agent or *piggy tool
-  sign* (a certificate is signed only through *piggy ca*, which says what it
-  is certifying), and no OpenSSH certificate.
+- Slot 82 (X.509) signs nothing through the agent or *piggy tool sign*: no DER
+  TBSCertificate, no OpenSSH certificate, no CRL, no other bytes. A certificate
+  is signed only through *piggy ca*, which says what it is certifying. A CRL
+  is a later, named addition behind a dialog of its own, not allowed until
+  then.
 - Slot 83 (SSH certificate) signs only an unsigned OpenSSH *user*
   certificate, as *ssh-keygen -U -s* sends it to an agent: no TBSCertificate,
   no sshsig in any namespace, no SSH login challenge, no other bytes. A host
