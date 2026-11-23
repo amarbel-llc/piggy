@@ -108,7 +108,7 @@ function slot_83_signs_a_certificate_behind_a_dialog_that_says_what_it_certifies
   grep -q '^\[piggy-test-askpass\] operator act kind: ssh-certificate' "$AGENT_LOG" || {
     echo "the prompt was not of kind ssh-certificate" >&2; _show; return 1; }
   for want in "OpenSSH user certificate" "Key id: grant-1" "Principal: deploy-site" "Principal: restart-service" \
-    "Certified key: SHA256:" "Signed by CA: SHA256:" 'Critical option: force-command:' '  "/usr/bin/true"' "slot 83"; do
+    "Certified key: SHA256:" "Signed by CA: SHA256:" 'Critical option: force-command:' '"/usr/bin/true"' "slot 83"; do
     grep -qF -- "$want" "$AGENT_LOG" || { echo "the dialog context lacks: $want" >&2; _show; return 1; }
   done
 

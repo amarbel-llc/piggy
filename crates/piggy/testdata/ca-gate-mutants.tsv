@@ -22,7 +22,7 @@ cert-too-tall-wrap	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	1 + l.chars().coun
 cert-expired-boundary	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if now >= self.valid_before {	if now > self.valid_before {
 cert-starts-later	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if ahead > BACKDATE_ALLOWANCE_SECS {	if ahead > 10 * BACKDATE_ALLOWANCE_SECS {
 cert-too-long	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if secs > max_secs.saturating_add(BACKDATE_ALLOWANCE_SECS) {	if secs > 10 * max_secs {
-cert-value-own-line	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	"Critical option: {}:\n  \"{v}\"\n"	"Critical option: {}: \"{v}\"\n"
+cert-value-own-line	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	"Critical option: {}:\n\"{v}\"\n"	"Critical option: {}: \"{v}\"\n"
 cert-unknown-option	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	return Err(SshCertRefusal::UnknownOption { name });	continue;
 cert-duplicate-option	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if out.iter().any(|d| d.name == name) {	if false {
 cert-nonce-length	piggy-piv	crates/piggy-piv/src/ssh_cert.rs	if nonce.len() != 32 {	if false {

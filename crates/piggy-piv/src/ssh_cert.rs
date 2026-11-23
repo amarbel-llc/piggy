@@ -209,7 +209,7 @@ const MAX_NAME: usize = 64;
 /// The most principals a certificate this CA signs may name.
 const MAX_PRINCIPALS: usize = 8;
 /// The longest option value, in bytes: it is shown on a line of its own, in
-/// quotes and indented, which fits the dialog's 100-column wrap.
+/// quotes, which fits the dialog's 100-column wrap.
 const MAX_OPTION_VALUE: usize = 80;
 /// The column the dialog wraps its text at (`piggy-askpass-gtk`'s
 /// `TEXT_WIDTH_CHARS`).
@@ -566,10 +566,12 @@ impl SshCertTbs {
         }
         for option in &self.critical_options {
             match &option.value {
-                // The value on a line of its own, indented and in quotes: the
+                // The value on a line of its own, in quotes (not indented: GTK
+                // breaks a long unbreakable run after leading spaces and leaves
+                // a blank row, seen in the rendered dialog): the
                 // parser admits no quote, backslash or padding in it, so no
                 // line of the dialog can start with text the certificate chose.
-                Some(v) => s.push_str(&format!("Critical option: {}:\n  \"{v}\"\n", option.name)),
+                Some(v) => s.push_str(&format!("Critical option: {}:\n\"{v}\"\n", option.name)),
                 None => s.push_str(&format!("Critical option: {}\n", option.name)),
             }
         }
@@ -1320,7 +1322,7 @@ mod tests {
     #[test]
     fn the_dialog_cannot_be_made_to_read_as_other_lines_or_grow_without_bound() {
         // A value that spells another option: it is on a line of its own, in
-        // quotes, indented, so no line of the dialog starts with it.
+        // quotes, so no line of the dialog starts with it.
         let mut cert = Cert::user();
         cert.critical = packed(&[("force-command", Some("/bin/true, source-address=10.0.0.1"))]);
         let text = parse_unsigned_certificate(&cert.unsigned())
@@ -1333,7 +1335,7 @@ mod tests {
         assert!(option_lines.is_empty(), "{text}");
         assert!(
             text.contains(
-                "Critical option: force-command:\n  \"/bin/true, source-address=10.0.0.1\"\n"
+                "Critical option: force-command:\n\"/bin/true, source-address=10.0.0.1\"\n"
             ),
             "{text}"
         );
@@ -1469,7 +1471,7 @@ mod tests {
             "Serial: 5",
             "Valid: 2026-11-18T11:06:40Z to 2026-11-18T13:06:40Z",
             "Lifetime: 2h",
-            "Critical option: force-command:\n  \"/usr/bin/true\"",
+            "Critical option: force-command:\n\"/usr/bin/true\"",
             "Extensions: permit-pty",
         ] {
             assert!(text.contains(want), "{want:?} not in:\n{text}");
