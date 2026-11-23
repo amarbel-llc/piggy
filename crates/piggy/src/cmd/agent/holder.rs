@@ -670,8 +670,12 @@ mod tests {
         holder.record(b.clone()).await;
         let keys = Arc::new(Mutex::new(vec![cached(&a), cached(&b)]));
         let pins = Arc::new(Mutex::new(PinCache::new()));
-        pins.lock().await.cache_verified(&a.guid, MINTED_SLOT, "aaaaaaaa");
-        pins.lock().await.cache_verified(&b.guid, MINTED_SLOT, "bbbbbbbb");
+        pins.lock()
+            .await
+            .cache_verified(&a.guid, MINTED_SLOT, "aaaaaaaa");
+        pins.lock()
+            .await
+            .cache_verified(&b.guid, MINTED_SLOT, "bbbbbbbb");
 
         assert!(sweep_bindings(&holder, &keys, &pins).await.is_empty());
 

@@ -559,13 +559,14 @@ never-cached slot, and it is not spent on them; a request on a slot that
 already holds a PIN of its own leaves it alone). Whether or not the card
 accepts it, it is gone after that, and after the 60 seconds it is gone
 unused; if the card accepts it, it is cached for that one slot under that
-slot's rule like any typed PIN. It does not serve a second slot, and it
-does not refill a slot whose limits have passed (an offer made while a slot
-was still cached has run out long before 9D's cap; for 9C, whose idle limit
-is also 60 seconds, a PIN cached before the offer may run out while the
-offer is still alive, and the next 9C request then takes the offer you
-made that minute: that one is your own explicit act, and it is spent).
-*ssh-add -x* forgets everything, the offer included.
+slot's rule like any typed PIN. It does not serve a second slot. An offer
+serves the next request, on any slot that may be cached, that needs a PIN
+within its 60 seconds, including a request on a slot whose own limit passes
+in that minute (for example a 9D PIN reaching its idle limit 30 seconds
+after *ssh-add -X*): that is your own explicit act of the last minute, and it
+is spent once. A card that has refused a PIN since is not sent an offer
+that was already taken. *ssh-add -x* forgets everything, the offer
+included.
 
 The rule for each slot is a table COMPILED INTO the agent: no flag, option
 or environment of a running host changes it. Shipped values: 9A cached

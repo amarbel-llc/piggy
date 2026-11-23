@@ -2036,6 +2036,7 @@ test-pin-cache-table-checks:
     set -uo pipefail
     mkdir -p .tmp
     work="$(mktemp -d "$PWD/.tmp/pin-cache-checks.XXXXXX")"
+    trap 'rm -rf "$work"' EXIT
     export CARGO_TARGET_DIR="$PWD/target/pin-cache-checks"
     cp -r crates Cargo.toml Cargo.lock version.env "$work/"
     over="$work/crates/piggy/src/cmd/agent/pin_cache_override.rs"
@@ -2055,7 +2056,7 @@ test-pin-cache-table-checks:
       || { grep -q 'names a slot twice' <<<"$out" && ok "a slot named twice fails the build on the check" || no "a slot named twice fails on the check"; }
     attempt 'Some(&[(0x9A, 60)])' \
       && no "a table of the wrong shape is refused" \
-      || ok "a table of the wrong shape fails the build"
+      || { grep -q 'E0308' <<<"$out" && ok "a table of the wrong shape fails the build on a type error" || no "a table of the wrong shape fails on a type error"; }
     echo "1..$n"
     exit $bad
 

@@ -145,7 +145,8 @@ struct Entry {
 
 impl Entry {
     fn expired(&self, now: Stamp) -> bool {
-        self.idle.is_some_and(|idle| now.since(self.last_used) >= idle)
+        self.idle
+            .is_some_and(|idle| now.since(self.last_used) >= idle)
             || self.cap.is_some_and(|cap| now.since(self.cached_at) >= cap)
     }
 }
@@ -379,8 +380,19 @@ impl PinCache {
     }
 
     fn offer_at(&mut self, pin: &str, now: Stamp) {
-        self.offered = guard(pin).map(|guarded| (guarded, now));
+        // An offer that cannot be timed out is not kept (a failed clock read).
+        self.offered = guard(pin)
+            .filter(|_| now.is_known())
+            .map(|guarded| (guarded, now));
         self.offered_rejected_by.clear();
+    }
+
+    /// Whether `guid` refused a PIN since the last `ssh-add -X` (a stale cached
+    /// PIN, or an offer): a request that already took the offer must not send
+    /// it to such a card, since another request has just shown that a PIN the
+    /// agent holds for it is wrong.
+    pub fn refused_a_pin(&self, guid: &Guid) -> bool {
+        self.offered_rejected_by.contains(guid)
     }
 
     /// `ssh-add -x`: forget everything.
@@ -629,9 +641,10 @@ mod tests {
     fn the_holders_own_pin_is_kept_whatever_the_table_says() {
         let mut c = short_table();
         c.cache_verified_unlimited(&g(1), 0x9A, "1111");
-        assert!(c
-            .lookup_at(&g(1), 0x9A, Stamp::now() + secs(1_000_000))
-            .is_some());
+        assert!(
+            c.lookup_at(&g(1), 0x9A, Stamp::now() + secs(1_000_000))
+                .is_some()
+        );
     }
 
     /// H1: the `ssh-add -X` offer is handed out ONCE, to the first request
@@ -646,7 +659,10 @@ mod tests {
         );
         assert!(c.offered().is_none(), "taken on the first hand-out");
         // Whether or not the card accepted it, nothing else is served by it:
-        assert!(c.lookup(&g(1), D).is_none(), "another slot of the same card");
+        assert!(
+            c.lookup(&g(1), D).is_none(),
+            "another slot of the same card"
+        );
         assert!(c.lookup(&g(2), A).is_none(), "another card");
         assert!(c.lookup(&g(1), A).is_none(), "the same request again");
     }
@@ -669,7 +685,10 @@ mod tests {
         // Past 9D's cap AND the offer's life: nothing serves 9D, the person
         // is asked.
         assert!(c.lookup_at(&g(1), D, t0 + secs(61)).is_none());
-        assert!(!c.has_any_at(t0 + secs(61)), "an expired offer is not 'a PIN'");
+        assert!(
+            !c.has_any_at(t0 + secs(61)),
+            "an expired offer is not 'a PIN'"
+        );
         // An offer older than its life serves nothing, on any slot.
         c.offer_at("8888", t0);
         assert!(c.lookup_at(&g(2), A, t0 + secs(60)).is_none());
@@ -677,6 +696,35 @@ mod tests {
         // One inside its life does.
         c.offer_at("7777", t0);
         assert!(c.lookup_at(&g(2), A, t0 + secs(59)).is_some());
+    }
+
+    /// Round 3, 1: the predicate a request that already TOOK the offer asks
+    /// under the card lock: a card that has refused a PIN since is not sent it.
+    #[test]
+    fn a_card_that_refused_a_pin_is_not_sent_an_offer_already_taken() {
+        let mut c = short_table();
+        c.offer("9999");
+        assert!(!c.refused_a_pin(&g(1)));
+        // Request B took the offer; request A's stale cached PIN is refused.
+        assert!(c.lookup(&g(1), A).is_some());
+        c.forget_for(&g(1));
+        assert!(
+            c.refused_a_pin(&g(1)),
+            "B must not now send its offer to this card"
+        );
+        assert!(!c.refused_a_pin(&g(2)), "another card is unaffected");
+        // A new `ssh-add -X` is a fresh start.
+        c.offer("8888");
+        assert!(!c.refused_a_pin(&g(1)));
+    }
+
+    /// Round 3, 4: an offer made on a failed clock read is not kept at all.
+    #[test]
+    fn an_offer_made_on_a_failed_clock_read_is_not_kept() {
+        let mut c = short_table();
+        c.offer_at("9999", Stamp::failed());
+        assert!(c.offered().is_none());
+        assert!(c.lookup_at(&g(1), A, Stamp::now()).is_none());
     }
 
     /// Round 2, L3: what a request asks again under the card lock. A PIN another
@@ -687,8 +735,14 @@ mod tests {
         let mut c = short_table();
         c.cache_verified(&g(1), A, "1111");
         c.offer("9999");
-        assert_eq!(c.cached_now(&g(1), A).as_deref().map(String::as_str), Some("1111"));
-        assert!(c.cached_now(&g(1), D).is_none(), "another slot's PIN is not this one's");
+        assert_eq!(
+            c.cached_now(&g(1), A).as_deref().map(String::as_str),
+            Some("1111")
+        );
+        assert!(
+            c.cached_now(&g(1), D).is_none(),
+            "another slot's PIN is not this one's"
+        );
         c.forget_for(&g(1)); // the request ahead of us found it wrong
         assert!(c.cached_now(&g(1), A).is_none());
         assert!(c.offered().is_some(), "asking never takes the offer");
@@ -700,7 +754,10 @@ mod tests {
     fn a_failed_clock_read_caches_nothing_and_expires_what_is_limited() {
         let mut c = short_table();
         c.cache_verified_at(&g(1), A, "1111", Stamp::failed());
-        assert!(c.verified_for(&g(1), A).is_none(), "not cached on a failed read");
+        assert!(
+            c.verified_for(&g(1), A).is_none(),
+            "not cached on a failed read"
+        );
         let t0 = Stamp::now();
         c.cache_verified_at(&g(1), D, "2222", t0);
         assert!(
@@ -754,7 +811,10 @@ mod tests {
         c.offer("9999");
         assert!(c.lookup(&g(1), C).is_none());
         assert!(c.lookup(&g(1), 0x83).is_none());
-        assert!(c.offered().is_some(), "still there for a slot that may be cached");
+        assert!(
+            c.offered().is_some(),
+            "still there for a slot that may be cached"
+        );
         assert!(c.lookup(&g(1), A).is_some());
     }
 

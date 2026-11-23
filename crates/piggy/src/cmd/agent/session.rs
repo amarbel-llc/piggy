@@ -43,6 +43,16 @@ fn offered_retries_ok(remaining: Result<u8, PivError>) -> bool {
     matches!(remaining, Ok(n) if n >= MIN_RETRIES_FOR_OFFERED_PIN)
 }
 
+/// Whether a PIN may be sent to a card with `remaining` retries. A PIN the
+/// person just typed always may (each wrong try spends one, but they are
+/// there to retype). An offered PIN and a CACHED one are speculative (the
+/// card's PIN may have changed, or several requests are using it at once), so
+/// they are sent only with a safe margin; otherwise the person is asked.
+fn pin_may_be_tried(offered: bool, fresh: bool, remaining: Result<u8, PivError>) -> bool {
+    let speculative = offered || !fresh;
+    !speculative || offered_retries_ok(remaining)
+}
+
 /// Cached key info from a PIV token (populated at startup)
 #[derive(Clone)]
 pub struct CachedKey {
@@ -362,12 +372,14 @@ impl PiggyAgent {
         // card only after its on-card verify succeeds, and never re-offered
         // to a card that rejects it (`forget_pin` records the rejection).
         let from_cache = |cache: &mut PinCache| {
-            cache.lookup(guid, slot_id).map(|(pin, source)| AcquiredPin {
-                pin,
-                fresh: source == PinSource::Offered,
-                cacheable: true,
-                offered: source == PinSource::Offered,
-            })
+            cache
+                .lookup(guid, slot_id)
+                .map(|(pin, source)| AcquiredPin {
+                    pin,
+                    fresh: source == PinSource::Offered,
+                    cacheable: true,
+                    offered: source == PinSource::Offered,
+                })
         };
         if !how.uncached {
             if let Some(acq) = from_cache(&mut *self.pins.lock().await) {
@@ -501,11 +513,14 @@ impl PiggyAgent {
             // wrong and forgotten it. Look again, here, so that only ONE
             // stale PIN ever reaches the card; if it is gone, ask the person.
             let current_cached: Option<Zeroizing<String>> = match &acquired {
-                Some(acq) if !acq.fresh => {
-                    match self.pins.lock().await.cached_now(guid, slot_id) {
-                        Some(pin) => Some(pin),
-                        None => continue,
-                    }
+                Some(acq) if !acq.fresh => match self.pins.lock().await.cached_now(guid, slot_id) {
+                    Some(pin) => Some(pin),
+                    None => continue,
+                },
+                // An offer taken before this lock is not sent to a card that
+                // has refused a PIN since (a stale cached one, ahead of us).
+                Some(acq) if acq.offered && self.pins.lock().await.refused_a_pin(guid) => {
+                    continue;
                 }
                 _ => None,
             };
@@ -538,9 +553,7 @@ impl PiggyAgent {
                 // was changed, or several requests are using it at once), are
                 // speculative: not risked on a card with too few retries left
                 // (each wrong try spends one), the person is asked instead.
-                if (acq.offered || !acq.fresh)
-                    && !offered_retries_ok(session.pin_retries_remaining())
-                {
+                if !pin_may_be_tried(acq.offered, acq.fresh, session.pin_retries_remaining()) {
                     self.forget_pin(guid).await;
                     continue;
                 }
@@ -2276,6 +2289,28 @@ mod tests {
     /// `ssh-add -X` offer only when the card confirms at least
     /// `MIN_RETRIES_FOR_OFFERED_PIN` tries left; a low count or a query
     /// error is treated as unsafe (drop the offer, re-prompt).
+    /// Round 3, 4: the guard's branches. A typed PIN is always tried; an offered
+    /// or a cached one only with a safe margin of retries (and never on an
+    /// unreadable count).
+    #[test]
+    fn a_cached_or_offered_pin_is_tried_only_with_a_safe_margin_and_a_typed_one_always() {
+        let unreadable = || Err(PivError::Apdu { sw: 0x6a80 });
+        // (offered, fresh): typed is (false, true); cached (false, false); offer (true, true).
+        for remaining in [Ok(0), Ok(1), Ok(2), Ok(3), unreadable()] {
+            assert!(pin_may_be_tried(false, true, remaining), "typed: always");
+        }
+        for (offered, fresh, what) in [(false, false, "cached"), (true, true, "offered")] {
+            assert!(!pin_may_be_tried(offered, fresh, Ok(0)), "{what} at 0");
+            assert!(!pin_may_be_tried(offered, fresh, Ok(1)), "{what} at 1");
+            assert!(
+                !pin_may_be_tried(offered, fresh, unreadable()),
+                "{what}, unreadable"
+            );
+            assert!(pin_may_be_tried(offered, fresh, Ok(2)), "{what} at 2");
+            assert!(pin_may_be_tried(offered, fresh, Ok(3)), "{what} at 3");
+        }
+    }
+
     #[test]
     fn offered_retries_ok_permits_only_a_confirmed_safe_margin() {
         assert!(offered_retries_ok(Ok(u8::MAX)), "already verified: safe");

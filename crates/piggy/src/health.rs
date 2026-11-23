@@ -1568,7 +1568,8 @@ fn push_presence_point(out: &mut Vec<CheckResult>, probes: &Probes) {
                     .filter_map(|line| line.rsplit_once(": "))
                     .map(|(what, rule)| {
                         // A slot line is "9D: ..."; the others name themselves.
-                        let is_slot = what.len() == 2 && what.chars().all(|c| c.is_ascii_hexdigit());
+                        let is_slot =
+                            what.len() == 2 && what.chars().all(|c| c.is_ascii_hexdigit());
                         (
                             if is_slot {
                                 format!("slot {what}")
