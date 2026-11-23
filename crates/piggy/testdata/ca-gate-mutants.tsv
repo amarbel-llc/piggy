@@ -40,5 +40,5 @@ agent-ca-key-is-signer	piggy	crates/piggy/src/operator_act.rs	if tbs.ca_key_blob
 agent-ssh-cert-on-other-slots	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::ssh_cert::looks_like_ssh_certificate(data) {	if false {
 agent-x509-slot-refuses-tbs	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::x509_profile::looks_like_tbs_certificate(data) {	if false {
 agent-x509-slot-refuses-other-bytes	piggy	crates/piggy/src/operator_act.rs	Err(format!(<NL>                "refusing to sign with the X.509 certificate authority	if true {<NL>                return Ok(SlotData::Ordinary);<NL>            }<NL>            Err(format!(<NL>                "refusing to sign with the X.509 certificate authority
-tool-sign-refuses-83piggy	crates/piggy/src/operator_act.rs	if piggy_piv::slot::ca_kind(slot_id) == Some(piggy_piv::slot::CaKind::SshCertificate) {	if false {
+tool-sign-refuses-83	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::slot::ca_kind(slot_id) == Some(piggy_piv::slot::CaKind::SshCertificate) {	if false {
 askpass-ack-checked	piggy	crates/piggy/src/card_oracle.rs	let acknowledged = ack == Some(format!("piggy-askpass-ack {nonce}").as_str()) && rest_empty;	let acknowledged = true;

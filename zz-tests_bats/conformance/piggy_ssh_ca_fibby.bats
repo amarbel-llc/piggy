@@ -200,6 +200,9 @@ function slot_82_refuses_an_openssh_certificate_and_slot_83_refuses_everything_e
   printf 'hello\n' >"$WORKDIR/m"
   SSH_AUTH_SOCK="$AGENT_SOCK" run ssh-keygen -q -Y sign -f "$WORKDIR/ca83.pub" -n file "$WORKDIR/m"
   [[ $status -ne 0 && ! -e $WORKDIR/m.sig ]] || { echo "slot 83 signed an sshsig" >&2; return 1; }
+  # Piggy#405: slot 82 signs no other bytes either, an sshsig included.
+  SSH_AUTH_SOCK="$AGENT_SOCK" run ssh-keygen -q -Y sign -f "$WORKDIR/ca82.pub" -n file "$WORKDIR/m"
+  [[ $status -ne 0 && ! -e $WORKDIR/m.sig ]] || { echo "slot 82 signed an sshsig" >&2; return 1; }
   # Nor does a plain ssh-agent-protocol sign of non-certificate data (what a
   # login challenge is) go through: ssh-keygen -Y check is the sshsig above;
   # the agent's refusal of the rest is the unit tests' (gate_data_for_slot).
