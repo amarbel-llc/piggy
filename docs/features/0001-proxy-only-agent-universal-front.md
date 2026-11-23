@@ -179,6 +179,24 @@ on fibby, none in the proxy), and health.
   PIN and never prompts.
 - **`piggy agent -i` is meaningless in proxy-only mode** and is rejected
   rather than listing upstream keys; use `ssh-add -L` against the socket.
+- **Known residual: one caller can keep another's sign waiting (piggy#407).**
+  Signs for one upstream go one at a time in arrival order, 64 deep, each
+  waiting at most `--sign-wait` per sign ahead of it (at most 10 minutes). Two
+  or three connections of the SAME user, each resubmitting a sign that is never
+  answered, keep the operator's own sign waiting out its queue timeout again
+  and again; a hung-up client is dropped (the front watches its socket,
+  because ssh-agent-lib reads nothing while a handler runs and so never sees
+  it), but a client that stays and re-sends is not told apart from the
+  operator. The candidate fix, not built: a cap on queued signs per caller,
+  identifying the caller by `SO_PEERCRED` and its cgroup (`peer.rs` already
+  reads both for the holder). The operator accepted the residual for the
+  bump (2026-11-23).
+- **A timed-out sign's dialog is not cancelled at the card agent.** The front
+  closes its connection to the upstream when an answer times out, but
+  ssh-agent-lib does not drop a handler whose connection closes (the test
+  `the_library_does_not_cancel_a_handler_when_its_connection_closes`): the
+  card agent's PIN dialog stays up until it is answered or dismissed, and a
+  PIN entered then completes a sign nobody is waiting for.
 
 ## Tuning Levers
 

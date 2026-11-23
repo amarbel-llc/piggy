@@ -75,6 +75,7 @@ pub const MAX_QUEUED_SIGNS_PER_UPSTREAM: usize = 64;
 struct SignQueue {
     turn: Mutex<()>,
     depth: Arc<Semaphore>,
+    capacity: usize,
 }
 
 impl SignQueue {
@@ -82,9 +83,13 @@ impl SignQueue {
         Self {
             turn: Mutex::new(()),
             depth: Arc::new(Semaphore::new(depth)),
+            capacity: depth,
         }
     }
 }
+
+/// The longest a sign waits in the queue for its turn, however many are ahead.
+pub const MAX_QUEUE_WAIT: Duration = Duration::from_secs(600);
 
 /// A connection's claim on its one pending sign, released on drop (every
 /// path: answered, failed, timed out, cancelled).
@@ -96,9 +101,11 @@ struct OwnerClaim {
 impl Drop for OwnerClaim {
     fn drop(&mut self) {
         if self.owner != 0 {
+            // A poisoned lock still holds the set: release the claim anyway,
+            // and never panic in a drop.
             self.pending
                 .lock()
-                .expect("pending owners lock")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&self.owner);
         }
     }
@@ -393,7 +400,7 @@ impl UpstreamPool {
             && !self
                 .pending_owners
                 .lock()
-                .expect("pending owners lock")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(owner)
         {
             return Err(AgentError::Other(
@@ -586,11 +593,12 @@ impl UpstreamPool {
     /// may have appeared since the last listing) before giving up. The
     /// map lock is only ever held for the lookups, never across IO.
     ///
-    /// A sign that never got through (the upstream is gone, the connection
-    /// dropped) is retried once after a fresh listing, which redials every
-    /// upstream and may route the key to another backing that serves it
-    /// (piggy#333). A refusal is the upstream's answer, and a timeout may
-    /// be a human still at a prompt; neither is retried.
+    /// A sign whose upstream could not be CONNECTED to is retried once after
+    /// a fresh listing, which redials every upstream and may route the key to
+    /// another backing that serves it (piggy#333). Nothing else is: a
+    /// refusal is the upstream's answer, and once the request may be on the
+    /// wire a failure or a timeout is final for it (a human may be at the
+    /// dialog).
     pub async fn sign(&self, request: SignRequest) -> Result<Signature, AgentError> {
         self.sign_as(request, 0).await
     }
@@ -599,13 +607,25 @@ impl UpstreamPool {
     /// one): a connection has one sign pending at a time. Signs for one
     /// upstream are QUEUED in arrival order and sent one at a time (a person
     /// answers one dialog at a time, and the card agent serializes on the card
-    /// anyway), each waiting at most the sign wait in the queue and again for
-    /// its answer.
-    ///
-    /// Only a failure to CONNECT is retried: once the request may be on the
-    /// wire any failure is final for it, since the upstream may be showing the
-    /// dialog and a second send would raise a second prompt.
+    /// anyway). A sign waits for its answer at most the sign wait, and in the
+    /// queue at most (the signs ahead of it + 1) sign waits, capped at
+    /// [`MAX_QUEUE_WAIT`]: each sign ahead takes at most one sign wait, so a
+    /// line of legitimate signs is not failed for being long.
     pub async fn sign_as(&self, request: SignRequest, owner: u64) -> Result<Signature, AgentError> {
+        self.sign_gated(request, owner, None).await
+    }
+
+    /// [`Self::sign_as`] for data that only an upstream that applies the
+    /// certificate authority gate may be sent (`require_extension`, the name it
+    /// advertises). The upstream a connect-failure retry re-routes to is
+    /// checked again: a new route is not covered by the check made for the
+    /// first.
+    pub async fn sign_gated(
+        &self,
+        request: SignRequest,
+        owner: u64,
+        require_extension: Option<&str>,
+    ) -> Result<Signature, AgentError> {
         let _claim = self.claim_owner(owner)?;
         let mut idx = self.known_keys.lock().await.get(&request.pubkey).copied();
         if idx.is_none() {
@@ -624,7 +644,7 @@ impl UpstreamPool {
             Err((e, true)) => {
                 tracing::warn!(
                     upstream = %upstream.name,
-                    "sign got no answer ({e}); redialing and retrying once"
+                    "could not connect to sign ({e}); redialing and retrying once"
                 );
                 self.list_identities().await;
                 let idx = self.known_keys.lock().await.get(&request.pubkey).copied();
@@ -632,6 +652,18 @@ impl UpstreamPool {
                     return Err(e);
                 };
                 let upstream = self.upstreams[idx].clone();
+                if let Some(name) = require_extension {
+                    if !self.holder_advertises(&request.pubkey, name).await {
+                        return Err(AgentError::Other(
+                            format!(
+                                "refusing to relay certificate-shaped data to upstream {}: it \
+                                 does not advertise {name}",
+                                upstream.name
+                            )
+                            .into(),
+                        ));
+                    }
+                }
                 self.sign_on(&upstream, request).await.map_err(|(e, _)| e)
             }
             answered => answered.map_err(|(e, _)| e),
@@ -649,6 +681,10 @@ impl UpstreamPool {
         // Wait in line for this upstream: a place in the queue (not the
         // upstream's fault when none is free, and not retried), then our turn.
         let queue = self.sign_queue(upstream);
+        // The signs ahead of this one, counted before it takes its place.
+        let ahead = queue.as_ref().map_or(0, |q| {
+            q.capacity.saturating_sub(q.depth.available_permits())
+        });
         let _place = queue
             .as_ref()
             .map(|q| q.depth.clone().try_acquire_owned())
@@ -657,23 +693,29 @@ impl UpstreamPool {
                 (
                     AgentError::Other(
                         format!(
-                            "upstream {}: signs are already queued at the card's machine; not \
-                             queueing another",
-                            upstream.name
+                            "upstream {}: {} signs are already queued at the card's machine; \
+                             not queueing another",
+                            upstream.name,
+                            queue.as_ref().map_or(0, |q| q.capacity)
                         )
                         .into(),
                     ),
                     false,
                 )
             })?;
+        let queue_wait = self
+            .sign_wait
+            .saturating_mul(u32::try_from(ahead + 1).unwrap_or(u32::MAX))
+            .min(MAX_QUEUE_WAIT.max(self.sign_wait));
         let _turn = match &queue {
-            Some(q) => Some(timeout(self.sign_wait, q.turn.lock()).await.map_err(|_| {
+            Some(q) => Some(timeout(queue_wait, q.turn.lock()).await.map_err(|_| {
                 (
                     AgentError::Other(
                         format!(
-                            "upstream {}: waited {} s in the queue for the card's machine",
+                            "upstream {}: waited {:.1} s in the queue for the card's machine \
+                             ({ahead} sign(s) were ahead)",
                             upstream.name,
-                            self.sign_wait.as_secs()
+                            queue_wait.as_secs_f64()
                         )
                         .into(),
                     ),
@@ -1041,6 +1083,11 @@ pub(super) mod test_support {
         /// once (shared by every connection's clone).
         pub live_signs: Arc<std::sync::atomic::AtomicUsize>,
         pub peak_concurrent_signs: Arc<std::sync::atomic::AtomicUsize>,
+        /// The data of every sign, in the order the stub saw them.
+        pub sign_log: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        /// Hung signs whose handler was dropped (the connection went away and
+        /// the library cancelled it).
+        pub cancelled_signs: Arc<std::sync::atomic::AtomicUsize>,
         /// A proxying agent: answers `request_identities` by listing this
         /// pool, as piggy's own agent does. Pointed at the stub's own
         /// socket it is the cycle piggy#326 guards against.
@@ -1060,6 +1107,8 @@ pub(super) mod test_support {
                 hang_sign: false,
                 live_signs: Arc::default(),
                 peak_concurrent_signs: Arc::default(),
+                sign_log: Arc::default(),
+                cancelled_signs: Arc::default(),
                 relay: None,
             }
         }
@@ -1117,9 +1166,20 @@ pub(super) mod test_support {
             Ok(self.identities.clone())
         }
 
-        async fn sign(&mut self, _request: SignRequest) -> Result<Signature, AgentError> {
+        async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {
             self.record("sign".into());
+            self.sign_log
+                .lock()
+                .expect("stub sign log")
+                .push(request.data.clone());
             if self.hang_sign {
+                struct Cancelled(Arc<std::sync::atomic::AtomicUsize>);
+                impl Drop for Cancelled {
+                    fn drop(&mut self) {
+                        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _cancelled = Cancelled(self.cancelled_signs.clone());
                 std::future::pending::<()>().await;
             }
             use std::sync::atomic::Ordering::SeqCst;
@@ -1645,6 +1705,227 @@ mod tests {
             !good_events.lock().unwrap().iter().any(|e| e == "sign"),
             "the second upstream was asked to sign"
         );
+    }
+
+    /// Fourth read, 3: the queue wait is not one sign-wait for the whole
+    /// line. Five legitimate signs each taking most of a sign wait all
+    /// succeed (the old rule failed the fifth in the queue).
+    #[tokio::test]
+    async fn a_long_line_of_signs_that_each_answer_in_time_all_succeed() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xD2, "line-key")])
+            .slow_sign(Duration::from_millis(250));
+        let path = spawn_stub("sign-line", stub);
+        let pool = one_upstream_pool(path, Duration::from_millis(500));
+        pool.list_identities().await;
+        let mut signs = Vec::new();
+        for owner in 1..=5u64 {
+            let pool = pool.clone();
+            signs.push(tokio::spawn(async move {
+                pool.sign_as(sign_request(0xD2, "line-key"), owner).await
+            }));
+        }
+        for (i, sign) in signs.into_iter().enumerate() {
+            sign.await
+                .unwrap()
+                .unwrap_or_else(|e| panic!("sign {} of 5 failed in the line: {e}", i + 1));
+        }
+    }
+
+    /// Signs reach the upstream in the order they arrived.
+    #[tokio::test]
+    async fn signs_are_sent_in_arrival_order() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xD3, "order-key")])
+            .slow_sign(Duration::from_millis(60));
+        let log = stub.sign_log.clone();
+        let path = spawn_stub("sign-order", stub);
+        let pool = one_upstream_pool(path, Duration::from_secs(10));
+        pool.list_identities().await;
+        let mut signs = Vec::new();
+        for owner in 1..=4u8 {
+            let pool = pool.clone();
+            signs.push(tokio::spawn(async move {
+                let mut request = sign_request(0xD3, "order-key");
+                request.data = vec![owner];
+                pool.sign_as(request, u64::from(owner)).await
+            }));
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        for sign in signs {
+            sign.await.unwrap().unwrap();
+        }
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![vec![1], vec![2], vec![3], vec![4]]
+        );
+    }
+
+    /// A sign past the queue's depth fails FAST (not after a wait) and says how
+    /// deep the queue is.
+    #[tokio::test]
+    async fn a_sign_past_the_queue_depth_fails_at_once_and_names_the_depth() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xD4, "fast-key")]).hanging_sign();
+        let path = spawn_stub("sign-fast", stub);
+        let pool = one_upstream_pool(path, Duration::from_secs(5)).with_max_queued_signs(1);
+        pool.list_identities().await;
+        let holder = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.sign_as(sign_request(0xD4, "fast-key"), 1).await })
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let started = std::time::Instant::now();
+        let err = pool
+            .sign_as(sign_request(0xD4, "fast-key"), 2)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(err.contains("1 signs are already queued"), "{err}");
+        holder.abort();
+    }
+
+    /// A sign that waits too long in the queue says so (and how many were
+    /// ahead), distinctly from one that was sent and not answered.
+    #[tokio::test]
+    async fn a_sign_that_waits_too_long_in_the_queue_says_so() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xD5, "wait-key")]).hanging_sign();
+        let path = spawn_stub("sign-queued", stub);
+        let pool = one_upstream_pool(path, Duration::from_millis(300));
+        pool.list_identities().await;
+        let first = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.sign_as(sign_request(0xD5, "wait-key"), 1).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let err = pool
+            .sign_as(sign_request(0xD5, "wait-key"), 2)
+            .await
+            .unwrap_err()
+            .to_string();
+        // One sign is ahead: it may wait two sign waits (0.6 s) for its turn,
+        // and the sign ahead times out at 0.3 s, so this one gets its turn
+        // and is sent: its error is the sent-and-unanswered one.
+        assert!(err.contains("sign request timed out"), "{err}");
+        let err_first = first.await.unwrap().unwrap_err().to_string();
+        assert!(err_first.contains("sign request timed out"), "{err_first}");
+    }
+
+    /// Release on cancellation: a queued sign that is dropped (its client
+    /// went) gives its place back at once.
+    #[tokio::test]
+    async fn a_cancelled_queued_sign_gives_its_place_back() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xD6, "cancel-key")]).hanging_sign();
+        let path = spawn_stub("sign-cancel", stub);
+        let pool = one_upstream_pool(path, Duration::from_secs(5)).with_max_queued_signs(2);
+        pool.list_identities().await;
+        let mut held = Vec::new();
+        for owner in 1..=2u64 {
+            let pool = pool.clone();
+            held.push(tokio::spawn(async move {
+                pool.sign_as(sign_request(0xD6, "cancel-key"), owner).await
+            }));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Full: a third is refused at once.
+        let err = pool
+            .sign_as(sign_request(0xD6, "cancel-key"), 3)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already queued"), "{err}");
+        // The queued one goes away: its place is free, and its owner may sign.
+        held.pop().unwrap().abort();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let third = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.sign_as(sign_request(0xD6, "cancel-key"), 3).await })
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !third.is_finished(),
+            "the third sign took the freed place and is queued"
+        );
+        third.abort();
+        held.pop().unwrap().abort();
+    }
+
+    /// EVIDENCE about ssh-agent-lib 0.5 (fourth read, 4): the server side
+    /// does NOT drop a handler when its connection closes (it reads nothing
+    /// while a handler runs). The front closes its connection to the upstream
+    /// when an answer times out, and the upstream's handler for that sign
+    /// lives on: the card agent's dialog is not cancelled by it, and a client
+    /// that hangs up on a front is not seen by the library either (so the
+    /// front watches its client's socket itself: `listener::peer_closed`).
+    /// If the library ever cancels handlers, this fails and the watch can go.
+    #[tokio::test]
+    async fn the_library_does_not_cancel_a_handler_when_its_connection_closes() {
+        let stub = StubUpstream::new(vec![upstream_identity(0xD7, "close-key")]).hanging_sign();
+        let cancelled = stub.cancelled_signs.clone();
+        let path = spawn_stub("sign-close", stub);
+        let pool = one_upstream_pool(path, Duration::from_millis(300));
+        pool.list_identities().await;
+        let err = pool
+            .sign_as(sign_request(0xD7, "close-key"), 1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("timed out"), "{err}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            cancelled.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "ssh-agent-lib now cancels a handler whose connection closed: drop the hangup watch"
+        );
+    }
+
+    /// Fourth read, 5: a connect-failure retry that re-routes the sign to
+    /// another upstream is checked against the certificate gate again.
+    #[tokio::test]
+    async fn a_rerouted_gated_sign_is_checked_against_the_gate_again() {
+        let ext = crate::operator_act::SSH_CA_GATE_EXT;
+        for (advertises, expect_signed) in [(false, false), (true, true)] {
+            let mut other = StubUpstream::new(vec![upstream_identity(0xD8, "gate-key")]);
+            if advertises {
+                other = other.with_extensions(&[ext]);
+            }
+            let other_events = other.events.clone();
+            let pool = UpstreamPool::new(
+                vec![
+                    Upstream {
+                        name: "gone".into(),
+                        path: PathBuf::from("/tmp/piggy-no-such-agent.sock"),
+                    },
+                    Upstream {
+                        name: "other".into(),
+                        path: spawn_stub(&format!("sign-gate-{advertises}"), other),
+                    },
+                ],
+                Duration::from_secs(2),
+            );
+            // The first check was made for the upstream listed first.
+            pool.known_keys
+                .lock()
+                .await
+                .insert(upstream_identity(0xD8, "gate-key").pubkey, 0);
+            let result = pool
+                .sign_gated(sign_request(0xD8, "gate-key"), 1, Some(ext))
+                .await;
+            let signed = other_events.lock().unwrap().iter().any(|e| e == "sign");
+            assert_eq!(signed, expect_signed, "advertises={advertises}: {result:?}");
+            assert_eq!(result.is_ok(), expect_signed);
+            if !expect_signed {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("does not advertise"),
+                    "the refusal says why"
+                );
+            }
+        }
     }
 
     /// A sign can sit behind a PIN dialog and a touch (a certificate always

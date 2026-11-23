@@ -132,6 +132,9 @@ pub struct PiggyAgent {
     /// This connection's number (never 0 for an accepted one): the proxy lets
     /// a connection have one sign pending at a time.
     conn_id: u64,
+    /// A duplicate of this connection's socket, to notice a client that hangs
+    /// up while its relayed sign waits (ssh-agent-lib reads nothing then).
+    client: Option<Arc<std::os::fd::OwnedFd>>,
 }
 
 /// A PIN acquired for a card op, plus whether it came from an on-demand
@@ -231,6 +234,7 @@ impl PiggyAgent {
             holder: None,
             peer: super::holder::PeerStatus::NotRead,
             conn_id: 0,
+            client: None,
         }
     }
 
@@ -242,10 +246,31 @@ impl PiggyAgent {
 
     /// The peer of this connection, as the listener read it.
     pub fn with_peer(mut self, peer: super::holder::PeerStatus) -> Self {
-        static NEXT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         self.peer = peer;
+        self
+    }
+
+    /// This session is a new connection: it gets a number of its own (the
+    /// listener does this for EVERY accepted connection, a front's included,
+    /// so the proxy can give each one a sign at a time).
+    pub fn numbered(mut self) -> Self {
+        static NEXT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         self.conn_id = NEXT_CONNECTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self
+    }
+
+    /// Watch this connection's socket (a duplicate of its descriptor) so a
+    /// relayed sign waiting on a person stops when the client hangs up.
+    pub fn with_client_socket(mut self, socket: &tokio::net::UnixStream) -> Self {
+        use std::os::fd::AsFd;
+        self.client = socket.as_fd().try_clone_to_owned().ok().map(Arc::new);
+        self
+    }
+
+    /// The connection's number: 0 for a session no listener numbered.
+    #[cfg(test)]
+    pub fn connection_id(&self) -> u64 {
+        self.conn_id
     }
 
     pub fn is_holder(&self) -> bool {
@@ -665,9 +690,10 @@ impl PiggyAgent {
                 // the CA slot rules at all (it advertises `ssh-ca-gate@piggy`)
                 // before it relays data that is shaped like a certificate:
                 // an older piggy agent or a plain ssh-agent never sees it.
-                if piggy_piv::ssh_cert::looks_like_ssh_certificate(&request.data)
-                    || piggy_piv::x509_profile::looks_like_tbs_certificate(&request.data)
-                {
+                let certificate_shaped =
+                    piggy_piv::ssh_cert::looks_like_ssh_certificate(&request.data)
+                        || piggy_piv::x509_profile::looks_like_tbs_certificate(&request.data);
+                if certificate_shaped {
                     let gated = self
                         .upstreams
                         .holder_advertises(&request.pubkey, crate::operator_act::SSH_CA_GATE_EXT)
@@ -682,7 +708,24 @@ impl PiggyAgent {
                         ));
                     }
                 }
-                return self.upstreams.sign_as(request, self.conn_id).await;
+                // The pool checks the gate again for any other upstream a
+                // connect failure re-routes the sign to.
+                let sign = self.upstreams.sign_gated(
+                    request,
+                    self.conn_id,
+                    certificate_shaped.then_some(crate::operator_act::SSH_CA_GATE_EXT),
+                );
+                // A client that hangs up while its sign waits (in the queue,
+                // or on a person) takes its place and its connection with it.
+                return match self.client.clone() {
+                    Some(fd) => tokio::select! {
+                        signed = sign => signed,
+                        () = super::listener::peer_closed(fd) => Err(AgentError::Other(
+                            "the client hung up while its sign was waiting at the card's machine".into(),
+                        )),
+                    },
+                    None => sign.await,
+                };
             }
         };
 
@@ -2998,6 +3041,93 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert_eq!(ids[0].pubkey, ed25519_key_data(0x11), "native key first");
         assert_eq!(ids[1].comment, "soft-key");
+    }
+
+    /// Fourth read, 1: a FRONT's connections are numbered (the listener does
+    /// it for every accepted connection) and each has one sign pending. This
+    /// is the test through a front session that was missing: with the
+    /// connection number left 0 the limit did nothing.
+    #[tokio::test]
+    async fn a_front_connection_has_one_sign_pending_at_a_time() {
+        let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+            0x78, "card-key",
+        )])
+        .slow_sign(std::time::Duration::from_millis(400));
+        let path = upstream_stub::spawn_stub("sess-one-pending", stub);
+        let mut front = PiggyAgent::new(Vec::new())
+            .with_proxy_only(true)
+            .with_upstream_pool(pool_for(path));
+        front.request_identities().await.unwrap();
+
+        let request = || SignRequest {
+            pubkey: ed25519_key_data(0x78),
+            data: b"hello".to_vec(),
+            flags: 0,
+        };
+        let a = front.clone().numbered();
+        let b = front.clone().numbered();
+        assert_ne!(a.connection_id(), 0, "an accepted connection is numbered");
+        assert_ne!(a.connection_id(), b.connection_id(), "each its own");
+
+        // Two requests on ONE connection at once: the second is refused.
+        let mut a_again = a.clone();
+        let mut a = a;
+        let first = tokio::spawn(async move { a.sign(request()).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let err = a_again.sign(request()).await.unwrap_err();
+        assert_agent_error_other_eq(&err, "already has a sign pending");
+        // Another connection is not refused: it queues and is answered.
+        let mut b = b;
+        b.sign(request()).await.expect("another connection queues");
+        first
+            .await
+            .unwrap()
+            .expect("the first connection's sign is unharmed");
+    }
+
+    /// Fourth read, 4: a client that hangs up while its sign waits takes its
+    /// place and its relayed sign with it (the library does not tell us).
+    #[tokio::test]
+    async fn a_client_that_hangs_up_while_its_sign_waits_frees_the_queue() {
+        let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
+            0x79, "card-key",
+        )])
+        .hanging_sign();
+        let path = upstream_stub::spawn_stub("sess-hangup", stub);
+        let mut front = PiggyAgent::new(Vec::new())
+            .with_proxy_only(true)
+            .with_upstream_pool(pool_for(path).with_sign_wait(std::time::Duration::from_secs(30)));
+        front.request_identities().await.unwrap();
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let mut conn = front.clone().numbered().with_client_socket(&ours);
+        let started = std::time::Instant::now();
+        let sign = tokio::spawn(async move {
+            conn.sign(SignRequest {
+                pubkey: ed25519_key_data(0x79),
+                data: b"hello".to_vec(),
+                flags: 0,
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !sign.is_finished(),
+            "the sign is waiting on the card's machine"
+        );
+        drop(theirs);
+        let err = tokio::time::timeout(std::time::Duration::from_secs(3), sign)
+            .await
+            .expect("the hangup ends the wait")
+            .unwrap()
+            .unwrap_err();
+        assert_agent_error_other_eq(&err, "hung up");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// Before the listener numbers a session it is 0, which is nobody's.
+    #[test]
+    fn an_unnumbered_session_is_connection_zero() {
+        assert_eq!(PiggyAgent::new(Vec::new()).connection_id(), 0);
     }
 
     fn dead_pool(tag: &str) -> UpstreamPool {

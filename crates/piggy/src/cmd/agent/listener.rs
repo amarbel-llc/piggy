@@ -54,7 +54,9 @@ impl ListeningSocket for ResilientListener {
 /// request (FDR 0006 phase (d)); any other agent does not look.
 impl Agent<ResilientListener> for PiggyAgent {
     fn new_session(&mut self, socket: &UnixStream) -> impl Session {
-        let session = self.clone();
+        // Every connection is its own: numbered here, whatever the agent is,
+        // and its socket is watched for a hangup while a relayed sign waits.
+        let session = self.clone().numbered().with_client_socket(socket);
         if !session.is_holder() {
             return session;
         }
@@ -72,6 +74,44 @@ impl Agent<ResilientListener> for PiggyAgent {
     }
 }
 
+/// How often a waiting sign looks at its client's socket.
+const CLIENT_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Resolves when the peer of `fd` has hung up. ssh-agent-lib answers one
+/// request at a time and reads nothing while a handler runs, so a client that
+/// goes away mid-request is not seen by it (shown by
+/// `the_connection_is_closed_when_a_sign_times_out`): this looks for it,
+/// without consuming a byte (MSG_PEEK), every [`CLIENT_WATCH_INTERVAL`].
+pub async fn peer_closed(fd: std::sync::Arc<std::os::fd::OwnedFd>) {
+    use std::os::fd::AsRawFd;
+    loop {
+        let mut byte = 0u8;
+        // SAFETY: a one-byte peek into a local buffer, on a descriptor this
+        // Arc keeps open for the whole call.
+        let n = unsafe {
+            libc::recv(
+                fd.as_raw_fd(),
+                std::ptr::addr_of_mut!(byte).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        if n == 0 {
+            return;
+        }
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            if !matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) {
+                return;
+            }
+        }
+        tokio::time::sleep(CLIENT_WATCH_INTERVAL).await;
+    }
+}
+
 /// Whether an `accept` error passes once in-flight work finishes: out of
 /// descriptors (per process or system-wide), out of buffer or kernel memory,
 /// or a client that gave up before it was accepted.
@@ -85,6 +125,44 @@ fn accept_error_is_transient(e: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_hung_up_client_is_noticed_and_a_waiting_one_is_not() {
+        use std::os::fd::AsFd;
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let watched = std::sync::Arc::new(ours.as_fd().try_clone_to_owned().unwrap());
+        // Nothing sent, nothing closed: not closed, however long we look.
+        let still_open = tokio::time::timeout(
+            std::time::Duration::from_millis(600),
+            peer_closed(watched.clone()),
+        )
+        .await;
+        assert!(
+            still_open.is_err(),
+            "a client that is merely waiting was reported gone"
+        );
+        // A pending request byte is not a hangup either, and is not consumed.
+        theirs.writable().await.unwrap();
+        assert_eq!(theirs.try_write(b"x").unwrap(), 1);
+        let with_data = tokio::time::timeout(
+            std::time::Duration::from_millis(600),
+            peer_closed(watched.clone()),
+        )
+        .await;
+        assert!(with_data.is_err(), "pipelined data was taken for a hangup");
+        let mut buf = [0u8; 1];
+        ours.readable().await.unwrap();
+        assert_eq!(
+            ours.try_read(&mut buf).unwrap(),
+            1,
+            "the peek consumed the byte"
+        );
+        // The client hangs up: noticed within a watch interval or two.
+        drop(theirs);
+        tokio::time::timeout(std::time::Duration::from_secs(2), peer_closed(watched))
+            .await
+            .expect("a hangup is noticed");
+    }
 
     #[test]
     fn descriptor_and_memory_exhaustion_are_transient() {
