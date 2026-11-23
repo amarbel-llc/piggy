@@ -191,11 +191,10 @@ pub fn unblock_signals() {
 /// any of it cannot be set, the exec fails and hogtie reports it.
 pub fn prepare(cmd: &mut Command) {
     use std::os::unix::process::CommandExt as _;
-    let strict = is_root();
     // SAFETY: `exec` does not fork, so the hook runs in hogtie's own
     // process just before execve; it still makes only plain system calls.
     unsafe {
-        cmd.pre_exec(move || {
+        cmd.pre_exec(|| {
             libc::umask(0o022);
             let mut dfl: libc::sigaction = std::mem::zeroed();
             dfl.sa_sigaction = libc::SIG_DFL;
@@ -216,7 +215,6 @@ pub fn prepare(cmd: &mut Command) {
             }
             // The limits and the scheduling are already reset: shield_self
             // did it for hogtie's own process, and exec keeps them.
-            let _ = strict;
             // Last: every descriptor above 2. No fallback (review N4): a
             // kernel without close_range refuses.
             if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) != 0 {
