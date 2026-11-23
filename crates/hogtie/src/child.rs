@@ -169,9 +169,8 @@ pub fn prepare(cmd: &mut Command) {
             if libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut()) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            for (r, cur, max) in LIMITS {
-                set_limit(strict, r, cur, max)?;
-            }
+            // The limits are already the table's: shield_self set them for
+            // hogtie's own process, and exec keeps them.
             required(strict, libc::setpriority(libc::PRIO_PROCESS, 0, 0) == 0)?;
             let param = libc::sched_param { sched_priority: 0 };
             required(

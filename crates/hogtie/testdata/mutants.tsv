@@ -3,6 +3,8 @@
 # exactly once in the file (else the mutant is STALE). `just
 # explore-hogtie-mutants` applies each to a scratch copy and runs every
 # hogtie test: each must turn a test red (KILLED).
+# Not listed, as equivalent: Admit::Quiet => false in cli.rs (reached only
+# when two refusals of one account race past the over_budget check).
 nonce-not-burnt	src/nonce.rs	match std::fs::rename(dir.join(&hex), &claimed) {	match std::fs::copy(dir.join(&hex), &claimed).map(|_| ()) {
 nonce-expiry-ignored	src/nonce.rs	if now >= entry.expires {	if now >= entry.expires + 1000 {
 nonce-account-shared	src/nonce.rs	self.dir.join(uid.to_string())	self.dir.join("shared")
@@ -18,10 +20,18 @@ exec-store-unchecked	src/exec.rs	crate::paths::check_dir(&paths.nonces(), 0o700)
 audit-no-line-cap	src/audit.rs	if full.len() <= LINE_MAX {	if true {
 audit-no-budget	src/audit.rs	(None, c) if c <= REFUSAL_BUDGET => Admit::Log,	(None, _) => Admit::Log,
 audit-summary-lost	src/audit.rs	summary = Some(quiet);	let _ = quiet;
-audit-partial-line-kept	src/audit.rs	let _ = f.set_len(before);	let _ = before;
-cli-budget-ignored	src/cli.rs	Ok(audit::Admit::Quiet) => false,	Ok(audit::Admit::Quiet) => true,
-child-sigxfsz-default	src/child.rs	libc::signal(libc::SIGXFSZ, libc::SIG_IGN);	libc::signal(libc::SIGXFSZ, libc::SIG_DFL);
-child-fsize-not-raised	src/child.rs	let _ = set_limit(false, libc::RLIMIT_FSIZE, INF, INF);	let _ = 0;
+audit-fsize-unchecked	src/audit.rs	if lim.rlim_cur != libc::RLIM_INFINITY && size + line.len() as u64 > lim.rlim_cur {	if false {
+audit-never-over-budget	src/audit.rs	if b.window_closed(now) || b.count <= REFUSAL_BUDGET {	if true {
+audit-no-summaries	src/audit.rs	append(log, &record)?;	let _ = (log, &record);
+audit-budget-lock-waits	src/audit.rs	libc::LOCK_EX | libc::LOCK_NB	libc::LOCK_EX
+cli-over-budget-evaluated	src/cli.rs	if over {	if false {
+cli-errors-unbudgeted	src/cli.rs	let logged = decision.record.outcome == "started"	let logged = decision.record.outcome != "refused"
+serve-issue-unlimited	src/serve.rs	Ok(asker) if !budget.take(asker.uid, now) => {	Ok(asker) if false && !budget.take(asker.uid, now) => {
+serve-issue-budget-off	src/serve.rs	if *count >= ISSUE_BUDGET {	if false {
+exec-started-cut	src/exec.rs	if started.fits_whole() {	if true {
+exec-started-args-twice	src/exec.rs	started.args = Vec::new();	let _ = 0;
+child-shield-limits-off	src/child.rs	unsafe { set_limit(strict, r, cur, max)? };	let _ = (strict, r, cur, max);
+child-sigxfsz-default	src/child.rs	for sig in [libc::SIGXFSZ, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {	for sig in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
 child-nofile-not-default	src/child.rs	(libc::RLIMIT_NOFILE, 1024, 524_288),	(libc::RLIMIT_NOFILE, 524_288, 524_288),
 child-affinity-kept	src/child.rs	libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &all) == 0,	true,
 message-trailing-accepted	src/message.rs	r.end()?;	let _ = 0;
@@ -86,5 +96,4 @@ cli-action-state-inherited	src/cli.rs	    crate::child::prepare(&mut cmd);	    l
 child-umask-kept	src/child.rs	libc::umask(0o022);	libc::umask(0o077);
 child-signals-kept	src/child.rs	if libc::sigaction(sig, &dfl, std::ptr::null_mut()) != 0 {	if false && libc::sigaction(sig, &dfl, std::ptr::null_mut()) != 0 {
 child-mask-kept	src/child.rs	if libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut()) != 0 {	if false {
-child-limits-kept	src/child.rs	set_limit(strict, r, cur, max)?;	let _ = (strict, r, cur, max);
 child-fds-kept	src/child.rs	if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) != 0 {	if false {
