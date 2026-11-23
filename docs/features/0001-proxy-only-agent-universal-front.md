@@ -184,9 +184,9 @@ on fibby, none in the proxy), and health.
   waiting at most `--sign-wait` per sign ahead of it (at most 10 minutes). Two
   or three connections of the SAME user, each resubmitting a sign that is never
   answered, keep the operator's own sign waiting out its queue timeout again
-  and again; a hung-up client is dropped (the front watches its socket,
-  because ssh-agent-lib reads nothing while a handler runs and so never sees
-  it), but a client that stays and re-sends is not told apart from the
+  and again; a hung-up client is dropped while its sign is still queued (the
+  front watches its socket, because ssh-agent-lib reads nothing while a
+  handler runs and so never sees it), but a client that stays and re-sends is not told apart from the
   operator. The candidate fix, not built: a cap on queued signs per caller,
   identifying the caller by `SO_PEERCRED` and its cgroup (`peer.rs` already
   reads both for the holder). The operator accepted the residual for the
@@ -200,8 +200,11 @@ on fibby, none in the proxy), and health.
   reason a client that hangs up gives its place up only while its sign is
   still QUEUED at the front; once its request is at the card agent the front
   keeps the turn until the answer or `--sign-wait`, so abandoned requests
-  cannot stack up there faster than they are answered (a hung-up client is
-  seen by `poll(2)` reporting POLLHUP on a duplicate of its socket every
+  reach it at most one per `--sign-wait` per upstream (a timeout releases the
+  turn while its dialog may still stand, so they are bounded, not prevented)
+  (a hung-up client is
+  seen, on Linux only (elsewhere it is never seen, and a queued sign waits
+  out its queue timeout, which fails safe), by `poll(2)` reporting POLLHUP on a duplicate of its socket every
   250 ms; a half-closed client that still waits is not one). **Next step, not
   built:** the card agent's own cancel, by racing its wait for the prompt
   lock (`ensure_pin`) against the same hangup watch on its connection, so

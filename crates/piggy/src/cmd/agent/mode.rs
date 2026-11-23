@@ -47,4 +47,8 @@ pub struct AgentMode {
     /// (no field) is not one.
     #[serde(default)]
     pub holder: bool,
+    /// The PIN cache table COMPILED INTO this agent (piggy#404), one line
+    /// per named slot, for `piggy health -v`. An older agent reports none.
+    #[serde(default)]
+    pub pin_cache: Vec<String>,
 }

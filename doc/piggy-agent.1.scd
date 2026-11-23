@@ -546,13 +546,31 @@ a non-interactive helper; see *piggy-testing*(7).
 
 # PIN MEMORY
 
-A PIN that verified on a card, or that *ssh-add -X* offered, stays cached
-for that card until the card leaves, *ssh-add -x* clears it, or the agent
-exits. The exception is the certificate authority slots, 82 and 83
-(*piggy-piv-slots*(7)): their PIN is asked every time and is neither taken
-from the cache nor put in it, so a PIN-always key is asked for per signature
-by the operator, not only by the card; what 82 and 83 prompt never changes
-what is cached for the card's other slots, 9C and 9D included. Each cached PIN is held on pages of its own (FDR 0006 phase (b)):
+A PIN that verified on a card is cached for the SLOT it was typed for, under
+that slot's rule, until its limit passes, the card leaves, *ssh-add -x*
+clears it, or the agent exits. The PIV PIN is the card's, but one typed to
+log in over ssh (9A) does not serve a decrypt (9D) or a signature (9C): the
+request on another slot asks again. A PIN that *ssh-add -X* offered is
+tried once per card and cached the same way, but only for a slot that may
+be cached. The rule for each slot is a table COMPILED INTO the agent: no
+flag, option or environment of a running host changes it. Shipped values:
+9A cached until 12 hours without use; 9C until 60 seconds without use (the
+card's touch is asked every time either way); 9D until 10 minutes without
+use and 1 hour after it was typed; every other slot never. *piggy health -v*
+prints the table the running agent has (the point "agent PIN cache
+(compiled in)") and the agent logs it at start. The certificate authority
+slots, 82 and 83 (*piggy-piv-slots*(7)), are never cached whatever the table
+says, and a table that says otherwise does not build: their PIN is asked
+every time, so a PIN-always key is asked for per signature by the
+operator, not only by the card.
+
+To change a rule, edit the table in _crates/piggy/src/cmd/agent/pin_cache_table.rs_
+(one line per slot, with its limits), rebuild and bump piggy; or build with
+the Nix package argument *pinCachePolicy*, a file of the same shape:
+_piggy-rs.withPinCachePolicy ./my-table.rs_ (and give that to *mkPiggy*).
+Then restart the agent. There is no run-time setting.
+
+Each cached PIN is held on pages of its own (FDR 0006 phase (b)):
 between two inaccessible guard pages, locked against swap, and unreadable
 except while one VERIFY copies it out; its pages are zeroed when it is
 forgotten. At start the agent makes itself non-dumpable and sets its core

@@ -18,6 +18,7 @@ pub mod peer;
 // pub: `agent_client::probe_agent_mode` (the `piggy health` side) shares
 // the AGENT_MODE_EXT name + AgentMode payload type.
 pub mod mode;
+mod pin_policy;
 mod pins;
 mod session;
 // pub: `agent_client::probe_upstream_status` (the `piggy health` side)
@@ -672,6 +673,11 @@ async fn run_async(
         .with_proxy_only(cli.proxy_only)
         .with_event_driven(event_driven)
         .with_service_name(cli.service_name.clone());
+    // piggy#404: the PIN cache table is compiled in; say which one this is.
+    tracing::info!(
+        table = %pin_policy::PinCachePolicy::compiled_in().describe().join("; "),
+        "PIN cache (compiled in, not configuration)"
+    );
     // piggy#215: with --upstream flags, proxy the named agents for keys
     // piggy does not serve natively. Without them the pool stays empty
     // and the agent behaves exactly as before.

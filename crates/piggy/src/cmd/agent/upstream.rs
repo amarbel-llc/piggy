@@ -732,9 +732,10 @@ impl UpstreamPool {
                     false,
                 )
             })?;
-        // The signs ahead of this one: the places taken, ours excluded (it
-        // was taken just above, so the count cannot include a later arrival
-        // or miss an earlier one).
+        // The signs ahead of this one: the places taken, ours excluded. Taking
+        // a place and reading the count are two steps, so a sign arriving in
+        // between is counted too: the count can only be too high, which only
+        // lengthens this sign's queue wait (it never fails one early).
         let ahead = queue.as_ref().map_or(0, |q| {
             q.capacity
                 .saturating_sub(q.depth.available_permits())
@@ -860,26 +861,12 @@ impl UpstreamPool {
         Some(answer.await)
     }
 
-    /// Whether the upstream that holds `pubkey` advertises the extension
-    /// `name` in its answer to `query`. False when no upstream holds the key,
-    /// when it cannot be reached or does not answer, and when its answer does
-    /// not list the name: a front only trusts what it was told, now.
-    pub async fn holder_advertises(&self, pubkey: &KeyData, name: &str) -> bool {
-        let mut idx = self.known_keys.lock().await.get(pubkey).copied();
-        if idx.is_none() {
-            self.list_identities().await;
-            idx = self.known_keys.lock().await.get(pubkey).copied();
-        }
-        let Some(idx) = idx else {
-            return false;
-        };
-        self.upstream_advertises(idx, name).await
-    }
-
-    /// [`Self::holder_advertises`] for the upstream at `idx`, the one a sign
-    /// has ALREADY been routed to: a concurrent listing cannot swap the route
-    /// between this check and the send, because the check is made on the
-    /// upstream the send goes to.
+    /// Whether the upstream at `idx` advertises the extension `name` in its
+    /// answer to `query`: False when it cannot be reached or does not answer,
+    /// and when its answer does not list the name: a front only trusts what it
+    /// was told, now. `idx` is the upstream a sign has ALREADY been routed to:
+    /// a concurrent listing cannot swap the route between this check and the
+    /// send, because the check is made on the upstream the send goes to.
     async fn upstream_advertises(&self, idx: usize, name: &str) -> bool {
         let upstream = self.upstreams[idx].clone();
         let query = Extension {
@@ -1968,13 +1955,14 @@ mod tests {
     /// run out before the sign ahead has been answered).
     #[tokio::test]
     async fn the_queue_timeout_says_how_long_and_how_many_were_ahead() {
-        // Three hung signs, each 200 ms to its answer, queue cap 300 ms: the
-        // third (two ahead) is out of patience before its turn comes (the
-        // first two take 400 ms between them).
+        // Three hung signs, each 500 ms to its answer, queue cap 600 ms (the
+        // cap never goes below one sign wait): the third (two ahead) is out of
+        // patience at about 660 ms, well before its turn (the first two take
+        // 1000 ms between them): a margin of about 340 ms on a slow host.
         let stub = StubUpstream::new(vec![upstream_identity(0xDA, "cap-key")]).hanging_sign();
         let path = spawn_stub("sign-cap", stub);
-        let pool = one_upstream_pool(path, Duration::from_millis(200))
-            .with_max_queue_wait(Duration::from_millis(300));
+        let pool = one_upstream_pool(path, Duration::from_millis(500))
+            .with_max_queue_wait(Duration::from_millis(600));
         pool.list_identities().await;
         let mut signs = Vec::new();
         for owner in 1..=3u64 {
@@ -1991,7 +1979,7 @@ mod tests {
         assert!(errs[0].contains("sign request timed out"), "{}", errs[0]);
         assert!(
             errs[2].contains(
-                "waited 0.3 s in the queue for the card's machine (2 sign(s) were ahead)"
+                "waited 0.6 s in the queue for the card's machine (2 sign(s) were ahead)"
             ),
             "{}",
             errs[2]

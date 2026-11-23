@@ -260,7 +260,8 @@ impl PiggyAgent {
     }
 
     /// Watch this connection's socket (a duplicate of its descriptor) so a
-    /// relayed sign waiting on a person stops when the client hangs up.
+    /// relayed sign still QUEUED at the front gives its place up when the
+    /// client hangs up (one already sent keeps its turn).
     pub fn with_client_socket(mut self, socket: &tokio::net::UnixStream) -> Self {
         use std::os::fd::AsFd;
         self.client = socket.as_fd().try_clone_to_owned().ok().map(Arc::new);
@@ -351,15 +352,17 @@ impl PiggyAgent {
         &self,
         op: &str,
         guid: &Guid,
+        slot_id: u8,
         how: &PinPrompt,
     ) -> Result<AcquiredPin, AgentError> {
-        // piggy#177: the cache is per-card. A hit verified on THIS card is
+        // piggy#177: the cache is per-card; piggy#404: and per slot, under the
+        // slot's own rule. A hit verified on THIS card for THIS slot is
         // trusted (fresh: false); the `ssh-add -X` offer has not verified
         // anywhere yet, so it rides the fresh=true path — cached for this
         // card only after its on-card verify succeeds, and never re-offered
         // to a card that rejects it (`forget_pin` records the rejection).
-        let from_cache = |cache: &PinCache| {
-            cache.lookup(guid).map(|(pin, source)| AcquiredPin {
+        let from_cache = |cache: &mut PinCache| {
+            cache.lookup(guid, slot_id).map(|(pin, source)| AcquiredPin {
                 pin,
                 fresh: source == PinSource::Offered,
                 cacheable: true,
@@ -367,7 +370,7 @@ impl PiggyAgent {
             })
         };
         if !how.uncached {
-            if let Some(acq) = from_cache(&*self.pins.lock().await) {
+            if let Some(acq) = from_cache(&mut *self.pins.lock().await) {
                 return Ok(acq);
             }
         }
@@ -375,7 +378,7 @@ impl PiggyAgent {
         // have just prompted and cached one while we waited).
         let _prompt_guard = self.prompt_lock.lock().await;
         if !how.uncached {
-            if let Some(acq) = from_cache(&*self.pins.lock().await) {
+            if let Some(acq) = from_cache(&mut *self.pins.lock().await) {
                 return Ok(acq);
             }
         }
@@ -413,12 +416,12 @@ impl PiggyAgent {
     /// Cache a freshly-prompted (or freshly-promoted `ssh-add -X`) PIN for
     /// `guid` after its on-card verify succeeded. A CA slot's PIN is never
     /// cached.
-    async fn cache_pin(&self, guid: &Guid, acquired: &AcquiredPin) {
+    async fn cache_pin(&self, guid: &Guid, slot_id: u8, acquired: &AcquiredPin) {
         if acquired.fresh && acquired.cacheable {
             self.pins
                 .lock()
                 .await
-                .cache_verified(guid, acquired.pin.as_str());
+                .cache_verified(guid, slot_id, acquired.pin.as_str());
         }
     }
 
@@ -482,7 +485,7 @@ impl PiggyAgent {
         let mut attempt = 0u32;
         loop {
             let acquired = if needs_pin {
-                Some(self.ensure_pin(op, guid, how).await?)
+                Some(self.ensure_pin(op, guid, slot_id, how).await?)
             } else {
                 None
             };
@@ -519,13 +522,14 @@ impl PiggyAgent {
                     continue;
                 }
                 match session.verify_pin(&acq.pin) {
-                    Ok(()) => self.cache_pin(guid, acq).await,
+                    Ok(()) => self.cache_pin(guid, slot_id, acq).await,
                     Err(PivError::PinIncorrect { .. }) if attempt < PIN_RETRY_LIMIT => {
                         attempt += 1;
-                        // An uncached prompt never used the cache: a wrong
-                        // PIN typed for a CA slot says nothing about the
-                        // PIN cached for the card's other slots.
-                        if !how.uncached {
+                        // Only a PIN that came out of the cache (or the
+                        // `ssh-add -X` offer) is stale: a wrong PIN just typed
+                        // for this slot says nothing about what is cached
+                        // for the card's other slots.
+                        if !how.uncached && (!acq.fresh || acq.offered) {
                             self.forget_pin(guid).await;
                         }
                         continue;
@@ -1021,6 +1025,7 @@ impl PiggyAgent {
                     service: self.service_name.clone(),
                     event_driven: self.event_driven,
                     holder: self.holder.is_some(),
+                    pin_cache: self.pins.lock().await.describe_policy(),
                 };
                 let json = serde_json::to_vec(&mode)
                     .map_err(|e| AgentError::Other(format!("agent-mode: {e}").into()))?;
@@ -1587,7 +1592,10 @@ impl PiggyAgent {
             Err(e) => return undo(format!("encode the minted key: {e}")).await,
         };
 
-        self.pins.lock().await.cache_verified(&card.guid, &pin);
+        self.pins
+            .lock()
+            .await
+            .cache_verified_unlimited(&card.guid, holder::MINTED_SLOT, &pin);
         self.keys.lock().await.push(CachedKey {
             guid: card.guid.clone(),
             reader_name: reader.clone(),
@@ -3082,8 +3090,9 @@ mod tests {
 
     /// Fifth read, M1: a client that hangs up while its sign is still QUEUED
     /// gives its place up; one whose request is already at the card's machine
-    /// keeps its turn, so abandoned requests cannot stack up there faster than
-    /// they are answered.
+    /// keeps its turn until the answer or the sign wait, so abandoned requests
+    /// reach it at most one per sign wait per upstream.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_hangup_frees_a_queued_sign_but_not_one_already_sent() {
         let stub = upstream_stub::StubUpstream::new(vec![upstream_stub::upstream_identity(
@@ -3466,6 +3475,7 @@ mod tests {
                 service: None,
                 event_driven: true,
                 holder: false,
+                pin_cache: super::super::pin_policy::PinCachePolicy::compiled_in().describe(),
             }
         );
 
@@ -3490,6 +3500,7 @@ mod tests {
                 service: Some("piggy-agent-proxy.service".into()),
                 event_driven: false,
                 holder: false,
+                pin_cache: super::super::pin_policy::PinCachePolicy::compiled_in().describe(),
             }
         );
     }
@@ -4420,7 +4431,7 @@ mod tests {
             .pin_handle()
             .lock()
             .await
-            .cache_verified(&sample_guid(), "verified");
+            .cache_verified(&sample_guid(), 0x9A, "verified");
         agent.lock("ignored-by-impl".into()).await.unwrap();
         assert!(!agent.pin_handle().lock().await.has_any());
     }
@@ -4475,10 +4486,14 @@ mod tests {
         handle
             .lock()
             .await
-            .cache_verified(&sample_guid(), "via-handle");
+            .cache_verified(&sample_guid(), 0x9A, "via-handle");
         let handle2 = agent.pin_handle();
         assert_eq!(
-            handle2.lock().await.verified_for(&sample_guid()).as_deref(),
+            handle2
+                .lock()
+                .await
+                .verified_for(&sample_guid(), 0x9A)
+                .as_deref(),
             Some("via-handle")
         );
     }
@@ -4497,7 +4512,7 @@ mod tests {
         // ssh-add -X: both cards are offered the PIN, as fresh.
         agent.pin_handle().lock().await.offer("offer-pin");
         let acq_a = agent
-            .ensure_pin("test", &card_a, &PinPrompt::default())
+            .ensure_pin("test", &card_a, 0x9A, &PinPrompt::default())
             .await
             .unwrap();
         assert!(acq_a.fresh, "offer must ride the cache-after-verify path");
@@ -4505,9 +4520,9 @@ mod tests {
 
         // Card A verifies it: promoted to A's verified PIN; subsequent
         // lookups are trusted (not fresh).
-        agent.cache_pin(&card_a, &acq_a).await;
+        agent.cache_pin(&card_a, 0x9A, &acq_a).await;
         let again_a = agent
-            .ensure_pin("test", &card_a, &PinPrompt::default())
+            .ensure_pin("test", &card_a, 0x9A, &PinPrompt::default())
             .await
             .unwrap();
         assert!(!again_a.fresh, "verified PIN must not be re-cached");
@@ -4515,7 +4530,12 @@ mod tests {
         // Card B rejects the offer: it is not offered again to B…
         agent.forget_pin(&card_b).await;
         assert!(
-            agent.pin_handle().lock().await.lookup(&card_b).is_none(),
+            agent
+                .pin_handle()
+                .lock()
+                .await
+                .lookup(&card_b, 0x9A)
+                .is_none(),
             "rejected offer re-offered to the same card"
         );
         // …while A's verified PIN is untouched (the whole point of #177).
@@ -4524,7 +4544,7 @@ mod tests {
                 .pin_handle()
                 .lock()
                 .await
-                .verified_for(&card_a)
+                .verified_for(&card_a, 0x9A)
                 .as_deref(),
             Some("offer-pin")
         );

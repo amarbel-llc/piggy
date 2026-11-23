@@ -40,5 +40,13 @@ agent-ca-key-is-signer	piggy	crates/piggy/src/operator_act.rs	if tbs.ca_key_blob
 agent-ssh-cert-on-other-slots	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::ssh_cert::looks_like_ssh_certificate(data) {	if false {
 agent-x509-slot-refuses-tbs	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::x509_profile::looks_like_tbs_certificate(data) {	if false {
 agent-x509-slot-refuses-other-bytes	piggy	crates/piggy/src/operator_act.rs	Err(format!(<NL>                "refusing to sign with the X.509 certificate authority	if true {<NL>                return Ok(SlotData::Ordinary);<NL>            }<NL>            Err(format!(<NL>                "refusing to sign with the X.509 certificate authority
+pins-keyed-by-slot	piggy	crates/piggy/src/cmd/agent/pins.rs	let key = (guid.clone(), slot);<NL>        if let Some(entry) = self.verified.get_mut(&key) {	let key = (guid.clone(), 0x9A);<NL>        if let Some(entry) = self.verified.get_mut(&key) {
+pins-idle-expiry	piggy	crates/piggy/src/cmd/agent/pins.rs	.is_some_and(|idle| now.saturating_duration_since(self.last_used) >= idle)	.is_some_and(|_| false)
+pins-cap-expiry	piggy	crates/piggy/src/cmd/agent/pins.rs	.is_some_and(|cap| now.saturating_duration_since(self.cached_at) >= cap)	.is_some_and(|_| false)
+pins-idle-counts-from-last-use	piggy	crates/piggy/src/cmd/agent/pins.rs	entry.last_used = now;	let _ = now;
+pins-never-slot-kept	piggy	crates/piggy/src/cmd/agent/pins.rs	CacheRule::Never => return,	CacheRule::Never => (None, None),
+pins-offer-to-never-slot	piggy	crates/piggy/src/cmd/agent/pins.rs	if self.policy.rule(slot) == CacheRule::Never {<NL>            return None;	if false {<NL>            return None;
+pins-forget-every-slot	piggy	crates/piggy/src/cmd/agent/pins.rs	self.verified.retain(|(g, _), _| g != guid);<NL>        self.offered_rejected_by.insert(guid.clone());	self.verified.retain(|(g, s), _| !(g == guid && *s == 0x9A));<NL>        self.offered_rejected_by.insert(guid.clone());
+policy-authority-never	piggy	crates/piggy/src/cmd/agent/pin_policy.rs	if is_authority_slot(slot) || piggy_piv::slot::is_ca_slot(slot) {	if false {
 tool-sign-refuses-83	piggy	crates/piggy/src/operator_act.rs	if piggy_piv::slot::ca_kind(slot_id) == Some(piggy_piv::slot::CaKind::SshCertificate) {	if false {
 askpass-ack-checked	piggy	crates/piggy/src/card_oracle.rs	let acknowledged = ack == Some(format!("piggy-askpass-ack {nonce}").as_str()) && rest_empty;	let acknowledged = true;

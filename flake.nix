@@ -382,14 +382,28 @@
             doCheck = false;
           };
 
+          # `pinCachePolicy` (piggy#404): a file shaped like
+          # crates/piggy/src/cmd/agent/pin_cache_table.rs, compiled in INSTEAD
+          # of the checked-in table, so a fleet can build a piggy with other
+          # PIN-caching numbers without patching source (see piggy-agent(1),
+          # PIN MEMORY). The table is a build input and nothing a running host
+          # can change; a table that makes slot 82 or 83 cacheable fails the
+          # build (the const check in pin_policy.rs).
           mkPiggyRs =
             {
               coverage ? false,
+              pinCachePolicy ? null,
             }:
             pkgs.rustPlatform.buildRustPackage (
               {
                 pname = if coverage then "piggy-rs-cov" else "piggy-rs";
                 version = "0.1.0";
+
+                postPatch = pkgs.lib.optionalString (pinCachePolicy != null) ''
+                  cp ${pinCachePolicy} crates/piggy/src/cmd/agent/pin_cache_table.rs
+                '';
+
+                passthru.withPinCachePolicy = file: mkPiggyRs { pinCachePolicy = file; };
 
                 src = pkgs.lib.cleanSourceWith {
                   src = ./.;

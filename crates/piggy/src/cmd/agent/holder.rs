@@ -670,8 +670,8 @@ mod tests {
         holder.record(b.clone()).await;
         let keys = Arc::new(Mutex::new(vec![cached(&a), cached(&b)]));
         let pins = Arc::new(Mutex::new(PinCache::new()));
-        pins.lock().await.cache_verified(&a.guid, "aaaaaaaa");
-        pins.lock().await.cache_verified(&b.guid, "bbbbbbbb");
+        pins.lock().await.cache_verified(&a.guid, MINTED_SLOT, "aaaaaaaa");
+        pins.lock().await.cache_verified(&b.guid, MINTED_SLOT, "bbbbbbbb");
 
         assert!(sweep_bindings(&holder, &keys, &pins).await.is_empty());
 
@@ -690,10 +690,10 @@ mod tests {
             .collect();
         assert_eq!(served, vec![b.key.clone()]);
         assert!(
-            pins.lock().await.lookup(&a.guid).is_none(),
+            pins.lock().await.lookup(&a.guid, MINTED_SLOT).is_none(),
             "the PIN went with the card"
         );
-        assert!(pins.lock().await.lookup(&b.guid).is_some());
+        assert!(pins.lock().await.lookup(&b.guid, MINTED_SLOT).is_some());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

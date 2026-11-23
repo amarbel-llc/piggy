@@ -1556,6 +1556,20 @@ fn push_presence_point(out: &mut Vec<CheckResult>, probes: &Probes) {
             status: Status::Pass,
             diags: vec![],
         });
+        // piggy#404: the PIN cache table COMPILED INTO the agent, per slot.
+        // Informational: it is the binary's, not this host's configuration.
+        if !m.pin_cache.is_empty() {
+            out.push(CheckResult {
+                name: "agent PIN cache (compiled in)".into(),
+                status: Status::Pass,
+                diags: m
+                    .pin_cache
+                    .iter()
+                    .filter_map(|line| line.split_once(": "))
+                    .map(|(slot, rule)| (format!("slot {slot}"), rule.to_string()))
+                    .collect(),
+            });
+        }
     }
 }
 
@@ -2054,6 +2068,7 @@ mod tests {
                 service: None,
                 event_driven,
                 holder: false,
+                pin_cache: vec![],
             }))
         };
         let presence = |probes: &Probes| {
@@ -2145,6 +2160,7 @@ mod tests {
             service: None,
             event_driven: false,
             holder: false,
+            pin_cache: vec![],
         }));
         probes.pcsc = PcscProbe::Error("PC/SC unavailable".into());
         probes.cards = None;
@@ -2215,6 +2231,7 @@ mod tests {
             service: None,
             event_driven: false,
             holder: false,
+            pin_cache: vec![],
         }));
         let mut posh = upstream("posh", false, 0);
         posh.since = Some(1_790_000_000);
@@ -2271,6 +2288,7 @@ mod tests {
             service: None,
             event_driven: false,
             holder: false,
+            pin_cache: vec![],
         }));
         let results = evaluate(&probes);
         assert!(matches!(results[5].status, Status::Fail));
@@ -2291,6 +2309,7 @@ mod tests {
                 service: s.map(str::to_string),
                 event_driven: false,
                 holder: false,
+                pin_cache: vec![],
             }))
         };
         assert_eq!(

@@ -473,13 +473,13 @@ mod tests {
     fn pin_cache_with(entries: &[(&Guid, &str)]) -> Arc<Mutex<PinCache>> {
         let mut cache = PinCache::new();
         for (g, p) in entries {
-            cache.cache_verified(g, p);
+            cache.cache_verified(g, 0x9A, p);
         }
         Arc::new(Mutex::new(cache))
     }
 
     async fn verified(pin: &Arc<Mutex<PinCache>>, guid: &Guid) -> Option<String> {
-        pin.lock().await.verified_for(guid)
+        pin.lock().await.verified_for(guid, 0x9A)
     }
 
     async fn served_guids(keys: &Arc<Mutex<Vec<CachedKey>>>) -> Vec<String> {

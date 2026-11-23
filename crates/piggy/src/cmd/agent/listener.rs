@@ -100,6 +100,16 @@ const CLIENT_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 /// unread does not hide a hangup either (the peek this replaces did both
 /// wrong). On macOS and the BSDs I have not verified when a Unix socket
 /// reports POLLHUP (THEORY: the same, for a full close); no test runs there.
+#[cfg(not(target_os = "linux"))]
+pub async fn peer_closed(_fd: std::sync::Arc<std::os::fd::OwnedFd>) {
+    // Not verified off Linux: poll(2) with no event asked may report nothing
+    // for a closed Unix socket there, so no hangup is seen and a queued sign
+    // waits out its queue timeout (it fails safe: nothing is signed).
+    std::future::pending::<()>().await;
+}
+
+/// See the doc comment above ([`peer_closed`] on Linux).
+#[cfg(target_os = "linux")]
 pub async fn peer_closed(fd: std::sync::Arc<std::os::fd::OwnedFd>) {
     use std::os::fd::AsRawFd;
     loop {
@@ -135,6 +145,7 @@ fn accept_error_is_transient(e: &io::Error) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_hung_up_client_is_noticed_and_a_waiting_one_is_not() {
         use std::os::fd::AsFd;
@@ -150,22 +161,27 @@ mod tests {
             still_open.is_err(),
             "a client that is merely waiting was reported gone"
         );
-        // A client that sent its request and half-closed (socat, `nc -N`)
-        // still waits for the answer: not a hangup.
-        let theirs = theirs.into_std().unwrap();
-        std::io::Write::write_all(&mut &theirs, b"x").unwrap();
-        theirs.shutdown(std::net::Shutdown::Write).unwrap();
+        // A client that half-closed (socat, `nc -N`) and still waits for the
+        // answer is not a hangup. A pair with NOTHING unread, so the read side
+        // reports end-of-file and the old EOF test would have said "gone".
+        let (half_ours, half_theirs) = tokio::net::UnixStream::pair().unwrap();
+        let half_watched = std::sync::Arc::new(half_ours.as_fd().try_clone_to_owned().unwrap());
+        let half_theirs = half_theirs.into_std().unwrap();
+        half_theirs.shutdown(std::net::Shutdown::Write).unwrap();
         let half_closed = tokio::time::timeout(
             std::time::Duration::from_millis(600),
-            peer_closed(watched.clone()),
+            peer_closed(half_watched),
         )
         .await;
         assert!(
             half_closed.is_err(),
             "a half-closed client that still waits was taken for a hangup"
         );
+        drop(half_theirs);
         // The client goes away with its request byte still unread: noticed
         // (an unread byte used to hide the hangup), and nothing was consumed.
+        let theirs = theirs.into_std().unwrap();
+        std::io::Write::write_all(&mut &theirs, b"x").unwrap();
         drop(theirs);
         tokio::time::timeout(
             std::time::Duration::from_secs(2),

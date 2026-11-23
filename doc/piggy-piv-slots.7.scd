@@ -205,7 +205,10 @@ What the kinds refuse:
 - Every other slot refuses an OpenSSH certificate.
 
 The PIN of slots 82 and 83 is asked every time and never cached by the
-agent; the PIN of every other slot, 9C and 9D included, is cached as before.
+agent. The other slots' PIN is cached per slot under a table compiled into
+the agent (9A 12 hours idle, 9C 60 seconds idle, 9D 10 minutes idle with a
+1 hour cap; see *piggy-agent*(1), PIN MEMORY): a PIN typed for one slot does
+not serve another.
 A certificate is signed behind a PIN dialog of kind *ssh-certificate* (see
 *piggy-agent*(1), SSH CERTIFICATE AUTHORITY) that shows the certificate's key
 id, principals, certified key, CA key, validity, critical options and
