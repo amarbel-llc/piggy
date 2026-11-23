@@ -102,6 +102,9 @@ attempt, whether that attempt runs or is refused.
 	oom_score_adj, I/O priority) to the defaults above, so a caller cannot
 	make it run out of descriptors, memory or file size, or starve it while
 	it holds a lock, and so cause an error; the action inherits that state.
+	Every reset must succeed as root; the client verbs (*nonce*, *message*,
+	*response*), run as the caller, skip any reset the caller lacks the
+	privilege for (going back to nice 0 from a positive nice, say).
 	It ignores SIGXFSZ (a write
 	past the file size limit fails instead); and ignores SIGTSTP, SIGTTIN
 	and SIGTTOU, so a caller cannot stop it through sudo's signal
@@ -328,6 +331,12 @@ path are placeholders):
 Defaults!/run/current-system/sw/bin/hogtie env_reset, use_pty
 %agents ALL=(root) NOPASSWD: /run/current-system/sw/bin/hogtie exec *
 ```
+
+sudo matches the command by the path the caller gives it, not by what a
+symlink points to: a rule naming the binary's store path is matched only
+when the caller runs that full path, and *sudo hogtie* found through
+PATH (the profile's symlink) asks for a password (seen in the circus VM
+test). Name the path callers use.
 
 *exec \** admits nothing else: *exec* takes only the response, the action
 and its arguments, no flag, and its paths are compiled in. *env_reset* is

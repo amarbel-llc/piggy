@@ -8,7 +8,7 @@
 //!
 //! As root (production) every one of these must succeed or the exec fails.
 //! Not as root (the test harness only), a reset that needs privilege the
-//! test lacks (EPERM) is skipped, and a limit the test cannot raise to its
+//! test lacks (EPERM, EACCES) is skipped, and a limit the test cannot raise to its
 //! value gets the highest the test may give it.
 //!
 //! Left as inherited, deliberately: the controlling terminal, the session
@@ -47,13 +47,15 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Run `f`; an error fails, except EPERM when not `strict`.
+/// Run `f`; an error fails, except, when not `strict`, a lack of privilege:
+/// EPERM, or EACCES (what setpriority says when RLIMIT_NICE forbids a
+/// niced caller going back to nice 0).
 fn required(strict: bool, ok: bool) -> io::Result<()> {
     if ok {
         return Ok(());
     }
     let e = io::Error::last_os_error();
-    if !strict && e.raw_os_error() == Some(libc::EPERM) {
+    if !strict && matches!(e.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
         return Ok(());
     }
     Err(e)

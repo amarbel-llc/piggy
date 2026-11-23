@@ -249,6 +249,27 @@ fn a_flood_of_refusals_is_counted_not_logged() {
     assert!(log[20].contains("counted, not logged"), "{}", log[20]);
 }
 
+#[test]
+fn a_niced_caller_can_still_ask_for_a_nonce() {
+    // Found under real sudo (circus VM run): at nice 19, resetting the
+    // client's own nice to 0 is EACCES, and the client verbs failed.
+    use std::os::unix::process::CommandExt as _;
+    let h = Host::new();
+    let mut cmd = Command::new(HOGTIE);
+    cmd.arg("nonce").env("HOGTIE_TEST_ROOT", h.root.path());
+    // SAFETY: setpriority in the child before exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpriority(libc::PRIO_PROCESS, 0, 19) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let out = cmd.output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
 /// `hogtie exec` with `pre` run in the child before exec, killed after 10 s.
 fn exec_with(h: &Host, args: &[&str], pre: fn() -> std::io::Result<()>) -> Output {
     use std::os::unix::process::CommandExt as _;
