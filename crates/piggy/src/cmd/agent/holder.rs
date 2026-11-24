@@ -394,7 +394,15 @@ struct HolderState {
     /// the cap is checked against.
     live: usize,
     next_card: u64,
+    /// Readers a mint gave up on (its `create` failed or timed out) whose card
+    /// fibby may still make, late: each is tried again by the watcher for
+    /// [`SUSPECT_SWEEPS`] passes, or until a destroy finds the card. Reader
+    /// names never repeat, so a card that shows up under one is an orphan.
+    suspects: Vec<(String, u32)>,
 }
+
+/// How many watcher passes a reader whose `create` failed stays suspect.
+pub const SUSPECT_SWEEPS: u32 = 15;
 
 /// The holder: configuration, the live bindings, and the card store.
 pub struct Holder {
@@ -412,50 +420,54 @@ pub struct Holder {
 /// A claim that this agent is the only holder serving one fibby. Dropping it
 /// (the agent ending) frees the claim.
 pub struct FibbyLock {
-    _listener: std::os::unix::net::UnixListener,
+    _directory: std::fs::File,
 }
 
-/// Claim fibby's control socket for this agent. A fibby belongs to ONE holder
-/// agent: at start an agent destroys the `piggy-holder N` cards it did not
-/// mint, so a second agent on the same fibby would destroy the first's live
-/// cards (and two agents would count reader names from 1 each). The claim is a
-/// bound name in the abstract unix namespace derived from the control
-/// socket's path, which the kernel frees when the agent ends, however it
-/// ends, and which needs no write access to the (fibby-owned) socket
-/// directory. A second claim on the same path is refused: "never share a
-/// fibby" is a refusal, not a convention. Linux only; elsewhere no claim.
-pub fn lock_fibby(ctl: &std::path::Path) -> Result<Option<FibbyLock>, String> {
-    #[cfg(target_os = "linux")]
-    {
-        use sha2::{Digest, Sha256};
-        use std::os::linux::net::SocketAddrExt;
-        let canonical = std::fs::canonicalize(ctl).unwrap_or_else(|_| ctl.to_path_buf());
-        let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
-        let name = format!(
-            "piggy-holder-fibby:{}",
-            digest
-                .iter()
-                .take(16)
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        );
-        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())
-            .map_err(|e| format!("the claim on fibby: {e}"))?;
-        match std::os::unix::net::UnixListener::bind_addr(&addr) {
-            Ok(listener) => Ok(Some(FibbyLock {
-                _listener: listener,
-            })),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(format!(
-                "another holder agent already serves the fibby at {}: never share a fibby (a second agent would destroy the first's cards at start)",
-                ctl.display()
-            )),
-            Err(e) => Err(format!("the claim on fibby {}: {e}", ctl.display())),
-        }
+/// Claim fibby for this agent: an exclusive `flock` on fibby's control socket
+/// DIRECTORY. A fibby belongs to ONE holder agent: at start an agent destroys
+/// the `piggy-holder N` cards it did not mint, so a second agent on the same
+/// fibby would destroy the first's live cards (and two agents would count
+/// reader names from 1 each). The lock is keyed on the directory's inode, not
+/// on a path string (two views of one directory contend; two sessions' own
+/// directories, whatever their names inside their views, do not), needs only
+/// read access to the directory, is freed by the kernel when the agent ends
+/// however it ends, and can be contended only by a process that has the
+/// directory in view, so no one else can squat on it (an abstract socket
+/// name, which every process of the network namespace can bind, could). A
+/// directory that cannot be opened is an error, not "no claim". "Never share
+/// a fibby" is a refusal, not a convention.
+pub fn lock_fibby(ctl: &std::path::Path) -> Result<FibbyLock, String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = match ctl.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(dir)
+        .map_err(|e| {
+            format!(
+                "the claim on fibby: cannot open its directory {}: {e}",
+                dir.display()
+            )
+        })?;
+    // SAFETY: flock takes a descriptor this function owns and a flag word.
+    let rc = unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(FibbyLock {
+            _directory: directory,
+        });
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = ctl;
-        Ok(None)
+    let e = std::io::Error::last_os_error();
+    if e.kind() == std::io::ErrorKind::WouldBlock {
+        Err(format!(
+            "another holder agent already serves the fibby in {}: never share a fibby (a second agent would destroy the first's cards at start)",
+            dir.display()
+        ))
+    } else {
+        Err(format!("the claim on fibby: flock {}: {e}", dir.display()))
     }
 }
 
@@ -471,9 +483,37 @@ impl Holder {
     }
 
     /// This holder with the claim on its fibby, kept for its lifetime.
-    pub fn with_fibby_lock(mut self, lock: Option<FibbyLock>) -> Self {
-        self.fibby_lock = lock;
+    pub fn with_fibby_lock(mut self, lock: FibbyLock) -> Self {
+        self.fibby_lock = Some(lock);
         self
+    }
+
+    /// A mint that gave up on `reader` without being sure no card exists
+    /// (the destroy it tried failed, or said "no such reader" before a slow
+    /// fibby had made the card): keep trying for a while, from the watcher.
+    pub async fn add_suspect(&self, reader: &str) {
+        self.state
+            .lock()
+            .await
+            .suspects
+            .push((reader.to_string(), SUSPECT_SWEEPS));
+    }
+
+    /// One watcher pass over the suspect readers: destroy each; a destroy that
+    /// succeeds ends the suspicion, any other answer counts one pass off.
+    pub async fn retry_suspects(&self) {
+        let suspects = std::mem::take(&mut self.state.lock().await.suspects);
+        let mut keep = Vec::new();
+        for (reader, left) in suspects {
+            match self.control.destroy(&reader).await {
+                Ok(()) => {
+                    tracing::warn!(%reader, "holder: destroyed a card that appeared after its create had failed");
+                }
+                Err(_) if left > 1 => keep.push((reader, left - 1)),
+                Err(_) => {}
+            }
+        }
+        self.state.lock().await.suspects.extend(keep);
     }
 
     /// Mark `key`'s binding retiring (see [`Binding::retiring`]). `false`
@@ -848,6 +888,7 @@ pub async fn sweep_bindings(
     keys: &Arc<Mutex<Vec<CachedKey>>>,
     pins: &Arc<Mutex<PinCache>>,
 ) -> Vec<String> {
+    holder.retry_suspects().await;
     let mut gone = Vec::new();
     for binding in holder.bindings().await {
         let why = if !holder.cgroup_exists(&binding) {
@@ -898,6 +939,9 @@ mod tests {
         readers: Vec<String>,
         /// `readers` fails (fibby cannot be listed).
         list_fails: bool,
+        /// The first this-many `destroy` calls answer "no such reader" (a
+        /// slow fibby that has not made the card yet), then one succeeds.
+        late_after: usize,
     }
 
     #[ssh_agent_lib::async_trait]
@@ -921,7 +965,9 @@ mod tests {
             // socket round trip does: a test of two racing teardowns sees
             // the race, not a destroy that finishes before the other starts.
             tokio::task::yield_now().await;
-            if self.already_gone {
+            if self.late_after > 0 && self.calls.lock().unwrap().len() <= self.late_after {
+                Err(format!("no such reader: {reader}"))
+            } else if self.already_gone {
                 // fibby's own words for a card it does not have.
                 Err(format!("no such reader: {reader}"))
             } else if self.fail_destroy {
@@ -1486,19 +1532,83 @@ mod tests {
     // Follow-up (4th read, 2): a fibby belongs to one holder agent; a second
     // claim on the same control socket is a refusal, not a convention.
     #[test]
-    #[cfg(target_os = "linux")]
     fn a_second_holder_on_one_fibby_is_refused_and_a_released_claim_is_free_again() {
-        let ctl = std::path::PathBuf::from(format!("/tmp/pgfibby{}/ctl.sock", std::process::id()));
-        let other =
-            std::path::PathBuf::from(format!("/tmp/pgfibby{}/other.sock", std::process::id()));
-        let first = lock_fibby(&ctl).unwrap().expect("a claim on Linux");
-        let err = lock_fibby(&ctl).err().expect("a second claim is refused");
-        assert!(err.contains("never share a fibby"), "{err}");
-        // Another fibby is another claim.
-        let _second_fibby = lock_fibby(&other).unwrap().unwrap();
+        let root = std::path::PathBuf::from(format!("/tmp/pgfibby{}", std::process::id()));
+        let dir_a = root.join("a");
+        let dir_b = root.join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let first = lock_fibby(&dir_a.join("ctl.sock")).unwrap();
+        // The same DIRECTORY is the same fibby, whatever the socket's name or
+        // the spelling of the path to it (the claim is on the inode).
+        for spelled in [
+            dir_a.join("ctl.sock"),
+            dir_a.join("other.sock"),
+            dir_a.join("../a/ctl.sock"),
+        ] {
+            let err = lock_fibby(&spelled)
+                .err()
+                .expect("a second claim is refused");
+            assert!(err.contains("never share a fibby"), "{spelled:?}: {err}");
+        }
+        // Another fibby (another directory) is another claim.
+        let _second_fibby = lock_fibby(&dir_b.join("ctl.sock")).unwrap();
         // The agent ending (the claim dropped) frees it.
         drop(first);
-        assert!(lock_fibby(&ctl).unwrap().is_some());
+        assert!(lock_fibby(&dir_a.join("ctl.sock")).is_ok());
+        // A directory that cannot be opened is an error, not "no claim".
+        let err = lock_fibby(&root.join("missing/ctl.sock")).err().unwrap();
+        assert!(err.contains("cannot open"), "{err}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // Follow-up review, 6: a mint that gave up on a reader (its create failed)
+    // may find the card appear late; the watcher keeps trying the destroy for
+    // a while, stops once it finds the card, and stops for good after
+    // SUSPECT_SWEEPS passes.
+    #[tokio::test]
+    async fn a_suspect_reader_is_retried_until_its_card_is_found_or_the_passes_run_out() {
+        let holder_over = |recorder: &Arc<Recorder>| {
+            Holder::new(
+                HolderConfig {
+                    scopes: HashMap::new(),
+                    cgroup_root: "/nonexistent".into(),
+                    poll_interval: Duration::from_millis(10),
+                    cap: CARD_CAP,
+                },
+                Box::new(Shared(recorder.clone())),
+            )
+        };
+        // The card appears after two "no such reader" answers.
+        let late = Arc::new(Recorder {
+            late_after: 2,
+            ..Recorder::default()
+        });
+        let holder = holder_over(&late);
+        holder.add_suspect("piggy-holder 5").await;
+        for _ in 0..6 {
+            holder.retry_suspects().await;
+        }
+        assert_eq!(
+            late.calls.lock().unwrap().len(),
+            3,
+            "two misses, then the destroy that found the card, then no more"
+        );
+        // A card that never appears: the passes run out.
+        let never = Arc::new(Recorder {
+            already_gone: true,
+            ..Recorder::default()
+        });
+        let holder = holder_over(&never);
+        holder.add_suspect("piggy-holder 6").await;
+        for _ in 0..(SUSPECT_SWEEPS + 5) {
+            holder.retry_suspects().await;
+        }
+        assert_eq!(
+            never.calls.lock().unwrap().len(),
+            SUSPECT_SWEEPS as usize,
+            "tried for SUSPECT_SWEEPS passes and no longer"
+        );
     }
 
     // Follow-up (4th read, 6): a listing that fails is an error, so a holder

@@ -374,6 +374,15 @@ pub fn run(full_argv: Vec<String>) -> i32 {
         return 0;
     }
 
+    // The claim on fibby (one holder per fibby), after `--info` above.
+    let holder = match holder.map(|h| claim_fibby(h, &cli)).transpose() {
+        Ok(holder) => holder,
+        Err(e) => {
+            eprintln!("piggy agent: {e}");
+            return 1;
+        }
+    };
+
     tracing::info!("Loaded {} keys from PIV tokens", cached_keys.len());
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -406,7 +415,7 @@ const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_se
 
 /// The holder, from the `--holder` flags (FDR 0006 phase (d)), or `None`
 /// without `--holder`. A malformed `--scope` is a startup error.
-fn build_holder(cli: &AgentArgs) -> Result<Option<std::sync::Arc<holder::Holder>>, String> {
+fn build_holder(cli: &AgentArgs) -> Result<Option<holder::Holder>, String> {
     if !cli.holder {
         return Ok(None);
     }
@@ -459,16 +468,51 @@ fn build_holder(cli: &AgentArgs) -> Result<Option<std::sync::Arc<holder::Holder>
         scopes = config.scopes.len(),
         "holder mode (FDR 0006 phase (d))"
     );
-    // One holder per fibby: claim it now, so a second agent on the same fibby
-    // is refused instead of destroying the first's cards at its start.
+    Ok(Some(holder::Holder::new(
+        config,
+        Box::new(holder::FibbyControl::new(ctl)),
+    )))
+}
+
+/// One holder per fibby: claim fibby's directory (a `flock`, held for the
+/// agent's life), so a second agent on the same fibby is refused instead of
+/// destroying the first's cards at its start. Taken after the `--info` early
+/// return (which serves nothing and must not hold a fibby) and before the
+/// first thing that touches fibby's cards.
+fn claim_fibby(
+    holder: holder::Holder,
+    cli: &AgentArgs,
+) -> Result<std::sync::Arc<holder::Holder>, String> {
+    let ctl = cli
+        .holder_fibby_ctl
+        .as_deref()
+        .ok_or("--holder needs --holder-fibby-ctl PATH")?;
     let claim = holder::lock_fibby(std::path::Path::new(ctl))?;
-    let holder = holder::Holder::new(config, Box::new(holder::FibbyControl::new(ctl)))
-        .with_fibby_lock(claim);
+    let holder = holder.with_fibby_lock(claim);
     tracing::debug!(
         claimed = holder.holds_fibby_lock(),
-        "holder: the claim on fibby's control socket"
+        "holder: the claim on fibby's directory"
     );
-    Ok(Some(std::sync::Arc::new(holder)))
+    Ok(std::sync::Arc::new(holder))
+}
+
+/// What a startup that could not list fibby's cards means: the cards of an
+/// earlier run could not be destroyed, so one that stays would be signable over
+/// fibby's PC/SC socket. For a holder whose socket is its boundary that is
+/// fatal; another holder (whose keys are bound to cgroups, and which has no
+/// binding for such a card, so serves it to no one) logs and goes on.
+fn orphans_outcome(
+    listed: Result<Vec<String>, String>,
+    socket_is_the_boundary: bool,
+) -> Result<(), String> {
+    match listed {
+        Ok(_) => Ok(()),
+        Err(e) if socket_is_the_boundary => Err(format!("holder: {e}")),
+        Err(e) => {
+            tracing::warn!("holder: {e}");
+            Ok(())
+        }
+    }
 }
 
 /// Resolves on SIGINT or SIGTERM (`systemctl stop`, launchd). Falls back
@@ -686,6 +730,15 @@ async fn run_async(
         .into());
     }
 
+    // Cards fibby holds from before this start have no binding, and nothing
+    // would ever retire them: destroy them now. Before the environment is
+    // printed and before the socket is bound, so a holder that cannot start
+    // (fibby cannot be listed, for one whose socket is its boundary) leaves no
+    // stale socket and has told its caller nothing.
+    if let Some(holder) = &holder {
+        orphans_outcome(holder.destroy_orphans().await, socket_is_the_boundary)?;
+    }
+
     if use_csh {
         println!("setenv SSH_AUTH_SOCK {};", socket_path);
         println!("setenv SSH_AGENT_PID {};", std::process::id());
@@ -735,17 +788,6 @@ async fn run_async(
     // card once its bound cgroup is gone; retire does the same on request.
     let agent = match holder {
         Some(holder) => {
-            // Cards fibby holds from before this start have no binding, and
-            // nothing would ever retire them: destroy them now. If fibby
-            // cannot even be listed, a holder whose socket is its boundary
-            // does not start (an orphan it cannot see would stay signable
-            // over fibby's PC/SC socket); another holder logs and goes on.
-            if let Err(e) = holder.destroy_orphans().await {
-                if holder.config().socket_is_the_boundary() {
-                    return Err(format!("holder: {e}").into());
-                }
-                tracing::warn!("holder: {e}");
-            }
             tokio::spawn(holder::watch_bindings(
                 holder.clone(),
                 agent.keys_handle(),
@@ -1067,6 +1109,17 @@ mod tests {
         let reclaimed = bind_reclaiming_stale(&path).expect("stale socket must be reclaimed");
         drop(reclaimed);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // Follow-up review, 9: a startup that cannot list fibby's cards is fatal for
+    // a holder whose socket is its boundary and only a log line for any other.
+    #[test]
+    fn a_failed_listing_is_fatal_only_for_a_holder_whose_socket_is_its_boundary() {
+        assert!(orphans_outcome(Ok(vec!["piggy-holder 1".into()]), true).is_ok());
+        assert!(orphans_outcome(Ok(Vec::new()), false).is_ok());
+        assert!(orphans_outcome(Err("could not list".into()), false).is_ok());
+        let err = orphans_outcome(Err("could not list".into()), true).unwrap_err();
+        assert!(err.contains("could not list"), "{err}");
     }
 
     // Round 3, L6: a regular file named by -a is not "a stale socket": connecting

@@ -480,6 +480,19 @@ retire* (piggy(1)) are the clients.
 	that holds this session's agent socket and no other session's) is the
 	launcher's, not piggy's.
 
+*One holder per fibby.*
+	A fibby belongs to one holder agent. At start the agent destroys every
+	_piggy-holder N_ card fibby holds that it did not mint (cards of an
+	earlier run: bindings are memory only, so nothing else would retire
+	them), so a second agent on the same fibby would destroy the first's live
+	cards. The agent takes an exclusive *flock* on the directory of
+	*--holder-fibby-ctl* (so that directory must be readable by the agent,
+	and be fibby's alone) and holds it for its life; a second agent on that
+	directory is refused ("never share a fibby"). With an *any* scope the
+	agent also refuses to start when fibby's cards cannot be listed; a cgroup
+	holder logs it and goes on. A mint whose card store failed or timed out
+	is destroyed again, and retried for a while, in case fibby was only slow.
+
 *Teardown.*
 	A card is destroyed when its scope retires it or when its bound
 	cgroup's directory disappears from under *--cgroup-root*, which the

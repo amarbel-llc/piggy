@@ -1619,9 +1619,15 @@ impl PiggyAgent {
             async move {
                 match holder.control().destroy(&reader).await {
                     Ok(()) => {}
-                    Err(e) if e.contains("no such reader") => {}
+                    // "No such reader" now may only mean a slow fibby has not
+                    // made the card yet (a `create` that timed out): so a
+                    // destroy that did not find it is retried by the watcher
+                    // for a while, like one that failed.
                     Err(e) => {
-                        tracing::warn!(reader = %reader, "holder: could not destroy a half-minted card: {e}");
+                        if !e.contains("no such reader") {
+                            tracing::warn!(reader = %reader, "holder: could not destroy a half-minted card: {e}");
+                        }
+                        holder.add_suspect(&reader).await;
                     }
                 }
                 holder.release_reservation().await;
@@ -1800,6 +1806,13 @@ impl PiggyAgent {
     /// is held: a request that queued behind the card (or behind another
     /// request's PIN prompt) completes after the key was marked retiring or
     /// its scope exited unless the check is made where the card is touched.
+    ///
+    /// Tested where it can matter today (sign, attest). It is also called at
+    /// the operator-act and CA-attestation lock sites as DEFENCE IN DEPTH, not
+    /// because a holder key can reach them now: a minted key is slot 9A, which
+    /// is neither a CA slot nor an operator-act slot, so those paths refuse it
+    /// earlier. The call is there so that a future slot rule cannot make a
+    /// card path skip the binding.
     async fn check_card_binding(&self, guid: &Guid) -> Result<(), AgentError> {
         let Some(holder) = &self.holder else {
             return Ok(());
@@ -4467,6 +4480,15 @@ mod tests {
             ]
         );
         assert_eq!(holder.live().await, 0, "the slot is free again");
+        // The destroy found no such card (fibby may only be slow): the reader
+        // is a suspect, and the watcher tries it again.
+        holder.retry_suspects().await;
+        assert_eq!(
+            calls.lock().unwrap().last().unwrap(),
+            "destroy piggy-holder 1",
+            "the watcher did not retry the destroy"
+        );
+        assert_eq!(calls.lock().unwrap().len(), 3);
     }
 
     // Round 3, N1: a card the reconcile loop re-adopts with an unreadable PIN
