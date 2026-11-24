@@ -242,6 +242,89 @@ function the_sixteen_card_cap_is_its_own_refusal_and_a_retire_frees_a_slot { # @
   [[ $status -eq 0 ]] || { echo "mint after a retire failed ($status): $output" >&2; _dump_logs; return 1; }
 }
 
+# Shape A (a holder per session): `--scope session=any` binds a key to no
+# cgroup; the socket, in a private directory, is the whole boundary.
+
+# The agent over a cgroup root with NO directory in it: a key bound to a
+# cgroup would be torn down at the first sweep, an `any` key must not be.
+_spawn_any_agent() {
+  mkdir -p "$WORKDIR/emptyroot"
+  PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent --holder \
+    --holder-fibby-ctl "$FIBBY_CTL" \
+    --scope session=any \
+    --cgroup-root "$WORKDIR/emptyroot" --scope-poll-interval 1 \
+    -a "$AGENT_SOCK" "$@" >"$AGENT_LOG" 2>&1 3>&- &
+  AGENT_PID=$!
+  local _
+  for _ in $(seq 1 50); do
+    [[ -S $AGENT_SOCK ]] && { export SSH_AUTH_SOCK="$AGENT_SOCK"; return 0; }
+    sleep 0.1
+  done
+  echo "agent socket never appeared at $AGENT_SOCK" >&2
+  cat "$AGENT_LOG" "$FIBBY_LOG" >&2 || true
+  return 1
+}
+
+function an_any_scope_key_signs_and_is_never_torn_down_for_want_of_a_cgroup { # @test
+  _spawn_holder_fibby
+  _spawn_any_agent
+  run "$PIGGY_BIN" holder mint --scope session
+  [[ $status -eq 0 ]] || { echo "mint under an any scope failed ($status): $output" >&2; _dump_logs; return 1; }
+  printf '%s\n' "$output" >"$WORKDIR/id.pub"
+  local ktype kdata _c
+  read -r ktype kdata _c <"$WORKDIR/id.pub"
+
+  # Several sweep intervals pass over a cgroup root that holds nothing.
+  sleep 3.5
+  run ssh-add -L
+  [[ $output == *"$kdata"* ]] || { echo "the any key was dropped: $output" >&2; _dump_logs; return 1; }
+  run "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" list
+  [[ $output == *"piggy-holder 1"* ]] || { echo "the card was destroyed: $output" >&2; _dump_logs; return 1; }
+  if grep -q "its scope exited" "$AGENT_LOG"; then
+    echo "the agent tore an any key down for a vanished scope" >&2; _dump_logs; return 1
+  fi
+
+  printf 'piggy-test@holder %s %s\n' "$ktype" "$kdata" >"$WORKDIR/allowed_signers"
+  echo "piggy-test: signed under an any scope" >"$WORKDIR/data"
+  run ssh-keygen -Y sign -f "$WORKDIR/id.pub" -U -n file "$WORKDIR/data"
+  [[ $status -eq 0 && -f $WORKDIR/data.sig ]] || {
+    echo "sign under an any scope failed ($status): $output" >&2; _dump_logs; return 1; }
+  ssh-keygen -Y verify -f "$WORKDIR/allowed_signers" -I piggy-test@holder \
+    -n file -s "$WORKDIR/data.sig" <"$WORKDIR/data" >/dev/null
+
+  # A retire still destroys the card.
+  run "$PIGGY_BIN" holder retire "$WORKDIR/id.pub"
+  [[ $status -eq 0 ]] || { echo "retire failed ($status): $output" >&2; _dump_logs; return 1; }
+  run "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" list
+  [[ $output == "ok" ]] || { echo "the card survived the retire: $output" >&2; return 1; }
+}
+
+function an_any_scope_agent_refuses_to_start_on_a_socket_others_can_reach { # @test
+  _spawn_holder_fibby
+  local shared="$WORKDIR/shared"
+  mkdir -m 0755 "$shared"
+  run timeout 20 env PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent --holder \
+    --holder-fibby-ctl "$FIBBY_CTL" --scope session=any -a "$shared/a.sock" 3>&-
+  [[ $status -ne 0 && $status -ne 124 ]] || { echo "want a refusal, got $status: $output" >&2; return 1; }
+  [[ $output == *"an \`any\` scope needs a private socket"* ]] || {
+    echo "the refusal does not say why: $output" >&2; return 1; }
+  [[ ! -e $shared/a.sock ]] || { echo "the socket was bound anyway" >&2; return 1; }
+  # The same directory at 0700 is served.
+  chmod 0700 "$shared"
+  AGENT_SOCK="$shared/a.sock"
+  _spawn_any_agent
+}
+
+function an_any_scope_cannot_share_an_agent_with_a_cgroup_scope { # @test
+  _spawn_holder_fibby
+  run timeout 20 env PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent --holder \
+    --holder-fibby-ctl "$FIBBY_CTL" --scope session=any --scope piggy-mint-v1=caller \
+    -a "$AGENT_SOCK" 3>&-
+  [[ $status -ne 0 && $status -ne 124 ]] || { echo "want a refusal, got $status: $output" >&2; return 1; }
+  [[ $output == *"every --scope must be"* ]] || { echo "the refusal does not say why: $output" >&2; return 1; }
+  [[ ! -e $AGENT_SOCK ]]
+}
+
 function an_agent_that_is_not_a_holder_does_not_serve_the_extensions { # @test
   spawn_fibby --model yk5.7 --seed-rfc6979-slot-9a-cert 3>&-
   PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent -A -a "$AGENT_SOCK" >"$AGENT_LOG" 2>&1 3>&- &

@@ -46,14 +46,23 @@ pub enum ScopeRule {
     Caller,
     /// Bind to this cgroup; the caller must be inside it.
     Cgroup(CgroupPath),
+    /// Bind to nothing: whoever can open the agent's socket may use the key
+    /// (the shape of a holder per session, whose socket only that session
+    /// can reach). A cgroup is something a same-uid process can move itself
+    /// into, so this rule keeps no cgroup and reads no peer; the socket is
+    /// the whole boundary, and the agent refuses to start unless that socket
+    /// sits in a private directory ([`check_private_socket_dir`]). A holder
+    /// that has one `any` scope has only `any` scopes.
+    Any,
 }
 
-/// Parse one `--scope NAME=RULE`: `NAME=caller` or `NAME=cgroup:/path`.
-/// The name is opaque (it may hold `@`); the split is at the first `=`.
+/// Parse one `--scope NAME=RULE`: `NAME=caller`, `NAME=any` or
+/// `NAME=cgroup:/path`. The name is opaque (it may hold `@`); the split is at
+/// the first `=`.
 pub fn parse_scope_spec(spec: &str) -> Result<(String, ScopeRule), String> {
     let Some((name, rule)) = spec.split_once('=') else {
         return Err(format!(
-            "--scope {spec:?}: want NAME=caller or NAME=cgroup:/path"
+            "--scope {spec:?}: want NAME=caller, NAME=any or NAME=cgroup:/path"
         ));
     };
     if name.is_empty() {
@@ -61,6 +70,7 @@ pub fn parse_scope_spec(spec: &str) -> Result<(String, ScopeRule), String> {
     }
     let rule = match rule {
         "caller" => ScopeRule::Caller,
+        "any" => ScopeRule::Any,
         other => match other.strip_prefix("cgroup:") {
             Some(path) => CgroupPath::parse(path)
                 .map(ScopeRule::Cgroup)
@@ -69,7 +79,7 @@ pub fn parse_scope_spec(spec: &str) -> Result<(String, ScopeRule), String> {
                 })?,
             None => {
                 return Err(format!(
-                    "--scope {spec:?}: unknown rule {other:?}; want caller or cgroup:/path"
+                    "--scope {spec:?}: unknown rule {other:?}; want caller, any or cgroup:/path"
                 ));
             }
         },
@@ -86,6 +96,65 @@ pub struct HolderConfig {
     pub cap: usize,
 }
 
+impl HolderConfig {
+    /// Whether this holder's socket is its only boundary: it has an `any`
+    /// scope. Then ALL its scopes are `any` ([`Self::check_scopes_agree`]).
+    pub fn socket_is_the_boundary(&self) -> bool {
+        self.scopes.values().any(|r| matches!(r, ScopeRule::Any))
+    }
+
+    /// An `any` scope on a holder that also has cgroup rules would serve two
+    /// kinds of key on one socket, one open to every connection and one not:
+    /// refused, so a socket is either the boundary or it is not.
+    pub fn check_scopes_agree(&self) -> Result<(), String> {
+        if self.socket_is_the_boundary()
+            && self.scopes.values().any(|r| !matches!(r, ScopeRule::Any))
+        {
+            return Err(
+                "an `any` scope makes the socket the only boundary, so every --scope must be \
+                 `any` (it is mixed with caller or cgroup rules)"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// An `any` scope trusts whoever can open the socket, so the socket's
+/// directory must be the operator's alone: owned by `uid` and with no group
+/// or other bits. A shared directory (the host holder's 0750 one) is refused,
+/// whatever the scope names; this catches the mistake of an `any` scope on a
+/// socket more than one session can reach, not an attacker who can already
+/// write the directory.
+pub fn check_private_socket_dir(socket: &std::path::Path, uid: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = match socket.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    let meta = std::fs::metadata(dir)
+        .map_err(|e| format!("the socket's directory {}: {e}", dir.display()))?;
+    if !meta.is_dir() {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    if meta.uid() != uid {
+        return Err(format!(
+            "the socket's directory {} is owned by uid {}, not the agent's {uid}",
+            dir.display(),
+            meta.uid()
+        ));
+    }
+    let loose = meta.mode() & 0o077;
+    if loose != 0 {
+        return Err(format!(
+            "the socket's directory {} has group or other permission bits (mode {:o}); an `any` scope needs it private (0700)",
+            dir.display(),
+            meta.mode() & 0o7777
+        ));
+    }
+    Ok(())
+}
+
 /// A minted key and what it is bound to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
@@ -94,7 +163,11 @@ pub struct Binding {
     /// The reader fibby serves the card as.
     pub reader: String,
     pub scope: String,
-    pub cgroup: CgroupPath,
+    /// The cgroup the key is bound to, or `None` for an [`ScopeRule::Any`]
+    /// scope: the key is then usable from every connection to this agent's
+    /// socket, lives until it is retired or the agent ends, and no watcher
+    /// looks at any cgroup for it.
+    pub cgroup: Option<CgroupPath>,
 }
 
 /// The card store's create and destroy verbs (fibby's control socket in
@@ -205,9 +278,9 @@ impl Holder {
     /// claim, the peer is the proof).
     pub fn resolve_scope(
         &self,
-        peer: &Peer,
+        peer: &PeerStatus,
         scope: &str,
-    ) -> Result<(String, CgroupPath), (Status, String)> {
+    ) -> Result<(String, Option<CgroupPath>), (Status, String)> {
         if crate::holder_ext::scope_is_absent(scope) {
             return Err((
                 Status::ScopeUnbound,
@@ -229,6 +302,21 @@ impl Holder {
                 ),
             ));
         };
+        // An `any` scope binds to no cgroup, so it asks nothing of the peer:
+        // a connection whose credentials could not be read may mint under it.
+        if matches!(rule, ScopeRule::Any) {
+            return Ok((scope.to_string(), None));
+        }
+        let peer = match peer {
+            PeerStatus::Known(peer) => peer,
+            PeerStatus::Unknown(why) => return Err((Status::PeerUnknown, why.clone())),
+            PeerStatus::NotRead => {
+                return Err((
+                    Status::PeerUnknown,
+                    "the connection's peer was not read".into(),
+                ));
+            }
+        };
         let cgroup = match rule {
             ScopeRule::Caller => peer.cgroup.clone(),
             ScopeRule::Cgroup(path) if path.contains(&peer.cgroup) => path.clone(),
@@ -240,8 +328,9 @@ impl Holder {
                     ),
                 ));
             }
+            ScopeRule::Any => unreachable!("an any scope returned above"),
         };
-        Ok((scope.to_string(), cgroup))
+        Ok((scope.to_string(), Some(cgroup)))
     }
 
     /// Whether `peer` is inside `binding`'s scope and may sign with or
@@ -251,13 +340,18 @@ impl Holder {
         binding: &Binding,
         peer: &PeerStatus,
     ) -> Result<(), (Status, String)> {
+        // A key minted under an `any` scope has no cgroup: the socket it was
+        // minted on is its whole boundary, so every connection may use it.
+        let Some(cgroup) = &binding.cgroup else {
+            return Ok(());
+        };
         match peer {
-            PeerStatus::Known(peer) if binding.cgroup.contains(&peer.cgroup) => Ok(()),
+            PeerStatus::Known(peer) if cgroup.contains(&peer.cgroup) => Ok(()),
             PeerStatus::Known(peer) => Err((
                 Status::NotBoundScope,
                 format!(
-                    "the key is bound to scope {:?} ({}), and the caller ({peer}) is not inside it",
-                    binding.scope, binding.cgroup
+                    "the key is bound to scope {:?} ({cgroup}), and the caller ({peer}) is not inside it",
+                    binding.scope
                 ),
             )),
             PeerStatus::Unknown(why) => Err((Status::PeerUnknown, why.clone())),
@@ -324,12 +418,13 @@ impl Holder {
         self.state.lock().await.live
     }
 
-    /// Whether `binding`'s cgroup still exists under the configured root.
+    /// Whether `binding`'s cgroup still exists under the configured root. A
+    /// binding with no cgroup (an `any` scope) has nothing to vanish.
     pub fn cgroup_exists(&self, binding: &Binding) -> bool {
         binding
             .cgroup
-            .directory_under(&self.config.cgroup_root)
-            .is_dir()
+            .as_ref()
+            .is_none_or(|cgroup| cgroup.directory_under(&self.config.cgroup_root).is_dir())
     }
 }
 
@@ -412,7 +507,7 @@ pub async fn teardown(
     tracing::info!(
         reader = %binding.reader,
         scope = %binding.scope,
-        cgroup = %binding.cgroup,
+        cgroup = %binding.cgroup.as_ref().map_or_else(|| "(none: any)".to_string(), ToString::to_string),
         "holder: card destroyed ({why})"
     );
     Ok(())
@@ -523,8 +618,12 @@ mod tests {
             guid: Guid::from_bytes(&[seed; 16]).unwrap(),
             reader: reader.into(),
             scope: "piggy-mint-v1".into(),
-            cgroup: cg(cgroup),
+            cgroup: Some(cg(cgroup)),
         }
+    }
+
+    fn known(cgroup: &str) -> PeerStatus {
+        PeerStatus::Known(peer_in(cgroup))
     }
 
     #[test]
@@ -558,7 +657,7 @@ mod tests {
             &[("piggy-mint-v1", ScopeRule::Caller)],
             std::path::Path::new("/nonexistent"),
         );
-        let peer = peer_in("/user.slice/s.scope");
+        let peer = known("/user.slice/s.scope");
         assert_eq!(
             holder.resolve_scope(&peer, "").unwrap_err().0,
             Status::ScopeUnbound
@@ -577,21 +676,181 @@ mod tests {
             ],
             std::path::Path::new("/nonexistent"),
         );
-        let peer = peer_in("/user.slice/s.scope");
+        let peer = known("/user.slice/s.scope");
         assert_eq!(
             holder.resolve_scope(&peer, "piggy-mint-v1").unwrap(),
-            ("piggy-mint-v1".into(), cg("/user.slice/s.scope"))
+            ("piggy-mint-v1".into(), Some(cg("/user.slice/s.scope")))
         );
         // The name is a claim: a peer outside the fixed cgroup is refused.
         assert_eq!(
             holder.resolve_scope(&peer, "unit-v1").unwrap_err().0,
             Status::NotBoundScope
         );
-        let inside = peer_in("/system.slice/u.service/child");
+        let inside = known("/system.slice/u.service/child");
         assert_eq!(
             holder.resolve_scope(&inside, "unit-v1").unwrap(),
-            ("unit-v1".into(), cg("/system.slice/u.service"))
+            ("unit-v1".into(), Some(cg("/system.slice/u.service")))
         );
+        // A cgroup rule needs a peer that was read; an unread one is refused.
+        for unread in [PeerStatus::Unknown("no pid".into()), PeerStatus::NotRead] {
+            for scope in ["piggy-mint-v1", "unit-v1"] {
+                assert_eq!(
+                    holder.resolve_scope(&unread, scope).unwrap_err().0,
+                    Status::PeerUnknown,
+                    "{scope} {unread:?}"
+                );
+            }
+        }
+    }
+
+    // Shape A (a holder per session): an `any` scope binds to no cgroup and
+    // reads no peer; the socket is the boundary.
+
+    #[test]
+    fn an_any_scope_binds_to_nothing_whoever_asks_even_an_unread_peer() {
+        assert_eq!(
+            parse_scope_spec("session=any").unwrap(),
+            ("session".into(), ScopeRule::Any)
+        );
+        let holder = holder_with(
+            &[("session", ScopeRule::Any)],
+            std::path::Path::new("/nonexistent"),
+        );
+        for peer in [
+            known("/user.slice/anything.scope"),
+            PeerStatus::Unknown("no pid".into()),
+            PeerStatus::NotRead,
+        ] {
+            assert_eq!(
+                holder.resolve_scope(&peer, "session").unwrap(),
+                ("session".into(), None),
+                "{peer:?}"
+            );
+        }
+        // An absent or undefined name is still refused, as for any rule.
+        assert_eq!(
+            holder
+                .resolve_scope(&PeerStatus::NotRead, "")
+                .unwrap_err()
+                .0,
+            Status::ScopeUnbound
+        );
+        assert_eq!(
+            holder
+                .resolve_scope(&PeerStatus::NotRead, "other")
+                .unwrap_err()
+                .0,
+            Status::UnknownScope
+        );
+    }
+
+    #[test]
+    fn a_key_with_no_cgroup_is_usable_from_every_connection() {
+        let holder = holder_with(&[], std::path::Path::new("/nonexistent"));
+        let mut b = binding(1, "piggy-holder 1", "/unused");
+        b.cgroup = None;
+        for peer in [
+            known("/user.slice/a.scope"),
+            known("/system.slice/other.service"),
+            PeerStatus::Unknown("no pid".into()),
+            PeerStatus::NotRead,
+        ] {
+            assert!(holder.peer_may_use(&b, &peer).is_ok(), "{peer:?}");
+        }
+        assert!(holder.cgroup_exists(&b), "no cgroup, so nothing to vanish");
+    }
+
+    #[tokio::test]
+    async fn the_sweep_never_tears_down_a_key_that_has_no_cgroup() {
+        let root = tempdir();
+        let holder = Arc::new(Holder::new(
+            HolderConfig {
+                scopes: HashMap::new(),
+                cgroup_root: root.clone(),
+                poll_interval: Duration::from_millis(10),
+                cap: CARD_CAP,
+            },
+            Box::new(Recorder::default()),
+        ));
+        let mut a = binding(1, "piggy-holder 1", "/gone.scope");
+        a.cgroup = None;
+        holder.reserve_reader().await.unwrap();
+        holder.record(a.clone()).await;
+        let keys = Arc::new(Mutex::new(vec![cached(&a)]));
+        let pins = Arc::new(Mutex::new(PinCache::new()));
+        assert!(sweep_bindings(&holder, &keys, &pins).await.is_empty());
+        assert_eq!(holder.bindings().await, vec![a]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_holder_with_an_any_scope_has_only_any_scopes() {
+        let cfg = |scopes: &[(&str, ScopeRule)]| HolderConfig {
+            scopes: scopes
+                .iter()
+                .map(|(n, r)| (n.to_string(), r.clone()))
+                .collect(),
+            cgroup_root: "/sys/fs/cgroup".into(),
+            poll_interval: Duration::from_secs(1),
+            cap: 1,
+        };
+        assert!(
+            cfg(&[("a", ScopeRule::Any), ("b", ScopeRule::Any)])
+                .check_scopes_agree()
+                .is_ok()
+        );
+        assert!(
+            cfg(&[("a", ScopeRule::Caller), ("b", ScopeRule::Caller)])
+                .check_scopes_agree()
+                .is_ok()
+        );
+        assert!(
+            cfg(&[("a", ScopeRule::Any), ("b", ScopeRule::Caller)])
+                .check_scopes_agree()
+                .is_err()
+        );
+        assert!(
+            cfg(&[("a", ScopeRule::Any), ("b", ScopeRule::Cgroup(cg("/x")))])
+                .check_scopes_agree()
+                .is_err()
+        );
+        assert!(cfg(&[("a", ScopeRule::Any)]).socket_is_the_boundary());
+        assert!(!cfg(&[("a", ScopeRule::Caller)]).socket_is_the_boundary());
+    }
+
+    #[test]
+    fn the_private_socket_check_wants_the_agents_own_directory_with_no_group_or_other_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        let dir = tempdir();
+        let sock = dir.join("agent.sock");
+        for (mode, ok) in [
+            (0o700, true),
+            (0o500, true),
+            (0o750, false),
+            (0o710, false),
+            (0o770, false),
+            (0o755, false),
+            (0o701, false),
+        ] {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(
+                check_private_socket_dir(&sock, uid).is_ok(),
+                ok,
+                "mode {mode:o}"
+            );
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Not the agent's directory: owned by another uid (any uid but ours).
+        let err = check_private_socket_dir(&sock, uid.wrapping_add(1)).unwrap_err();
+        assert!(err.contains("owned by uid"), "{err}");
+        // No such directory, and the socket's directory a file.
+        assert!(check_private_socket_dir(&dir.join("no/such/agent.sock"), uid).is_err());
+        let file = dir.join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(check_private_socket_dir(&file.join("agent.sock"), uid).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

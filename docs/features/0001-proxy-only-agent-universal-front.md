@@ -189,8 +189,23 @@ on fibby, none in the proxy), and health.
   handler runs and so never sees it), but a client that stays and re-sends is not told apart from the
   operator. The candidate fix, not built: a cap on queued signs per caller,
   identifying the caller by `SO_PEERCRED` and its cgroup (`peer.rs` already
-  reads both for the holder). The operator accepted the residual for the
-  bump (2026-11-23).
+  reads both for the holder). **Held (2026-11-24):** a cgroup is not a
+  caller's identity against another process of the same user: `just
+  explore-cgroup-self-move` shows a process under the user manager moving
+  itself into a sibling user scope's cgroup (a process in the root-owned
+  login session scope, or anything aiming at a system unit's cgroup, is
+  refused), so a cap keyed by cgroup would be forgeable. The operator
+  accepted the residual for the bump (2026-11-23); a key that a caller cannot
+  change (a socket of its own: a holder per session, FDR 0006) replaces it.
+- **Known residual: a second `ssh-add -X` can let a card take one wrong try
+  too many.** Between one request's PIN refusal and another request's turn at
+  the PIN lock, another `ssh-add -X` replaces the offered PIN and so clears
+  the record of which cards refused the offer. The next request then sends
+  the new offer to a card that has just refused a PIN, so two wrong tries can
+  fall on one card while the retry guard still reports a retry left. It needs
+  two offers inside one request's wait, from the account that owns the agent;
+  the guard that keeps an offer from a card with fewer than two tries left
+  still stops it short of a lockout.
 - **A timed-out sign's dialog is not cancelled at the card agent.** The front
   closes its connection to the upstream when an answer times out, but
   ssh-agent-lib does not drop a handler whose connection closes (the test

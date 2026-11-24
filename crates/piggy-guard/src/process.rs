@@ -9,7 +9,9 @@ use super::GuardError;
 #[derive(Debug)]
 pub struct ProcessHardening {
     /// `prctl(PR_SET_DUMPABLE, 0)`: no core dump, no same-user ptrace
-    /// attach, `/proc/<pid>` owned by root. `None` where the call does
+    /// attach, and the entries under `/proc/<pid>` (smaps, environ, fd, mem,
+    /// ...) owned by root; the directory `/proc/<pid>` itself keeps the
+    /// process's own uid. `None` where the call does
     /// not exist (everything but Linux).
     pub non_dumpable: Option<Result<(), GuardError>>,
     /// `setrlimit(RLIMIT_CORE, 0)`, soft and hard, so no core file is

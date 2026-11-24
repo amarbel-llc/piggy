@@ -430,6 +430,7 @@ fn build_holder(cli: &AgentArgs) -> Result<Option<std::sync::Arc<holder::Holder>
         poll_interval: std::time::Duration::from_secs(cli.scope_poll_interval.max(1)),
         cap: holder::CARD_CAP,
     };
+    config.check_scopes_agree()?;
     tracing::info!(
         fibby_ctl = ctl,
         cgroup_root = %config.cgroup_root.display(),
@@ -639,6 +640,18 @@ async fn run_async(
             dir.join("agent.sock").to_string_lossy().into_owned()
         }
     };
+
+    // An `any` scope makes the socket the only boundary (a holder per
+    // session): refuse to serve it from a directory more than the operator
+    // can reach, before the socket exists.
+    if let Some(holder) = &holder {
+        if holder.config().socket_is_the_boundary() {
+            // SAFETY: geteuid takes no arguments and cannot fail.
+            let uid = unsafe { libc::geteuid() };
+            holder::check_private_socket_dir(std::path::Path::new(&socket_path), uid)
+                .map_err(|e| format!("holder: an `any` scope needs a private socket: {e}"))?;
+        }
+    }
 
     // piggy#326: an upstream at this agent's own socket would send every
     // proxied request straight back in, without end.

@@ -133,10 +133,12 @@ two agents cannot silently fight over one path.
 
 *--scope* _NAME_=_RULE_
 	A scope definition, repeatable: what a mint naming _NAME_ binds to.
-	_RULE_ is *caller* (the calling connection's own cgroup) or
+	_RULE_ is *caller* (the calling connection's own cgroup),
 	*cgroup:*_/absolute/path_ (that cgroup; the caller must be inside
-	it). _NAME_ is opaque and is matched whole; the split is at the first
-	*=*. A mint naming no scope, or a name not defined here, is refused.
+	it) or *any* (no cgroup: whoever can open this agent's socket may mint
+	and use the key; see *Scope any* below). _NAME_ is opaque and is
+	matched whole; the split is at the first *=*. A mint naming no scope,
+	or a name not defined here, is refused.
 
 *--cgroup-root* _DIR_
 	Where the cgroup2 filesystem is mounted (default
@@ -443,6 +445,22 @@ retire* (piggy(1)) are the clients.
 	retire alike, each answered with a failure naming *not-bound-scope*.
 	Listing is not gated. A peer whose cgroup cannot be read (no cgroup
 	v2 line, no _/proc_) may use no holder key.
+
+*Scope any.*
+	A cgroup is not an identity against another process of the same
+	user: one under the user manager can move itself into a sibling user
+	scope's cgroup (a process in the login session scope, and anything
+	aiming at a system unit's cgroup, cannot). A holder per session
+	therefore does not use one: *--scope* _NAME_=*any* binds a key to
+	nothing, reads no peer for it, and leaves the socket as the whole
+	boundary, so the socket must be the one session's alone. The agent
+	refuses to start with an *any* scope unless its socket's directory is
+	owned by the agent's user with no group or other permission bits
+	(0700), and refuses a holder that mixes *any* with *caller* or
+	*cgroup:* scopes. A key under it lives until it is retired or the
+	holder ends; no watcher looks for its cgroup. Keeping other sessions
+	from the socket (a view that holds this session's socket and no
+	other) is the launcher's, not piggy's.
 
 *Teardown.*
 	A card is destroyed when its scope retires it or when its bound

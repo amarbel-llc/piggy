@@ -5990,6 +5990,252 @@ explore-fdr0006-d BIN_DIR="" NO_SHELL="":
     FIBBY="$holder" FIBBY_CTL="$ctl" PIGGY="$piggy" "${SHELL:-bash}" -i || true
     ((fails == 0))
 
+# Can a process of the SAME uid leave its cgroup and join another? Holder
+# keys and the front's per-caller limit (piggy#407) identify a caller by the
+# cgroup path read from /proc/<pid>/cgroup, so a process that can move itself
+# into a victim's cgroup poses as the victim. From inside a fresh user scope
+# it tries to write its own pid into (1) a sibling user scope, (2) the cgroup
+# this recipe itself runs in (the stand-in for the operator's login-shell
+# scope), (3) a cgroup of the root-owned system slice, and prints what the
+# kernel said. Each line is TAP: ok = the move was REFUSED (the boundary
+# holds), not ok = the process moved (the boundary is open). No card, no
+# piggy binary, no PIN prompt; it only needs a systemd user session and
+# cgroup v2. A moved probe process exits at once and takes nothing with it.
+#
+# probe whether a same-uid process can move itself into another cgroup (lane 3, piggy#407)
+[group('explore')]
+[linux]
+explore-cgroup-self-move:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v systemd-run >/dev/null || { echo "explore-cgroup-self-move: systemd-run is needed (a systemd user session makes the scopes)" >&2; exit 1; }
+    root=/sys/fs/cgroup
+    [[ -e $root/cgroup.controllers ]] || { echo "explore-cgroup-self-move: $root is not a cgroup v2 mount" >&2; exit 1; }
+    tag="cgmove-$$"
+    dir="$(mktemp -d -t cgmove.XXXXXX)"
+    cleanup() {
+      systemctl --user stop "$tag-target.scope" "$tag-probe.scope" 2>/dev/null || true
+      kill "${pids[@]}" 2>/dev/null || true
+      rm -rf "$dir"
+    }
+    pids=()
+    trap cleanup EXIT
+    trap 'exit 130' INT TERM HUP
+    cg_of() { sed -n 's/^0:://p' "/proc/$1/cgroup"; }
+    own_cg="$(cg_of $$)"
+    echo "# uid $(id -u); this recipe runs in cgroup $own_cg"
+    # The sibling target: a scope holding one sleeping process.
+    systemd-run --user --scope --quiet --unit "$tag-target" sleep 300 >"$dir/target.log" 2>&1 &
+    pids+=($!)
+    target_pid=""
+    for _ in $(seq 1 50); do
+      target_pid="$(pgrep -f "sleep 300$" -n || true)"
+      [[ -n $target_pid && $(cg_of "$target_pid") == *"$tag-target.scope" ]] && break
+      target_pid=""
+      sleep 0.1
+    done
+    if [[ -z $target_pid ]]; then
+      echo "explore-cgroup-self-move: the sibling target scope did not come up; systemd-run said:" >&2
+      sed 's/^/#   /' "$dir/target.log" >&2
+      echo "#   sleep processes: $(pgrep -af 'sleep 300' || echo none)" >&2
+      exit 1
+    fi
+    target_cg="$(cg_of "$target_pid")"
+    echo "# sibling target scope: $target_cg"
+    # Who owns what: the answer to a move is the kernel's, these are its inputs.
+    for cg in "$target_cg" "$own_cg" /system.slice; do
+      printf '# %s: owner %s, cgroup.procs mode %s, delegated subtree files %s\n' \
+        "$cg" "$(stat -c %U "$root$cg")" "$(stat -c %a "$root$cg/cgroup.procs")" \
+        "$([[ -w $root$cg/cgroup.procs ]] && echo writable-by-me || echo not-writable-by-me)"
+    done
+    # The probe: runs in its own fresh scope and tries each move, reporting
+    # where it ended up. It prints "moved <cgroup>" or "refused <error>".
+    cat >"$dir/probe.sh" <<'EOF'
+    # The write is made by this shell itself (no subshell), of its own pid.
+    exec 3>&2 2>"$TMPDIR_PROBE.err"
+    me="$BASHPID"
+    if { printf '%s\n' "$me" >"$root$1/cgroup.procs"; } 2>>"$TMPDIR_PROBE.err"; then
+      exec 2>&3
+      echo "moved $(sed -n 's/^0:://p' "/proc/$me/cgroup")"
+    else
+      exec 2>&3
+      echo "refused (wrote pid '$me' to $1) $(cat "$TMPDIR_PROBE.err")"
+    fi
+    EOF
+    probe() { # probe CGROUP: run the move attempt from a fresh scope, print its one line
+      systemd-run --user --scope --quiet --unit "$tag-probe" \
+        env root="$root" TMPDIR_PROBE="$dir/probe" bash -c "$(cat "$dir/probe.sh")" probe "$1" 2>&1
+      systemctl --user stop "$tag-probe.scope" 2>/dev/null || true
+    }
+    n=0 fails=0
+    # A move the kernel refuses for permission (EACCES/EPERM) is a boundary
+    # that holds; a refusal for any other reason (EINVAL, EBUSY, ...) says
+    # nothing about permission and is reported as inconclusive, not as ok.
+    verdict() { # verdict DESCRIPTION CGROUP
+      local out
+      out="$(probe "$2")"
+      n=$((n + 1))
+      if [[ $out == moved* ]]; then
+        echo "not ok $n - $1 was NOT refused: the process moved ($out)"
+        fails=$((fails + 1))
+      elif [[ $out == *"Permission denied"* || $out == *"Operation not permitted"* ]]; then
+        echo "ok $n - $1 is refused for permission ($out)"
+      else
+        echo "not ok $n - $1 was refused, but NOT for permission: INCONCLUSIVE ($out)"
+        fails=$((fails + 1))
+      fi
+    }
+    control() { # control DESCRIPTION CGROUP: the probe's own cgroup, a move that must succeed
+      local out
+      out="$(probe "$2")"
+      n=$((n + 1))
+      if [[ $out == moved* ]]; then
+        echo "ok $n - control: $1 works ($out)"
+      else
+        echo "not ok $n - control: $1 failed, so the write method itself is suspect ($out)"
+        fails=$((fails + 1))
+      fi
+    }
+    # The probe's scope is a sibling of the target, so its path is known up front.
+    probe_cg="${target_cg%/*}/$tag-probe.scope"
+    echo "# probe scope (the control's target): $probe_cg"
+    for f in cgroup.type cgroup.controllers cgroup.subtree_control; do
+      printf '# target %s: %s\n' "$f" "$(tr '\n' ' ' <"$root$target_cg/$f")"
+    done
+    echo "TAP version 14"
+    control "a process writing its own pid into the cgroup it is already in" "$probe_cg"
+    verdict "a same-uid process moving into a sibling user scope"        "$target_cg"
+    verdict "a same-uid process moving into the recipe's own cgroup"     "$own_cg"
+    verdict "a same-uid process moving into the root-owned system slice" /system.slice
+    # A process that starts where a login shell's children start (not under the
+    # user manager): the recipe's own cgroup, so no systemd-run in between.
+    from_login() { # from_login DESCRIPTION CGROUP
+      local out
+      out="$(env root="$root" TMPDIR_PROBE="$dir/login" bash -c "$(cat "$dir/probe.sh")" probe "$2" 2>&1)"
+      n=$((n + 1))
+      if [[ $out == moved* ]]; then
+        echo "not ok $n - $1 was NOT refused: the process moved ($out)"
+        fails=$((fails + 1))
+      elif [[ $out == *"Permission denied"* || $out == *"Operation not permitted"* ]]; then
+        echo "ok $n - $1 is refused for permission ($out)"
+      else
+        echo "not ok $n - $1 was refused, but NOT for permission: INCONCLUSIVE ($out)"
+        fails=$((fails + 1))
+      fi
+    }
+    echo "# from a process that starts in $own_cg (the login session scope):"
+    from_login "a login-session process moving into a user-manager scope" "$target_cg"
+    echo "1..$n"
+    echo "# $fails of $n moves succeeded."
+    ((fails == 0))
+
+# What a holder pair costs in memory: for each count in COUNTS it starts that
+# many pairs of (the fibby HOLDER build + `piggy agent --holder`) as throwaway
+# processes with scratch state, each pair minting one key, and reads the RSS
+# split (anonymous, file, shmem), peak, data, locked pages and thread count
+# from /proc/PID/status at idle (after the mint) and again after one sign each,
+# with the host's MemAvailable drop per pair. (PSS is not readable: both
+# processes are non-dumpable on purpose, so a same-uid reader is denied
+# smaps_rollup.) Virtual cards only: no real card and no PIN prompt (the askpass safety
+# net is set anyway, piggy-testing(7)). BIN_DIR, when given, holds a holder
+# build named fibby-holder and a piggy to measure instead.
+#
+# measure the memory of N fibby + holder-agent pairs (no card, FDR 0006 shape A sizing)
+[group('explore')]
+[linux]
+explore-holder-memory COUNTS="1 4 8 16" BIN_DIR="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{ BIN_DIR }}" ]]; then
+      bin="$(realpath "{{ BIN_DIR }}")"
+      holder="$bin/fibby-holder" piggy="$bin/piggy"
+    else
+      holder="$(nix build .#fibby-holder --no-link --print-out-paths)/bin/fibby"
+      piggy="$(nix build .#default --no-link --print-out-paths)/bin/piggy"
+    fi
+    dir="$(mktemp -d -t holdermem.XXXXXX)"
+    export SSH_ASKPASS="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
+    export SSH_ASKPASS_REQUIRE=force DISPLAY=""
+    unset WAYLAND_DISPLAY PIGGY_TEST_FIB_PIN SSH_AUTH_SOCK PIGGY_AUTH_SOCK
+    pids=()
+    cleanup() {
+      kill "${pids[@]}" 2>/dev/null || true
+      wait 2>/dev/null || true
+      rm -rf "$dir"
+    }
+    trap cleanup EXIT
+    trap 'exit 130' INT TERM HUP
+    avail_kb() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo; }
+    # field FILE NAME: the number after "NAME:" in a /proc status-like file.
+    field() { awk -v k="$2:" '$1 == k {print $2; exit}' "$1"; }
+    start_pair() { # start_pair INDEX: a fibby holder and its agent with one minted key
+      local d="$dir/p$1"
+      mkdir -p "$d"
+      PCSCLITE_CSOCK_NAME="$d/pcscd.comm" "$holder" --socket "$d/pcscd.comm" \
+        --control-socket "$d/ctl.sock" --model yk5.7 >"$d/fibby.log" 2>&1 &
+      echo $! >"$d/fibby.pid"
+      pids+=($!)
+      for _ in $(seq 1 100); do [[ -S $d/ctl.sock ]] && break; sleep 0.1; done
+      "$holder" ctl --socket "$d/ctl.sock" destroy "Virtual PCD piggy fibby 00 00" >/dev/null 2>&1 || true
+      PCSCLITE_CSOCK_NAME="$d/pcscd.comm" "$piggy" agent --holder --holder-fibby-ctl "$d/ctl.sock" \
+        --scope piggy-mint-v1=caller --scope-poll-interval 1 -a "$d/agent.sock" >"$d/agent.log" 2>&1 &
+      echo $! >"$d/agent.pid"
+      pids+=($!)
+      for _ in $(seq 1 100); do [[ -S $d/agent.sock ]] && break; sleep 0.1; done
+      SSH_AUTH_SOCK="$d/agent.sock" "$piggy" holder mint --scope piggy-mint-v1 >"$d/key.pub"
+    }
+    sign_once() { # sign_once INDEX
+      local d="$dir/p$1"
+      echo "piggy-test: memory probe" >"$d/data"
+      SSH_AUTH_SOCK="$d/agent.sock" ssh-keygen -Y sign -f "$d/key.pub" -U -n file "$d/data" >/dev/null 2>&1
+    }
+    # Both processes are non-dumpable on purpose (FDR 0006 phase (b): no core
+    # dump, no same-user ptrace, /proc/PID/smaps* owned by root), so a
+    # same-uid reader gets "Permission denied" on smaps_rollup and no PSS is
+    # available. /proc/PID/status stays world-readable and splits RSS into
+    # anonymous (private to the process: the cost of one more pair), file-backed
+    # (the binary and libraries, shared across pairs) and shmem pages.
+    # report LABEL N: per-pair means from /proc/PID/status, fibby then agent.
+    report() {
+      local label="$1" n="$2" i who pid k
+      for who in fibby agent; do
+        local -A sum=([VmRSS]=0 [RssAnon]=0 [RssFile]=0 [RssShmem]=0 [VmHWM]=0 [VmData]=0 [VmLck]=0 [Threads]=0)
+        for i in $(seq 1 "$n"); do
+          pid="$(cat "$dir/p$i/$who.pid")"
+          for k in "${!sum[@]}"; do
+            sum[$k]=$((sum[$k] + $(field "/proc/$pid/status" "$k")))
+          done
+        done
+        printf '%-11s N=%-2s %-5s per process (kB): rss %6d = anon %6d + file %6d + shmem %4d | peak %6d data %6d locked %4d threads %d\n' \
+          "$label" "$n" "$who" $((sum[VmRSS] / n)) $((sum[RssAnon] / n)) $((sum[RssFile] / n)) \
+          $((sum[RssShmem] / n)) $((sum[VmHWM] / n)) $((sum[VmData] / n)) $((sum[VmLck] / n)) $((sum[Threads] / n))
+      done
+    }
+    echo "# holder fibby: $holder"
+    echo "# piggy:        $piggy"
+    echo "# host MemAvailable now: $(avail_kb) kB"
+    started=0
+    for n in {{ COUNTS }}; do
+      before="$(avail_kb)"
+      while ((started < n)); do
+        started=$((started + 1))
+        start_pair "$started"
+      done
+      sleep 2
+      report idle "$n"
+      for i in $(seq 1 "$n"); do sign_once "$i"; done
+      sleep 1
+      report "after-sign" "$n"
+      after="$(avail_kb)"
+      echo "# N=$n host MemAvailable fell $((before - after)) kB since the last count ($(((before - after) / n)) kB per pair added)"
+    done
+    for who in fibby agent; do
+      pid="$(cat "$dir/p1/$who.pid")"
+      printf '# %s (pair 1): VmSize %s kB, VmStk %s kB, VmExe %s kB, VmLib %s kB, VmSwap %s kB\n' \
+        "$who" "$(field /proc/$pid/status VmSize)" "$(field /proc/$pid/status VmStk)" \
+        "$(field /proc/$pid/status VmExe)" "$(field /proc/$pid/status VmLib)" "$(field /proc/$pid/status VmSwap)"
+    done
+
 # UNRUN AGAINST A REAL CARD (drafted 2026-11-19 while the card was away;
 # its guards are exercised with fake tools by explore_fdr0007_root_cert_
 # guard.bats, the card path is not): the ykcs11 object label, the

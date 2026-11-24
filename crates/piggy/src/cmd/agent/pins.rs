@@ -381,6 +381,13 @@ impl PinCache {
 
     fn offer_at(&mut self, pin: &str, now: Stamp) {
         // An offer that cannot be timed out is not kept (a failed clock read).
+        // `ssh-add -X` still reports success to its caller (the extension
+        // carries no answer), so the log is the only place this shows.
+        if !now.is_known() {
+            tracing::warn!(
+                "the clock could not be read; the PIN offered with ssh-add -X is not kept"
+            );
+        }
         self.offered = guard(pin)
             .filter(|_| now.is_known())
             .map(|guarded| (guarded, now));

@@ -1548,7 +1548,7 @@ impl PiggyAgent {
     /// and replaces the factory PIN with a random one it keeps, and the key
     /// joins the served set, bound to the scope's cgroup.
     async fn handle_mint(&mut self, details: &[u8]) -> crate::holder_ext::MintResponse {
-        use super::holder::{self, Binding, PeerStatus};
+        use super::holder::{self, Binding};
         use crate::holder_ext::{KeyType, MintRequest, MintResponse, Status};
         fn refuse(status: Status, detail: impl Into<String>) -> MintResponse {
             MintResponse::refusal(status, detail)
@@ -1561,13 +1561,6 @@ impl PiggyAgent {
         let Some(request) = MintRequest::decode(details) else {
             return refuse(Status::BadRequest, "malformed mint request");
         };
-        let peer = match &self.peer {
-            PeerStatus::Known(peer) => peer.clone(),
-            PeerStatus::Unknown(why) => return refuse(Status::PeerUnknown, why.clone()),
-            PeerStatus::NotRead => {
-                return refuse(Status::PeerUnknown, "the connection's peer was not read");
-            }
-        };
         let Some(key_type) = KeyType::parse(&request.key_type) else {
             return refuse(
                 Status::RefusedKeyType,
@@ -1579,7 +1572,9 @@ impl PiggyAgent {
                 ),
             );
         };
-        let (scope, cgroup) = match holder.resolve_scope(&peer, &request.scope) {
+        // The scope's rule says whether the peer matters: an unread peer is
+        // refused for a cgroup rule and ignored for an `any` scope.
+        let (scope, cgroup) = match holder.resolve_scope(&self.peer, &request.scope) {
             Ok(resolved) => resolved,
             Err((status, detail)) => return refuse(status, detail),
         };
@@ -1657,8 +1652,8 @@ impl PiggyAgent {
             guid = %card.guid.short_id(),
             key_type = key_type.as_str(),
             scope = %scope,
-            cgroup = %cgroup,
-            peer = %peer,
+            cgroup = %cgroup.as_ref().map_or_else(|| "(none: any)".to_string(), ToString::to_string),
+            peer = ?self.peer,
             "holder: minted a key"
         );
         MintResponse::minted(blob, reader)
@@ -2285,10 +2280,6 @@ mod tests {
     use ssh_agent_lib::proto::{Extension, SignRequest, signature};
     use ssh_key::public::{Ed25519PublicKey, KeyData};
 
-    /// piggy#245: the offered-PIN retry guard attempts a speculative
-    /// `ssh-add -X` offer only when the card confirms at least
-    /// `MIN_RETRIES_FOR_OFFERED_PIN` tries left; a low count or a query
-    /// error is treated as unsafe (drop the offer, re-prompt).
     /// Round 3, 4: the guard's branches. A typed PIN is always tried; an offered
     /// or a cached one only with a safe margin of retries (and never on an
     /// unreadable count).
@@ -2311,6 +2302,10 @@ mod tests {
         }
     }
 
+    /// piggy#245: the offered-PIN retry guard attempts a speculative
+    /// `ssh-add -X` offer only when the card confirms at least
+    /// `MIN_RETRIES_FOR_OFFERED_PIN` tries left; a low count or a query
+    /// error is treated as unsafe (drop the offer, re-prompt).
     #[test]
     fn offered_retries_ok_permits_only_a_confirmed_safe_margin() {
         assert!(offered_retries_ok(Ok(u8::MAX)), "already verified: safe");
