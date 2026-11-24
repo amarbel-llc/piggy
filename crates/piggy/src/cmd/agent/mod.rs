@@ -459,10 +459,16 @@ fn build_holder(cli: &AgentArgs) -> Result<Option<std::sync::Arc<holder::Holder>
         scopes = config.scopes.len(),
         "holder mode (FDR 0006 phase (d))"
     );
-    Ok(Some(std::sync::Arc::new(holder::Holder::new(
-        config,
-        Box::new(holder::FibbyControl::new(ctl)),
-    ))))
+    // One holder per fibby: claim it now, so a second agent on the same fibby
+    // is refused instead of destroying the first's cards at its start.
+    let claim = holder::lock_fibby(std::path::Path::new(ctl))?;
+    let holder = holder::Holder::new(config, Box::new(holder::FibbyControl::new(ctl)))
+        .with_fibby_lock(claim);
+    tracing::debug!(
+        claimed = holder.holds_fibby_lock(),
+        "holder: the claim on fibby's control socket"
+    );
+    Ok(Some(std::sync::Arc::new(holder)))
 }
 
 /// Resolves on SIGINT or SIGTERM (`systemctl stop`, launchd). Falls back
@@ -730,8 +736,16 @@ async fn run_async(
     let agent = match holder {
         Some(holder) => {
             // Cards fibby holds from before this start have no binding, and
-            // nothing would ever retire them: destroy them now.
-            holder.destroy_orphans().await;
+            // nothing would ever retire them: destroy them now. If fibby
+            // cannot even be listed, a holder whose socket is its boundary
+            // does not start (an orphan it cannot see would stay signable
+            // over fibby's PC/SC socket); another holder logs and goes on.
+            if let Err(e) = holder.destroy_orphans().await {
+                if holder.config().socket_is_the_boundary() {
+                    return Err(format!("holder: {e}").into());
+                }
+                tracing::warn!("holder: {e}");
+            }
             tokio::spawn(holder::watch_bindings(
                 holder.clone(),
                 agent.keys_handle(),
@@ -866,6 +880,14 @@ async fn run_async(
 /// piggy#215 asked for; it also makes the agent self-sufficient under a
 /// supervisor that doesn't pre-clean (the HM launcher's `rm -f` stays as
 /// belt-and-braces).
+///
+/// Only a leftover SOCKET is ever unlinked. A path that exists and is a
+/// regular file, a directory or a SYMLINK (even one to a dead socket) is
+/// refused with "exists and is not a socket; not removing it": connecting to
+/// such a path is refused too, which used to read as "stale" and delete what
+/// the operator had put there. A supervisor that passed `-a` a symlink and
+/// relied on this replacing it must remove it first (the HM launcher's `rm -f`
+/// does; units that pass a plain path are unaffected).
 fn bind_reclaiming_stale(path: &str) -> std::io::Result<UnixListener> {
     use std::os::unix::fs::FileTypeExt;
     match UnixListener::bind(path) {

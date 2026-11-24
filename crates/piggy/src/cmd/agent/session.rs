@@ -805,6 +805,7 @@ impl PiggyAgent {
         let is_ca = piggy_piv::slot::is_ca_slot(key.slot_id);
         if is_ca {
             let _card_guard = self.card_lock.lock().await;
+            self.check_card_binding(&key.guid).await?;
             let token = reconnect_to_token(&key.guid)?;
             check_ca_slot_attestation(&token, key.slot_id, &key.public_key)
                 .map_err(|refusal| AgentError::Other(refusal.into()))?;
@@ -1408,6 +1409,9 @@ impl PiggyAgent {
 
         {
             let _card_guard = self.card_lock.lock().await;
+            if let Err(e) = self.check_card_binding(&key.guid).await {
+                return refuse(Status::RefusedPolicy, e.to_string());
+            }
             let token = match reconnect_to_token(&key.guid) {
                 Ok(token) => token,
                 Err(e) => return refuse(Status::CardAbsent, e.to_string()),
@@ -1458,6 +1462,9 @@ impl PiggyAgent {
         };
         let card_signature = {
             let _card_guard = self.card_lock.lock().await;
+            if let Err(e) = self.check_card_binding(&key.guid).await {
+                return refuse(Status::RefusedPolicy, e.to_string());
+            }
             let mut token = match reconnect_to_token(&key.guid) {
                 Ok(token) => token,
                 Err(e) => return refuse(Status::CardAbsent, e.to_string()),
@@ -1600,26 +1607,30 @@ impl PiggyAgent {
             Err((status, detail)) => return refuse(status, detail),
         };
 
-        if let Err(e) = holder.control().create(key_type.fibby_alg(), &reader).await {
-            holder.release_reservation().await;
-            return refuse(
-                Status::Error,
-                format!("the card store did not create a card: {e}"),
-            );
-        }
-        // From here a failure destroys the card again, so a half-minted
-        // card never lingers with the factory PIN.
+        // A failure destroys the card again, so a half-minted card never
+        // lingers with the factory PIN. That includes a `create` that failed:
+        // a fibby that was slow (the control stream times out) may still make
+        // the card after we gave up on it, and a PIN-never card with no
+        // binding is signable over fibby's PC/SC socket. "No such reader" is
+        // the usual answer, and fine.
         let undo = |why: String| {
             let holder = holder.clone();
             let reader = reader.clone();
             async move {
-                if let Err(e) = holder.control().destroy(&reader).await {
-                    tracing::warn!(reader = %reader, "holder: could not destroy a half-minted card: {e}");
+                match holder.control().destroy(&reader).await {
+                    Ok(()) => {}
+                    Err(e) if e.contains("no such reader") => {}
+                    Err(e) => {
+                        tracing::warn!(reader = %reader, "holder: could not destroy a half-minted card: {e}");
+                    }
                 }
                 holder.release_reservation().await;
                 refuse(Status::Error, why)
             }
         };
+        if let Err(e) = holder.control().create(key_type.fibby_alg(), &reader).await {
+            return undo(format!("the card store did not create a card: {e}")).await;
+        }
         let pin = match holder::random_pin() {
             Ok(pin) => pin,
             Err(e) => return undo(e).await,
@@ -1998,6 +2009,19 @@ impl PiggyAgent {
         // is touched: a peer outside the key's scope gets no decryption.
         self.check_binding(&key.public_key).await?;
         let key = self.holder_key(key);
+        // A minted card has the one slot. A legacy box may name another slot
+        // on the card's GUID; the PIN policy known for that slot is none, so
+        // it would raise a PIN prompt nobody can answer. Refused instead.
+        if self.holder.is_some() && box_slot != key.slot_id {
+            return Err(AgentError::Other(
+                format!(
+                    "ecdh-rebox: a minted card has only slot {:02X}, the box names {box_slot:02X}",
+                    key.slot_id
+                )
+                .into(),
+            )
+            .into());
+        }
 
         let ec_point = decompress_ec_point(&piv_box.ephemeral_pubkey, piv_box.curve)?;
 
@@ -4328,6 +4352,121 @@ mod tests {
         drop(guard);
         let err = task.await.unwrap().unwrap_err();
         assert!(format!("{err}").contains("being retired"), "{err}");
+    }
+
+    // Follow-up (4th read, 7): a legacy box naming another slot on a minted
+    // card's GUID would raise a PIN prompt nobody can answer (no policy is
+    // known for the other slot); a minted card has one slot, and the box is
+    // refused before any prompt. (The test never reaches the card layer: with
+    // the check gone this request would go on to ask for a PIN.)
+    #[tokio::test]
+    async fn a_box_naming_another_slot_on_a_minted_card_is_refused_before_any_prompt() {
+        let (key, recipient) = p256_key_and_recipient();
+        let (mut agent, _holder) = holder_agent(&key, peer_in("/user.slice/a.scope"), true).await;
+        let mut piv_box = PivBox::new(EcCurve::NistP256);
+        piv_box.guid_slot = Some((key.guid.clone(), 0x9D));
+        piv_box.set_data(b"secret");
+        piv_box.seal_offline(&recipient).unwrap();
+        let mut inner = ssh_string(&piv_box.to_bytes().unwrap());
+        inner.extend(ssh_string(b""));
+        inner.push(0x9D);
+        inner.extend(ssh_string(b"partner"));
+        inner.extend(0u32.to_be_bytes());
+        let err = agent
+            .extension(Extension {
+                name: "ecdh-rebox@joyent.com".into(),
+                details: ssh_string(&inner).into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("has only slot 9A"), "{err}");
+    }
+
+    // Follow-up (4th read, 5): the attest verb waits for the card lock too, and
+    // checks the binding again once it holds it.
+    #[tokio::test]
+    async fn an_attest_queued_behind_the_card_lock_is_refused_if_its_key_began_retiring() {
+        let (key, _recipient) = p256_key_and_recipient();
+        let (agent, holder) = holder_agent(&key, peer_in("/user.slice/a.scope"), true).await;
+        let guard = agent.card_lock.lock().await;
+        let mut queued = agent.clone();
+        let blob = PublicKey::new(key.public_key.clone(), "")
+            .to_bytes()
+            .unwrap();
+        let mut inner = ssh_string(&blob);
+        inner.extend(0u32.to_be_bytes());
+        let request = Extension {
+            name: "ykpiv-attest@joyent.com".into(),
+            details: ssh_string(&inner).into(),
+        };
+        let task = tokio::spawn(async move { queued.extension(request).await });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(!task.is_finished(), "the attest did not wait for the lock");
+        assert!(holder.mark_retiring(&key.public_key).await);
+        drop(guard);
+        let err = task.await.unwrap().unwrap_err();
+        assert!(format!("{err}").contains("being retired"), "{err}");
+    }
+
+    /// A card store that records what it is asked and whose `create` fails
+    /// (as a timed-out one does: the card may exist all the same).
+    struct CreateFails(Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[ssh_agent_lib::async_trait]
+    impl CardControl for CreateFails {
+        async fn create(&self, alg: &str, reader: &str) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("create {alg} {reader}"));
+            Err("did not answer within 10s".into())
+        }
+        async fn destroy(&self, reader: &str) -> Result<(), String> {
+            self.0.lock().unwrap().push(format!("destroy {reader}"));
+            Err("no such reader: the card was never made".into())
+        }
+        async fn readers(&self) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    // Follow-up (4th read, 1): a `create` that errors may still have made the
+    // card (a slow fibby): the mint destroys it, best effort, and gives the
+    // reservation back.
+    #[tokio::test]
+    async fn a_create_that_fails_is_followed_by_a_destroy_and_frees_its_slot() {
+        use crate::holder_ext::{MintRequest, Status};
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let holder = Arc::new(Holder::new(
+            HolderConfig {
+                scopes: [("s".to_string(), ScopeRule::Caller)].into_iter().collect(),
+                cgroup_root: "/nonexistent".into(),
+                poll_interval: std::time::Duration::from_secs(1),
+                cap: CARD_CAP,
+            },
+            Box::new(CreateFails(calls.clone())),
+        ));
+        let mut agent = PiggyAgent::new(Vec::new())
+            .with_holder(holder.clone())
+            .with_peer(peer_in("/user.slice/a.scope"));
+        let response = agent
+            .handle_mint(
+                &MintRequest {
+                    scope: "s".into(),
+                    key_type: crate::holder_ext::KeyType::Ed25519.as_str().into(),
+                }
+                .encode(),
+            )
+            .await;
+        assert_eq!(response.status, Status::Error, "{}", response.detail);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "create ed25519 piggy-holder 1".to_string(),
+                "destroy piggy-holder 1".to_string()
+            ]
+        );
+        assert_eq!(holder.live().await, 0, "the slot is free again");
     }
 
     // Round 3, N1: a card the reconcile loop re-adopts with an unreadable PIN

@@ -364,9 +364,27 @@ function an_any_scope_agent_needs_its_socket_named_and_never_deletes_a_file_ther
   printf 'precious\n' >"$AGENT_SOCK"
   run timeout 20 env PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent --holder \
     --holder-fibby-ctl "$FIBBY_CTL" --scope session=any -a "$AGENT_SOCK" 3>&-
-  [[ $status -ne 0 && $status -ne 124 && $output == *"not a socket"* ]] || {
-    echo "want a refusal of the regular file, got $status: $output" >&2; return 1; }
+  [[ $status -ne 0 && $status -ne 124 && $output == *"the agent's socket"*"is not a socket"* ]] || {
+    echo "want the guard's refusal of the regular file, got $status: $output" >&2; return 1; }
   [[ $(cat "$AGENT_SOCK") == precious ]] || { echo "the file was deleted or changed" >&2; return 1; }
+}
+
+# Follow-up (4th read, 2): a fibby belongs to ONE holder agent. A second agent
+# on the same fibby would destroy the first's live cards at its start (it
+# destroys every `piggy-holder N` it did not mint), so it is refused, and the
+# first agent's card survives the attempt.
+function a_second_holder_agent_on_one_fibby_is_refused_and_the_first_keeps_its_cards { # @test
+  _spawn_holder_fibby
+  _spawn_holder_agent
+  run "$PIGGY_BIN" holder mint --scope piggy-mint-v1
+  [[ $status -eq 0 ]] || { echo "mint failed ($status): $output" >&2; _dump_logs; return 1; }
+  run timeout 20 env PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent --holder \
+    --holder-fibby-ctl "$FIBBY_CTL" --scope piggy-mint-v1=caller -a "$WORKDIR/second.sock" 3>&-
+  [[ $status -ne 0 && $status -ne 124 && $output == *"never share a fibby"* ]] || {
+    echo "want a refusal naming the shared fibby, got $status: $output" >&2; return 1; }
+  [[ ! -e $WORKDIR/second.sock ]]
+  run "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" list
+  [[ $output == *"piggy-holder 1"* ]] || { echo "the first agent's card is gone: $output" >&2; return 1; }
 }
 
 # Round 3, L3: cards left over from an earlier run (no binding in this one)

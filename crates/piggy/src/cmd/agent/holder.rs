@@ -404,6 +404,59 @@ pub struct Holder {
     /// One teardown at a time: a retire and the watcher's retry never
     /// destroy the same card together.
     teardown_lock: Mutex<()>,
+    /// The claim on this fibby (see [`lock_fibby`]), held for as long as the
+    /// holder lives.
+    fibby_lock: Option<FibbyLock>,
+}
+
+/// A claim that this agent is the only holder serving one fibby. Dropping it
+/// (the agent ending) frees the claim.
+pub struct FibbyLock {
+    _listener: std::os::unix::net::UnixListener,
+}
+
+/// Claim fibby's control socket for this agent. A fibby belongs to ONE holder
+/// agent: at start an agent destroys the `piggy-holder N` cards it did not
+/// mint, so a second agent on the same fibby would destroy the first's live
+/// cards (and two agents would count reader names from 1 each). The claim is a
+/// bound name in the abstract unix namespace derived from the control
+/// socket's path, which the kernel frees when the agent ends, however it
+/// ends, and which needs no write access to the (fibby-owned) socket
+/// directory. A second claim on the same path is refused: "never share a
+/// fibby" is a refusal, not a convention. Linux only; elsewhere no claim.
+pub fn lock_fibby(ctl: &std::path::Path) -> Result<Option<FibbyLock>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use sha2::{Digest, Sha256};
+        use std::os::linux::net::SocketAddrExt;
+        let canonical = std::fs::canonicalize(ctl).unwrap_or_else(|_| ctl.to_path_buf());
+        let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+        let name = format!(
+            "piggy-holder-fibby:{}",
+            digest
+                .iter()
+                .take(16)
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())
+            .map_err(|e| format!("the claim on fibby: {e}"))?;
+        match std::os::unix::net::UnixListener::bind_addr(&addr) {
+            Ok(listener) => Ok(Some(FibbyLock {
+                _listener: listener,
+            })),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(format!(
+                "another holder agent already serves the fibby at {}: never share a fibby (a second agent would destroy the first's cards at start)",
+                ctl.display()
+            )),
+            Err(e) => Err(format!("the claim on fibby {}: {e}", ctl.display())),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = ctl;
+        Ok(None)
+    }
 }
 
 impl Holder {
@@ -413,7 +466,14 @@ impl Holder {
             control,
             state: Mutex::new(HolderState::default()),
             teardown_lock: Mutex::new(()),
+            fibby_lock: None,
         }
+    }
+
+    /// This holder with the claim on its fibby, kept for its lifetime.
+    pub fn with_fibby_lock(mut self, lock: Option<FibbyLock>) -> Self {
+        self.fibby_lock = lock;
+        self
     }
 
     /// Mark `key`'s binding retiring (see [`Binding::retiring`]). `false`
@@ -572,15 +632,17 @@ impl Holder {
     /// whose destroy had failed (or that nothing retired) would stay signable
     /// over fibby's PC/SC socket and fill its reader table. A holder restart
     /// loses every key by design; this makes the cards agree. Returns the
-    /// readers destroyed; a failure is logged and not fatal.
-    pub async fn destroy_orphans(&self) -> Vec<String> {
-        let readers = match self.control.readers().await {
-            Ok(readers) => readers,
-            Err(e) => {
-                tracing::warn!("holder: could not list fibby's cards to destroy orphans: {e}");
-                return Vec::new();
-            }
-        };
+    /// readers destroyed. A listing that fails is an `Err`: the caller says
+    /// whether that is fatal (it is for a holder whose socket is its boundary,
+    /// where an orphan nobody can see would stay signable over fibby's PC/SC
+    /// socket); a destroy that fails is logged, and the card is retried by the
+    /// next start.
+    pub async fn destroy_orphans(&self) -> Result<Vec<String>, String> {
+        let readers = self
+            .control
+            .readers()
+            .await
+            .map_err(|e| format!("could not list fibby's cards to destroy orphans: {e}"))?;
         let bound: Vec<String> = self
             .bindings()
             .await
@@ -601,7 +663,12 @@ impl Holder {
         if !gone.is_empty() {
             tracing::warn!(readers = %gone.join(", "), "holder: destroyed cards left over from before this start");
         }
-        gone
+        Ok(gone)
+    }
+
+    /// Whether this holder holds the claim on its fibby ([`lock_fibby`]).
+    pub fn holds_fibby_lock(&self) -> bool {
+        self.fibby_lock.is_some()
     }
 
     /// Reserve a card slot under the cap and name its reader. A reservation
@@ -829,6 +896,8 @@ mod tests {
         already_gone: bool,
         /// The readers the store lists.
         readers: Vec<String>,
+        /// `readers` fails (fibby cannot be listed).
+        list_fails: bool,
     }
 
     #[ssh_agent_lib::async_trait]
@@ -841,6 +910,9 @@ mod tests {
             Ok(())
         }
         async fn readers(&self) -> Result<Vec<String>, String> {
+            if self.list_fails {
+                return Err("the card store is down".into());
+            }
             Ok(self.readers.clone())
         }
         async fn destroy(&self, reader: &str) -> Result<(), String> {
@@ -1402,13 +1474,93 @@ mod tests {
         // `piggy-holder 9` was minted in this run.
         holder.reserve_reader().await.unwrap();
         holder.record(binding(1, "piggy-holder 9", "/unused")).await;
-        let gone = holder.destroy_orphans().await;
+        let gone = holder.destroy_orphans().await.unwrap();
         assert_eq!(gone, ["piggy-holder 3", "piggy-holder 7"]);
         assert_eq!(
             *recorder.calls.lock().unwrap(),
             ["destroy piggy-holder 3", "destroy piggy-holder 7"]
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // Follow-up (4th read, 2): a fibby belongs to one holder agent; a second
+    // claim on the same control socket is a refusal, not a convention.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_second_holder_on_one_fibby_is_refused_and_a_released_claim_is_free_again() {
+        let ctl = std::path::PathBuf::from(format!("/tmp/pgfibby{}/ctl.sock", std::process::id()));
+        let other =
+            std::path::PathBuf::from(format!("/tmp/pgfibby{}/other.sock", std::process::id()));
+        let first = lock_fibby(&ctl).unwrap().expect("a claim on Linux");
+        let err = lock_fibby(&ctl).err().expect("a second claim is refused");
+        assert!(err.contains("never share a fibby"), "{err}");
+        // Another fibby is another claim.
+        let _second_fibby = lock_fibby(&other).unwrap().unwrap();
+        // The agent ending (the claim dropped) frees it.
+        drop(first);
+        assert!(lock_fibby(&ctl).unwrap().is_some());
+    }
+
+    // Follow-up (4th read, 6): a listing that fails is an error, so a holder
+    // whose socket is its boundary can refuse to start over cards it cannot
+    // see; nothing is destroyed on a guess.
+    #[tokio::test]
+    async fn a_failed_listing_is_an_error_and_destroys_nothing() {
+        let recorder = Arc::new(Recorder {
+            list_fails: true,
+            readers: vec!["piggy-holder 3".into()],
+            ..Recorder::default()
+        });
+        let holder = Holder::new(
+            HolderConfig {
+                scopes: HashMap::new(),
+                cgroup_root: "/nonexistent".into(),
+                poll_interval: Duration::from_millis(10),
+                cap: CARD_CAP,
+            },
+            Box::new(Shared(recorder.clone())),
+        );
+        let err = holder.destroy_orphans().await.unwrap_err();
+        assert!(err.contains("could not list"), "{err}");
+        assert!(recorder.calls.lock().unwrap().is_empty());
+    }
+
+    // Follow-up (4th read, 5): a destroy that times out leaves the binding
+    // marked retiring and the key unserved (the watcher retries it).
+    #[tokio::test]
+    async fn a_destroy_that_times_out_leaves_the_binding_retiring() {
+        let dir = std::path::PathBuf::from(format!("/tmp/hd{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ctl.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let silent = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        });
+        let holder = Holder::new(
+            HolderConfig {
+                scopes: HashMap::new(),
+                cgroup_root: "/nonexistent".into(),
+                poll_interval: Duration::from_millis(10),
+                cap: CARD_CAP,
+            },
+            Box::new(FibbyControl::new(&path).with_timeout(Duration::from_millis(200))),
+        );
+        let a = binding(1, "piggy-holder 1", "/unused");
+        holder.reserve_reader().await.unwrap();
+        holder.record(a.clone()).await;
+        let keys = Arc::new(Mutex::new(vec![cached(&a)]));
+        let pins = Arc::new(Mutex::new(PinCache::new()));
+        assert!(
+            teardown(&holder, &keys, &pins, &a, "retired")
+                .await
+                .is_err()
+        );
+        assert!(holder.binding_of(&a.key).await.unwrap().retiring);
+        assert!(keys.lock().await.is_empty());
+        silent.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // Round 3, L5: a peer outside the scope is told nothing about the key's
