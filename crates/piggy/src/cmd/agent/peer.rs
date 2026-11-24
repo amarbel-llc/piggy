@@ -41,6 +41,11 @@ impl CgroupPath {
         &self.0
     }
 
+    /// Whether this is the root cgroup `/`, which contains every process.
+    pub fn is_root(&self) -> bool {
+        self.0 == "/"
+    }
+
     /// The path components, none for the root.
     fn components(&self) -> impl Iterator<Item = &str> {
         self.0.split('/').filter(|c| !c.is_empty())

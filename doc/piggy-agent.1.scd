@@ -453,14 +453,26 @@ retire* (piggy(1)) are the clients.
 	aiming at a system unit's cgroup, cannot). A holder per session
 	therefore does not use one: *--scope* _NAME_=*any* binds a key to
 	nothing, reads no peer for it, and leaves the socket as the whole
-	boundary, so the socket must be the one session's alone. The agent
-	refuses to start with an *any* scope unless its socket's directory is
-	owned by the agent's user with no group or other permission bits
-	(0700), and refuses a holder that mixes *any* with *caller* or
-	*cgroup:* scopes. A key under it lives until it is retired or the
-	holder ends; no watcher looks for its cgroup. Keeping other sessions
-	from the socket (a view that holds this session's socket and no
-	other) is the launcher's, not piggy's.
+	boundary, so the socket must be the one session's alone. There are
+	THREE sockets, and a minted card is PIN *never* and touch *never*: the
+	agent's, fibby's control socket (*--holder-fibby-ctl*) and fibby's PC/SC
+	socket (*PCSCLITE_CSOCK_NAME*, which must be set). Whoever reaches
+	either of fibby's signs with every key over PC/SC with no agent, or
+	creates and destroys cards, so all three must be in the session's
+	private view and nowhere else. The agent refuses to start with an *any*
+	scope unless each socket's directory is owned by the agent's user with
+	no group or other permission bits (0700) and the agent's directory is
+	not the directory of either of fibby's, and creates its own socket mode
+	0600; it also refuses a holder that mixes *any* with *caller* or
+	*cgroup:* scopes. These checks catch a misconfigured launch, a shared or
+	world-reachable directory; they are not a defence against a process that
+	can already write those directories (the check is made once, before the
+	socket exists). A key under an *any* scope lives until it is retired or
+	the holder ends; no watcher looks for its cgroup. A retire whose card
+	cannot be destroyed still stops serving the key at once and the holder
+	retries the destroy. Keeping other sessions from the sockets (a view
+	that holds this session's agent socket and no other session's) is the
+	launcher's, not piggy's.
 
 *Teardown.*
 	A card is destroyed when its scope retires it or when its bound

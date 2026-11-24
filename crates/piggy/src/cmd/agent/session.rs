@@ -1561,6 +1561,19 @@ impl PiggyAgent {
         let Some(request) = MintRequest::decode(details) else {
             return refuse(Status::BadRequest, "malformed mint request");
         };
+        // A cgroup-bound holder asks who is calling before it says anything
+        // about scopes or key types (an unread peer learns no scope names).
+        if !holder.config().socket_is_the_boundary() {
+            match &self.peer {
+                holder::PeerStatus::Known(_) => {}
+                holder::PeerStatus::Unknown(why) => {
+                    return refuse(Status::PeerUnknown, why.clone());
+                }
+                holder::PeerStatus::NotRead => {
+                    return refuse(Status::PeerUnknown, "the connection's peer was not read");
+                }
+            }
+        }
         let Some(key_type) = KeyType::parse(&request.key_type) else {
             return refuse(
                 Status::RefusedKeyType,
@@ -1725,16 +1738,34 @@ impl PiggyAgent {
             Self::find_key(&keys, pubkey)
                 .ok_or_else(|| AgentError::Other("key not found".into()))?
         };
-        if let Some(holder) = &self.holder {
-            if let Some(binding) = holder.binding_of(pubkey).await {
-                holder
-                    .peer_may_use(&binding, &self.peer)
-                    .map_err(|(status, detail)| {
-                        AgentError::Other(format!("{}: {detail}", status.name()).into())
-                    })?;
-            }
-        }
+        self.check_binding(pubkey).await?;
         Ok(key)
+    }
+
+    /// In holder mode, whether this connection may use the key `pubkey`: a
+    /// key must have a binding (a served key with none, a card fibby already
+    /// held or one a mint has not finished recording, is refused, not
+    /// served to everyone) and the peer must be inside it. Every verb that
+    /// uses a key goes through this, however it finds the key. Outside holder
+    /// mode every key is served as before.
+    async fn check_binding(&self, pubkey: &KeyData) -> Result<(), AgentError> {
+        let Some(holder) = &self.holder else {
+            return Ok(());
+        };
+        let Some(binding) = holder.binding_of(pubkey).await else {
+            return Err(AgentError::Other(
+                format!(
+                    "{}: this holder has no binding for the key, so it serves it to no one",
+                    crate::holder_ext::Status::NotBoundScope.name()
+                )
+                .into(),
+            ));
+        };
+        holder
+            .peer_may_use(&binding, &self.peer)
+            .map_err(|(status, detail)| {
+                AgentError::Other(format!("{}: {detail}", status.name()).into())
+            })
     }
 
     /// Serve the card ECDH extension; `name` is the name it was asked under
@@ -1894,6 +1925,12 @@ impl PiggyAgent {
                         "ecdh-rebox: no agent key matches the box recipient",
                     ))?,
             };
+
+        // The key was found by the box's GUID or recipient, not by a key blob
+        // the caller sent, so the holder's binding check (every other verb
+        // goes through it in `find_cached_key`) is made here, before the card
+        // is touched: a peer outside the key's scope gets no decryption.
+        self.check_binding(&key.public_key).await?;
 
         let ec_point = decompress_ec_point(&piv_box.ephemeral_pubkey, piv_box.curve)?;
 
@@ -3828,6 +3865,227 @@ mod tests {
                 .any(|e| e == "ext:ecdh@joyent.com"),
             "malformed ecdh request was forwarded upstream"
         );
+    }
+
+    // -------- holder mode: every key-using verb is gated by the binding --------
+    //
+    // Round 1 of the review of the `any` scope (M2, L4): a peer outside a
+    // minted key's cgroup gets nothing from it, whichever verb it asks, and a
+    // served key with no binding is served to no one. All of it is decided
+    // before the card is opened, so none of it needs PC/SC.
+
+    use super::super::holder::{
+        Binding, CARD_CAP, CardControl, Holder, HolderConfig, PeerStatus, ScopeRule,
+    };
+    use super::super::peer::{CgroupPath, Peer};
+
+    /// A card store that creates nothing and destroys without complaint.
+    struct NoCards;
+
+    #[ssh_agent_lib::async_trait]
+    impl CardControl for NoCards {
+        async fn create(&self, _alg: &str, _reader: &str) -> Result<(), String> {
+            Err("no cards in this test".into())
+        }
+        async fn destroy(&self, _reader: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn holder_for_tests() -> Arc<Holder> {
+        Arc::new(Holder::new(
+            HolderConfig {
+                scopes: [("s".to_string(), ScopeRule::Caller)].into_iter().collect(),
+                cgroup_root: "/nonexistent".into(),
+                poll_interval: std::time::Duration::from_secs(1),
+                cap: CARD_CAP,
+            },
+            Box::new(NoCards),
+        ))
+    }
+
+    fn peer_in(cgroup: &str) -> PeerStatus {
+        PeerStatus::Known(Peer {
+            uid: 1000,
+            pid: 4242,
+            cgroup: CgroupPath::parse(cgroup).unwrap(),
+        })
+    }
+
+    /// A P-256 minted-style key (slot 9A, PIN never) and the recipient key a
+    /// box can be sealed to for it.
+    fn p256_key_and_recipient() -> (CachedKey, openssl::ec::EcKey<openssl::pkey::Public>) {
+        use openssl::bn::BigNumContext;
+        use openssl::ec::{EcGroup, EcKey, PointConversionForm};
+        use openssl::nid::Nid;
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let private = EcKey::generate(&group).unwrap();
+        let point = private
+            .public_key()
+            .to_bytes(
+                &group,
+                PointConversionForm::UNCOMPRESSED,
+                &mut BigNumContext::new().unwrap(),
+            )
+            .unwrap();
+        let public = EcKey::from_public_key(&group, private.public_key()).unwrap();
+        let key = CachedKey {
+            guid: sample_guid(),
+            reader_name: "piggy-holder 1".into(),
+            slot_id: 0x9A,
+            algorithm: PivAlgorithm::EcP256,
+            public_key: KeyData::Ecdsa(
+                ssh_key::public::EcdsaPublicKey::from_sec1_bytes(&point).unwrap(),
+            ),
+            comment: "holder:piggy-holder 1".into(),
+            pin_policy: Some(piggy_piv::PinPolicy::Never),
+        };
+        (key, public)
+    }
+
+    /// An agent holding `key` bound to `/user.slice/a.scope`, serving the
+    /// connection of `peer`.
+    async fn holder_agent(
+        key: &CachedKey,
+        peer: PeerStatus,
+        bound: bool,
+    ) -> (PiggyAgent, Arc<Holder>) {
+        let holder = holder_for_tests();
+        if bound {
+            holder.reserve_reader().await.unwrap();
+            holder
+                .record(Binding {
+                    key: key.public_key.clone(),
+                    guid: key.guid.clone(),
+                    reader: key.reader_name.clone(),
+                    scope: "s".into(),
+                    cgroup: Some(CgroupPath::parse("/user.slice/a.scope").unwrap()),
+                })
+                .await;
+        }
+        let agent = PiggyAgent::new(vec![key.clone()])
+            .with_holder(holder.clone())
+            .with_peer(peer);
+        (agent, holder)
+    }
+
+    fn rebox_request_to(recipient: &openssl::ec::EcKey<openssl::pkey::Public>) -> Extension {
+        let mut piv_box = PivBox::new(EcCurve::NistP256);
+        piv_box.set_data(b"secret");
+        piv_box.seal_offline(recipient).unwrap();
+        let mut inner = ssh_string(&piv_box.to_bytes().unwrap());
+        inner.extend(ssh_string(b"")); // no target GUID
+        inner.push(0x9D);
+        inner.extend(ssh_string(b"partner"));
+        inner.extend(0u32.to_be_bytes());
+        Extension {
+            name: "ecdh-rebox@joyent.com".into(),
+            details: ssh_string(&inner).into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_outside_the_scope_gets_no_ecdh_rebox_of_a_minted_key() {
+        let (key, recipient) = p256_key_and_recipient();
+        let (mut agent, _holder) = holder_agent(&key, peer_in("/user.slice/b.scope"), true).await;
+        let err = agent
+            .extension(rebox_request_to(&recipient))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("not-bound-scope"),
+            "the decryption oracle is open to a sibling scope: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_outside_the_scope_gets_no_sign_ecdh_or_attest_of_a_minted_key() {
+        let (key, _recipient) = p256_key_and_recipient();
+        let (mut agent, _holder) = holder_agent(&key, peer_in("/user.slice/b.scope"), true).await;
+        let err = agent
+            .sign(SignRequest {
+                pubkey: key.public_key.clone(),
+                data: b"whatever".to_vec(),
+                flags: 0,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("not-bound-scope"), "sign: {err}");
+
+        let blob = PublicKey::new(key.public_key.clone(), "")
+            .to_bytes()
+            .unwrap();
+        let mut ecdh_inner = ssh_string(&blob);
+        ecdh_inner.extend(ssh_string(b"partner"));
+        ecdh_inner.extend(0u32.to_be_bytes());
+        let mut attest_inner = ssh_string(&blob);
+        attest_inner.extend(0u32.to_be_bytes());
+        for (name, inner) in [
+            (crate::ecdh_ext::LEGACY, ecdh_inner.clone()),
+            (crate::ecdh_ext::CANONICAL, ecdh_inner),
+            ("ykpiv-attest@joyent.com", attest_inner),
+        ] {
+            let err = agent
+                .extension(Extension {
+                    name: name.into(),
+                    details: ssh_string(&inner).into(),
+                })
+                .await;
+            // Refused as a key this connection cannot use, never reaching
+            // the card (a native miss, so not forwarded: no upstreams).
+            assert!(err.is_err(), "{name} was served to a sibling scope");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_outside_the_scope_cannot_retire_a_minted_key_and_one_inside_gets_past_the_check()
+     {
+        use crate::holder_ext::{RETIRE, RetireRequest};
+        let (key, _recipient) = p256_key_and_recipient();
+        let blob = PublicKey::new(key.public_key.clone(), "")
+            .to_bytes()
+            .unwrap();
+        let request = || Extension {
+            name: RETIRE.into(),
+            details: RetireRequest { key: blob.clone() }.encode().into(),
+        };
+        let (mut outside, holder) = holder_agent(&key, peer_in("/user.slice/b.scope"), true).await;
+        outside.extension(request()).await.ok();
+        assert!(
+            holder.binding_of(&key.public_key).await.is_some(),
+            "a sibling scope retired the key"
+        );
+        let mut inside = PiggyAgent::new(vec![key.clone()])
+            .with_holder(holder.clone())
+            .with_peer(peer_in("/user.slice/a.scope/child"));
+        inside.extension(request()).await.ok();
+        assert!(
+            holder.binding_of(&key.public_key).await.is_none(),
+            "the owning scope could not retire its own key"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_served_key_with_no_binding_is_served_to_no_one() {
+        let (key, recipient) = p256_key_and_recipient();
+        // Unbound: a card fibby already held, or a mint that has not recorded
+        // its binding yet. Even a peer in the scope it would have had is
+        // refused.
+        let (mut agent, _holder) = holder_agent(&key, peer_in("/user.slice/a.scope"), false).await;
+        let err = agent
+            .sign(SignRequest {
+                pubkey: key.public_key.clone(),
+                data: b"whatever".to_vec(),
+                flags: 0,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("no binding"), "sign: {err}");
+        let err = agent
+            .extension(rebox_request_to(&recipient))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("no binding"), "rebox: {err}");
     }
 
     // -------- operator-act@piggy (RFC 0012; pre-PCSC branches) --------

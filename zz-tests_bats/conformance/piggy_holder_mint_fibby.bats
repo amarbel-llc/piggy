@@ -245,6 +245,13 @@ function the_sixteen_card_cap_is_its_own_refusal_and_a_retire_frees_a_slot { # @
 # Shape A (a holder per session): `--scope session=any` binds a key to no
 # cgroup; the socket, in a private directory, is the whole boundary.
 
+# The agent's socket in a private directory of its own, apart from fibby's
+# (they share $WORKDIR): what an `any` holder requires of all three sockets.
+_private_agent_socket() {
+  mkdir -m 0700 "$WORKDIR/agent"
+  AGENT_SOCK="$WORKDIR/agent/a.sock"
+}
+
 # The agent over a cgroup root with NO directory in it: a key bound to a
 # cgroup would be torn down at the first sweep, an `any` key must not be.
 _spawn_any_agent() {
@@ -267,7 +274,11 @@ _spawn_any_agent() {
 
 function an_any_scope_key_signs_and_is_never_torn_down_for_want_of_a_cgroup { # @test
   _spawn_holder_fibby
+  _private_agent_socket
   _spawn_any_agent
+  # The socket file itself is 0600 whatever the umask (round 1, L2).
+  [[ $(stat -c %a "$AGENT_SOCK") == 600 ]] || {
+    echo "the agent socket is mode $(stat -c %a "$AGENT_SOCK"), want 600" >&2; return 1; }
   run "$PIGGY_BIN" holder mint --scope session
   [[ $status -eq 0 ]] || { echo "mint under an any scope failed ($status): $output" >&2; _dump_logs; return 1; }
   printf '%s\n' "$output" >"$WORKDIR/id.pub"
@@ -306,13 +317,32 @@ function an_any_scope_agent_refuses_to_start_on_a_socket_others_can_reach { # @t
   run timeout 20 env PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent --holder \
     --holder-fibby-ctl "$FIBBY_CTL" --scope session=any -a "$shared/a.sock" 3>&-
   [[ $status -ne 0 && $status -ne 124 ]] || { echo "want a refusal, got $status: $output" >&2; return 1; }
-  [[ $output == *"an \`any\` scope needs a private socket"* ]] || {
+  [[ $output == *"an \`any\` scope needs private sockets"* && $output == *"0700"* ]] || {
     echo "the refusal does not say why: $output" >&2; return 1; }
   [[ ! -e $shared/a.sock ]] || { echo "the socket was bound anyway" >&2; return 1; }
   # The same directory at 0700 is served.
   chmod 0700 "$shared"
   AGENT_SOCK="$shared/a.sock"
   _spawn_any_agent
+}
+
+# Round 1, M1: minted cards are PIN never and touch never, so fibby's own two
+# sockets are as much the boundary as the agent's.
+function an_any_scope_agent_refuses_a_socket_directory_shared_with_fibby_or_an_unnamed_pcsc_socket { # @test
+  _spawn_holder_fibby
+  # The agent's socket in $WORKDIR, where fibby's two sockets are.
+  run timeout 20 env PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent --holder \
+    --holder-fibby-ctl "$FIBBY_CTL" --scope session=any -a "$WORKDIR/a2.sock" 3>&-
+  [[ $status -ne 0 && $status -ne 124 && $output == *"own directory"* ]] || {
+    echo "want a refusal naming the shared directory, got $status: $output" >&2; return 1; }
+  [[ ! -e $WORKDIR/a2.sock ]]
+  # No PC/SC socket named.
+  _private_agent_socket
+  run timeout 20 env -u PCSCLITE_CSOCK_NAME "$PIGGY_BIN" agent --holder \
+    --holder-fibby-ctl "$FIBBY_CTL" --scope session=any -a "$AGENT_SOCK" 3>&-
+  [[ $status -ne 0 && $status -ne 124 && $output == *"PCSCLITE_CSOCK_NAME"* ]] || {
+    echo "want a refusal naming PCSCLITE_CSOCK_NAME, got $status: $output" >&2; return 1; }
+  [[ ! -e $AGENT_SOCK ]]
 }
 
 function an_any_scope_cannot_share_an_agent_with_a_cgroup_scope { # @test

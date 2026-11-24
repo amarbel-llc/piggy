@@ -642,15 +642,27 @@ async fn run_async(
     };
 
     // An `any` scope makes the socket the only boundary (a holder per
-    // session): refuse to serve it from a directory more than the operator
-    // can reach, before the socket exists.
-    if let Some(holder) = &holder {
-        if holder.config().socket_is_the_boundary() {
-            // SAFETY: geteuid takes no arguments and cannot fail.
-            let uid = unsafe { libc::geteuid() };
-            holder::check_private_socket_dir(std::path::Path::new(&socket_path), uid)
-                .map_err(|e| format!("holder: an `any` scope needs a private socket: {e}"))?;
-        }
+    // session): refuse to serve it unless all three sockets (this agent's and
+    // fibby's two) sit in private directories, the agent's apart from
+    // fibby's, before the socket exists.
+    let socket_is_the_boundary = holder
+        .as_ref()
+        .is_some_and(|h| h.config().socket_is_the_boundary());
+    if socket_is_the_boundary {
+        let ctl = cli
+            .holder_fibby_ctl
+            .as_deref()
+            .ok_or("--holder needs --holder-fibby-ctl PATH")?;
+        let pcsc = std::env::var_os("PCSCLITE_CSOCK_NAME");
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        holder::check_boundary_sockets(
+            std::path::Path::new(&socket_path),
+            std::path::Path::new(ctl),
+            pcsc.as_deref().map(std::path::Path::new),
+            uid,
+        )
+        .map_err(|e| format!("holder: an `any` scope needs private sockets: {e}"))?;
     }
 
     // piggy#326: an upstream at this agent's own socket would send every
@@ -678,7 +690,19 @@ async fn run_async(
         println!("echo Agent pid {};", std::process::id());
     }
 
-    let listener = listener::ResilientListener(bind_reclaiming_stale(&socket_path)?);
+    // A holder whose socket is its boundary creates it mode 0600, whatever the
+    // umask it was started with (the directory is already private, this is
+    // the second lock).
+    let previous_umask = socket_is_the_boundary.then(|| {
+        // SAFETY: umask takes one mode and cannot fail.
+        unsafe { libc::umask(0o177) }
+    });
+    let bound = bind_reclaiming_stale(&socket_path);
+    if let Some(previous) = previous_umask {
+        // SAFETY: as above.
+        unsafe { libc::umask(previous) };
+    }
+    let listener = listener::ResilientListener(bound?);
     // piggy#255: event-driven presence is the default for a card-backed agent;
     // --poll-only opts out, and a proxy-only agent runs no card loop at all.
     let event_driven = !cli.proxy_only && !cli.poll_only;

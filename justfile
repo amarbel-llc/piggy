@@ -6028,16 +6028,23 @@ explore-cgroup-self-move:
     systemd-run --user --scope --quiet --unit "$tag-target" sleep 300 >"$dir/target.log" 2>&1 &
     pids+=($!)
     target_pid=""
+    # The target scope's own process, found through the scope's cgroup (the
+    # unit name is unique to this run), never by matching a command line that
+    # another session's `sleep` could also carry.
     for _ in $(seq 1 50); do
-      target_pid="$(pgrep -f "sleep 300$" -n || true)"
-      [[ -n $target_pid && $(cg_of "$target_pid") == *"$tag-target.scope" ]] && break
-      target_pid=""
+      target_cg_dir="$(systemctl --user show "$tag-target.scope" -p ControlGroup --value 2>/dev/null || true)"
+      if [[ -n $target_cg_dir ]]; then
+        # (a kernel file reports size 0, so read it rather than test -s)
+        target_pid="$(head -n1 "$root$target_cg_dir/cgroup.procs" 2>/dev/null || true)"
+        [[ -n $target_pid ]] && break
+      fi
       sleep 0.1
     done
     if [[ -z $target_pid ]]; then
       echo "explore-cgroup-self-move: the sibling target scope did not come up; systemd-run said:" >&2
       sed 's/^/#   /' "$dir/target.log" >&2
-      echo "#   sleep processes: $(pgrep -af 'sleep 300' || echo none)" >&2
+      echo "#   the unit: $(systemctl --user show "$tag-target.scope" -p ControlGroup -p ActiveState 2>&1 | tr '\n' ' ')" >&2
+      echo "#   its cgroup.procs: $(cat "$root${target_cg_dir:-/none}/cgroup.procs" 2>&1 | tr '\n' ' ')" >&2
       exit 1
     fi
     target_cg="$(cg_of "$target_pid")"
@@ -6067,24 +6074,25 @@ explore-cgroup-self-move:
         env root="$root" TMPDIR_PROBE="$dir/probe" bash -c "$(cat "$dir/probe.sh")" probe "$1" 2>&1
       systemctl --user stop "$tag-probe.scope" 2>/dev/null || true
     }
-    n=0 fails=0
+    n=0 moved=0 inconclusive=0
     # A move the kernel refuses for permission (EACCES/EPERM) is a boundary
     # that holds; a refusal for any other reason (EINVAL, EBUSY, ...) says
-    # nothing about permission and is reported as inconclusive, not as ok.
-    verdict() { # verdict DESCRIPTION CGROUP
-      local out
-      out="$(probe "$2")"
+    # nothing about permission and is counted as inconclusive, never as a move
+    # and never as ok. judge DESCRIPTION OUTPUT prints one TAP line.
+    judge() {
+      local what="$1" out="$2"
       n=$((n + 1))
       if [[ $out == moved* ]]; then
-        echo "not ok $n - $1 was NOT refused: the process moved ($out)"
-        fails=$((fails + 1))
+        echo "not ok $n - $what was NOT refused: the process moved ($out)"
+        moved=$((moved + 1))
       elif [[ $out == *"Permission denied"* || $out == *"Operation not permitted"* ]]; then
-        echo "ok $n - $1 is refused for permission ($out)"
+        echo "ok $n - $what is refused for permission ($out)"
       else
-        echo "not ok $n - $1 was refused, but NOT for permission: INCONCLUSIVE ($out)"
-        fails=$((fails + 1))
+        echo "not ok $n - $what was refused, but NOT for permission: INCONCLUSIVE ($out)"
+        inconclusive=$((inconclusive + 1))
       fi
     }
+    verdict() { judge "$1" "$(probe "$2")"; } # verdict DESCRIPTION CGROUP
     control() { # control DESCRIPTION CGROUP: the probe's own cgroup, a move that must succeed
       local out
       out="$(probe "$2")"
@@ -6093,7 +6101,7 @@ explore-cgroup-self-move:
         echo "ok $n - control: $1 works ($out)"
       else
         echo "not ok $n - control: $1 failed, so the write method itself is suspect ($out)"
-        fails=$((fails + 1))
+        inconclusive=$((inconclusive + 1))
       fi
     }
     # The probe's scope is a sibling of the target, so its path is known up front.
@@ -6110,24 +6118,13 @@ explore-cgroup-self-move:
     # A process that starts where a login shell's children start (not under the
     # user manager): the recipe's own cgroup, so no systemd-run in between.
     from_login() { # from_login DESCRIPTION CGROUP
-      local out
-      out="$(env root="$root" TMPDIR_PROBE="$dir/login" bash -c "$(cat "$dir/probe.sh")" probe "$2" 2>&1)"
-      n=$((n + 1))
-      if [[ $out == moved* ]]; then
-        echo "not ok $n - $1 was NOT refused: the process moved ($out)"
-        fails=$((fails + 1))
-      elif [[ $out == *"Permission denied"* || $out == *"Operation not permitted"* ]]; then
-        echo "ok $n - $1 is refused for permission ($out)"
-      else
-        echo "not ok $n - $1 was refused, but NOT for permission: INCONCLUSIVE ($out)"
-        fails=$((fails + 1))
-      fi
+      judge "$1" "$(env root="$root" TMPDIR_PROBE="$dir/login" bash -c "$(cat "$dir/probe.sh")" probe "$2" 2>&1)"
     }
     echo "# from a process that starts in $own_cg (the login session scope):"
     from_login "a login-session process moving into a user-manager scope" "$target_cg"
     echo "1..$n"
-    echo "# $fails of $n moves succeeded."
-    ((fails == 0))
+    echo "# $moved moves succeeded; $inconclusive attempts were inconclusive (not a permission refusal, not a move); $n attempts in all."
+    ((moved == 0 && inconclusive == 0))
 
 # What a holder pair costs in memory: for each count in COUNTS it starts that
 # many pairs of (the fibby HOLDER build + `piggy agent --holder`) as throwaway
@@ -6165,7 +6162,6 @@ explore-holder-memory COUNTS="1 4 8 16" BIN_DIR="":
     }
     trap cleanup EXIT
     trap 'exit 130' INT TERM HUP
-    avail_kb() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo; }
     # field FILE NAME: the number after "NAME:" in a /proc status-like file.
     field() { awk -v k="$2:" '$1 == k {print $2; exit}' "$1"; }
     start_pair() { # start_pair INDEX: a fibby holder and its agent with one minted key
@@ -6213,10 +6209,9 @@ explore-holder-memory COUNTS="1 4 8 16" BIN_DIR="":
     }
     echo "# holder fibby: $holder"
     echo "# piggy:        $piggy"
-    echo "# host MemAvailable now: $(avail_kb) kB"
     started=0
     for n in {{ COUNTS }}; do
-      before="$(avail_kb)"
+      ((n >= 1)) || { echo "# skipping a count of $n (a pair count is at least 1)"; continue; }
       while ((started < n)); do
         started=$((started + 1))
         start_pair "$started"
@@ -6226,8 +6221,6 @@ explore-holder-memory COUNTS="1 4 8 16" BIN_DIR="":
       for i in $(seq 1 "$n"); do sign_once "$i"; done
       sleep 1
       report "after-sign" "$n"
-      after="$(avail_kb)"
-      echo "# N=$n host MemAvailable fell $((before - after)) kB since the last count ($(((before - after) / n)) kB per pair added)"
     done
     for who in fibby agent; do
       pid="$(cat "$dir/p1/$who.pid")"
