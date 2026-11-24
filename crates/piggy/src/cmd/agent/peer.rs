@@ -24,14 +24,19 @@ pub struct CgroupPath(String);
 
 impl CgroupPath {
     /// Parse an absolute path. `None` for a relative one, an empty one, or
-    /// one with an empty component (`/a//b`).
+    /// one with an empty, `.` or `..` component (`/a//b`, `/a/../b`).
     pub fn parse(path: &str) -> Option<Self> {
         let rest = path.strip_prefix('/')?;
         let rest = rest.strip_suffix('/').unwrap_or(rest);
         if rest.is_empty() {
             return Some(Self("/".to_string()));
         }
-        if rest.split('/').any(str::is_empty) {
+        // An empty component, or a `.` or `..` one (`/..` is not the root and
+        // `/a/..` is not `/`: a path that names a place by walking is no name).
+        if rest
+            .split('/')
+            .any(|c| c.is_empty() || c == "." || c == "..")
+        {
             return None;
         }
         Some(Self(format!("/{rest}")))
@@ -189,6 +194,18 @@ mod tests {
         assert!(CgroupPath::parse("a/b").is_none());
         assert!(CgroupPath::parse("").is_none());
         assert!(CgroupPath::parse("/a//b").is_none());
+        // Round 2, L6: a path that walks is no name. (A cgroup a process sees
+        // from outside its own cgroup namespace reads as `/../x`: refused,
+        // so such a peer is unreadable, not inside anything.)
+        for bad in ["/..", "/../x", "/a/..", "/a/../b", "/.", "/a/./b", "/a/."] {
+            assert!(CgroupPath::parse(bad).is_none(), "{bad}");
+        }
+        assert!(parse_proc_cgroup("0::/../x\n").is_none());
+        assert!(
+            cg("/a/.b").as_str() == "/a/.b",
+            "a dot inside a name is a name"
+        );
+        assert!(CgroupPath::parse("/a/..b").is_some());
     }
 
     #[test]

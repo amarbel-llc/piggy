@@ -1658,6 +1658,7 @@ impl PiggyAgent {
                 reader: reader.clone(),
                 scope: scope.clone(),
                 cgroup: cgroup.clone(),
+                retiring: false,
             })
             .await;
         tracing::info!(
@@ -1693,7 +1694,13 @@ impl PiggyAgent {
         let Some(binding) = holder.binding_of(public_key.key_data()).await else {
             return refuse(Status::NoSuchKey, "this holder minted no such key");
         };
-        if let Err((status, detail)) = holder.peer_may_use(&binding, &self.peer) {
+        // A key already marked retiring may be retired again by its owner (the
+        // retry of a destroy that failed); for the peer check it is as it was.
+        let owner_view = super::holder::Binding {
+            retiring: false,
+            ..binding.clone()
+        };
+        if let Err((status, detail)) = holder.peer_may_use(&owner_view, &self.peer) {
             return refuse(status, detail);
         }
         match super::holder::teardown(
@@ -1738,6 +1745,24 @@ impl PiggyAgent {
             Self::find_key(&keys, pubkey)
                 .ok_or_else(|| AgentError::Other("key not found".into()))?
         };
+        self.check_binding(pubkey).await?;
+        Ok(key)
+    }
+
+    /// [`Self::find_cached_key`] for the native extensions: a key this agent
+    /// does not hold is a native miss (`miss`, forwarded to an upstream when
+    /// there is one); a key it holds but this connection may not use is a
+    /// refusal, said as one, never dressed as a miss.
+    async fn find_native_key(
+        &self,
+        pubkey: &KeyData,
+        miss: &'static str,
+    ) -> Result<CachedKey, NativeExtError> {
+        let key = {
+            let keys = self.keys.lock().await;
+            Self::find_key(&keys, pubkey)
+        }
+        .ok_or(NativeExtError::KeyNotNative(miss))?;
         self.check_binding(pubkey).await?;
         Ok(key)
     }
@@ -1789,9 +1814,8 @@ impl PiggyAgent {
             .map_err(|e| AgentError::Other(format!("ecdh: bad card key: {e}").into()))?;
 
         let key = self
-            .find_cached_key(card_pubkey.key_data())
-            .await
-            .map_err(|_| NativeExtError::KeyNotNative("ecdh: key not found"))?;
+            .find_native_key(card_pubkey.key_data(), "ecdh: key not found")
+            .await?;
 
         let ec_point = extract_ec_point_from_ssh_blob(partner_blob)
             .map_err(|e| AgentError::Other(e.into()))?;
@@ -1842,9 +1866,8 @@ impl PiggyAgent {
             .map_err(|e| AgentError::Other(format!("attest: bad card key: {e}").into()))?;
 
         let key = self
-            .find_cached_key(card_pubkey.key_data())
-            .await
-            .map_err(|_| NativeExtError::KeyNotNative("attest: key not found"))?;
+            .find_native_key(card_pubkey.key_data(), "attest: key not found")
+            .await?;
 
         // One request on the card at a time (piggy#213).
         let _card_guard = self.card_lock.lock().await;
@@ -3960,6 +3983,7 @@ mod tests {
                     reader: key.reader_name.clone(),
                     scope: "s".into(),
                     cgroup: Some(CgroupPath::parse("/user.slice/a.scope").unwrap()),
+                    retiring: false,
                 })
                 .await;
         }
@@ -4030,11 +4054,86 @@ mod tests {
                     name: name.into(),
                     details: ssh_string(&inner).into(),
                 })
-                .await;
-            // Refused as a key this connection cannot use, never reaching
-            // the card (a native miss, so not forwarded: no upstreams).
-            assert!(err.is_err(), "{name} was served to a sibling scope");
+                .await
+                .unwrap_err();
+            // Said as a refusal of a key this connection cannot use (the
+            // text is the binding's, not "key not found" and not a PC/SC
+            // error: a test that passed on any error would pass with the
+            // check deleted, as there is no card here).
+            assert!(
+                format!("{err}").contains("not-bound-scope"),
+                "{name} was not refused as out of scope: {err}"
+            );
         }
+    }
+
+    // Round 2, N2: a cgroup-bound holder asks who is calling before it says
+    // anything about key types or scopes (an unread peer is `peer-unknown`
+    // whatever else is wrong with the request).
+    #[tokio::test]
+    async fn a_mint_from_an_unread_peer_is_peer_unknown_before_anything_else() {
+        use crate::holder_ext::{MintRequest, Status};
+        let (key, _recipient) = p256_key_and_recipient();
+        let (mut agent, _holder) = holder_agent(&key, PeerStatus::NotRead, true).await;
+        for (scope, key_type) in [("s", "rsa"), ("no-such-scope", "ed25519"), ("", "")] {
+            let response = agent
+                .handle_mint(
+                    &MintRequest {
+                        scope: scope.into(),
+                        key_type: key_type.into(),
+                    }
+                    .encode(),
+                )
+                .await;
+            assert_eq!(
+                response.status,
+                Status::PeerUnknown,
+                "scope {scope:?} key type {key_type:?}: {}",
+                response.detail
+            );
+        }
+    }
+
+    // Round 2, N3: the guid-hinted box takes the other lookup in
+    // `handle_ecdh_rebox` (by GUID, not by recipient); it is gated too.
+    #[tokio::test]
+    async fn a_peer_outside_the_scope_gets_no_guid_hinted_ecdh_rebox_either() {
+        let (key, recipient) = p256_key_and_recipient();
+        let (mut agent, _holder) = holder_agent(&key, peer_in("/user.slice/b.scope"), true).await;
+        let mut piv_box = PivBox::new(EcCurve::NistP256);
+        piv_box.guid_slot = Some((key.guid.clone(), 0x9A));
+        piv_box.set_data(b"secret");
+        piv_box.seal_offline(&recipient).unwrap();
+        let mut inner = ssh_string(&piv_box.to_bytes().unwrap());
+        inner.extend(ssh_string(b""));
+        inner.push(0x9D);
+        inner.extend(ssh_string(b"partner"));
+        inner.extend(0u32.to_be_bytes());
+        let err = agent
+            .extension(Extension {
+                name: "ecdh-rebox@joyent.com".into(),
+                details: ssh_string(&inner).into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("not-bound-scope"), "{err}");
+    }
+
+    // Round 2, M1: a key already marked retiring is refused to every verb.
+    #[tokio::test]
+    async fn a_retiring_key_is_served_to_no_one_whoever_asks() {
+        let (key, _recipient) = p256_key_and_recipient();
+        let (mut agent, holder) = holder_agent(&key, peer_in("/user.slice/a.scope"), true).await;
+        assert!(holder.mark_retiring(&key.public_key).await);
+        let err = agent
+            .sign(SignRequest {
+                pubkey: key.public_key.clone(),
+                data: b"whatever".to_vec(),
+                flags: 0,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("being retired"), "{err}");
     }
 
     #[tokio::test]

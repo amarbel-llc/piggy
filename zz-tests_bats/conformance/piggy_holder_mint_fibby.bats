@@ -165,8 +165,11 @@ function mints_are_refused_by_name_for_no_scope_an_unknown_scope_and_a_scope_the
     echo "no scope: want exit 1 scope-unbound, got $status: $output" >&2; return 1; }
 
   run "$PIGGY_BIN" holder mint --scope piggy-mint-v9
-  [[ $status -eq 1 && $output == *"unknown-scope"* && $output == *"piggy-mint-v1"* ]] || {
-    echo "unknown scope: want exit 1 unknown-scope naming the defined ones, got $status: $output" >&2; return 1; }
+  # The names the holder defines are its log's, not the caller's (round 2, L5).
+  [[ $status -eq 1 && $output == *"unknown-scope"* && $output != *"piggy-mint-v1"* ]] || {
+    echo "unknown scope: want exit 1 unknown-scope naming none of the defined ones, got $status: $output" >&2; return 1; }
+  grep -q "piggy-mint-v1" "$AGENT_LOG" || {
+    echo "the agent log does not list the defined scopes" >&2; _dump_logs; return 1; }
 
   # The name is a claim; the peer is not inside elsewhere-v1's cgroup.
   run "$PIGGY_BIN" holder mint --scope elsewhere-v1

@@ -180,7 +180,6 @@ pub fn check_boundary_sockets(
     fibby_pcsc: Option<&std::path::Path>,
     uid: u32,
 ) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
     let pcsc = fibby_pcsc.ok_or(
         "PCSCLITE_CSOCK_NAME is not set; an `any` scope needs it to name fibby's own PC/SC socket, in a private directory",
     )?;
@@ -191,24 +190,59 @@ pub fn check_boundary_sockets(
     ] {
         check_private_socket_dir(path, uid).map_err(|e| format!("{what}: {e}"))?;
     }
-    let dir_id = |path: &std::path::Path| {
+    // The sockets themselves: none may be a symlink (it could lead out of the
+    // private directory), and fibby's two must already be sockets (fibby is
+    // started first, and the agent reads cards over PC/SC as soon as it runs).
+    // The agent's own may be absent (it is bound later) or a stale socket.
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    for (what, path, must_exist) in [
+        ("the agent's socket", agent, false),
+        ("fibby's control socket", fibby_ctl, true),
+        ("fibby's PC/SC socket", pcsc, true),
+    ] {
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(format!("{what} {} is a symlink", path.display()));
+            }
+            Ok(m) if must_exist && !m.file_type().is_socket() => {
+                return Err(format!("{what} {} is not a socket", path.display()));
+            }
+            Ok(_) => {}
+            Err(e) if must_exist => {
+                return Err(format!(
+                    "{what} {}: {e} (fibby must be running first)",
+                    path.display()
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+    // Apart: neither of fibby's directories may be the agent's, or under it
+    // (a view that holds the agent's directory holds everything below it).
+    let dir_of = |path: &std::path::Path| {
         let dir = match path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
             _ => std::path::Path::new("."),
         };
+        std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))
+    };
+    let id = |dir: &std::path::Path| {
         std::fs::metadata(dir)
             .map(|m| (m.dev(), m.ino()))
             .map_err(|e| format!("{}: {e}", dir.display()))
     };
-    let agent_dir = dir_id(agent)?;
+    let agent_dir = dir_of(agent)?;
+    let agent_id = id(&agent_dir)?;
     for (what, path) in [
         ("fibby's control socket", fibby_ctl),
         ("fibby's PC/SC socket", pcsc),
     ] {
-        if dir_id(path)? == agent_dir {
-            return Err(format!(
-                "{what} is in the agent socket's own directory; they must be apart, so a view that holds the agent's socket does not hold fibby's"
-            ));
+        for ancestor in dir_of(path)?.ancestors() {
+            if id(ancestor)? == agent_id {
+                return Err(format!(
+                    "{what} is in the agent socket's own directory or under it; they must be apart, so a view that holds the agent's socket does not hold fibby's"
+                ));
+            }
         }
     }
     Ok(())
@@ -227,6 +261,12 @@ pub struct Binding {
     /// socket, lives until it is retired or the agent ends, and no watcher
     /// looks at any cgroup for it.
     pub cgroup: Option<CgroupPath>,
+    /// Set when the card is being destroyed (a retire, or its scope exited)
+    /// and cleared by nothing: the key is then usable by no one, whatever
+    /// the card reconcile loop does with a card fibby still holds, and the
+    /// watcher keeps trying to destroy it. Never inferred from a key being
+    /// absent from the served set: that loop drops keys for a PC/SC blip too.
+    pub retiring: bool,
 }
 
 /// The card store's create and destroy verbs (fibby's control socket in
@@ -311,6 +351,9 @@ pub struct Holder {
     config: HolderConfig,
     control: Box<dyn CardControl>,
     state: Mutex<HolderState>,
+    /// One teardown at a time: a retire and the watcher's retry never
+    /// destroy the same card together.
+    teardown_lock: Mutex<()>,
 }
 
 impl Holder {
@@ -319,6 +362,20 @@ impl Holder {
             config,
             control,
             state: Mutex::new(HolderState::default()),
+            teardown_lock: Mutex::new(()),
+        }
+    }
+
+    /// Mark `key`'s binding retiring (see [`Binding::retiring`]). `false`
+    /// when there is no such binding.
+    pub async fn mark_retiring(&self, key: &KeyData) -> bool {
+        let mut state = self.state.lock().await;
+        match state.bindings.iter_mut().find(|b| b.key == *key) {
+            Some(binding) => {
+                binding.retiring = true;
+                true
+            }
+            None => false,
         }
     }
 
@@ -347,18 +404,15 @@ impl Holder {
             ));
         }
         let Some(rule) = self.config.scopes.get(scope) else {
+            // The names this holder defines are the operator's to read in its
+            // log, not the caller's: a peer that names a scope it is not in
+            // learns nothing about the others.
             let mut known: Vec<&str> = self.config.scopes.keys().map(String::as_str).collect();
             known.sort_unstable();
+            tracing::info!(scope, defined = %known.join(", "), "holder: a mint named an undefined scope");
             return Err((
                 Status::UnknownScope,
-                format!(
-                    "scope {scope:?} is not one this holder defines (it defines: {})",
-                    if known.is_empty() {
-                        "none".to_string()
-                    } else {
-                        known.join(", ")
-                    }
-                ),
+                format!("scope {scope:?} is not one this holder defines"),
             ));
         };
         // An `any` scope binds to no cgroup, so it asks nothing of the peer:
@@ -389,11 +443,11 @@ impl Holder {
             ScopeRule::Caller => peer.cgroup.clone(),
             ScopeRule::Cgroup(path) if path.contains(&peer.cgroup) => path.clone(),
             ScopeRule::Cgroup(path) => {
+                // The cgroup it binds to goes to the log, not to the caller.
+                tracing::info!(scope, %path, %peer, "holder: a mint named a scope its caller is not inside");
                 return Err((
                     Status::NotBoundScope,
-                    format!(
-                        "scope {scope:?} binds to {path}, and the caller ({peer}) is not inside it"
-                    ),
+                    format!("scope {scope:?} is not the caller's scope"),
                 ));
             }
             ScopeRule::Any => unreachable!("an any scope returned above"),
@@ -413,28 +467,33 @@ impl Holder {
         // key with no cgroup on a holder that is NOT built that way (the
         // startup refusals live in `build_holder`, which `Holder::new` does
         // not repeat) is refused, not trusted.
+        // A key whose card is being destroyed is usable by no one.
+        if binding.retiring {
+            return Err((Status::NotBoundScope, "the key is being retired".into()));
+        }
         let Some(cgroup) = &binding.cgroup else {
             return if self.config.socket_is_the_boundary() {
                 Ok(())
             } else {
+                tracing::warn!(scope = %binding.scope, "holder: a key bound to no cgroup on a holder whose socket is not its boundary");
                 Err((
                     Status::NotBoundScope,
-                    format!(
-                        "the key (scope {:?}) is bound to no cgroup, and this holder's socket is not its boundary",
-                        binding.scope
-                    ),
+                    "the key is bound to no cgroup, and this holder's socket is not its boundary"
+                        .into(),
                 ))
             };
         };
         match peer {
             PeerStatus::Known(peer) if cgroup.contains(&peer.cgroup) => Ok(()),
-            PeerStatus::Known(peer) => Err((
-                Status::NotBoundScope,
-                format!(
-                    "the key is bound to scope {:?} ({cgroup}), and the caller ({peer}) is not inside it",
-                    binding.scope
-                ),
-            )),
+            PeerStatus::Known(peer) => {
+                // The key's scope and cgroup go to the log, not to a caller
+                // outside the scope.
+                tracing::info!(scope = %binding.scope, %cgroup, %peer, "holder: a peer outside a key's scope was refused it");
+                Err((
+                    Status::NotBoundScope,
+                    "the key is not bound to the caller's scope".into(),
+                ))
+            }
             PeerStatus::Unknown(why) => Err((Status::PeerUnknown, why.clone())),
             PeerStatus::NotRead => Err((
                 Status::PeerUnknown,
@@ -572,11 +631,17 @@ pub fn provision_minted_card(reader: &str, new_pin: &str) -> Result<MintedCard, 
 }
 
 /// Destroy a minted card and forget everything about it: the card store's
-/// `destroy`, the served key, the PIN, the binding. The key and PIN go FIRST:
-/// a `destroy` that fails leaves the card and the binding in place and is
-/// reported, but the key is no longer served, so a retire that could not
-/// finish never leaves a key signable (for an `any` key nothing else would
-/// ever look at it); the watcher retries the destroy ([`sweep_bindings`]).
+/// `destroy`, the served key, the PIN, the binding.
+///
+/// The binding is marked RETIRING first: from then on the key is usable by no
+/// one ([`Holder::peer_may_use`]) however the card reconcile loop treats a
+/// card fibby still holds (it may serve the key again; it stays unusable), and
+/// [`sweep_bindings`] keeps trying the destroy for as long as the mark stands.
+/// The mark is explicit and never inferred from a key being absent from the
+/// served set (that loop drops keys on a PC/SC blip too). A `destroy` that
+/// fails leaves the card and the binding in place and is reported; "no such
+/// reader" is a card already gone, which is what was wanted. One teardown at a
+/// time, so a retire and the watcher's retry do not race on one reader.
 pub async fn teardown(
     holder: &Holder,
     keys: &Arc<Mutex<Vec<CachedKey>>>,
@@ -584,9 +649,18 @@ pub async fn teardown(
     binding: &Binding,
     why: &str,
 ) -> Result<(), String> {
+    let _one_at_a_time = holder.teardown_lock.lock().await;
+    if !holder.mark_retiring(&binding.key).await {
+        // Another teardown finished it while this one waited.
+        return Ok(());
+    }
     keys.lock().await.retain(|k| k.public_key != binding.key);
     pins.lock().await.forget_card(&binding.guid);
-    holder.control().destroy(&binding.reader).await?;
+    match holder.control().destroy(&binding.reader).await {
+        Ok(()) => {}
+        Err(e) if e.contains("no such reader") => {}
+        Err(e) => return Err(e),
+    }
     holder.remove(&binding.key).await;
     tracing::info!(
         reader = %binding.reader,
@@ -598,8 +672,8 @@ pub async fn teardown(
 }
 
 /// One pass of the teardown watcher: every binding whose cgroup directory
-/// is gone, or whose key is no longer served (a retire whose destroy failed),
-/// is torn down. Returns the readers torn down.
+/// is gone, or that is marked retiring (a destroy that failed earlier), is
+/// torn down. Returns the readers torn down.
 pub async fn sweep_bindings(
     holder: &Holder,
     keys: &Arc<Mutex<Vec<CachedKey>>>,
@@ -607,14 +681,9 @@ pub async fn sweep_bindings(
 ) -> Vec<String> {
     let mut gone = Vec::new();
     for binding in holder.bindings().await {
-        let served = keys
-            .lock()
-            .await
-            .iter()
-            .any(|k| k.public_key == binding.key);
         let why = if !holder.cgroup_exists(&binding) {
             "its scope exited"
-        } else if !served {
+        } else if binding.retiring {
             "a retire could not finish; destroying the card again"
         } else {
             continue;
@@ -654,6 +723,8 @@ mod tests {
     struct Recorder {
         calls: StdMutex<Vec<String>>,
         fail_destroy: bool,
+        /// `destroy` answers "no such reader" (the card is already gone).
+        already_gone: bool,
     }
 
     #[ssh_agent_lib::async_trait]
@@ -667,8 +738,11 @@ mod tests {
         }
         async fn destroy(&self, reader: &str) -> Result<(), String> {
             self.calls.lock().unwrap().push(format!("destroy {reader}"));
-            if self.fail_destroy {
-                Err("no such reader".into())
+            if self.already_gone {
+                // fibby's own words for a card it does not have.
+                Err(format!("no such reader: {reader}"))
+            } else if self.fail_destroy {
+                Err("the card store is down".into())
             } else {
                 Ok(())
             }
@@ -713,6 +787,21 @@ mod tests {
             reader: reader.into(),
             scope: "piggy-mint-v1".into(),
             cgroup: Some(cg(cgroup)),
+            retiring: false,
+        }
+    }
+
+    /// A card store whose calls the test can read afterwards (the holder owns
+    /// its store, so the test keeps a second handle).
+    struct Shared(Arc<Recorder>);
+
+    #[ssh_agent_lib::async_trait]
+    impl CardControl for Shared {
+        async fn create(&self, alg: &str, reader: &str) -> Result<(), String> {
+            self.0.create(alg, reader).await
+        }
+        async fn destroy(&self, reader: &str) -> Result<(), String> {
+            self.0.destroy(reader).await
         }
     }
 
@@ -758,7 +847,9 @@ mod tests {
         );
         let (status, detail) = holder.resolve_scope(&peer, "piggy-mint-v2").unwrap_err();
         assert_eq!(status, Status::UnknownScope);
-        assert!(detail.contains("piggy-mint-v1"), "{detail}");
+        // Round 2, L5: the names this holder defines are the log's, not the
+        // caller's.
+        assert!(!detail.contains("piggy-mint-v1"), "{detail}");
     }
 
     #[test]
@@ -896,63 +987,107 @@ mod tests {
     }
 
     // Round 1, M1: with an `any` scope all three sockets are private, in
-    // directories of their own.
+    // directories of their own. Round 2, L3 (nesting) and L4 (symlinks, and
+    // fibby's two must be real sockets).
     #[test]
-    fn the_three_sockets_of_an_any_holder_must_be_private_and_apart() {
+    fn the_three_sockets_of_an_any_holder_must_be_private_apart_and_real() {
         use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
         // SAFETY: geteuid takes no arguments and cannot fail.
         let uid = unsafe { libc::geteuid() };
-        let root = tempdir();
-        let dir = |name: &str, mode: u32| {
+        // A short path: a unix socket's name is limited to about 100 bytes,
+        // which the usual test directory under a long worktree path exceeds.
+        let root = std::path::PathBuf::from(format!(
+            "/tmp/hs{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos())
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = |name: &str| {
             let d = root.join(name);
             std::fs::create_dir_all(&d).unwrap();
-            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(mode)).unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
             d
         };
-        let agent = dir("a", 0o700).join("agent.sock");
-        let ctl = dir("d", 0o700).join("ctl.sock");
-        let pcsc = dir("p", 0o700).join("pcscd.comm");
+        let agent = dir("a").join("agent.sock");
+        let ctl = dir("d").join("ctl.sock");
+        let pcsc = dir("p").join("pcscd.comm");
+        let _ctl_socket = UnixListener::bind(&ctl).unwrap();
+        let _pcsc_socket = UnixListener::bind(&pcsc).unwrap();
         assert_eq!(
             check_boundary_sockets(&agent, &ctl, Some(&pcsc), uid),
             Ok(())
         );
         // The same directory as fibby's ctl or PC/SC socket is refused.
         let same_ctl = root.join("a/ctl.sock");
+        let _s1 = UnixListener::bind(&same_ctl).unwrap();
         let err = check_boundary_sockets(&agent, &same_ctl, Some(&pcsc), uid).unwrap_err();
         assert!(err.contains("own directory"), "{err}");
         let same_pcsc = root.join("a/pcscd.comm");
+        let _s2 = UnixListener::bind(&same_pcsc).unwrap();
         let err = check_boundary_sockets(&agent, &ctl, Some(&same_pcsc), uid).unwrap_err();
         assert!(err.contains("own directory"), "{err}");
+        // A directory UNDER the agent's is held by whoever holds the agent's.
+        let nested = dir("a/fibby").join("ctl.sock");
+        let _s3 = UnixListener::bind(&nested).unwrap();
+        let err = check_boundary_sockets(&agent, &nested, Some(&pcsc), uid).unwrap_err();
+        assert!(err.contains("or under it"), "{err}");
         // A PC/SC socket that is not named at all is refused.
         let err = check_boundary_sockets(&agent, &ctl, None, uid).unwrap_err();
         assert!(err.contains("PCSCLITE_CSOCK_NAME"), "{err}");
         // Each of the three directories must itself be private.
-        for (which, loose) in [("a", 0), ("d", 1), ("p", 2)] {
+        for which in ["a", "d", "p"] {
             let path = root.join(which);
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).unwrap();
             let err = check_boundary_sockets(&agent, &ctl, Some(&pcsc), uid).unwrap_err();
-            assert!(err.contains("private"), "{which} ({loose}): {err}");
+            assert!(err.contains("private"), "{which}: {err}");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
+        // A symlink in place of a socket (it could lead out of the private
+        // directory) is refused, for fibby's two and the agent's.
+        let link = root.join("d/link.sock");
+        std::os::unix::fs::symlink(&ctl, &link).unwrap();
+        let err = check_boundary_sockets(&agent, &link, Some(&pcsc), uid).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        let err = check_boundary_sockets(&agent, &ctl, Some(&link), uid).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        let agent_link = root.join("a/agent-link.sock");
+        std::os::unix::fs::symlink(&ctl, &agent_link).unwrap();
+        let err = check_boundary_sockets(&agent_link, &ctl, Some(&pcsc), uid).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        // Fibby's two must exist and be sockets: fibby is started first.
+        let missing = root.join("d/not-yet.sock");
+        let err = check_boundary_sockets(&agent, &missing, Some(&pcsc), uid).unwrap_err();
+        assert!(err.contains("fibby must be running"), "{err}");
+        let plain = root.join("p/plain");
+        std::fs::write(&plain, b"x").unwrap();
+        let err = check_boundary_sockets(&agent, &ctl, Some(&plain), uid).unwrap_err();
+        assert!(err.contains("not a socket"), "{err}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    // Round 1, L3: a retire whose destroy fails leaves nothing signable, and
-    // the watcher destroys the card on a later pass.
+    // Round 1, L3 and round 2, M1: a retire whose destroy fails leaves the
+    // key usable by no one, whatever the card reconcile loop does with a card
+    // fibby still holds, and the watcher destroys the card on a later pass.
     #[tokio::test]
-    async fn a_failed_destroy_unserves_the_key_and_the_next_sweep_retries() {
+    async fn a_failed_destroy_leaves_the_key_unusable_even_if_reconcile_serves_it_again() {
         let root = tempdir();
+        let recorder = Arc::new(Recorder {
+            fail_destroy: true,
+            ..Recorder::default()
+        });
         let failing = Holder::new(
             HolderConfig {
-                scopes: HashMap::new(),
+                scopes: [("session".to_string(), ScopeRule::Any)]
+                    .into_iter()
+                    .collect(),
                 cgroup_root: root.clone(),
                 poll_interval: Duration::from_millis(10),
                 cap: CARD_CAP,
             },
-            Box::new(Recorder {
-                fail_destroy: true,
-                ..Recorder::default()
-            }),
+            Box::new(Shared(recorder.clone())),
         );
         let mut a = binding(1, "piggy-holder 1", "/unused");
         a.cgroup = None;
@@ -960,6 +1095,9 @@ mod tests {
         failing.record(a.clone()).await;
         let keys = Arc::new(Mutex::new(vec![cached(&a)]));
         let pins = Arc::new(Mutex::new(PinCache::new()));
+        let usable = |b: &Binding| failing.peer_may_use(b, &PeerStatus::NotRead).is_ok();
+        assert!(usable(&failing.binding_of(&a.key).await.unwrap()));
+
         // The retire path: the destroy fails.
         assert!(
             teardown(&failing, &keys, &pins, &a, "retired")
@@ -967,17 +1105,127 @@ mod tests {
                 .is_err()
         );
         assert!(keys.lock().await.is_empty(), "the key is no longer served");
-        assert_eq!(failing.bindings().await, vec![a.clone()], "kept to retry");
-        assert!(sweep_bindings(&failing, &keys, &pins).await.is_empty());
+        let kept = failing.binding_of(&a.key).await.unwrap();
+        assert!(kept.retiring, "kept, and marked, to retry");
+        assert!(!usable(&kept), "a retiring key is usable by no one");
 
-        // A holder whose destroy works finds the unserved key's binding and
-        // finishes the job, though its (absent) cgroup never vanishes.
-        let working = holder_with(&[], &root);
+        // The reconcile loop sees the card fibby still holds and serves the
+        // key again: it is still refused, because the mark is on the binding.
+        keys.lock().await.push(cached(&a));
+        assert!(!usable(&failing.binding_of(&a.key).await.unwrap()));
+
+        // The watcher retries on the mark (the destroy still fails here).
+        let before = recorder.calls.lock().unwrap().len();
+        assert!(sweep_bindings(&failing, &keys, &pins).await.is_empty());
+        assert!(recorder.calls.lock().unwrap().len() > before, "retried");
+
+        // A holder whose destroy works finishes the job.
+        let working = holder_with(&[("session", ScopeRule::Any)], &root);
         working.reserve_reader().await.unwrap();
-        working.record(a.clone()).await;
+        working
+            .record(Binding {
+                retiring: true,
+                ..a.clone()
+            })
+            .await;
         let gone = sweep_bindings(&working, &keys, &pins).await;
         assert_eq!(gone, vec!["piggy-holder 1".to_string()]);
         assert!(working.bindings().await.is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // Round 2, M2: "binding present, key not served" is NOT a retire. The card
+    // reconcile loop drops keys on a PC/SC blip, and the sweep must not turn
+    // that into destroyed cards.
+    #[tokio::test]
+    async fn a_key_the_reconcile_loop_dropped_is_not_destroyed_by_the_sweep() {
+        let root = tempdir();
+        let recorder = Arc::new(Recorder::default());
+        let holder = Holder::new(
+            HolderConfig {
+                scopes: [("session".to_string(), ScopeRule::Any)]
+                    .into_iter()
+                    .collect(),
+                cgroup_root: root.clone(),
+                poll_interval: Duration::from_millis(10),
+                cap: CARD_CAP,
+            },
+            Box::new(Shared(recorder.clone())),
+        );
+        let mut a = binding(1, "piggy-holder 1", "/unused");
+        a.cgroup = None;
+        holder.reserve_reader().await.unwrap();
+        holder.record(a.clone()).await;
+        // No key served: the loop dropped it (an enumeration error empties the
+        // set), nobody retired anything.
+        let keys = Arc::new(Mutex::new(Vec::<CachedKey>::new()));
+        let pins = Arc::new(Mutex::new(PinCache::new()));
+        for _ in 0..3 {
+            assert!(sweep_bindings(&holder, &keys, &pins).await.is_empty());
+        }
+        assert!(
+            recorder.calls.lock().unwrap().is_empty(),
+            "the sweep destroyed a card nobody retired"
+        );
+        assert_eq!(holder.bindings().await, vec![a]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // Round 2, L2: a destroy that finds no such card has what it wanted.
+    #[tokio::test]
+    async fn a_card_that_is_already_gone_is_a_finished_teardown() {
+        let root = tempdir();
+        let holder = Holder::new(
+            HolderConfig {
+                scopes: HashMap::new(),
+                cgroup_root: root.clone(),
+                poll_interval: Duration::from_millis(10),
+                cap: CARD_CAP,
+            },
+            Box::new(Recorder {
+                already_gone: true,
+                ..Recorder::default()
+            }),
+        );
+        let a = binding(1, "piggy-holder 1", "/unused");
+        holder.reserve_reader().await.unwrap();
+        holder.record(a.clone()).await;
+        let keys = Arc::new(Mutex::new(vec![cached(&a)]));
+        let pins = Arc::new(Mutex::new(PinCache::new()));
+        teardown(&holder, &keys, &pins, &a, "retired")
+            .await
+            .unwrap();
+        assert!(holder.bindings().await.is_empty());
+        assert_eq!(holder.live().await, 0, "the cap slot is free again");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // Round 2, L1: two teardowns of one card (a retire and the watcher) end
+    // with one destroy.
+    #[tokio::test]
+    async fn two_teardowns_of_one_card_destroy_it_once() {
+        let root = tempdir();
+        let recorder = Arc::new(Recorder::default());
+        let holder = Arc::new(Holder::new(
+            HolderConfig {
+                scopes: HashMap::new(),
+                cgroup_root: root.clone(),
+                poll_interval: Duration::from_millis(10),
+                cap: CARD_CAP,
+            },
+            Box::new(Shared(recorder.clone())),
+        ));
+        let a = binding(1, "piggy-holder 1", "/unused");
+        holder.reserve_reader().await.unwrap();
+        holder.record(a.clone()).await;
+        let keys = Arc::new(Mutex::new(vec![cached(&a)]));
+        let pins = Arc::new(Mutex::new(PinCache::new()));
+        let (one, two) = tokio::join!(
+            teardown(&holder, &keys, &pins, &a, "retired"),
+            teardown(&holder, &keys, &pins, &a, "its scope exited"),
+        );
+        assert!(one.is_ok() && two.is_ok());
+        assert_eq!(recorder.calls.lock().unwrap().len(), 1);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1202,9 +1450,16 @@ mod tests {
         let keys = Arc::new(Mutex::new(vec![cached(&a)]));
         let pins = Arc::new(Mutex::new(PinCache::new()));
         assert!(sweep_bindings(&holder, &keys, &pins).await.is_empty());
-        assert_eq!(holder.bindings().await, vec![a]);
-        // The key is unserved at once (a card that cannot be destroyed yet
-        // still signs for no one); the binding stays for the next sweep.
+        // The binding stays for the next sweep, marked retiring; the key is
+        // unserved at once (a card that cannot be destroyed yet signs for no
+        // one).
+        assert_eq!(
+            holder.bindings().await,
+            vec![Binding {
+                retiring: true,
+                ..a
+            }]
+        );
         assert_eq!(keys.lock().await.len(), 0);
         std::fs::remove_dir_all(&root).unwrap();
     }

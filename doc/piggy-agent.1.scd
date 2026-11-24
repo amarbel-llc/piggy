@@ -470,7 +470,13 @@ retire* (piggy(1)) are the clients.
 	socket exists). A key under an *any* scope lives until it is retired or
 	the holder ends; no watcher looks for its cgroup. A retire whose card
 	cannot be destroyed still stops serving the key at once and the holder
-	retries the destroy. Keeping other sessions from the sockets (a view
+	retries the destroy: the binding is marked retiring, a mark nothing
+	clears, and a retiring key is usable by no one even if the card
+	reconcile loop serves the card again. None of the three sockets may be
+	a symlink, fibby's two must be sockets that exist when the agent
+	starts, none of fibby's directories may be, or lie under, the agent's,
+	and all of it is checked before the first PC/SC use; for this the
+	socket must be named with *-a*. Keeping other sessions from the sockets (a view
 	that holds this session's agent socket and no other session's) is the
 	launcher's, not piggy's.
 

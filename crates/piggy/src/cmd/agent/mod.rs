@@ -431,6 +431,28 @@ fn build_holder(cli: &AgentArgs) -> Result<Option<std::sync::Arc<holder::Holder>
         cap: holder::CARD_CAP,
     };
     config.check_scopes_agree()?;
+    // An `any` scope makes the socket the only boundary (a holder per
+    // session): refuse to start unless all three sockets (this agent's and
+    // fibby's two) are in private directories, the agent's apart from
+    // fibby's, and none is a symlink. Here, before the first PC/SC use (the
+    // keys are loaded over PC/SC right after) and before any socket of the
+    // agent's exists. The agent's socket must be named: a default path is not
+    // something an operator placed.
+    if config.socket_is_the_boundary() {
+        let socket = cli.socket.as_deref().ok_or(
+            "holder: an `any` scope needs the agent's socket named with -a, in a private directory of its own",
+        )?;
+        let pcsc = std::env::var_os("PCSCLITE_CSOCK_NAME");
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        holder::check_boundary_sockets(
+            std::path::Path::new(socket),
+            std::path::Path::new(ctl),
+            pcsc.as_deref().map(std::path::Path::new),
+            uid,
+        )
+        .map_err(|e| format!("holder: an `any` scope needs private sockets: {e}"))?;
+    }
     tracing::info!(
         fibby_ctl = ctl,
         cgroup_root = %config.cgroup_root.display(),
@@ -641,29 +663,10 @@ async fn run_async(
         }
     };
 
-    // An `any` scope makes the socket the only boundary (a holder per
-    // session): refuse to serve it unless all three sockets (this agent's and
-    // fibby's two) sit in private directories, the agent's apart from
-    // fibby's, before the socket exists.
+    // (An `any` holder's three sockets were checked in `build_holder`.)
     let socket_is_the_boundary = holder
         .as_ref()
         .is_some_and(|h| h.config().socket_is_the_boundary());
-    if socket_is_the_boundary {
-        let ctl = cli
-            .holder_fibby_ctl
-            .as_deref()
-            .ok_or("--holder needs --holder-fibby-ctl PATH")?;
-        let pcsc = std::env::var_os("PCSCLITE_CSOCK_NAME");
-        // SAFETY: geteuid takes no arguments and cannot fail.
-        let uid = unsafe { libc::geteuid() };
-        holder::check_boundary_sockets(
-            std::path::Path::new(&socket_path),
-            std::path::Path::new(ctl),
-            pcsc.as_deref().map(std::path::Path::new),
-            uid,
-        )
-        .map_err(|e| format!("holder: an `any` scope needs private sockets: {e}"))?;
-    }
 
     // piggy#326: an upstream at this agent's own socket would send every
     // proxied request straight back in, without end.
