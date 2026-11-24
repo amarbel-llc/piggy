@@ -739,19 +739,6 @@ async fn run_async(
         orphans_outcome(holder.destroy_orphans().await, socket_is_the_boundary)?;
     }
 
-    if use_csh {
-        println!("setenv SSH_AUTH_SOCK {};", socket_path);
-        println!("setenv SSH_AGENT_PID {};", std::process::id());
-        println!("echo Agent pid {};", std::process::id());
-    } else {
-        println!("SSH_AUTH_SOCK={}; export SSH_AUTH_SOCK;", socket_path);
-        println!(
-            "SSH_AGENT_PID={}; export SSH_AGENT_PID;",
-            std::process::id()
-        );
-        println!("echo Agent pid {};", std::process::id());
-    }
-
     // A holder whose socket is its boundary creates it mode 0600, whatever the
     // umask it was started with (the directory is already private, this is
     // the second lock).
@@ -765,6 +752,21 @@ async fn run_async(
         unsafe { libc::umask(previous) };
     }
     let listener = listener::ResilientListener(bound?);
+
+    // The environment is printed once the socket is bound: an agent that could
+    // not start has told its caller nothing to `eval`.
+    if use_csh {
+        println!("setenv SSH_AUTH_SOCK {};", socket_path);
+        println!("setenv SSH_AGENT_PID {};", std::process::id());
+        println!("echo Agent pid {};", std::process::id());
+    } else {
+        println!("SSH_AUTH_SOCK={}; export SSH_AUTH_SOCK;", socket_path);
+        println!(
+            "SSH_AGENT_PID={}; export SSH_AGENT_PID;",
+            std::process::id()
+        );
+        println!("echo Agent pid {};", std::process::id());
+    }
     // piggy#255: event-driven presence is the default for a card-backed agent;
     // --poll-only opts out, and a proxy-only agent runs no card loop at all.
     let event_driven = !cli.proxy_only && !cli.poll_only;

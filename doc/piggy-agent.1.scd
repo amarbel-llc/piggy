@@ -490,8 +490,18 @@ retire* (piggy(1)) are the clients.
 	and be fibby's alone) and holds it for its life; a second agent on that
 	directory is refused ("never share a fibby"). With an *any* scope the
 	agent also refuses to start when fibby's cards cannot be listed; a cgroup
-	holder logs it and goes on. A mint whose card store failed or timed out
-	is destroyed again, and retried for a while, in case fibby was only slow.
+	holder logs it and goes on; so does an orphan that cannot be destroyed
+	(fatal for *any*). The claim is on the directory opened at start, and the
+	agent talks to fibby by the socket path: the directory must outlive
+	fibby's restarts, and whoever starts the pair must never recreate it
+	under a live holder (a second holder would lock the new directory); the
+	pair's launcher creates it and removes it only after both processes have
+	ended. The control socket must be named as itself, not as a symlink. The
+	NixOS module's directory is mode 0750 with the agent's account in its
+	group, which is enough (a mode without read for the agent, such as 0710,
+	is not). A mint whose card store failed or timed out is destroyed again,
+	and retried for two minutes by a task of its own, in case fibby was only
+	slow.
 
 *Teardown.*
 	A card is destroyed when its scope retires it or when its bound

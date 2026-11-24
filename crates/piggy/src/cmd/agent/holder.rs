@@ -395,14 +395,16 @@ struct HolderState {
     live: usize,
     next_card: u64,
     /// Readers a mint gave up on (its `create` failed or timed out) whose card
-    /// fibby may still make, late: each is tried again by the watcher for
-    /// [`SUSPECT_SWEEPS`] passes, or until a destroy finds the card. Reader
+    /// fibby may still make, late: each is tried again, by its own task, until
+    /// a destroy finds the card or its deadline passes. At most
+    /// [`CARD_CAP`] are kept (the oldest is dropped, with a warning). Reader
     /// names never repeat, so a card that shows up under one is an orphan.
-    suspects: Vec<(String, u32)>,
+    suspects: Vec<(String, std::time::Instant)>,
 }
 
-/// How many watcher passes a reader whose `create` failed stays suspect.
-pub const SUSPECT_SWEEPS: u32 = 15;
+/// How long a reader whose `create` failed stays suspect: longer than the
+/// control timeout plus slack, so a fibby that is merely slow is waited out.
+pub const SUSPECT_FOR: Duration = Duration::from_secs(120);
 
 /// The holder: configuration, the live bindings, and the card store.
 pub struct Holder {
@@ -439,6 +441,14 @@ pub struct FibbyLock {
 pub fn lock_fibby(ctl: &std::path::Path) -> Result<FibbyLock, String> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
+    // Every holder, whatever its scopes: a symlink where the control socket
+    // should be leads somewhere the claim and the checks did not look.
+    if std::fs::symlink_metadata(ctl).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!(
+            "fibby's control socket {} is a symlink; name the socket itself",
+            ctl.display()
+        ));
+    }
     let dir = match ctl.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => std::path::Path::new("."),
@@ -492,25 +502,39 @@ impl Holder {
     /// (the destroy it tried failed, or said "no such reader" before a slow
     /// fibby had made the card): keep trying for a while, from the watcher.
     pub async fn add_suspect(&self, reader: &str) {
-        self.state
-            .lock()
-            .await
-            .suspects
-            .push((reader.to_string(), SUSPECT_SWEEPS));
+        self.add_suspect_for(reader, SUSPECT_FOR).await;
     }
 
-    /// One watcher pass over the suspect readers: destroy each; a destroy that
-    /// succeeds ends the suspicion, any other answer counts one pass off.
+    /// [`Self::add_suspect`] for a window of the caller's choosing (the tests').
+    pub async fn add_suspect_for(&self, reader: &str, window: Duration) {
+        let mut state = self.state.lock().await;
+        if state.suspects.len() >= CARD_CAP {
+            let (dropped, _) = state.suspects.remove(0);
+            tracing::warn!(reader = %dropped, "holder: too many suspect readers; no longer retrying the oldest");
+        }
+        state
+            .suspects
+            .push((reader.to_string(), std::time::Instant::now() + window));
+    }
+
+    /// One pass over the suspect readers: destroy each; a destroy that
+    /// succeeds ends the suspicion; any other answer keeps it until the
+    /// deadline, when the holder says it gave up (a card that shows up later
+    /// is then an orphan until the next start). Run by its own task, not the
+    /// bindings sweep: each destroy against a fibby that never answers costs
+    /// the control timeout, and nobody's teardown waits behind that.
     pub async fn retry_suspects(&self) {
         let suspects = std::mem::take(&mut self.state.lock().await.suspects);
         let mut keep = Vec::new();
-        for (reader, left) in suspects {
+        for (reader, deadline) in suspects {
             match self.control.destroy(&reader).await {
                 Ok(()) => {
                     tracing::warn!(%reader, "holder: destroyed a card that appeared after its create had failed");
                 }
-                Err(_) if left > 1 => keep.push((reader, left - 1)),
-                Err(_) => {}
+                Err(_) if std::time::Instant::now() < deadline => keep.push((reader, deadline)),
+                Err(e) => {
+                    tracing::warn!(%reader, "holder: gave up on a reader whose create had failed, found no card in time ({e}); a card that appears later stays until the next start");
+                }
             }
         }
         self.state.lock().await.suspects.extend(keep);
@@ -690,6 +714,7 @@ impl Holder {
             .map(|b| b.reader)
             .collect();
         let mut gone = Vec::new();
+        let mut stuck = Vec::new();
         for reader in readers {
             if !reader.starts_with("piggy-holder ") || bound.contains(&reader) {
                 continue;
@@ -697,11 +722,24 @@ impl Holder {
             match self.control.destroy(&reader).await {
                 Ok(()) => gone.push(reader),
                 Err(e) if e.contains("no such reader") => {}
-                Err(e) => tracing::warn!(%reader, "holder: could not destroy an orphan card: {e}"),
+                Err(e) => {
+                    tracing::warn!(%reader, "holder: could not destroy an orphan card: {e}");
+                    stuck.push(reader);
+                }
             }
         }
         if !gone.is_empty() {
             tracing::warn!(readers = %gone.join(", "), "holder: destroyed cards left over from before this start");
+        }
+        // An orphan that could not be destroyed is still signable over
+        // fibby's PC/SC socket: said as an error, and the caller decides
+        // whether that is fatal (it is for a holder whose socket is its
+        // boundary).
+        if !stuck.is_empty() {
+            return Err(format!(
+                "could not destroy the cards left over from before this start: {}",
+                stuck.join(", ")
+            ));
         }
         Ok(gone)
     }
@@ -888,7 +926,6 @@ pub async fn sweep_bindings(
     keys: &Arc<Mutex<Vec<CachedKey>>>,
     pins: &Arc<Mutex<PinCache>>,
 ) -> Vec<String> {
-    holder.retry_suspects().await;
     let mut gone = Vec::new();
     for binding in holder.bindings().await {
         let why = if !holder.cgroup_exists(&binding) {
@@ -917,6 +954,16 @@ pub async fn watch_bindings(
     pins: Arc<Mutex<PinCache>>,
 ) {
     let interval = holder.config().poll_interval;
+    // The suspect readers (a mint's failed create) in a task of their own: a
+    // destroy against a fibby that never answers costs the control timeout,
+    // and no caller's teardown waits behind it.
+    let for_suspects = holder.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            for_suspects.retry_suspects().await;
+        }
+    });
     loop {
         tokio::time::sleep(interval).await;
         sweep_bindings(&holder, &keys, &pins).await;
@@ -1564,10 +1611,10 @@ mod tests {
 
     // Follow-up review, 6: a mint that gave up on a reader (its create failed)
     // may find the card appear late; the watcher keeps trying the destroy for
-    // a while, stops once it finds the card, and stops for good after
-    // SUSPECT_SWEEPS passes.
+    // a while, stops once it finds the card, and stops for good when its
+    // window (SUSPECT_FOR, a time, not a count of passes) runs out.
     #[tokio::test]
-    async fn a_suspect_reader_is_retried_until_its_card_is_found_or_the_passes_run_out() {
+    async fn a_suspect_reader_is_retried_until_its_card_is_found_or_its_window_runs_out() {
         let holder_over = |recorder: &Arc<Recorder>| {
             Holder::new(
                 HolderConfig {
@@ -1594,21 +1641,94 @@ mod tests {
             3,
             "two misses, then the destroy that found the card, then no more"
         );
-        // A card that never appears: the passes run out.
+        // A card that never appears: tried for the window, and no longer.
         let never = Arc::new(Recorder {
             already_gone: true,
             ..Recorder::default()
         });
         let holder = holder_over(&never);
-        holder.add_suspect("piggy-holder 6").await;
-        for _ in 0..(SUSPECT_SWEEPS + 5) {
+        holder
+            .add_suspect_for("piggy-holder 6", Duration::from_millis(150))
+            .await;
+        for _ in 0..4 {
+            holder.retry_suspects().await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        let inside_the_window = never.calls.lock().unwrap().len();
+        assert!(inside_the_window >= 3, "{inside_the_window}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        holder.retry_suspects().await; // the pass that finds the window over
+        let at_expiry = never.calls.lock().unwrap().len();
+        for _ in 0..4 {
             holder.retry_suspects().await;
         }
         assert_eq!(
             never.calls.lock().unwrap().len(),
-            SUSPECT_SWEEPS as usize,
-            "tried for SUSPECT_SWEEPS passes and no longer"
+            at_expiry,
+            "tried again after its window had run out"
         );
+        // The list is capped: the oldest is dropped, the newest kept.
+        let capped = Arc::new(Recorder::default());
+        let holder = holder_over(&capped);
+        for n in 0..(CARD_CAP + 3) {
+            holder.add_suspect(&format!("piggy-holder {n}")).await;
+        }
+        holder.retry_suspects().await;
+        assert_eq!(capped.calls.lock().unwrap().len(), CARD_CAP);
+        assert_eq!(
+            capped.calls.lock().unwrap().first().unwrap(),
+            "destroy piggy-holder 3",
+            "the three oldest were dropped"
+        );
+    }
+
+    // Second read, (c): an orphan that could not be destroyed is an error (the
+    // caller makes it fatal for a holder whose socket is its boundary); one that
+    // is already gone is not.
+    #[tokio::test]
+    async fn an_orphan_that_cannot_be_destroyed_is_an_error_not_a_log_line() {
+        let over = |recorder: Recorder| {
+            Holder::new(
+                HolderConfig {
+                    scopes: HashMap::new(),
+                    cgroup_root: "/nonexistent".into(),
+                    poll_interval: Duration::from_millis(10),
+                    cap: CARD_CAP,
+                },
+                Box::new(recorder),
+            )
+        };
+        let stuck = over(Recorder {
+            readers: vec!["piggy-holder 3".into(), "piggy-holder 4".into()],
+            fail_destroy: true,
+            ..Recorder::default()
+        });
+        let err = stuck.destroy_orphans().await.unwrap_err();
+        assert!(
+            err.contains("piggy-holder 3") && err.contains("piggy-holder 4"),
+            "{err}"
+        );
+        let gone = over(Recorder {
+            readers: vec!["piggy-holder 3".into()],
+            already_gone: true,
+            ..Recorder::default()
+        });
+        assert_eq!(gone.destroy_orphans().await.unwrap(), Vec::<String>::new());
+    }
+
+    // Second read, (f): a symlink where fibby's control socket should be is
+    // refused by every holder.
+    #[test]
+    fn a_symlinked_control_socket_is_refused() {
+        let root = std::path::PathBuf::from(format!("/tmp/pglink{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let real = root.join("real.sock");
+        std::fs::write(&real, b"").unwrap();
+        let link = root.join("ctl.sock");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let err = lock_fibby(&link).err().expect("refused");
+        assert!(err.contains("is a symlink"), "{err}");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     // Follow-up (4th read, 6): a listing that fails is an error, so a holder
