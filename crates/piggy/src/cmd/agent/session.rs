@@ -508,6 +508,10 @@ impl PiggyAgent {
             };
 
             let _card_guard = self.card_lock.lock().await;
+            // In holder mode the binding is checked again here, where the card
+            // is touched: this request may have queued behind the lock while
+            // its key was marked retiring (round 3, L4).
+            self.check_card_binding(guid).await?;
             // A PIN taken from the cache was taken BEFORE this lock: another
             // request ahead of us may have sent it to the card, found it
             // wrong and forgotten it. Look again, here, so that only ONE
@@ -1746,7 +1750,7 @@ impl PiggyAgent {
                 .ok_or_else(|| AgentError::Other("key not found".into()))?
         };
         self.check_binding(pubkey).await?;
-        Ok(key)
+        Ok(self.holder_key(key))
     }
 
     /// [`Self::find_cached_key`] for the native extensions: a key this agent
@@ -1764,7 +1768,45 @@ impl PiggyAgent {
         }
         .ok_or(NativeExtError::KeyNotNative(miss))?;
         self.check_binding(pubkey).await?;
-        Ok(key)
+        Ok(self.holder_key(key))
+    }
+
+    /// A key a holder serves (it has passed [`Self::check_binding`], so it has
+    /// a binding) is a minted one: PIN `never`, whatever the card reconcile
+    /// loop made of it. After a PC/SC blip the loop re-adopts the card with
+    /// the policy it read from the attestation, which may be unreadable
+    /// (`None`), and the holder's only copy of the random PIN went with the
+    /// dropped key: the key would ask for a PIN nobody has. The holder knows
+    /// what it minted.
+    fn holder_key(&self, mut key: CachedKey) -> CachedKey {
+        if self.holder.is_some() {
+            key.pin_policy = Some(piggy_piv::PinPolicy::Never);
+        }
+        key
+    }
+
+    /// [`Self::check_binding`] again, by the card's GUID, once the card lock
+    /// is held: a request that queued behind the card (or behind another
+    /// request's PIN prompt) completes after the key was marked retiring or
+    /// its scope exited unless the check is made where the card is touched.
+    async fn check_card_binding(&self, guid: &Guid) -> Result<(), AgentError> {
+        let Some(holder) = &self.holder else {
+            return Ok(());
+        };
+        let Some(binding) = holder.binding_of_guid(guid).await else {
+            return Err(AgentError::Other(
+                format!(
+                    "{}: this holder has no binding for the card, so it serves it to no one",
+                    crate::holder_ext::Status::NotBoundScope.name()
+                )
+                .into(),
+            ));
+        };
+        holder
+            .peer_may_use(&binding, &self.peer)
+            .map_err(|(status, detail)| {
+                AgentError::Other(format!("{}: {detail}", status.name()).into())
+            })
     }
 
     /// In holder mode, whether this connection may use the key `pubkey`: a
@@ -1871,6 +1913,7 @@ impl PiggyAgent {
 
         // One request on the card at a time (piggy#213).
         let _card_guard = self.card_lock.lock().await;
+        self.check_card_binding(&key.guid).await?;
         let token = reconnect_to_token(&key.guid)?;
 
         let attest_cert = token
@@ -1954,6 +1997,7 @@ impl PiggyAgent {
         // goes through it in `find_cached_key`) is made here, before the card
         // is touched: a peer outside the key's scope gets no decryption.
         self.check_binding(&key.public_key).await?;
+        let key = self.holder_key(key);
 
         let ec_point = decompress_ec_point(&piv_box.ephemeral_pubkey, piv_box.curve)?;
 
@@ -3913,6 +3957,9 @@ mod tests {
         async fn destroy(&self, _reader: &str) -> Result<(), String> {
             Ok(())
         }
+        async fn readers(&self) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
     }
 
     fn holder_for_tests() -> Arc<Holder> {
@@ -4119,13 +4166,28 @@ mod tests {
         assert!(format!("{err}").contains("not-bound-scope"), "{err}");
     }
 
-    // Round 2, M1: a key already marked retiring is refused to every verb.
-    #[tokio::test]
-    async fn a_retiring_key_is_served_to_no_one_whoever_asks() {
-        let (key, _recipient) = p256_key_and_recipient();
-        let (mut agent, holder) = holder_agent(&key, peer_in("/user.slice/a.scope"), true).await;
-        assert!(holder.mark_retiring(&key.public_key).await);
-        let err = agent
+    /// What every key-using verb answers `agent` for `key`: (verb, the error's
+    /// text), every one of them an error (no card is present in a unit test, so
+    /// a verb that was let through would say so in some other words).
+    async fn every_verb_refused(
+        agent: &mut PiggyAgent,
+        key: &CachedKey,
+        recipient: &openssl::ec::EcKey<openssl::pkey::Public>,
+    ) -> Vec<(&'static str, String)> {
+        let blob = PublicKey::new(key.public_key.clone(), "")
+            .to_bytes()
+            .unwrap();
+        let mut ecdh_inner = ssh_string(&blob);
+        ecdh_inner.extend(ssh_string(b"partner"));
+        ecdh_inner.extend(0u32.to_be_bytes());
+        let mut attest_inner = ssh_string(&blob);
+        attest_inner.extend(0u32.to_be_bytes());
+        let ext = |name: &str, inner: &[u8]| Extension {
+            name: name.into(),
+            details: ssh_string(inner).into(),
+        };
+        let mut said = Vec::new();
+        let sign = agent
             .sign(SignRequest {
                 pubkey: key.public_key.clone(),
                 data: b"whatever".to_vec(),
@@ -4133,35 +4195,156 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(format!("{err}").contains("being retired"), "{err}");
+        said.push(("sign", format!("{sign}")));
+        for (verb, request) in [
+            (
+                "ecdh (legacy name)",
+                ext(crate::ecdh_ext::LEGACY, &ecdh_inner),
+            ),
+            (
+                "ecdh (canonical name)",
+                ext(crate::ecdh_ext::CANONICAL, &ecdh_inner),
+            ),
+            ("attest", ext("ykpiv-attest@joyent.com", &attest_inner)),
+            ("ecdh-rebox", rebox_request_to(recipient)),
+        ] {
+            let err = agent.extension(request).await.unwrap_err();
+            said.push((verb, format!("{err}")));
+        }
+        said
     }
 
+    // Round 2, M1; round 3, L7: a key marked retiring is refused to EVERY
+    // verb, each with its own request; a peer inside the scope is told why, a
+    // peer outside it is told only that the key is not its scope's.
     #[tokio::test]
-    async fn a_peer_outside_the_scope_cannot_retire_a_minted_key_and_one_inside_gets_past_the_check()
-     {
+    async fn a_retiring_key_is_served_to_no_one_whoever_asks() {
+        let (key, recipient) = p256_key_and_recipient();
+        for (peer, wants, must_not_say) in [
+            ("/user.slice/a.scope", "being retired", ""),
+            (
+                "/user.slice/b.scope",
+                "not bound to the caller's scope",
+                "retir",
+            ),
+        ] {
+            let (mut agent, holder) = holder_agent(&key, peer_in(peer), true).await;
+            assert!(holder.mark_retiring(&key.public_key).await);
+            for (verb, said) in every_verb_refused(&mut agent, &key, &recipient).await {
+                assert!(said.contains(wants), "{verb} for a peer in {peer}: {said}");
+                assert!(
+                    must_not_say.is_empty() || !said.contains(must_not_say),
+                    "{verb} for a peer in {peer} learned the key's state: {said}"
+                );
+                // Nothing of the scope's or the key's cgroup leaks (round 2, L5).
+                assert!(
+                    !said.contains("/user.slice/a.scope"),
+                    "{verb} leaks the cgroup: {said}"
+                );
+            }
+        }
+    }
+
+    fn retire_request(key: &CachedKey) -> Extension {
         use crate::holder_ext::{RETIRE, RetireRequest};
-        let (key, _recipient) = p256_key_and_recipient();
         let blob = PublicKey::new(key.public_key.clone(), "")
             .to_bytes()
             .unwrap();
-        let request = || Extension {
+        Extension {
             name: RETIRE.into(),
-            details: RetireRequest { key: blob.clone() }.encode().into(),
-        };
+            details: RetireRequest { key: blob }.encode().into(),
+        }
+    }
+
+    async fn retire_status(agent: &mut PiggyAgent, key: &CachedKey) -> crate::holder_ext::Status {
+        let response = agent
+            .extension(retire_request(key))
+            .await
+            .unwrap()
+            .expect("a retire is answered");
+        crate::holder_ext::RetireResponse::decode(&response.details.into_bytes())
+            .expect("a retire response")
+            .status
+    }
+
+    // Round 3, L7: the responses are read, not discarded. An outsider retires
+    // nothing (and is not told the key is retiring); the owner retires it, and
+    // may retire it again after a destroy failed (the mark is set).
+    #[tokio::test]
+    async fn only_the_owning_scope_retires_a_minted_key_and_may_do_so_again() {
+        use crate::holder_ext::Status;
+        let (key, _recipient) = p256_key_and_recipient();
         let (mut outside, holder) = holder_agent(&key, peer_in("/user.slice/b.scope"), true).await;
-        outside.extension(request()).await.ok();
+        assert_eq!(
+            retire_status(&mut outside, &key).await,
+            Status::NotBoundScope
+        );
         assert!(
             holder.binding_of(&key.public_key).await.is_some(),
             "a sibling scope retired the key"
         );
+        // A key already marked retiring (a destroy that failed): the outsider
+        // is refused the same way, the owner's retry goes through.
+        assert!(holder.mark_retiring(&key.public_key).await);
+        assert_eq!(
+            retire_status(&mut outside, &key).await,
+            Status::NotBoundScope
+        );
+        assert!(holder.binding_of(&key.public_key).await.is_some());
         let mut inside = PiggyAgent::new(vec![key.clone()])
             .with_holder(holder.clone())
             .with_peer(peer_in("/user.slice/a.scope/child"));
-        inside.extension(request()).await.ok();
+        assert_eq!(retire_status(&mut inside, &key).await, Status::Ok);
         assert!(
             holder.binding_of(&key.public_key).await.is_none(),
             "the owning scope could not retire its own key"
         );
+    }
+
+    // Round 3, L4: a request that queued behind the card lock completes after
+    // its key was marked retiring unless the binding is checked again where
+    // the card is touched. (Without the check the sign reaches the card layer
+    // and fails there, with a PC/SC error.)
+    #[tokio::test]
+    async fn a_sign_queued_behind_the_card_lock_is_refused_if_its_key_began_retiring() {
+        let (key, _recipient) = p256_key_and_recipient();
+        let (agent, holder) = holder_agent(&key, peer_in("/user.slice/a.scope"), true).await;
+        let guard = agent.card_lock.lock().await;
+        let mut queued = agent.clone();
+        let pubkey = key.public_key.clone();
+        let task = tokio::spawn(async move {
+            queued
+                .sign(SignRequest {
+                    pubkey,
+                    data: b"whatever".to_vec(),
+                    flags: 0,
+                })
+                .await
+        });
+        // It passed the first check and now waits for the card.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(!task.is_finished(), "the sign did not wait for the lock");
+        assert!(holder.mark_retiring(&key.public_key).await);
+        drop(guard);
+        let err = task.await.unwrap().unwrap_err();
+        assert!(format!("{err}").contains("being retired"), "{err}");
+    }
+
+    // Round 3, N1: a card the reconcile loop re-adopts with an unreadable PIN
+    // policy is still a minted card, PIN never: the holder's only copy of its
+    // random PIN went when the loop dropped the key, and nobody has it.
+    #[tokio::test]
+    async fn a_holder_serves_a_minted_key_as_pin_never_whatever_the_loop_read() {
+        let (mut key, _recipient) = p256_key_and_recipient();
+        key.pin_policy = None;
+        let (agent, _holder) = holder_agent(&key, peer_in("/user.slice/a.scope"), true).await;
+        let served = agent.find_cached_key(&key.public_key).await.unwrap();
+        assert_eq!(served.pin_policy, Some(piggy_piv::PinPolicy::Never));
+        assert!(!served.needs_pin());
+        // A non-holder agent is unchanged: the policy stays as read.
+        let plain = PiggyAgent::new(vec![key.clone()]);
+        let served = plain.find_cached_key(&key.public_key).await.unwrap();
+        assert_eq!(served.pin_policy, None);
     }
 
     #[tokio::test]

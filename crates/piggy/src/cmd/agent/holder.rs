@@ -204,7 +204,9 @@ pub fn check_boundary_sockets(
             Ok(m) if m.file_type().is_symlink() => {
                 return Err(format!("{what} {} is a symlink", path.display()));
             }
-            Ok(m) if must_exist && !m.file_type().is_socket() => {
+            // (the agent's own path may be absent or a stale socket, but never
+            // a file of another kind: binding would unlink it)
+            Ok(m) if !m.file_type().is_socket() => {
                 return Err(format!("{what} {} is not a socket", path.display()));
             }
             Ok(_) => {}
@@ -278,30 +280,66 @@ pub trait CardControl: Send + Sync {
     async fn create(&self, alg: &str, reader: &str) -> Result<(), String>;
     /// Wipe the card served as `reader` and remove it.
     async fn destroy(&self, reader: &str) -> Result<(), String>;
+    /// The readers the card store serves a card for, by name.
+    async fn readers(&self) -> Result<Vec<String>, String>;
 }
+
+/// How long the agent waits on fibby's control socket for one command. A
+/// fibby that accepts and never answers must not hold a teardown (and the
+/// lock it takes) for ever.
+pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// fibby's control socket (piggy#130, #382 item 6): one line in, one reply
 /// out, `ok …` or `err …`.
 pub struct FibbyControl {
     socket: PathBuf,
+    timeout: Duration,
 }
 
 impl FibbyControl {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
+            timeout: CONTROL_TIMEOUT,
         }
     }
 
+    /// The same control socket with another timeout (the tests').
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// One command, as `fibby ctl` sends it: a line, then read to EOF. A
-    /// plain blocking socket on a blocking task; the exchange is tiny.
+    /// plain blocking socket on a blocking task; the exchange is tiny. It
+    /// ends after `timeout` whatever fibby does: the socket's reads and
+    /// writes time out, and the whole call is bounded too (a connect has no
+    /// socket timeout), so a silent fibby costs a failed command, not a hung
+    /// retire, watcher and lock.
     async fn command(&self, line: &str) -> Result<String, String> {
+        let timeout = self.timeout;
+        let display = self.socket.display().to_string();
+        let work = self.command_blocking(line);
+        match tokio::time::timeout(timeout + Duration::from_secs(1), work).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "fibby's control socket {display} did not answer within {timeout:?}"
+            )),
+        }
+    }
+
+    async fn command_blocking(&self, line: &str) -> Result<String, String> {
         let socket = self.socket.clone();
         let line = line.to_string();
+        let timeout = self.timeout;
         tokio::task::spawn_blocking(move || {
             use std::io::{Read, Write};
             let mut stream = std::os::unix::net::UnixStream::connect(&socket)
                 .map_err(|e| format!("connect {}: {e}", socket.display()))?;
+            stream
+                .set_read_timeout(Some(timeout))
+                .and_then(|()| stream.set_write_timeout(Some(timeout)))
+                .map_err(|e| format!("timeouts on {}: {e}", socket.display()))?;
             stream
                 .write_all(format!("{line}\n").as_bytes())
                 .map_err(|e| format!("write to {}: {e}", socket.display()))?;
@@ -334,6 +372,18 @@ impl CardControl for FibbyControl {
 
     async fn destroy(&self, reader: &str) -> Result<(), String> {
         self.command(&format!("destroy {reader}")).await.map(drop)
+    }
+
+    async fn readers(&self) -> Result<Vec<String>, String> {
+        // `ok`, then one `<reader>\t<present|absent>` line per card.
+        let reply = self.command("list").await?;
+        Ok(reply
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split('\t').next())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 }
 
@@ -467,39 +517,91 @@ impl Holder {
         // key with no cgroup on a holder that is NOT built that way (the
         // startup refusals live in `build_holder`, which `Holder::new` does
         // not repeat) is refused, not trusted.
-        // A key whose card is being destroyed is usable by no one.
-        if binding.retiring {
-            return Err((Status::NotBoundScope, "the key is being retired".into()));
-        }
-        let Some(cgroup) = &binding.cgroup else {
-            return if self.config.socket_is_the_boundary() {
-                Ok(())
-            } else {
+        match &binding.cgroup {
+            None if self.config.socket_is_the_boundary() => {}
+            None => {
                 tracing::warn!(scope = %binding.scope, "holder: a key bound to no cgroup on a holder whose socket is not its boundary");
-                Err((
+                return Err((
                     Status::NotBoundScope,
                     "the key is bound to no cgroup, and this holder's socket is not its boundary"
                         .into(),
-                ))
-            };
-        };
-        match peer {
-            PeerStatus::Known(peer) if cgroup.contains(&peer.cgroup) => Ok(()),
-            PeerStatus::Known(peer) => {
-                // The key's scope and cgroup go to the log, not to a caller
-                // outside the scope.
-                tracing::info!(scope = %binding.scope, %cgroup, %peer, "holder: a peer outside a key's scope was refused it");
-                Err((
-                    Status::NotBoundScope,
-                    "the key is not bound to the caller's scope".into(),
-                ))
+                ));
             }
-            PeerStatus::Unknown(why) => Err((Status::PeerUnknown, why.clone())),
-            PeerStatus::NotRead => Err((
-                Status::PeerUnknown,
-                "the connection's peer was not read".into(),
-            )),
+            Some(cgroup) => match peer {
+                PeerStatus::Known(peer) if cgroup.contains(&peer.cgroup) => {}
+                PeerStatus::Known(peer) => {
+                    // The key's scope and cgroup go to the log, not to a
+                    // caller outside the scope.
+                    tracing::info!(scope = %binding.scope, %cgroup, %peer, "holder: a peer outside a key's scope was refused it");
+                    return Err((
+                        Status::NotBoundScope,
+                        "the key is not bound to the caller's scope".into(),
+                    ));
+                }
+                PeerStatus::Unknown(why) => return Err((Status::PeerUnknown, why.clone())),
+                PeerStatus::NotRead => {
+                    return Err((
+                        Status::PeerUnknown,
+                        "the connection's peer was not read".into(),
+                    ));
+                }
+            },
         }
+        // Only a peer that is inside the scope is told what state the key is
+        // in: a key whose card is being destroyed is usable by no one.
+        if binding.retiring {
+            return Err((Status::NotBoundScope, "the key is being retired".into()));
+        }
+        Ok(())
+    }
+
+    /// The binding of the card whose GUID is `guid`, if this holder minted it.
+    pub async fn binding_of_guid(&self, guid: &Guid) -> Option<Binding> {
+        self.state
+            .lock()
+            .await
+            .bindings
+            .iter()
+            .find(|b| &b.guid == guid)
+            .cloned()
+    }
+
+    /// At start, destroy every card fibby holds that this holder did not mint
+    /// in this run: a `piggy-holder N` reader with no binding. Bindings and
+    /// the retiring mark live in memory only, so after an agent restart a card
+    /// whose destroy had failed (or that nothing retired) would stay signable
+    /// over fibby's PC/SC socket and fill its reader table. A holder restart
+    /// loses every key by design; this makes the cards agree. Returns the
+    /// readers destroyed; a failure is logged and not fatal.
+    pub async fn destroy_orphans(&self) -> Vec<String> {
+        let readers = match self.control.readers().await {
+            Ok(readers) => readers,
+            Err(e) => {
+                tracing::warn!("holder: could not list fibby's cards to destroy orphans: {e}");
+                return Vec::new();
+            }
+        };
+        let bound: Vec<String> = self
+            .bindings()
+            .await
+            .into_iter()
+            .map(|b| b.reader)
+            .collect();
+        let mut gone = Vec::new();
+        for reader in readers {
+            if !reader.starts_with("piggy-holder ") || bound.contains(&reader) {
+                continue;
+            }
+            match self.control.destroy(&reader).await {
+                Ok(()) => gone.push(reader),
+                Err(e) if e.contains("no such reader") => {}
+                Err(e) => tracing::warn!(%reader, "holder: could not destroy an orphan card: {e}"),
+            }
+        }
+        if !gone.is_empty() {
+            tracing::warn!(readers = %gone.join(", "), "holder: destroyed cards left over from before this start");
+        }
+        gone
     }
 
     /// Reserve a card slot under the cap and name its reader. A reservation
@@ -725,6 +827,8 @@ mod tests {
         fail_destroy: bool,
         /// `destroy` answers "no such reader" (the card is already gone).
         already_gone: bool,
+        /// The readers the store lists.
+        readers: Vec<String>,
     }
 
     #[ssh_agent_lib::async_trait]
@@ -736,8 +840,15 @@ mod tests {
                 .push(format!("create {alg} {reader}"));
             Ok(())
         }
+        async fn readers(&self) -> Result<Vec<String>, String> {
+            Ok(self.readers.clone())
+        }
         async fn destroy(&self, reader: &str) -> Result<(), String> {
             self.calls.lock().unwrap().push(format!("destroy {reader}"));
+            // Let another task run mid-destroy, as a real card store's
+            // socket round trip does: a test of two racing teardowns sees
+            // the race, not a destroy that finishes before the other starts.
+            tokio::task::yield_now().await;
             if self.already_gone {
                 // fibby's own words for a card it does not have.
                 Err(format!("no such reader: {reader}"))
@@ -802,6 +913,9 @@ mod tests {
         }
         async fn destroy(&self, reader: &str) -> Result<(), String> {
             self.0.destroy(reader).await
+        }
+        async fn readers(&self) -> Result<Vec<String>, String> {
+            self.0.readers().await
         }
     }
 
@@ -1225,8 +1339,93 @@ mod tests {
             teardown(&holder, &keys, &pins, &a, "its scope exited"),
         );
         assert!(one.is_ok() && two.is_ok());
-        assert_eq!(recorder.calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            recorder.calls.lock().unwrap().len(),
+            1,
+            "a destroy per teardown: the lock that serialises them is gone"
+        );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // Round 3, L2: a fibby that accepts a command and never answers costs a
+    // failed command, not a hung teardown (which holds the teardown lock and
+    // so would stall the watcher and every retire).
+    #[tokio::test]
+    async fn a_fibby_that_never_answers_costs_a_failed_command_not_a_hung_one() {
+        let dir = std::path::PathBuf::from(format!("/tmp/hc{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ctl.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let silent = std::thread::spawn(move || {
+            // Accept, read nothing, say nothing, hold the connection.
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        });
+        let control = FibbyControl::new(&path).with_timeout(Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        let err = control.destroy("piggy-holder 1").await.unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}: {err}",
+            started.elapsed()
+        );
+        assert!(!err.is_empty());
+        silent.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Round 3, L3: bindings are memory only, so at start the cards of an
+    // earlier run are destroyed: every `piggy-holder N` reader with no
+    // binding, and nothing else.
+    #[tokio::test]
+    async fn at_start_every_unbound_piggy_holder_card_is_destroyed_and_nothing_else() {
+        let root = tempdir();
+        let recorder = Arc::new(Recorder {
+            readers: vec![
+                "Virtual PCD piggy fibby 00 00".into(),
+                "piggy-holder 3".into(),
+                "piggy-holder 7".into(),
+                "piggy-holder 9".into(),
+            ],
+            ..Recorder::default()
+        });
+        let holder = Holder::new(
+            HolderConfig {
+                scopes: HashMap::new(),
+                cgroup_root: root.clone(),
+                poll_interval: Duration::from_millis(10),
+                cap: CARD_CAP,
+            },
+            Box::new(Shared(recorder.clone())),
+        );
+        // `piggy-holder 9` was minted in this run.
+        holder.reserve_reader().await.unwrap();
+        holder.record(binding(1, "piggy-holder 9", "/unused")).await;
+        let gone = holder.destroy_orphans().await;
+        assert_eq!(gone, ["piggy-holder 3", "piggy-holder 7"]);
+        assert_eq!(
+            *recorder.calls.lock().unwrap(),
+            ["destroy piggy-holder 3", "destroy piggy-holder 7"]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // Round 3, L5: a peer outside the scope is told nothing about the key's
+    // state, not even that it is being retired.
+    #[test]
+    fn a_peer_outside_the_scope_is_not_told_the_key_is_retiring() {
+        let holder = holder_with(&[], std::path::Path::new("/nonexistent"));
+        let mut b = binding(1, "piggy-holder 1", "/user.slice/a.scope");
+        b.retiring = true;
+        let outside = holder
+            .peer_may_use(&b, &known("/user.slice/b.scope"))
+            .unwrap_err();
+        assert!(!outside.1.contains("retir"), "{}", outside.1);
+        let inside = holder
+            .peer_may_use(&b, &known("/user.slice/a.scope"))
+            .unwrap_err();
+        assert!(inside.1.contains("being retired"), "{}", inside.1);
     }
 
     #[tokio::test]

@@ -322,6 +322,9 @@ function an_any_scope_agent_refuses_to_start_on_a_socket_others_can_reach { # @t
   [[ $status -ne 0 && $status -ne 124 ]] || { echo "want a refusal, got $status: $output" >&2; return 1; }
   [[ $output == *"an \`any\` scope needs private sockets"* && $output == *"0700"* ]] || {
     echo "the refusal does not say why: $output" >&2; return 1; }
+  # Refused before any card was enumerated (round 3, L7): the agent's
+  # "Loaded N keys from PIV tokens" line is never reached.
+  [[ $output != *"Loaded"* ]] || { echo "the agent read the cards before refusing: $output" >&2; return 1; }
   [[ ! -e $shared/a.sock ]] || { echo "the socket was bound anyway" >&2; return 1; }
   # The same directory at 0700 is served.
   chmod 0700 "$shared"
@@ -346,6 +349,41 @@ function an_any_scope_agent_refuses_a_socket_directory_shared_with_fibby_or_an_u
   [[ $status -ne 0 && $status -ne 124 && $output == *"PCSCLITE_CSOCK_NAME"* ]] || {
     echo "want a refusal naming PCSCLITE_CSOCK_NAME, got $status: $output" >&2; return 1; }
   [[ ! -e $AGENT_SOCK ]]
+}
+
+function an_any_scope_agent_needs_its_socket_named_and_never_deletes_a_file_there { # @test
+  _spawn_holder_fibby
+  # No -a: the agent would make a default path nobody placed.
+  run timeout 20 env PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent --holder \
+    --holder-fibby-ctl "$FIBBY_CTL" --scope session=any 3>&-
+  [[ $status -ne 0 && $status -ne 124 && $output == *"named with -a"* ]] || {
+    echo "want a refusal naming -a, got $status: $output" >&2; return 1; }
+  [[ $output != *"Loaded"* ]] || { echo "the agent read the cards before refusing" >&2; return 1; }
+  # A regular file at -a is refused and left alone (it is no stale socket).
+  _private_agent_socket
+  printf 'precious\n' >"$AGENT_SOCK"
+  run timeout 20 env PCSCLITE_CSOCK_NAME="$FIBBY_SOCK" "$PIGGY_BIN" agent --holder \
+    --holder-fibby-ctl "$FIBBY_CTL" --scope session=any -a "$AGENT_SOCK" 3>&-
+  [[ $status -ne 0 && $status -ne 124 && $output == *"not a socket"* ]] || {
+    echo "want a refusal of the regular file, got $status: $output" >&2; return 1; }
+  [[ $(cat "$AGENT_SOCK") == precious ]] || { echo "the file was deleted or changed" >&2; return 1; }
+}
+
+# Round 3, L3: cards left over from an earlier run (no binding in this one)
+# are destroyed at start, so nothing stays signable over fibby's PC/SC socket.
+function a_card_left_over_from_an_earlier_holder_run_is_destroyed_at_start { # @test
+  _spawn_holder_fibby
+  "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" create alg=ed25519 pin=never touch=never "piggy-holder 41" >/dev/null || {
+    echo "could not create a leftover card" >&2; return 1; }
+  run "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" list
+  [[ $output == *"piggy-holder 41"* ]] || { echo "no leftover card to start from: $output" >&2; return 1; }
+  _spawn_holder_agent
+  local _ gone=0
+  for _ in $(seq 1 50); do
+    if ! "$FIBBY_BIN" ctl --socket "$FIBBY_CTL" list | grep -q "piggy-holder 41"; then gone=1; break; fi
+    sleep 0.1
+  done
+  [[ $gone -eq 1 ]] || { echo "the leftover card survived the start" >&2; _dump_logs; return 1; }
 }
 
 function an_any_scope_cannot_share_an_agent_with_a_cgroup_scope { # @test

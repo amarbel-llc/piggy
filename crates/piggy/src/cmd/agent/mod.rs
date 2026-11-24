@@ -729,6 +729,9 @@ async fn run_async(
     // card once its bound cgroup is gone; retire does the same on request.
     let agent = match holder {
         Some(holder) => {
+            // Cards fibby holds from before this start have no binding, and
+            // nothing would ever retire them: destroy them now.
+            holder.destroy_orphans().await;
             tokio::spawn(holder::watch_bindings(
                 holder.clone(),
                 agent.keys_handle(),
@@ -864,8 +867,18 @@ async fn run_async(
 /// supervisor that doesn't pre-clean (the HM launcher's `rm -f` stays as
 /// belt-and-braces).
 fn bind_reclaiming_stale(path: &str) -> std::io::Result<UnixListener> {
+    use std::os::unix::fs::FileTypeExt;
     match UnixListener::bind(path) {
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            // Only a leftover SOCKET is ever unlinked: connecting to a regular
+            // file is refused too, which would read as "stale" and delete a
+            // file the operator named by mistake.
+            if !std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    format!("{path} exists and is not a socket; not removing it"),
+                ));
+            }
             match std::os::unix::net::UnixStream::connect(path) {
                 Ok(_) => Err(e),
                 Err(ce) if ce.kind() == std::io::ErrorKind::ConnectionRefused => {
@@ -1032,6 +1045,63 @@ mod tests {
         let reclaimed = bind_reclaiming_stale(&path).expect("stale socket must be reclaimed");
         drop(reclaimed);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // Round 3, L6: a regular file named by -a is not "a stale socket": connecting
+    // to it is refused too, and it must not be unlinked.
+    #[tokio::test]
+    async fn bind_never_unlinks_a_file_that_is_not_a_socket() {
+        let path = scratch_socket_path("regular");
+        std::fs::write(&path, b"precious").unwrap();
+        let err = bind_reclaiming_stale(&path).expect_err("a regular file must not be reclaimed");
+        assert!(err.to_string().contains("not a socket"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"precious");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Round 3, L7: the `any` checks live in `build_holder`, which `run` calls
+    // BEFORE the first PC/SC use: an error here is an agent that never
+    // enumerated a card.
+    #[test]
+    fn an_any_holder_is_refused_in_build_holder_before_any_card_is_touched() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec![
+                "piggy agent",
+                "--holder",
+                "--holder-fibby-ctl",
+                "/tmp/no-such-ctl.sock",
+                "--scope",
+                "session=any",
+            ];
+            args.extend_from_slice(extra);
+            AgentArgs::try_parse_from(args).unwrap()
+        };
+        // No -a at all.
+        let err = build_holder(&parse(&[])).err().expect("refused");
+        assert!(err.contains("named with -a"), "{err}");
+        // -a in a directory more than the operator can reach.
+        let shared = format!("/tmp/pgshared{}", std::process::id());
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::set_permissions(
+            &shared,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        let sock = format!("{shared}/a.sock");
+        let err = build_holder(&parse(&["-a", &sock])).err().expect("refused");
+        assert!(err.contains("private sockets"), "{err}");
+        // A holder with only a cgroup scope has no such requirement.
+        let ok = AgentArgs::try_parse_from([
+            "piggy agent",
+            "--holder",
+            "--holder-fibby-ctl",
+            "/tmp/no-such-ctl.sock",
+            "--scope",
+            "s=caller",
+        ])
+        .unwrap();
+        assert!(build_holder(&ok).is_ok());
+        let _ = std::fs::remove_dir_all(&shared);
     }
 
     #[tokio::test]

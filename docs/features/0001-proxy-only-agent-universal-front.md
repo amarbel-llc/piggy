@@ -206,6 +206,22 @@ on fibby, none in the proxy), and health.
   two offers inside one request's wait, from the account that owns the agent;
   the guard that keeps an offer from a card with fewer than two tries left
   still stops it short of a lockout.
+- **Known residual of a SHARED holder (caller or cgroup scopes), found by the
+  review of the `any` scope; not fixed (2026-11-24).** Both are denials, not
+  disclosures, and both exist only where one holder serves more than one
+  scope; a holder per session (`--scope NAME=any`) has neither, because its
+  one session is its only user. (a) The cap of 16 live cards is one counter
+  per holder: one scope can mint 16 keys and every other scope then gets
+  `cap-reached` until a cgroup exits, and a retiring card keeps its slot until
+  its destroy succeeds. A per-scope quota in `reserve_reader` would fix it.
+  (b) `ssh-add -x` from any connection clears every cached PIN. A minted key
+  is PIN `never` and, I believe (not tested), never consults the cache, so
+  this should do nothing to holder keys; the open question is whether a card
+  the reconcile loop re-adopts can ask for a PIN nobody has, which the holder
+  now prevents by serving every key it holds as PIN `never`. No fleet host
+  runs a shared holder: circus's `infra/` has no `piggy-holder` or scopes
+  setting (a search, 2026-11-24). Left to the operator to accept or to have
+  filed.
 - **A timed-out sign's dialog is not cancelled at the card agent.** The front
   closes its connection to the upstream when an answer times out, but
   ssh-agent-lib does not drop a handler whose connection closes (the test
