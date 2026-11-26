@@ -34,12 +34,17 @@ let
         text=True,
         timeout=20,
     )
-    with open(f"/proc/{parent}/environ", "rb") as f:
-        inherited = dict(
-            entry.decode(errors="replace").partition("=")[::2]
-            for entry in f.read().split(b"\0")
-            if entry
-        )
+    def environ(pid):
+        """The environment as it was at exec; Python adds to os.environ itself."""
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            return dict(
+                entry.decode(errors="replace").partition("=")[::2]
+                for entry in f.read().split(b"\0")
+                if entry
+            )
+
+
+    inherited = environ(parent)
     record = {
         "parent_env_path": inherited.get("PATH"),
         "parent_env_shell": inherited.get("SHELL"),
@@ -50,7 +55,7 @@ let
         "tty": os.environ.get("PAM_TTY"),
         "ruid": os.getuid(),
         "euid": os.geteuid(),
-        "env_keys": sorted(os.environ),
+        "env_keys": sorted(environ("self")),
         "parent_argv": argv(parent),
         "parent_cwd": os.readlink(f"/proc/{parent}/cwd"),
         "agent_lists_key": "pam-probe" in listing.stdout,
@@ -77,6 +82,7 @@ let
 
   fakeEditor = pkgs.writeShellScript "pam-probe-fake-editor" ''
     echo "FAKE-editor ran as uid $(${pkgs.coreutils}/bin/id -u) with: $*" >/tmp/editor.log
+    echo changed-by-the-caller >"$1"
   '';
 
   noPassword = pkgs.writeShellScript "pam-probe-nopasswd" ''
@@ -93,12 +99,16 @@ in
         account required ${lib}/pam_unix.so
         session required ${lib}/pam_permit.so
       '';
-      piggyOnly = user: service: ''
+      # Without timestamp_timeout=0: sudo's default cache stays on.
+      piggyCached = user: service: ''
         Defaults:${user} pam_service=${service}
         Defaults:${user} pam_login_service=${service}
         Defaults:${user} pam_askpass_service=${service}
-        Defaults:${user} timestamp_timeout=0
         ${user} ALL=(ALL:ALL) ALL
+      '';
+      piggyOnly = user: service: ''
+        ${piggyCached user service}
+        Defaults:${user} timestamp_timeout=0
       '';
     in
     {
@@ -107,6 +117,7 @@ in
         ${piggyOnly "alice" "sudo-piggy"}
         ${piggyOnly "carol" "sudo-piggy-seteuid"}
         ${piggyOnly "dave" "sudo-piggy-seteuid"}
+        ${piggyCached "erin" "sudo-piggy"}
         Defaults:dave secure_path="/run/wrappers/bin:/run/current-system/sw/bin"
         alice ALL=(root) NOPASSWD: ${noPassword}
       '';
@@ -122,6 +133,10 @@ in
           inherit password;
         };
         dave = {
+          isNormalUser = true;
+          inherit password;
+        };
+        erin = {
           isNormalUser = true;
           inherit password;
         };
@@ -187,11 +202,14 @@ in
     def run(label, user, script):
         """Runs script in a login shell of user; reports what the helper and sudo saw."""
         machine.succeed("rm -f ${state}/calls.jsonl")
+        # journald takes messages in asynchronously.
+        machine.succeed("journalctl --sync")
         before = machine.succeed("journalctl -t sudo -o cat --no-pager | grep -c COMMAND= || true")
         status, output = machine.execute(
             f"timeout 90 ${pkgs.util-linux}/bin/runuser -l {user} -c {shlex.quote(script)} 2>&1"
         )
         seen = calls()
+        machine.succeed("journalctl --sync")
         logged = machine.succeed("journalctl -t sudo -o cat --no-pager | grep COMMAND= || true")
         logged = logged.splitlines()[int(before):]
         print(f"=== PROBE {label} ===")
@@ -214,11 +232,14 @@ in
         status, output, seen, logged = run(label, user, script)
         assert status == 0 and len(seen) == 1, (label, status, output, seen)
         (call,) = seen
-        keys = {k for k in call["env_keys"] if not k.startswith("LC_")}
-        assert keys == {"PAM_RUSER", "PAM_SERVICE", "PAM_TYPE", "PAM_USER"}, keys
+        # No terminal here, so no PAM_TTY.
+        assert call["env_keys"] == ["PAM_RUSER", "PAM_SERVICE", "PAM_TYPE", "PAM_USER"], call["env_keys"]
         assert call["agent_lists_key"] and call["user"] == call["ruser"] == user, call
         return output, call, "\n".join(logged)
 
+
+    assert "Sudo version 1.9.17p2" in machine.succeed(f"{sudo} -V")
+    assert machine.succeed("stat -c %a /home/alice/.local/state/piggy").strip() == "700"
 
     mode("allow")
     with subtest("what runs, against what the helper sees"):
@@ -229,6 +250,7 @@ in
         out, call, logged = approved("caller's PATH", "alice", f"PATH=/home/alice/bin:$PATH {sudo} id -u")
         assert "FAKE-id ran as uid 0" in out and call["parent_argv"][1:] == ["id", "-u"], (out, call)
         assert "COMMAND=/home/alice/bin/id -u" in logged, logged
+        assert call["parent_env_path"].startswith("/home/alice/bin:"), call
 
         out, call, _ = approved("-s with the caller's SHELL", "alice", f"SHELL=${fake "shell"} {sudo} -s id -u")
         assert "FAKE-shell ran as uid 0" in out, out
@@ -244,7 +266,10 @@ in
         _, call, logged = approved(
             "sudoedit", "alice", f"SUDO_EDITOR=${fakeEditor} {sudo} -e /etc/pam-probe-file"
         )
-        assert "ran as uid 1000" in machine.succeed("cat /tmp/editor.log")
+        editor = machine.succeed("cat /tmp/editor.log")
+        # As the caller, on a copy; root then writes the caller's text back.
+        assert "ran as uid 1000 with: /var/tmp/" in editor, editor
+        assert machine.succeed("cat /etc/pam-probe-file") == "changed-by-the-caller\n"
         assert call["parent_argv"][1:] == ["-e", "/etc/pam-probe-file"], call
 
         out, call, logged = approved("-u another user", "alice", f"{sudo} -u bob ${pkgs.coreutils}/bin/id -u")
@@ -277,12 +302,17 @@ in
         assert "FAKE-shell ran as uid 0" in out, out
 
     with subtest("approval is not reused, and the other modes"):
-        twice = f"{sudo} ${pkgs.coreutils}/bin/true; {sudo} ${pkgs.coreutils}/bin/true"
-        status, _, seen, _ = run("twice in one shell", "alice", twice)
-        assert status == 0 and len(seen) == 2, (status, seen)
+        # The final `true` keeps bash from exec'ing the second sudo: both
+        # must be its children, as with no terminal sudo keys its cache to
+        # the parent. erin shows that this setup does reuse an approval.
+        twice = f"{sudo} ${pkgs.coreutils}/bin/true; {sudo} ${pkgs.coreutils}/bin/true; true"
+        for user, expected in (("alice", 2), ("erin", 1)):
+            status, _, seen, _ = run(f"twice in one shell, {user}", user, twice)
+            assert status == 0 and len(seen) == expected, (user, status, seen)
         status, out, seen, _ = run("-n", "alice", f"{sudo} -n ${pkgs.coreutils}/bin/true")
         assert status != 0 and not seen and "a password is required" in out, (status, out, seen)
-        approved("-v", "alice", f"{sudo} -v")
+        _, call, _ = approved("-v", "alice", f"{sudo} -v")
+        assert call["parent_argv"][1:] == ["-v"], call
         # alice has a NOPASSWD rule, so listing asks for nothing.
         status, _, seen, _ = run("-l", "alice", f"{sudo} -l")
         assert status == 0 and not seen, (status, seen)
@@ -300,15 +330,19 @@ in
                 ("-A", f"SUDO_ASKPASS=${askpass} {sudo} -A ${pkgs.coreutils}/bin/id -u"),
                 ("-A -i", f"SUDO_ASKPASS=${askpass} {sudo} -A -i id -u"),
             ):
-                status, output, seen, _ = run(f"refused, {user} {label}", user, script)
+                status, output, seen, logged = run(f"refused, {user} {label}", user, script)
                 service = "sudo-piggy" if user == "alice" else "sudo-piggy-seteuid"
                 assert status != 0 and len(seen) == 1, (user, label, output, seen)
-                assert seen[0]["service"] == service, seen
-        # Control: the same password does work where the stack takes one.
-        status, output, seen, _ = run(
-            "control: admin with a password", "bob", f"{piped} {sudo} -S ${pkgs.coreutils}/bin/id -u"
-        )
-        assert status == 0 and output.strip().endswith("0") and not seen, (status, output, seen)
+                assert seen[0]["service"] == service and seen[0]["agent_lists_key"], seen
+                # sudo had resolved the command although authentication failed.
+                assert any("PAM authentication error" in x and "COMMAND=/" in x for x in logged), logged
+        # Controls: the same password and askpass work where the stack takes one.
+        for label, script in (
+            ("-S", f"{piped} {sudo} -S ${pkgs.coreutils}/bin/id -u"),
+            ("-A", f"SUDO_ASKPASS=${askpass} {sudo} -k -A ${pkgs.coreutils}/bin/id -u"),
+        ):
+            status, output, seen, _ = run(f"control: admin with a password {label}", "bob", script)
+            assert status == 0 and output.strip().endswith("0") and not seen, (status, output, seen)
 
     mode("sleep")
     with subtest("can the waiting user signal the helper?"):
