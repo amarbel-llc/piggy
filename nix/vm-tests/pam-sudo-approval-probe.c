@@ -1,6 +1,8 @@
 /* TODO(#408): a stand-in sudo approval plugin for the pam_piggy design
- * probe (pam-sudo-approval-probe.nix). It records what sudo gives it and
- * then allows or refuses by a root-owned switch. A probe, never a
+ * probe (pam-sudo-approval-probe.nix). It records the user_info,
+ * command_info, run_argv and run_envp sudo gives it, then answers as a
+ * root-owned switch says: allow, refuse, hold (allow once told to) or
+ * safe (hold, after the root-only path check). A probe, never a
  * template. */
 #include <limits.h>
 #include <stdio.h>
@@ -14,7 +16,6 @@
 #define STATE "/run/pam-probe"
 
 static char *const *saved_user_info;
-static char *const *saved_submit_argv;
 
 /* One record per line: "<kind> <value>", newlines in a value escaped. */
 static void dump(FILE *out, const char *kind, char *const values[]) {
@@ -140,9 +141,9 @@ static int probe_open(unsigned int version, sudo_conv_t conversation,
                       char *const submit_argv[], char *const submit_envp[],
                       char *const plugin_options[], const char **errstr) {
   (void)version, (void)conversation, (void)plugin_printf, (void)settings;
-  (void)submit_optind, (void)submit_envp, (void)plugin_options, (void)errstr;
+  (void)submit_optind, (void)submit_argv, (void)submit_envp;
+  (void)plugin_options, (void)errstr;
   saved_user_info = user_info;
-  saved_submit_argv = submit_argv;
   return 1;
 }
 
@@ -154,7 +155,6 @@ static int probe_check(char *const command_info[], char *const run_argv[],
     return 0;
   fputs("call\n", out);
   dump(out, "user", saved_user_info);
-  dump(out, "submit", saved_submit_argv);
   dump(out, "info", command_info);
   dump(out, "argv", run_argv);
   dump(out, "env", run_envp);

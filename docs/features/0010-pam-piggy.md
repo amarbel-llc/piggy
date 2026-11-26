@@ -362,7 +362,8 @@ For open question 3. "Not designed" and "not tested" mean just that.
 | `-v` | the helper is called with nothing to show | the plugin is not called, so PAM or sudo's rules must settle it |
 | Content swapped during the wait | inferred, not tested | happens (tested) |
 | Recovery account | untouched: the stack is chosen per user | `sudo.conf` is global: the plugin must let that account through |
-| Fails to load, or its line is missing | a broken per-user stack: not tested | **not tested**, either way: whether sudo then stops for everyone, or runs unchecked |
+| Its configuration line is missing | the per-user setting is missing: sudo uses its default stack | sudo loads only what `sudo.conf` names, so by reasoning (not tested) it **runs with no check** |
+| It fails to load | a broken per-user stack: not tested | **not tested** |
 | Our code in sudo's process | none | a shared object |
 
 ## What the module can learn about a request

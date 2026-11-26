@@ -1,8 +1,10 @@
 # TODO(#408): a probe for the pam_piggy design, not a gate. FDR 0010 open
 # question 3: sudo's arguments do not say what runs. Is a sudo APPROVAL
 # PLUGIN given what will run, in the modes where the arguments mislead?
-# A stand-in plugin (pam-sudo-approval-probe.c) records command_info,
-# run_argv and run_envp, then allows or refuses by a root-owned switch.
+# Can the approved program be swapped while it waits, and what does
+# approving only what root can change (question 23) catch and miss?
+# A stand-in plugin (pam-sudo-approval-probe.c) records what sudo gives
+# it, then answers as a root-owned switch says.
 # Users reach it through a NOPASSWD rule, so the plugin is the only gate
 # under test, except `carol`, who shows the order against authentication.
 # Run with `just debug-vm-probe pam-sudo-approval`.
@@ -18,11 +20,7 @@ let
       ${./pam-sudo-approval-probe.c} -o $out
   '';
 
-  fake =
-    name:
-    pkgs.writeShellScript "pam-probe-fake-${name}" ''
-      echo "FAKE-${name} ran as uid $(${pkgs.coreutils}/bin/id -u) with: $*"
-    '';
+  inherit (import ./pam-probe-lib.nix { inherit pkgs; }) fake;
 
   fakeEditor = pkgs.writeShellScript "pam-probe-fake-editor" ''
     echo changed-by-the-caller >"$1"
@@ -82,8 +80,11 @@ in
     sudo = "/run/wrappers/bin/sudo"
 
 
-    def mode(value):
+    def mode(value, hold=False):
+        """A plugin that waits for `go` is let through at once unless `hold`."""
         machine.succeed(f"rm -f ${state}/go; echo {value} > ${state}/mode")
+        if not hold:
+            machine.succeed("touch ${state}/go")
 
 
     def calls():
@@ -91,10 +92,10 @@ in
         found: list[Any] = []
         for line in text.splitlines():
             if line == "call":
-                found.append({"user": {}, "submit": [], "info": {}, "argv": [], "env": {}})
+                found.append({"user": {}, "info": {}, "argv": [], "env": {}})
             elif line != "end":
                 kind, _, value = line.partition(" ")
-                if kind in ("submit", "argv"):
+                if kind == "argv":
                     found[-1][kind].append(value)
                 else:
                     key, _, rest = value.partition("=")
@@ -109,7 +110,6 @@ in
         for call in seen:
             print(f"  info: {call['info']}")
             print(f"  argv: {call['argv']}")
-            print(f"  submit: {call['submit']}")
             print(f"  user cwd: {call['user'].get('cwd')} user: {call['user'].get('user')}")
             print("  env: " + str({k: call["env"].get(k) for k in ("PATH", "SHELL", "FOO", "HOME")}))
         print(f"=== END {label} ===")
@@ -199,7 +199,7 @@ in
     def held(label, script, swap, setup="true", how="hold"):
         """Starts script, changes the user's files while the plugin waits, then approves."""
         machine.succeed(f"{as_alice} sh -c {shlex.quote(setup)}")
-        mode(how)
+        mode(how, hold=True)
         machine.succeed("rm -f ${state}/approval /tmp/held.log")
         machine.execute(
             f"(status=0; ${pkgs.util-linux}/bin/runuser -l alice -c {shlex.quote(script)}"
@@ -288,9 +288,10 @@ in
                 mode("allow")
                 status, output, _ = run(f"control: {label}", script)
                 assert status == 0, (label, status, output)
+                if "-D" in script:
+                    # The directory change is real: the caller's file ran.
+                    assert "FAKE-callers-good ran as uid 0" in output, output
             mode("safe")
-            # A call that passes the check is let go at once.
-            machine.succeed("touch ${state}/go")
             status, output, seen = run(f"remedy: {label}", script)
             assert len(seen) == 1 and (status == 0) == allowed, (label, status, output, seen)
 
@@ -323,7 +324,7 @@ in
             " && chmod 755 /tmp/authored"
             " && ${pkgs.nix}/bin/nix-store --add /tmp/authored'"
         ).strip()
-        machine.succeed("touch ${state}/go")
+        mode("safe")
         status, output, seen = run("a program the caller added to the store", f"{sudo} {added}")
         assert status == 0 and "CALLER-AUTHORED as 0" in output, (added, status, output)
   '';

@@ -52,7 +52,6 @@ let
         "service": os.environ.get("PAM_SERVICE"),
         "user": os.environ.get("PAM_USER"),
         "ruser": os.environ.get("PAM_RUSER"),
-        "tty": os.environ.get("PAM_TTY"),
         "ruid": os.getuid(),
         "euid": os.geteuid(),
         "env_keys": sorted(environ("self")),
@@ -73,12 +72,7 @@ let
     echo ${password}
   '';
 
-  # Stand-ins a caller could put in the way. Each says who ran it.
-  fake =
-    name:
-    pkgs.writeShellScript "pam-probe-fake-${name}" ''
-      echo "FAKE-${name} ran as uid $(${pkgs.coreutils}/bin/id -u) with: $*"
-    '';
+  inherit (import ./pam-probe-lib.nix { inherit pkgs; }) fake;
 
   fakeEditor = pkgs.writeShellScript "pam-probe-fake-editor" ''
     echo "FAKE-editor ran as uid $(${pkgs.coreutils}/bin/id -u) with: $*" >/tmp/editor.log

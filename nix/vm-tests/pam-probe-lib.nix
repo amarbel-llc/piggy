@@ -1,6 +1,13 @@
 # TODO(#408): guest scripts the pam_piggy probes share. Goes when they do.
 { pkgs }:
 {
+  # A stand-in a caller could put in the way. It says who ran it.
+  fake =
+    name:
+    pkgs.writeShellScript "pam-probe-fake-${name}" ''
+      echo "FAKE-${name} ran as uid $(${pkgs.coreutils}/bin/id -u) with: $*"
+    '';
+
   # Connects to the polkit helper socket, which starts one instance of
   # polkit-agent-helper@.service, and prints what the unit sends.
   activate = pkgs.writeScript "pam-probe-activate" ''
