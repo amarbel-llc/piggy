@@ -2355,6 +2355,20 @@ test-vm-coverage:
 debug-vm-dry-run check="vm-piggy-luks":
     nix build .#checks.{{ vm-check-system }}.{{ check }} --dry-run --show-trace
 
+# TODO(#408): the pam_piggy design experiments (nix/vm-tests/pam-*-probe.nix),
+# no part of the merge gate. PROBE is pam-sandbox (socket paths the polkit
+# helper sandbox reaches), pam-socket-move (the moved socket, link and
+# fallback), pam-command (what a pam_exec helper sees and shows) or
+# pkexec-password (pkexec's agents with the stock stack). The log is
+# printed whether the probe passes, fails or was already built. PROBE is
+# quoted: this recipe runs without a permission prompt.
+#
+# run one pam_piggy VM probe and print its log
+[group('debug')]
+[linux]
+debug-vm-probe probe:
+    status=0; nix build .#vm-probe-{{ quote(probe) }} --no-link --show-trace || status=$?; nix log .#vm-probe-{{ quote(probe) }}; exit $status
+
 # Re-run one VM lane RUNS times to catch an intermittent failure
 # (piggy#296/#300: vm-piggy-agent hangs in an ssh step about once in a
 # few dozen runs). Each run is a forced rebuild of the already-built

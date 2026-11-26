@@ -1097,6 +1097,12 @@
             inherit hogtie;
           };
 
+          # TODO(#408): the pam_piggy design probes. Here rather than in
+          # packages so `nix flake check` does not evaluate their guests.
+          legacyPackages = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+            import ./nix/vm-tests/probes.nix { inherit pkgs piggy; }
+          );
+
           checks = {
             bats-default = batsLib.batsLaneOutputs.bats-default;
             # Every go/ package's tests, in the sandbox (piggy#189). Driven
