@@ -301,9 +301,38 @@ the approved link, and **the new content ran as root** each time
 (asserted). Naming the resolved path therefore settles which path runs,
 not what is there. That the same holds under the `pam_exec` shape is an
 inference: its approval is earlier still, but this was not probed.
-Refusing a program the caller can change (the file, a link, or any
-directory above it) is a candidate remedy, **not designed or tested**;
-neither are sudo's digest rules.
+sudo's digest rules were not examined.
+
+**A candidate remedy, tested in the plugin:** approve a program only if
+root alone can change what its path leads to. Walking the path one
+component at a time and following links, every entry must be root's and
+not group- or other-writable, except a sticky directory, as `/nix/store`
+is. Asserted:
+
+| Program | Verdict |
+|---|---|
+| in the store; reached through root's links; root's file in root's directory, also named relatively from there | allowed |
+| the caller's own, also when found on `PATH` or named relatively | refused |
+| root's file in the caller's directory | refused |
+| the caller's link to a good program; root's link to the caller's program | refused |
+| a group-writable file, or one in an open, non-sticky directory | refused |
+
+It checks **the program only**. All three of these passed it and ran what
+the caller chose, as root (asserted):
+
+| Gap | What happened |
+|---|---|
+| a good interpreter with the caller's script | the caller replaced the script during the wait |
+| root's own script that finds a command on `PATH`, no `secure_path` | the caller's command ran |
+| a program the caller added to the Nix store | root owns it and nothing can change it, so it passes; its path does not say who wrote it |
+
+The second needs `secure_path` or sudo's environment rules (that either
+closes it was not tested here). The first has no general check: arguments,
+configuration files and anything loaded later are outside it. The third
+means **root-owned is not reviewed**. The check does not read POSIX ACLs,
+did not cover `sudoedit` (whose content the caller chooses), and was not
+tried under `pam_exec`, which is not given the resolved path. It refuses
+every program of the caller's own, which narrows "any command".
 
 **What a plugin would cost:** a shared object loaded into sudo, and a
 change to the ruled shape. `sudo.conf` is not per user: the probe's
@@ -544,7 +573,7 @@ run outside a transaction.
 | 14 | **(blocks)** RFC 0012 says callers must not put secrets in an act's text, and sudo arguments can hold one; the text also crosses forwarded agents. | State that secrets on a sudo command line are unsupported, and settle what the helper does when it suspects one. |
 | 2 | **(blocks)** Should the helper run as root (`seteuid`)? Without it the user who is asking can stop or kill it (tested). | Yes: with it those signals were refused. Give it a fixed environment. |
 | 3 | **(blocks)** The arguments do not say what runs: `-s` runs the program the caller's `SHELL` names, and `sudoedit` lets the caller write any content (tested). The prompt must not misstate a command. Does the ruled `pam_exec` shape stay, or does the decision move to a sudo approval plugin, which is given the resolved path (tested)? With `pam_exec`, either refusing `-s`, `-e` and `-v` means reading sudo's command line a second time, and it **narrows the ruled "any command"**. | The plugin, **only if** its reach over the recovery account and its load failure are settled first. It still shows a path, not content (question 23). |
-| 23 | **(blocks)** The caller can change an approved program before it runs (tested with the plugin; inferred for `pam_exec`). What does "any command, shown" mean for a program the caller can change, and for `sudoedit`? | Refuse, or mark unmissably in the prompt, what the caller can change; design and test the check first. This too may narrow "any command". |
+| 23 | **(blocks)** The caller can change an approved program before it runs (tested with the plugin; inferred for `pam_exec`). What does "any command, shown" mean for a program the caller can change, and for `sudoedit`? | Refuse a program the caller can change (tested above; it **narrows "any command"**), and require `secure_path`. It cannot make "what you see is what runs" true for interpreters, loaded files or store paths the caller added: the prompt must not promise that, and the operator decides whether the remainder is acceptable. |
 | 4 | **(blocks)** How does the helper find the right agent socket, including where the user's agent only relays? | A root-owned per-host setting. |
 | 5 | The namespace name, display class and text for the RFC 0012 amendment, and whether the text reuses `piggy-act-v1` (RFC 0013). | A namespace of its own, with a class that looks unlike every other. |
 | 6 | Does the socket move happen now, or wait for the polkit stage? | Wait: the sudo test reached the agent without it (proxy-only, no card). |

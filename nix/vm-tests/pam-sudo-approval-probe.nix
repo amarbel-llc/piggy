@@ -58,6 +58,14 @@ in
       text = "original\n";
       mode = "0644";
     };
+    # Root's own script, which finds one of its commands by PATH.
+    environment.etc."pam-probe-script" = {
+      text = ''
+        #!/bin/sh
+        pam-probe-step
+      '';
+      mode = "0755";
+    };
     systemd.tmpfiles.rules = [ "d ${state} 0700 root root -" ];
   };
 
@@ -227,5 +235,84 @@ in
             output, seen = held(label, setup, f"{sudo} /home/alice/bin/{program}", swap)
             assert len(seen) == 1 and seen[0]["info"]["command"] == f"/home/alice/bin/{program}", seen
             assert ran in output and "sudo-exit 0" in output, (label, output)
+
+    with subtest("remedy: only a program that only root can change"):
+        coreutils = "${pkgs.coreutils}/bin"
+        # Files root owns, in places where the caller can or cannot act.
+        machine.succeed("install -m 0755 ${fake "root-copy"} /home/alice/bin/root-owned")
+        machine.succeed("install -d -m 0755 /srv/safe /srv/open && chmod 0777 /srv/open")
+        # Scripts, not copies of coreutils: its binary acts by its name.
+        machine.succeed("install -m 0755 ${fake "good"} /srv/safe/good")
+        machine.succeed("install -m 0775 -g users ${fake "grouped"} /srv/safe/group-writable")
+        machine.succeed("install -m 0755 ${fake "open"} /srv/open/in-open-dir")
+        machine.succeed(f"{as_alice} ln -sfn {coreutils}/true /home/alice/bin/link-to-good")
+        machine.succeed("ln -sfn /home/alice/bin/tool /srv/safe/link-to-callers")
+
+        mode("safe")
+        # Any call that passes the check is let go at once.
+        machine.succeed("touch ${state}/go")
+        for label, script, allowed in (
+            ("a store program", f"{sudo} {coreutils}/true", True),
+            ("through root's links", f"{sudo} /run/current-system/sw/bin/true", True),
+            ("root's file in root's directory", f"{sudo} /srv/safe/good", True),
+            ("the caller's own program", f"{sudo} /home/alice/bin/tool", False),
+            ("found on the caller's PATH", f"PATH=/home/alice/bin:$PATH {sudo} id -u", False),
+            ("root's file in the caller's directory", f"{sudo} /home/alice/bin/root-owned", False),
+            ("the caller's link to a good program", f"{sudo} /home/alice/bin/link-to-good", False),
+            ("root's link to the caller's program", f"{sudo} /srv/safe/link-to-callers", False),
+            ("group-writable file", f"{sudo} /srv/safe/group-writable", False),
+            ("in an open directory", f"{sudo} /srv/open/in-open-dir", False),
+            ("relative, in the caller's directory", f"cd bin && {sudo} ./tool", False),
+            ("relative, in root's directory", f"cd /srv/safe && {sudo} ./good", True),
+        ):
+            status, output, seen = run(f"remedy: {label}", script)
+            assert len(seen) == 1 and (status == 0) == allowed, (label, status, output, seen)
+
+    with subtest("what the remedy does not cover"):
+        mode("safe")
+        machine.succeed(f"{as_alice} sh -c {shlex.quote(original)}")
+
+
+        def held_safe(label, script, swap):
+            mode("safe")
+            machine.succeed("rm -f ${state}/approval /tmp/held.log")
+            machine.execute(
+                f"(status=0; ${pkgs.util-linux}/bin/runuser -l alice -c {shlex.quote(script)}"
+                " || status=$?; echo sudo-exit $status) >/tmp/held.log 2>&1 &"
+            )
+            machine.wait_until_succeeds("grep -qx end ${state}/approval", timeout=60)
+            machine.succeed(f"{as_alice} sh -c {shlex.quote(swap)}")
+            machine.succeed("touch ${state}/go")
+            machine.wait_until_succeeds("grep -q sudo-exit /tmp/held.log", timeout=90)
+            output = machine.succeed("cat /tmp/held.log")
+            show(label, script, "-", output, calls())
+            return output
+
+
+        output = held_safe(
+            "a good interpreter, the caller's script",
+            f"{sudo} /run/current-system/sw/bin/sh /home/alice/bin/tool",
+            in_place,
+        )
+        assert "SWAPPED" in output and "sudo-exit 0" in output, output
+
+        step = "printf '#!/bin/sh\\necho CALLERS-STEP\\n' > /home/alice/bin/pam-probe-step && chmod 755 /home/alice/bin/pam-probe-step"
+        output = held_safe(
+            "root's script, a command found on the caller's PATH",
+            f"PATH=/home/alice/bin:$PATH {sudo} /etc/pam-probe-script",
+            step,
+        )
+        assert "CALLERS-STEP" in output and "sudo-exit 0" in output, output
+
+        # A user can put a file of their own into the store: root owns it
+        # and nobody can change it, so the check passes.
+        added = machine.succeed(
+            f"{as_alice} sh -c 'printf \"#!/bin/sh\\necho CALLER-AUTHORED\\n\" >/tmp/authored"
+            " && chmod 755 /tmp/authored"
+            " && ${pkgs.nix}/bin/nix-store --add /tmp/authored'"
+        ).strip()
+        machine.succeed("touch ${state}/go")
+        status, output, seen = run("a program the caller added to the store", f"{sudo} {added}")
+        assert status == 0 and "CALLER-AUTHORED" in output, (added, status, output)
   '';
 }
