@@ -4,8 +4,8 @@
 # and then allows or refuses by a root-owned switch. It answers: does any
 # password path remain, what runs compared with the arguments the helper
 # can show, which ids the helper needs, and can it reach the user's agent.
-# It asserts what FDR 0010 states, including the two cases where what ran
-# is not what the arguments say.
+# It asserts what FDR 0010 states, including the cases where what ran or
+# was written is not what the arguments say.
 # The helper IS the authentication here: a probe, never a template.
 # Run with `just debug-vm-probe pam-sudo`.
 { piggy }:
@@ -325,6 +325,8 @@ in
         for user in ("alice", "carol"):
             for label, script in (
                 ("-S", f"{piped} {sudo} -S ${pkgs.coreutils}/bin/id -u"),
+                # A bare name: the full path in sudo's log is its own lookup.
+                ("-S bare name", f"{piped} {sudo} -S id -u"),
                 ("-i -S", f"{piped} {sudo} -S -i id -u"),
                 ("-s -S", f"{piped} {sudo} -S -s id -u"),
                 ("-A", f"SUDO_ASKPASS=${askpass} {sudo} -A ${pkgs.coreutils}/bin/id -u"),
@@ -357,10 +359,12 @@ in
             pid = calls()[0]["pid"]
             results = {}
             for signal in ("STOP", "CONT", "KILL"):
-                status, _ = machine.execute(
-                    f"${pkgs.util-linux}/bin/runuser -u {user} -- ${pkgs.bash}/bin/bash -c 'kill -{signal} {pid}'"
+                status, output = machine.execute(
+                    f"${pkgs.util-linux}/bin/runuser -u {user} -- ${pkgs.bash}/bin/bash -c 'kill -{signal} {pid}' 2>&1"
                 )
                 results[signal] = status
+                # A helper that had already gone would also fail the kill.
+                assert status == 0 or "Operation not permitted" in output, (signal, output)
             machine.wait_until_succeeds("grep -q sudo-exit /tmp/sudo-sig.log", timeout=90)
             sudo_log = machine.succeed("cat /tmp/sudo-sig.log")
             print(f"=== PROBE signals from {user}: {results}\n{sudo_log}=== END ===")

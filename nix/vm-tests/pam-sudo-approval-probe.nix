@@ -33,6 +33,8 @@ in
     security.sudo.enable = true;
     security.sudo.extraConfig = ''
       alice ALL=(ALL:ALL) NOPASSWD: ALL
+      # Lets alice pick the directory the command runs in (sudo -D).
+      Defaults:alice runcwd="*"
       carol ALL=(ALL:ALL) ALL
       Defaults:carol timestamp_timeout=0
     '';
@@ -147,7 +149,8 @@ in
         assert call["argv"] == ["${fake "shell"}", "-c", "id -u"], call
 
         _, call = approved("-s alone", f"echo id -u | {sudo} -s")
-        assert call["info"]["command"].endswith("/bin/bash") and len(call["argv"]) == 1, call
+        assert call["info"]["command"].endswith("/bin/bash"), call
+        assert call["argv"] == [call["info"]["command"]], call
 
         _, call = approved("-i with a command", f"{sudo} -i id -u")
         assert call["info"]["command"].endswith("/bin/bash") and call["info"]["cwd"] == "/root", call
@@ -193,10 +196,10 @@ in
         assert machine.succeed("cat /etc/pam-probe-file") == "original\n"
 
 
-    def held(label, setup, script, swap):
+    def held(label, script, swap, setup="true", how="hold"):
         """Starts script, changes the user's files while the plugin waits, then approves."""
         machine.succeed(f"{as_alice} sh -c {shlex.quote(setup)}")
-        mode("hold")
+        mode(how)
         machine.succeed("rm -f ${state}/approval /tmp/held.log")
         machine.execute(
             f"(status=0; ${pkgs.util-linux}/bin/runuser -l alice -c {shlex.quote(script)}"
@@ -214,16 +217,19 @@ in
 
     with subtest("can the approved program change while the plugin waits?"):
         original = "printf '#!/bin/sh\\necho ORIGINAL\\n' > /home/alice/bin/tool && chmod 755 /home/alice/bin/tool"
-        swapped = (
-            "printf '#!/bin/sh\\necho SWAPPED\\n' > /home/alice/bin/next && chmod 755 /home/alice/bin/next"
-            " && mv /home/alice/bin/next /home/alice/bin/tool"
-        )
         # What is asserted is the hole: the approval names a path, and
-        # what the caller puts there afterwards is what runs as root.
-        in_place = "printf '#!/bin/sh\\necho SWAPPED\\n' > /home/alice/bin/tool"
+        # what the caller puts there afterwards is what runs as root. Each
+        # payload says which uid it got.
+        in_place = (
+            "printf '#!/bin/sh\\necho SWAPPED as $(${pkgs.coreutils}/bin/id -u)\\n' > /home/alice/bin/tool"
+        )
+        swapped = (
+            in_place.replace("bin/tool", "bin/next")
+            + " && chmod 755 /home/alice/bin/next && mv /home/alice/bin/next /home/alice/bin/tool"
+        )
         for label, setup, program, swap, ran in (
-            ("file replaced while waiting", original, "tool", swapped, "SWAPPED"),
-            ("file rewritten in place while waiting", original, "tool", in_place, "SWAPPED"),
+            ("file replaced while waiting", original, "tool", swapped, "SWAPPED as 0"),
+            ("file rewritten in place while waiting", original, "tool", in_place, "SWAPPED as 0"),
             (
                 "link retargeted while waiting",
                 "ln -sfn ${fake "approved"} /home/alice/bin/link",
@@ -232,7 +238,7 @@ in
                 "FAKE-swapped ran as uid 0",
             ),
         ):
-            output, seen = held(label, setup, f"{sudo} /home/alice/bin/{program}", swap)
+            output, seen = held(label, f"{sudo} /home/alice/bin/{program}", swap, setup=setup)
             assert len(seen) == 1 and seen[0]["info"]["command"] == f"/home/alice/bin/{program}", seen
             assert ran in output and "sudo-exit 0" in output, (label, output)
 
@@ -245,12 +251,20 @@ in
         machine.succeed("install -m 0755 ${fake "good"} /srv/safe/good")
         machine.succeed("install -m 0775 -g users ${fake "grouped"} /srv/safe/group-writable")
         machine.succeed("install -m 0755 ${fake "open"} /srv/open/in-open-dir")
-        machine.succeed(f"{as_alice} ln -sfn {coreutils}/true /home/alice/bin/link-to-good")
+        machine.succeed(f"{as_alice} ln -sfn /srv/safe/good /home/alice/bin/link-to-good")
         machine.succeed("ln -sfn /home/alice/bin/tool /srv/safe/link-to-callers")
+        machine.succeed(f"{as_alice} sh -c {shlex.quote(original)}")
+        machine.succeed("install -o alice -m 0755 ${fake "callers-good"} /home/alice/bin/good")
+        # A root-owned sticky directory, so that the exception and the
+        # owner rule are each tried on their own.
+        machine.succeed("install -d -m 1777 /srv/sticky")
+        machine.succeed("install -m 0755 ${fake "sticky"} /srv/sticky/roots")
+        # A link the caller owns where only the owner rule can object. (In
+        # a sticky directory the kernel itself stops root following one.)
+        machine.succeed("ln -s /srv/safe/good /srv/safe/callers-link && chown -h alice /srv/safe/callers-link")
+        machine.succeed(f"{as_alice} cp ${fake "sticky-own"} /srv/sticky/callers-file")
+        machine.succeed(f"{as_alice} chmod 755 /srv/sticky/callers-file")
 
-        mode("safe")
-        # Any call that passes the check is let go at once.
-        machine.succeed("touch ${state}/go")
         for label, script, allowed in (
             ("a store program", f"{sudo} {coreutils}/true", True),
             ("through root's links", f"{sudo} /run/current-system/sw/bin/true", True),
@@ -264,55 +278,53 @@ in
             ("in an open directory", f"{sudo} /srv/open/in-open-dir", False),
             ("relative, in the caller's directory", f"cd bin && {sudo} ./tool", False),
             ("relative, in root's directory", f"cd /srv/safe && {sudo} ./good", True),
+            ("root's file in a sticky directory", f"{sudo} /srv/sticky/roots", True),
+            ("a link the caller owns, all else root's", f"{sudo} /srv/safe/callers-link", False),
+            ("the caller's file in a sticky directory", f"{sudo} /srv/sticky/callers-file", False),
+            ("relative, run elsewhere with -D", f"cd /srv/safe && {sudo} -D /home/alice/bin ./good", False),
         ):
+            if not allowed:
+                # Control: without the check the same command runs.
+                mode("allow")
+                status, output, _ = run(f"control: {label}", script)
+                assert status == 0, (label, status, output)
+            mode("safe")
+            # A call that passes the check is let go at once.
+            machine.succeed("touch ${state}/go")
             status, output, seen = run(f"remedy: {label}", script)
             assert len(seen) == 1 and (status == 0) == allowed, (label, status, output, seen)
 
     with subtest("what the remedy does not cover"):
-        mode("safe")
-        machine.succeed(f"{as_alice} sh -c {shlex.quote(original)}")
-
-
-        def held_safe(label, script, swap):
-            mode("safe")
-            machine.succeed("rm -f ${state}/approval /tmp/held.log")
-            machine.execute(
-                f"(status=0; ${pkgs.util-linux}/bin/runuser -l alice -c {shlex.quote(script)}"
-                " || status=$?; echo sudo-exit $status) >/tmp/held.log 2>&1 &"
-            )
-            machine.wait_until_succeeds("grep -qx end ${state}/approval", timeout=60)
-            machine.succeed(f"{as_alice} sh -c {shlex.quote(swap)}")
-            machine.succeed("touch ${state}/go")
-            machine.wait_until_succeeds("grep -q sudo-exit /tmp/held.log", timeout=90)
-            output = machine.succeed("cat /tmp/held.log")
-            show(label, script, "-", output, calls())
-            return output
-
-
-        output = held_safe(
+        output, _ = held(
             "a good interpreter, the caller's script",
             f"{sudo} /run/current-system/sw/bin/sh /home/alice/bin/tool",
             in_place,
+            setup=original,
+            how="safe",
         )
-        assert "SWAPPED" in output and "sudo-exit 0" in output, output
+        assert "SWAPPED as 0" in output and "sudo-exit 0" in output, output
 
-        step = "printf '#!/bin/sh\\necho CALLERS-STEP\\n' > /home/alice/bin/pam-probe-step && chmod 755 /home/alice/bin/pam-probe-step"
-        output = held_safe(
+        step = (
+            "printf '#!/bin/sh\\necho CALLERS-STEP as $(${pkgs.coreutils}/bin/id -u)\\n'"
+            " > /home/alice/bin/pam-probe-step && chmod 755 /home/alice/bin/pam-probe-step"
+        )
+        output, _ = held(
             "root's script, a command found on the caller's PATH",
             f"PATH=/home/alice/bin:$PATH {sudo} /etc/pam-probe-script",
             step,
+            how="safe",
         )
-        assert "CALLERS-STEP" in output and "sudo-exit 0" in output, output
+        assert "CALLERS-STEP as 0" in output and "sudo-exit 0" in output, output
 
         # A user can put a file of their own into the store: root owns it
         # and nobody can change it, so the check passes.
         added = machine.succeed(
-            f"{as_alice} sh -c 'printf \"#!/bin/sh\\necho CALLER-AUTHORED\\n\" >/tmp/authored"
+            f"{as_alice} sh -c 'printf \"#!/bin/sh\\necho CALLER-AUTHORED as \\$(${pkgs.coreutils}/bin/id -u)\\n\" >/tmp/authored"
             " && chmod 755 /tmp/authored"
             " && ${pkgs.nix}/bin/nix-store --add /tmp/authored'"
         ).strip()
         machine.succeed("touch ${state}/go")
         status, output, seen = run("a program the caller added to the store", f"{sudo} {added}")
-        assert status == 0 and "CALLER-AUTHORED" in output, (added, status, output)
+        assert status == 0 and "CALLER-AUTHORED as 0" in output, (added, status, output)
   '';
 }

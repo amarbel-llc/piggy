@@ -55,7 +55,7 @@ admin account.
 
 | Who | What they can do | What stands against it |
 |---|---|---|
-| Code running as the normal user account, **agent sessions included** | Run sudo and raise a genuine prompt. One PIN and touch gives it root. Signal the helper. | The prompt shows the arguments, and the operator declines what they did not start. **The operator has said agents will later be confined, with no sudo, escalating only through hogtie. That is not built.** |
+| Code running as the normal user account, **agent sessions included** | Run sudo and raise a genuine prompt. One PIN and touch gives it root. Signal the helper. | The prompt shows the arguments, and the operator declines what they did not start. **That is not enough:** such code can also change what a command the operator did start will run, through `PATH`, `SHELL` or a file of the user's (open questions 3 and 23). **The operator has said agents will later be confined, with no sudo, escalating only through hogtie. That is not built.** |
 | The same code, able to draw over windows or read input | Imitate a dialog; capture the PIN, then drive the 9C slot with another tool, leaving only the touch | Nothing in piggy. RFC 0012 relies on a display surface agents cannot write to and says piggy does not provide it. By ruling, no host enables the pilot while this is possible there. |
 | A program that reaches the agent socket | Ask for operator acts; fill the screen with prompts | Each act needs PIN and touch and shows its text. The cancel limit is per connection only. |
 | A program posing as the agent | Answer the helper | It cannot sign without a listed key. |
@@ -183,7 +183,8 @@ open question says so.
   authenticates; the helper has its own time limit, since `pam_exec` has
   none.
 - **No new permission logic.** pam_piggy only authenticates. What may run
-  stays with sudo's own rules (open question 18).
+  stays with sudo's own rules (open question 18). The remedy in open
+  question 23 would break this: it is a rule about what may run.
 - **Codec first:** extract the `operator-act@piggy` codec from the
   `piggy` crate into a small crate that both use. No copy.
 - **Rollout:** one host at a time behind a per-host option, off by
@@ -311,11 +312,16 @@ is. Asserted:
 
 | Program | Verdict |
 |---|---|
-| in the store; reached through root's links; root's file in root's directory, also named relatively from there | allowed |
-| the caller's own, also when found on `PATH` or named relatively | refused |
+| in the store; reached through root's links; root's file in root's directory (also named relatively from there) or in a root-owned sticky directory | allowed |
+| the caller's own, also when found on `PATH`, named relatively, or in a sticky directory | refused |
 | root's file in the caller's directory | refused |
-| the caller's link to a good program; root's link to the caller's program | refused |
+| the caller's link to a good program (in their directory, or theirs alone in root's); root's link to the caller's program | refused |
 | a group-writable file, or one in an open, non-sticky directory | refused |
+| a relative name that `sudo -D` would run in the caller's directory | refused |
+
+Each refused command ran with the check off. A changed root
+(`chroot`) is refused too, **not tested**. (Linux itself stops root
+following another user's link in a sticky directory.)
 
 It checks **the program only**. All three of these passed it and ran what
 the caller chose, as root (asserted):
@@ -329,8 +335,10 @@ the caller chose, as root (asserted):
 The second needs `secure_path` or sudo's environment rules (that either
 closes it was not tested here). The first has no general check: arguments,
 configuration files and anything loaded later are outside it. The third
-means **root-owned is not reviewed**. The check does not read POSIX ACLs,
-did not cover `sudoedit` (whose content the caller chooses), and was not
+means **root-owned is not reviewed**. The check does not read POSIX ACLs.
+It trusts the ownership a filesystem reports: by reasoning (not tested),
+where `user_allow_other` is set a user's FUSE mount could report root's.
+It did not cover `sudoedit` (whose content the caller chooses), and was not
 tried under `pam_exec`, which is not given the resolved path. It refuses
 every program of the caller's own, which narrows "any command".
 
@@ -340,6 +348,22 @@ plugin was called for both accounts that ran commands, so a real one
 would also sit in front of the recovery account unless it let that
 account through. What sudo does when the object fails to load was not
 tested. Both bear on open question 1.
+
+### The two shapes side by side
+
+For open question 3. "Not designed" and "not tested" mean just that.
+
+| | `pam_exec` (ruled) | with a sudo approval plugin |
+|---|---|---|
+| What authenticates | the helper's card signature, in PAM | **not designed**: the plugin does not replace authentication, and it also runs where `NOPASSWD` skips it. The signature would have to be over what the plugin is given |
+| What the prompt can show | sudo's arguments, and what the helper reads from the sudo process | the path sudo resolved, arguments, target user, environment. A relative path needs the directory too |
+| `-s` | arguments do not name the shell | names the shell |
+| `-e` | shows the file, not the content | the same |
+| `-v` | the helper is called with nothing to show | the plugin is not called, so PAM or sudo's rules must settle it |
+| Content swapped during the wait | inferred, not tested | happens (tested) |
+| Recovery account | untouched: the stack is chosen per user | `sudo.conf` is global: the plugin must let that account through |
+| Fails to load, or its line is missing | a broken per-user stack: not tested | **not tested**, either way: whether sudo then stops for everyone, or runs unchecked |
+| Our code in sudo's process | none | a shared object |
 
 ## What the module can learn about a request
 
@@ -565,15 +589,15 @@ run outside a transaction.
 | 19 | **(blocks)** The design and every probe assume Linux. On any other platform nothing is checked, including whether the `pam_exec` shape exists. | Check on a real system of each such platform before enabling it. If the shape is absent, it comes back to the operator. |
 | 21 | **(blocks)** What keeps an agent that does not know the namespace from ever serving a listed key, after rollbacks and for agents attached later? | Not designed. |
 | 22 | Which repo owns which part? | The split proposed above. |
-| 18 | pam_piggy sits outside the shared policy engine and hogtie's action registry. Is that right? | Yes: hogtie is the door for agent sessions, with named actions under signed grants; this is the operator's interactive sudo, which confined agents will not have. |
+| 18 | pam_piggy sits outside the shared policy engine and hogtie's action registry. Is that right? | Yes **while it only authenticates**: hogtie is the door for agent sessions, with named actions under signed grants; this is the operator's interactive sudo, which confined agents will not have. A rule about what may run (question 23) reopens this. |
 | 20 | **(blocks)** Has a sibling repo already built part of this, and could `pam_u2f` or `pam_pkcs11` serve? | Search the repos and examine both modules. |
 | 13 | **(blocks)** The pilot waits until agent sessions can neither draw on nor read the operator's display (ruled). How does a host meet that, and how is it checked? | Settle it with the circus session as part of confinement; test it by attempting both from an agent session. |
 | 15 | **(blocks)** The command must be shown on every use, but the agent cannot tell what the askpass program displayed: one that ignores the text shows a bare PIN prompt and the act is still signed (piggy-agent(1)). What makes that impossible, or detectable, on the card's host? | Treat the agent and askpass of the card's host as part of the trusted base: both root-owned or otherwise outside what agent sessions can replace. Not designed. |
 | 16 | **(blocks)** Which tracked work delivers agent confinement and the display separation? Hosts that already have sudo may go before confinement. A search by the circus session found no single item for either. | The circus session owns it; cite its work here. |
 | 14 | **(blocks)** RFC 0012 says callers must not put secrets in an act's text, and sudo arguments can hold one; the text also crosses forwarded agents. | State that secrets on a sudo command line are unsupported, and settle what the helper does when it suspects one. |
 | 2 | **(blocks)** Should the helper run as root (`seteuid`)? Without it the user who is asking can stop or kill it (tested). | Yes: with it those signals were refused. Give it a fixed environment. |
-| 3 | **(blocks)** The arguments do not say what runs: `-s` runs the program the caller's `SHELL` names, and `sudoedit` lets the caller write any content (tested). The prompt must not misstate a command. Does the ruled `pam_exec` shape stay, or does the decision move to a sudo approval plugin, which is given the resolved path (tested)? With `pam_exec`, either refusing `-s`, `-e` and `-v` means reading sudo's command line a second time, and it **narrows the ruled "any command"**. | The plugin, **only if** its reach over the recovery account and its load failure are settled first. It still shows a path, not content (question 23). |
-| 23 | **(blocks)** The caller can change an approved program before it runs (tested with the plugin; inferred for `pam_exec`). What does "any command, shown" mean for a program the caller can change, and for `sudoedit`? | Refuse a program the caller can change (tested above; it **narrows "any command"**), and require `secure_path`. It cannot make "what you see is what runs" true for interpreters, loaded files or store paths the caller added: the prompt must not promise that, and the operator decides whether the remainder is acceptable. |
+| 3 | **(blocks)** The arguments do not say what runs: `-s` runs the program the caller's `SHELL` names, and `sudoedit` lets the caller write any content (tested). The prompt must not misstate a command. Does the ruled `pam_exec` shape stay, or does the decision move to a sudo approval plugin? See "The two shapes side by side". With `pam_exec`, the modes it cannot show would be refused by reading sudo's command line a second time; refusing `-s` or `-e` **narrows the ruled "any command"**. | Do not move yet. First design what authenticates in the plugin shape, and test its reach over the recovery account and what a load failure does. |
+| 23 | **(blocks)** The caller can change an approved program before it runs (tested with the plugin; inferred for `pam_exec`). What does "any command, shown" mean for a program the caller can change, and for `sudoedit`? | Refuse a program the caller can change (tested above; it **narrows "any command"**), and require `secure_path`. It cannot make "what you see is what runs" true for interpreters, loaded files or store paths the caller added: the prompt must not promise that, and the operator decides whether the remainder is acceptable. It is a rule about what may run, against "No new permission logic": **where should it live**, the shared policy engine, sudo's own rules or the plugin? |
 | 4 | **(blocks)** How does the helper find the right agent socket, including where the user's agent only relays? | A root-owned per-host setting. |
 | 5 | The namespace name, display class and text for the RFC 0012 amendment, and whether the text reuses `piggy-act-v1` (RFC 0013). | A namespace of its own, with a class that looks unlike every other. |
 | 6 | Does the socket move happen now, or wait for the polkit stage? | Wait: the sudo test reached the agent without it (proxy-only, no card). |
@@ -598,8 +622,8 @@ run outside a transaction.
   C-pivy retirement that drops `pam_pivy`)
 - RFC 0012 (`docs/rfcs/0012-operator-act-extension.md`), piggy-agent(1)
   OPERATOR ACTS and PIN PROMPTS, hogtie(8)
-- `nix/vm-tests/pam-*-probe.nix` (with `probes.nix` and
-  `pam-probe-lib.nix`): probes, to be deleted once the pilot has real
+- `nix/vm-tests/pam-*-probe.nix` (with `probes.nix`,
+  `pam-probe-lib.nix` and `pam-sudo-approval-probe.c`): probes, to be deleted once the pilot has real
   tests. No gate runs them, so "asserted" means they held when
   this version of the record was written; before deleting one, name here
   the test that replaces it or the commit the result was observed at.

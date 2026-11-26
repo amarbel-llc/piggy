@@ -102,13 +102,17 @@ static const char *value_of(char *const list[], const char *name) {
   return NULL;
 }
 
-/* The command as an absolute path; a relative one is against the caller's
- * directory. */
+/* The command as an absolute path. A relative one is resolved where sudo
+ * will run it: command_info's cwd when sudo changes directory, else the
+ * caller's. A changed root is refused: the checked path would not be the
+ * one that runs. */
 static int command_is_safe(char *const command_info[]) {
   const char *command = value_of(command_info, "command");
-  const char *cwd = value_of(saved_user_info, "cwd");
+  const char *cwd = value_of(command_info, "cwd");
   char absolute[PATH_MAX];
-  if (command == NULL)
+  if (cwd == NULL)
+    cwd = value_of(saved_user_info, "cwd");
+  if (command == NULL || value_of(command_info, "chroot") != NULL)
     return 0;
   if (command[0] == '/')
     return only_root_can_change(command);
