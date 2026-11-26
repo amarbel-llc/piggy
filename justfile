@@ -46,10 +46,11 @@ build-nix:
 #
 # cargo-build the workspace, forwarding ARGS
 [group('build')]
+[positional-arguments]
 build-rust *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build {{ARGS}}
+    cargo build "$@"
     # Linux-only second pass: build fibby with --features hardware-proxy
     # so pcsc-sys's build.rs (which pkg-configs for libpcsclite at
     # compile time) runs in the merge gate. Clippy doesn't link, so a
@@ -58,7 +59,7 @@ build-rust *ARGS:
     # adds pcsclite to rustBuildInputs only on isLinux). Skipped when
     # ARGS is set on the assumption that the caller is specifying a
     # narrower build scope on purpose.
-    if [ -z "{{ARGS}}" ] && [ "$(uname -s)" = Linux ]; then
+    if [ -z "$*" ] && [ "$(uname -s)" = Linux ]; then
       cargo build -p fibby --features hardware-proxy
     fi
 
@@ -376,8 +377,9 @@ codemod-fmt-go:
     cd go && gofmt -w internal cmd
 
 # run the nix-built piggy package (nix run . --), forwarding ARGS
+[positional-arguments]
 run-nix *ARGS:
-    nix run . -- {{ARGS}}
+    nix run . -- "$@"
 
 # --- test ---
 
@@ -709,6 +711,7 @@ codemod-capture-pivy-oracle-tool-fibby: (_lane-tool-fibby "capture")
 _lane-tool-fibby mode: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
+  mode={{ quote(mode) }}
   fibby_bin="$PWD/target/debug/fibby"
   piggy_bin="$PWD/target/debug/piggy"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
@@ -730,7 +733,7 @@ _lane-tool-fibby mode: build-rust
   # Capture runs the live C pivy-tool and records into $workdir (exposed to
   # the sandbox), copied into the repo only after the lane passes.
   capture_env=()
-  if [[ {{ mode }} == capture ]]; then
+  if [[ $mode == capture ]]; then
     pivy_out=$(nix build .#pivy --no-link --print-out-paths) || exit 1
     capture_env=(PIGGY_ORACLE_MODE=capture REAL_PIVY_TOOL="$pivy_out/bin/pivy-tool"
       PIVY_ORACLE_CAPTURE_DIR="$workdir/oracle")
@@ -750,7 +753,7 @@ _lane-tool-fibby mode: build-rust
     BATS_TEST_TIMEOUT=30 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
     zz-tests_bats/conformance/piggy_tool_fibby.bats || exit 1
 
-  if [[ {{ mode }} == capture ]]; then
+  if [[ $mode == capture ]]; then
     dest="$PWD/zz-tests_bats/fixtures/pivy-oracle/tool-fibby"
     rm -rf "$dest"
     mkdir -p "$(dirname "$dest")"
@@ -792,13 +795,15 @@ codemod-capture-pivy-oracle-tool-pin-fibby: (_lane-pivy-oracle "tool-pin-fibby" 
 _lane-pivy-oracle lane file mode: build-rust
   #!/usr/bin/env bash
   set -uo pipefail
+  lane={{ quote(lane) }} file={{ quote(file) }} mode={{ quote(mode) }}
+  [[ $lane =~ ^[A-Za-z0-9_-]+$ ]] || { echo "LANE is not a lane name" >&2; exit 2; }
   fibby_bin="$PWD/target/debug/fibby"
   piggy_bin="$PWD/target/debug/piggy"
   [[ -x $fibby_bin ]] || { echo "missing $fibby_bin (build-rust)"; exit 1; }
-  workdir=$(mktemp -d /tmp/{{ lane }}-XXXXXX)
+  workdir=$(mktemp -d "/tmp/$lane-XXXXXX")
   trap 'rm -rf "$workdir"' EXIT
   capture_env=()
-  if [[ {{ mode }} == capture ]]; then
+  if [[ $mode == capture ]]; then
     pivy_out=$(nix build .#pivy --no-link --print-out-paths) || exit 1
     capture_env=(PIGGY_ORACLE_MODE=capture REAL_PIVY_TOOL="$pivy_out/bin/pivy-tool"
       REAL_PIVY_BOX="$pivy_out/bin/pivy-box" PIVY_ORACLE_CAPTURE_DIR="$workdir/oracle")
@@ -813,11 +818,11 @@ _lane-pivy-oracle lane file mode: build-rust
     PIGGY_TEST_FIB_PIN=123456 \
     {{ fence-tmpdir-linux }} \
     BATS_TEST_TIMEOUT=60 bats --allow-local-binding {{ bats-expose-fibby-workdir }} --tap \
-    zz-tests_bats/conformance/{{ file }} || exit 1
-  if [[ {{ mode }} == capture ]]; then
-    dest="$PWD/zz-tests_bats/fixtures/pivy-oracle/{{ lane }}"
+    "zz-tests_bats/conformance/$file" || exit 1
+  if [[ $mode == capture ]]; then
+    dest="$PWD/zz-tests_bats/fixtures/pivy-oracle/$lane"
     rm -rf "$dest"
-    cp -r "$workdir/oracle/{{ lane }}" "$dest"
+    cp -r "$workdir/oracle/$lane" "$dest"
     echo "recorded $(find "$dest" -name '*.out' | wc -l) cases into $dest"
   fi
 
@@ -1735,20 +1740,21 @@ test-bats-conformance-card-add-key-fibby:
 # run the fibby-backed operator-act bats gate
 [group('post-build')]
 [linux]
+[positional-arguments]
 test-bats-conformance-operator-act *FILES:
     #!/usr/bin/env bash
     set -euo pipefail
     fibby_out=$(nix build .#fibby --no-link --print-out-paths)
     piggy_out=$(nix build .#default --no-link --print-out-paths)
     cargo build -p operator-act-probe --quiet
-    files="{{ FILES }}"
+    [[ -n $* ]] || set -- zz-tests_bats/conformance/operator_act_*.bats zz-tests_bats/conformance/attestation_bundle.bats
     # PIGGY satisfies the parent common.bash loader without a cargo build.
     PIGGY="$piggy_out/bin/piggy" \
       FIBBY_BIN="$fibby_out/bin/fibby" \
       PIGGY_BIN="$piggy_out/bin/piggy" \
       OPERATOR_ACT_PROBE_BIN="$PWD/target/debug/operator-act-probe" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
-      ${files:-zz-tests_bats/conformance/operator_act_*.bats zz-tests_bats/conformance/attestation_bundle.bats}
+      "$@"
 
 # FDR 0007 phase (i), piggy#393: the X.509 profile builders in piggy-piv
 # (root, intermediate, leaf) checked with `openssl verify`, including the
@@ -1773,16 +1779,17 @@ test-bats-conformance-x509-profile:
 # run the operator-act bats lanes against target/debug binaries
 [group('debug')]
 [linux]
+[positional-arguments]
 debug-operator-act-local *FILES: build-rust
     #!/usr/bin/env bash
     set -euo pipefail
-    files="{{ FILES }}"
+    [[ -n $* ]] || set -- zz-tests_bats/conformance/operator_act_*.bats zz-tests_bats/conformance/attestation_bundle.bats
     PIGGY="$PWD/target/debug/piggy" \
       FIBBY_BIN="$PWD/target/debug/fibby" \
       PIGGY_BIN="$PWD/target/debug/piggy" \
       OPERATOR_ACT_PROBE_BIN="$PWD/target/debug/operator-act-probe" \
       BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
-      ${files:-zz-tests_bats/conformance/operator_act_*.bats zz-tests_bats/conformance/attestation_bundle.bats}
+      "$@"
 
 # Fibby-backed gate for `piggy manage --jsonrpc` (piggy#201, RFC 0007): drive
 # the headless command server end to end against a virtual fibby card through
@@ -1885,8 +1892,9 @@ test-bats-conformance-pivy-agent-hardware: build-rust
 #
 # run the given bats FILES outside the sandbox
 [group('post-build')]
+[positional-arguments]
 test-bats-file *FILES: build-rust
-    BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
+    BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap "$@"
 
 # Survey (and optionally kill) bats / fibby / piggy processes left over from
 # a wedged local bats run — a background fibby that keeps bats' fd 3 open
@@ -1898,15 +1906,17 @@ debug-stale-bats-procs KILL="0":
     #!/usr/bin/env bash
     set -uo pipefail
     ps -eo pid,ppid,etimes,stat,cmd | grep -E '(^|/)(bats|bats-exec|fibby|piggy) |fibby --socket|bats-exec-test' | grep -v grep || true
-    if [[ "{{KILL}}" == 1 ]]; then
+    kill_arg={{ quote(KILL) }}
+    if [[ $kill_arg == 1 ]]; then
       ps -eo pid,cmd | grep -E 'bats-exec-(test|file|suite)|fibby --socket /tmp/pf\.' | grep -v grep | awk '{print $1}' | xargs -r kill
       echo "killed"
     fi
 
 # run the Rust test suite (cargo test), forwarding ARGS
 [group('post-build')]
+[positional-arguments]
 test-rust *ARGS:
-    cargo test {{ARGS}}
+    cargo test "$@"
 
 # hogtie's whole suite, the binary tests included (they need the
 # `test-harness` feature, so plain `test-rust` skips them); the merge gate
@@ -1914,8 +1924,9 @@ test-rust *ARGS:
 #
 # run every hogtie test, the binary tests with the test harness, forwarding ARGS
 [group('post-build')]
+[positional-arguments]
 test-rust-hogtie *ARGS:
-    cargo test -p hogtie --features test-harness {{ARGS}}
+    cargo test -p hogtie --features test-harness "$@"
 
 # Mutation pass over hogtie's refusals: apply each mutant in
 # crates/hogtie/testdata/mutants.tsv (a literal one-place edit) to a scratch
@@ -1929,7 +1940,7 @@ test-rust-hogtie *ARGS:
 explore-hogtie-mutants only="":
     #!/usr/bin/env bash
     set -uo pipefail
-    only='{{ only }}'
+    only={{ quote(only) }}
     src=crates/hogtie
     work=$(mktemp -d "$PWD/.tmp/hogtie-mutants.XXXXXX")
     export CARGO_TARGET_DIR="$PWD/target/hogtie-mutants"
@@ -2112,14 +2123,18 @@ explore-pin-cache-override:
 #
 # run the fibby SSH CA lane against the named CA gate mutants
 [group('explore')]
+[positional-arguments]
 explore-ca-gate-lane-mutants +IDS:
     #!/usr/bin/env bash
     set -uo pipefail
+    for want in "$@"; do
+      [[ $want =~ ^[A-Za-z0-9_-]+$ ]] || { echo "IDS holds a value that is not a mutant id" >&2; exit 2; }
+    done
     tsv=crates/piggy/testdata/ca-gate-mutants.tsv
     nl=$'\n'
     work=$(mktemp -d "$PWD/.tmp/ca-gate-lane-mutants.XXXXXX")
     survived=() stale=() killed=()
-    for want in {{IDS}}; do
+    for want in "$@"; do
       line=$(grep -P "^\Q$want\E\t" "$tsv") || { echo "no mutant $want"; stale+=("$want"); continue; }
       IFS=$'\t' read -r id crate file from to <<<"$line"
       from=${from//<NL>/$nl} to=${to//<NL>/$nl}
@@ -2158,16 +2173,18 @@ explore-ca-gate-lane-mutants +IDS:
 debug-fibby-loopback-loop runs="50":
     #!/usr/bin/env bash
     set -uo pipefail
+    runs={{ quote(runs) }}
+    [[ $runs =~ ^(0|[1-9][0-9]*)$ ]] || { echo "RUNS is not a number" >&2; exit 2; }
     cargo test -q -p fibby --test loopback --no-run || exit 1
     failed=0
-    for ((i = 1; i <= {{runs}}; i++)); do
+    for ((i = 1; i <= runs; i++)); do
       if ! out=$(cargo test -q -p fibby --test loopback 2>&1); then
         failed=$((failed + 1))
         echo "run $i FAILED:"
         grep -E 'panicked|FAILED|refused' <<<"$out" | head -n 5
       fi
     done
-    echo "{{runs}} runs, $failed failed"
+    echo "$runs runs, $failed failed"
     ((failed == 0))
 
 # Smoke-test for the `services.piggy-agent` home-manager module (#52).
@@ -2359,8 +2376,9 @@ debug-vm-dry-run check="vm-piggy-luks":
 # no part of the merge gate. PROBE is pam-sandbox (socket paths the polkit
 # helper sandbox reaches), pam-socket-move (the moved socket, link and
 # fallback), pam-command (what a pam_exec helper sees and shows),
-# pkexec-password (pkexec's agents with the stock stack) or pam-sudo (the
-# sudo pilot's setup). The log is
+# pkexec-password (pkexec's agents with the stock stack), pam-sudo (the
+# sudo pilot's setup) or pam-sudo-approval (what a sudo approval plugin
+# is given). The log is
 # printed whether the probe passes, fails or was already built. PROBE is
 # quoted: this recipe runs without a permission prompt.
 #
@@ -2470,8 +2488,9 @@ validate: validate-box validate-piggy validate-rust
 #
 # cargo check the workspace, forwarding ARGS
 [group('pre-build')]
+[positional-arguments]
 validate-rust *ARGS:
-    cargo check {{ARGS}}
+    cargo check "$@"
 
 # `cargo check` the piggy-box crate only — a fast per-crate type-eval subset of
 # validate-rust.
@@ -2561,8 +2580,9 @@ test-grammar-vectors:
 #
 # dump the recipient pubkeys baked into the given EBOXES
 [group('debug')]
+[positional-arguments]
 debug-ebox-recipients *EBOXES:
-    cargo run -q -p piggy-box --example dump-recipients -- {{EBOXES}}
+    cargo run -q -p piggy-box --example dump-recipients -- "$@"
 
 # EXPLORE (#task darwin-fibby) — prove/refute whether macOS's PCSC.framework
 # honors PCSCLITE_CSOCK_NAME. Starts fibby (virtual, seeded slot 9D) on a temp
@@ -2660,8 +2680,9 @@ explore-sudo-inheritance:
 #
 # run the given exploratory bats FILES outside the sandbox
 [group('explore')]
+[positional-arguments]
 explore-bats *FILES: build-rust
-  BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap {{FILES}}
+  BATS_TEST_TIMEOUT=30 bats --no-sandbox --tap "$@"
 
 # Delegation proof (no code under test): a P-256 key generated in fibby's
 # slot 83 (PIN always, touch always) signs a forced-command OpenSSH user
@@ -2718,8 +2739,9 @@ explore-ssh-cert-proof USER_PUB DIR:
 explore-ssh-cert-dialog-png DIR=".tmp/dialog-png":
     #!/usr/bin/env bash
     set -euo pipefail
-    mkdir -p "{{ DIR }}"
-    out="$(cd "{{ DIR }}" && pwd)"
+    dir={{ quote(DIR) }}
+    mkdir -p -- "$dir"
+    out="$(cd -- "$dir" && pwd)"
     gtk=$(nix build .#piggy-askpass-gtk --no-link --print-out-paths)
     typical=$'card 191755CF slot 83, the SSH certificate authority\nOpenSSH user certificate\nKey id: goldielocks-tunnel\nPrincipal: tunnel\nCertified key: SHA256:VwTKavMZsIyhTV79SVgMR6phfKlJuiLfnyx6IPIaSdQ\nSigned by CA: SHA256:CyrC9JjEcSecv/WY2LVyRJsUBbRYx1XMVgJC5INNvM0\nSerial: 0\nValid: 2026-11-22T22:07:00Z to 2026-11-23T22:12:00Z\nLifetime: 1d 5m\nCritical options: none\nExtensions: permit-port-forwarding'
     long=$(printf 'W%.0s' $(seq 1 80))
@@ -2760,10 +2782,11 @@ explore-ssh-cert-dialog-png DIR=".tmp/dialog-png":
 #
 # bash -n and shellcheck the given shell scripts
 [group('debug')]
+[positional-arguments]
 debug-shell-script *FILES:
     #!/usr/bin/env bash
     set -euo pipefail
-    for f in {{ FILES }}; do
+    for f in "$@"; do
       bash -n "$f"
       echo "bash -n ok: $f"
       if command -v shellcheck >/dev/null 2>&1; then
@@ -3026,10 +3049,11 @@ debug-stats-me-roundtrip: build-rust
 #
 # run CLIENT_CMD against fibby in hardware-proxy mode and dump the wire trace
 [group('debug')]
+[positional-arguments]
 debug-fibby-proxy *CLIENT_CMD:
     #!/usr/bin/env bash
     set -uo pipefail
-    if [[ -z "{{CLIENT_CMD}}" ]]; then
+    if [[ -z "$*" ]]; then
       echo "usage: just debug-fibby-proxy <client cmd...>" >&2
       exit 2
     fi
@@ -3091,7 +3115,7 @@ debug-fibby-proxy *CLIENT_CMD:
       exit 1
     fi
     echo "=== fibby up on $sock (pid $fibby_pid); running client ==="
-    PCSCLITE_CSOCK_NAME="$sock" {{CLIENT_CMD}}
+    PCSCLITE_CSOCK_NAME="$sock" "$@"
     client_exit=$?
     echo
     echo "=== client exit: $client_exit ==="
@@ -3620,7 +3644,7 @@ explore-pivy-tool-bats: build-nix
 explore-trace-agent-query sock="":
     #!/usr/bin/env bash
     set -euo pipefail
-    sock_arg="{{sock}}"
+    sock_arg={{ quote(sock) }}
     export PIGGY_PROBE_SOCK="${sock_arg:-${SSH_AUTH_SOCK:?set SSH_AUTH_SOCK or pass a socket arg}}"
     python3 <<'PY'
     import os, socket, struct, sys
@@ -3719,8 +3743,8 @@ explore-verify-auth-sock-cache piggy_auth_sock=env_var_or_default("PIGGY_AUTH_SO
     #!/usr/bin/env bash
     set -euo pipefail
 
-    piggy_sock="{{piggy_auth_sock}}"
-    mux_sock="{{ssh_auth_sock}}"
+    piggy_sock={{ quote(piggy_auth_sock) }}
+    mux_sock={{ quote(ssh_auth_sock) }}
     : "${piggy_sock:?set PIGGY_AUTH_SOCK (piggy-agent socket) or pass piggy_auth_sock=...}"
     : "${mux_sock:?set SSH_AUTH_SOCK (mux socket) or pass ssh_auth_sock=...}"
 
@@ -3824,7 +3848,7 @@ explore-verify-auth-sock-cache piggy_auth_sock=env_var_or_default("PIGGY_AUTH_SO
 explore-rust-card-unlock-hw guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456": build-rust
     #!/usr/bin/env bash
     set -euo pipefail
-    guid="{{guid}}"; pin="{{pin}}"
+    guid={{ quote(guid) }}; pin={{ quote(pin) }}
     pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     pivy_tool="$pivy_out/bin/pivy-tool"
     tmpdir=$(mktemp -d /tmp/piggy-rust-card-hw.XXXXXX); trap 'rm -rf "$tmpdir"' EXIT
@@ -3891,7 +3915,7 @@ debug-list-piv-cards:
 [group('debug')]
 [linux]
 debug-hold-card-lock guid="5DA19C98257243EFCD29BE3AE91EA7F8" secs="3600":
-    cargo run -q -p piggy-piv --example hold_lock -- "{{guid}}" "{{secs}}"
+    cargo run -q -p piggy-piv --example hold_lock -- {{ quote(guid) }} {{ quote(secs) }}
 
 # DIAGNOSTIC (piggy#56) — run the faithful reset-loop contender standalone
 # for <secs>s and report how many begin+verify+end(ResetCard) cycles it
@@ -3903,7 +3927,7 @@ debug-hold-card-lock guid="5DA19C98257243EFCD29BE3AE91EA7F8" secs="3600":
 [group('debug')]
 [linux]
 debug-reset-loop guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456" secs="5":
-    cargo run -q -p piggy-piv --example reset_loop -- "{{guid}}" "{{pin}}" "{{secs}}"
+    cargo run -q -p piggy-piv --example reset_loop -- {{ quote(guid) }} {{ quote(pin) }} {{ quote(secs) }}
 
 # DIAGNOSTIC (piggy#56) — is a second client's card lock actually visible to
 # other clients on the throwaway, or do they run in isolation? Holds an
@@ -3922,7 +3946,7 @@ debug-reset-loop guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456" secs="5":
 debug-lock-contention-probe guid="5DA19C98257243EFCD29BE3AE91EA7F8" pin="123456": build-rust
     #!/usr/bin/env bash
     set -uo pipefail
-    guid="{{guid}}"; pin="{{pin}}"
+    guid={{ quote(guid) }}; pin={{ quote(pin) }}
     pivy_out=$(nix build .#pivy --no-link --print-out-paths)
     pivy_tool="$pivy_out/bin/pivy-tool"
 
@@ -4036,10 +4060,14 @@ release_tag_prefixes := "v go/v"
 # rewrite the PIGGY_VERSION line in version.env
 [group('maintenance')]
 bump-version new_version:
-    sed -E -i "s/^(export PIGGY_VERSION)=.*/\1={{new_version}}/" version.env
-    for crate in piggy age-plugin-piggy; do \
-      sed -E -i '0,/^version = ".*"$/s//version = "{{new_version}}"/' "crates/$crate/Cargo.toml"; \
-      sed -E -i "/^name = \"$crate\"\$/{n;s/^version = \".*\"\$/version = \"{{new_version}}\"/}" Cargo.lock; \
+    #!/usr/bin/env bash
+    set -euo pipefail
+    new_version={{ quote(new_version) }}
+    [[ $new_version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "NEW_VERSION is not a version like 1.2.3" >&2; exit 2; }
+    sed -E -i "s/^(export PIGGY_VERSION)=.*/\1=$new_version/" version.env
+    for crate in piggy age-plugin-piggy; do
+      sed -E -i '0,/^version = ".*"$/s//version = "'"$new_version"'"/' "crates/$crate/Cargo.toml"
+      sed -E -i "/^name = \"$crate\"\$/{n;s/^version = \".*\"\$/version = \"$new_version\"/}" Cargo.lock
     done
 
 # Sign + push the full release tag set named after the current
@@ -4093,6 +4121,8 @@ tag message="":
 release new_version:
     #!/usr/bin/env bash
     set -euo pipefail
+    new_version={{ quote(new_version) }}
+    [[ $new_version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "NEW_VERSION is not a version like 1.2.3" >&2; exit 2; }
 
     branch=$(git rev-parse --abbrev-ref HEAD)
     if [[ "$branch" != "master" ]]; then
@@ -4104,10 +4134,10 @@ release new_version:
     # sub-module tags (go/v…) sort separately and must not bound the
     # changelog range.
     prev=$(git tag --sort=-v:refname -l "v*" | grep -E '^v[0-9]' | head -1 || true)
-    header="release v{{new_version}}"
+    header="release v$new_version"
     # Enumerated in the tag annotation + Forgejo release notes; `tag` creates
     # these from release_tag_prefixes, the release points at the primary.
-    siblings=$'\n\nTags: go/v{{new_version}}'
+    siblings=$'\n\nTags: go/v'"$new_version"
     if [[ -n "$prev" ]]; then
         summary=$(git log --format='- %s' "$prev"..HEAD)
         if [[ -n "$summary" ]]; then
@@ -4119,13 +4149,13 @@ release new_version:
         msg="$header""$siblings"
     fi
 
-    just bump-version "{{new_version}}"
+    just bump-version "$new_version"
     git add version.env crates/piggy/Cargo.toml crates/age-plugin-piggy/Cargo.toml Cargo.lock
     git commit -m "$header"
 
     just tag "$msg"
 
-    fj release create "$header" --tag "v{{new_version}}" --body "$msg"
+    fj release create "$header" --tag "v$new_version" --body "$msg"
 
 # Factory-reset a YubiKey 4 throwaway so its PIV applet is wiped and the
 # CHUID GUID rolls. DESTRUCTIVE — the recipe refuses to run unless the
@@ -4590,7 +4620,8 @@ debug-ssh-via-fibby GDB="":
     # lands in the agent log. Requires gdb on PATH; symbols depend on the
     # pivy build (see nix/pivy.nix).
     agent_argv=("$pivy_agent" -A -d -a "$agent_sock")
-    if [[ -n "{{ GDB }}" ]]; then
+    gdb_arg={{ quote(GDB) }}
+    if [[ -n $gdb_arg ]]; then
       # gdb can't exec pivy's makeWrapper shell shim — target the real
       # ELF (.pivy-agent-unwrapped, not stripped) and replicate the
       # wrapper's libpcsclite LD_PRELOAD ourselves.
@@ -4961,12 +4992,14 @@ debug-fibby-slot-9c-sign:
 debug-card-init-interleave DELAY="3": build-rust
     #!/usr/bin/env bash
     set -uo pipefail
+    delay={{ quote(DELAY) }}
+    [[ $delay =~ ^([0-9]+(\.[0-9]*)?|\.[0-9]+)[smhd]?$ ]] || { echo "DELAY is not a sleep duration" >&2; exit 2; }
     piggy="$PWD/target/debug/piggy"
     fibby="$PWD/target/debug/fibby"
     test_askpass="$PWD/zz-tests_bats/helpers/piggy-test-askpass.sh"
     workdir=$(mktemp -d /tmp/pg320-XXXXXX)
     trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$workdir"' EXIT
-    printf '#!/usr/bin/env bash\nsleep %s\nexec %q "$@"\n' "{{ DELAY }}" "$test_askpass" >"$workdir/slow-askpass"
+    printf '#!/usr/bin/env bash\nsleep %s\nexec %q "$@"\n' "$delay" "$test_askpass" >"$workdir/slow-askpass"
     chmod +x "$workdir/slow-askpass"
     run_case() {
       local name="$1" interloper="$2" sock="$workdir/$1.comm"
@@ -5174,12 +5207,13 @@ debug-fibby-get-status-change:
 explore-launchd-piggy-agent label="piggy-agent":
     #!/usr/bin/env bash
     set -uo pipefail
+    label={{ quote(label) }}
     uid=$(id -u)
-    echo "=== launchctl print gui/$uid/{{label}} ==="
-    launchctl print "gui/$uid/{{label}}" 2>&1 || echo "  (exit $?)"
+    echo "=== launchctl print gui/$uid/$label ==="
+    launchctl print "gui/$uid/$label" 2>&1 || echo "  (exit $?)"
     echo
-    echo "=== launchctl list {{label}} (legacy) ==="
-    launchctl list "{{label}}" 2>&1 || echo "  (exit $?)"
+    echo "=== launchctl list $label (legacy) ==="
+    launchctl list "$label" 2>&1 || echo "  (exit $?)"
     echo
     echo "=== launchctl print gui/$uid | grep piggy-agent ==="
     launchctl print "gui/$uid" 2>&1 | grep -i piggy-agent || echo "  (no match)"
@@ -5191,8 +5225,9 @@ explore-launchd-piggy-agent label="piggy-agent":
 #
 # run piggy health -v --format tap against the live local agent and cards
 [group('explore')]
+[positional-arguments]
 explore-piggy-health *ARGS:
-    cargo run -q -p piggy -- health -v --format tap {{ARGS}}
+    cargo run -q -p piggy -- health -v --format tap "$@"
 
 # Print this host's piggy agent unit log for a window (read only): the front's
 # lines for a refused sign ("sign request timed out" names the upstream).
@@ -5202,7 +5237,7 @@ explore-piggy-health *ARGS:
 [group('explore')]
 [linux]
 explore-agent-log SINCE UNTIL UNIT="piggy-agent.service":
-    journalctl --user -u {{ UNIT }} --since "{{ SINCE }}" --until "{{ UNTIL }}" --no-pager
+    journalctl --user -u {{ quote(UNIT) }} --since {{ quote(SINCE) }} --until {{ quote(UNTIL) }} --no-pager
 
 # Run the pigtrough pilot pass (docs/plans/2026-11-16-pigtrough-pilot-runbook.md)
 # start to finish with no terminal, in a throwaway runtime dir: start
@@ -5232,14 +5267,15 @@ explore-agent-log SINCE UNTIL UNIT="piggy-agent.service":
 explore-pigtrough-pilot-pass BIN PHASE="pre-load":
     #!/usr/bin/env bash
     set -euo pipefail
-    case "{{ PHASE }}" in
+    phase={{ quote(PHASE) }}
+    case "$phase" in
       pre-load | loaded | proc | proc-fake) ;;
       *)
         echo "PHASE is pre-load, loaded, proc or proc-fake" >&2
         exit 2
         ;;
     esac
-    bin="{{ BIN }}"
+    bin={{ quote(BIN) }}
     [[ -x $bin ]] || {
       echo "not executable: $bin" >&2
       exit 2
@@ -5301,7 +5337,7 @@ explore-pigtrough-pilot-pass BIN PHASE="pre-load":
     # for GitHub's token prefixes; only counts and PASS/FAIL are printed.
     run_step_6() {
       local token pid=$serve_pid fails=0 artifact
-      if [[ "{{ PHASE }}" == proc-fake ]]; then
+      if [[ $phase == proc-fake ]]; then
         echo "\$ (a fixed fake token, no card)   (into this check's memory, then into pigtrough load)"
         token=ghp_pigtroughPilotFakeTokenNotASecret0000
       else
@@ -5368,7 +5404,7 @@ explore-pigtrough-pilot-pass BIN PHASE="pre-load":
       [[ $fails == 0 ]]
     }
     full "$api/$repo"
-    if [[ "{{ PHASE }}" == pre-load ]]; then
+    if [[ $phase == pre-load ]]; then
       full -H 'Authorization: Bearer not-a-token' "$api/$repo"
       full "$api/user"
       full "$api/repos/someone-else/repo"
@@ -5378,7 +5414,7 @@ explore-pigtrough-pilot-pass BIN PHASE="pre-load":
       exit 0
     fi
     echo
-    if [[ "{{ PHASE }}" == loaded ]]; then
+    if [[ $phase == loaded ]]; then
       echo "\$ piggy pass show github/forgejo-mirror | pigtrough load github-api --dir run"
       (
         unset PIGGY_STORE_DIR
@@ -5460,8 +5496,8 @@ explore-pigtrough-admission:
 explore-fdr0006-a CARD="virtual" PROMPTS="test" RUN="":
     #!/usr/bin/env bash
     set -euo pipefail
-    card="{{ CARD }}"
-    prompts="{{ PROMPTS }}"
+    card={{ quote(CARD) }}
+    prompts={{ quote(PROMPTS) }}
     run={{ quote(RUN) }}
     case "$card" in virtual | real) ;; *) echo "CARD must be virtual or real, not '$card'" >&2; exit 2 ;; esac
     case "$prompts" in test | real | gtk) ;; *) echo "PROMPTS must be test, real or gtk, not '$prompts'" >&2; exit 2 ;; esac
@@ -5793,8 +5829,9 @@ explore-fdr0006-a-askpass-tty:
 explore-fdr0006-b BIN_DIR="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "{{ BIN_DIR }}" ]]; then
-      bin="$(realpath "{{ BIN_DIR }}")"
+    bin_dir={{ quote(BIN_DIR) }}
+    if [[ -n $bin_dir ]]; then
+      bin="$(realpath "$bin_dir")"
       piggy="$bin/piggy" fibby="$bin/fibby"
     else
       piggy="$(nix build .#default --no-link --print-out-paths)/bin/piggy"
@@ -5892,9 +5929,10 @@ explore-fdr0006-d BIN_DIR="" NO_SHELL="":
     #!/usr/bin/env bash
     set -euo pipefail
     # NO_SHELL=1 as a parameter or in the environment runs unattended.
-    NO_SHELL="${NO_SHELL:-{{ NO_SHELL }}}"
-    if [[ -n "{{ BIN_DIR }}" ]]; then
-      bin="$(realpath "{{ BIN_DIR }}")"
+    no_shell_arg={{ quote(NO_SHELL) }} bin_dir={{ quote(BIN_DIR) }}
+    NO_SHELL="${NO_SHELL:-$no_shell_arg}"
+    if [[ -n $bin_dir ]]; then
+      bin="$(realpath "$bin_dir")"
       holder="$bin/fibby-holder" piggy="$bin/piggy"
     else
       holder="$(nix build .#fibby-holder --no-link --print-out-paths)/bin/fibby"
@@ -5947,21 +5985,22 @@ explore-fdr0006-d BIN_DIR="" NO_SHELL="":
     echo "# piggy:        $piggy"
     echo "TAP version 14"
     check "holder fibby reports profile holder"      test "$("$holder" ctl --socket "$ctl" profile)" = "ok holder"
-    check "a mint naming no scope is refused scope-unbound" bash -c "\"$piggy\" holder mint 2>&1 | grep -q scope-unbound"
-    check "a mint naming an undefined scope is refused unknown-scope" bash -c "\"$piggy\" holder mint --scope piggy-mint-v9 2>&1 | grep -q unknown-scope"
+    check "a mint naming no scope is refused scope-unbound" bash -c '"$1" holder mint 2>&1 | grep -q scope-unbound' _ "$piggy"
+    check "a mint naming an undefined scope is refused unknown-scope" bash -c '"$1" holder mint --scope piggy-mint-v9 2>&1 | grep -q unknown-scope' _ "$piggy"
 
     # The bound scope: mint two keys, sign with the first, then wait for
     # the go-file so the scope stays alive while the sibling is tried.
     cat >"$dir/bound.sh" <<EOF
     set -euo pipefail
     cd "$dir"
-    "$piggy" holder mint --scope piggy-mint-v1 > a.pub
-    "$piggy" holder mint --scope piggy-mint-v1 > b.pub
+    piggy=${piggy@Q}
+    "\$piggy" holder mint --scope piggy-mint-v1 > a.pub
+    "\$piggy" holder mint --scope piggy-mint-v1 > b.pub
     read -r t k _ < a.pub; printf 'fdr6d %s %s\n' "\$t" "\$k" > signers
     echo "piggy-test: signed from the bound scope" > data
     ssh-keygen -Y sign -f a.pub -U -n file data
     ssh-keygen -Y verify -f signers -I fdr6d -n file -s data.sig < data
-    "$piggy" holder retire a.pub
+    "\$piggy" holder retire a.pub
     touch bound.ok
     while [[ ! -e go ]]; do sleep 0.2; done
     EOF
@@ -5969,7 +6008,7 @@ explore-fdr0006-d BIN_DIR="" NO_SHELL="":
     pids+=($!)
     for _ in $(seq 1 300); do [[ -e $dir/bound.ok ]] && break; sleep 0.1; done
     check "bound scope: minted two keys, signed and verified with one, retired it" test -e "$dir/bound.ok"
-    check "bound scope: the retired card is gone, the other stays" bash -c "\"$holder\" ctl --socket \"$ctl\" list | grep -qF 'piggy-holder 2' && ! \"$holder\" ctl --socket \"$ctl\" list | grep -qF 'piggy-holder 1'"
+    check "bound scope: the retired card is gone, the other stays" bash -c '"$1" ctl --socket "$2" list | grep -qF "piggy-holder 2" && ! "$1" ctl --socket "$2" list | grep -qF "piggy-holder 1"' _ "$holder" "$ctl"
     # The sibling scope: the same socket, a different cgroup.
     echo "piggy-test: from the sibling" >"$dir/sdata"
     sibling_sign_refused() {
@@ -6163,8 +6202,11 @@ explore-cgroup-self-move:
 explore-holder-memory COUNTS="1 4 8 16" BIN_DIR="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "{{ BIN_DIR }}" ]]; then
-      bin="$(realpath "{{ BIN_DIR }}")"
+    counts={{ quote(COUNTS) }} bin_dir={{ quote(BIN_DIR) }}
+    counts_pattern='^[[:space:]]*((0|[1-9][0-9]*)([[:space:]]+|$))*$'
+    [[ $counts =~ $counts_pattern ]] || { echo "COUNTS is not a space-separated list of numbers" >&2; exit 2; }
+    if [[ -n $bin_dir ]]; then
+      bin="$(realpath "$bin_dir")"
       holder="$bin/fibby-holder" piggy="$bin/piggy"
     else
       holder="$(nix build .#fibby-holder --no-link --print-out-paths)/bin/fibby"
@@ -6230,7 +6272,7 @@ explore-holder-memory COUNTS="1 4 8 16" BIN_DIR="":
     echo "# holder fibby: $holder"
     echo "# piggy:        $piggy"
     started=0
-    for n in {{ COUNTS }}; do
+    for n in $counts; do
       ((n >= 1)) || { echo "# skipping a count of $n (a pair count is at least 1)"; continue; }
       while ((started < n)); do
         started=$((started + 1))
@@ -6304,6 +6346,7 @@ explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_P
     [[ -n $cn ]] || { echo "CN is required" >&2; exit 2; }
     [[ -f $module ]] || { echo "MODULE must name the PKCS#11 module (libykcs11.so or opensc-pkcs11.so), got '$module'" >&2; exit 2; }
     [[ -f $provider_path/pkcs11.so ]] || { echo "PROVIDER_PATH must hold OpenSSL 3's pkcs11.so provider, got '$provider_path'" >&2; exit 2; }
+    [[ $names =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*,?$ ]] || { echo "NAMES must be comma-separated DNS names" >&2; exit 2; }
     for tool in piggy openssl ssh-keygen pkcs11-tool; do
       command -v "$tool" >/dev/null || { echo "$tool is not on PATH" >&2; exit 2; }
     done
@@ -6323,9 +6366,9 @@ explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_P
     }
     echo "TAP version 14"
     echo "# 1. card reads (no PIN, no touch): the rollback and the evidence"
-    check "slot $slot public key saved ($out/slot$slot.pub)"            bash -c "piggy tool pubkey $slot > '$out/slot$slot.pub'"
-    check "slot $slot stored certificate saved (the rollback)"            bash -c "piggy tool cert $slot > '$out/slot$slot-placeholder.pem'"
-    check "slot $slot attestation saved"                                   bash -c "piggy tool attest $slot > '$out/slot$slot-attest.pem'"
+    check "slot $slot public key saved ($out/slot$slot.pub)"            bash -c 'piggy tool pubkey "$1" >"$2"' _ "$slot" "$out/slot$slot.pub"
+    check "slot $slot stored certificate saved (the rollback)"            bash -c 'piggy tool cert "$1" >"$2"' _ "$slot" "$out/slot$slot-placeholder.pem"
+    check "slot $slot attestation saved"                                   bash -c 'piggy tool attest "$1" >"$2"' _ "$slot" "$out/slot$slot-attest.pem"
     echo "# The attested policy, as piggy lists it (expect pin_policy always, touch_policy always, P-256):"
     piggy list --format=ndjson 2>/dev/null | grep -i '"slot": *"82"' | sed 's/^/#   /' || echo "#   (piggy list printed no slot 82 line; read the attestation PEM by hand)"
     echo "# step 1: $fails of $n card reads failed"
@@ -6380,19 +6423,19 @@ explore-fdr0007-root-cert CN NAMES="github.com" DAYS="3650" MODULE="" PROVIDER_P
     echo "# 4. read-back"
     openssl x509 -in "$out/root.pem" -noout -text >"$out/root.txt"
     check "the root verifies against itself"                        openssl verify -CAfile "$out/root.pem" "$out/root.pem"
-    check "basicConstraints critical CA:TRUE pathlen:1"            bash -c "grep -A1 'X509v3 Basic Constraints: critical' '$out/root.txt' | grep -q 'CA:TRUE, pathlen:1'"
-    check "keyUsage keyCertSign, cRLSign"                           bash -c "grep -A1 'X509v3 Key Usage: critical' '$out/root.txt' | grep -q 'Certificate Sign, CRL Sign'"
-    check "name constraints permit exactly the given DNS names"     bash -c "grep -q 'Name Constraints: critical' '$out/root.txt' && for name in ${names//,/ }; do grep -q \"DNS:\$name\" '$out/root.txt' || exit 1; done"
-    check "name constraints exclude every IPv4 and IPv6 address"    bash -c "grep -q 'IP:0.0.0.0/0.0.0.0' '$out/root.txt' && grep -qE 'IP:(0:0:0:0:0:0:0:0|::)/' '$out/root.txt'"
-    check "subject and authority key identifiers present"          bash -c "grep -q 'Subject Key Identifier' '$out/root.txt' && grep -q 'Authority Key Identifier' '$out/root.txt'"
-    check "the certificate's key is slot $slot's key"               bash -c "cmp -s <(openssl x509 -in '$out/root.pem' -pubkey -noout) <(ssh-keygen -e -m PKCS8 -f '$out/slot$slot.pub')"
-    check "the serial has at least 64 bits"                         bash -c "[[ \$(openssl x509 -in '$out/root.pem' -noout -serial | cut -d= -f2 | wc -c) -ge 17 ]]"
+    check "basicConstraints critical CA:TRUE pathlen:1"            bash -c 'grep -A1 "X509v3 Basic Constraints: critical" "$1" | grep -q "CA:TRUE, pathlen:1"' _ "$out/root.txt"
+    check "keyUsage keyCertSign, cRLSign"                           bash -c 'grep -A1 "X509v3 Key Usage: critical" "$1" | grep -q "Certificate Sign, CRL Sign"' _ "$out/root.txt"
+    check "name constraints permit exactly the given DNS names"     bash -c 'grep -q "Name Constraints: critical" "$1" && for name in ${2//,/ }; do grep -q "DNS:$name" "$1" || exit 1; done' _ "$out/root.txt" "$names"
+    check "name constraints exclude every IPv4 and IPv6 address"    bash -c 'grep -q "IP:0.0.0.0/0.0.0.0" "$1" && grep -qE "IP:(0:0:0:0:0:0:0:0|::)/" "$1"' _ "$out/root.txt"
+    check "subject and authority key identifiers present"          bash -c 'grep -q "Subject Key Identifier" "$1" && grep -q "Authority Key Identifier" "$1"' _ "$out/root.txt"
+    check "the certificate's key is slot $slot's key"               bash -c 'cmp -s <(openssl x509 -in "$1" -pubkey -noout) <(ssh-keygen -e -m PKCS8 -f "$2")' _ "$out/root.pem" "$out/slot$slot.pub"
+    check "the serial has at least 64 bits"                         bash -c '[[ $(openssl x509 -in "$1" -noout -serial | cut -d= -f2 | wc -c) -ge 17 ]]' _ "$out/root.pem"
     # Each `attest` makes the card sign a fresh attestation; whether the
     # signature's nonce is deterministic on real firmware is not known, so
     # the bytes are not compared: the attested key and the YubicoPIV policy
     # extension (1.3.6.1.4.1.41482.3.8, [pin, touch]) are.
-    check "slot $slot's attested key is unchanged"                  bash -c "cmp -s <(piggy tool attest $slot | openssl x509 -noout -pubkey) <(openssl x509 -in '$out/slot$slot-attest.pem' -noout -pubkey)"
-    check "slot $slot's attested PIN and touch policy are unchanged"  bash -c "cmp -s <(piggy tool attest $slot | openssl x509 -noout -text | grep -A1 '1.3.6.1.4.1.41482.3.8') <(openssl x509 -in '$out/slot$slot-attest.pem' -noout -text | grep -A1 '1.3.6.1.4.1.41482.3.8')"
+    check "slot $slot's attested key is unchanged"                  bash -c 'cmp -s <(piggy tool attest "$1" | openssl x509 -noout -pubkey) <(openssl x509 -in "$2" -noout -pubkey)' _ "$slot" "$out/slot$slot-attest.pem"
+    check "slot $slot's attested PIN and touch policy are unchanged"  bash -c 'cmp -s <(piggy tool attest "$1" | openssl x509 -noout -text | grep -A1 "1.3.6.1.4.1.41482.3.8") <(openssl x509 -in "$2" -noout -text | grep -A1 "1.3.6.1.4.1.41482.3.8")' _ "$slot" "$out/slot$slot-attest.pem"
     echo "1..$n"
     if ((fails > 0)); then
       echo "# $fails read-back check(s) failed AFTER the signature: the signature was made and $out/root.pem exists."
@@ -6508,13 +6551,13 @@ explore-fdr0007-chain-holder CN_INT="circus-pigtrough-github-intermediate" CN_LE
       fi
     }
     echo "TAP version 14"
-    check "the intermediate key is minted in the holder ($out/int.pub)" bash -c "'$piggy_bin' holder mint --scope piggy-ca-intermediate-v1 --type p256 > '$out/int.pub'"
+    check "the intermediate key is minted in the holder ($out/int.pub)" bash -c '"$1" holder mint --scope piggy-ca-intermediate-v1 --type p256 >"$2"' _ "$piggy_bin" "$out/int.pub"
     check "the intermediate request is signed through the holder ($out/int.csr)" "$piggy_bin" ca csr --key "$out/int.pub" --cn "$cn_int" --out "$out/int.csr"
     if "$piggy_bin" ca leaf-csr --help >/dev/null 2>&1; then
       check "the leaf key and request are made by piggy ca leaf-csr ($out/leaf.key 0600, $out/leaf.csr)" "$piggy_bin" ca leaf-csr --key-out "$out/leaf.key" --cn "$cn_leaf" --out "$out/leaf.csr"
     else
       echo "# this piggy has no 'ca leaf-csr': the leaf key is a second holder key, and dies with the holder"
-      check "the leaf key is minted in the holder ($out/leaf.pub)" bash -c "'$piggy_bin' holder mint --scope piggy-ca-leaf-v1 --type p256 > '$out/leaf.pub'"
+      check "the leaf key is minted in the holder ($out/leaf.pub)" bash -c '"$1" holder mint --scope piggy-ca-leaf-v1 --type p256 >"$2"' _ "$piggy_bin" "$out/leaf.pub"
       check "the leaf request is signed through the holder ($out/leaf.csr)" "$piggy_bin" ca csr --key "$out/leaf.pub" --cn "$cn_leaf" --out "$out/leaf.csr"
     fi
     echo "1..$n"
@@ -6579,6 +6622,7 @@ explore-fdr0007-chain-card GUID INT_CSR LEAF_CSR INT_CN="circus-pigtrough-github
     [[ -f $int_csr ]] || { echo "INT_CSR '$int_csr' is not a file" >&2; exit 2; }
     [[ -f $leaf_csr ]] || { echo "LEAF_CSR '$leaf_csr' is not a file" >&2; exit 2; }
     [[ -n ${SSH_AUTH_SOCK:-}${PIGGY_AUTH_SOCK:-} ]] || { echo "SSH_AUTH_SOCK is not set: the certificate acts are sealed through the operator's piggy agent (slot 9C)" >&2; exit 2; }
+    [[ $names =~ ^[A-Za-z0-9*._-]+(,[A-Za-z0-9*._-]+)*,?$ ]] || { echo "NAMES must be comma-separated DNS names" >&2; exit 2; }
     [[ -n $out ]] || out="$PWD/fdr0007-chain-card-$(date -u +%Y%m%dT%H%M%SZ)"
     mkdir -p "$out/config/ca-profiles" "$out/state"
     chmod 700 "$out"
@@ -6619,7 +6663,7 @@ explore-fdr0007-chain-card GUID INT_CSR LEAF_CSR INT_CN="circus-pigtrough-github
     echo "TAP version 14"
     echo "# piggy: $piggy_bin $(piggy --version 2>&1 | head -n1); agent: ${PIGGY_AUTH_SOCK:-$SSH_AUTH_SOCK}"
     echo "# S0. card reads (no PIN, no touch): the pilot root and its key proven on-card"
-    check "slot $slot certificate (the pilot root) saved ($out/root.pem)" bash -c "piggy tool cert $slot > '$out/root.pem'"
+    check "slot $slot certificate (the pilot root) saved ($out/root.pem)" bash -c 'piggy tool cert "$1" >"$2"' _ "$slot" "$out/root.pem"
     check "slot $slot key attested as this card's (piggy tool attest-verify)" piggy tool attest-verify "$slot"
     if command -v openssl >/dev/null; then
       openssl x509 -in "$out/root.pem" -noout -subject -enddate 2>/dev/null | sed 's/^/#   /' || true
@@ -6638,7 +6682,7 @@ explore-fdr0007-chain-card GUID INT_CSR LEAF_CSR INT_CN="circus-pigtrough-github
       exit 1
     fi
     check "the intermediate's act seal verifies (piggy act verify --seal-only)" piggy act verify --seal-only "$out/int.pem.act"
-    check "the intermediate's act is a piggy:x509-ca link (piggy act canon)" bash -c "piggy act canon '$out/int.pem.act' | grep -q -- '- right = piggy:x509-ca'"
+    check "the intermediate's act is a piggy:x509-ca link (piggy act canon)" bash -c 'piggy act canon "$1" | grep -q -- "- right = piggy:x509-ca"' _ "$out/int.pem.act"
     echo "# S4'. a leaf under the root directly (2 PIN + 2 touch; the interim until the holder issues leaves, piggy#392)."
     read -r -p "# Press Enter to run piggy ca issue (2 PIN + 2 touch), or Ctrl-C to stop: " _
     if piggy ca issue --profile leaf --out "$out/leaf.pem" <"$leaf_csr"; then
@@ -6649,25 +6693,25 @@ explore-fdr0007-chain-card GUID INT_CSR LEAF_CSR INT_CN="circus-pigtrough-github
       exit 1
     fi
     check "the leaf's act seal verifies (piggy act verify --seal-only)" piggy act verify --seal-only "$out/leaf.pem.act"
-    check "the leaf's act is a piggy:x509-leaf link (piggy act canon)" bash -c "piggy act canon '$out/leaf.pem.act' | grep -q -- '- right = piggy:x509-leaf'"
-    check "two audit lines, one per certificate ($out/state/audit)" bash -c "[[ \$(wc -l < '$out/state/audit') -eq 2 ]]"
-    check "slot $slot still serves the same root: the card was not written" bash -c "cmp -s <(piggy tool cert $slot) '$out/root.pem'"
+    check "the leaf's act is a piggy:x509-leaf link (piggy act canon)" bash -c 'piggy act canon "$1" | grep -q -- "- right = piggy:x509-leaf"' _ "$out/leaf.pem.act"
+    check "two audit lines, one per certificate ($out/state/audit)" bash -c '[[ $(wc -l <"$1") -eq 2 ]]' _ "$out/state/audit"
+    check "slot $slot still serves the same root: the card was not written" bash -c 'cmp -s <(piggy tool cert "$1") "$2"' _ "$slot" "$out/root.pem"
     if command -v openssl >/dev/null; then
       echo "# read-back through openssl (interim: piggy ca verify is not built yet)"
       check "int.pem verifies under root.pem" openssl verify -CAfile "$out/root.pem" "$out/int.pem"
       check "leaf.pem verifies under root.pem" openssl verify -CAfile "$out/root.pem" "$out/leaf.pem"
-      check "int.pem is a CA with pathlen 0" bash -c "openssl x509 -in '$out/int.pem' -noout -text | grep -q 'CA:TRUE, pathlen:0'"
-      check "leaf.pem names every permitted name and is not a CA" bash -c "t=\$(openssl x509 -in '$out/leaf.pem' -noout -text); for name in ${names//,/ }; do grep -q \"DNS:\$name\" <<<\"\$t\" || exit 1; done; grep -q 'CA:FALSE' <<<\"\$t\""
-      check "int.pem's key is the request's" bash -c "cmp -s <(openssl x509 -in '$out/int.pem' -noout -pubkey) <(openssl req -in '$int_csr' -noout -pubkey)"
-      check "leaf.pem's key is the request's" bash -c "cmp -s <(openssl x509 -in '$out/leaf.pem' -noout -pubkey) <(openssl req -in '$leaf_csr' -noout -pubkey)"
+      check "int.pem is a CA with pathlen 0" bash -c 'openssl x509 -in "$1" -noout -text | grep -q "CA:TRUE, pathlen:0"' _ "$out/int.pem"
+      check "leaf.pem names every permitted name and is not a CA" bash -c 'set -f; t=$(openssl x509 -in "$1" -noout -text); for name in ${2//,/ }; do grep -q "DNS:$name" <<<"$t" || exit 1; done; grep -q "CA:FALSE" <<<"$t"' _ "$out/leaf.pem" "$names"
+      check "int.pem's key is the request's" bash -c 'cmp -s <(openssl x509 -in "$1" -noout -pubkey) <(openssl req -in "$2" -noout -pubkey)' _ "$out/int.pem" "$int_csr"
+      check "leaf.pem's key is the request's" bash -c 'cmp -s <(openssl x509 -in "$1" -noout -pubkey) <(openssl req -in "$2" -noout -pubkey)' _ "$out/leaf.pem" "$leaf_csr"
     else
       echo "# openssl is not on PATH: the openssl read-back is skipped"
     fi
     if piggy ca verify --help >/dev/null 2>&1; then
       echo "# read-back in piggy: ca verify (the leaf under the root, its key the request's) and cert show"
-      check "leaf.pem verifies under root.pem with the request's key (piggy ca verify)" bash -c "piggy ca verify --root '$out/root.pem' --untrusted '$out/int.pem' --key '$leaf_csr' '$out/leaf.pem' > '$out/verify-leaf.tap'"
-      check "int.pem is a CA with pathlen 0 (piggy cert show)" bash -c "piggy cert show '$out/int.pem' | grep -q 'CA:TRUE pathlen:0'"
-      check "leaf.pem names every permitted name and is not a CA (piggy cert show)" bash -c "t=\$(piggy cert show '$out/leaf.pem'); for name in \$(tr , ' ' <<<'$names'); do grep -q \"\$name\" <<<\"\$t\" || exit 1; done; grep -q 'CA:FALSE' <<<\"\$t\""
+      check "leaf.pem verifies under root.pem with the request's key (piggy ca verify)" bash -c 'piggy ca verify --root "$1" --untrusted "$2" --key "$3" "$4" >"$5"' _ "$out/root.pem" "$out/int.pem" "$leaf_csr" "$out/leaf.pem" "$out/verify-leaf.tap"
+      check "int.pem is a CA with pathlen 0 (piggy cert show)" bash -c 'piggy cert show "$1" | grep -q "CA:TRUE pathlen:0"' _ "$out/int.pem"
+      check "leaf.pem names every permitted name and is not a CA (piggy cert show)" bash -c 'set -f; t=$(piggy cert show "$1"); for name in ${2//,/ }; do grep -q "$name" <<<"$t" || exit 1; done; grep -q "CA:FALSE" <<<"$t"' _ "$out/leaf.pem" "$names"
       piggy cert show "$out/int.pem" "$out/leaf.pem" 2>/dev/null | sed 's/^/#   /' || true
     else
       echo "# this piggy has no 'ca verify': the piggy read-back is skipped"
@@ -6713,8 +6757,9 @@ debug-ssh-key-identifiers KEY:
 explore-fdr0006-c BIN_DIR="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "{{ BIN_DIR }}" ]]; then
-      bin="$(realpath "{{ BIN_DIR }}")"
+    bin_dir={{ quote(BIN_DIR) }}
+    if [[ -n $bin_dir ]]; then
+      bin="$(realpath "$bin_dir")"
       holder="$bin/fibby-holder" testdouble="$bin/fibby" piggy="$bin/piggy"
     else
       holder="$(nix build .#fibby-holder --no-link --print-out-paths)/bin/fibby"
@@ -6792,7 +6837,7 @@ explore-fdr0006-c BIN_DIR="":
     check "holder: piggy reads its 9A attestation"   "$piggy" card export-attestation 9a --reader "$minted"
     check "holder: a second card of that name is refused" exits 1 "$holder" ctl --socket "$ctl" create "$minted"
     check "holder: destroy it"                       hctl destroy "$minted"
-    check "holder: it is no longer listed"           bash -c "! \"$holder\" ctl --socket \"$ctl\" list | grep -qF \"$minted\""
+    check "holder: it is no longer listed"           bash -c '! "$1" ctl --socket "$2" list | grep -qF "$3"' _ "$holder" "$ctl" "$minted"
     check "holder: destroying it again is refused"   exits 1 "$holder" ctl --socket "$ctl" destroy "$minted"
     echo "1..$n"
 
