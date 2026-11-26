@@ -259,8 +259,8 @@ is asserted, except what is marked otherwise.
 The helper could also read the caller's `PATH` and `SHELL` from
 `/proc/PARENT/environ`, but repeating sudo's own resolution from them
 would be a second implementation that can disagree with it. sudo's log
-named the resolved command even for refused attempts, so sudo had
-resolved it before authentication failed.
+named the resolved command even for refused attempts; by inference sudo
+had resolved it before authentication failed.
 
 **The helper and its surroundings:**
 
@@ -286,9 +286,9 @@ or refuses. Asserted, on sudo 1.9.17p2:
 | a command found on the caller's `PATH` | `command` is the file chosen, here the caller's own `id` |
 | `-s` with the caller's `SHELL`, and `-s` alone | `command` and `run_argv` name the shell that will run |
 | `-i` | the shell, its login `run_argv`, and `cwd` |
-| `-e` | `sudoedit=true`, the editor, and the file. Not the new content |
+| `-e` | `sudoedit=true`, the editor, and the file. By inference not the new content, which is not written yet |
 | `-u`, `-g` | the target user, group and ids |
-| a relative command | `command` **stays relative**; the directory is only in `user_info` |
+| a relative command | `command` **stays relative** and `command_info` has no `cwd`; `user_info` has the caller's directory |
 | `VAR=value` | in `run_envp` |
 
 - It ran for a `NOPASSWD` rule, also with `-n`, and its refusal stopped
@@ -320,8 +320,10 @@ is. Asserted:
 | a relative name that `sudo -D` would run in the caller's directory | refused |
 
 Each refused command ran with the check off. A changed root
-(`chroot`) is refused too, **not tested**. (Linux itself stops root
-following another user's link in a sticky directory.)
+(`chroot`) is refused too, **not tested**. (Not asserted: in the guest,
+root could not follow another user's link in a world-writable sticky
+directory. That is the `fs.protected_symlinks` setting, by reasoning;
+its value was not read, and the check does not rely on it.)
 
 It checks **the program only**. All three of these passed it and ran what
 the caller chose, as root (asserted):
@@ -362,7 +364,7 @@ For open question 3. "Not designed" and "not tested" mean just that.
 | `-v` | the helper is called with nothing to show | the plugin is not called, so PAM or sudo's rules must settle it |
 | Content swapped during the wait | inferred, not tested | happens (tested) |
 | Recovery account | untouched: the stack is chosen per user | `sudo.conf` is global: the plugin must let that account through |
-| Its configuration line is missing | the per-user setting is missing: sudo uses its default stack | sudo loads only what `sudo.conf` names, so by reasoning (not tested) it **runs with no check** |
+| Its configuration line is missing | each of plain, `-i` and `-A` has its own `Defaults` line; **one left out falls back to the stock stack, which by reasoning (not tested) brings a password path back** | sudo loads only what `sudo.conf` names, so by reasoning (not tested) it **runs with no check** |
 | It fails to load | a broken per-user stack: not tested | **not tested** |
 | Our code in sudo's process | none | a shared object |
 
@@ -598,7 +600,7 @@ run outside a transaction.
 | 14 | **(blocks)** RFC 0012 says callers must not put secrets in an act's text, and sudo arguments can hold one; the text also crosses forwarded agents. | State that secrets on a sudo command line are unsupported, and settle what the helper does when it suspects one. |
 | 2 | **(blocks)** Should the helper run as root (`seteuid`)? Without it the user who is asking can stop or kill it (tested). | Yes: with it those signals were refused. Give it a fixed environment. |
 | 3 | **(blocks)** The arguments do not say what runs: `-s` runs the program the caller's `SHELL` names, and `sudoedit` lets the caller write any content (tested). The prompt must not misstate a command. Does the ruled `pam_exec` shape stay, or does the decision move to a sudo approval plugin? See "The two shapes side by side". With `pam_exec`, the modes it cannot show would be refused by reading sudo's command line a second time; refusing `-s` or `-e` **narrows the ruled "any command"**. | Do not move yet. First design what authenticates in the plugin shape, and test its reach over the recovery account and what a load failure does. |
-| 23 | **(blocks)** The caller can change an approved program before it runs (tested with the plugin; inferred for `pam_exec`). What does "any command, shown" mean for a program the caller can change, and for `sudoedit`? | Refuse a program the caller can change (tested above; it **narrows "any command"**), and require `secure_path`. It cannot make "what you see is what runs" true for interpreters, loaded files or store paths the caller added: the prompt must not promise that, and the operator decides whether the remainder is acceptable. It is a rule about what may run, against "No new permission logic": **where should it live**, the shared policy engine, sudo's own rules or the plugin? |
+| 23 | **(blocks)** The caller can change an approved program before it runs (tested with the plugin; inferred for `pam_exec`). What does "any command, shown" mean for a program the caller can change, and for `sudoedit`? | Refuse a program the caller can change (tested above; it **narrows "any command"**), and require `secure_path`. It cannot make "what you see is what runs" true for interpreters, loaded files or store paths the caller added: the prompt must not promise that, and the operator decides whether the remainder is acceptable. It is a rule about what may run, against "No new permission logic": **where should it live**, the shared policy engine, sudo's own rules or the plugin? The remedy was tested only in the plugin: under `pam_exec`, the ruled shape, **it has no tested or designed form**. |
 | 4 | **(blocks)** How does the helper find the right agent socket, including where the user's agent only relays? | A root-owned per-host setting. |
 | 5 | The namespace name, display class and text for the RFC 0012 amendment, and whether the text reuses `piggy-act-v1` (RFC 0013). | A namespace of its own, with a class that looks unlike every other. |
 | 6 | Does the socket move happen now, or wait for the polkit stage? | Wait: the sudo test reached the agent without it (proxy-only, no card). |

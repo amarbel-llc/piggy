@@ -1,5 +1,8 @@
 bats_timeout := "30"
 
-test *targets="*.bats":
-  BATS_TEST_TIMEOUT="{{bats_timeout}}" \
-    bats --no-sandbox --tap {{targets}}
+# TARGETS reach bats as arguments, never as shell text.
+[positional-arguments]
+test *targets:
+  [ $# -gt 0 ] || set -- *.bats; \
+    BATS_TEST_TIMEOUT="{{bats_timeout}}" \
+    bats --no-sandbox --tap "$@"

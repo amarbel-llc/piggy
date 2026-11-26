@@ -259,8 +259,8 @@ in
         # owner rule are each tried on their own.
         machine.succeed("install -d -m 1777 /srv/sticky")
         machine.succeed("install -m 0755 ${fake "sticky"} /srv/sticky/roots")
-        # A link the caller owns where only the owner rule can object. (In
-        # a sticky directory the kernel itself stops root following one.)
+        # A link the caller owns where only the owner rule can object. Not
+        # in a sticky directory: there root could not follow it at all.
         machine.succeed("ln -s /srv/safe/good /srv/safe/callers-link && chown -h alice /srv/safe/callers-link")
         machine.succeed(f"{as_alice} cp ${fake "sticky-own"} /srv/sticky/callers-file")
         machine.succeed(f"{as_alice} chmod 755 /srv/sticky/callers-file")
