@@ -2353,7 +2353,7 @@ test-vm-coverage:
 [group('debug')]
 [linux]
 debug-vm-dry-run check="vm-piggy-luks":
-    nix build .#checks.{{ vm-check-system }}.{{ check }} --dry-run --show-trace
+    nix build .#checks.{{ vm-check-system }}.{{ quote(check) }} --dry-run --show-trace
 
 # TODO(#408): the pam_piggy design experiments (nix/vm-tests/pam-*-probe.nix),
 # no part of the merge gate. PROBE is pam-sandbox (socket paths the polkit
@@ -2383,16 +2383,21 @@ debug-vm-probe probe:
 debug-vm-loop check="vm-piggy-agent" runs="10" logdir="":
     #!/usr/bin/env bash
     set -uo pipefail
-    attr=".#checks.{{ vm-check-system }}.{{ check }}"
-    logdir="{{ logdir }}"
-    [[ -n $logdir ]] || logdir="${TMPDIR:-/tmp}/vm-loop-{{ check }}-$(date +%Y%m%dT%H%M%S)"
-    mkdir -p "$logdir"
+    # Arguments reach the script only through quote(), then as variables.
+    check={{ quote(check) }}
+    runs={{ quote(runs) }}
+    logdir={{ quote(logdir) }}
+    [[ $check =~ ^[A-Za-z0-9_-]+$ ]] || { echo "CHECK is not a check name" >&2; exit 2; }
+    [[ $runs =~ ^[1-9][0-9]*$ ]] || { echo "RUNS is not a positive number" >&2; exit 2; }
+    attr=".#checks.{{ vm-check-system }}.$check"
+    [[ -n $logdir ]] || logdir="${TMPDIR:-/tmp}/vm-loop-$check-$(date +%Y%m%dT%H%M%S)"
+    mkdir -p -- "$logdir"
     echo "logs: $logdir"
     # --rebuild needs the output to exist already.
     nix build "$attr" --no-link --show-trace >"$logdir/run-00-prime.log" 2>&1 \
       || echo "run 00 (prime): FAIL, see $logdir/run-00-prime.log"
     failures=0
-    for i in $(seq 1 {{ runs }}); do
+    for i in $(seq 1 "$runs"); do
       log=$(printf '%s/run-%02d.log' "$logdir" "$i")
       start=$(date +%s)
       if nix build "$attr" --rebuild --no-link --print-build-logs --show-trace >"$log" 2>&1; then
@@ -2403,7 +2408,7 @@ debug-vm-loop check="vm-piggy-agent" runs="10" logdir="":
       fi
       echo "run $(printf '%02d' "$i"): $verdict $(( $(date +%s) - start ))s $(grep -c 'HANG WATCHDOG:.*seconds' "$log" || true) watchdog dump(s)"
     done
-    echo "$failures of {{ runs }} runs failed; logs in $logdir"
+    echo "$failures of $runs runs failed; logs in $logdir"
 
 # Rust card-integration tests against FIBBY — the one lane for the agent
 # ECDH, agent unlock and card unlock integration tests since the fib card was
