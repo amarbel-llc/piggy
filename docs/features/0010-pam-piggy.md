@@ -155,6 +155,8 @@ open question says so.
   agents restored by a rollback included. All are upgraded before a key
   is listed or a host enabled, and the refusal is tested. What enforces
   the rule afterwards is open question 21.
+- **The caller's `PATH` does not pick the program:** `secure_path` is set
+  for the account, naming only directories the caller cannot write.
 - **Agent code cannot use the recovery account:** shown for each host
   before it relies on it.
 - **Every refusal prints the recovery route:** no card, no agent,
@@ -201,39 +203,78 @@ important defence. The CA path is later reused for hogtie operations.
 
 ## Examples
 
-Sketches only, **not tested and not to be applied**; the helper's
-arguments are not designed. sudoers, for the normal user account:
+Sketches, **not to be applied**: the shape was tested with a stand-in
+helper (below), the real helper and its arguments are not designed.
+sudoers, for the normal user account:
 
     Defaults:USER pam_service=sudo-piggy
     Defaults:USER pam_login_service=sudo-piggy
     Defaults:USER pam_askpass_service=sudo-piggy
     Defaults:USER timestamp_timeout=0
+    Defaults:USER secure_path="ROOT-OWNED-DIRECTORIES"
 
-and the auth phase of `/etc/pam.d/sudo-piggy` (`seteuid` is not
-settled):
+and the auth phase of `/etc/pam.d/sudo-piggy` (whether to add `seteuid`
+is open question 2):
 
     auth required pam_exec.so stdout HELPER
 
 ## The sudo pilot
 
-From `sudoers(5)`; none of it is tested:
+`just debug-vm-probe pam-sudo` sets up the examples above on sudo
+1.9.17p2, with a stand-in helper that records what it is given and then
+allows or refuses. No card or signature is involved. All of this section
+is asserted, except what is marked otherwise.
 
-- sudo authenticates the **invoking** user by default, so a key list for
-  the normal user account is enough. `PAM_RUSER` names the invoking user
-  (`pam_ruser`, on by default).
-- `pam_service` selects another PAM stack, which `Defaults` can scope to
-  one user. `pam_login_service` (`sudo -i`) and `pam_askpass_service`
-  (`sudo -A`) are separate settings; one left alone could keep a
-  password path.
-- `timestamp_timeout` is 5 minutes by default: without 0, one approval
-  covers later sudo commands.
-- `NOPASSWD` rules skip authentication, so existing ones get no prompt.
-- The dialog appears where the card agent runs, which is another machine
-  when the user's agent only relays to a forwarded one.
-- sudo is not in polkit's sandbox, so by inference it needs no socket
-  move. The proposal is a configured socket path (open question 4);
-  whether a caller's `SSH_AUTH_SOCK` could reach the helper was not
-  tested.
+**The setup holds:**
+
+- With the helper refusing, no password path was left: plain, `-i`, `-s`,
+  `-A` and `-A -i` all failed although the right password was supplied,
+  with and without `seteuid`. A control account's password worked.
+- With `timestamp_timeout=0`, two commands in one shell called the helper
+  twice. With `-n` sudo refused without calling it.
+- `-v` calls the helper with no command to show. `-l` did not call it for
+  an account that has a `NOPASSWD` rule.
+- A `NOPASSWD` rule runs with no call at all.
+- `PAM_USER` and `PAM_RUSER` name the invoking user, also under `-u`.
+
+**The arguments do not say what runs:**
+
+| Case | What happened |
+|---|---|
+| `sudo id -u`, the caller's `PATH` led by their own directory, no `secure_path` | **the caller's `id` ran as root**; the arguments read `id -u` |
+| the same with `secure_path` set for the account | the system `id` ran |
+| `SHELL=PROGRAM sudo -s id -u` | **PROGRAM ran as root**, also with `secure_path`; the arguments read `-s id -u` |
+| `sudo -s` | a shell |
+| `sudo -i id -u` | the target account's login shell ran the command; the caller's `SHELL` was ignored |
+| `sudo -e FILE` | the caller's editor ran **as the caller** on a copy (the write back by root is `sudoedit`'s documented behaviour, not asserted): approving it lets the caller put anything in FILE |
+| `-u USER`, `VAR=value` | in the arguments only |
+| a relative path | depends on the working directory, which is not in the arguments; the helper could read sudo's |
+
+The helper could also read the caller's `PATH` and `SHELL` from
+`/proc/PARENT/environ`, but repeating sudo's own resolution from them
+would be a second implementation that can disagree with it. sudo's log
+named the resolved command even for refused attempts, so sudo had
+resolved it before authentication failed.
+
+**A candidate that is not tested:** `sudo_plugin(5)` describes an
+*approval plugin*, run after the policy accepts a command, which is
+given `command_info`, `run_argv` and `run_envp`. That is sudo's own
+account of what will run. It would change the ruled `pam_exec` shape and
+put a shared object in sudo's process.
+
+**The helper and its surroundings:**
+
+- sudo gave the helper only `PAM_RUSER`, `PAM_SERVICE`, `PAM_TYPE` and
+  `PAM_USER` (and a locale variable). The caller's `SSH_AUTH_SOCK` did
+  not reach it.
+- Without `seteuid` the helper keeps the caller's real uid, and **the
+  caller could stop, continue and kill it**; after the kill sudo refused.
+  With `seteuid` all three signals were refused. `ptrace` was not tried.
+- From either, the helper reached a `piggy agent` (proxy-only, no card)
+  on a socket in the user's mode-0700 directory, with no socket move.
+- Not tested: the dialog, a terminal (`PAM_TTY` was unset with none),
+  a card, and a forwarded agent. The dialog appears where the card agent
+  runs.
 
 ## What the module can learn about a request
 
@@ -268,9 +309,8 @@ action raised while the operator's `pkexec` waits would be shown with the
 operator's command. **Do not show it.**
 
 Under sudo the parent is the process asking, so the helper can show its
-arguments. Those are the arguments given to sudo, not necessarily what
-runs (`-s`, `-i`, `sudoedit`, path lookup; not tested), and an
-operator-act text is capped at 4096 bytes.
+arguments. Those are the arguments given to sudo, **not necessarily what
+runs** (below), and an operator-act text is capped at 4096 bytes.
 
 ## Module shape and language
 
@@ -299,8 +339,9 @@ From `pam_exec.c` at Linux-PAM v1.7.2:
 - The child gets the PAM environment list plus the `PAM_*` items, not the
   caller's process environment.
 - Without `seteuid` the child keeps the caller's real uid: under sudo the
-  invoking user, with effective uid root. By Linux's rules (not tested)
-  that user can then signal the child but not ptrace it. With equal uids
+  invoking user, with effective uid root. By Linux's rules
+  that user can then signal the child (tested, below) but not ptrace it
+  (not tested). With equal uids
   the dynamic loader honours `LD_*` from the child's environment.
 - With `stdout`, lines the helper prints reach the PAM conversation.
 
@@ -464,8 +505,8 @@ run outside a transaction.
 | 15 | **(blocks)** The command must be shown on every use, but the agent cannot tell what the askpass program displayed: one that ignores the text shows a bare PIN prompt and the act is still signed (piggy-agent(1)). What makes that impossible, or detectable, on the card's host? | Treat the agent and askpass of the card's host as part of the trusted base: both root-owned or otherwise outside what agent sessions can replace. Not designed. |
 | 16 | **(blocks)** Which tracked work delivers agent confinement and the display separation? Hosts that already have sudo may go before confinement. A search by the circus session found no single item for either. | The circus session owns it; cite its work here. |
 | 14 | **(blocks)** RFC 0012 says callers must not put secrets in an act's text, and sudo arguments can hold one; the text also crosses forwarded agents. | State that secrets on a sudo command line are unsupported, and settle what the helper does when it suspects one. |
-| 2 | **(blocks)** Should the helper run as root (`seteuid`)? Without it the user who is asking can pause or kill it. | Yes, with a fixed environment; confirm in a VM. |
-| 3 | **(blocks)** `sudo -s`, `-i` and `sudoedit` may run something other than the arguments suggest. What does the prompt do? "Any command" is ruled; these modes are not. | Probe each; show it truthfully, and refuse any that cannot be. |
+| 2 | **(blocks)** Should the helper run as root (`seteuid`)? Without it the user who is asking can stop or kill it (tested). | Yes: with it those signals were refused. Give it a fixed environment. |
+| 3 | **(blocks)** The arguments do not say what runs: `-s` runs the program the caller's `SHELL` names, and `sudoedit` lets the caller write any content (tested). The prompt must not misstate a command. Does the ruled `pam_exec` shape stay, refusing what it cannot show truthfully, or does the decision move to a sudo approval plugin? | Test the approval plugin first: whether it is given the resolved program and arguments for each mode above. If the shape stays, refuse `-s`, `-e` and `-v`, require `secure_path`, and show the working directory. |
 | 4 | **(blocks)** How does the helper find the right agent socket, including where the user's agent only relays? | A root-owned per-host setting. |
 | 5 | The namespace name, display class and text for the RFC 0012 amendment, and whether the text reuses `piggy-act-v1` (RFC 0013). | A namespace of its own, with a class that looks unlike every other. |
 | 6 | Does the socket move happen now, or wait for the polkit stage? | Wait, unless the sudo tests show a need. |

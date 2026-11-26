@@ -2358,8 +2358,9 @@ debug-vm-dry-run check="vm-piggy-luks":
 # TODO(#408): the pam_piggy design experiments (nix/vm-tests/pam-*-probe.nix),
 # no part of the merge gate. PROBE is pam-sandbox (socket paths the polkit
 # helper sandbox reaches), pam-socket-move (the moved socket, link and
-# fallback), pam-command (what a pam_exec helper sees and shows) or
-# pkexec-password (pkexec's agents with the stock stack). The log is
+# fallback), pam-command (what a pam_exec helper sees and shows),
+# pkexec-password (pkexec's agents with the stock stack) or pam-sudo (the
+# sudo pilot's setup). The log is
 # printed whether the probe passes, fails or was already built. PROBE is
 # quoted: this recipe runs without a permission prompt.
 #

@@ -7,4 +7,5 @@ pkgs.mkVmChecks {
   tests.vm-probe-pam-command = import ./pam-command-visibility-probe.nix;
   tests.vm-probe-pkexec-password = import ./pam-pkexec-password-probe.nix;
   tests.vm-probe-pam-socket-move = import ./pam-socket-move-probe.nix { inherit piggy; };
+  tests.vm-probe-pam-sudo = import ./pam-sudo-probe.nix { inherit piggy; };
 }
