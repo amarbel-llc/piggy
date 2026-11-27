@@ -18,7 +18,7 @@
 //! server calls from a blocking thread, never from a runtime worker.
 
 use std::io::{self, Read};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +34,8 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
+use tokio::task::AbortHandle;
 use tokio::time::{Instant, timeout_at};
 use tokio_rustls::TlsConnector;
 
@@ -159,12 +161,16 @@ impl TlsUpstream {
     }
 
     /// A connection to `upstream`, verified and ready for one request.
-    async fn connect(&self, upstream: &Upstream) -> Result<Sender, UpstreamError> {
-        let tcp = match self.connect_to {
-            Some(addr) => TcpStream::connect(addr).await,
-            None => TcpStream::connect((upstream.host, upstream.port)).await,
-        }
-        .map_err(|_| UpstreamError::Connect)?;
+    async fn connect(&self, upstream: &Upstream) -> Result<(Sender, Connection), UpstreamError> {
+        let addrs = match self.connect_to {
+            Some(addr) => vec![addr],
+            None => resolve(upstream.host, upstream.port)
+                .await
+                .map_err(|_| UpstreamError::Connect)?,
+        };
+        let tcp = TcpStream::connect(&addrs[..])
+            .await
+            .map_err(|_| UpstreamError::Connect)?;
         let name = ServerName::try_from(upstream.host).map_err(|_| UpstreamError::Tls)?;
         let tls = TlsConnector::from(self.config.clone())
             .connect(name, tcp)
@@ -173,16 +179,16 @@ impl TlsUpstream {
         let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
             .await
             .map_err(|_| UpstreamError::Protocol)?;
-        self.runtime.spawn(async move {
+        let task = self.runtime.spawn(async move {
             let _ = connection.await;
         });
-        Ok(sender)
+        Ok((sender, Connection(task.abort_handle())))
     }
 
     /// Send `request` on `sender` and wait for the response head.
     async fn exchange(
         &self,
-        mut sender: Sender,
+        (mut sender, connection): (Sender, Connection),
         request: OutboundRequest<'_>,
     ) -> Result<UpstreamResponse, UpstreamError> {
         let mut outbound = Request::builder()
@@ -217,6 +223,7 @@ impl TlsUpstream {
                 pending: Bytes::new(),
                 done: false,
                 cancel: request.cancel.clone(),
+                _connection: connection,
             }),
         })
     }
@@ -231,16 +238,40 @@ impl TlsUpstream {
     ) -> Result<UpstreamResponse, UpstreamError> {
         let deadline = Instant::now() + request.head_timeout;
         let connect_by = deadline.min(Instant::now() + self.connect_timeout);
-        let sender = timeout_at(connect_by, self.connect(upstream))
+        let connected = timeout_at(connect_by, self.connect(upstream))
             .await
             .unwrap_or(Err(UpstreamError::Connect))?;
-        timeout_at(deadline, self.exchange(sender, request))
+        timeout_at(deadline, self.exchange(connected, request))
             .await
             .unwrap_or(Err(UpstreamError::Timeout))
     }
 }
 
 type Sender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;
+
+/// The task that drives one upstream connection, ended when this is
+/// dropped: by a call that gives up, or with the response body. Left to
+/// itself it can outlive both, for as long as an upstream that has stopped
+/// reading keeps the socket full, and with it the request body.
+struct Connection(AbortHandle);
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The addresses of `host`, looked up on a thread of its own. The runtime
+/// would look them up on its blocking pool, which is the pool whose threads
+/// wait for this call: with every one of them taken, the lookup never ran.
+async fn resolve(host: &'static str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    let (found, lookup) = oneshot::channel();
+    std::thread::Builder::new().spawn(move || {
+        let addrs = (host, port).to_socket_addrs().map(Iterator::collect);
+        let _ = found.send(addrs);
+    })?;
+    lookup.await.map_err(io::Error::other)?
+}
 
 impl UpstreamClient for TlsUpstream {
     fn send(
@@ -267,6 +298,7 @@ struct BlockingBody {
     pending: Bytes,
     done: bool,
     cancel: Cancel,
+    _connection: Connection,
 }
 
 impl Read for BlockingBody {

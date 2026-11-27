@@ -142,8 +142,9 @@ Unknown keys are refused.
 - A request outside the allowlist is answered before its body is read.
 - Request bodies are held whole in memory, at most 64 MiB of them at a
   time over all listeners. A body is counted as it arrives, from then
-  until its upstream starts answering; one that does not fit is refused
-  at once, not queued. A body must arrive within 60 s. The 64 MiB counts
+  until its upstream starts answering (if the upstream answers before it
+  has read the whole body, until that answer ends); one that does not fit
+  is refused at once, not queued. A body must arrive within 60 s. The 64 MiB counts
   body bytes, not the process's memory: buffers inside the proxy and its
   HTTP and TLS libraries come on top, by an amount not measured.
 - Redirects are never followed. A redirect to another host is an error.
@@ -241,7 +242,8 @@ At most 16 threads run requests, for all routes together, and a response
 body streaming back holds one too. A route that waits long for its
 upstream can hold them all, and requests to every route then wait. A
 waiting request's head timeout has not started, and its body stays
-counted.
+counted, even if its client has since hung up: that is noticed, and
+audited, only when a thread takes the request up.
 
 The echo scan finds the credential only as the exact bytes that were
 loaded. It does not find an encoded, shortened or masked copy, and it

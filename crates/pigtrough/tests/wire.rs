@@ -771,7 +771,7 @@ fn a_body_that_stalls_is_rejected_and_gives_its_room_back() {
 #[test]
 fn an_upstream_slower_than_the_routes_head_timeout_is_a_timeout() {
     let (running, events) = limited_hanging(
-        route_with(1 << 20, Duration::from_secs(1)),
+        route_with(1 << 20, Duration::from_secs(3)),
         Arc::new(BodyBudget::default()),
     );
     let (status, body) = head_of(&get(&running, "/github-api/repos/amarbel-llc/piggy"));
@@ -818,23 +818,126 @@ fn the_connect_bound_does_not_cut_a_slow_answer() {
     let (addr, seen) = start_fake_upstream(
         &runtime,
         Arc::new(|_| {
-            std::thread::sleep(Duration::from_millis(1500));
+            std::thread::sleep(Duration::from_secs(3));
             Response::new(Full::new(Bytes::from_static(b"{}")))
         }),
     );
     let client = TlsUpstream::with_roots(runtime.handle().clone(), test_roots())
         .connect_to(addr)
-        .connect_timeout(Duration::from_millis(500));
+        .connect_timeout(Duration::from_secs(2));
     let running = start_serving(
         runtime,
         client,
         seen,
-        route_with(1 << 20, Duration::from_secs(10)),
+        route_with(1 << 20, Duration::from_secs(20)),
         Arc::new(BodyBudget::default()),
         admit_self,
     );
     let (status, _) = head_of(&get(&running, "/github-api/repos/amarbel-llc/piggy"));
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+}
+
+/// The lookup of the upstream's name must not wait for a thread of the pool
+/// that requests hold while they wait for it. One request on a pool of one
+/// shows it: an upstream named by host still gets the connection.
+#[test]
+fn looking_up_the_upstream_does_not_wait_for_a_request_thread() {
+    let upstream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = upstream.local_addr().unwrap().port();
+    let (tx, connected) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _held = upstream.accept();
+        let _ = tx.send(());
+        std::thread::sleep(Duration::from_secs(60));
+    });
+    let route: &'static Route = Box::leak(Box::new(Route {
+        upstream: pigtrough::route::Upstream {
+            host: "localhost",
+            port,
+        },
+        ..GITHUB_API.clone()
+    }));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let client = TlsUpstream::with_roots(runtime.handle().clone(), test_roots());
+    let running = start_serving(
+        runtime,
+        client,
+        Arc::default(),
+        route,
+        Arc::new(BodyBudget::default()),
+        admit_self,
+    );
+    let mut stream = StdUnixStream::connect(&running.socket).unwrap();
+    stream
+        .write_all(b"GET /github-api/repos/amarbel-llc/piggy HTTP/1.1\r\nHost: proxy\r\n\r\n")
+        .unwrap();
+    assert_eq!(connected.recv_timeout(Duration::from_secs(10)), Ok(()));
+    // Closed first, so the request thread is free when the runtime drops.
+    drop(stream);
+}
+
+/// An upstream that completes TLS and then reads nothing more. With
+/// `answer` it first sends those bytes.
+fn start_deaf_upstream(runtime: &Runtime, answer: &'static [u8]) -> SocketAddr {
+    use tokio::io::AsyncWriteExt;
+    let acceptor = tls_acceptor();
+    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let addr = listener.local_addr().unwrap();
+    runtime.spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let _ = tls.write_all(answer).await;
+                let _ = tls.flush().await;
+                std::future::pending::<()>().await;
+                drop(tls);
+            });
+        }
+    });
+    addr
+}
+
+/// A request too large for the sockets' buffers, to an upstream that stops
+/// reading: whatever ends the request also ends the upstream connection, so
+/// the body's room comes back.
+fn a_deaf_upstream_gives_the_room_back(answer: &'static [u8], head_timeout: Duration) {
+    let len = 15 << 20;
+    let budget = Arc::new(BodyBudget::default());
+    let runtime = two_workers();
+    let addr = start_deaf_upstream(&runtime, answer);
+    let client = TlsUpstream::with_roots(runtime.handle().clone(), test_roots()).connect_to(addr);
+    let running = start_serving(
+        runtime,
+        client,
+        Arc::default(),
+        route_with(16 << 20, head_timeout),
+        budget.clone(),
+        admit_self,
+    );
+    let reply = exchange(&running, &post(len), false);
+    assert!(!reply.is_empty(), "no answer");
+    wait_for("the budget to empty", || budget.used() == 0);
+}
+
+#[test]
+fn a_timed_out_call_to_an_upstream_that_stopped_reading_frees_its_body() {
+    a_deaf_upstream_gives_the_room_back(b"", Duration::from_secs(2));
+}
+
+#[test]
+fn an_early_answer_from_an_upstream_that_stopped_reading_frees_the_body() {
+    a_deaf_upstream_gives_the_room_back(
+        b"HTTP/1.1 413 Too Large\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        SLOW,
+    );
 }
 
 /// A client that hangs up while the response body is streaming: the
