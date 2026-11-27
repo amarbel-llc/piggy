@@ -264,6 +264,7 @@ impl Drop for Connection {
 /// The addresses of `host`, looked up on a thread of its own. The runtime
 /// would look them up on its blocking pool, which is the pool whose threads
 /// wait for this call: with every one of them taken, the lookup never ran.
+// TODO(#422): cap the lookups in progress; a hung one keeps its thread.
 async fn resolve(host: &'static str, port: u16) -> io::Result<Vec<SocketAddr>> {
     let (found, lookup) = oneshot::channel();
     std::thread::Builder::new().spawn(move || {
