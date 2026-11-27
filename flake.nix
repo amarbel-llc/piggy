@@ -578,6 +578,9 @@
                 base == "Cargo.toml"
                 || base == "Cargo.lock"
                 || base == "version.env"
+                # tests/manpage.rs checks the page's numbers.
+                || rel == "doc"
+                || rel == "doc/pigtrough.1.scd"
                 || pkgs.lib.hasPrefix "crates" rel;
             };
 

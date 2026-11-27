@@ -18,7 +18,7 @@
 //! upstream dial, handshake, head wait or body read stops and closes its
 //! connection. One known limit of running the synchronous path on the
 //! blocking pool, for a later slice: the pool's size bounds concurrent
-//! requests (the binary sets it explicitly, `MAX_IN_FLIGHT`).
+//! requests (the binary sets it explicitly, [`MAX_IN_FLIGHT`]).
 
 use std::convert::Infallible;
 use std::io::{self, Read};
@@ -43,6 +43,13 @@ use crate::proxy::{ClientRequest, Proxy, Reply, ReplyBody};
 use crate::refusal::Cause;
 use crate::upstream::UpstreamClient;
 use crate::wire::{extend_header_map, from_header_map};
+
+/// The blocking threads the binary gives its runtime. Each request holds one
+/// for the length of its upstream call, and a streaming response holds one
+/// too, so this caps the requests in flight. A slow upstream that holds them
+/// all makes later requests wait, not fail (their bodies stay charged to the
+/// body budget meanwhile).
+pub const MAX_IN_FLIGHT: usize = 16;
 
 pub type ReplyStream = BoxBody<Bytes, io::Error>;
 
@@ -155,7 +162,7 @@ async fn read_body(
     }
     let mut charge = budget.reservation();
     let mut data = Vec::new();
-    let whole = async {
+    let arrive = async {
         while let Some(frame) = body.frame().await {
             let frame = frame.map_err(|_| Cause::RequestRejected)?;
             let Ok(chunk) = frame.into_data() else {
@@ -171,9 +178,12 @@ async fn read_body(
         }
         Ok(())
     };
-    tokio::time::timeout(budget.read_timeout(), whole)
-        .await
-        .map_err(|_| Cause::RequestRejected)??;
+    match budget.read_timeout() {
+        Some(within) => tokio::time::timeout(within, arrive)
+            .await
+            .map_err(|_| Cause::RequestRejected)??,
+        None => arrive.await?,
+    }
     Ok(charge.into_body(data))
 }
 

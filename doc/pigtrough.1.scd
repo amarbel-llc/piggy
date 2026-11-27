@@ -6,7 +6,8 @@ pigtrough - auth decoration proxy that attaches piggy credentials
 
 # SYNOPSIS
 
-*pigtrough serve* [*--dir* _DIR_] [*--routes* _FILE_]++
+*pigtrough serve* [*--dir* _DIR_] [*--routes* _FILE_]
+	[*--max-buffered-bytes* _N_] [*--body-read-timeout-seconds* _N_]++
 *pigtrough load* _ROUTE_ [*--dir* _DIR_]
 
 # DESCRIPTION
@@ -66,6 +67,19 @@ the socket below reaches these as */github-api/repos/...*, and so on.
 *--dir* _DIR_
 	The directory holding both sockets. Default:
 	*$XDG_RUNTIME_DIR/pigtrough*.
+
+*--max-buffered-bytes* _N_
+	*serve* only: the most bytes of request bodies held at once, over all
+	listeners. Default 67108864 (64 MiB). 0 turns the cap off.
+
+*--body-read-timeout-seconds* _N_
+	*serve* only: how long a client may take to send one request body.
+	Default 60. 0 turns the timeout off.
+
+Both limits can be changed or turned off without a new build: stop the
+unit and run *serve* by hand with the option, or override the unit's
+*ExecStart* in a drop-in. Either way *serve* restarts, so every secret has
+to be loaded again.
 
 # ROUTE TABLE
 
@@ -140,12 +154,13 @@ Unknown keys are refused.
   body ends: in a streamed response the end of each event reaches the
   client only with what follows it.
 - A request outside the allowlist is answered before its body is read.
-- Request bodies are held whole in memory, at most 64 MiB of them at a
-  time over all listeners. A body is counted as it arrives, from then
-  until its upstream starts answering (if the upstream answers before it
+- Request bodies are held whole in memory, no more of them at a time,
+  over all listeners, than *--max-buffered-bytes*. A body is counted as
+  it arrives, from then until its upstream starts answering (if the upstream answers before it
   has read the whole body, until that answer ends); one that does not fit
-  is refused at once, not queued. A body must arrive within 60 s. The 64 MiB counts
-  body bytes, not the process's memory: buffers inside the proxy and its
+  is refused at once, not queued. A body must arrive within
+  *--body-read-timeout-seconds*. The cap counts body bytes, not the
+  process's memory: buffers inside the proxy and its
   HTTP and TLS libraries come on top, by an amount not measured.
 - Redirects are never followed. A redirect to another host is an error.
 - Every request produces one audit line: time, route, scope, method, path
@@ -180,7 +195,9 @@ the child inherits that, so *kill -INT* does nothing there.
 
 # EXIT AND RESPONSE STATUS
 
-Requests *pigtrough* answers itself carry a fixed body naming the cause:
+Requests *pigtrough* answers itself carry a fixed body: the cause on its
+first line and, for *400*, *429* and *504*, a second line saying what to
+change:
 
 *403 refused*
 	An unknown route, or a method, owner or path outside the allowlist.
@@ -188,8 +205,8 @@ Requests *pigtrough* answers itself carry a fixed body naming the cause:
 
 *400 request-rejected*
 	The request body could not be read whole: over the route's limit,
-	shorter than its declared length, or not all there within 60 s. The
-	proxy may close the connection while the client is still sending, so
+	shorter than its declared length, or not all there within
+	*--body-read-timeout-seconds*. The proxy may close the connection while the client is still sending, so
 	a client can see a broken connection instead of this answer. The same
 	holds for *403* and *429*.
 

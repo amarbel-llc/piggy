@@ -285,6 +285,138 @@ fn a_loopback_route_serves_this_user_and_only_its_own_route() {
     let _ = std::fs::remove_file(file);
 }
 
+fn os<'a>(args: &[&'a str]) -> Vec<&'a std::ffi::OsStr> {
+    args.iter().map(|arg| std::ffi::OsStr::new(*arg)).collect()
+}
+
+/// A request head to an allowed path declaring `len` body bytes, followed by
+/// `sent` of them.
+fn with_body(path: &str, len: usize, sent: usize) -> Vec<u8> {
+    let mut raw = format!(
+        "{path} HTTP/1.1\r\nHost: proxy\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes();
+    raw.resize(raw.len() + sent, b'b');
+    raw
+}
+
+const POST_REPOS: &str = "POST /github-api/orgs/amarbel-llc/repos";
+
+fn open(dir: &Path, raw: &[u8]) -> UnixStream {
+    let mut stream = UnixStream::connect(dir.join("proxy.sock")).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(raw).unwrap();
+    stream
+}
+
+fn reply_on(mut stream: impl Read) -> String {
+    let mut out = Vec::new();
+    let _ = stream.read_to_end(&mut out);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The cap on buffered bodies is `serve`'s to set: a small one turns a body
+/// away, and 0 turns the cap off. With no secret loaded, a body that gets
+/// through is answered `503` and nothing reaches an upstream.
+#[test]
+fn serve_sets_or_turns_off_the_body_cap() {
+    for (tag, cap, status, needle) in [
+        ("capped", "10", "HTTP/1.1 429", "--max-buffered-bytes"),
+        ("uncapped", "0", "HTTP/1.1 503", "secret-unavailable"),
+    ] {
+        let server = Server::start_with(short_dir(tag), &os(&["--max-buffered-bytes", cap]));
+        let reply = reply_on(open(&server.dir, &with_body(POST_REPOS, 100, 100)));
+        assert!(reply.starts_with(status), "{tag}: {reply}");
+        assert!(reply.contains(needle), "{tag}: {reply}");
+    }
+}
+
+#[test]
+fn serve_sets_or_turns_off_the_body_read_timeout() {
+    let server = Server::start_with(
+        short_dir("deadline"),
+        &os(&["--body-read-timeout-seconds", "1"]),
+    );
+    let reply = reply_on(open(&server.dir, &with_body(POST_REPOS, 10, 4)));
+    assert!(reply.starts_with("HTTP/1.1 400"), "{reply}");
+    assert!(reply.contains("--body-read-timeout-seconds"), "{reply}");
+    drop(server);
+
+    let server = Server::start_with(
+        short_dir("nodeadline"),
+        &os(&["--body-read-timeout-seconds", "0"]),
+    );
+    let mut stream = open(&server.dir, &with_body(POST_REPOS, 10, 4));
+    std::thread::sleep(Duration::from_secs(2));
+    stream.write_all(b"bbbbbb").unwrap();
+    let reply = reply_on(stream);
+    assert!(reply.starts_with("HTTP/1.1 503"), "{reply}");
+}
+
+/// One cap for the process: bytes held for a request on the unix socket
+/// leave less for one on a loopback port.
+#[test]
+fn the_listeners_share_one_body_cap() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let file = routes_file("shared", &TWO_ROUTES.replace("PORT", &port.to_string()));
+    let mut args = os(&["--max-buffered-bytes", "10", "--routes"]);
+    args.push(file.as_os_str());
+    let server = Server::start_with(short_dir("shared"), &args);
+    // Waits for the loopback listener too.
+    assert!(get_tcp(port, "/fj-api/api/v1/user").starts_with(b"HTTP/1.1 403"));
+
+    let _holding = open(
+        &server.dir,
+        &with_body("GET /second/repos/some-org/x", 9, 8),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        tcp.write_all(&with_body("GET /fj-api/api/v1/repos/some-org/x", 5, 5))
+            .unwrap();
+        let reply = reply_on(tcp);
+        // Until the first body has arrived there is still room.
+        if reply.starts_with("HTTP/1.1 429") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never refused: {reply}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+fn serve_refuses_a_limit_that_is_not_a_number_or_is_given_twice() {
+    let dir = short_dir("badlimit");
+    for args in [
+        &["--max-buffered-bytes", "64MiB"][..],
+        &["--body-read-timeout-seconds", "-1"],
+        &["--max-buffered-bytes"],
+        &["--max-buffered-bytes", "1", "--max-buffered-bytes", "2"],
+    ] {
+        let out = pigtrough()
+            .args(["serve", "--dir"])
+            .arg(&dir)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        assert!(contains(&out.stderr, "usage:"), "{args:?}");
+        assert!(
+            !dir.join("control.sock").exists(),
+            "{args:?}: bound a socket"
+        );
+    }
+}
+
 #[test]
 fn serve_refuses_a_bad_route_table_before_binding_anything() {
     let dir = short_dir("badtable");

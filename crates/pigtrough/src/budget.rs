@@ -20,12 +20,12 @@ pub const TOTAL_BUFFERED_BODIES: usize = 64 << 20;
 
 /// How long a client may take to send one request body, so that a stalled
 /// upload cannot keep its share of the budget.
-const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+pub const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct BodyBudget {
     cap: usize,
     used: AtomicUsize,
-    read_timeout: Duration,
+    read_timeout: Option<Duration>,
 }
 
 impl Default for BodyBudget {
@@ -39,17 +39,34 @@ impl BodyBudget {
         Self {
             cap,
             used: AtomicUsize::new(0),
-            read_timeout: BODY_READ_TIMEOUT,
+            read_timeout: Some(BODY_READ_TIMEOUT),
         }
     }
 
-    /// Replace the time a body may take to arrive; for tests.
-    pub fn with_read_timeout(mut self, timeout: Duration) -> Self {
+    /// The budget `serve` is told to keep. Each value is the default when
+    /// not given, and 0 turns that limit off, which is how things were
+    /// before there was one.
+    pub fn configured(cap_bytes: Option<usize>, read_timeout_seconds: Option<u64>) -> Self {
+        let cap = match cap_bytes {
+            None => TOTAL_BUFFERED_BODIES,
+            Some(0) => usize::MAX,
+            Some(bytes) => bytes,
+        };
+        let read_timeout = match read_timeout_seconds {
+            None => Some(BODY_READ_TIMEOUT),
+            Some(0) => None,
+            Some(seconds) => Some(Duration::from_secs(seconds)),
+        };
+        Self::new(cap).with_read_timeout(read_timeout)
+    }
+
+    /// Replace the time a body may take to arrive; `None` is no limit.
+    pub fn with_read_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.read_timeout = timeout;
         self
     }
 
-    pub fn read_timeout(&self) -> Duration {
+    pub fn read_timeout(&self) -> Option<Duration> {
         self.read_timeout
     }
 

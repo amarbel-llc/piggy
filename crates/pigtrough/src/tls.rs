@@ -48,7 +48,7 @@ use crate::wire::{extend_header_map, from_header_map};
 /// together. A route's response-head timeout covers these too, but a longer
 /// one does not extend them: it is for an upstream that is slow to answer,
 /// not slow to be reached.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The Mozilla roots plus every certificate in each PEM file of `files`. A
 /// file that cannot be read, is not PEM, or holds no certificate is an

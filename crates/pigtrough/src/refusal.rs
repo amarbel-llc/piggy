@@ -54,8 +54,7 @@ impl Cause {
         }
     }
 
-    /// The cause token, which is also the whole response body (plus a
-    /// newline).
+    /// The cause token, the first line of the response body.
     pub fn token(self) -> &'static str {
         match self {
             Cause::Refused => "refused",
@@ -71,8 +70,31 @@ impl Cause {
         }
     }
 
+    /// What gets a client past a limit of the proxy's own, naming the
+    /// setting to change.
+    pub fn hint(self) -> Option<&'static str> {
+        match self {
+            Cause::RequestRejected => Some(
+                "The body may be over the route's max_request_body_bytes, or too slow \
+                 for serve --body-read-timeout-seconds.",
+            ),
+            Cause::Busy => Some(
+                "Retry later; the operator can change the cap with serve --max-buffered-bytes.",
+            ),
+            Cause::UpstreamTimeout => Some(
+                "The upstream may have acted on the request. The operator can raise the \
+                 route's response_head_timeout_seconds.",
+            ),
+            _ => None,
+        }
+    }
+
+    /// The cause token on a line of its own, then the hint if it has one.
     pub fn body(self) -> String {
-        format!("{}\n", self.token())
+        match self.hint() {
+            Some(hint) => format!("{}\n{hint}\n", self.token()),
+            None => format!("{}\n", self.token()),
+        }
     }
 
     pub fn decision(self) -> Decision {
@@ -88,5 +110,30 @@ impl Cause {
             | Cause::UpstreamEncodedResponse
             | Cause::UpstreamEchoedCredential => Decision::RefuseUpstream,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_limits_refusal_names_the_setting_that_changes_it() {
+        for (cause, settings) in [
+            (
+                Cause::RequestRejected,
+                &["max_request_body_bytes", "--body-read-timeout-seconds"][..],
+            ),
+            (Cause::Busy, &["--max-buffered-bytes"]),
+            (Cause::UpstreamTimeout, &["response_head_timeout_seconds"]),
+        ] {
+            let body = cause.body();
+            assert!(body.starts_with(&format!("{}\n", cause.token())), "{body}");
+            assert_eq!(body.lines().count(), 2, "{body}");
+            for setting in settings {
+                assert!(body.contains(setting), "{body} lacks {setting}");
+            }
+        }
+        assert_eq!(Cause::Refused.body(), "refused\n");
     }
 }

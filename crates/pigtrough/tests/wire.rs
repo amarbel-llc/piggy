@@ -31,6 +31,7 @@ use pigtrough::budget::BodyBudget;
 use pigtrough::holder::{Mount, SecretHolder};
 use pigtrough::listener::{admit_peer, effective_uid};
 use pigtrough::proxy::{Proxy, Scope};
+use pigtrough::refusal::Cause;
 use pigtrough::route::{GITHUB_API, Limits, Route};
 use pigtrough::server::serve;
 use pigtrough::tls::TlsUpstream;
@@ -675,7 +676,7 @@ fn a_routes_body_limit_replaces_the_default() {
         if !reply.is_empty() {
             let (status, body) = head_of(&reply);
             assert!(status.starts_with("HTTP/1.1 400"), "{status}");
-            assert_eq!(body, b"request-rejected\n");
+            assert_eq!(body, Cause::RequestRejected.body().as_bytes());
         }
     }
     assert_eq!(running.seen.lock().unwrap().len(), 2);
@@ -692,7 +693,7 @@ fn a_route_without_limits_keeps_the_one_mebibyte_default() {
     let over = post_head(&format!("Content-Length: {}", (1 << 20) + 1));
     let (status, body) = head_of(&exchange(&running, &over, false));
     assert!(status.starts_with("HTTP/1.1 400"), "{status}");
-    assert_eq!(body, b"request-rejected\n");
+    assert_eq!(body, Cause::RequestRejected.body().as_bytes());
     assert_eq!(running.seen.lock().unwrap().len(), 1);
 }
 
@@ -729,7 +730,7 @@ fn the_total_budget_turns_away_a_body_that_does_not_fit() {
         if !reply.is_empty() {
             let (status, body) = head_of(&reply);
             assert!(status.starts_with("HTTP/1.1 429"), "{status}");
-            assert_eq!(body, b"proxy-busy\n");
+            assert_eq!(body, Cause::Busy.body().as_bytes());
         }
     }
     wait_for("the refused bodies to be released", || {
@@ -757,13 +758,14 @@ fn the_total_budget_turns_away_a_body_that_does_not_fit() {
 
 #[test]
 fn a_body_that_stalls_is_rejected_and_gives_its_room_back() {
-    let budget = Arc::new(BodyBudget::new(100_000).with_read_timeout(Duration::from_millis(500)));
+    let budget =
+        Arc::new(BodyBudget::new(100_000).with_read_timeout(Some(Duration::from_millis(500))));
     let running = limited(&GITHUB_API, budget.clone());
     let mut raw = post_head("Content-Length: 1000");
     raw.extend_from_slice(&[b'b'; 10]);
     let (status, body) = head_of(&exchange(&running, &raw, false));
     assert!(status.starts_with("HTTP/1.1 400"), "{status}");
-    assert_eq!(body, b"request-rejected\n");
+    assert_eq!(body, Cause::RequestRejected.body().as_bytes());
     assert!(running.seen.lock().unwrap().is_empty());
     wait_for("the budget to empty", || budget.used() == 0);
 }
@@ -776,7 +778,7 @@ fn an_upstream_slower_than_the_routes_head_timeout_is_a_timeout() {
     );
     let (status, body) = head_of(&get(&running, "/github-api/repos/amarbel-llc/piggy"));
     assert!(status.starts_with("HTTP/1.1 504"), "{status}");
-    assert_eq!(body, b"upstream-timeout\n");
+    assert_eq!(body, Cause::UpstreamTimeout.body().as_bytes());
     let wait = Duration::from_secs(10);
     assert_eq!(events.recv_timeout(wait), Ok("request"));
     assert_eq!(events.recv_timeout(wait), Ok("closed"));

@@ -1,6 +1,7 @@
 //! `pigtrough`: the auth decoration proxy pilot (FDR 0009).
 //!
-//!     pigtrough serve [--dir DIR] [--routes FILE]
+//!     pigtrough serve [--dir DIR] [--routes FILE] [--max-buffered-bytes N]
+//!                     [--body-read-timeout-seconds N]
 //!     piggy pass show <entry> | pigtrough load ROUTE [--dir DIR]
 //!
 //! `serve` listens on `DIR/proxy.sock` (clients) and `DIR/control.sock`
@@ -27,22 +28,16 @@ use pigtrough::holder::Mount;
 use pigtrough::listener::{admit_loopback_peer, admit_peer, bind, bind_loopback, effective_uid};
 use pigtrough::proxy::{Proxy, Scope};
 use pigtrough::route::GITHUB_API;
-use pigtrough::server::{serve, serve_tcp};
+use pigtrough::server::{MAX_IN_FLIGHT, serve, serve_tcp};
 use pigtrough::table::{self, RouteEntry};
 use pigtrough::tls::{HostClients, TlsUpstream, roots_with};
 
-/// The blocking threads that run requests (each holds one for the length of
-/// its upstream call), so the cap is the number of concurrent requests. A
-/// slow upstream that holds them all makes later requests wait, not fail
-/// (their bodies stay charged to the body budget meanwhile).
-const MAX_IN_FLIGHT: usize = 16;
-
-const USAGE: &str = "usage: pigtrough serve [--dir DIR] [--routes FILE]\n       pigtrough load ROUTE [--dir DIR]   (the secret on stdin)\n";
+const USAGE: &str = "usage: pigtrough serve [--dir DIR] [--routes FILE] [--max-buffered-bytes N]\n                       [--body-read-timeout-seconds N]   (0: no limit)\n       pigtrough load ROUTE [--dir DIR]   (the secret on stdin)\n";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        Some("serve") => parse_serve(&args[1..]).and_then(|(dir, routes)| run_serve(dir, routes)),
+        Some("serve") => parse_serve(&args[1..]).and_then(run_serve),
         Some("load") => match args.get(1) {
             Some(route) if !route.starts_with('-') => {
                 parse_dir(&args[2..]).and_then(|dir| run_load(route, dir))
@@ -77,28 +72,45 @@ fn parse_dir(args: &[String]) -> Result<PathBuf, String> {
     }
 }
 
+/// What `serve` was asked for.
+struct Serve {
+    dir: PathBuf,
+    routes: Option<PathBuf>,
+    budget: BodyBudget,
+}
+
 /// `serve`'s flags, each at most once, in any order.
-fn parse_serve(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
-    let (mut dir, mut routes) = (None, None);
+fn parse_serve(args: &[String]) -> Result<Serve, String> {
+    let (mut dir, mut routes, mut cap, mut read_timeout) = (None, None, None, None);
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
         let slot = match flag.as_str() {
             "--dir" => &mut dir,
             "--routes" => &mut routes,
+            "--max-buffered-bytes" => &mut cap,
+            "--body-read-timeout-seconds" => &mut read_timeout,
             _ => return Err(USAGE.to_owned()),
         };
         match rest.next() {
-            Some(value) if slot.is_none() => *slot = Some(PathBuf::from(value)),
+            Some(value) if slot.is_none() => *slot = Some(value),
             _ => return Err(USAGE.to_owned()),
         }
     }
-    Ok((
-        match dir {
-            Some(dir) => dir,
+    Ok(Serve {
+        budget: BodyBudget::configured(number(cap)?, number(read_timeout)?),
+        dir: match dir {
+            Some(dir) => PathBuf::from(dir),
             None => default_dir()?,
         },
-        routes,
-    ))
+        routes: routes.map(PathBuf::from),
+    })
+}
+
+/// A limit's value, if one was given.
+fn number<T: std::str::FromStr>(value: Option<&String>) -> Result<Option<T>, String> {
+    value
+        .map(|v| v.parse().map_err(|_| USAGE.to_owned()))
+        .transpose()
 }
 
 /// The routes to serve: the table file, or the compiled-in route.
@@ -140,8 +152,13 @@ fn build_client(
     Ok(clients)
 }
 
-fn run_serve(dir: PathBuf, routes_file: Option<PathBuf>) -> Result<(), String> {
-    let entries = read_routes(routes_file)?;
+fn run_serve(options: Serve) -> Result<(), String> {
+    let Serve {
+        dir,
+        routes,
+        budget,
+    } = options;
+    let entries = read_routes(routes)?;
     let hardening = piggy_guard::harden_process();
     if let Some(Err(e)) = &hardening.non_dumpable {
         eprintln!("pigtrough: warning: could not make the process non-dumpable: {e}");
@@ -171,7 +188,7 @@ fn run_serve(dir: PathBuf, routes_file: Option<PathBuf>) -> Result<(), String> {
     let mounts: Vec<Mount> = entries.iter().map(|e| Mount::empty(e.route)).collect();
     let audit = Arc::new(StderrSink);
     // One budget over every listener: the cap is the process's.
-    let budget = Arc::new(BodyBudget::default());
+    let budget = Arc::new(budget);
 
     // A loopback listener per route that asks for one. Each gets its own
     // proxy over that one route, so a connection on its port can name no
