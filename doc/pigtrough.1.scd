@@ -104,6 +104,17 @@ error refuses to start, with no partial table. Each *[[route]]* has:
 	_.patch_) and *{rest}* (one or more pieces, last only). A path needs
 	a literal, and no piece may be empty, _._ or _.._.
 
+*max_request_body_bytes*
+	Optional: the largest request body the route takes. Default 1048576
+	(1 MiB); 1 to 16777216 (16 MiB).
+
+*response_head_timeout_seconds*
+	Optional: how long the route waits, from the start of the upstream
+	call, for the response head. Default 30; 1 to 600. Raise it for an
+	upstream that works before it answers, such as a model call that is
+	not streamed. It does not lengthen the 30 s allowed for connecting
+	(the dial and both handshakes). It does not time the response body.
+
 *extra_roots*
 	Optional array of PEM file paths. Their certificates are trusted in
 	addition to the bundled Mozilla roots, for that route's upstream
@@ -124,7 +135,17 @@ Unknown keys are refused.
 - Response headers that carry the credential, cookies and hop-by-hop
   headers are dropped. The response body is scanned as it streams; if
   the upstream echoes the credential, the connection is aborted before
-  any part of it is sent.
+  any part of it is sent. To do that it holds back the last bytes it has
+  read, one fewer than the credential is long, until more arrive or the
+  body ends: in a streamed response the end of each event reaches the
+  client only with what follows it.
+- A request outside the allowlist is answered before its body is read.
+- Request bodies are held whole in memory, at most 64 MiB of them at a
+  time over all listeners. A body is counted as it arrives, from then
+  until its upstream starts answering; one that does not fit is refused
+  at once, not queued. A body must arrive within 60 s. The 64 MiB counts
+  body bytes, not the process's memory: buffers inside the proxy and its
+  HTTP and TLS libraries come on top, by an amount not measured.
 - Redirects are never followed. A redirect to another host is an error.
 - Every request produces one audit line: time, route, scope, method, path
   without query string, status, byte counts and decision. Never a header
@@ -165,16 +186,30 @@ Requests *pigtrough* answers itself carry a fixed body naming the cause:
 	All of these answer the same way, and none reaches the upstream.
 
 *400 request-rejected*
-	The request body could not be read whole (over 1 MiB, or shorter than
-	its declared length).
+	The request body could not be read whole: over the route's limit,
+	shorter than its declared length, or not all there within 60 s. The
+	proxy may close the connection while the client is still sending, so
+	a client can see a broken connection instead of this answer. The same
+	holds for *403* and *429*.
+
+*429 proxy-busy*
+	The body does not fit beside those held now. Nothing is sent
+	upstream, and the same request may pass later.
 
 *503 secret-unavailable*
 	No credential is loaded. Nothing is sent upstream. A client should
 	stop on any *503*, not retry.
 
 *502 upstream-unavailable*
-	The upstream could not be reached, failed certificate verification
-	against the bundled Mozilla roots, or answered unreadably.
+	The upstream could not be reached within the connect time, failed
+	certificate verification against the bundled Mozilla roots, or
+	answered unreadably.
+
+*504 upstream-timeout*
+	The upstream was connected, and no response head came within the
+	route's *response_head_timeout_seconds*. The request may have reached
+	the upstream and been acted on (and, for a paid API, billed): do not
+	retry a request that must not happen twice.
 
 *502 upstream-redirect-refused*, *502 upstream-encoded-response*
 	The upstream redirected to another host, or sent a content-coded
@@ -201,6 +236,18 @@ still being tested for races and other users); the unix socket's peer
 credential is the stronger check. The trusted roots are the
 *webpki-roots* bundle of the build plus a route's *extra_roots*. Linux
 only.
+
+At most 16 threads run requests, for all routes together, and a response
+body streaming back holds one too. A route that waits long for its
+upstream can hold them all, and requests to every route then wait. A
+waiting request's head timeout has not started, and its body stays
+counted.
+
+The echo scan finds the credential only as the exact bytes that were
+loaded. It does not find an encoded, shortened or masked copy, and it
+cannot know a new credential that the upstream mints. So an allowlist must
+not admit an endpoint that returns credential material, such as an API's
+key management.
 
 A client that hangs up cancels its request: the upstream dial, handshake,
 head wait or body read stops and its connection closes. The audit line

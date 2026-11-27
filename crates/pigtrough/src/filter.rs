@@ -11,8 +11,9 @@
 //! The scan sees bytes, so the proxy asks for an unencoded body
 //! (`Accept-Encoding: identity`) and refuses any response with a content
 //! coding: a gzipped echo would pass the scan. It does not catch an echo
-//! the upstream itself encodes (base64, a JSON-escaped string); GitHub
-//! echoes neither, and catching them would mean understanding the body.
+//! the upstream itself encodes, shortens or masks, nor a new credential the
+//! upstream mints; catching those would mean understanding the body. A
+//! route's allowlist is what keeps such endpoints out of reach.
 
 use std::io::{self, Read};
 use std::sync::Arc;

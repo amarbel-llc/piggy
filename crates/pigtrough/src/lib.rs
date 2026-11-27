@@ -15,6 +15,7 @@
 //! - [`control`]: the control socket the `load` verb speaks to.
 //! - [`filter`]: what the proxy forwards from the client and returns from
 //!   the upstream.
+//! - [`budget`]: the cap on request bodies held in memory at once.
 //! - [`upstream`]: the seam to the upstream client.
 //! - [`audit`]: the one audit line per request.
 //! - [`proxy`]: the request path that ties them together, independent of how
@@ -27,6 +28,7 @@
 //! The crate and its binary are `pigtrough` (operator ruling, 2026-11-16).
 
 pub mod audit;
+pub mod budget;
 pub mod cancel;
 pub mod control;
 pub mod filter;

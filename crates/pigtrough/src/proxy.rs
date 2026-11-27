@@ -10,13 +10,16 @@
 use std::io::{self, Read};
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use crate::Headers;
 use crate::audit::{AuditRecord, AuditSink, Decision};
+use crate::budget::BodyBudget;
 use crate::cancel::Cancel;
 use crate::filter::{ScannedBody, inbound_headers, outbound_headers};
 use crate::holder::{Mount, SecretHolder};
 use crate::refusal::Cause;
-use crate::route::{Route, admit};
+use crate::route::{Limits, Route, admit};
 use crate::upstream::{Credential, OutboundRequest, UpstreamClient, UpstreamError};
 
 /// A client request, as the wire adapter read it. A body with a transfer
@@ -26,7 +29,7 @@ pub struct ClientRequest {
     pub method: String,
     pub target: String,
     pub headers: Headers,
-    pub body: Vec<u8>,
+    pub body: Bytes,
 }
 
 /// What to send back to the client.
@@ -62,10 +65,13 @@ pub struct Proxy<C> {
     client: C,
     audit: Arc<dyn AuditSink>,
     scope: Scope,
+    /// Shared with every other proxy of the process.
+    budget: Arc<BodyBudget>,
 }
 
 impl<C: UpstreamClient> Proxy<C> {
-    /// A proxy serving `route` for `scope`, its secret in `holder`.
+    /// A proxy serving `route` for `scope`, its secret in `holder`, with a
+    /// body budget of its own.
     pub fn new(
         route: &'static Route,
         holder: Arc<SecretHolder>,
@@ -73,16 +79,24 @@ impl<C: UpstreamClient> Proxy<C> {
         audit: Arc<dyn AuditSink>,
         scope: Scope,
     ) -> Self {
-        Self::with_mounts(vec![Mount { route, holder }], client, audit, scope)
+        Self::with_mounts(
+            vec![Mount { route, holder }],
+            client,
+            audit,
+            scope,
+            Arc::default(),
+        )
     }
 
     /// A proxy serving every mounted route for `scope`, each decorated with
     /// its own holder's secret. A request can only reach a route in `mounts`.
+    /// Proxies that share a process must share `budget`.
     pub fn with_mounts(
         mounts: Vec<Mount>,
         client: C,
         audit: Arc<dyn AuditSink>,
         scope: Scope,
+        budget: Arc<BodyBudget>,
     ) -> Self {
         Self {
             routes: mounts.iter().map(|m| m.route).collect(),
@@ -90,7 +104,20 @@ impl<C: UpstreamClient> Proxy<C> {
             client,
             audit,
             scope,
+            budget,
         }
+    }
+
+    /// What request bodies held in memory are charged against.
+    pub fn body_budget(&self) -> &Arc<BodyBudget> {
+        &self.budget
+    }
+
+    /// The limits of the route that admits `method` and `target`, so the wire
+    /// adapter can tell before it reads a body whether to read one and how
+    /// much. `None` is a [`Cause::Refused`] request.
+    pub fn admitted_limits(&self, method: &str, target: &str) -> Option<Limits> {
+        admit(&self.routes, method, target).map(|admitted| admitted.route.limits)
     }
 
     /// Record a connection refused before any request was read.
@@ -134,13 +161,17 @@ impl<C: UpstreamClient> Proxy<C> {
             path_and_query: admitted.path_and_query(),
             headers: outbound_headers(admitted.route, &request.headers),
             credential,
-            body: &request.body,
+            // A clone, so the body stays charged until the upstream has
+            // answered: the client may hold copies of it that long.
+            body: request.body.clone(),
+            head_timeout: admitted.route.limits.response_head_timeout,
             cancel,
         };
         let upstream = &admitted.route.upstream;
         let response = match self.client.send(upstream, outbound) {
             Ok(response) => response,
             Err(UpstreamError::Cancelled) => return self.refuse(record, Cause::ClientGone),
+            Err(UpstreamError::Timeout) => return self.refuse(record, Cause::UpstreamTimeout),
             Err(_) => return self.refuse(record, Cause::UpstreamUnavailable),
         };
         let headers = match inbound_headers(upstream, response.status, response.headers, &secret) {
@@ -159,10 +190,12 @@ impl<C: UpstreamClient> Proxy<C> {
         }
     }
 
-    /// Refuse a request the wire adapter could not read whole, with its
-    /// audit line.
+    /// Refuse a request the wire adapter will not hand to
+    /// [`Proxy::handle`], with its audit line.
     pub fn reject(&self, method: &str, target: &str, cause: Cause) -> Reply {
-        let record = AuditRecord::new(&self.scope.name, Decision::Allow).request(method, target);
+        let mut record =
+            AuditRecord::new(&self.scope.name, Decision::Allow).request(method, target);
+        record.route = admit(&self.routes, method, target).map(|a| a.route.name);
         self.refuse(record, cause)
     }
 

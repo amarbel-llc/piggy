@@ -140,6 +140,7 @@ mod tests {
             owners: &[],
             allow: &[],
             forward_headers: &[],
+            limits: crate::route::Limits::DEFAULT,
         };
         let (a, b) = (Mount::empty(&GITHUB_API), Mount::empty(&OTHER));
         let mounts = [a.clone(), b.clone()];

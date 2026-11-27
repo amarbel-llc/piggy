@@ -93,6 +93,7 @@ fn proxy(rig: &Rig, mounts: Vec<Mount>) -> Proxy<FakeClient> {
         Scope {
             name: "operator".to_owned(),
         },
+        Arc::default(),
     )
 }
 
@@ -101,7 +102,7 @@ fn get(proxy: &Proxy<FakeClient>, target: &str) -> u16 {
         method: "GET".to_owned(),
         target: target.to_owned(),
         headers: Headers::new(),
-        body: Vec::new(),
+        body: Default::default(),
     });
     // The body is dropped unread; the fake upstream has nothing to cut.
     reply.status()
@@ -175,7 +176,7 @@ fn request(target: &str) -> ClientRequest {
         method: "GET".to_owned(),
         target: target.to_owned(),
         headers: Headers::new(),
-        body: Vec::new(),
+        body: Default::default(),
     }
 }
 
@@ -202,6 +203,7 @@ fn an_upstream_that_reports_cancelled_is_client_gone_not_unavailable() {
         Scope {
             name: "operator".to_owned(),
         },
+        Arc::default(),
     );
     let reply = proxy.handle(request("/alpha/repos/some-org/x"));
     assert_eq!(reply.status(), 499);

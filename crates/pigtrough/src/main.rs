@@ -21,6 +21,7 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 use pigtrough::audit::StderrSink;
+use pigtrough::budget::BodyBudget;
 use pigtrough::control::{MAX_LOAD, send_load, serve_control};
 use pigtrough::holder::Mount;
 use pigtrough::listener::{admit_loopback_peer, admit_peer, bind, bind_loopback, effective_uid};
@@ -32,7 +33,8 @@ use pigtrough::tls::{HostClients, TlsUpstream, roots_with};
 
 /// The blocking threads that run requests (each holds one for the length of
 /// its upstream call), so the cap is the number of concurrent requests. A
-/// slow upstream that holds them all makes later requests wait, not fail.
+/// slow upstream that holds them all makes later requests wait, not fail
+/// (their bodies stay charged to the body budget meanwhile).
 const MAX_IN_FLIGHT: usize = 16;
 
 const USAGE: &str = "usage: pigtrough serve [--dir DIR] [--routes FILE]\n       pigtrough load ROUTE [--dir DIR]   (the secret on stdin)\n";
@@ -168,6 +170,8 @@ fn run_serve(dir: PathBuf, routes_file: Option<PathBuf>) -> Result<(), String> {
 
     let mounts: Vec<Mount> = entries.iter().map(|e| Mount::empty(e.route)).collect();
     let audit = Arc::new(StderrSink);
+    // One budget over every listener: the cap is the process's.
+    let budget = Arc::new(BodyBudget::default());
 
     // A loopback listener per route that asks for one. Each gets its own
     // proxy over that one route, so a connection on its port can name no
@@ -193,6 +197,7 @@ fn run_serve(dir: PathBuf, routes_file: Option<PathBuf>) -> Result<(), String> {
             Scope {
                 name: format!("loopback-{}", entry.route.name),
             },
+            budget.clone(),
         ));
         loopbacks.push((listener, proxy, entry.route.name, port));
     }
@@ -204,6 +209,7 @@ fn run_serve(dir: PathBuf, routes_file: Option<PathBuf>) -> Result<(), String> {
         Scope {
             name: "operator".to_owned(),
         },
+        budget,
     ));
     for entry in &entries {
         eprintln!(

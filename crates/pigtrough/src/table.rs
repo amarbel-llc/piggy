@@ -15,10 +15,11 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::route::{Allow, Route, Scheme, Segment, Upstream};
+use crate::route::{Allow, Limits, Route, Scheme, Segment, Upstream};
 
 /// One route of the table, with the parts that are not in [`Route`].
 #[derive(Debug)]
@@ -67,6 +68,8 @@ struct RouteSpec {
     #[serde(default)]
     extra_roots: Vec<String>,
     forward_headers: Option<Vec<String>>,
+    max_request_body_bytes: Option<u64>,
+    response_head_timeout_seconds: Option<u64>,
     #[serde(default)]
     allow: Vec<AllowSpec>,
 }
@@ -182,6 +185,11 @@ fn build(spec: RouteSpec) -> Result<RouteEntry, TableError> {
     }
     let forward = forward_headers(name, spec.forward_headers)?;
     let allow = allow_list(name, &spec.allow, !spec.owners.is_empty())?;
+    let limits = limits(
+        name,
+        spec.max_request_body_bytes,
+        spec.response_head_timeout_seconds,
+    )?;
 
     let route = Route {
         name: leak_str(spec.name),
@@ -191,11 +199,38 @@ fn build(spec: RouteSpec) -> Result<RouteEntry, TableError> {
         owners: leak_slice(spec.owners.into_iter().map(leak_str).collect()),
         allow: leak_slice(allow),
         forward_headers: leak_slice(forward.into_iter().map(leak_str).collect()),
+        limits,
     };
     Ok(RouteEntry {
         route: Box::leak(Box::new(route)),
         loopback_port: spec.loopback_port,
         extra_roots: spec.extra_roots.into_iter().map(PathBuf::from).collect(),
+    })
+}
+
+/// The route's limits: each is the default unless set, and set values stay
+/// within 1 and the compiled ceiling.
+fn limits(route: &str, body: Option<u64>, head: Option<u64>) -> Result<Limits, TableError> {
+    let within = |field: &str, given: Option<u64>, ceiling: u64| match given {
+        Some(n) if n == 0 || n > ceiling => {
+            refuse(route, field, &format!("must be 1 to {ceiling}"))
+        }
+        other => Ok(other),
+    };
+    let body = within(
+        "max_request_body_bytes",
+        body,
+        Limits::MAX_REQUEST_BODY_CEILING as u64,
+    )?;
+    let head = within(
+        "response_head_timeout_seconds",
+        head,
+        Limits::HEAD_TIMEOUT_CEILING.as_secs(),
+    )?;
+    Ok(Limits {
+        max_request_body: body.map_or(Limits::DEFAULT.max_request_body, |n| n as usize),
+        response_head_timeout: head
+            .map_or(Limits::DEFAULT.response_head_timeout, Duration::from_secs),
     })
 }
 
@@ -602,6 +637,42 @@ path = ["api", "v1", "repos", "{owner}", "{name}", "raw", "{rest}"]
         refused(&one("forward_headers = [\"\"]"), "forward_headers");
         let ok = parse(&one("forward_headers = [\"accept\"]")).unwrap();
         assert_eq!(ok[0].route.forward_headers, &["accept"]);
+    }
+
+    #[test]
+    fn limits_default_to_the_pilots_values() {
+        let limits = parse(&one("")).unwrap()[0].route.limits;
+        assert_eq!(limits.max_request_body, 1 << 20);
+        assert_eq!(limits.response_head_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn limits_are_set_per_route_up_to_the_ceilings() {
+        let ok = parse(&format!(
+            "{}\n{}",
+            one("max_request_body_bytes = 16777216\nresponse_head_timeout_seconds = 600"),
+            one("max_request_body_bytes = 1\nresponse_head_timeout_seconds = 1")
+                .replace("name = \"r\"", "name = \"s\"")
+        ))
+        .unwrap();
+        assert_eq!(ok[0].route.limits.max_request_body, 16 << 20);
+        assert_eq!(
+            ok[0].route.limits.response_head_timeout,
+            Duration::from_secs(600)
+        );
+        assert_eq!(ok[1].route.limits.max_request_body, 1);
+        assert_eq!(
+            ok[1].route.limits.response_head_timeout,
+            Duration::from_secs(1)
+        );
+        for bad in ["0", "16777217", "-1", "\"1MiB\""] {
+            let line = format!("max_request_body_bytes = {bad}");
+            refused(&one(&line), "max_request_body_bytes");
+        }
+        for bad in ["0", "601", "-1", "1.5"] {
+            let line = format!("response_head_timeout_seconds = {bad}");
+            refused(&one(&line), "response_head_timeout_seconds");
+        }
     }
 
     #[test]

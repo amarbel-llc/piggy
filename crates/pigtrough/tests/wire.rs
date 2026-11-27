@@ -27,10 +27,11 @@ use tokio::runtime::Runtime;
 use tokio_rustls::TlsAcceptor;
 
 use pigtrough::audit::{AuditRecord, AuditSink};
-use pigtrough::holder::SecretHolder;
+use pigtrough::budget::BodyBudget;
+use pigtrough::holder::{Mount, SecretHolder};
 use pigtrough::listener::{admit_peer, effective_uid};
 use pigtrough::proxy::{Proxy, Scope};
-use pigtrough::route::GITHUB_API;
+use pigtrough::route::{GITHUB_API, Limits, Route};
 use pigtrough::server::serve;
 use pigtrough::tls::TlsUpstream;
 
@@ -240,17 +241,35 @@ fn start_with_client<C: pigtrough::upstream::UpstreamClient + 'static>(
     seen: Arc<Mutex<Vec<Seen>>>,
     admit: impl Fn(&tokio::net::UnixStream) -> bool + Send + 'static,
 ) -> Running {
+    start_serving(
+        runtime,
+        client,
+        seen,
+        &GITHUB_API,
+        Arc::new(BodyBudget::default()),
+        admit,
+    )
+}
+
+fn start_serving<C: pigtrough::upstream::UpstreamClient + 'static>(
+    runtime: Runtime,
+    client: C,
+    seen: Arc<Mutex<Vec<Seen>>>,
+    route: &'static Route,
+    budget: Arc<BodyBudget>,
+    admit: impl Fn(&tokio::net::UnixStream) -> bool + Send + 'static,
+) -> Running {
     let holder = Arc::new(SecretHolder::empty());
     holder.load(format!("{TOKEN}\n").as_bytes()).unwrap();
     let audit = Arc::new(CaptureSink::default());
-    let proxy = Arc::new(Proxy::new(
-        &GITHUB_API,
-        holder,
+    let proxy = Arc::new(Proxy::with_mounts(
+        vec![Mount { route, holder }],
         client,
         audit.clone(),
         Scope {
             name: "operator".to_owned(),
         },
+        budget,
     ));
     let socket = short_dir().join("s");
     let std_listener = pigtrough::listener::bind(&socket).unwrap();
@@ -550,6 +569,272 @@ fn host_clients_use_the_private_roots_for_their_own_upstream_only() {
         assert_eq!(body, b"upstream-unavailable\n");
         assert!(rig.seen.lock().unwrap().is_empty());
     }
+}
+
+/// The pilot route with other limits.
+fn route_with(max_request_body: usize, response_head_timeout: Duration) -> &'static Route {
+    Box::leak(Box::new(Route {
+        limits: Limits {
+            max_request_body,
+            response_head_timeout,
+        },
+        ..GITHUB_API.clone()
+    }))
+}
+
+fn two_workers() -> Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// A proxy serving `route` under `budget` in front of an upstream that
+/// answers `{}`.
+fn limited(route: &'static Route, budget: Arc<BodyBudget>) -> Running {
+    let runtime = two_workers();
+    let (addr, seen) = start_fake_upstream(&runtime, ok("{}"));
+    let client = TlsUpstream::with_roots(runtime.handle().clone(), test_roots()).connect_to(addr);
+    start_serving(runtime, client, seen, route, budget, admit_self)
+}
+
+/// The same, in front of an upstream that never finishes answering.
+fn limited_hanging(
+    route: &'static Route,
+    budget: Arc<BodyBudget>,
+) -> (Running, std::sync::mpsc::Receiver<&'static str>) {
+    let runtime = two_workers();
+    let (addr, events) = start_hanging_upstream(&runtime, false);
+    let client = TlsUpstream::with_roots(runtime.handle().clone(), test_roots()).connect_to(addr);
+    let running = start_serving(runtime, client, Arc::default(), route, budget, admit_self);
+    (running, events)
+}
+
+/// The head of a request to the route's one `POST` path, `framing` being
+/// its body framing header.
+fn post_head(framing: &str) -> Vec<u8> {
+    format!(
+        "POST /github-api/orgs/amarbel-llc/repos HTTP/1.1\r\nHost: proxy\r\n\
+         {framing}\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+fn post(len: usize) -> Vec<u8> {
+    let mut raw = post_head(&format!("Content-Length: {len}"));
+    raw.resize(raw.len() + len, b'b');
+    raw
+}
+
+/// A body of `len` bytes with no declared length, in 16 KiB chunks.
+fn post_chunked(len: usize) -> Vec<u8> {
+    let mut raw = post_head("Transfer-Encoding: chunked");
+    let mut left = len;
+    while left > 0 {
+        let n = left.min(16 * 1024);
+        raw.extend_from_slice(format!("{n:x}\r\n").as_bytes());
+        raw.resize(raw.len() + n, b'b');
+        raw.extend_from_slice(b"\r\n");
+        left -= n;
+    }
+    raw.extend_from_slice(b"0\r\n\r\n");
+    raw
+}
+
+fn head_of(reply: &[u8]) -> (String, Vec<u8>) {
+    let (head, body) = split_response(reply);
+    (head.lines().next().unwrap_or("").to_owned(), body)
+}
+
+fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+const SLOW: Duration = Duration::from_secs(30);
+
+#[test]
+fn a_routes_body_limit_replaces_the_default() {
+    let limit = 2 << 20;
+    let budget = Arc::new(BodyBudget::default());
+    let running = limited(route_with(limit, SLOW), budget.clone());
+    for (raw, len) in [(post(limit), limit), (post_chunked(limit), limit)] {
+        let (status, _) = head_of(&exchange(&running, &raw, false));
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert_eq!(running.seen.lock().unwrap().last().unwrap().body.len(), len);
+    }
+    // One byte over, with and without a declared length. The proxy may
+    // answer and close while the client still writes, so a reset that loses
+    // the reply is allowed; reaching the upstream is not.
+    for raw in [post(limit + 1), post_chunked(limit + 1)] {
+        let reply = exchange(&running, &raw, false);
+        if !reply.is_empty() {
+            let (status, body) = head_of(&reply);
+            assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+            assert_eq!(body, b"request-rejected\n");
+        }
+    }
+    assert_eq!(running.seen.lock().unwrap().len(), 2);
+    wait_for("the budget to empty", || budget.used() == 0);
+}
+
+#[test]
+fn a_route_without_limits_keeps_the_one_mebibyte_default() {
+    let running = limited(&GITHUB_API, Arc::new(BodyBudget::default()));
+    let (status, _) = head_of(&exchange(&running, &post(1 << 20), false));
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    // Declared only: nothing of the body is sent, so the reply is not lost
+    // to a reset.
+    let over = post_head(&format!("Content-Length: {}", (1 << 20) + 1));
+    let (status, body) = head_of(&exchange(&running, &over, false));
+    assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+    assert_eq!(body, b"request-rejected\n");
+    assert_eq!(running.seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_request_outside_the_allowlist_is_answered_before_its_body() {
+    let budget = Arc::new(BodyBudget::default());
+    let running = limited(&GITHUB_API, budget.clone());
+    // The body is declared and never sent, and the write side stays open.
+    let raw = b"POST /github-api/user HTTP/1.1\r\nHost: proxy\r\n\
+                Content-Length: 1000\r\nConnection: close\r\n\r\n";
+    let (status, body) = head_of(&exchange(&running, raw, false));
+    assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+    assert_eq!(body, b"refused\n");
+    assert_eq!(budget.used(), 0);
+    assert!(running.seen.lock().unwrap().is_empty());
+}
+
+/// The cap is on all bodies held at once: while one waits on its upstream, a
+/// second that does not fit is turned away, a bodyless request is not, and
+/// the room comes back when the first ends.
+#[test]
+fn the_total_budget_turns_away_a_body_that_does_not_fit() {
+    let budget = Arc::new(BodyBudget::new(100_000));
+    let (running, events) = limited_hanging(route_with(1 << 20, SLOW), budget.clone());
+    let wait = Duration::from_secs(10);
+
+    let mut first = StdUnixStream::connect(&running.socket).unwrap();
+    first.write_all(&post(60_000)).unwrap();
+    assert_eq!(events.recv_timeout(wait), Ok("request"));
+    assert_eq!(budget.used(), 60_000);
+
+    for raw in [post(60_000), post_chunked(60_000)] {
+        let reply = exchange(&running, &raw, false);
+        if !reply.is_empty() {
+            let (status, body) = head_of(&reply);
+            assert!(status.starts_with("HTTP/1.1 429"), "{status}");
+            assert_eq!(body, b"proxy-busy\n");
+        }
+    }
+    wait_for("the refused bodies to be released", || {
+        budget.used() == 60_000
+    });
+    wait_for("their audit lines", || {
+        let audit = running.audit.0.lock().unwrap();
+        audit.len() == 2
+            && audit.iter().all(|r| {
+                r.decision == pigtrough::audit::Decision::RefuseBusy
+                    && r.route == Some("github-api")
+            })
+    });
+    assert!(events.try_recv().is_err(), "neither reached the upstream");
+
+    let mut bodyless = StdUnixStream::connect(&running.socket).unwrap();
+    bodyless
+        .write_all(b"GET /github-api/repos/amarbel-llc/piggy HTTP/1.1\r\nHost: proxy\r\n\r\n")
+        .unwrap();
+    assert_eq!(events.recv_timeout(wait), Ok("request"));
+
+    drop(first);
+    wait_for("the first body to be released", || budget.used() == 0);
+}
+
+#[test]
+fn a_body_that_stalls_is_rejected_and_gives_its_room_back() {
+    let budget = Arc::new(BodyBudget::new(100_000).with_read_timeout(Duration::from_millis(500)));
+    let running = limited(&GITHUB_API, budget.clone());
+    let mut raw = post_head("Content-Length: 1000");
+    raw.extend_from_slice(&[b'b'; 10]);
+    let (status, body) = head_of(&exchange(&running, &raw, false));
+    assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+    assert_eq!(body, b"request-rejected\n");
+    assert!(running.seen.lock().unwrap().is_empty());
+    wait_for("the budget to empty", || budget.used() == 0);
+}
+
+#[test]
+fn an_upstream_slower_than_the_routes_head_timeout_is_a_timeout() {
+    let (running, events) = limited_hanging(
+        route_with(1 << 20, Duration::from_secs(1)),
+        Arc::new(BodyBudget::default()),
+    );
+    let (status, body) = head_of(&get(&running, "/github-api/repos/amarbel-llc/piggy"));
+    assert!(status.starts_with("HTTP/1.1 504"), "{status}");
+    assert_eq!(body, b"upstream-timeout\n");
+    let wait = Duration::from_secs(10);
+    assert_eq!(events.recv_timeout(wait), Ok("request"));
+    assert_eq!(events.recv_timeout(wait), Ok("closed"));
+    let audit = running.audit.0.lock().unwrap();
+    assert_eq!(
+        (audit[0].decision, audit[0].status),
+        (pigtrough::audit::Decision::RefuseUpstream, Some(504))
+    );
+}
+
+/// An upstream that accepts TCP and never speaks TLS was not reached: that
+/// stays `upstream-unavailable`, within the connect bound, however long the
+/// route would wait for an answer.
+#[test]
+fn a_stalled_handshake_is_unavailable_within_the_connect_bound() {
+    let runtime = two_workers();
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TlsUpstream::with_roots(runtime.handle().clone(), test_roots())
+        .connect_to(silent.local_addr().unwrap())
+        .connect_timeout(Duration::from_millis(500));
+    let running = start_serving(
+        runtime,
+        client,
+        Arc::default(),
+        route_with(1 << 20, Duration::from_secs(600)),
+        Arc::new(BodyBudget::default()),
+        admit_self,
+    );
+    let (status, body) = head_of(&get(&running, "/github-api/repos/amarbel-llc/piggy"));
+    assert!(status.starts_with("HTTP/1.1 502"), "{status}");
+    assert_eq!(body, b"upstream-unavailable\n");
+}
+
+/// The connect bound covers only getting connected: an answer may take
+/// longer than it, up to the route's head timeout.
+#[test]
+fn the_connect_bound_does_not_cut_a_slow_answer() {
+    let runtime = two_workers();
+    let (addr, seen) = start_fake_upstream(
+        &runtime,
+        Arc::new(|_| {
+            std::thread::sleep(Duration::from_millis(1500));
+            Response::new(Full::new(Bytes::from_static(b"{}")))
+        }),
+    );
+    let client = TlsUpstream::with_roots(runtime.handle().clone(), test_roots())
+        .connect_to(addr)
+        .connect_timeout(Duration::from_millis(500));
+    let running = start_serving(
+        runtime,
+        client,
+        seen,
+        route_with(1 << 20, Duration::from_secs(10)),
+        Arc::new(BodyBudget::default()),
+        admit_self,
+    );
+    let (status, _) = head_of(&get(&running, "/github-api/repos/amarbel-llc/piggy"));
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
 }
 
 /// A client that hangs up while the response body is streaming: the

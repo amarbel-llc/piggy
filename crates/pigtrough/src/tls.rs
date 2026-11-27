@@ -34,6 +34,7 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
+use tokio::time::{Instant, timeout_at};
 use tokio_rustls::TlsConnector;
 
 use crate::cancel::Cancel;
@@ -41,9 +42,11 @@ use crate::route::Upstream;
 use crate::upstream::{OutboundRequest, UpstreamClient, UpstreamError, UpstreamResponse};
 use crate::wire::{extend_header_map, from_header_map};
 
-/// How long the dial, the TLS handshake and the response head may take
-/// together.
-const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the dial, the TLS handshake and the HTTP handshake may take
+/// together. A route's response-head timeout covers these too, but a longer
+/// one does not extend them: it is for an upstream that is slow to answer,
+/// not slow to be reached.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The Mozilla roots plus every certificate in each PEM file of `files`. A
 /// file that cannot be read, is not PEM, or holds no certificate is an
@@ -112,6 +115,7 @@ pub struct TlsUpstream {
     config: Arc<ClientConfig>,
     runtime: Handle,
     connect_to: Option<SocketAddr>,
+    connect_timeout: Duration,
 }
 
 impl TlsUpstream {
@@ -136,7 +140,14 @@ impl TlsUpstream {
             config: Arc::new(config),
             runtime,
             connect_to: None,
+            connect_timeout: CONNECT_TIMEOUT,
         }
+    }
+
+    /// Replace the bound on getting connected; for tests.
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
     }
 
     /// Dial `addr` instead of the route's host and port; the certificate is
@@ -147,11 +158,8 @@ impl TlsUpstream {
         self
     }
 
-    async fn send_async(
-        &self,
-        upstream: &Upstream,
-        request: OutboundRequest<'_>,
-    ) -> Result<UpstreamResponse, UpstreamError> {
+    /// A connection to `upstream`, verified and ready for one request.
+    async fn connect(&self, upstream: &Upstream) -> Result<Sender, UpstreamError> {
         let tcp = match self.connect_to {
             Some(addr) => TcpStream::connect(addr).await,
             None => TcpStream::connect((upstream.host, upstream.port)).await,
@@ -162,17 +170,25 @@ impl TlsUpstream {
             .connect(name, tcp)
             .await
             .map_err(|_| UpstreamError::Tls)?;
-        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+        let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
             .await
             .map_err(|_| UpstreamError::Protocol)?;
         self.runtime.spawn(async move {
             let _ = connection.await;
         });
+        Ok(sender)
+    }
 
+    /// Send `request` on `sender` and wait for the response head.
+    async fn exchange(
+        &self,
+        mut sender: Sender,
+        request: OutboundRequest<'_>,
+    ) -> Result<UpstreamResponse, UpstreamError> {
         let mut outbound = Request::builder()
             .method(request.method)
             .uri(request.path_and_query.as_str())
-            .body(Full::new(Bytes::copy_from_slice(request.body)))
+            .body(Full::new(request.body))
             .map_err(|_| UpstreamError::Protocol)?;
         extend_header_map(outbound.headers_mut(), &request.headers);
         // hyper keeps its own copy of the value, which is not wiped; marking
@@ -204,7 +220,27 @@ impl TlsUpstream {
             }),
         })
     }
+
+    /// Connect and send, within the request's head timeout overall and the
+    /// connect bound for the first part. Running out while still connecting
+    /// is [`UpstreamError::Connect`]; after that, [`UpstreamError::Timeout`].
+    async fn send_async(
+        &self,
+        upstream: &Upstream,
+        request: OutboundRequest<'_>,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        let deadline = Instant::now() + request.head_timeout;
+        let connect_by = deadline.min(Instant::now() + self.connect_timeout);
+        let sender = timeout_at(connect_by, self.connect(upstream))
+            .await
+            .unwrap_or(Err(UpstreamError::Connect))?;
+        timeout_at(deadline, self.exchange(sender, request))
+            .await
+            .unwrap_or(Err(UpstreamError::Timeout))
+    }
 }
+
+type Sender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;
 
 impl UpstreamClient for TlsUpstream {
     fn send(
@@ -217,9 +253,7 @@ impl UpstreamClient for TlsUpstream {
             // Dropping the call when the client has gone closes its
             // upstream connection.
             tokio::select! {
-                result = tokio::time::timeout(HEAD_TIMEOUT, self.send_async(upstream, request)) => {
-                    result.unwrap_or(Err(UpstreamError::Connect))
-                }
+                result = self.send_async(upstream, request) => result,
                 () = cancel.cancelled() => Err(UpstreamError::Cancelled),
             }
         })

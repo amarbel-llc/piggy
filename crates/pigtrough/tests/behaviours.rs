@@ -151,7 +151,7 @@ fn request(method: &str, target: &str) -> ClientRequest {
             ("Accept", "application/vnd.github+json"),
             ("User-Agent", "mirror-reconciler"),
         ]),
-        body: Vec::new(),
+        body: Default::default(),
     }
 }
 
@@ -209,7 +209,9 @@ fn b1_decorates_with_the_bearer_and_drops_client_credentials() {
         ("Cookie", "session=client"),
         ("Content-Type", "application/json"),
     ]));
-    req.body = b"{\"name\":\"example-mirror\",\"private\":true}".to_vec();
+    req.body = b"{\"name\":\"example-mirror\",\"private\":true}"
+        .to_vec()
+        .into();
     let reply = h.proxy.handle(req);
     assert_eq!(reply.status(), 200);
     drop(reply);

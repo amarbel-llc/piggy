@@ -11,8 +11,14 @@ pub enum Cause {
     /// cause for all of them, so a client cannot tell which (behaviour 4).
     Refused,
     /// The client's request could not be read whole: a body larger than the
-    /// limit, or shorter than its declared length.
+    /// limit, shorter than its declared length, or too slow to arrive.
     RequestRejected,
+    /// The request's body does not fit in the memory the proxy keeps for
+    /// bodies at once; the same request may pass later.
+    Busy,
+    /// The upstream was reached and did not start answering within the
+    /// route's response-head timeout. It may have acted on the request.
+    UpstreamTimeout,
     /// The route's secret is not loaded (behaviour 3).
     SecretUnavailable,
     /// The upstream could not be reached, failed TLS verification, or
@@ -38,6 +44,8 @@ impl Cause {
             Cause::ClientGone => 499,
             Cause::Refused => 403,
             Cause::RequestRejected => 400,
+            Cause::Busy => 429,
+            Cause::UpstreamTimeout => 504,
             Cause::SecretUnavailable => 503,
             Cause::UpstreamUnavailable
             | Cause::UpstreamRedirectRefused
@@ -52,6 +60,8 @@ impl Cause {
         match self {
             Cause::Refused => "refused",
             Cause::RequestRejected => "request-rejected",
+            Cause::Busy => "proxy-busy",
+            Cause::UpstreamTimeout => "upstream-timeout",
             Cause::SecretUnavailable => "secret-unavailable",
             Cause::UpstreamUnavailable => "upstream-unavailable",
             Cause::UpstreamRedirectRefused => "upstream-redirect-refused",
@@ -70,8 +80,10 @@ impl Cause {
             Cause::ClientGone => Decision::ClientGone,
             Cause::Refused => Decision::RefuseAllowlist,
             Cause::RequestRejected => Decision::RefuseMalformed,
+            Cause::Busy => Decision::RefuseBusy,
             Cause::SecretUnavailable => Decision::RefuseUnavailable,
-            Cause::UpstreamUnavailable
+            Cause::UpstreamTimeout
+            | Cause::UpstreamUnavailable
             | Cause::UpstreamRedirectRefused
             | Cause::UpstreamEncodedResponse
             | Cause::UpstreamEchoedCredential => Decision::RefuseUpstream,

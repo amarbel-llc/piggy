@@ -24,6 +24,8 @@ pub enum Decision {
     RefuseUpstream,
     /// The client's request could not be read.
     RefuseMalformed,
+    /// The request's body did not fit in the memory kept for bodies.
+    RefuseBusy,
     /// The client hung up while the request was in flight; the upstream
     /// call was cancelled.
     ClientGone,
@@ -38,6 +40,7 @@ impl Decision {
             Decision::RefuseUnavailable => "refuse-unavailable",
             Decision::RefuseUpstream => "refuse-upstream",
             Decision::RefuseMalformed => "refuse-malformed",
+            Decision::RefuseBusy => "refuse-busy",
             Decision::ClientGone => "client-gone",
         }
     }

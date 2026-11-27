@@ -2,8 +2,10 @@
 //!
 //! Each accepted connection passes the admission check first (behaviour 6;
 //! the decision is [`crate::listener::admit_peer`], passed in as a closure so
-//! a test can stand in for a second UID). A request's body is read whole, up
-//! to [`MAX_REQUEST_BODY`], then [`Proxy::handle`] runs on a blocking thread
+//! a test can stand in for a second UID). A request no route admits is
+//! refused before its body is read. An admitted one's body is read whole, up
+//! to the route's limit and charged to the proxy's [`BodyBudget`], then
+//! [`Proxy::handle`] runs on a blocking thread
 //! (the request path and its upstream seam are synchronous) and the reply
 //! body streams back through a channel. When the reply body fails (an echoed
 //! credential, an upstream that broke off), the failure is passed to hyper as
@@ -26,7 +28,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Frame, Incoming};
 use hyper::header::{CONTENT_TYPE, HeaderValue};
 use hyper::service::service_fn;
@@ -35,15 +37,12 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
+use crate::budget::BodyBudget;
 use crate::cancel::{Cancel, CancelOnDrop};
 use crate::proxy::{ClientRequest, Proxy, Reply, ReplyBody};
 use crate::refusal::Cause;
 use crate::upstream::UpstreamClient;
 use crate::wire::{extend_header_map, from_header_map};
-
-/// The largest request body the proxy reads. The pilot's calls send small
-/// JSON objects.
-pub const MAX_REQUEST_BODY: usize = 1 << 20;
 
 pub type ReplyStream = BoxBody<Bytes, io::Error>;
 
@@ -120,10 +119,14 @@ async fn respond<C: UpstreamClient + 'static>(
         .path_and_query()
         .map(|p| p.as_str().to_owned())
         .unwrap_or_default();
-    let body = match Limited::new(body, MAX_REQUEST_BODY).collect().await {
-        Ok(collected) => collected.to_bytes().to_vec(),
-        Err(_) => {
-            let reply = proxy.reject(&method, &target, Cause::RequestRejected);
+    let body = match proxy.admitted_limits(&method, &target) {
+        Some(limits) => read_body(body, limits.max_request_body, proxy.body_budget()).await,
+        None => Err(Cause::Refused),
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(cause) => {
+            let reply = proxy.reject(&method, &target, cause);
             return Ok(to_response(reply, guard));
         }
     };
@@ -137,6 +140,41 @@ async fn respond<C: UpstreamClient + 'static>(
         .await
         .unwrap_or(Reply::Refusal(Cause::UpstreamUnavailable));
     Ok(to_response(reply, guard))
+}
+
+/// Read a request body whole: at most `limit` bytes, charged to `budget` as
+/// they arrive, within the budget's read timeout.
+async fn read_body(
+    mut body: Incoming,
+    limit: usize,
+    budget: &Arc<BodyBudget>,
+) -> Result<Bytes, Cause> {
+    // A declared length over the limit is refused before any of it is read.
+    if body.size_hint().lower() > limit as u64 {
+        return Err(Cause::RequestRejected);
+    }
+    let mut charge = budget.reservation();
+    let mut data = Vec::new();
+    let whole = async {
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|_| Cause::RequestRejected)?;
+            let Ok(chunk) = frame.into_data() else {
+                continue;
+            };
+            if chunk.len() > limit - data.len() {
+                return Err(Cause::RequestRejected);
+            }
+            if !charge.grow(chunk.len()) {
+                return Err(Cause::Busy);
+            }
+            data.extend_from_slice(&chunk);
+        }
+        Ok(())
+    };
+    tokio::time::timeout(budget.read_timeout(), whole)
+        .await
+        .map_err(|_| Cause::RequestRejected)??;
+    Ok(charge.into_body(data))
 }
 
 /// `guard` goes with the response body, so a client that hangs up while the

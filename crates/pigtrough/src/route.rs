@@ -6,6 +6,8 @@
 //! uses, and exactly which methods and path shapes it serves. Anything that
 //! does not match is refused before an upstream connection is made.
 
+use std::time::Duration;
+
 /// Where a route's requests go. The host is also the only host a redirect
 /// may point at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,7 +57,29 @@ pub struct Allow {
     pub path: &'static [Segment],
 }
 
-#[derive(Debug, PartialEq, Eq)]
+/// How much one request on a route may send, and how long its upstream may
+/// take to start answering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// The largest request body, in bytes.
+    pub max_request_body: usize,
+    /// How long from the start of the upstream call to the response head.
+    pub response_head_timeout: Duration,
+}
+
+impl Limits {
+    /// A route that sets neither: the pilot's calls send small JSON objects
+    /// and are answered at once.
+    pub const DEFAULT: Limits = Limits {
+        max_request_body: 1 << 20,
+        response_head_timeout: Duration::from_secs(30),
+    };
+    /// The most a route table may ask for.
+    pub const MAX_REQUEST_BODY_CEILING: usize = 16 << 20;
+    pub const HEAD_TIMEOUT_CEILING: Duration = Duration::from_secs(600);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Route {
     /// The first path segment clients use to name the route.
     pub name: &'static str,
@@ -70,6 +94,7 @@ pub struct Route {
     /// case). Every other client header is dropped, so a credential the
     /// client sets under any name never leaves the proxy.
     pub forward_headers: &'static [&'static str],
+    pub limits: Limits,
 }
 
 use Segment::{Literal, Name, Number, NumberDiff, Owner, Ref, RefRange, Rest};
@@ -120,6 +145,7 @@ pub static GITHUB_API: Route = Route {
         "if-none-match",
         "if-modified-since",
     ],
+    limits: Limits::DEFAULT,
 };
 
 /// A client request target that names a route and fits its allowlist.
@@ -340,6 +366,7 @@ mod tests {
             },
         ],
         forward_headers: &["user-agent"],
+        limits: Limits::DEFAULT,
     };
 
     fn forgejo(method: &str, target: &str) -> bool {
@@ -420,6 +447,7 @@ mod tests {
                 path: &[Rest, Literal("tail")],
             }],
             forward_headers: &[],
+            limits: Limits::DEFAULT,
         };
         assert!(admit(&[&MISPLACED], "GET", "/x/a/tail").is_none());
     }

@@ -12,7 +12,9 @@
 use std::fmt;
 use std::io::Read;
 use std::sync::Arc;
+use std::time::Duration;
 
+use bytes::Bytes;
 use piggy_guard::{GuardError, GuardedBytes};
 use zeroize::Zeroizing;
 
@@ -75,7 +77,10 @@ pub struct OutboundRequest<'a> {
     pub path_and_query: String,
     pub headers: Headers,
     pub credential: Credential,
-    pub body: &'a [u8],
+    /// The client's body, shared and not copied.
+    pub body: Bytes,
+    /// How long from the start of the call to the response head.
+    pub head_timeout: Duration,
     /// Fired when the client has gone; the call stops and its upstream
     /// connection closes.
     pub cancel: Cancel,
@@ -104,6 +109,8 @@ pub enum UpstreamError {
     Connect,
     Tls,
     Protocol,
+    /// Connected, but no response head within the request's head timeout.
+    Timeout,
     /// The request's [`Cancel`] fired before the response head arrived.
     Cancelled,
 }
