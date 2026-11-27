@@ -371,12 +371,23 @@ fn the_listeners_share_one_body_cap() {
     // Waits for the loopback listener too.
     assert!(get_tcp(port, "/fj-api/api/v1/user").starts_with(b"HTTP/1.1 403"));
 
-    let _holding = open(
-        &server.dir,
-        &with_body("GET /second/repos/some-org/x", 9, 8),
-    );
+    let hold = || {
+        let held = open(
+            &server.dir,
+            &with_body("GET /second/repos/some-org/x", 9, 8),
+        );
+        held.set_nonblocking(true).unwrap();
+        held
+    };
+    let mut holding = hold();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
+        // A probe can hold its 5 bytes just as the 8 arrive, and then it is
+        // the held request that is turned away: open it again.
+        match holding.read(&mut [0u8; 1]) {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            _ => holding = hold(),
+        }
         let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         tcp.write_all(&with_body("GET /fj-api/api/v1/repos/some-org/x", 5, 5))

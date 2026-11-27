@@ -79,7 +79,8 @@ impl Cause {
                  for serve --body-read-timeout-seconds.",
             ),
             Cause::Busy => Some(
-                "Retry later; the operator can change the cap with serve --max-buffered-bytes.",
+                "Retry later (a body larger than the whole cap never fits). The operator \
+                 can change the cap with serve --max-buffered-bytes.",
             ),
             Cause::UpstreamTimeout => Some(
                 "The upstream may have acted on the request. The operator can raise the \

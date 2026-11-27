@@ -420,6 +420,10 @@
                     # version.env is read by crates/piggy/build.rs at compile
                     # time and must reach the sandboxed source tree.
                     || base == "version.env"
+                    # The workspace's tests include pigtrough's
+                    # tests/manpage.rs, which reads its page.
+                    || rel == "doc"
+                    || rel == "doc/pigtrough.1.scd"
                     || pkgs.lib.hasPrefix "crates" rel;
                 };
 

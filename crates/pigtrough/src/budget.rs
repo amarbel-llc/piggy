@@ -158,6 +158,22 @@ mod tests {
     }
 
     #[test]
+    fn configured_tells_unset_from_off() {
+        let unset = Arc::new(BodyBudget::configured(None, None));
+        assert!(!unset.reservation().grow(TOTAL_BUFFERED_BODIES + 1));
+        assert_eq!(unset.read_timeout(), Some(BODY_READ_TIMEOUT));
+
+        let off = Arc::new(BodyBudget::configured(Some(0), Some(0)));
+        assert!(off.reservation().grow(TOTAL_BUFFERED_BODIES + 1));
+        assert_eq!(off.read_timeout(), None);
+
+        let set = Arc::new(BodyBudget::configured(Some(7), Some(9)));
+        assert!(!set.reservation().grow(8));
+        assert!(set.reservation().grow(7));
+        assert_eq!(set.read_timeout(), Some(Duration::from_secs(9)));
+    }
+
+    #[test]
     fn the_charge_lives_as_long_as_the_last_handle_on_the_body() {
         let budget = Arc::new(BodyBudget::new(10));
         let mut charge = budget.reservation();

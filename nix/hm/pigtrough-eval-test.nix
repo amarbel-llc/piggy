@@ -87,8 +87,36 @@ let
             tripped == [ ]
             && lib.hasInfix "/bin/pigtrough serve" text
             && !(lib.hasInfix "--routes" text)
-            && !(lib.hasInfix "--dir" text);
+            && !(lib.hasInfix "--dir" text)
+            && !(lib.hasInfix "--max-buffered-bytes" text)
+            && !(lib.hasInfix "--body-read-timeout-seconds" text);
           got = { inherit tripped text; };
+        };
+    }
+    {
+      # Both limits reach serve, 0 included (it turns a limit off, so it
+      # must not be taken for unset), and never the load helper.
+      name = "limits-reach-serve-only";
+      cfg.services.pigtrough = {
+        enable = true;
+        routes = twoRoutes;
+        maxBufferedBytes = 0;
+        bodyReadTimeoutSeconds = 120;
+      };
+      check =
+        result:
+        let
+          serve = launcherOf result;
+          load = result.config.services.pigtrough._loadAllText;
+        in
+        {
+          ok =
+            trippedMessages result == [ ]
+            && lib.hasInfix "--max-buffered-bytes 0" serve
+            && lib.hasInfix "--body-read-timeout-seconds 120" serve
+            && !(lib.hasInfix "--max-buffered-bytes" load)
+            && !(lib.hasInfix "--body-read-timeout-seconds" load);
+          got = { inherit serve load; };
         };
     }
     {

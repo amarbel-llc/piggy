@@ -883,10 +883,10 @@ fn looking_up_the_upstream_does_not_wait_for_a_request_thread() {
     drop(stream);
 }
 
-/// An upstream that completes TLS and then reads nothing more. With
-/// `answer` it first sends those bytes.
+/// An upstream that completes TLS, reads the start of the request and then
+/// reads nothing more. With `answer` it then sends those bytes.
 fn start_deaf_upstream(runtime: &Runtime, answer: &'static [u8]) -> SocketAddr {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let acceptor = tls_acceptor();
     let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -897,6 +897,10 @@ fn start_deaf_upstream(runtime: &Runtime, answer: &'static [u8]) -> SocketAddr {
                 let Ok(mut tls) = acceptor.accept(tcp).await else {
                     return;
                 };
+                let mut start = [0u8; 512];
+                if tls.read_exact(&mut start).await.is_err() {
+                    return;
+                }
                 let _ = tls.write_all(answer).await;
                 let _ = tls.flush().await;
                 std::future::pending::<()>().await;
@@ -910,7 +914,11 @@ fn start_deaf_upstream(runtime: &Runtime, answer: &'static [u8]) -> SocketAddr {
 /// A request too large for the sockets' buffers, to an upstream that stops
 /// reading: whatever ends the request also ends the upstream connection, so
 /// the body's room comes back.
-fn a_deaf_upstream_gives_the_room_back(answer: &'static [u8], head_timeout: Duration) {
+fn a_deaf_upstream_gives_the_room_back(
+    answer: &'static [u8],
+    head_timeout: Duration,
+    status: &str,
+) {
     let len = 15 << 20;
     let budget = Arc::new(BodyBudget::default());
     let runtime = two_workers();
@@ -925,13 +933,14 @@ fn a_deaf_upstream_gives_the_room_back(answer: &'static [u8], head_timeout: Dura
         admit_self,
     );
     let reply = exchange(&running, &post(len), false);
-    assert!(!reply.is_empty(), "no answer");
+    let (got, _) = head_of(&reply);
+    assert!(got.starts_with(status), "{got}");
     wait_for("the budget to empty", || budget.used() == 0);
 }
 
 #[test]
 fn a_timed_out_call_to_an_upstream_that_stopped_reading_frees_its_body() {
-    a_deaf_upstream_gives_the_room_back(b"", Duration::from_secs(2));
+    a_deaf_upstream_gives_the_room_back(b"", Duration::from_secs(3), "HTTP/1.1 504");
 }
 
 #[test]
@@ -939,6 +948,7 @@ fn an_early_answer_from_an_upstream_that_stopped_reading_frees_the_body() {
     a_deaf_upstream_gives_the_room_back(
         b"HTTP/1.1 413 Too Large\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
         SLOW,
+        "HTTP/1.1 413",
     );
 }
 

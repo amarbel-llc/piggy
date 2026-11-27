@@ -59,6 +59,14 @@ let
   ++ lib.optionals (routesFile != null) [
     "--routes"
     "${routesFile}"
+  ]
+  ++ lib.optionals (cfg.maxBufferedBytes != null) [
+    "--max-buffered-bytes"
+    (toString cfg.maxBufferedBytes)
+  ]
+  ++ lib.optionals (cfg.bodyReadTimeoutSeconds != null) [
+    "--body-read-timeout-seconds"
+    (toString cfg.bodyReadTimeoutSeconds)
   ];
 
   launcherText = ''
@@ -128,6 +136,24 @@ in
         for both the serve unit and the load unit. `null` uses the
         binary's default, `$XDG_RUNTIME_DIR/pigtrough`. Keep it short: a
         unix socket path is limited to about 108 bytes.
+      '';
+    };
+
+    maxBufferedBytes = mkOption {
+      type = types.nullOr types.ints.unsigned;
+      default = null;
+      description = ''
+        `serve --max-buffered-bytes`, as pigtrough(1) describes it; 0 turns
+        the cap off. `null` keeps the binary's default.
+      '';
+    };
+
+    bodyReadTimeoutSeconds = mkOption {
+      type = types.nullOr types.ints.unsigned;
+      default = null;
+      description = ''
+        `serve --body-read-timeout-seconds`, as pigtrough(1) describes it;
+        0 turns the timeout off. `null` keeps the binary's default.
       '';
     };
 

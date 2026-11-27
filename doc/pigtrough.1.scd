@@ -76,10 +76,11 @@ the socket below reaches these as */github-api/repos/...*, and so on.
 	*serve* only: how long a client may take to send one request body.
 	Default 60. 0 turns the timeout off.
 
-Both limits can be changed or turned off without a new build: stop the
-unit and run *serve* by hand with the option, or override the unit's
-*ExecStart* in a drop-in. Either way *serve* restarts, so every secret has
-to be loaded again.
+The home-manager module sets these as *maxBufferedBytes* and
+*bodyReadTimeoutSeconds*. To change or turn off a limit without a switch,
+stop the unit and run *serve* by hand with the option, or override the
+unit's *ExecStart* in a drop-in. Each way restarts *serve*, so every
+secret has to be loaded again.
 
 # ROUTE TABLE
 
@@ -171,8 +172,8 @@ Unknown keys are refused.
 
 The flake exports the home-manager module *services.pigtrough*
 (*homeManagerModules.pigtrough*): a systemd user unit that runs *serve*
-(with *--routes* and *--dir* from its options) and restarts it when it
-exits. A restart comes back with every route unloaded, so each route
+(with *--routes*, *--dir* and the two limit options from its own
+options) and restarts it when it exits. A restart comes back with every route unloaded, so each route
 answers *503 secret-unavailable* until the operator runs *load* again by
 hand; the unit never reads the card and never loads a credential.
 
@@ -212,7 +213,8 @@ change:
 
 *429 proxy-busy*
 	The body does not fit beside those held now. Nothing is sent
-	upstream, and the same request may pass later.
+	upstream, and the same request may pass later, unless its body is
+	larger than the whole cap.
 
 *503 secret-unavailable*
 	No credential is loaded. Nothing is sent upstream. A client should
@@ -261,6 +263,10 @@ upstream can hold them all, and requests to every route then wait. A
 waiting request's head timeout has not started, and its body stays
 counted, even if its client has since hung up: that is noticed, and
 audited, only when a thread takes the request up.
+
+An upstream's name is looked up on a new thread for each connection. A
+lookup that hangs keeps its thread until the system resolver gives up,
+even if the request has ended, and nothing caps how many there are.
 
 The echo scan finds the credential only as the exact bytes that were
 loaded. It does not find an encoded, shortened or masked copy, and it
