@@ -6,8 +6,7 @@ pigtrough - auth decoration proxy that attaches piggy credentials
 
 # SYNOPSIS
 
-*pigtrough serve* [*--dir* _DIR_] [*--routes* _FILE_]
-	[*--max-buffered-bytes* _N_] [*--body-read-timeout-seconds* _N_]++
+*pigtrough serve* [*--dir* _DIR_] [*--routes* _FILE_] [*--max-buffered-bytes* _N_] [*--body-read-timeout-seconds* _N_]++
 *pigtrough load* _ROUTE_ [*--dir* _DIR_]
 
 # DESCRIPTION
