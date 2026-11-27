@@ -34,6 +34,8 @@ teardown() {
 _recipe() { # JUSTFILE RECIPE ARGS...
   local justfile="$1"
   shift
+  # Only this recipe's calls: an earlier one must not answer for it.
+  rm -f "$WORK"/*.argv
   PATH="$FAKE:$PATH" run just --justfile "$justfile" --working-directory "$WORK" "$@"
 }
 
@@ -66,10 +68,21 @@ function quoted_arguments_reach_nix_unread { # @test
   for payload in "${PAYLOADS[@]}"; do
     _recipe "$PIGGY_JUSTFILE" debug-vm-dry-run "$payload"
     _not_run "debug-vm-dry-run $payload"
-    grep -q -F -- "$payload" "$WORK/nix.argv" || { echo "nix did not get the argument: $output" >&2; return 1; }
+    _nix_got_inside_an_argument "$payload"
     _recipe "$PIGGY_JUSTFILE" debug-vm-probe "$payload"
     _not_run "debug-vm-probe $payload"
+    _nix_got_inside_an_argument "$payload"
   done
+}
+
+_nix_got_inside_an_argument() { # TEXT
+  grep -q -F -- "$1" "$WORK/nix.argv" || { echo "nix did not get the argument: $output" >&2; return 1; }
+}
+
+# The recipe stopped at its own check: exit 2, and nix was not called.
+_refused() { # WHAT
+  [[ $status -eq 2 ]] || { echo "want exit 2 for $1, got $status: $output" >&2; return 1; }
+  [[ ! -e $WORK/nix.argv ]] || { echo "nix ran for a refused $1" >&2; return 1; }
 }
 
 function checked_arguments_are_refused_before_any_tool_runs { # @test
@@ -77,15 +90,14 @@ function checked_arguments_are_refused_before_any_tool_runs { # @test
   for payload in "${PAYLOADS[@]}"; do
     _recipe "$PIGGY_JUSTFILE" debug-vm-loop "$payload" 1 ""
     _not_run "debug-vm-loop check=$payload"
-    [[ $status -eq 2 ]] || { echo "want exit 2 for CHECK, got $status: $output" >&2; return 1; }
+    _refused CHECK
     _recipe "$PIGGY_JUSTFILE" debug-vm-loop vm-piggy-luks "$payload" ""
     _not_run "debug-vm-loop runs=$payload"
-    [[ $status -eq 2 ]] || { echo "want exit 2 for RUNS, got $status: $output" >&2; return 1; }
+    _refused RUNS
     _recipe "$PIGGY_JUSTFILE" bump-version "$payload"
     _not_run "bump-version $payload"
-    [[ $status -eq 2 ]] || { echo "want exit 2 for the version, got $status: $output" >&2; return 1; }
+    _refused "the version"
   done
-  [[ ! -e $WORK/nix.argv ]] || { echo "nix ran for a refused argument" >&2; return 1; }
 }
 
 function the_nested_bats_justfile_passes_targets_unread { # @test
