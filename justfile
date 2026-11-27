@@ -397,7 +397,7 @@ _test-optional-linux-only: test-bats-conformance-fibby-pivy-agent-smoke
 _test-optional-linux-only:
 
 [linux]
-_test-conformance-linux-only: test-bats-conformance-ca-root-cert test-bats-conformance-ca-root-cert-fibby test-bats-conformance-ca-issue-fibby test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-ca-csr-fibby test-bats-conformance-root-cert-guard test-bats-conformance-tool-admin-store-fibby test-bats-conformance-card-rotate-admin-fibby test-bats-conformance-tool-attest-verify-fibby test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
+_test-conformance-linux-only: test-bats-conformance-argument-quoting test-bats-conformance-ca-root-cert test-bats-conformance-ca-root-cert-fibby test-bats-conformance-ca-issue-fibby test-bats-conformance-piggy-ssh-via-fibby test-bats-conformance-box-agentless-fibby test-bats-conformance-agent-pin-on-demand test-bats-conformance-agent-concurrent-sign test-bats-conformance-agent-ed25519 test-bats-conformance-holder-mint-fibby test-bats-conformance-ca-csr-fibby test-bats-conformance-root-cert-guard test-bats-conformance-tool-admin-store-fibby test-bats-conformance-card-rotate-admin-fibby test-bats-conformance-tool-attest-verify-fibby test-bats-conformance-pigpen-open-fibby test-bats-conformance-agent-upstream test-bats-conformance-agent-multicard test-bats-conformance-fibby-hotplug test-bats-conformance-age-plugin-piggy test-bats-conformance-sign-bytes-fibby test-bats-conformance-agentless-fallback-fibby test-bats-conformance-card-init-fibby test-bats-conformance-card-add-key-fibby test-bats-conformance-operator-act test-bats-conformance-init-fibby test-bats-conformance-box-interop-fibby test-bats-conformance-tool-fibby test-bats-conformance-tool-pin-fibby test-bats-conformance-tool-admin-fibby test-bats-conformance-tool-keys-fibby test-bats-conformance-tool-factory-reset-fibby test-bats-conformance-list-blank-fibby test-bats-conformance-manage-fibby test-bats-conformance-recipients-add-attached-fibby test-rust-integration-fibby test-bats-conformance-show-batch-fibby test-bats-conformance-secrets-reconcile-fibby test-bats-conformance-recipients-sync-fibby test-bats-conformance-pass-ls-recipients-fibby test-bats-conformance-health-fibby
 
 [macos]
 _test-conformance-linux-only:
@@ -1306,6 +1306,17 @@ test-bats-conformance-root-cert-guard:
 test-bats-conformance-chain-guard:
     PIGGY_JUSTFILE="$PWD/justfile" BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
       zz-tests_bats/conformance/explore_fdr0007_chain_guard.bats
+
+# Recipe arguments reach tools as arguments, never as shell text: a sample
+# of recipes run with fake tools on PATH. Shell and just only. A lint that
+# covers every recipe is conformist#156.
+#
+# run the recipe-argument quoting bats (fake tools)
+[group('post-build')]
+[linux]
+test-bats-conformance-argument-quoting:
+    PIGGY_JUSTFILE="$PWD/justfile" BATS_TEST_TIMEOUT=60 bats --no-sandbox --tap \
+      zz-tests_bats/conformance/justfile_argument_quoting.bats
 
 # FDR 0007 phase (ii), piggy#391: `piggy ca root-cert` off the card: the
 # profile is the only input and every refusal answers from the `ca` exit
